@@ -37,6 +37,7 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 | -------------------------------------------------- | ----- | --------- | -------- | ---------- |
 | Rust (`speedwave-runtime`, `speedwave-cli`)        | 70%   | —         | —        | —          |
 | MCP Hub                                            | 50%   | 50%       | 40%      | 50%        |
+| MCP GitHub                                          | 100%  | 100%      | 90%      | 100%       |
 | MCP Shared, Slack, OS, GitLab, Redmine, SharePoint | 60%   | 60%       | 50%      | 60%        |
 | Angular Desktop                                    | 40%   | 40%       | 30%      | 40%        |
 

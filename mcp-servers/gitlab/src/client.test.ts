@@ -68,7 +68,7 @@ interface MockGitlabEndpoints {
   Commits: { all: Mock; showDiff: Mock };
   Pipelines: { all: Mock; show: Mock; retry: Mock; create: Mock };
   Jobs: { all: Mock; showLog: Mock; erase: Mock };
-  Tags: { create: Mock };
+  Tags: { create: Mock; show: Mock; remove: Mock };
   ProjectReleases: { create: Mock };
   Branches: { all: Mock; show: Mock; create: Mock; remove: Mock };
   Repositories: { compare: Mock; allRepositoryTrees: Mock };
@@ -136,6 +136,8 @@ describe('GitLabClient', () => {
       },
       Tags: {
         create: vi.fn(),
+        show: vi.fn(),
+        remove: vi.fn(),
       },
       ProjectReleases: {
         create: vi.fn(),
@@ -2509,7 +2511,7 @@ describe('Response Mappers', () => {
       Commits: { all: vi.fn(), showDiff: vi.fn() },
       Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
       Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
-      Tags: { create: vi.fn() },
+      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
       ProjectReleases: { create: vi.fn() },
       Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
@@ -2707,5 +2709,1238 @@ describe('testConnection error logging', () => {
     );
 
     consoleSpy.mockRestore();
+  });
+});
+
+describe('validateRequired — error paths', () => {
+  let GitLabClientClass: typeof GitLabClientType;
+  let client: InstanceType<typeof GitLabClientType>;
+  let mockGitlabInstance: MockGitlabEndpoints;
+
+  beforeEach(async () => {
+    mockGitlabInstance = {
+      Users: { showCurrentUser: vi.fn() },
+      Projects: { all: vi.fn(), show: vi.fn() },
+      Search: { all: vi.fn() },
+      MergeRequests: {
+        all: vi.fn(),
+        show: vi.fn(),
+        create: vi.fn(),
+        edit: vi.fn(),
+        accept: vi.fn(),
+        allDiffs: vi.fn(),
+        allCommits: vi.fn(),
+        allPipelines: vi.fn(),
+      },
+      MergeRequestApprovals: { approve: vi.fn() },
+      MergeRequestNotes: { all: vi.fn(), create: vi.fn() },
+      MergeRequestDiscussions: { all: vi.fn(), create: vi.fn() },
+      Commits: { all: vi.fn(), showDiff: vi.fn() },
+      Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
+      Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
+      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
+      ProjectReleases: { create: vi.fn() },
+      Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
+      Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
+      RepositoryFiles: { show: vi.fn(), allFileBlames: vi.fn() },
+      Issues: { all: vi.fn(), create: vi.fn(), edit: vi.fn() },
+      ProjectLabels: { all: vi.fn(), create: vi.fn() },
+    };
+    mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
+    vi.resetModules();
+    const module = await import('./client.js');
+    GitLabClientClass = module.GitLabClient;
+    client = new GitLabClientClass({ token: 'test-token', host: 'https://gitlab.example.com' });
+  });
+
+  it('should throw with singular "parameter" for one missing field', async () => {
+    // showProject calls validateRequired({ project_id }) — pass undefined/null
+    await expect(client.showProject('')).rejects.toThrow('Missing required parameter: project_id');
+    await expect(client.showProject(null as unknown as string)).rejects.toThrow(
+      'Missing required parameter: project_id'
+    );
+  });
+
+  it('should throw with plural "parameters" for multiple missing fields', async () => {
+    // createMergeRequest requires project_id, source_branch, target_branch, title
+    // Pass valid project_id but empty source_branch and title to get multiple missing
+    await expect(
+      client.createMergeRequest(1, {
+        source_branch: '',
+        target_branch: 'main',
+        title: '',
+      })
+    ).rejects.toThrow('Missing required parameters: source_branch, title');
+  });
+
+  it('should throw when project_id is null', async () => {
+    await expect(client.listMergeRequests(null as unknown as number)).rejects.toThrow(
+      'Missing required parameter: project_id'
+    );
+  });
+
+  it('should throw when project_id is undefined', async () => {
+    await expect(client.listPipelines(undefined as unknown as number)).rejects.toThrow(
+      'Missing required parameter: project_id'
+    );
+  });
+
+  it('should throw when branch_name is empty for deleteBranch', async () => {
+    await expect(client.deleteBranch(1, '')).rejects.toThrow(
+      'Missing required parameter: branch_name'
+    );
+  });
+
+  it('should throw when commit_sha is empty for getCommitDiff', async () => {
+    await expect(client.getCommitDiff(1, '')).rejects.toThrow(
+      'Missing required parameter: commit_sha'
+    );
+  });
+
+  it('should throw when branch is empty for listBranchCommits', async () => {
+    await expect(client.listBranchCommits(1, '')).rejects.toThrow(
+      'Missing required parameter: branch'
+    );
+  });
+
+  it('should throw when query is empty for searchCode', async () => {
+    await expect(client.searchCode('')).rejects.toThrow('Missing required parameter: query');
+  });
+
+  it('should throw when tag_name is empty for createTag', async () => {
+    await expect(client.createTag(1, { tag_name: '', ref: 'main' })).rejects.toThrow(
+      'Missing required parameter: tag_name'
+    );
+  });
+
+  it('should throw when tag_name and ref are both empty for createTag', async () => {
+    await expect(client.createTag(1, { tag_name: '', ref: '' })).rejects.toThrow(
+      'Missing required parameters: tag_name, ref'
+    );
+  });
+});
+
+describe('formatError — 5xx server error branches', () => {
+  let GitLabClientClass: typeof GitLabClientType;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const module = await import('./client.js');
+    GitLabClientClass = module.GitLabClient;
+  });
+
+  it('should return specific message for status 500', () => {
+    const error = { response: { status: 500 } };
+    expect(GitLabClientClass.formatError(error)).toBe(
+      'GitLab server error. Please try again later.'
+    );
+  });
+
+  it('should return specific message for status 502', () => {
+    const error = { response: { status: 502 } };
+    expect(GitLabClientClass.formatError(error)).toBe(
+      'GitLab bad gateway. The server may be overloaded.'
+    );
+  });
+
+  it('should return specific message for status 503', () => {
+    const error = { response: { status: 503 } };
+    expect(GitLabClientClass.formatError(error)).toBe(
+      'GitLab service unavailable. The server is temporarily down.'
+    );
+  });
+
+  it('should return specific message for status 504', () => {
+    const error = { response: { status: 504 } };
+    expect(GitLabClientClass.formatError(error)).toBe(
+      'GitLab gateway timeout. The request took too long.'
+    );
+  });
+
+  it('should return generic 5xx message for other 5xx status codes', () => {
+    const error = { response: { status: 507 } };
+    expect(GitLabClientClass.formatError(error)).toBe(
+      'GitLab server error (507). Please try again later.'
+    );
+  });
+
+  it('should handle 5xx from cause.response', () => {
+    const error = { cause: { response: { status: 502 } } };
+    expect(GitLabClientClass.formatError(error)).toBe(
+      'GitLab bad gateway. The server may be overloaded.'
+    );
+  });
+
+  it('should format 401 from message containing "Unauthorized"', () => {
+    const error = { message: 'HTTP Unauthorized access denied' };
+    const result = GitLabClientClass.formatError(error);
+    expect(result).toContain('Authentication failed');
+  });
+
+  it('should format 403 from message containing "Forbidden"', () => {
+    const error = { message: 'Access Forbidden to this resource' };
+    const result = GitLabClientClass.formatError(error);
+    expect(result).toContain('Permission denied');
+  });
+
+  it('should format 404 from message containing "not found" (case-insensitive)', () => {
+    const error = { message: 'Project not found in namespace' };
+    const result = GitLabClientClass.formatError(error);
+    expect(result).toBe('Resource not found in GitLab.');
+  });
+
+  it('should format network error from ETIMEDOUT message', () => {
+    const error = { message: 'connect ETIMEDOUT 192.168.1.1:443' };
+    const result = GitLabClientClass.formatError(error);
+    expect(result).toContain('Network error');
+  });
+
+  it('should format network error from ENOTFOUND message', () => {
+    const error = { message: 'getaddrinfo ENOTFOUND my-gitlab.internal' };
+    const result = GitLabClientClass.formatError(error);
+    expect(result).toContain('Network error');
+  });
+
+  it('should format network error from "network error" message', () => {
+    const error = { message: 'network error occurred' };
+    const result = GitLabClientClass.formatError(error);
+    expect(result).toContain('Network error');
+  });
+
+  it('should format network error from "network failed" message', () => {
+    const error = { message: 'Network failed while connecting' };
+    const result = GitLabClientClass.formatError(error);
+    expect(result).toContain('Network error');
+  });
+
+  it('should return "GitLab API error" for completely empty error object', () => {
+    expect(GitLabClientClass.formatError({})).toBe('GitLab API error');
+  });
+
+  it('should return message for error with no status but with a message', () => {
+    const error = { message: 'Something unusual happened' };
+    expect(GitLabClientClass.formatError(error)).toBe('Something unusual happened');
+  });
+});
+
+describe('testConnection — error type classification', () => {
+  let GitLabClientClass: typeof GitLabClientType;
+  let makeClient: (error: Error) => InstanceType<typeof GitLabClientType>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const module = await import('./client.js');
+    GitLabClientClass = module.GitLabClient;
+    makeClient = (error: Error) => {
+      mockGitlabConstructor.mockImplementation(() => ({
+        Users: { showCurrentUser: vi.fn().mockRejectedValue(error) },
+      }));
+      return new GitLabClientClass({
+        token: 'test-token',
+        host: 'https://gitlab.example.com',
+      });
+    };
+  });
+
+  it('should classify 401 status as "auth" errorType', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = makeClient(
+      Object.assign(new Error('401 Unauthorized'), { response: { status: 401 } })
+    );
+    const result = await client.testConnection();
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('auth');
+  });
+
+  it('should classify 401 in message as "auth" errorType', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = makeClient(new Error('HTTP 401 Authentication required'));
+    const result = await client.testConnection();
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('auth');
+  });
+
+  it('should classify 403 status as "permission" errorType', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = makeClient(
+      Object.assign(new Error('403 Forbidden'), { response: { status: 403 } })
+    );
+    const result = await client.testConnection();
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('permission');
+  });
+
+  it('should classify 403 in message as "permission" errorType', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = makeClient(new Error('403 Forbidden'));
+    const result = await client.testConnection();
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('permission');
+  });
+
+  it('should classify 404 status as "not_found" errorType', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = makeClient(
+      Object.assign(new Error('404 Not Found'), { response: { status: 404 } })
+    );
+    const result = await client.testConnection();
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('not_found');
+  });
+
+  it('should classify 404 in message as "not_found" errorType', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = makeClient(new Error('404 User not found'));
+    const result = await client.testConnection();
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('not_found');
+  });
+
+  it('should classify ECONNREFUSED as "network" errorType', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = makeClient(new Error('connect ECONNREFUSED 127.0.0.1:443'));
+    const result = await client.testConnection();
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('network');
+  });
+
+  it('should classify unknown errors as "unknown" errorType', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = makeClient(new Error('Something completely unexpected'));
+    const result = await client.testConnection();
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('unknown');
+  });
+});
+
+describe('getTag and deleteTag', () => {
+  let GitLabClientClass: typeof GitLabClientType;
+  let client: InstanceType<typeof GitLabClientType>;
+  let mockGitlabInstance: MockGitlabEndpoints;
+
+  beforeEach(async () => {
+    mockGitlabInstance = {
+      Users: { showCurrentUser: vi.fn() },
+      Projects: { all: vi.fn(), show: vi.fn() },
+      Search: { all: vi.fn() },
+      MergeRequests: {
+        all: vi.fn(),
+        show: vi.fn(),
+        create: vi.fn(),
+        edit: vi.fn(),
+        accept: vi.fn(),
+        allDiffs: vi.fn(),
+        allCommits: vi.fn(),
+        allPipelines: vi.fn(),
+      },
+      MergeRequestApprovals: { approve: vi.fn() },
+      MergeRequestNotes: { all: vi.fn(), create: vi.fn() },
+      MergeRequestDiscussions: { all: vi.fn(), create: vi.fn() },
+      Commits: { all: vi.fn(), showDiff: vi.fn() },
+      Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
+      Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
+      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
+      ProjectReleases: { create: vi.fn() },
+      Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
+      Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
+      RepositoryFiles: { show: vi.fn(), allFileBlames: vi.fn() },
+      Issues: { all: vi.fn(), create: vi.fn(), edit: vi.fn() },
+      ProjectLabels: { all: vi.fn(), create: vi.fn() },
+    };
+    mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
+    vi.resetModules();
+    const module = await import('./client.js');
+    GitLabClientClass = module.GitLabClient;
+    client = new GitLabClientClass({ token: 'test-token', host: 'https://gitlab.example.com' });
+  });
+
+  describe('getTag', () => {
+    it('should get tag by name', async () => {
+      const mockTag = { name: 'v1.0.0', target: 'abc123def456', message: 'Release v1.0.0' };
+      mockGitlabInstance.Tags.show.mockResolvedValue(mockTag);
+
+      const result = await client.getTag(1, 'v1.0.0');
+
+      expect(mockGitlabInstance.Tags.show).toHaveBeenCalledWith(1, 'v1.0.0');
+      expect(result).toEqual(mockTag);
+    });
+
+    it('should get tag by project path', async () => {
+      const mockTag = { name: 'v2.0.0', target: 'deadbeef' };
+      mockGitlabInstance.Tags.show.mockResolvedValue(mockTag);
+
+      const result = await client.getTag('group/project', 'v2.0.0');
+
+      expect(mockGitlabInstance.Tags.show).toHaveBeenCalledWith('group/project', 'v2.0.0');
+      expect(result).toEqual(mockTag);
+    });
+
+    it('should throw when project_id is empty', async () => {
+      await expect(client.getTag('', 'v1.0.0')).rejects.toThrow(
+        'Missing required parameter: project_id'
+      );
+    });
+
+    it('should throw when tag_name is empty', async () => {
+      await expect(client.getTag(1, '')).rejects.toThrow('Missing required parameter: tag_name');
+    });
+
+    it('should throw when both project_id and tag_name are empty', async () => {
+      await expect(client.getTag('', '')).rejects.toThrow('Missing required parameters:');
+    });
+  });
+
+  describe('deleteTag', () => {
+    it('should delete tag and return audit info', async () => {
+      const mockTag = { name: 'v1.0.0', target: 'abc123', message: 'Release v1.0.0' };
+      mockGitlabInstance.Tags.show.mockResolvedValue(mockTag);
+      mockGitlabInstance.Tags.remove.mockResolvedValue(undefined);
+
+      const result = await client.deleteTag(1, 'v1.0.0');
+
+      expect(mockGitlabInstance.Tags.show).toHaveBeenCalledWith(1, 'v1.0.0');
+      expect(mockGitlabInstance.Tags.remove).toHaveBeenCalledWith(1, 'v1.0.0');
+      expect(result).toEqual({
+        deleted_tag: { name: 'v1.0.0', target: 'abc123', message: 'Release v1.0.0' },
+      });
+    });
+
+    it('should delete tag and return audit info without optional message', async () => {
+      const mockTag = { name: 'v2.0.0', target: 'def456', message: undefined };
+      mockGitlabInstance.Tags.show.mockResolvedValue(mockTag);
+      mockGitlabInstance.Tags.remove.mockResolvedValue(undefined);
+
+      const result = await client.deleteTag(1, 'v2.0.0');
+
+      expect(result).toEqual({
+        deleted_tag: { name: 'v2.0.0', target: 'def456', message: undefined },
+      });
+    });
+
+    it('should proceed with deletion even when Tags.show fails (audit failure path)', async () => {
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      mockGitlabInstance.Tags.show.mockRejectedValue(new Error('Tag not found'));
+      mockGitlabInstance.Tags.remove.mockResolvedValue(undefined);
+
+      const result = await client.deleteTag(1, 'v1.0.0');
+
+      expect(mockGitlabInstance.Tags.remove).toHaveBeenCalledWith(1, 'v1.0.0');
+      expect(result).toEqual({ deleted_tag: undefined });
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[GitLabClient] Failed to get tag info before deletion:'),
+        expect.objectContaining({ project: 1, tag: 'v1.0.0', error: 'Tag not found' })
+      );
+      consoleSpy.mockRestore();
+    });
+
+    it('should warn with String(error) when caught error is not an Error instance', async () => {
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      mockGitlabInstance.Tags.show.mockRejectedValue('string error from api');
+      mockGitlabInstance.Tags.remove.mockResolvedValue(undefined);
+
+      const result = await client.deleteTag(1, 'v1.0.0');
+
+      expect(result).toEqual({ deleted_tag: undefined });
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[GitLabClient] Failed to get tag info before deletion:'),
+        expect.objectContaining({ error: 'string error from api' })
+      );
+      consoleSpy.mockRestore();
+    });
+
+    it('should throw when project_id is empty', async () => {
+      await expect(client.deleteTag('', 'v1.0.0')).rejects.toThrow(
+        'Missing required parameter: project_id'
+      );
+    });
+
+    it('should throw when tag_name is empty', async () => {
+      await expect(client.deleteTag(1, '')).rejects.toThrow('Missing required parameter: tag_name');
+    });
+
+    it('should work with project path string', async () => {
+      const mockTag = { name: 'v3.0.0', target: 'ghi789' };
+      mockGitlabInstance.Tags.show.mockResolvedValue(mockTag);
+      mockGitlabInstance.Tags.remove.mockResolvedValue(undefined);
+
+      const result = await client.deleteTag('group/my-project', 'v3.0.0');
+
+      expect(mockGitlabInstance.Tags.remove).toHaveBeenCalledWith('group/my-project', 'v3.0.0');
+      expect(result.deleted_tag?.name).toBe('v3.0.0');
+    });
+  });
+});
+
+describe('Response mappers — defensive fallbacks (sparse API responses)', () => {
+  let GitLabClientClass: typeof GitLabClientType;
+  let client: InstanceType<typeof GitLabClientType>;
+  let mockGitlabInstance: MockGitlabEndpoints;
+
+  beforeEach(async () => {
+    mockGitlabInstance = {
+      Users: { showCurrentUser: vi.fn() },
+      Projects: { all: vi.fn(), show: vi.fn() },
+      Search: { all: vi.fn() },
+      MergeRequests: {
+        all: vi.fn(),
+        show: vi.fn(),
+        create: vi.fn(),
+        edit: vi.fn(),
+        accept: vi.fn(),
+        allDiffs: vi.fn(),
+        allCommits: vi.fn(),
+        allPipelines: vi.fn(),
+      },
+      MergeRequestApprovals: { approve: vi.fn() },
+      MergeRequestNotes: { all: vi.fn(), create: vi.fn() },
+      MergeRequestDiscussions: { all: vi.fn(), create: vi.fn() },
+      Commits: { all: vi.fn(), showDiff: vi.fn() },
+      Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
+      Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
+      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
+      ProjectReleases: { create: vi.fn() },
+      Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
+      Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
+      RepositoryFiles: { show: vi.fn(), allFileBlames: vi.fn() },
+      Issues: { all: vi.fn(), create: vi.fn(), edit: vi.fn() },
+      ProjectLabels: { all: vi.fn(), create: vi.fn() },
+    };
+    mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
+    vi.resetModules();
+    const module = await import('./client.js');
+    GitLabClientClass = module.GitLabClient;
+    client = new GitLabClientClass({ token: 'test-token', host: 'https://gitlab.example.com' });
+  });
+
+  describe('mapMergeRequestResponse — missing source/target/web_url with iid present (console.warn paths)', () => {
+    it('should warn and use empty string when source_branch is missing with iid', async () => {
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const sparseMr = {
+        id: 1,
+        iid: 10,
+        title: 'Sparse MR',
+        state: 'opened',
+        // no sourceBranch or source_branch
+        targetBranch: 'main',
+        author: { id: 1, name: 'User', username: 'user' },
+        webUrl: 'https://gitlab.com/mr/1',
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-01T00:00:00Z',
+      };
+      mockGitlabInstance.MergeRequests.show.mockResolvedValue(sparseMr);
+
+      const result = await client.showMergeRequest(1, 10);
+
+      expect(result.source_branch).toBe('');
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('MR !10 missing source_branch property')
+      );
+      consoleSpy.mockRestore();
+    });
+
+    it('should warn and use empty string when target_branch is missing with iid', async () => {
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const sparseMr = {
+        id: 1,
+        iid: 10,
+        title: 'Sparse MR',
+        state: 'opened',
+        sourceBranch: 'feature',
+        // no targetBranch or target_branch
+        author: { id: 1, name: 'User', username: 'user' },
+        webUrl: 'https://gitlab.com/mr/1',
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-01T00:00:00Z',
+      };
+      mockGitlabInstance.MergeRequests.show.mockResolvedValue(sparseMr);
+
+      const result = await client.showMergeRequest(1, 10);
+
+      expect(result.target_branch).toBe('');
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('MR !10 missing target_branch property')
+      );
+      consoleSpy.mockRestore();
+    });
+
+    it('should warn and use empty string when web_url is missing with iid', async () => {
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const sparseMr = {
+        id: 1,
+        iid: 10,
+        title: 'Sparse MR',
+        state: 'opened',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        author: { id: 1, name: 'User', username: 'user' },
+        // no webUrl or web_url
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-01T00:00:00Z',
+      };
+      mockGitlabInstance.MergeRequests.show.mockResolvedValue(sparseMr);
+
+      const result = await client.showMergeRequest(1, 10);
+
+      expect(result.web_url).toBe('');
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('MR !10 missing web_url property')
+      );
+      consoleSpy.mockRestore();
+    });
+
+    it('should use empty string fallbacks for all missing fields with no iid (no warn)', async () => {
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const sparseMr = {
+        id: 1,
+        // no iid — no warnings triggered
+        title: 'Sparse MR',
+        state: 'opened',
+        // no branches, no webUrl
+        author: { id: 1, name: 'User', username: 'user' },
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-01T00:00:00Z',
+      };
+      mockGitlabInstance.MergeRequests.show.mockResolvedValue(sparseMr);
+
+      const result = await client.showMergeRequest(1, 1);
+
+      expect(result.source_branch).toBe('');
+      expect(result.target_branch).toBe('');
+      expect(result.web_url).toBe('');
+      // No warnings when iid is absent
+      expect(consoleSpy).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    it('should use empty string for created_at/updated_at when both camelCase and snake_case are missing', async () => {
+      const sparseMr = {
+        id: 1,
+        iid: 10,
+        title: 'MR',
+        state: 'opened',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        author: { id: 1, name: 'User', username: 'user' },
+        webUrl: 'https://gitlab.com/mr/1',
+        // no createdAt, no created_at, no updatedAt, no updated_at
+      };
+      mockGitlabInstance.MergeRequests.show.mockResolvedValue(sparseMr);
+
+      const result = await client.showMergeRequest(1, 10);
+
+      expect(result.created_at).toBe('');
+      expect(result.updated_at).toBe('');
+    });
+  });
+
+  describe('mapCommitResponse — empty string fallbacks', () => {
+    it('should use empty string for short_id when both camelCase and snake_case are missing', async () => {
+      const sparseCommit = {
+        id: 'abc123',
+        // no shortId, no short_id
+        title: 'Commit',
+        message: 'Message',
+        authorName: 'Author',
+        authorEmail: 'author@example.com',
+        createdAt: '2024-01-01T00:00:00Z',
+      };
+      mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
+
+      const result = await client.listBranchCommits(1, 'main');
+
+      expect(result[0].short_id).toBe('');
+    });
+
+    it('should use empty string for author_name when both camelCase and snake_case are missing', async () => {
+      const sparseCommit = {
+        id: 'abc123',
+        shortId: 'abc',
+        title: 'Commit',
+        message: 'Message',
+        // no authorName, no author_name
+        authorEmail: 'author@example.com',
+        createdAt: '2024-01-01T00:00:00Z',
+      };
+      mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
+
+      const result = await client.listBranchCommits(1, 'main');
+
+      expect(result[0].author_name).toBe('');
+    });
+
+    it('should use empty string for author_email when both camelCase and snake_case are missing', async () => {
+      const sparseCommit = {
+        id: 'abc123',
+        shortId: 'abc',
+        title: 'Commit',
+        message: 'Message',
+        authorName: 'Author',
+        // no authorEmail, no author_email
+        createdAt: '2024-01-01T00:00:00Z',
+      };
+      mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
+
+      const result = await client.listBranchCommits(1, 'main');
+
+      expect(result[0].author_email).toBe('');
+    });
+
+    it('should use empty string for created_at when both camelCase and snake_case are missing', async () => {
+      const sparseCommit = {
+        id: 'abc123',
+        shortId: 'abc',
+        title: 'Commit',
+        message: 'Message',
+        authorName: 'Author',
+        authorEmail: 'a@b.com',
+        // no createdAt, no created_at
+      };
+      mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
+
+      const result = await client.listBranchCommits(1, 'main');
+
+      expect(result[0].created_at).toBe('');
+    });
+  });
+
+  describe('mapPipelineResponse — empty string fallbacks', () => {
+    it('should use empty string for web_url when both camelCase and snake_case are missing', async () => {
+      const sparsePipeline = {
+        id: 1,
+        status: 'success',
+        ref: 'main',
+        sha: 'abc123',
+        // no webUrl, no web_url
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-02T00:00:00Z',
+      };
+      mockGitlabInstance.Pipelines.all.mockResolvedValue([sparsePipeline]);
+
+      const result = await client.listPipelines(1);
+
+      expect(result[0].web_url).toBe('');
+    });
+
+    it('should use empty string for created_at when both camelCase and snake_case are missing', async () => {
+      const sparsePipeline = {
+        id: 1,
+        status: 'success',
+        ref: 'main',
+        sha: 'abc123',
+        webUrl: 'https://gitlab.com/p/1',
+        // no createdAt, no created_at
+        updatedAt: '2024-01-02T00:00:00Z',
+      };
+      mockGitlabInstance.Pipelines.all.mockResolvedValue([sparsePipeline]);
+
+      const result = await client.listPipelines(1);
+
+      expect(result[0].created_at).toBe('');
+    });
+
+    it('should use empty string for updated_at when both camelCase and snake_case are missing', async () => {
+      const sparsePipeline = {
+        id: 1,
+        status: 'success',
+        ref: 'main',
+        sha: 'abc123',
+        webUrl: 'https://gitlab.com/p/1',
+        createdAt: '2024-01-01T00:00:00Z',
+        // no updatedAt, no updated_at
+      };
+      mockGitlabInstance.Pipelines.all.mockResolvedValue([sparsePipeline]);
+
+      const result = await client.listPipelines(1);
+
+      expect(result[0].updated_at).toBe('');
+    });
+  });
+
+  describe('showProject — defensive fallbacks', () => {
+    it('should use snake_case path_with_namespace fallback', async () => {
+      const mockProject = {
+        id: 1,
+        name: 'Test',
+        // no pathWithNamespace — use path_with_namespace
+        path_with_namespace: 'group/test',
+        webUrl: 'https://gitlab.com/group/test',
+      };
+      mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
+
+      const result = await client.showProject(1);
+
+      expect(result.path_with_namespace).toBe('group/test');
+    });
+
+    it('should use empty string for path_with_namespace when neither property present', async () => {
+      const mockProject = {
+        id: 1,
+        name: 'Test',
+        // no pathWithNamespace, no path_with_namespace
+        webUrl: 'https://gitlab.com/group/test',
+      };
+      mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
+
+      const result = await client.showProject(1);
+
+      expect(result.path_with_namespace).toBe('');
+    });
+
+    it('should use snake_case web_url fallback', async () => {
+      const mockProject = {
+        id: 1,
+        name: 'Test',
+        pathWithNamespace: 'group/test',
+        // no webUrl — use web_url
+        web_url: 'https://gitlab.com/group/test',
+      };
+      mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
+
+      const result = await client.showProject(1);
+
+      expect(result.web_url).toBe('https://gitlab.com/group/test');
+    });
+
+    it('should use empty string for web_url when neither webUrl nor web_url are present', async () => {
+      const mockProject = {
+        id: 1,
+        name: 'Test',
+        pathWithNamespace: 'group/test',
+        // no webUrl, no web_url
+      };
+      mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
+
+      const result = await client.showProject(1);
+
+      expect(result.web_url).toBe('');
+    });
+
+    it('should use snake_case default_branch fallback', async () => {
+      const mockProject = {
+        id: 1,
+        name: 'Test',
+        pathWithNamespace: 'group/test',
+        webUrl: 'https://gitlab.com/group/test',
+        // no defaultBranch — use default_branch
+        default_branch: 'develop',
+      };
+      mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
+
+      const result = await client.showProject(1);
+
+      expect(result.default_branch).toBe('develop');
+    });
+
+    it('should include license when requested and present', async () => {
+      const mockProject = {
+        id: 1,
+        name: 'Test',
+        pathWithNamespace: 'group/test',
+        webUrl: 'https://gitlab.com/group/test',
+        license: { name: 'MIT', url: 'https://opensource.org/licenses/MIT' },
+        statistics: { commit_count: 100 },
+      };
+      mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
+
+      const result = await client.showProject(1, { license: true, statistics: true });
+
+      expect(result.license).toEqual({ name: 'MIT', url: 'https://opensource.org/licenses/MIT' });
+      expect(result.statistics).toEqual({ commit_count: 100 });
+    });
+
+    it('should not include license when license option false even if present', async () => {
+      const mockProject = {
+        id: 1,
+        name: 'Test',
+        pathWithNamespace: 'group/test',
+        webUrl: 'https://gitlab.com/group/test',
+        license: { name: 'MIT' },
+      };
+      mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
+
+      const result = await client.showProject(1, { license: false });
+
+      expect(result).not.toHaveProperty('license');
+    });
+  });
+});
+
+describe('initializeGitLabClient — additional branches', () => {
+  let initializeGitLabClient: typeof import('./client.js').initializeGitLabClient;
+  let originalEnv: NodeJS.ProcessEnv;
+
+  beforeEach(async () => {
+    originalEnv = { ...process.env };
+    vi.clearAllMocks();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const module = await import('./client.js');
+    initializeGitLabClient = module.initializeGitLabClient;
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it('should log warning and use default when host_url file is empty string', async () => {
+    delete process.env.GITLAB_URL;
+
+    mockLoadToken.mockResolvedValue('test-token');
+    // host_url returns empty string (trim results in empty)
+    mockReadFile.mockResolvedValue('  \n  ');
+
+    const mockGitlabInstance = {
+      Users: { showCurrentUser: vi.fn().mockResolvedValue({ id: 1 }) },
+    };
+    mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
+
+    await initializeGitLabClient();
+
+    // When host_url file has empty content, should use default gitlab.com
+    // (because trimmed is empty string, falls through to default)
+    expect(mockGitlabConstructor).toHaveBeenCalledWith({
+      token: 'test-token',
+      host: 'https://gitlab.com',
+    });
+  });
+
+  it('should warn and use GITLAB_URL when host_url has non-ENOENT error', async () => {
+    process.env.GITLAB_URL = 'https://gitlab-env.example.com';
+
+    mockLoadToken.mockResolvedValue('test-token');
+    // Throw non-ENOENT error
+    const permError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    mockReadFile.mockRejectedValue(permError);
+
+    const mockGitlabInstance = {
+      Users: { showCurrentUser: vi.fn().mockResolvedValue({ id: 1 }) },
+    };
+    mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
+
+    await initializeGitLabClient();
+
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to read /tokens/host_url')
+    );
+    expect(mockGitlabConstructor).toHaveBeenCalledWith({
+      token: 'test-token',
+      host: 'https://gitlab-env.example.com',
+    });
+  });
+
+  it('should use TOKENS_DIR when specified with ENOENT fallback to default', async () => {
+    process.env.TOKENS_DIR = '/custom/tokens';
+    delete process.env.GITLAB_URL;
+
+    mockLoadToken.mockResolvedValue('test-token');
+    // Simulate ENOENT with error object that has code property
+    const enoentError = Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+    mockReadFile.mockRejectedValue(enoentError);
+
+    const mockGitlabInstance = {
+      Users: { showCurrentUser: vi.fn().mockResolvedValue({ id: 1 }) },
+    };
+    mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
+
+    await initializeGitLabClient();
+
+    expect(mockLoadToken).toHaveBeenCalledWith('/custom/tokens/token');
+    expect(mockGitlabConstructor).toHaveBeenCalledWith({
+      token: 'test-token',
+      host: 'https://gitlab.com',
+    });
+  });
+});
+
+describe('Remaining branch coverage — inline mapper fallbacks and edge cases', () => {
+  let GitLabClientClass: typeof GitLabClientType;
+  let client: InstanceType<typeof GitLabClientType>;
+  let mockGitlabInstance: MockGitlabEndpoints;
+
+  beforeEach(async () => {
+    mockGitlabInstance = {
+      Users: { showCurrentUser: vi.fn() },
+      Projects: { all: vi.fn(), show: vi.fn() },
+      Search: { all: vi.fn() },
+      MergeRequests: {
+        all: vi.fn(),
+        show: vi.fn(),
+        create: vi.fn(),
+        edit: vi.fn(),
+        accept: vi.fn(),
+        allDiffs: vi.fn(),
+        allCommits: vi.fn(),
+        allPipelines: vi.fn(),
+      },
+      MergeRequestApprovals: { approve: vi.fn() },
+      MergeRequestNotes: { all: vi.fn(), create: vi.fn() },
+      MergeRequestDiscussions: { all: vi.fn(), create: vi.fn() },
+      Commits: { all: vi.fn(), showDiff: vi.fn() },
+      Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
+      Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
+      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
+      ProjectReleases: { create: vi.fn() },
+      Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
+      Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
+      RepositoryFiles: { show: vi.fn(), allFileBlames: vi.fn() },
+      Issues: { all: vi.fn(), create: vi.fn(), edit: vi.fn() },
+      ProjectLabels: { all: vi.fn(), create: vi.fn() },
+    };
+    mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
+    vi.resetModules();
+    const module = await import('./client.js');
+    GitLabClientClass = module.GitLabClient;
+    client = new GitLabClientClass({ token: 'test-token', host: 'https://gitlab.example.com' });
+  });
+
+  describe('mapMergeRequestResponse — title and state empty string fallbacks', () => {
+    it('should use empty string for title when title is null/undefined', async () => {
+      const mr = {
+        id: 1,
+        iid: 10,
+        // no title
+        state: 'opened',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        author: { id: 1, name: 'User', username: 'user' },
+        webUrl: 'https://gitlab.com/mr/1',
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-01T00:00:00Z',
+      };
+      mockGitlabInstance.MergeRequests.show.mockResolvedValue(mr);
+
+      const result = await client.showMergeRequest(1, 10);
+
+      expect(result.title).toBe('');
+    });
+
+    it('should use empty string for state when state is null/undefined', async () => {
+      const mr = {
+        id: 1,
+        iid: 10,
+        title: 'MR title',
+        // no state
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        author: { id: 1, name: 'User', username: 'user' },
+        webUrl: 'https://gitlab.com/mr/1',
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-01T00:00:00Z',
+      };
+      mockGitlabInstance.MergeRequests.show.mockResolvedValue(mr);
+
+      const result = await client.showMergeRequest(1, 10);
+
+      expect(result.state).toBe('');
+    });
+  });
+
+  describe('testConnection — error with no message property', () => {
+    it('should handle error objects without a message property (err.message || "")', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      // Error object with no message — e.g. a plain status-only error
+      const errorWithNoMessage = { response: { status: 500 } };
+      mockGitlabInstance.Users.showCurrentUser.mockRejectedValue(errorWithNoMessage);
+
+      const result = await client.testConnection();
+
+      expect(result.success).toBe(false);
+      // 500 triggers server error message, not network message
+      expect(result.error).toContain('GitLab server error');
+      // message is '' so no status-code-in-message match
+      expect(result.errorType).toBe('unknown');
+    });
+  });
+
+  describe('listProjects — path_with_namespace and web_url both-missing fallbacks', () => {
+    it('should use empty string for path_with_namespace when both pathWithNamespace and path_with_namespace are absent', async () => {
+      const project = {
+        id: 1,
+        name: 'Test',
+        // neither pathWithNamespace nor path_with_namespace
+        webUrl: 'https://gitlab.com/p/1',
+      };
+      mockGitlabInstance.Projects.all.mockResolvedValue([project]);
+
+      const result = await client.listProjects();
+
+      expect(result[0].path_with_namespace).toBe('');
+    });
+
+    it('should use empty string for web_url when both webUrl and web_url are absent', async () => {
+      const project = {
+        id: 1,
+        name: 'Test',
+        pathWithNamespace: 'group/test',
+        // neither webUrl nor web_url
+      };
+      mockGitlabInstance.Projects.all.mockResolvedValue([project]);
+
+      const result = await client.listProjects();
+
+      expect(result[0].web_url).toBe('');
+    });
+  });
+
+  describe('listMrCommits — all-missing field fallbacks', () => {
+    it('should use empty strings for all camelCase+snake_case missing commit fields', async () => {
+      const sparseCommit = {
+        id: 'abc123',
+        // no shortId, no short_id
+        title: 'Commit',
+        message: 'Message',
+        // no authorName, no author_name
+        // no authorEmail, no author_email
+        // no createdAt, no created_at
+      };
+      mockGitlabInstance.MergeRequests.allCommits.mockResolvedValue([sparseCommit]);
+
+      const result = await client.listMrCommits(1, 10);
+
+      expect(result[0].short_id).toBe('');
+      expect(result[0].author_name).toBe('');
+      expect(result[0].author_email).toBe('');
+      expect(result[0].created_at).toBe('');
+    });
+  });
+
+  describe('listMrPipelines — all-missing field fallbacks', () => {
+    it('should use empty strings for all camelCase+snake_case missing pipeline fields', async () => {
+      const sparsePipeline = {
+        id: 1,
+        status: 'success',
+        ref: 'main',
+        sha: 'abc123',
+        // no webUrl, no web_url
+        // no createdAt, no created_at
+        // no updatedAt, no updated_at
+      };
+      mockGitlabInstance.MergeRequests.allPipelines.mockResolvedValue([sparsePipeline]);
+
+      const result = await client.listMrPipelines(1, 10);
+
+      expect(result[0].web_url).toBe('');
+      expect(result[0].created_at).toBe('');
+      expect(result[0].updated_at).toBe('');
+    });
+  });
+
+  describe('listBranchCommits — all-missing field fallbacks', () => {
+    it('should use empty strings when both camelCase and snake_case are absent', async () => {
+      const sparseCommit = {
+        id: 'abc123',
+        title: 'Commit',
+        message: 'Message',
+        // no shortId, no short_id, no authorName, no author_name, no authorEmail, no author_email, no createdAt, no created_at
+      };
+      mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
+
+      const result = await client.listBranchCommits(1, 'main');
+
+      expect(result[0].short_id).toBe('');
+      expect(result[0].author_name).toBe('');
+      expect(result[0].author_email).toBe('');
+      expect(result[0].created_at).toBe('');
+    });
+  });
+
+  describe('listCommits — all-missing field fallbacks', () => {
+    it('should use empty strings when both camelCase and snake_case are absent', async () => {
+      const sparseCommit = {
+        id: 'abc123',
+        title: 'Commit',
+        message: 'Message',
+        // no shortId, no short_id, no authorName, no author_name, no authorEmail, no author_email, no createdAt, no created_at
+      };
+      mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
+
+      const result = await client.listCommits(1);
+
+      expect(result[0].short_id).toBe('');
+      expect(result[0].author_name).toBe('');
+      expect(result[0].author_email).toBe('');
+      expect(result[0].created_at).toBe('');
+    });
+  });
+
+  describe('searchCommits — all-missing field fallbacks', () => {
+    it('should use empty strings when both camelCase and snake_case are absent', async () => {
+      const sparseCommit = {
+        id: 'abc123',
+        title: 'fix: something',
+        message: 'fix: something',
+        // no shortId, no short_id, no authorName, no author_name, no authorEmail, no author_email, no createdAt, no created_at
+      };
+      mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
+
+      const result = await client.searchCommits(1, 'fix');
+
+      expect(result[0].short_id).toBe('');
+      expect(result[0].author_name).toBe('');
+      expect(result[0].author_email).toBe('');
+      expect(result[0].created_at).toBe('');
+    });
+  });
+
+  describe('listIssues — || [] fallback when result has no .data property', () => {
+    it('should return empty array when result is not an array and has no .data property', async () => {
+      // Returns an object that's not an array and has no .data field
+      mockGitlabInstance.Issues.all.mockResolvedValue({ meta: { total: 0 } } as unknown as never);
+
+      const result = await client.listIssues(1);
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('getIssue — || [] fallback when result has no .data property', () => {
+    it('should return null when result is not an array and has no .data property', async () => {
+      mockGitlabInstance.Issues.all.mockResolvedValue({ meta: { total: 0 } } as unknown as never);
+
+      const result = await client.getIssue(1, 5);
+
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('retryPipeline — || "" fallbacks when webUrl/createdAt/updatedAt are missing', () => {
+    it('should use empty strings when webUrl, createdAt, updatedAt are all absent', async () => {
+      const sparsePipeline = {
+        id: 1,
+        status: 'running',
+        ref: 'main',
+        sha: 'abc123',
+        // no webUrl, no createdAt, no updatedAt
+      };
+      mockGitlabInstance.Pipelines.retry.mockResolvedValue(sparsePipeline);
+
+      const result = await client.retryPipeline(1, 1);
+
+      expect(result.web_url).toBe('');
+      expect(result.created_at).toBe('');
+      expect(result.updated_at).toBe('');
+    });
+  });
+
+  describe('triggerPipeline — || "" fallbacks when webUrl/createdAt/updatedAt are missing', () => {
+    it('should use empty strings when webUrl, createdAt, updatedAt are all absent', async () => {
+      const sparsePipeline = {
+        id: 123,
+        status: 'pending',
+        ref: 'main',
+        sha: 'abc123',
+        // no webUrl, no createdAt, no updatedAt
+      };
+      mockGitlabInstance.Pipelines.create.mockResolvedValue(sparsePipeline);
+
+      const result = await client.triggerPipeline(1, { ref: 'main' });
+
+      expect(result.web_url).toBe('');
+      expect(result.created_at).toBe('');
+      expect(result.updated_at).toBe('');
+    });
   });
 });

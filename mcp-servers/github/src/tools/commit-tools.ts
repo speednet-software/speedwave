@@ -7,36 +7,29 @@ import {
   ToolDefinition,
   jsonResult,
   textResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
+import { GitHubCommit } from '../types.js';
 import { withValidation } from './validation.js';
-
-interface RawCommit {
-  sha: string;
-  commit: { message: string; author?: { name: string; email: string; date: string } };
-  html_url: string;
-}
 
 /**
  * Maps a normalized commit to the compact summary shape returned by the commit-list tools.
  * @param c - Normalized commit from the GitHub client
  * @returns Compact `{ sha, message, author, date, html_url }` summary
  */
-function commitSummary(c: RawCommit): {
+function commitSummary(c: GitHubCommit): {
   sha: string;
   message: string;
-  author: string | undefined;
-  date: string | undefined;
+  author: string;
+  date: string;
   html_url: string;
 } {
   return {
     sha: c.sha,
     message: c.commit.message,
-    author: c.commit.author?.name,
-    date: c.commit.author?.date,
+    author: c.commit.author.name,
+    date: c.commit.author.date,
     html_url: c.html_url,
   };
 }
@@ -279,16 +272,6 @@ const getCommitDiffTool: Tool = {
  * @param client - GitHub client instance (null when the service is not configured)
  */
 export function createCommitTools(client: GitHubClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitHub'));
-  if (!client) {
-    return [
-      { tool: listCommitsTool, handler: unconfigured },
-      { tool: listBranchCommitsTool, handler: unconfigured },
-      { tool: searchCommitsTool, handler: unconfigured },
-      { tool: getCommitDiffTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listCommitsTool,

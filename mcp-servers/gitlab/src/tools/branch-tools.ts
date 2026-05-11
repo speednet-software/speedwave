@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
@@ -223,17 +221,6 @@ const compareBranchesTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createBranchTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: listBranchesTool, handler: unconfigured },
-      { tool: getBranchTool, handler: unconfigured },
-      { tool: createBranchTool, handler: unconfigured },
-      { tool: deleteBranchTool, handler: unconfigured },
-      { tool: compareBranchesTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listBranchesTool,

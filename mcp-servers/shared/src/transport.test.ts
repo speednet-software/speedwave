@@ -465,6 +465,92 @@ describe('transport', () => {
         })
       );
     });
+
+    it('does not send 500 response when headers are already sent at time of unhandled error', async () => {
+      // Covers the false branch of `if (!res.headersSent)` in handleMCPPost outer catch
+      const throwingHandler = {
+        processRequest: vi.fn().mockRejectedValue(new Error('crash after headers sent')),
+      } as unknown as JSONRPCHandler;
+
+      const req = createMockRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'echo', arguments: {} },
+      });
+      const res = createMockResponse();
+      // Simulate headers already sent
+      (res as any).headersSent = true;
+
+      await handleMCPPost(throwingHandler, req as Request, res as unknown as Response);
+
+      // Since headers are already sent, no status/json should be called
+      expect(res.status).not.toHaveBeenCalledWith(500);
+      expect(res.json).not.toHaveBeenCalled();
+    });
+
+    it('handles non-Error thrown value from handler (String() branch in outer catch)', async () => {
+      // Covers line 50 false branch: error instanceof Error ? ... : String(error)
+      // When the thrown value is not an Error instance
+      const throwingHandler = {
+        processRequest: vi.fn().mockRejectedValue('plain string thrown'),
+      } as unknown as JSONRPCHandler;
+
+      const req = createMockRequest({ jsonrpc: '2.0', id: 1, method: 'ping' });
+      const res = createMockResponse();
+
+      await handleMCPPost(throwingHandler, req as Request, res as unknown as Response);
+
+      // Should still return 500
+      expect(res.status).toHaveBeenCalledWith(500);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.objectContaining({ message: 'Internal server error' }),
+        })
+      );
+    });
+
+    it('returns SSE stream for batch request when Accept includes text/event-stream', async () => {
+      // Covers lines 144-149: SSE batch path in handleMCPPostInner
+      vi.clearAllMocks();
+
+      const req = createMockRequest(
+        [
+          { jsonrpc: '2.0', id: 1, method: 'ping' },
+          { jsonrpc: '2.0', id: 2, method: 'ping' },
+        ],
+        { accept: 'application/json, text/event-stream' }
+      );
+      const res = createMockResponse();
+
+      await handleMCPPost(handler, req as Request, res as unknown as Response);
+
+      expect(mockCreateSSEStream).toHaveBeenCalledWith(res);
+      expect(mockSSEStream.sendMessage).toHaveBeenCalledTimes(2);
+      expect(mockSSEStream.close).toHaveBeenCalled();
+    });
+
+    it('sets Mcp-Session-Id header when batch contains initialize request', async () => {
+      // Covers line 131: batch sessionId header propagation
+      const req = createMockRequest([
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            clientInfo: { name: 'batch-client', version: '1.0.0' },
+          },
+        },
+        { jsonrpc: '2.0', id: 2, method: 'ping' },
+      ]);
+      const res = createMockResponse();
+
+      await handleMCPPost(handler, req as Request, res as unknown as Response);
+
+      expect(res.setHeader).toHaveBeenCalledWith('Mcp-Session-Id', expect.any(String));
+    });
   });
 
   describe('handleMCPDelete', () => {

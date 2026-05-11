@@ -64,6 +64,7 @@ export function addAutoReturn(code: string): AutoReturnResult {
     // Inne typy (VariableDeclaration, IfStatement, etc.) - nie dodawaj return
     return { code };
   } catch (error) {
+    /* c8 ignore next — acorn always throws Error instances; the String() fallback is defensive */
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.warn(`${ts()} [auto-return] Failed to parse code: ${errorMsg}`);
     console.warn(

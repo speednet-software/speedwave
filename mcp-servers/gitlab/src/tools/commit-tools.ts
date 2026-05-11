@@ -2,14 +2,7 @@
  * Commit Tools - 4 tools for GitLab commit operations
  */
 
-import {
-  Tool,
-  ToolDefinition,
-  jsonResult,
-  errorResult,
-  notConfiguredMessage,
-  READ_ONLY_ANNOTATIONS,
-} from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition, jsonResult, READ_ONLY_ANNOTATIONS } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -231,16 +224,6 @@ const getCommitDiffTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createCommitTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: listBranchCommitsTool, handler: unconfigured },
-      { tool: listCommitsTool, handler: unconfigured },
-      { tool: searchCommitsTool, handler: unconfigured },
-      { tool: getCommitDiffTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listBranchCommitsTool,

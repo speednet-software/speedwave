@@ -38,8 +38,8 @@ RUN cd github && npm prune --omit=dev
 # Production stage
 FROM node:24-alpine
 
-# curl for healthcheck
-RUN apk add --no-cache curl
+# curl for healthcheck; tzdata for TZ env — keep aligned with tz.rs (see CLAUDE.md SSOT).
+RUN apk add --no-cache curl tzdata
 
 WORKDIR /app
 

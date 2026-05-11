@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -187,15 +185,6 @@ const createReleaseTool: Tool = {
  * @param client - GitHub client instance (null when the service is not configured)
  */
 export function createReleaseTools(client: GitHubClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitHub'));
-  if (!client) {
-    return [
-      { tool: createTagTool, handler: unconfigured },
-      { tool: deleteTagTool, handler: unconfigured },
-      { tool: createReleaseTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: createTagTool,

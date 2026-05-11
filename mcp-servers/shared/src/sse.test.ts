@@ -668,6 +668,61 @@ describe('sse', () => {
     });
   });
 
+  describe('sendEvent retry field', () => {
+    it('includes retry field in SSE output when event has a retry value', () => {
+      // The private sendEvent method is exercised via sendMessage which builds an event
+      // without retry. We test the retry branch by accessing the SSEStream internals
+      // indirectly: since SSEEvent type has an optional retry field and sendEvent is
+      // private, we create a minimal SSEStream subclass to call it.
+      //
+      // Alternative: extend SSEStream in a test-only subclass exposing sendEvent.
+      // We use a different approach — spy on res.write and feed an event with retry
+      // via a custom SSEStream subclass.
+      class TestSSEStream extends SSEStream {
+        public sendRawEvent(event: {
+          id?: string;
+          event?: string;
+          retry?: number;
+          data?: string;
+        }): void {
+          // Access private sendEvent via bracket notation for test purposes
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (this as any).sendEvent(event);
+        }
+      }
+
+      const mockRes = mockResponse();
+      const stream = new TestSSEStream(mockRes);
+
+      stream.sendRawEvent({ retry: 3000 });
+
+      const written = mockRes.write.mock.calls[0][0] as string;
+      expect(written).toContain('retry: 3000\n');
+    });
+
+    it('omits retry field when event has no retry value', () => {
+      class TestSSEStream extends SSEStream {
+        public sendRawEvent(event: {
+          id?: string;
+          event?: string;
+          retry?: number;
+          data?: string;
+        }): void {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (this as any).sendEvent(event);
+        }
+      }
+
+      const mockRes = mockResponse();
+      const stream = new TestSSEStream(mockRes);
+
+      stream.sendRawEvent({ id: '1', event: 'test', data: '{}' });
+
+      const written = mockRes.write.mock.calls[0][0] as string;
+      expect(written).not.toContain('retry:');
+    });
+  });
+
   describe('sanitizeSSEField', () => {
     it('strips newline', () => {
       expect(sanitizeSSEField('foo\nbar')).toBe('foobar');

@@ -3108,6 +3108,156 @@ services:
         );
     }
 
+    /// mcp-github must render with the standard worker hardening AND its non-standard
+    /// 256m memory cap (Octokit + `octokit.paginate` need more headroom than the 128m
+    /// other API workers use — see the comment in compose.template.yml). Also verifies
+    /// the read-only, project-scoped `/tokens` mount and `PORT=PORT_WORKER`.
+    #[test]
+    fn test_render_compose_github_service_present() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            github: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let gh = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-github"))
+            .expect("mcp-github service must be present when enabled");
+
+        assert!(
+            gh.get("read_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "mcp-github must set read_only: true"
+        );
+        let cap_drop = gh
+            .get("cap_drop")
+            .and_then(|v| v.as_sequence())
+            .expect("cap_drop must be present");
+        assert!(cap_drop.iter().any(|c| c.as_str() == Some("ALL")));
+        let sec_opt = gh
+            .get("security_opt")
+            .and_then(|v| v.as_sequence())
+            .expect("security_opt must be present");
+        assert!(sec_opt
+            .iter()
+            .any(|s| s.as_str() == Some("no-new-privileges:true")));
+
+        // Non-standard, load-bearing memory cap.
+        assert_eq!(
+            gh.get("deploy")
+                .and_then(|d| d.get("resources"))
+                .and_then(|r| r.get("limits"))
+                .and_then(|l| l.get("memory"))
+                .and_then(|m| m.as_str()),
+            Some("256m"),
+            "mcp-github must keep its 256m memory limit (Octokit footprint)"
+        );
+
+        // Token mount: only its own service dir, read-only, under the project's tokens path.
+        let volumes = gh
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .expect("mcp-github must mount its token dir");
+        assert!(
+            volumes.iter().filter_map(|v| v.as_str()).any(|v| {
+                v.ends_with("/test-project/github:/tokens:ro") || v.ends_with("github:/tokens:ro")
+            }),
+            "mcp-github must mount github tokens read-only; got: {volumes:?}"
+        );
+        // It must NOT mount anyone else's tokens or /workspace.
+        let gh_block = serde_yaml_ng::to_string(gh).unwrap();
+        assert!(
+            !gh_block.contains("/workspace"),
+            "mcp-github must not mount /workspace"
+        );
+        assert!(
+            !gh_block.contains("slack:/tokens") && !gh_block.contains("gitlab:/tokens"),
+            "mcp-github must mount only its own tokens; got block:\n{gh_block}"
+        );
+
+        let env = gh
+            .get("environment")
+            .and_then(|e| e.as_sequence())
+            .expect("environment must be present");
+        let port_line = format!("PORT={}", crate::consts::PORT_WORKER);
+        assert!(
+            env.iter().any(|v| v.as_str() == Some(port_line.as_str())),
+            "mcp-github must set PORT={}",
+            crate::consts::PORT_WORKER
+        );
+    }
+
+    /// Hub must know where to reach the GitHub worker — `WORKER_GITHUB_URL` injected
+    /// from the compose template, pointing at `:PORT_WORKER`.
+    #[test]
+    fn test_github_worker_url_in_hub_env() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            github: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let hub_env = get_hub_env_seq(&doc);
+        let expected = format!(
+            "WORKER_GITHUB_URL=http://mcp-github:{}",
+            crate::consts::PORT_WORKER
+        );
+        assert!(
+            hub_env.iter().any(|s| s == &expected),
+            "hub must have '{expected}' in environment; got: {hub_env:?}"
+        );
+    }
+
+    /// Disabling the GitHub toggle must remove both the `mcp-github` service block
+    /// and the `WORKER_GITHUB_URL` hub env entry.
+    #[test]
+    fn test_apply_integrations_filter_disables_github() {
+        let mut integrations = ResolvedIntegrationsConfig::default();
+        integrations.github = false;
+
+        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+
+        let services = doc.get("services").and_then(|s| s.as_mapping()).unwrap();
+        assert!(
+            !services.contains_key(&serde_yaml_ng::Value::String("mcp-github".into())),
+            "mcp-github must be removed when disabled"
+        );
+        let hub_env = get_hub_env_seq(&doc);
+        assert!(
+            !hub_env.iter().any(|s| s.starts_with("WORKER_GITHUB_URL=")),
+            "WORKER_GITHUB_URL must be removed from hub env when github disabled; got: {hub_env:?}"
+        );
+    }
+
     /// Disabling the Playwright toggle must remove both the service block and
     /// the WORKER_PLAYWRIGHT_URL hub env entry.
     #[test]

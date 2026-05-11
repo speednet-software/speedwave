@@ -194,6 +194,13 @@ describe('GitHubClient', () => {
       expect(opts.baseUrl).toBe('https://ghe.example.com/api/v3');
     });
 
+    it('rejects an empty or whitespace-only token', () => {
+      expect(() => new GitHubClientClass({ token: '' })).toThrow('non-empty authentication token');
+      expect(() => new GitHubClientClass({ token: '   ' })).toThrow(
+        'non-empty authentication token'
+      );
+    });
+
     it('throttle.onRateLimit warns and retries up to twice', () => {
       const opts = mockOctokitConstructor.mock.calls[0][0] as {
         throttle: {
@@ -373,6 +380,20 @@ describe('GitHubClient', () => {
 
     it('categorizes everything else as unknown', async () => {
       octokit.rest.users.getAuthenticated.mockRejectedValue({ message: 'weird' });
+      const result = await client.testConnection();
+      expect(result.errorType).toBe('unknown');
+    });
+
+    it('folds a 5xx (server) error into errorType "unknown"', async () => {
+      octokit.rest.users.getAuthenticated.mockRejectedValue({ status: 503 });
+      const result = await client.testConnection();
+      expect(result.success).toBe(false);
+      expect(result.errorType).toBe('unknown');
+      expect(result.error).toContain('service unavailable');
+    });
+
+    it('folds a 422 (validation) error into errorType "unknown"', async () => {
+      octokit.rest.users.getAuthenticated.mockRejectedValue({ status: 422, message: 'bad' });
       const result = await client.testConnection();
       expect(result.errorType).toBe('unknown');
     });
@@ -1156,6 +1177,13 @@ describe('GitHubClient', () => {
       });
       expect(octokit.rest.repos.get).not.toHaveBeenCalled();
     });
+
+    it('throws a clear error when ref is omitted and the repo has no default branch', async () => {
+      // mapRepo normalises a missing default_branch to '' — getTree must not forward that.
+      octokit.rest.repos.get.mockResolvedValue({ data: { id: 1 } });
+      await expect(client.getTree('o', 'r')).rejects.toThrow('has no default branch');
+      expect(octokit.rest.git.getTree).not.toHaveBeenCalled();
+    });
   });
 
   describe('getFileContents', () => {
@@ -1408,7 +1436,13 @@ describe('GitHubClient', () => {
   describe('listWorkflowRunArtifacts', () => {
     it('lists artifacts', async () => {
       octokit.paginate.mockResolvedValue([
-        { id: 1, name: 'dist', size_in_bytes: 1024, archive_download_url: 'u', expired: false },
+        {
+          id: 1,
+          name: 'dist',
+          size_in_bytes: 1024,
+          archive_download_url: 'https://pipelines.actions.githubusercontent.com/abc/dist.zip',
+          expired: false,
+        },
       ]);
       const artifacts = await client.listWorkflowRunArtifacts('o', 'r', 7, { limit: 1 });
       expect(octokit.paginate).toHaveBeenCalledWith(
@@ -1416,8 +1450,42 @@ describe('GitHubClient', () => {
         expect.objectContaining({ run_id: 7, per_page: 1 })
       );
       expect(artifacts).toEqual([
-        { id: 1, name: 'dist', size_in_bytes: 1024, archive_download_url: 'u', expired: false },
+        {
+          id: 1,
+          name: 'dist',
+          size_in_bytes: 1024,
+          archive_download_url: 'https://pipelines.actions.githubusercontent.com/abc/dist.zip',
+          expired: false,
+        },
       ]);
+    });
+
+    it('drops a non-HTTPS archive_download_url (SSRF guard)', async () => {
+      octokit.paginate.mockResolvedValue([
+        {
+          id: 2,
+          name: 'evil',
+          size_in_bytes: 1,
+          archive_download_url: 'file:///etc/passwd',
+          expired: false,
+        },
+        {
+          id: 3,
+          name: 'meta',
+          size_in_bytes: 1,
+          archive_download_url: 'http://169.254.169.254/latest/meta-data',
+          expired: false,
+        },
+        {
+          id: 4,
+          name: 'junk',
+          size_in_bytes: 1,
+          archive_download_url: 'not a url',
+          expired: false,
+        },
+      ]);
+      const artifacts = await client.listWorkflowRunArtifacts('o', 'r', 7);
+      expect(artifacts.map((a) => a.archive_download_url)).toEqual(['', '', '']);
     });
   });
 
@@ -1858,6 +1926,16 @@ describe('initializeGitHubClient', () => {
     expect(mockLoadToken).toHaveBeenCalledWith('/custom/tokens/token');
   });
 
+  it('appends "/token" verbatim even when TOKENS_DIR has a trailing slash', async () => {
+    process.env.TOKENS_DIR = '/custom/tokens/';
+    mockLoadToken.mockResolvedValue('test-token');
+    octokitHolder.instance = {
+      rest: { users: { getAuthenticated: vi.fn().mockResolvedValue({ data: {} }) } },
+    };
+    await initializeGitHubClient();
+    expect(mockLoadToken).toHaveBeenCalledWith('/custom/tokens//token');
+  });
+
   it('returns null when the token is empty', async () => {
     mockLoadToken.mockResolvedValue('');
     const result = await initializeGitHubClient();
@@ -1886,11 +1964,39 @@ describe('initializeGitHubClient', () => {
     expect(console.warn).toHaveBeenCalled();
   });
 
-  it('returns null when loadToken throws', async () => {
-    mockLoadToken.mockRejectedValue(new Error('boom'));
+  it('returns null when loadToken throws, logging the error detail', async () => {
+    mockLoadToken.mockRejectedValue(new Error('EACCES: permission denied, open /tokens/token'));
     const result = await initializeGitHubClient();
     expect(result).toBeNull();
-    expect(console.warn).toHaveBeenCalled();
+    // The warning must carry the underlying error (a permissions failure must be
+    // distinguishable from a plain "token not found").
+    const warned = (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((c) => c.join(' '))
+      .join('\n');
+    expect(warned).toContain('Failed to initialize GitHub client');
+    expect(warned).toContain('EACCES: permission denied');
+  });
+
+  it('falls back to error.message when the thrown Error has no stack', async () => {
+    const e = new Error('no-stack error');
+    e.stack = undefined;
+    mockLoadToken.mockRejectedValue(e);
+    const result = await initializeGitHubClient();
+    expect(result).toBeNull();
+    const warned = (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((c) => c.join(' '))
+      .join('\n');
+    expect(warned).toContain('no-stack error');
+  });
+
+  it('stringifies a non-Error thrown value', async () => {
+    mockLoadToken.mockRejectedValue('plain string failure');
+    const result = await initializeGitHubClient();
+    expect(result).toBeNull();
+    const warned = (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((c) => c.join(' '))
+      .join('\n');
+    expect(warned).toContain('plain string failure');
   });
 });
 
@@ -2183,6 +2289,22 @@ describe('Response mappers — defensive fallbacks', () => {
     octokit.rest.actions.downloadArtifact.mockResolvedValue({});
     await expect(client.downloadArtifact('o', 'r', 42)).rejects.toThrow(
       'no download URL for workflow artifact'
+    );
+  });
+
+  it('throws when getRunLogs is redirected to a non-HTTPS URL (SSRF guard)', async () => {
+    octokit.rest.actions.downloadWorkflowRunLogs.mockResolvedValue({
+      headers: { location: 'http://169.254.169.254/latest/meta-data' },
+    });
+    await expect(client.getRunLogs('o', 'r', 7)).rejects.toThrow(
+      'non-HTTPS download URL for workflow run logs'
+    );
+  });
+
+  it('throws when downloadArtifact is redirected to a non-HTTPS URL (SSRF guard)', async () => {
+    octokit.rest.actions.downloadArtifact.mockResolvedValue({ url: 'file:///etc/passwd' });
+    await expect(client.downloadArtifact('o', 'r', 42)).rejects.toThrow(
+      'non-HTTPS download URL for workflow artifact'
     );
   });
 

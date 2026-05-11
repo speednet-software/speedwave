@@ -6,30 +6,20 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
+import { GitHubIssue } from '../types.js';
 import { withValidation } from './validation.js';
 
-interface RawIssue {
-  number: number;
-  title: string;
-  state: 'open' | 'closed';
-  user: { login: string };
-  labels: Array<{ name: string }>;
-  assignees: Array<{ login: string }>;
-  html_url: string;
-}
-
 /**
- * Maps a normalized issue to the compact summary returned by `listIssues`.
+ * Maps a normalized issue to the compact summary returned by `listIssues`
+ * (flattens `user`/`labels`/`assignees` to plain strings; drops `body`/timestamps).
  * @param i - Normalized issue from the GitHub client
  * @returns Compact `{ number, title, state, user, labels, assignees, html_url }` summary
  */
-function issueSummary(i: RawIssue): {
+function issueSummary(i: GitHubIssue): {
   number: number;
   title: string;
   state: 'open' | 'closed';
@@ -339,17 +329,6 @@ const closeIssueTool: Tool = {
  * @param client - GitHub client instance (null when the service is not configured)
  */
 export function createIssueTools(client: GitHubClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitHub'));
-  if (!client) {
-    return [
-      { tool: listIssuesTool, handler: unconfigured },
-      { tool: getIssueTool, handler: unconfigured },
-      { tool: createIssueTool, handler: unconfigured },
-      { tool: updateIssueTool, handler: unconfigured },
-      { tool: closeIssueTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listIssuesTool,

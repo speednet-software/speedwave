@@ -316,6 +316,9 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     return new Promise((resolve, reject) => {
       server = app.listen(port, host, () => {
         const addr = server!.address();
+        // addr is a string only when listening on a named pipe (never in Speedwave's TCP use).
+        // The fallback to `port` is defensive; the string-address branch is not reachable in tests.
+        /* c8 ignore next */
         const actualPort = typeof addr === 'object' && addr ? addr.port : port;
         console.log(`${ts()} \n${'═'.repeat(60)}`);
         console.log(`${ts()}   🚀 ${name} MCP Server v${version}`);

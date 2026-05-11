@@ -7,8 +7,6 @@ import {
   ToolDefinition,
   jsonResult,
   textResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
@@ -383,19 +381,6 @@ function mapPr(pr: GitHubPullRequest) {
  * @param client - GitHub client instance (null when the service is not configured)
  */
 export function createPrTools(client: GitHubClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitHub'));
-  if (!client) {
-    return [
-      { tool: listPullRequestsTool, handler: unconfigured },
-      { tool: getPullRequestTool, handler: unconfigured },
-      { tool: createPullRequestTool, handler: unconfigured },
-      { tool: mergePullRequestTool, handler: unconfigured },
-      { tool: updatePullRequestTool, handler: unconfigured },
-      { tool: getPrDiffTool, handler: unconfigured },
-      { tool: getPrFilesTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listPullRequestsTool,

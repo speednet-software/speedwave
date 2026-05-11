@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -118,14 +116,6 @@ const createLabelTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createLabelTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: listLabelsTool, handler: unconfigured },
-      { tool: createLabelTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listLabelsTool,

@@ -2,14 +2,7 @@
  * Repo Tools - 3 tools for GitHub repositories
  */
 
-import {
-  Tool,
-  ToolDefinition,
-  jsonResult,
-  errorResult,
-  notConfiguredMessage,
-  READ_ONLY_ANNOTATIONS,
-} from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition, jsonResult, READ_ONLY_ANNOTATIONS } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -166,15 +159,6 @@ const searchCodeTool: Tool = {
  * @param client - GitHub client instance (null when the service is not configured)
  */
 export function createRepoTools(client: GitHubClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitHub'));
-  if (!client) {
-    return [
-      { tool: listReposTool, handler: unconfigured },
-      { tool: getRepoTool, handler: unconfigured },
-      { tool: searchCodeTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listReposTool,

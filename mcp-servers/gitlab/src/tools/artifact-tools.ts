@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -133,15 +131,6 @@ const deleteArtifactsTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createArtifactTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: listArtifactsTool, handler: unconfigured },
-      { tool: downloadArtifactTool, handler: unconfigured },
-      { tool: deleteArtifactsTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listArtifactsTool,
