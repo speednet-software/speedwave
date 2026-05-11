@@ -2172,18 +2172,18 @@ describe('Response mappers — defensive fallbacks', () => {
     expect(result).toEqual({ commit_sha: '', path: 'x.md', html_url: '' });
   });
 
-  it('returns an empty download URL when getRunLogs has no redirect url', async () => {
+  it('throws when getRunLogs gets no redirect url (neither Location header nor res.url)', async () => {
     octokit.rest.actions.downloadWorkflowRunLogs.mockResolvedValue({});
-    const result = await client.getRunLogs('o', 'r', 7);
-    expect(result.download_url).toBe('');
-    expect(result.note).toContain('ZIP archive');
+    await expect(client.getRunLogs('o', 'r', 7)).rejects.toThrow(
+      'no download URL for workflow run logs'
+    );
   });
 
-  it('returns an empty download URL when downloadArtifact has no redirect url', async () => {
+  it('throws when downloadArtifact gets no redirect url (neither Location header nor res.url)', async () => {
     octokit.rest.actions.downloadArtifact.mockResolvedValue({});
-    const result = await client.downloadArtifact('o', 'r', 42);
-    expect(result.download_url).toBe('');
-    expect(result.note).toContain('ZIP archive');
+    await expect(client.downloadArtifact('o', 'r', 42)).rejects.toThrow(
+      'no download URL for workflow artifact'
+    );
   });
 
   it('falls back to the commit SHA when an annotated tag object omits sha (createTag)', async () => {

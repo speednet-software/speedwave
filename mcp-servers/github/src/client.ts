@@ -72,12 +72,20 @@ const MAX_PER_PAGE = 100;
  * Extracts the redirect target URL from an Octokit response fetched with
  * `request: { redirect: 'manual' }` (logs/artifact download endpoints). The URL
  * is in the `Location` header; older Octokit versions also exposed it as `res.url`.
+ * Throws if neither is present — better a clear error than handing Claude an empty
+ * `download_url` it can't act on (would only happen if GitHub changes the redirect
+ * behaviour or a future Octokit version stops exposing it).
  * @param res - Octokit response object (status 302)
- * @returns The redirect URL, or `''` if absent
+ * @param what - What was being downloaded, for the error message (e.g. "workflow run logs")
+ * @returns The non-empty redirect URL
  */
-function extractRedirectUrl(res: unknown): string {
+function extractRedirectUrl(res: unknown, what: string): string {
   const r = res as { url?: unknown; headers?: { location?: unknown } };
-  return String(r.headers?.location || r.url || '');
+  const url = String(r.headers?.location || r.url || '');
+  if (!url) {
+    throw new Error(`GitHub returned no download URL for ${what}`);
+  }
+  return url;
 }
 
 /**
@@ -1429,7 +1437,7 @@ export class GitHubClient {
       request: { redirect: 'manual' },
     });
     return {
-      download_url: extractRedirectUrl(res),
+      download_url: extractRedirectUrl(res, 'workflow run logs'),
       note: 'GitHub returns logs as a ZIP archive at this URL (short-lived; download promptly).',
     };
   }
@@ -1525,7 +1533,7 @@ export class GitHubClient {
       request: { redirect: 'manual' },
     });
     return {
-      download_url: extractRedirectUrl(res),
+      download_url: extractRedirectUrl(res, 'workflow artifact'),
       note: 'GitHub returns the artifact as a ZIP archive at this URL (short-lived; download promptly).',
     };
   }

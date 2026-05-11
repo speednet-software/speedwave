@@ -708,8 +708,15 @@ fn is_snapshotter_error(err: &anyhow::Error) -> bool {
     false
 }
 
+/// Registry hostnames that our `FROM` lines reference. A DNS failure mentioning
+/// one of these is the boot-time-resolver race (see `is_transient_build_error`),
+/// not a user typo — so it's worth a retry. A DNS failure for some *other* host
+/// is more likely a real misconfiguration and is left to fail fast.
+const BASE_IMAGE_REGISTRY_HOSTS: &[&str] =
+    &["registry-1.docker.io", "docker.io", "mcr.microsoft.com"];
+
 /// Returns `true` if the build error looks transient (I/O timeout, connection reset,
-/// temporary unavailable, or a DNS hiccup while pulling a base image). These may
+/// temporary unavailable, or a DNS hiccup resolving a base-image registry). These may
 /// succeed on retry without any recovery action.
 ///
 /// The DNS cases matter for first runs behind a VPN: when the Lima VM boots, its
@@ -717,9 +724,11 @@ fn is_snapshotter_error(err: &anyhow::Error) -> bool {
 /// survive a low-MTU tunnel (e.g. Tailscale's 1380). It takes a second or two to
 /// detect that and fall back to plain UDP — but BuildKit fires its
 /// `FROM <base-image>` metadata fetch inside that window, so the resolver returns
-/// `SERVFAIL` and BuildKit reports `server misbehaving` / `failed to resolve
-/// source metadata`. A single retry a few seconds later hits the now-degraded
-/// resolver and succeeds.
+/// `SERVFAIL` (`server misbehaving` / `failed to resolve source metadata`) or even
+/// `NXDOMAIN` (`no such host`) for `docker.io` / `mcr.microsoft.com`. A retry a few
+/// seconds later hits the now-degraded resolver and succeeds. The NXDOMAIN-shaped
+/// cases are scoped to `BASE_IMAGE_REGISTRY_HOSTS` so a typo'd custom registry URL
+/// fails fast instead of silently retrying.
 ///
 /// Uses case-insensitive matching because kernel/libc/BuildKit error messages vary
 /// in casing across distros and locales.
@@ -731,16 +740,24 @@ fn is_transient_build_error(err: &anyhow::Error) -> bool {
             || msg.contains("connection reset")
             || msg.contains("temporary failure")
             || msg.contains("resource temporarily unavailable")
-            // DNS hiccup while resolving a base-image registry host (see doc above)
+            // SERVFAIL during the EDNS0→UDP fallback window (see doc above) — these
+            // strings only ever appear for a registry metadata fetch, so no host scope.
             || msg.contains("server misbehaving")
             || msg.contains("failed to resolve source metadata")
-            || msg.contains("no such host")
-            || (msg.contains("dial tcp") && msg.contains("lookup"))
+            // NXDOMAIN / generic dial-lookup failures: only transient if they name one
+            // of our base-image registries; a typo'd custom registry should fail fast.
+            || (mentions_base_image_registry(&msg)
+                && (msg.contains("no such host") || (msg.contains("dial tcp") && msg.contains("lookup"))))
         {
             return true;
         }
     }
     false
+}
+
+/// `true` if `msg` (already lowercased) mentions one of [`BASE_IMAGE_REGISTRY_HOSTS`].
+fn mentions_base_image_registry(msg: &str) -> bool {
+    BASE_IMAGE_REGISTRY_HOSTS.iter().any(|h| msg.contains(h))
 }
 
 #[cfg(test)]
@@ -2082,6 +2099,31 @@ mod tests {
         // is not the DNS-fallback race; don't widen the net unnecessarily.
         let err = anyhow::anyhow!("dial tcp 10.0.0.5:443: connect: connection refused");
         assert!(!is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_dns_for_unknown_registry_is_not_transient() {
+        // NXDOMAIN / dial-lookup failure for a host that is NOT one of our base-image
+        // registries — most likely a typo'd custom registry URL. Should fail fast, not
+        // silently retry (the host scoping in `is_transient_build_error`).
+        let nxdomain = anyhow::anyhow!("dial tcp: lookup myregistry.example.com: no such host");
+        assert!(!is_transient_build_error(&nxdomain));
+        let dial_lookup =
+            anyhow::anyhow!("dial tcp: lookup ghcr.io on 127.0.0.53:53: server can't find ghcr.io");
+        // (`ghcr.io` isn't in BASE_IMAGE_REGISTRY_HOSTS, and there's no "server misbehaving" /
+        // "failed to resolve source metadata" substring here.)
+        assert!(!is_transient_build_error(&dial_lookup));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_servfail_is_transient_regardless_of_host() {
+        // "server misbehaving" / "failed to resolve source metadata" only ever appear for a
+        // registry metadata fetch during the EDNS0→UDP window, so they're transient even
+        // without a base-image hostname in the message.
+        let servfail = anyhow::anyhow!("Head \"https://example.invalid/v2/\": server misbehaving");
+        assert!(is_transient_build_error(&servfail));
+        let no_metadata = anyhow::anyhow!("foo:bar: failed to resolve source metadata for foo/bar");
+        assert!(is_transient_build_error(&no_metadata));
     }
 
     // -----------------------------------------------------------------------
