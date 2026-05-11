@@ -986,6 +986,7 @@ mod tests {
             ("redmine", 3),
             ("gitlab", 2),
             ("github", 1),
+            ("atlassian", 5),
             ("playwright", 0),
         ];
         for &(key, count) in expected {

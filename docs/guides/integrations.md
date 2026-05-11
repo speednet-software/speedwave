@@ -170,7 +170,7 @@ Inside a worker, Speedwave's convention is: use the service's official SDK (or a
 
 #### Tool surface
 
-35 tools. Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
+33 tools. Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
 Confluence: `listSpaces`, `getSpace`, `searchPages`, `getPage`, `getPageByTitle`, `createPage`, `updatePage`, `getPageChildren`, `addPageComment`, `getPageComments`, `addPageLabels`, `getPageLabels`, `listAttachments`.
 
 ### Redmine Configuration Wizard
