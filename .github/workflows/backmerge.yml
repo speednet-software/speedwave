@@ -76,7 +76,9 @@ jobs:
             ':!mcp-servers/hub/package.json' ':!mcp-servers/shared/package.json'
             ':!mcp-servers/slack/package.json' ':!mcp-servers/sharepoint/package.json'
             ':!mcp-servers/redmine/package.json' ':!mcp-servers/gitlab/package.json'
-            ':!mcp-servers/os/package.json' ':!mcp-servers/package-lock.json'
+            ':!mcp-servers/github/package.json' ':!mcp-servers/atlassian/package.json'
+            ':!mcp-servers/os/package.json' ':!mcp-servers/host_exec/package.json'
+            ':!mcp-servers/package-lock.json'
           )
           CONTENT_DIFF=$(git diff --name-only origin/dev origin/main -- . "${VERSION_EXCLUDES[@]}")
 
@@ -127,7 +129,10 @@ jobs:
               mcp-servers/sharepoint/package.json
               mcp-servers/redmine/package.json
               mcp-servers/gitlab/package.json
+              mcp-servers/github/package.json
+              mcp-servers/atlassian/package.json
               mcp-servers/os/package.json
+              mcp-servers/host_exec/package.json
               mcp-servers/package-lock.json
               Cargo.lock
               desktop/src-tauri/Cargo.lock

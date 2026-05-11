@@ -10,6 +10,7 @@ const workspaces = [
   'redmine',
   'sharepoint',
   'os',
+  'host_exec',
 ];
 
 export default defineWorkspace(
