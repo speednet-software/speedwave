@@ -38,7 +38,9 @@ export function truncate(text: string, maxChars: number): { content: string; tru
  * @returns A Markdown string covering every sheet.
  */
 function workbookToMarkdown(wb: XLSX.WorkBook): string {
-  const escape = (cell: string): string => cell.replace(/\|/g, '\\|');
+  // Escape backslash first, then pipe — otherwise a literal `\|` in a cell would round-trip as
+  // `\\|` (escaped backslash + cell-breaking pipe) instead of `\\\|` (escaped backslash + escaped pipe).
+  const escape = (cell: string): string => cell.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
   const parts: string[] = [];
   for (const name of wb.SheetNames) {
     const sheet = wb.Sheets[name];

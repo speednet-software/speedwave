@@ -10,9 +10,9 @@ from typing import Iterable, Sequence
 
 
 def _escape_cell(value: object) -> str:
-    """Render a cell value as Markdown-table-safe text (escape ``|``, collapse newlines)."""
+    """Render a cell value as Markdown-table-safe text (escape ``\\`` then ``|``, collapse newlines)."""
     text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", " ").replace("\n", " ")
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", " ").replace("\n", " ")
 
 
 def rows_to_markdown_table(rows: Sequence[Sequence[object]]) -> str:
