@@ -29,6 +29,17 @@
 use crate::config::{HostExecConfig, HostExecParam, HostExecRecipe};
 use crate::consts;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+/// Returns the per-project `host_exec` state directory:
+/// `<data_dir>/host-exec/<project>/` (holds `config.json`, `auth-token`,
+/// `port`, `pid`, `log`). Mirrors [`crate::claude_home::claude_home_dir`] —
+/// the caller is responsible for validating `project` as a safe single
+/// directory component beforehand. This is the SSOT for the layout; do not
+/// hard-code the `host-exec/<project>` join at call sites.
+pub fn host_exec_project_dir(data_dir: &Path, project: &str) -> PathBuf {
+    data_dir.join(consts::HOST_EXEC_SUBDIR).join(project)
+}
 
 /// Recipe name pattern: lowercase letters, digits, underscores; starts with a
 /// letter; max 64 chars. **Not** [`crate::plugin`]'s slug pattern — that one
@@ -439,6 +450,25 @@ mod tests {
             enabled: Some(true),
             commands: recipes,
         }
+    }
+
+    // -- per-project layout helper -------------------------------------------
+
+    #[test]
+    fn host_exec_project_dir_layout() {
+        assert_eq!(
+            host_exec_project_dir(Path::new("/data"), "myproj"),
+            Path::new("/data/host-exec/myproj")
+        );
+    }
+
+    #[test]
+    fn host_exec_project_dir_is_per_project() {
+        let a = host_exec_project_dir(Path::new("/data"), "proj-a");
+        let b = host_exec_project_dir(Path::new("/data"), "proj-b");
+        assert_ne!(a, b, "different projects must get different state dirs");
+        assert!(a.starts_with(Path::new("/data/host-exec")));
+        assert!(b.starts_with(Path::new("/data/host-exec")));
     }
 
     // -- happy paths ---------------------------------------------------------
