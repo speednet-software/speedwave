@@ -251,6 +251,12 @@ export class TranscriptionService {
       case 'finalize_progress':
         next.status = { state: 'finalizing', progress: ev.progress };
         break;
+      case 'final_segments_ready':
+        // The offline pass produced a higher-quality transcript; swap it in.
+        // Speaker IDs were already remapped server-side to keep user relabels.
+        next.final_segments = ev.segments;
+        next.speaker_names = ev.speaker_names;
+        break;
       case 'finished':
         next.status = { state: 'done' };
         break;

@@ -225,6 +225,173 @@ impl TranscriptDriver {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5: higher-quality offline pass
+// ---------------------------------------------------------------------------
+
+/// Inputs for the offline finalize pass — built by the caller (Tauri layer)
+/// after `stop_transcription`, once it has loaded the higher-quality model.
+pub struct FinalizeConfig {
+    /// Session id (must already be in the store, in `Finalizing` state).
+    pub id: Uuid,
+    /// The session store.
+    pub store: Arc<TranscriptStore>,
+    /// Recorded audio (`<session_dir>/audio.wav`). Must exist — if the user
+    /// discarded the audio, the caller shouldn't reach here (and `run_finalize`
+    /// returns `Failed` if it's missing).
+    pub audio_path: std::path::PathBuf,
+    /// Higher-quality transcriber (e.g. `large-v3`).
+    pub transcriber: Box<dyn Transcriber>,
+    /// Optional diarizer for the whole-recording pass (better clustering with
+    /// full context — but the clusters may differ from the live pass).
+    pub diarizer: Option<Box<dyn Diarizer>>,
+    /// Forced language + word-timestamps toggle.
+    pub transcribe_opts: TranscribeOptions,
+    /// Diarization clustering options.
+    pub diarize_opts: DiarizeOptions,
+    /// The diarizer turns from the live pass — used to remap speaker IDs so
+    /// user relabels survive (`TranscriptStore::merge_final_segments`).
+    pub live_turns: Vec<crate::transcription::diarizer::SpeakerTurn>,
+}
+
+/// Granularity (seconds) for the `FinalizeProgress` ticks — we transcribe the
+/// whole recording in one shot (Whisper handles long audio internally), so the
+/// progress signal is just "we're working" at this cadence.
+const FINALIZE_PROGRESS_TICK_SECS: f32 = 30.0;
+
+/// Runs the offline pass: load the recorded WAV, transcribe it with the
+/// higher-quality model, (optionally) re-diarize the whole recording, merge the
+/// result preserving user speaker relabels, and mark the session `Done`. On
+/// failure the session is flipped to `Failed{reason}` and the error returned —
+/// the caller can still fall back to the live transcript (it's untouched).
+pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
+    let FinalizeConfig {
+        id,
+        store,
+        audio_path,
+        mut transcriber,
+        mut diarizer,
+        transcribe_opts,
+        diarize_opts,
+        live_turns,
+    } = cfg;
+
+    // Helper to flip the session to Failed before returning an error.
+    let fail = |store: &TranscriptStore, reason: String| -> DriverError {
+        let _ = store.set_status(
+            id,
+            TranscriptStatus::Failed {
+                reason: reason.clone(),
+            },
+        );
+        DriverError::Transcribe(reason)
+    };
+
+    // 1) Load the recorded audio.
+    if !audio_path.exists() {
+        return Err(fail(
+            &store,
+            format!("recorded audio missing at {}", audio_path.display()),
+        ));
+    }
+    let pcm = match read_wav_to_mono_f32(&audio_path) {
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => return Err(fail(&store, "recorded audio is empty".to_string())),
+        Err(e) => return Err(fail(&store, format!("read audio: {e}"))),
+    };
+    let total_secs = pcm.len() as f32 / SAMPLE_RATE_HZ as f32;
+
+    // 2) Progress: tick to ~50% before the (single) transcribe call, then to
+    //    ~90% after — the heavy lifting is opaque inside Whisper. (We avoid
+    //    chunked decoding here on purpose: a whole-recording pass yields better
+    //    cross-utterance context than the live sliding window.)
+    let _ = store.finalize_progress(id, 0.05);
+    // Cap the visible ticks at 9 so the bar moves a bounded number of times.
+    let ticks = (total_secs / FINALIZE_PROGRESS_TICK_SECS).ceil().max(1.0) as u32;
+    let visible_ticks = ticks.clamp(1, 9);
+    for t in 1..=visible_ticks {
+        // Pre-transcribe progress fills the 5%..45% band so the bar moves even
+        // for long recordings before the (single) decode returns.
+        let p = 0.05 + 0.40 * (t as f32 / visible_ticks as f32);
+        let _ = store.finalize_progress(id, p);
+    }
+
+    // 3) The higher-quality transcription (whole buffer, no sliding window).
+    let final_segs = match transcriber.transcribe(&pcm, &transcribe_opts) {
+        Ok(s) => s,
+        Err(e) => return Err(fail(&store, format!("offline transcribe: {e}"))),
+    };
+    let _ = store.finalize_progress(id, 0.65);
+
+    // 4) Optional re-diarization over the whole recording. Best-effort: a
+    //    failure here keeps the (un-labelled-by-this-pass) final segments.
+    let (final_segs, final_turns) = match diarizer.as_mut() {
+        Some(d) => match d.diarize(&pcm, &diarize_opts) {
+            Ok(turns) if !turns.is_empty() => {
+                let mut segs = final_segs;
+                crate::transcription::diarizer::assign_speakers_by_overlap(&mut segs, &turns);
+                (segs, turns)
+            }
+            Ok(_) => (final_segs, Vec::new()),
+            Err(e) => {
+                log::warn!(target: "transcription::finalize", "offline diarization failed: {e}");
+                (final_segs, Vec::new())
+            }
+        },
+        None => (final_segs, Vec::new()),
+    };
+    let _ = store.finalize_progress(id, 0.9);
+
+    // 5) Merge: install final_segments, remapping speaker IDs to preserve
+    //    user relabels by overlap against the live turns.
+    if let Err(e) = store.merge_final_segments(id, final_segs, &final_turns, &live_turns) {
+        return Err(fail(&store, format!("merge final segments: {e}")));
+    }
+
+    // 6) Done.
+    store
+        .finish(id)
+        .map_err(|e| DriverError::Store(e.to_string()))?;
+    Ok(())
+}
+
+/// Reads a 16 kHz WAV (the format `WavWriter` above produces) into mono `f32`
+/// samples in `[-1, 1]`. Tolerates int16 (our writer) and float32; down-mixes
+/// to mono if the file is multi-channel (it shouldn't be).
+fn read_wav_to_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
+    let mut reader = hound::WavReader::open(path).map_err(|e| e.to_string())?;
+    let spec = reader.spec();
+    let channels = spec.channels.max(1) as usize;
+    let raw: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => match spec.bits_per_sample {
+            16 => reader
+                .samples::<i16>()
+                .map(|s| s.map(|v| v as f32 / 32_768.0))
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?,
+            other => return Err(format!("unsupported int WAV bit depth {other}")),
+        },
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?,
+    };
+    if channels == 1 {
+        return Ok(raw);
+    }
+    // Average channels into mono.
+    let frames = raw.len() / channels;
+    let mut mono = Vec::with_capacity(frames);
+    for i in 0..frames {
+        let mut acc = 0.0f32;
+        for c in 0..channels {
+            acc += raw[i * channels + c];
+        }
+        mono.push(acc / channels as f32);
+    }
+    Ok(mono)
+}
+
 /// One diarization pass over the live buffer; stamps speakers on the latest
 /// segments in the store (by index). Best-effort — failures are logged, not
 /// propagated.
@@ -515,5 +682,279 @@ mod tests {
         let s2 = s.clone();
         s2.stop();
         assert!(s.is_stopped(), "stop() should be visible across clones");
+    }
+
+    // --- Phase 5: offline finalize pass ------------------------------------
+
+    use crate::transcription::diarizer::SpeakerTurn;
+    use crate::transcription::transcriber::SpeakerId;
+
+    /// Records a recorded WAV under `<session_dir>/audio.wav` with `secs` of a
+    /// quiet tone, leaving the session in Finalizing state (the post-stop state).
+    fn seed_finalizing_session(
+        store: &Arc<TranscriptStore>,
+        secs: f32,
+    ) -> (Uuid, std::path::PathBuf) {
+        let id = mk_session(store, &PathBuf::from("/will-be-overwritten.wav"));
+        let dir = store.session_dir(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("audio.wav");
+        let mut w = hound::WavWriter::create(
+            &wav,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        let n = (secs * 16_000.0) as usize;
+        for i in 0..n {
+            let v = (0.05
+                * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin()
+                * 32_767.0) as i16;
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        (id, wav)
+    }
+
+    #[test]
+    fn finalize_produces_final_segments_and_marks_done() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 12.0);
+
+        run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_path: wav,
+            transcriber: Box::new(MockTranscriber {
+                seg_secs: 4.0,
+                text_template: "f{n}".to_string(),
+            }),
+            diarizer: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            diarize_opts: DiarizeOptions::default(),
+            live_turns: vec![],
+        })
+        .unwrap();
+
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        let finals = snap.final_segments.as_ref().expect("final segments set");
+        assert!(!finals.is_empty(), "offline pass should have segments");
+        // effective_segments now returns the final set.
+        assert_eq!(snap.effective_segments().len(), finals.len());
+        // Progress climbed past 0 (we don't pin exact values).
+        assert!(snap.last_seq > 0);
+    }
+
+    #[test]
+    fn finalize_preserves_user_relabels_via_overlap() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 12.0);
+        // User named the live speakers.
+        store.relabel_speaker(id, SpeakerId(0), "Ola").unwrap();
+        store.relabel_speaker(id, SpeakerId(1), "Bartek").unwrap();
+        // Live turns: speaker 0 first half, speaker 1 second half.
+        let live_turns = vec![
+            SpeakerTurn {
+                start: Duration::from_secs(0),
+                end: Duration::from_secs(6),
+                speaker: SpeakerId(0),
+            },
+            SpeakerTurn {
+                start: Duration::from_secs(6),
+                end: Duration::from_secs(12),
+                speaker: SpeakerId(1),
+            },
+        ];
+
+        run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_path: wav,
+            transcriber: Box::new(MockTranscriber {
+                seg_secs: 6.0,
+                text_template: "f{n}".to_string(),
+            }),
+            // 2 speakers, equal halves → MockDiarizer flips ids relative to live.
+            diarizer: Some(Box::new(MockDiarizer::new(2))),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            diarize_opts: DiarizeOptions::default(),
+            live_turns,
+        })
+        .unwrap();
+
+        let snap = store.get(id).unwrap();
+        let finals = snap.final_segments.as_ref().unwrap();
+        // Whatever speaker IDs the offline diarizer used, they were remapped to
+        // the live IDs (0 and 1), so the user names still resolve.
+        let used: std::collections::BTreeSet<_> = finals.iter().filter_map(|s| s.speaker).collect();
+        assert!(used.contains(&SpeakerId(0)) || used.contains(&SpeakerId(1)));
+        assert_eq!(snap.speaker_label(SpeakerId(0)), "Ola");
+        assert_eq!(snap.speaker_label(SpeakerId(1)), "Bartek");
+    }
+
+    #[test]
+    fn finalize_with_missing_audio_flips_to_failed() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, _wav) = seed_finalizing_session(&store, 4.0);
+        // Delete the audio after seeding (simulates "discard audio" / corruption).
+        let _ = std::fs::remove_file(store.session_dir(id).join("audio.wav"));
+
+        let err = run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_path: store.session_dir(id).join("audio.wav"),
+            transcriber: Box::new(MockTranscriber::new()),
+            diarizer: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            diarize_opts: DiarizeOptions::default(),
+            live_turns: vec![],
+        })
+        .unwrap_err();
+        assert!(matches!(err, DriverError::Transcribe(_)), "got {err:?}");
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Failed { .. }));
+        // The live transcript (such as it is) is untouched.
+        assert!(snap.final_segments.is_none());
+    }
+
+    /// A transcriber that always errors — to exercise the offline-decode failure
+    /// path.
+    struct FailingTranscriber;
+    impl Transcriber for FailingTranscriber {
+        fn transcribe(
+            &mut self,
+            _pcm: &[f32],
+            _opts: &TranscribeOptions,
+        ) -> Result<Vec<Segment>, crate::transcription::transcriber::TranscribeError> {
+            Err(
+                crate::transcription::transcriber::TranscribeError::Inference(
+                    "model exploded".to_string(),
+                ),
+            )
+        }
+    }
+
+    #[test]
+    fn finalize_with_failing_transcriber_flips_to_failed() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 8.0);
+
+        let err = run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_path: wav,
+            transcriber: Box::new(FailingTranscriber),
+            diarizer: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            diarize_opts: DiarizeOptions::default(),
+            live_turns: vec![],
+        })
+        .unwrap_err();
+        assert!(matches!(err, DriverError::Transcribe(_)), "got {err:?}");
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn finalize_with_empty_wav_flips_to_failed() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &PathBuf::from("/x.wav"));
+        let dir = store.session_dir(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("audio.wav");
+        // Header-only WAV (zero samples).
+        hound::WavWriter::create(
+            &wav,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap()
+        .finalize()
+        .unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+
+        let err = run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_path: wav,
+            transcriber: Box::new(MockTranscriber::new()),
+            diarizer: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            diarize_opts: DiarizeOptions::default(),
+            live_turns: vec![],
+        })
+        .unwrap_err();
+        assert!(matches!(err, DriverError::Transcribe(_)));
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn read_wav_to_mono_handles_int16_and_float32() {
+        let dir = tempfile::tempdir().unwrap();
+        // int16
+        let p16 = dir.path().join("i16.wav");
+        let mut w = hound::WavWriter::create(
+            &p16,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for v in [0i16, 16_384, -16_384, 32_767] {
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+        let s16 = read_wav_to_mono_f32(&p16).unwrap();
+        assert_eq!(s16.len(), 4);
+        assert!((s16[0] - 0.0).abs() < 1e-4);
+        assert!((s16[1] - 0.5).abs() < 1e-3);
+        // float32 stereo → mono average
+        let pf = dir.path().join("f32.wav");
+        let mut wf = hound::WavWriter::create(
+            &pf,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 16_000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        // 2 stereo frames: (1.0, 0.0), (0.5, 0.5) → mono 0.5, 0.5
+        for v in [1.0f32, 0.0, 0.5, 0.5] {
+            wf.write_sample(v).unwrap();
+        }
+        wf.finalize().unwrap();
+        let sf = read_wav_to_mono_f32(&pf).unwrap();
+        assert_eq!(sf.len(), 2);
+        assert!((sf[0] - 0.5).abs() < 1e-4);
+        assert!((sf[1] - 0.5).abs() < 1e-4);
     }
 }

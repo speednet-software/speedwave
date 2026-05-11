@@ -89,6 +89,12 @@ export type TranscriptEvent =
   | { kind: 'status_changed'; seq: number; status: TranscriptStatus }
   | { kind: 'speaker_relabeled'; seq: number; speaker_names: Record<number, string> }
   | { kind: 'finalize_progress'; seq: number; progress: number }
+  | {
+      kind: 'final_segments_ready';
+      seq: number;
+      segments: Segment[];
+      speaker_names: Record<number, string>;
+    }
   | { kind: 'finished'; seq: number };
 
 /** `transcription_capabilities` command return type. */

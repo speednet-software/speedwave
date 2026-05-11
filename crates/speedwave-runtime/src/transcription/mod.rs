@@ -38,7 +38,9 @@ pub use transcriber::{
     WhisperCppTranscriber, Word,
 };
 pub use transcript::{ModelsUsed, TranscriptSession, TranscriptStatus};
-pub use transcript_driver::{DriverConfig, DriverError, StopSignal, TranscriptDriver};
+pub use transcript_driver::{
+    run_finalize, DriverConfig, DriverError, FinalizeConfig, StopSignal, TranscriptDriver,
+};
 pub use transcript_store::{StoreError, Subscription, TranscriptEvent, TranscriptStore};
 
 use std::path::PathBuf;
