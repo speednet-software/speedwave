@@ -185,7 +185,9 @@ export class TokenManager {
         // Token refresh succeeded but save failed - tokens work in memory but won't survive restart
         // The error is also stored in this.lastTokenSaveError for programmatic access
         console.error(`${ts()} ❌ Failed to save refreshed tokens to disk after retries:`, {
-          error: (saveError as Error).message,
+          // Defensive: saveTokensWithRetry currently always rethrows an Error (it wraps
+          // non-Errors via `new Error(String(...))`), but don't assume that here.
+          error: saveError instanceof Error ? saveError.message : String(saveError),
           consequence:
             'Tokens valid in memory but old tokens on disk. After container restart, authentication may fail.',
           suggestion: 'Check if tokens directory is writable (not read-only mount)',
