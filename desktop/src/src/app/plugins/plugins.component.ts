@@ -237,7 +237,18 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
                       {{ toolsLabelFor(plugin) }}
                     </td>
                     <td class="hidden px-4 py-2.5 lg:table-cell">
-                      <span class="pill green" data-testid="plugins-row-signed">✓ ed25519</span>
+                      @if (isVerified(plugin)) {
+                        <span class="pill green" data-testid="plugins-row-signed">✓ ed25519</span>
+                      } @else {
+                        <span
+                          class="pill red"
+                          [attr.title]="
+                            plugin.verification_error || verificationStatusLabel(plugin)
+                          "
+                          [attr.data-testid]="'plugins-row-unverified-' + plugin.slug"
+                          >⚠ {{ verificationStatusLabel(plugin) }}</span
+                        >
+                      }
                     </td>
                     <td class="px-4 py-2.5 text-right">
                       <button
@@ -247,6 +258,13 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
                         [attr.aria-pressed]="plugin.enabled"
                         [attr.aria-label]="(plugin.enabled ? 'Disable ' : 'Enable ') + plugin.name"
                         [attr.data-testid]="'plugins-row-toggle-' + plugin.slug"
+                        [disabled]="!isVerified(plugin)"
+                        [attr.title]="
+                          isVerified(plugin)
+                            ? null
+                            : 'Plugin cannot be enabled: ' +
+                              (plugin.verification_error || verificationStatusLabel(plugin))
+                        "
                         (click)="onRowToggle(plugin, $event)"
                       ></button>
                     </td>
@@ -343,6 +361,40 @@ export class PluginsComponent implements OnInit, OnDestroy {
     // We don't currently expose tool counts via get_plugins, so render a stable
     // "—" placeholder and let plugin-detail report the real number per worker.
     return '—';
+  }
+
+  /**
+   * True iff the plugin's signature and manifest both passed the runtime
+   * audit. Drives whether the enable toggle is interactive and which
+   * pill (green/red) renders. The remove action is intentionally
+   * available regardless — that's the recovery path.
+   * @param plugin - the plugin status entry to inspect
+   */
+  isVerified(plugin: PluginStatusEntry): boolean {
+    return plugin.verification_status === 'verified';
+  }
+
+  /**
+   * Short label for the pill / aria text when a plugin is unverified.
+   * Backend always supplies `verification_status` so we don't need a
+   * "missing field" fallback here.
+   * @param plugin - the plugin status entry whose status string to render
+   */
+  verificationStatusLabel(plugin: PluginStatusEntry): string {
+    switch (plugin.verification_status) {
+      case 'missing_signature':
+        return 'unsigned';
+      case 'invalid_signature':
+        return 'tampered';
+      case 'dir_slug_mismatch':
+        return 'slug mismatch';
+      case 'manifest_invalid':
+        return 'invalid manifest';
+      case 'verified':
+        return 'verified';
+      default:
+        return 'unverified';
+    }
   }
 
   /**

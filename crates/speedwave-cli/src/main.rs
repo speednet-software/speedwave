@@ -97,6 +97,24 @@ const REPO_NAME: &str = "speedwave";
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
+/// Returns true for actions that must run even when one or more
+/// installed plugins fail signature verification. Without these
+/// skips, `speedwave plugin remove <bad>` would refuse to run while
+/// `<bad>` is the plugin causing the failure — leaving the user with
+/// no recovery path other than manually editing `~/.speedwave/`.
+///
+/// Help and self-update are handled earlier in `main` and never reach
+/// the audit; they are intentionally not listed here.
+fn skip_plugin_audit(action: &CliAction) -> bool {
+    matches!(
+        action,
+        CliAction::Init(_)
+            | CliAction::PluginInstall(_)
+            | CliAction::PluginList
+            | CliAction::PluginRemove(_)
+    )
+}
+
 // ── Update check cache ────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -391,6 +409,24 @@ fn main() -> anyhow::Result<()> {
     // Non-blocking update hint (max once per day, cached)
     maybe_print_update_hint();
 
+    // Hard-fail on tampered plugins. Recovery actions (remove, list,
+    // install) and project setup (init) skip the audit so a user with
+    // a bad plugin can still use the CLI to recover. Help/self-update
+    // already exited above.
+    if !skip_plugin_audit(&action) {
+        if let Err(failures) = speedwave_runtime::plugin::audit_all() {
+            eprintln!("Plugin verification failed:");
+            for (slug, reason) in &failures {
+                eprintln!("  • {slug}: {reason}");
+            }
+            eprintln!(
+                "\nFix: speedwave plugin remove <slug>   OR   \
+                 rm -rf ~/.speedwave/plugins/<slug>/\nThen reinstall a signed plugin."
+            );
+            std::process::exit(2);
+        }
+    }
+
     // Handle `speedwave init [name]` — register CWD as a project (no running VM required)
     if let CliAction::Init(ref custom_name) = action {
         let cwd = std::env::current_dir()?;
@@ -473,12 +509,31 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(0);
         }
         CliAction::PluginList => {
-            let plugins = plugin::list_installed_plugins()?;
+            // Tolerant listing: never fails, reports a verification status
+            // per plugin so the user can see *why* a plugin was rejected
+            // (this command intentionally skips the startup audit so it
+            // stays usable as a recovery/diagnostic path).
+            let plugins = plugin::list_for_ui();
             if plugins.is_empty() {
                 println!("No plugins installed");
             } else {
-                for m in &plugins {
-                    println!("{} ({}): {}", m.name, m.slug, m.version);
+                for e in &plugins {
+                    let name = e
+                        .manifest
+                        .as_ref()
+                        .map(|m| m.name.as_str())
+                        .unwrap_or(&e.slug);
+                    let version = e
+                        .manifest
+                        .as_ref()
+                        .map(|m| m.version.as_str())
+                        .unwrap_or("?");
+                    if e.verification_status == plugin::VerificationStatus::Verified {
+                        println!("{name} ({}): {version}  [verified]", e.slug);
+                    } else {
+                        let reason = e.verification_error.as_deref().unwrap_or("unverified");
+                        println!("{name} ({}): {version}  [UNVERIFIED: {reason}]", e.slug);
+                    }
                 }
             }
             std::process::exit(0);
@@ -495,28 +550,53 @@ fn main() -> anyhow::Result<()> {
             service_id,
             project,
         } => {
-            let manifests = plugin::list_installed_plugins()?;
-            let manifest = manifests
+            // Enabling requires a *verified* plugin — the same gate the
+            // Desktop `set_plugin_enabled` command enforces. The
+            // startup audit already ran (PluginEnable is not in the
+            // skip-list), but a plugin tampered between two audit runs
+            // must still be rejected here. `list_for_ui` is tolerant
+            // (other unverified plugins don't block the lookup) and
+            // exposes `verification_status` per entry.
+            let entries = plugin::list_for_ui();
+            let entry = entries
                 .iter()
-                .find(|m| m.service_id.as_deref() == Some(service_id))
+                .find(|e| {
+                    e.manifest.as_ref().map(|m| m.service_id.as_deref()) == Some(Some(service_id))
+                        || e.slug == *service_id
+                })
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "No installed plugin with service_id '{}'. Run `speedwave plugin list` to see installed plugins.",
                         service_id
                     )
                 })?;
+            if entry.verification_status != plugin::VerificationStatus::Verified {
+                return Err(anyhow::anyhow!(
+                    "plugin '{}' cannot be enabled: {}. Reinstall a signed plugin or remove it.",
+                    service_id,
+                    entry
+                        .verification_error
+                        .as_deref()
+                        .unwrap_or("signature verification failed")
+                ));
+            }
+            let display_name = entry
+                .manifest
+                .as_ref()
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| service_id.clone());
             let mut user_config = config::load_user_config()?;
-            let entry = user_config
+            let cfg_entry = user_config
                 .projects
                 .iter_mut()
                 .find(|p| p.name == *project)
                 .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
             integrations.set_plugin_enabled(service_id, true);
             config::save_user_config(&user_config)?;
             println!(
                 "Plugin '{}' (service_id: {}) enabled for project '{}'",
-                manifest.name, service_id, project
+                display_name, service_id, project
             );
             std::process::exit(0);
         }
@@ -524,28 +604,39 @@ fn main() -> anyhow::Result<()> {
             service_id,
             project,
         } => {
-            let manifests = plugin::list_installed_plugins()?;
-            let manifest = manifests
+            // Disabling does NOT require verification — the user must
+            // always be able to turn off a bad plugin. Use the tolerant
+            // lister so an unverified plugin elsewhere doesn't block it.
+            let entries = plugin::list_for_ui();
+            let entry = entries
                 .iter()
-                .find(|m| m.service_id.as_deref() == Some(service_id))
+                .find(|e| {
+                    e.manifest.as_ref().map(|m| m.service_id.as_deref()) == Some(Some(service_id))
+                        || e.slug == *service_id
+                })
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "No installed plugin with service_id '{}'. Run `speedwave plugin list` to see installed plugins.",
                         service_id
                     )
                 })?;
+            let display_name = entry
+                .manifest
+                .as_ref()
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| service_id.clone());
             let mut user_config = config::load_user_config()?;
-            let entry = user_config
+            let cfg_entry = user_config
                 .projects
                 .iter_mut()
                 .find(|p| p.name == *project)
                 .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
             integrations.set_plugin_enabled(service_id, false);
             config::save_user_config(&user_config)?;
             println!(
                 "Plugin '{}' (service_id: {}) disabled for project '{}'",
-                manifest.name, service_id, project
+                display_name, service_id, project
             );
             std::process::exit(0);
         }
@@ -1397,6 +1488,44 @@ mod tests {
             "--project".to_string(),
         ];
         assert!(parse_action(&args).is_err());
+    }
+
+    // ── plugin audit skip-list ────────────────────────────────────────────
+    // Pin which actions run with a tampered plugin on disk: a regression
+    // either way (extra runtime action skipped, or recovery action gated)
+    // is silent without these.
+
+    #[test]
+    fn skip_plugin_audit_skips_recovery_actions() {
+        // These actions MUST run even when another plugin fails audit,
+        // otherwise a user with a bad plugin has no way to fix it from
+        // the CLI.
+        assert!(skip_plugin_audit(&CliAction::Init(None)));
+        assert!(skip_plugin_audit(&CliAction::Init(Some("foo".into()))));
+        assert!(skip_plugin_audit(&CliAction::PluginInstall(
+            "/tmp/x.zip".into()
+        )));
+        assert!(skip_plugin_audit(&CliAction::PluginList));
+        assert!(skip_plugin_audit(&CliAction::PluginRemove("foo".into())));
+    }
+
+    #[test]
+    fn skip_plugin_audit_does_not_skip_runtime_actions() {
+        // These actions touch the runtime / config in ways that depend
+        // on every installed plugin being trusted. The audit must
+        // gate them — a regression that flips any of these to `true`
+        // silently disables the runtime-invariant promise.
+        assert!(!skip_plugin_audit(&CliAction::Run));
+        assert!(!skip_plugin_audit(&CliAction::Check));
+        assert!(!skip_plugin_audit(&CliAction::Update));
+        assert!(!skip_plugin_audit(&CliAction::PluginEnable {
+            project: "p".into(),
+            service_id: "s".into(),
+        }));
+        assert!(!skip_plugin_audit(&CliAction::PluginDisable {
+            project: "p".into(),
+            service_id: "s".into(),
+        }));
     }
 
     // ── self-update rebuild structural tests ─────────────────────────────
