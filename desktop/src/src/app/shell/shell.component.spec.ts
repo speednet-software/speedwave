@@ -246,6 +246,7 @@ describe('ShellComponent', () => {
       'nav-chat',
       'nav-integrations',
       'nav-plugins',
+      'nav-meeting-transcription',
       'nav-settings',
       'nav-logs',
     ]);
@@ -265,6 +266,7 @@ describe('ShellComponent', () => {
       'nav-chat',
       'nav-integrations',
       'nav-plugins',
+      'nav-meeting-transcription',
       'nav-settings',
       'nav-logs',
     ]);

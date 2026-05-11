@@ -39,6 +39,13 @@ export const routes: Routes = [
           ),
       },
       {
+        path: 'meeting-transcription',
+        loadComponent: () =>
+          import('./meeting-transcription/meeting-transcription.component').then(
+            (m) => m.MeetingTranscriptionComponent
+          ),
+      },
+      {
         path: 'settings',
         loadComponent: () =>
           import('./settings/settings.component').then((m) => m.SettingsComponent),

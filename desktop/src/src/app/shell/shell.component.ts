@@ -198,6 +198,13 @@ export class ShellComponent implements OnInit, OnDestroy {
       shortcut: '⌘3',
     },
     {
+      id: 'meeting-transcription',
+      label: 'Meeting transcription',
+      route: '/meeting-transcription',
+      iconName: 'document',
+      shortcut: '⌘4',
+    },
+    {
       id: 'settings',
       label: 'Settings',
       route: '/settings',
@@ -313,6 +320,10 @@ export class ShellComponent implements OnInit, OnDestroy {
       case '3':
         event.preventDefault();
         void this.router.navigateByUrl('/plugins');
+        return;
+      case '4':
+        event.preventDefault();
+        void this.router.navigateByUrl('/meeting-transcription');
         return;
       case ',':
         event.preventDefault();
