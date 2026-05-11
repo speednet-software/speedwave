@@ -9,6 +9,7 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 | Slack       | Messaging          | `speedwave_<project>_mcp_slack`      | `~/.speedwave/tokens/<project>/slack/`      |
 | SharePoint  | Documents          | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/` |
 | GitLab      | Code hosting       | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`     |
+| GitHub      | Code hosting       | `speedwave_<project>_mcp_github`     | `~/.speedwave/tokens/<project>/github/`     |
 | Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`    |
 | Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                        |
 | OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                          |
@@ -84,8 +85,47 @@ Each MCP integration requires specific credentials to function. Fields marked as
 | Slack       | `bot_token`, `user_token`                                       | —                                                    |
 | SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                    |
 | GitLab      | `token`, `host_url`                                             | —                                                    |
+| GitHub      | `token`                                                         | —                                                    |
 | Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project) |
 | Playwright  | _(none — no credentials required)_                              | —                                                    |
+
+### GitHub — Code Hosting
+
+The GitHub integration is a built-in MCP worker that talks to **GitHub.com** through the official Octokit REST client. It is the GitHub-side counterpart to the GitLab worker — repositories, pull requests, branches, commits, GitHub Actions, issues, labels, tags, and releases.
+
+#### Authentication — fine-grained Personal Access Token
+
+GitHub uses a single credential: a **fine-grained Personal Access Token**. Create one in GitHub under **Settings → Developer settings → Fine-grained tokens → Generate new token**, then scope it to exactly the repositories you want Claude to reach (or "All repositories" if you trust the worker with your whole account — not recommended). Paste the `github_pat_...` value into the GitHub integration's `token` field in the Desktop app; it is stored at `~/.speedwave/tokens/<project>/github/token` with `0o600` permissions and mounted read-only into the worker.
+
+Classic (`ghp_...`) tokens also work, but fine-grained tokens are strongly preferred because they let you grant the minimum permission per repository.
+
+#### Per-tool permission matrix
+
+A fine-grained token only carries the repository permissions you tick when creating it. Map the tools you want Claude to use to the permissions the token needs:
+
+| Capability                                                     | Token permission                                                 |
+| -------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Read issues                                                    | Issues: Read                                                     |
+| Create / update / close issues, labels                         | Issues: Read and write                                           |
+| Read pull requests, diffs, reviews, comments                   | Pull requests: Read                                              |
+| Create / update / merge PRs, post reviews                      | Pull requests: Read and write                                    |
+| Read file contents, branches, commits, trees                   | Contents: Read                                                   |
+| Push files, create / delete branches and tags, create releases | Contents: Read and write                                         |
+| Read GitHub Actions runs, logs, artifacts, CI status           | Actions: Read **and** Checks: Read **and** Commit statuses: Read |
+| Trigger / re-run workflows                                     | Actions: Read and write                                          |
+
+If a token is missing a permission, the worker returns the GitHub `403` body verbatim along with a hint naming the permission to add — so a failed call tells you exactly which checkbox to tick rather than failing silently.
+
+#### Scope and limitations vs GitLab
+
+- **GitHub.com only.** GitHub Enterprise Server (a self-hosted instance) is not supported in v1 — there is no `host_url` field. (GitLab, by contrast, lets you point at a self-hosted instance.)
+- **No REST blame API.** GitHub does not expose line-level blame over REST, so there is no `getBlame`-style tool (GitLab has one).
+- **GitHub Actions ≠ GitLab Pipelines.** Run logs and artifacts are per-run ZIP archives; the worker returns short-lived download URLs for them rather than streaming log text inline the way the GitLab worker does for pipeline jobs. Plan for an extra fetch step.
+- **Comment APIs are split.** General issue/PR conversation comments (`createPrComment`) and inline PR review comments anchored to a diff line (`createPrReviewComment`) are separate GitHub endpoints with different payloads — pick the one matching what you want to post.
+
+#### Tool surface
+
+`listRepos`, `getRepo`, `searchCode`, `listPullRequests`, `getPullRequest`, `createPullRequest`, `mergePullRequest`, `updatePullRequest`, `getPrDiff`, `getPrFiles`, `listPrCommits`, `listPrReviews`, `createPrReview`, `listPrComments`, `createPrComment`, `createPrReviewComment`, `listBranches`, `getBranch`, `createBranch`, `deleteBranch`, `compareBranches`, `listCommits`, `listBranchCommits`, `searchCommits`, `getCommitDiff`, `getTree`, `getFileContents`, `createOrUpdateFile`, `listWorkflowRuns`, `getWorkflowRun`, `getRunLogs`, `rerunWorkflow`, `triggerWorkflow`, `listWorkflowRunArtifacts`, `downloadArtifact`, `listIssues`, `getIssue`, `createIssue`, `updateIssue`, `closeIssue`, `listLabels`, `createLabel`, `createTag`, `deleteTag`, `createRelease`.
 
 ### Redmine Configuration Wizard
 

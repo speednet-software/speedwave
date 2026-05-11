@@ -36,7 +36,7 @@ Copy-Item mcp-servers\tsconfig.base.json "$dest\build-context\mcp-servers\"
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
-$services = @('shared','hub','slack','sharepoint','redmine','gitlab','playwright')
+$services = @('shared','hub','slack','sharepoint','redmine','gitlab','github','playwright')
 
 foreach ($svc in $services) {
     $svcDest = "$dest\build-context\mcp-servers\$svc"

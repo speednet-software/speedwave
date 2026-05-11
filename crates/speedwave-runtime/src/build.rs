@@ -25,6 +25,7 @@ pub const IMAGE_MCP_SLACK: &str = "speedwave-mcp-slack";
 pub const IMAGE_MCP_SHAREPOINT: &str = "speedwave-mcp-sharepoint";
 pub const IMAGE_MCP_REDMINE: &str = "speedwave-mcp-redmine";
 pub const IMAGE_MCP_GITLAB: &str = "speedwave-mcp-gitlab";
+pub const IMAGE_MCP_GITHUB: &str = "speedwave-mcp-github";
 pub const IMAGE_MCP_PLAYWRIGHT: &str = "speedwave-mcp-playwright";
 
 pub const IMAGES: &[ImageDef] = &[
@@ -62,6 +63,12 @@ pub const IMAGES: &[ImageDef] = &[
         name: IMAGE_MCP_GITLAB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/gitlab/Dockerfile",
+        build_args: &[],
+    },
+    ImageDef {
+        name: IMAGE_MCP_GITHUB,
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/github/Dockerfile",
         build_args: &[],
     },
     ImageDef {
@@ -1201,7 +1208,7 @@ mod tests {
 
     #[test]
     fn test_images_count() {
-        assert_eq!(IMAGES.len(), 7);
+        assert_eq!(IMAGES.len(), 8);
     }
 
     #[test]
@@ -1643,7 +1650,7 @@ mod tests {
             std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.ps1"))
                 .expect("bundle-build-context.ps1 should exist");
 
-        // Extract: MCP_SERVICES="shared hub slack sharepoint redmine gitlab"
+        // Extract: MCP_SERVICES="shared hub slack sharepoint redmine gitlab github playwright"
         let sh_services: Vec<&str> = sh_content
             .lines()
             .find(|l| l.starts_with("MCP_SERVICES="))
@@ -1653,7 +1660,7 @@ mod tests {
             .split_whitespace()
             .collect();
 
-        // Extract: $services = @('shared','hub','slack','sharepoint','redmine','gitlab')
+        // Extract: $services = @('shared','hub','slack','sharepoint','redmine','gitlab','github','playwright')
         let ps1_line = ps1_content
             .lines()
             .find(|l| l.contains("$services = @("))

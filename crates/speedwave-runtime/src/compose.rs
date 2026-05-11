@@ -92,6 +92,10 @@ pub fn render_compose(
         &build::image_ref(build::IMAGE_MCP_GITLAB, &bundle_manifest.bundle_id),
     );
     yaml = yaml.replace(
+        "${IMAGE_MCP_GITHUB}",
+        &build::image_ref(build::IMAGE_MCP_GITHUB, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
         "${IMAGE_MCP_PLAYWRIGHT}",
         &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
     );
@@ -2402,6 +2406,7 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
+      - WORKER_GITHUB_URL=http://mcp-github:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
@@ -2767,6 +2772,10 @@ services:
             build::IMAGE_MCP_GITLAB,
             &manifest.bundle_id
         )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_GITHUB,
+            &manifest.bundle_id
+        )));
 
         assert!(!yaml.contains("image: speedwave-claude:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-hub:latest"));
@@ -2774,6 +2783,7 @@ services:
         assert!(!yaml.contains("image: speedwave-mcp-sharepoint:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-redmine:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-gitlab:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-github:latest"));
     }
 
     #[test]
@@ -5302,6 +5312,7 @@ services:
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations.sharepoint = true;
         integrations.gitlab = true;
+        integrations.github = true;
         integrations.os_calendar = true;
         // slack, redmine remain disabled (default)
         // os_reminders, os_mail, os_notes remain disabled (default)
@@ -5336,6 +5347,7 @@ services:
         // Enabled services should be present
         assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-sharepoint".into())));
         assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-gitlab".into())));
+        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-github".into())));
 
         // ENABLED_SERVICES should be in hub env
         let env = get_hub_env_seq(&doc);
@@ -5353,6 +5365,10 @@ services:
         assert!(
             enabled_str.contains("gitlab"),
             "ENABLED_SERVICES should contain 'gitlab'"
+        );
+        assert!(
+            enabled_str.contains("github"),
+            "ENABLED_SERVICES should contain 'github'"
         );
         assert!(
             enabled_str.contains("os"),
@@ -5497,6 +5513,7 @@ services:
             sharepoint: true,
             redmine: true,
             gitlab: true,
+            github: true,
             playwright: true,
             ..ResolvedIntegrationsConfig::default()
         };
@@ -6332,7 +6349,7 @@ services:
 
     // ─── Worker auth token tests (SEC-035) ────────────────────────────────────
 
-    /// Compose YAML with all 4 toggleable workers for auth token tests.
+    /// Compose YAML with all 5 toggleable workers for auth token tests.
     const VALID_COMPOSE_ALL_WORKERS: &str = r#"
 version: "3"
 services:
@@ -6374,6 +6391,7 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
+      - WORKER_GITHUB_URL=http://mcp-github:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
@@ -6439,6 +6457,21 @@ services:
     networks:
       - speedwave_test_network
 
+  mcp-github:
+    image: speedwave-mcp-github:latest
+    container_name: speedwave_test_mcp_github
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /home/user/.speedwave/tokens/test/github:/tokens:ro
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
   mcp-playwright:
     image: speedwave-mcp-playwright:latest
     container_name: speedwave_test_mcp_playwright
@@ -6467,6 +6500,7 @@ networks:
             sharepoint: true,
             redmine: true,
             gitlab: true,
+            github: true,
             playwright: true,
             ..Default::default()
         }
@@ -6532,6 +6566,7 @@ networks:
             sharepoint: false,
             redmine: false,
             gitlab: false,
+            github: false,
             ..Default::default()
         };
 

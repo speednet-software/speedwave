@@ -168,6 +168,7 @@ mod tests {
         assert!(get_allowed_fields("sharepoint").is_some());
         assert!(get_allowed_fields("redmine").is_some());
         assert!(get_allowed_fields("gitlab").is_some());
+        assert!(get_allowed_fields("github").is_some());
     }
 
     #[test]
@@ -291,7 +292,7 @@ mod tests {
 
     #[test]
     fn get_auth_fields_other_services_no_oauth_flow() {
-        for svc_key in &["slack", "gitlab", "redmine"] {
+        for svc_key in &["slack", "gitlab", "github", "redmine"] {
             let fields = get_auth_fields(svc_key);
             for field in &fields {
                 assert!(

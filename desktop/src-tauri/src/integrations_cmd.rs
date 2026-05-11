@@ -990,7 +990,7 @@ mod tests {
 
     #[test]
     fn set_service_all_known_keys() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab", "playwright"] {
+        for key in &["slack", "sharepoint", "redmine", "gitlab", "github", "playwright"] {
             let mut cfg = config::IntegrationsConfig::default();
             let ic = config::IntegrationConfig {
                 enabled: Some(true),
@@ -1837,7 +1837,7 @@ mod tests {
 
     #[test]
     fn badge_none_for_credential_services() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab"] {
+        for key in &["slack", "sharepoint", "redmine", "gitlab", "github"] {
             let svc_desc = speedwave_runtime::consts::find_mcp_service(key)
                 .unwrap_or_else(|| panic!("service '{}' must exist", key));
             assert_eq!(
