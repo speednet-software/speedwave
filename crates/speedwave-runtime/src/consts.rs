@@ -550,7 +550,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         // A pure file processor — no service credentials. Operates on /workspace files only.
         auth_fields: &[],
         credential_files: &[],
-        badge: Some("NEW"),
+        badge: Some("BETA"),
     },
     McpServiceDescriptor {
         config_key: "playwright",
