@@ -12,7 +12,7 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 | `make test-mcp`                       | All MCP workspace tests (shared, hub, slack, gitlab, etc.)                                                                                                      |
 | `make test-os`                        | OS MCP server tests only                                                                                                                                        |
 | `make test-angular`                   | Angular desktop UI tests (`vitest run`)                                                                                                                         |
-| `make test-e2e`                       | End-to-end CLI tests, incl. plugin-tamper bats against the debug CLI (requires `bats-core`)                                                                     |
+| `make test-e2e`                       | End-to-end CLI tests against the debug CLI: `speedwave.bats`, `plugin-tamper.bats`, `host-exec.bats` (requires `bats-core`)                                     |
 | `make test-e2e-plugin-tamper-release` | Plugin tamper / signature-bypass bats against the **release** CLI — verifies the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is compiled out (requires `bats-core`) |
 | `make test-entrypoint`                | Container entrypoint script tests (requires `bats-core`)                                                                                                        |
 | `make test-swift`                     | Swift tests for native macOS CLI packages (macOS only)                                                                                                          |
@@ -174,6 +174,67 @@ See [ADR-024](../adr/ADR-024-e2e-testing-strategy.md) for full architectural rat
 ## Updater Pipeline Coverage
 
 Three BATS files guard the release pipeline against silent failures (Issue #26). `updater-config.bats` statically validates `tauri.conf.json` fields (`createUpdaterArtifacts`, `endpoints`, `pubkey`, and bundle targets) using intentionally broken fixtures in `_tests/desktop/fixtures/`. `version-consistency.bats` reads `release-please-config.json` dynamically and asserts every version-bearing file matches `.release-please-manifest.json`, catching version drift before a release ships. `verify-release-assets.bats` tests `scripts/verify-release-assets.sh` end-to-end by shimming `gh` — the script checks that all 20 expected assets (including 6 `.sig` companions and `latest.json`) are present and valid. Additional cases (16-25) validate that the script rejects missing or malformed `VERSION`, `REPO`, `TAG_NAME`, and `RID` inputs with structured `::error::` annotations. The split between `test-desktop-config` (in `make test`) and `test-release-gate` (CI-only) keeps the `gh` shim surface away from everyday development builds.
+
+## Host Exec — manual smoke (live Claude)
+
+`host_exec` (ADR-054) is exercised at four levels in CI:
+
+- **Unit / integration (Rust + TS + Angular):** `host_exec::validate_host_exec_config` (43+ tests in `crates/speedwave-runtime/src/host_exec.rs`), the per-project process manager (`desktop/src-tauri/src/host_exec_process.rs` — 43 tests, incl. fd-3 confirm round-trip, two-projects two-ports, `(project, recipe, argv, cwd, config-hash)` session-cache, env-allowlist, login-shell PATH recovery, process-tree kill on Unix), the compose wiring (`compose.rs` — `WORKER_HOST_EXEC_URL` per project, `ENABLED_SERVICES` membership, the security-test exception), the Tauri settings commands (`host_exec_cmd.rs`), the TypeScript worker (`mcp-servers/host_exec/` — 110 vitest tests, 100% lines/funcs/statements, `c8` branch ≥ 90%), and the Angular Integrations card (`host-exec-config.component.spec.ts` — 44 tests covering the danger modal, the recipe editor, the per-call confirm prompt, every validation path).
+- **CLI E2E (bats — `make test-e2e`):** `_tests/e2e/host-exec.bats` verifies the wire-format contract end-to-end through the real `speedwave` binary — a valid camelCase user config survives `speedwave check` unchanged; a `hostExec` block in repo `.speedwave.json` is silently ignored; a malformed user config does not panic the CLI.
+- **Desktop E2E (WebdriverIO — `make test-e2e-desktop`):** `desktop/e2e/specs/08-host-exec.spec.ts` drives the running Tauri app — the gated toggle / danger modal, the recipe-whitelist validation (shell-launcher / state-changing / meta-tool / reserved-env / `cwdSub` escape / duplicate-name rejection), the snake_case → camelCase round-trip through `host_exec_save_settings` / `host_exec_load_settings`, and the `host_exec_resolve_executable` `which`-style PATH probe.
+- **Manual smoke (live Claude — see below):** the scenarios that require a real Anthropic API turn through the MCP hub and a live worker process.
+
+### Live-Claude scenarios (not in CI)
+
+These verify Claude's view of `host_exec` — what comes back in a tool result, what happens when a confirmation is not answered, and that two projects do not cross-talk. They are NOT in `make test-e2e` / `test-e2e-desktop` because they require a real Anthropic API key (cost + flakiness). The non-Claude invariants they would assert are already covered by the unit/integration suite above; running them is a release-gate smoke, not a CI gate.
+
+```bash
+# Prereqs:  SPEEDWAVE_DATA_DIR=~/.speedwave-smoke ;  Anthropic OAuth or API key
+# already wired into Claude Code inside the container ;  Speedwave running
+# (Desktop or `speedwave` CLI).  Two projects added (A and B), each a Gradle
+# repo so `./gradlew` is available.
+
+# Scenario (a) — happy-path round-trip
+#   In project A:  Integrations → Host Exec → enable → add
+#       { name: "test", exec: "./gradlew", args: ["test"], confirm: "session" }
+#   Ask Claude:  "Run the test recipe."  Expected:
+#     - A confirmation dialog appears with the exact argv and cwd.
+#     - Click "allow for this session" → Claude reports a structured result
+#       with status="exited", an exitCode (0 or 1 — both fine), the captured
+#       stdout / stderr, and durationMs.
+
+# Scenario (c) — confirm:ask, no reply → fail-closed
+#   With the same recipe set to confirm: "ask", ask Claude to run it AGAIN.
+#   When the per-call dialog appears, DO NOT click anything.  After ~120 s the
+#   worker's own guard fires and Claude reports a tool error "confirmation
+#   unavailable" — the command must NOT have started.  Verify by reading the
+#   host log:
+#       cat $SPEEDWAVE_DATA_DIR/host-exec/<project>/log
+#   has the reply-timeout entry but no spawn line for that call.
+
+# Scenario (d) — exit ≠ 0 is a successful ToolResult, not a tool error
+#   Add a recipe that intentionally fails:
+#       { name: "fail_now", exec: "./gradlew",
+#         args: ["nonexistent-task"], confirm: "session" }
+#   Ask Claude to run it.  Expected:  Claude reports a *successful* tool
+#   result with status="exited", exitCode=1, the Gradle error in stderr, and
+#   NO MCP tool error.  Tool errors are reserved for unknown recipe, regex
+#   fail, cwdSub escape, denied, confirmation-unavailable, and spawn_error.
+
+# Scenario (f) — two projects, two workers, no cross-talk
+#   In both project A and project B:  enable Host Exec + add a "test" recipe.
+#   Confirm that
+#       $SPEEDWAVE_DATA_DIR/host-exec/<A>/{port,pid,auth-token}
+#       $SPEEDWAVE_DATA_DIR/host-exec/<B>/{port,pid,auth-token}
+#   each contain DIFFERENT values (`cat` each file).  Switch to project A in
+#   the Desktop UI, ask Claude to run host_exec.test() — the spawn line in
+#   A's log appears, NOT in B's.  Switch to B, ask Claude to run
+#   host_exec.test() — symmetric.  Throughout,
+#       ps aux | grep 'host_exec/dist/index.js' | grep -v grep
+#   shows two distinct Node processes.
+```
+
+The "definition of done" for a Host Exec release: all four CI levels green, plus a clean run of the four live-Claude scenarios above against the release build.
 
 ## See Also
 
