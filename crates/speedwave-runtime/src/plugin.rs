@@ -3035,6 +3035,44 @@ mod tests {
         assert!(err.to_string().contains("does not match manifest slug"));
     }
 
+    /// A plugin dir with a well-formed manifest but no `SIGNATURE` file
+    /// is the canonical "manually pasted, never installed" case. The UI
+    /// lister must flag it `MissingSignature` (not `Verified`), and the
+    /// fail-closed loader must reject the whole set. Runs WITHOUT the
+    /// unsigned bypass — that's the point.
+    #[test]
+    fn test_unsigned_plugin_flagged_missing_signature() {
+        let _g = unsigned_env_lock();
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("pasted");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"x","slug":"pasted","version":"1.0.0","description":"x"}"#,
+        )
+        .unwrap();
+        // No SIGNATURE.
+
+        let entries = list_for_ui_from_dir(&plugins);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].slug, "pasted");
+        assert_eq!(
+            entries[0].verification_status,
+            VerificationStatus::MissingSignature,
+            "unsigned plugin must be flagged, not treated as verified"
+        );
+
+        // Fail-closed loader rejects the whole set.
+        list_verified_from_dir(&plugins)
+            .expect_err("list_verified must reject when any plugin is unsigned");
+        // Audit reports it.
+        let failures =
+            audit_all_in_dir(&plugins).expect_err("audit must report the unsigned plugin");
+        assert!(failures.iter().any(|(slug, _)| slug == "pasted"));
+    }
+
     #[test]
     fn test_list_for_ui_skips_transient_install_dirs() {
         let _g = UnsignedBypassGuard::new();

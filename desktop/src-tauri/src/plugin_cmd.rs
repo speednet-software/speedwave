@@ -753,6 +753,7 @@ mod tests {
         assert!(json.contains("PLN"));
         assert!(json.contains("requires_integrations"));
         assert!(json.contains("sharepoint"));
+        assert!(json.contains(r#""verification_status":"verified""#));
     }
 
     // ── settings-schema validation (the `plugin_save_settings` gate) ─────
