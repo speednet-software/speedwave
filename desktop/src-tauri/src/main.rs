@@ -943,20 +943,10 @@ fn ensure_mcp_os_running(
 /// Shows the audit-failure dialog and terminates the process. Returns
 /// only via `process::exit`.
 ///
-/// macOS / Windows: native blocking dialog via `tauri-plugin-dialog`'s
-/// `blocking_show()`. The setup thread is not the UI thread on these
-/// platforms; the OS-native dialog renders directly.
-///
-/// Linux: the dialog plugin queues `show()` onto the Tauri event loop,
-/// which has not yet started running when `setup()` is executing —
-/// blocking_show would deadlock, and `show(callback)` would silently
-/// drop the dialog because the queue never drains. We bypass the
-/// plugin entirely and write the body to stderr, the same diagnostic
-/// path the CLI already takes. Users running the Desktop app from a
-/// terminal see the message; users launching from a desktop launcher
-/// see nothing in the UI but the journalctl record carries the same
-/// content. This is a deliberate downgrade from the cross-platform
-/// dialog story, recorded in ADR-051.
+/// macOS / Windows: native `blocking_show()`. Linux: the dialog plugin
+/// queues onto the (not-yet-running) Tauri event loop and would
+/// deadlock or silently drop, so we skip it — the caller already
+/// logged the body via `log::error!`. Downgrade recorded in ADR-051.
 fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> ! {
     #[cfg(not(target_os = "linux"))]
     {
@@ -971,8 +961,7 @@ fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> !
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = app; // suppress unused-var warning on Linux
-        eprintln!("Plugin verification failed:\n{}", body);
+        let _ = (app, body); // unused on this path
         std::process::exit(1);
     }
 }
