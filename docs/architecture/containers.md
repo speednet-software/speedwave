@@ -88,7 +88,7 @@ Existing projects receive the new Claude container memory limit on next containe
 
 When the bundle ID changes (app version bump or build-context change), disk space is reclaimed in two steps **before** building the new image set:
 
-1. The previous bundle's 6 tagged images are removed via `nerdctl rmi`, reclaiming ~4–6 GiB.
+1. The previous bundle's tagged images (one per `build.rs::IMAGES` entry) are removed via `nerdctl rmi`, reclaiming several GiB.
 2. BuildKit build cache is pruned via `nerdctl builder prune --all --force`, reclaiming an additional ~5–15 GiB of transient layers from `--mount=type=cache` steps.
 
 This two-step cleanup ensures the Lima VM diffdisk (50 GiB cap) has sufficient space for the new build.

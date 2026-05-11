@@ -475,6 +475,73 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: None,
     },
     McpServiceDescriptor {
+        config_key: "atlassian",
+        compose_name: "mcp-atlassian",
+        worker_env: "WORKER_ATLASSIAN_URL",
+        display_name: "Atlassian",
+        description: "Jira and Confluence (Atlassian Cloud)",
+        auth_fields: &[
+            McpAuthFieldDescriptor {
+                key: "site_url",
+                label: "Atlassian site URL",
+                field_type: "url",
+                placeholder: "https://your-domain.atlassian.net",
+                is_secret: false,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: false,
+            },
+            McpAuthFieldDescriptor {
+                key: "email",
+                label: "Account email",
+                field_type: "text",
+                placeholder: "you@example.com",
+                is_secret: false,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: false,
+            },
+            McpAuthFieldDescriptor {
+                key: "api_token",
+                label: "API token",
+                field_type: "password",
+                placeholder: "ATATT3x...",
+                is_secret: true,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: false,
+            },
+            McpAuthFieldDescriptor {
+                key: "jira_project_keys",
+                label: "Jira project keys (allowlist, optional)",
+                field_type: "text",
+                placeholder: "PROJ,OPS — empty = all",
+                is_secret: false,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: true,
+            },
+            McpAuthFieldDescriptor {
+                key: "confluence_space_keys",
+                label: "Confluence space keys (allowlist, optional)",
+                field_type: "text",
+                placeholder: "DEV,DOCS — empty = all",
+                is_secret: false,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: true,
+            },
+        ],
+        credential_files: &[
+            "site_url",
+            "email",
+            "api_token",
+            "jira_project_keys",
+            "confluence_space_keys",
+        ],
+        badge: None,
+    },
+    McpServiceDescriptor {
         config_key: "playwright",
         compose_name: "mcp-playwright",
         worker_env: "WORKER_PLAYWRIGHT_URL",
@@ -556,6 +623,7 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-redmine",
     "mcp-gitlab",
     "mcp-github",
+    "mcp-atlassian",
     "mcp-playwright",
 ];
 
@@ -567,6 +635,7 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "redmine",
     "gitlab",
     "github",
+    "atlassian",
     "playwright",
     "os",
 ];
@@ -839,13 +908,14 @@ mod tests {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
         // Explicit field enumeration — update this when adding/removing MCP fields.
         // Using a const to force a compile-time reminder when struct changes.
-        const EXPECTED_MCP_FIELDS: usize = 6; // slack, sharepoint, redmine, gitlab, github, playwright
+        const EXPECTED_MCP_FIELDS: usize = 7; // slack, sharepoint, redmine, gitlab, github, atlassian, playwright
         let _ = (
             resolved.slack,
             resolved.sharepoint,
             resolved.redmine,
             resolved.gitlab,
             resolved.github,
+            resolved.atlassian,
             resolved.playwright,
         );
         assert_eq!(
@@ -916,6 +986,7 @@ mod tests {
             ("redmine", 3),
             ("gitlab", 2),
             ("github", 1),
+            ("atlassian", 5),
             ("playwright", 0),
         ];
         for &(key, count) in expected {
@@ -1083,31 +1154,38 @@ mod tests {
     }
 
     #[test]
-    fn test_optional_only_on_redmine_project_fields() {
-        let redmine = find_mcp_service("redmine").unwrap();
-        let optional_fields: Vec<&str> = redmine
-            .auth_fields
-            .iter()
-            .filter(|f| f.optional)
-            .map(|f| f.key)
-            .collect();
-        assert_eq!(
-            optional_fields,
-            vec!["project_id"],
-            "only Redmine's project_id should be optional"
-        );
+    fn test_optional_auth_fields_are_only_where_expected() {
+        // Optional auth fields are exception-listed: a service not in this map
+        // must have every auth field required. The set: Redmine's project scope,
+        // and Atlassian's optional Jira-project / Confluence-space allowlists.
+        let expected: std::collections::HashMap<&str, Vec<&str>> = [
+            ("redmine", vec!["project_id"]),
+            (
+                "atlassian",
+                vec!["jira_project_keys", "confluence_space_keys"],
+            ),
+        ]
+        .into_iter()
+        .collect();
 
-        // No other service should have optional fields
         for svc in TOGGLEABLE_MCP_SERVICES {
-            if svc.config_key == "redmine" {
-                continue;
-            }
-            for field in svc.auth_fields {
-                assert!(
-                    !field.optional,
-                    "field '{}' in service '{}' should not be optional",
-                    field.key, svc.config_key
-                );
+            let optional_fields: Vec<&str> = svc
+                .auth_fields
+                .iter()
+                .filter(|f| f.optional)
+                .map(|f| f.key)
+                .collect();
+            match expected.get(svc.config_key) {
+                Some(want) => assert_eq!(
+                    &optional_fields, want,
+                    "service '{}' optional fields changed unexpectedly",
+                    svc.config_key
+                ),
+                None => assert!(
+                    optional_fields.is_empty(),
+                    "service '{}' has unexpected optional auth fields: {optional_fields:?}",
+                    svc.config_key
+                ),
             }
         }
     }
@@ -1117,6 +1195,26 @@ mod tests {
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("Sites.Read.All"));
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("Files.ReadWrite.All"));
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("offline_access"));
+    }
+
+    /// `credential_files` must be a superset of `auth_fields[*].key`: the UI
+    /// collects values for the auth fields and the credential-file list is what
+    /// `save_integration_credentials` (Desktop) is allowed to write/read. A
+    /// field whose key isn't a permitted credential file would be silently
+    /// dropped on save.
+    #[test]
+    fn test_credential_files_superset_of_auth_fields() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            for field in svc.auth_fields {
+                assert!(
+                    svc.credential_files.contains(&field.key),
+                    "service '{}': auth field '{}' is not in credential_files {:?}",
+                    svc.config_key,
+                    field.key,
+                    svc.credential_files,
+                );
+            }
+        }
     }
 
     #[test]

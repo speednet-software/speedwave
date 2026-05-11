@@ -260,7 +260,7 @@ mod tests {
                 .join("modecheck"),
         ];
         // One token dir per credential-bearing service — same SSOT-derived set as
-        // init_project_dirs_in. (At minimum: slack, sharepoint, redmine, gitlab, github.)
+        // init_project_dirs_in. (At minimum: slack, sharepoint, redmine, gitlab, github, atlassian.)
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             if !svc.credential_files.is_empty() {
                 dirs.push(
@@ -274,6 +274,10 @@ mod tests {
         assert!(
             dirs.iter().any(|d| d.ends_with("modecheck/github")),
             "github token dir must be among the created dirs"
+        );
+        assert!(
+            dirs.iter().any(|d| d.ends_with("modecheck/atlassian")),
+            "atlassian token dir must be among the created dirs"
         );
         for dir in &dirs {
             let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;

@@ -27,6 +27,7 @@ export default {
         'mcp-redmine',
         'mcp-gitlab',
         'mcp-github',
+        'mcp-atlassian',
         'mcp-playwright',
         'mcp-os',
         'containers',

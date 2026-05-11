@@ -40,7 +40,7 @@ This means Claude's context window stays clean regardless of how many integratio
 ## Key Features
 
 - **Two interfaces** — Desktop app (chat UI with project management) and CLI (`speedwave` terminal command)
-- **Built-in integrations** — Slack, SharePoint, GitLab, Redmine, Mail, Calendar, Reminders, Notes
+- **Built-in integrations** — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar, Reminders, Notes
 - **Plugin system** — extend with custom MCP services via Ed25519-signed plugins
 - **Cross-platform** — macOS, Linux, Windows with platform-native OS integrations
 - **Zero-install dependencies** — Lima, nerdctl, and containerd are bundled; no system-wide Docker or container runtime needed
@@ -61,7 +61,7 @@ graph TB
         HUB[MCP Hub]
         subgraph Workers[" Workers "]
             direction LR
-            SLACK[Slack] ~~~ GITLAB[GitLab] ~~~ SP[SharePoint] ~~~ REDMINE[Redmine]
+            SLACK[Slack] ~~~ GITLAB[GitLab] ~~~ GITHUB[GitHub] ~~~ ATLASSIAN[Atlassian] ~~~ SP[SharePoint] ~~~ REDMINE[Redmine]
         end
     end
 

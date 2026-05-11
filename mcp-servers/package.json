@@ -16,6 +16,7 @@
     "redmine",
     "gitlab",
     "github",
+    "atlassian",
     "os"
   ],
   "scripts": {

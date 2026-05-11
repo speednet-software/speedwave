@@ -96,6 +96,10 @@ pub fn render_compose(
         &build::image_ref(build::IMAGE_MCP_GITHUB, &bundle_manifest.bundle_id),
     );
     yaml = yaml.replace(
+        "${IMAGE_MCP_ATLASSIAN}",
+        &build::image_ref(build::IMAGE_MCP_ATLASSIAN, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
         "${IMAGE_MCP_PLAYWRIGHT}",
         &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
     );
@@ -2533,6 +2537,7 @@ services:
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
       - WORKER_GITHUB_URL=http://mcp-github:3000
+      - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
@@ -2540,11 +2545,14 @@ services:
   mcp-slack:
     image: speedwave-mcp-slack:latest
     container_name: speedwave_test_mcp_slack
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
     environment:
@@ -2902,6 +2910,10 @@ services:
             build::IMAGE_MCP_GITHUB,
             &manifest.bundle_id
         )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_ATLASSIAN,
+            &manifest.bundle_id
+        )));
 
         assert!(!yaml.contains("image: speedwave-claude:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-hub:latest"));
@@ -2910,6 +2922,7 @@ services:
         assert!(!yaml.contains("image: speedwave-mcp-redmine:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-gitlab:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-github:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-atlassian:latest"));
     }
 
     #[test]
@@ -5790,6 +5803,7 @@ services:
             redmine: true,
             gitlab: true,
             github: true,
+            atlassian: true,
             playwright: true,
             ..ResolvedIntegrationsConfig::default()
         };
@@ -6668,6 +6682,7 @@ services:
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
       - WORKER_GITHUB_URL=http://mcp-github:3000
+      - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
@@ -6675,11 +6690,14 @@ services:
   mcp-slack:
     image: speedwave-mcp-slack:latest
     container_name: speedwave_test_mcp_slack
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
     environment:
@@ -6690,11 +6708,14 @@ services:
   mcp-sharepoint:
     image: speedwave-mcp-sharepoint:latest
     container_name: speedwave_test_mcp_sharepoint
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/sharepoint:/tokens:rw
       - /home/user/projects/test:/workspace:rw
@@ -6706,11 +6727,14 @@ services:
   mcp-redmine:
     image: speedwave-mcp-redmine:latest
     container_name: speedwave_test_mcp_redmine
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/redmine:/tokens:ro
     environment:
@@ -6721,11 +6745,14 @@ services:
   mcp-gitlab:
     image: speedwave-mcp-gitlab:latest
     container_name: speedwave_test_mcp_gitlab
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/gitlab:/tokens:ro
     environment:
@@ -6736,13 +6763,34 @@ services:
   mcp-github:
     image: speedwave-mcp-github:latest
     container_name: speedwave_test_mcp_github
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/github:/tokens:ro
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    container_name: speedwave_test_mcp_atlassian
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/atlassian:/tokens:ro
     environment:
       - PORT=3000
     networks:
@@ -6777,6 +6825,7 @@ networks:
             redmine: true,
             gitlab: true,
             github: true,
+            atlassian: true,
             playwright: true,
             ..Default::default()
         }

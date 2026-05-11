@@ -10,6 +10,7 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 | SharePoint  | Documents          | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/` |
 | GitLab      | Code hosting       | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`     |
 | GitHub      | Code hosting       | `speedwave_<project>_mcp_github`     | `~/.speedwave/tokens/<project>/github/`     |
+| Atlassian   | Jira & Confluence  | `speedwave_<project>_mcp_atlassian`  | `~/.speedwave/tokens/<project>/atlassian/`  |
 | Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`    |
 | Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                        |
 | OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                          |
@@ -86,6 +87,7 @@ Each MCP integration requires specific credentials to function. Fields marked as
 | SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                    |
 | GitLab      | `token`, `host_url`                                             | —                                                    |
 | GitHub      | `token`                                                         | —                                                    |
+| Atlassian   | `site_url`, `email`, `api_token`                                | `jira_project_keys`, `confluence_space_keys` (allowlists; empty = all) |
 | Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project) |
 | Playwright  | _(none — no credentials required)_                              | —                                                    |
 
@@ -126,6 +128,50 @@ If a token is missing a permission, the worker returns the GitHub `403` body ver
 #### Tool surface
 
 `listRepos`, `getRepo`, `searchCode`, `listPullRequests`, `getPullRequest`, `createPullRequest`, `mergePullRequest`, `updatePullRequest`, `getPrDiff`, `getPrFiles`, `listPrCommits`, `listPrReviews`, `createPrReview`, `listPrComments`, `createPrComment`, `createPrReviewComment`, `listBranches`, `getBranch`, `createBranch`, `deleteBranch`, `compareBranches`, `listCommits`, `listBranchCommits`, `searchCommits`, `getCommitDiff`, `getTree`, `getFileContents`, `createOrUpdateFile`, `listWorkflowRuns`, `getWorkflowRun`, `getRunLogs`, `rerunWorkflow`, `triggerWorkflow`, `listWorkflowRunArtifacts`, `downloadArtifact`, `listIssues`, `getIssue`, `createIssue`, `updateIssue`, `closeIssue`, `listLabels`, `createLabel`, `createTag`, `deleteTag`, `createRelease`.
+
+### Atlassian — Jira & Confluence
+
+The Atlassian integration is a built-in MCP worker for **Atlassian Cloud** — Jira (issues, comments, worklog, projects, and Agile boards/sprints) and Confluence (spaces, pages, comments, labels, attachments). It is built on a thin `axios` HTTP client over the Jira Cloud REST v3 + Agile 1.0 APIs and the Confluence Cloud REST v2 API; CQL search and bulk label-add use the v1 endpoints (which have no v2 equivalent).
+
+#### Authentication
+
+Atlassian Cloud uses HTTP Basic auth: the worker sends `Authorization: Basic base64(email:api_token)`. Create an API token at <https://id.atlassian.com/manage-profile/security/api-tokens> ("Create API token"). In the Desktop app's Atlassian integration, fill in:
+
+- **`site_url`** — your site, e.g. `https://your-domain.atlassian.net` (must be `https://` and `*.atlassian.net`).
+- **`email`** — the account the token belongs to.
+- **`api_token`** — the `ATATT3x...` value. Stored at `~/.speedwave/tokens/<project>/atlassian/api_token` with `0o600` permissions, mounted read-only into the worker; it never appears in responses or logs.
+
+Two optional allowlist fields narrow what the worker may touch:
+
+- **`jira_project_keys`** — comma-separated project keys (e.g. `PROJ,OPS`). When set, any operation whose project key is outside the list is rejected. Empty = unrestricted.
+- **`confluence_space_keys`** — comma-separated space keys (e.g. `DEV,DOCS`). Same semantics. Empty = unrestricted.
+
+Because the worker authenticates as a real account, it can reach everything that account can — using a dedicated service account with the narrowest workable permissions, plus these allowlists, keeps the blast radius small.
+
+#### Content formats
+
+- **Jira write payloads use ADF.** `createIssue` / `updateIssue` (description) and `addComment` / `addWorklog` (comment) accept either `bodyText` — plain text the worker converts to a minimal Atlassian Document Format document (one paragraph per line) — or `bodyAdf` / `commentAdf`, a pre-built ADF object for rich content.
+- **Confluence bodies use the storage representation.** `createPage` / `updatePage` / `addPageComment` accept either `bodyText` (wrapped in a single escaped `<p>`) or `bodyStorage` (raw storage-format XHTML you provide). `updatePage` fetches the current version and increments it automatically — you never pass a version number.
+
+#### Scope and limitations
+
+- **Atlassian Cloud only.** Jira Data Center / Server (self-hosted) is not supported — there is no on-prem PAT field.
+- **Enhanced JQL search.** `searchIssues` uses `POST /rest/api/3/search/jql` with an opaque `nextPageToken` cursor (the old `startAt`-based `/rest/api/3/search` is being removed by Atlassian).
+- **CQL search is best-effort for scoping.** The v1 `/content/search` endpoint that backs `searchPages` returns less metadata than v2 reads; when a space allowlist is set, results whose space can't be resolved are dropped.
+- **Per-request retry.** Read / idempotent calls retry transient `5xx` (and `429`, honouring `Retry-After`); write calls retry only `429`, never `5xx`, so a server error mid-write surfaces rather than risking a duplicated side effect.
+
+#### Why a thin worker, not the official Atlassian Rovo MCP
+
+Atlassian publishes a hosted **Rovo MCP Server** (`mcp.atlassian.com`), but it is a cloud-hosted bridge: it has no self-hostable container, and using it headless means sending the credential to an Atlassian-operated endpoint and depending on that service's availability — incompatible with Speedwave's token-free hub model (the hub holds zero tokens; each worker holds only its own credential, mounted read-only). The ADR-053 "wrap an official upstream MCP server" gate is not met (it is not distributed as an npm package, and integrating with the Atlassian API is a domain integration, not generic infrastructure), so Atlassian gets its own thin worker — the `mcp-servers/gitlab` / `mcp-servers/github` pattern.
+
+#### Why a thin HTTP client, not `jira.js` / `confluence.js`
+
+Inside a worker, Speedwave's convention is: use the service's official SDK (or a large, well-maintained community SDK) when one exists — Slack uses `@slack/web-api`, GitHub uses `@octokit/rest`, GitLab uses `@gitbeaker/rest` — and otherwise write a thin `axios` client like the Redmine worker. Atlassian publishes no official Node SDK, and the popular community libraries (`jira.js`, `confluence.js`) are single-maintainer projects (~489★ / ~110★, no sponsorship); a bus-factor-1 dependency that holds the account credential inside the worker is a risk this security-first repo declines. Jira Basic auth is a single header, JQL pagination is a `nextPageToken` loop, and rate limiting is `429 + Retry-After` — well within the "thin client" envelope.
+
+#### Tool surface
+
+33 tools. Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
+Confluence: `listSpaces`, `getSpace`, `searchPages`, `getPage`, `getPageByTitle`, `createPage`, `updatePage`, `getPageChildren`, `addPageComment`, `getPageComments`, `addPageLabels`, `getPageLabels`, `listAttachments`.
 
 ### Redmine Configuration Wizard
 

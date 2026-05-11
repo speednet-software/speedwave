@@ -1,6 +1,6 @@
 # Speedwave
 
-Security-first AI platform connecting Claude Code with external services (Slack, SharePoint, GitLab, Redmine, Mail, Calendar). Claude runs in a hardened, token-free container — all service credentials are isolated per-worker. Additional VM-level isolation on macOS (Lima) and Windows (WSL2); rootless user namespaces on Linux. Ships as a single installable app (.dmg, .exe, .deb) without Docker Desktop. Two interfaces: CLI (terminal) and Desktop (chat UI).
+Security-first AI platform connecting Claude Code with external services (Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar). Claude runs in a hardened, token-free container — all service credentials are isolated per-worker. Additional VM-level isolation on macOS (Lima) and Windows (WSL2); rootless user namespaces on Linux. Ships as a single installable app (.dmg, .exe, .deb) without Docker Desktop. Two interfaces: CLI (terminal) and Desktop (chat UI).
 
 ## Key Architecture
 
