@@ -10,14 +10,15 @@
 //! and so never compiles this module.
 //!
 //! Submodules land across Phase 1's four PRs:
-//! - 1a (this PR): `audio` (trait + `FileAudioCapture`), `model_catalog` (SSOT).
-//! - 1b: `model_store` (download/verify/cache).
+//! - 1a: `audio` (trait + `FileAudioCapture`), `model_catalog` (SSOT).
+//! - 1b (this PR): `model_store` (download/verify/cache).
 //! - 1c: `transcriber` (Whisper via `whisper-rs`), `diarizer` (sherpa-onnx),
 //!   `accel` (which backends were compiled in).
 //! - 1d: `transcript` (`TranscriptSession`), `transcript_store`, `transcript_driver`.
 
 pub mod audio;
 pub mod model_catalog;
+pub mod model_store;
 
 pub use audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
@@ -27,6 +28,10 @@ pub use model_catalog::{
     default_diarization_model, diarization_model, whisper_model, DiarizationModelInfo,
     DiarizationModelKind, ModelRole, Quantization, WhisperModelInfo, DIARIZATION_MODELS,
     WHISPER_MODELS,
+};
+pub use model_store::{
+    no_progress, DiarizationModelPaths, DownloadProgress, ModelStatusEntry, ModelStore,
+    ModelStoreError,
 };
 
 use std::path::PathBuf;

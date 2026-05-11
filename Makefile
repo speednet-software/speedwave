@@ -552,6 +552,9 @@ setup-e2e-vms:
 
 check-clippy:
 	cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+	@# The `audio-transcription` feature is off by default, so the line above
+	@# doesn't lint the `transcription` module — clippy it explicitly too.
+	cargo clippy -p speedwave-runtime --features audio-transcription -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp

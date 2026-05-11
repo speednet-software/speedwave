@@ -45,15 +45,25 @@ tempfile = "3"
 # (only the Desktop crate enables this feature; the CLI stays lean — see
 #  docs/adr/ADR-056-host-side-audio-transcription.md)
 hound = { version = "3", optional = true }
+# Model downloader (Phase 1b). `blocking` because ModelStore is a synchronous
+# API — a large download is a long blocking operation the Tauri layer wraps in
+# `spawn_blocking`; `stream` for chunked reads while hashing on the fly.
+# `rustls-tls` to match the rest of Speedwave (no system OpenSSL).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "stream"], optional = true }
+# Untar the sherpa-onnx diarization-model archives (`.tar.bz2`).
+tar = { version = "0.4", optional = true }
+bzip2 = { version = "0.4", optional = true }
 
 [features]
-# Host-side meeting transcription: WAV I/O now; whisper-rs / sherpa-onnx /
-# cpal / reqwest are added to this feature's dep list in later phases
-# (1b ModelStore, 1c Transcriber/Diarizer, 4 capture impls).
-audio-transcription = ["dep:hound"]
+# Host-side meeting transcription: WAV I/O + the model downloader now;
+# whisper-rs / sherpa-onnx / cpal are added to this feature's dep list in
+# later phases (1c Transcriber/Diarizer, 4 capture impls).
+audio-transcription = ["dep:hound", "dep:reqwest", "dep:tar", "dep:bzip2"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+# Local HTTP mock for the model-downloader tests (no real network in unit tests).
+mockito = "1"
 
 [lints]
 workspace = true
