@@ -528,14 +528,10 @@ fn main() -> anyhow::Result<()> {
             &project_name,
         )?;
         if removed == 0 {
-            println!(
-                "No Claude credentials found for project '{}'.",
-                project_name
-            );
+            eprintln!("No Claude credentials found for project '{project_name}'.");
         } else {
-            println!(
-                "Removed Claude credentials for project '{}' ({removed} file(s)).",
-                project_name
+            eprintln!(
+                "Removed Claude credentials for project '{project_name}' ({removed} file(s))."
             );
         }
         std::process::exit(0);

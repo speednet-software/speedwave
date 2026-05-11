@@ -33,6 +33,7 @@ pub(crate) fn escape_for_applescript(s: &str) -> anyhow::Result<String> {
     Ok(s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+#[cfg(target_os = "macos")]
 const DEFAULT_LOGIN_SHELL: &str = "/bin/zsh";
 
 /// Whether `s` is a plain absolute path safe to use as argv[0] in iTerm2's
