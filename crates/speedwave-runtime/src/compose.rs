@@ -96,6 +96,10 @@ pub fn render_compose(
         &build::image_ref(build::IMAGE_MCP_GITHUB, &bundle_manifest.bundle_id),
     );
     yaml = yaml.replace(
+        "${IMAGE_MCP_ATLASSIAN}",
+        &build::image_ref(build::IMAGE_MCP_ATLASSIAN, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
         "${IMAGE_MCP_PLAYWRIGHT}",
         &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
     );
@@ -2533,6 +2537,7 @@ services:
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
       - WORKER_GITHUB_URL=http://mcp-github:3000
+      - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
@@ -2902,6 +2907,10 @@ services:
             build::IMAGE_MCP_GITHUB,
             &manifest.bundle_id
         )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_ATLASSIAN,
+            &manifest.bundle_id
+        )));
 
         assert!(!yaml.contains("image: speedwave-claude:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-hub:latest"));
@@ -2910,6 +2919,7 @@ services:
         assert!(!yaml.contains("image: speedwave-mcp-redmine:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-gitlab:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-github:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-atlassian:latest"));
     }
 
     #[test]
@@ -5640,6 +5650,7 @@ services:
             redmine: true,
             gitlab: true,
             github: true,
+            atlassian: true,
             playwright: true,
             ..ResolvedIntegrationsConfig::default()
         };
@@ -6518,6 +6529,7 @@ services:
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
       - WORKER_GITHUB_URL=http://mcp-github:3000
+      - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
@@ -6598,6 +6610,21 @@ services:
     networks:
       - speedwave_test_network
 
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    container_name: speedwave_test_mcp_atlassian
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /home/user/.speedwave/tokens/test/atlassian:/tokens:ro
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
   mcp-playwright:
     image: speedwave-mcp-playwright:latest
     container_name: speedwave_test_mcp_playwright
@@ -6627,6 +6654,7 @@ networks:
             redmine: true,
             gitlab: true,
             github: true,
+            atlassian: true,
             playwright: true,
             ..Default::default()
         }

@@ -38,6 +38,8 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         ),
         // GitLab tokens: glpat- prefixed (20+ alphanumeric/hyphen chars)
         (r"glpat-[A-Za-z0-9\-]{20,}", "***REDACTED_GITLAB_TOKEN***"),
+        // Atlassian Cloud API tokens: ATATT prefixed (long base64url-ish payload)
+        (r"ATATT[A-Za-z0-9_\-]{20,}", "***REDACTED_ATLASSIAN_TOKEN***"),
         // Anthropic API keys: sk-ant- prefixed
         (r"sk-ant-[A-Za-z0-9_-]+", "***REDACTED_ANTHROPIC_KEY***"),
         // URL userinfo credentials: ://user:password@host — redact password
@@ -114,7 +116,7 @@ mod tests {
     /// The definitions vec contains exactly this many rules. If a new rule is
     /// added to the vec but fails to compile, RULES.len() will be less than
     /// this constant and the test will fail, catching the silent drop.
-    const EXPECTED_RULE_COUNT: usize = 16;
+    const EXPECTED_RULE_COUNT: usize = 17;
 
     #[test]
     fn test_rules_count() {
@@ -146,6 +148,7 @@ mod tests {
             r"ghu_[A-Za-z0-9]{36,}",
             r"github_pat_[A-Za-z0-9]{36,}",
             r"glpat-[A-Za-z0-9\-]{20,}",
+            r"ATATT[A-Za-z0-9_\-]{20,}",
             r"sk-ant-[A-Za-z0-9_-]+",
             r"(://[^:/@\s]+:)[^@\s]+(@)",
             r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token)=)[^&\s]+",
@@ -803,6 +806,36 @@ mod tests {
         assert_eq!(
             output, input,
             "Short glpat- string should not be redacted (below 20 chars)"
+        );
+    }
+
+    #[test]
+    fn test_atlassian_token_redaction() {
+        let input = "Atlassian API token: ATATT3xFfGF0abcdefghij1234567890KLMNOP";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED_ATLASSIAN_TOKEN***"),
+            "Atlassian token not redacted: {output}"
+        );
+        assert!(
+            !output.contains("ATATT3xFfGF0"),
+            "Atlassian token payload should not appear: {output}"
+        );
+    }
+
+    #[test]
+    fn test_atlassian_basic_auth_header_redaction() {
+        // base64("bot@acme.com:ATATT3xSecret") — must not leak through the
+        // existing Authorization: header rule.
+        let input = "header set: Authorization: Basic Ym90QGFjbWUuY29tOkFUQVRUM3hTZWNyZXQ=";
+        let output = sanitize(input);
+        assert!(
+            output.contains("Authorization: ***REDACTED***"),
+            "Authorization Basic header not redacted: {output}"
+        );
+        assert!(
+            !output.contains("Ym90QGFjbWUuY29t"),
+            "base64 email:token blob should not appear: {output}"
         );
     }
 
