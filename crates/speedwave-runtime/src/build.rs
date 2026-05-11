@@ -84,6 +84,19 @@ pub const IMAGES: &[ImageDef] = &[
 /// contention (see ADR-032).
 const DEFAULT_BUILD_WORKER_FALLBACK: usize = 4;
 
+/// How many times to retry a build that failed with a transient error
+/// (I/O hiccup, DNS not yet settled after VM boot — see `is_transient_build_error`).
+const TRANSIENT_BUILD_RETRIES: u32 = 2;
+
+/// Base wait before the first transient retry; the Nth retry waits `BASE * N`.
+/// Sized so the VM's `systemd-resolved` has time to fall back from EDNS0 to plain
+/// UDP, while two attempts (3s + 6s) don't noticeably stall a genuinely-down network.
+/// Near-zero under `cfg(test)` so retry-path tests don't actually sleep.
+#[cfg(not(test))]
+const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
+
 pub fn image_ref(name: &str, bundle_id: &str) -> String {
     format!("{name}:{bundle_id}")
 }
@@ -451,8 +464,25 @@ pub fn build_all_images_for_bundle(
                 anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
             })
         } else if is_transient_build_error(&first_err) {
-            log::warn!("build failed with transient error, retrying once: {first_err}");
-            try_build_all(runtime, &vm_root, bundle_id)
+            // Transient — most often a DNS hiccup right after the VM boots while
+            // `systemd-resolved` is still falling back from EDNS0 to plain UDP
+            // (see `is_transient_build_error`). A few seconds' wait lets the
+            // resolver settle; two backed-off attempts cover a slow fallback
+            // without making a genuinely-down network drag the build out.
+            let mut last_err = first_err;
+            for attempt in 1..=TRANSIENT_BUILD_RETRIES {
+                let delay = TRANSIENT_BUILD_RETRY_BASE_DELAY * attempt;
+                log::warn!(
+                    "build failed with transient error, retrying in {}s (attempt {attempt}/{TRANSIENT_BUILD_RETRIES}): {last_err}",
+                    delay.as_secs()
+                );
+                std::thread::sleep(delay);
+                match try_build_all(runtime, &vm_root, bundle_id) {
+                    Ok(n) => return Ok(n),
+                    Err(e) => last_err = e,
+                }
+            }
+            Err(last_err)
         } else {
             Err(first_err)
         }
@@ -679,10 +709,20 @@ fn is_snapshotter_error(err: &anyhow::Error) -> bool {
 }
 
 /// Returns `true` if the build error looks transient (I/O timeout, connection reset,
-/// temporary unavailable). These may succeed on retry without any recovery action.
+/// temporary unavailable, or a DNS hiccup while pulling a base image). These may
+/// succeed on retry without any recovery action.
 ///
-/// Uses case-insensitive matching because kernel/libc error messages vary in casing
-/// across distros and locales.
+/// The DNS cases matter for first runs behind a VPN: when the Lima VM boots, its
+/// `systemd-resolved` initially tries `UDP+EDNS0`, whose large responses do not
+/// survive a low-MTU tunnel (e.g. Tailscale's 1380). It takes a second or two to
+/// detect that and fall back to plain UDP — but BuildKit fires its
+/// `FROM <base-image>` metadata fetch inside that window, so the resolver returns
+/// `SERVFAIL` and BuildKit reports `server misbehaving` / `failed to resolve
+/// source metadata`. A single retry a few seconds later hits the now-degraded
+/// resolver and succeeds.
+///
+/// Uses case-insensitive matching because kernel/libc/BuildKit error messages vary
+/// in casing across distros and locales.
 fn is_transient_build_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
@@ -691,6 +731,11 @@ fn is_transient_build_error(err: &anyhow::Error) -> bool {
             || msg.contains("connection reset")
             || msg.contains("temporary failure")
             || msg.contains("resource temporarily unavailable")
+            // DNS hiccup while resolving a base-image registry host (see doc above)
+            || msg.contains("server misbehaving")
+            || msg.contains("failed to resolve source metadata")
+            || msg.contains("no such host")
+            || (msg.contains("dial tcp") && msg.contains("lookup"))
         {
             return true;
         }
@@ -1993,6 +2038,53 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // is_transient_build_error() — DNS hiccup while pulling a base image
+    // (VM's systemd-resolved still falling back from EDNS0 right after boot;
+    // BuildKit's `FROM <image>` metadata fetch lands in that window).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_transient_build_error_dns_server_misbehaving() {
+        // The exact BuildKit error seen on first run behind a VPN.
+        let err = anyhow::anyhow!(
+            "failed to do request: Head \"https://registry-1.docker.io/v2/library/node/manifests/24-alpine\": dial tcp: lookup registry-1.docker.io on 127.0.0.53:53: server misbehaving"
+        );
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_dns_resolve_source_metadata() {
+        let err = anyhow::anyhow!(
+            "node:24-alpine: failed to resolve source metadata for docker.io/library/node:24-alpine"
+        );
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_dns_no_such_host() {
+        let err = anyhow::anyhow!("dial tcp: lookup mcr.microsoft.com: no such host");
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_dial_tcp_lookup_chain() {
+        let inner =
+            anyhow::anyhow!("dial tcp: lookup registry-1.docker.io on 192.168.5.2:53: i/o timeout");
+        let outer = inner
+            .context("failed to do request")
+            .context("nerdctl build failed");
+        assert!(is_transient_build_error(&outer));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_plain_dial_tcp_without_lookup_is_not_transient() {
+        // A bare `dial tcp` without a DNS lookup (e.g. connection refused to a fixed IP)
+        // is not the DNS-fallback race; don't widen the net unnecessarily.
+        let err = anyhow::anyhow!("dial tcp 10.0.0.5:443: connect: connection refused");
+        assert!(!is_transient_build_error(&err));
+    }
+
+    // -----------------------------------------------------------------------
     // is_snapshotter_error() Boy Scout case-insensitivity test
     // -----------------------------------------------------------------------
 
@@ -2327,6 +2419,80 @@ mod tests {
             count_builds(&recorded),
             2 * IMAGES.len(),
             "full first attempt (with one transient failure) + full retry"
+        );
+    }
+
+    #[test]
+    fn test_parallel_build_dns_error_retries_then_succeeds_on_second_attempt() {
+        // The DNS-fallback race: attempts 1 AND 2 fail with `server misbehaving`,
+        // attempt 3 succeeds (resolver has settled). Exercises the >1 retry path.
+        let mut fail_on = std::collections::HashMap::new();
+        let tag = image_ref(IMAGE_MCP_GITHUB, "test-bundle");
+        fail_on.insert(
+            format!("{tag}:1"),
+            "failed to do request: dial tcp: lookup registry-1.docker.io on 127.0.0.53:53: server misbehaving".to_string(),
+        );
+        fail_on.insert(
+            format!("{tag}:2"),
+            "node:24-alpine: failed to resolve source metadata for docker.io/library/node:24-alpine".to_string(),
+        );
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root, fail_on);
+
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        assert_eq!(
+            result.unwrap(),
+            IMAGES.len() as u32,
+            "should succeed on the third (second-retry) attempt"
+        );
+
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(
+            count_prunes(&recorded),
+            0,
+            "DNS retry must NOT trigger prune"
+        );
+        assert_eq!(
+            count_builds(&recorded),
+            3 * IMAGES.len(),
+            "first attempt + 2 retries (all images rebuilt each time)"
+        );
+    }
+
+    #[test]
+    fn test_parallel_build_dns_error_exhausts_retries_and_fails() {
+        // All three attempts (1 + TRANSIENT_BUILD_RETRIES) fail with a DNS error.
+        let mut fail_on = std::collections::HashMap::new();
+        let tag = image_ref(IMAGE_MCP_GITHUB, "test-bundle");
+        for attempt in 1..=(TRANSIENT_BUILD_RETRIES + 1) {
+            fail_on.insert(
+                format!("{tag}:{attempt}"),
+                "dial tcp: lookup registry-1.docker.io: no such host".to_string(),
+            );
+        }
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root, fail_on);
+
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        assert!(result.is_err(), "exhausting retries must surface the error");
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("no such host"),
+            "final error should carry the DNS failure, got: {msg}"
+        );
+
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(
+            count_prunes(&recorded),
+            0,
+            "DNS retry must NOT trigger prune"
+        );
+        assert_eq!(
+            count_builds(&recorded),
+            (TRANSIENT_BUILD_RETRIES as usize + 1) * IMAGES.len(),
+            "first attempt + all retries, every image each time"
         );
     }
 
