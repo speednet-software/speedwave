@@ -40,6 +40,7 @@ fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
         data_dir.join("tokens").join(project).join("sharepoint"),
         data_dir.join("tokens").join(project).join("redmine"),
         data_dir.join("tokens").join(project).join("gitlab"),
+        data_dir.join("tokens").join(project).join("github"),
         data_dir.join("compose").join(project),
         data_dir.join("context").join(project),
         data_dir
@@ -253,6 +254,7 @@ mod tests {
             data_dir.join("tokens").join("modecheck").join("sharepoint"),
             data_dir.join("tokens").join("modecheck").join("redmine"),
             data_dir.join("tokens").join("modecheck").join("gitlab"),
+            data_dir.join("tokens").join("modecheck").join("github"),
             data_dir.join("compose").join("modecheck"),
             data_dir.join("context").join("modecheck"),
             data_dir

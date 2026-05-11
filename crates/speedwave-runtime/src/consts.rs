@@ -456,6 +456,25 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: None,
     },
     McpServiceDescriptor {
+        config_key: "github",
+        compose_name: "mcp-github",
+        worker_env: "WORKER_GITHUB_URL",
+        display_name: "GitHub",
+        description: "Code hosting and CI/CD platform",
+        auth_fields: &[McpAuthFieldDescriptor {
+            key: "token",
+            label: "Personal Access Token (fine-grained)",
+            field_type: "password",
+            placeholder: "github_pat_...",
+            is_secret: true,
+            stored_in_config_json: false,
+            oauth_flow: false,
+            optional: false,
+        }],
+        credential_files: &["token"],
+        badge: None,
+    },
+    McpServiceDescriptor {
         config_key: "playwright",
         compose_name: "mcp-playwright",
         worker_env: "WORKER_PLAYWRIGHT_URL",
@@ -536,6 +555,7 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-sharepoint",
     "mcp-redmine",
     "mcp-gitlab",
+    "mcp-github",
     "mcp-playwright",
 ];
 
@@ -546,6 +566,7 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "sharepoint",
     "redmine",
     "gitlab",
+    "github",
     "playwright",
     "os",
 ];
@@ -818,12 +839,13 @@ mod tests {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
         // Explicit field enumeration — update this when adding/removing MCP fields.
         // Using a const to force a compile-time reminder when struct changes.
-        const EXPECTED_MCP_FIELDS: usize = 5; // slack, sharepoint, redmine, gitlab, playwright
+        const EXPECTED_MCP_FIELDS: usize = 6; // slack, sharepoint, redmine, gitlab, github, playwright
         let _ = (
             resolved.slack,
             resolved.sharepoint,
             resolved.redmine,
             resolved.gitlab,
+            resolved.github,
             resolved.playwright,
         );
         assert_eq!(
@@ -893,6 +915,7 @@ mod tests {
             ("sharepoint", 6),
             ("redmine", 3),
             ("gitlab", 2),
+            ("github", 1),
             ("playwright", 0),
         ];
         for &(key, count) in expected {
@@ -1102,6 +1125,7 @@ mod tests {
         assert!(find_mcp_service("sharepoint").is_some());
         assert!(find_mcp_service("redmine").is_some());
         assert!(find_mcp_service("gitlab").is_some());
+        assert!(find_mcp_service("github").is_some());
     }
 
     #[test]

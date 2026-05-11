@@ -59,6 +59,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-050](ADR-050-host-timezone-propagation.md)                        | Host Timezone Propagation Into Containers                   | Accepted              |
 | [ADR-051](ADR-051-plugin-signature-runtime-verification.md)            | Plugin Signature as a Runtime Invariant                     | Accepted              |
 | [ADR-052](ADR-052-anthropic-oauth-login-flow.md)                       | Claude Code Login Surface + Clipboard Bridge                | Accepted              |
+| [ADR-053](ADR-053-worker-implementation-own-vs-wrap-official-mcp.md)   | Worker Implementation — Own Thin Worker vs Wrapping an Official MCP Server | Accepted          |
 
 ## Creating a New ADR
 

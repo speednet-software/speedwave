@@ -232,6 +232,7 @@ mod tests {
             data_dir.join("tokens/proj"),
             data_dir.join("tokens/proj/slack"),
             data_dir.join("tokens/proj/gitlab"),
+            data_dir.join("tokens/proj/github"),
             data_dir.join("tokens/proj/empty-service"),
             data_dir.join("ide-bridge"),
         ];
@@ -244,6 +245,7 @@ mod tests {
             data_dir.join("secrets/proj/worker-auth-token"),
             data_dir.join("tokens/proj/slack/token.txt"),
             data_dir.join("tokens/proj/gitlab/key.txt"),
+            data_dir.join("tokens/proj/github/key.txt"),
             data_dir.join("snapshots/proj/snapshot.json"),
             data_dir.join("ide-bridge/1234.lock"),
             data_dir.join("bundle-state.json"),
@@ -268,10 +270,10 @@ mod tests {
 
         let (dirs, files) = collect_security_paths(data_dir, "proj");
 
-        // Expected dirs (10): secrets, secrets/proj, snapshots, snapshots/proj,
+        // Expected dirs (11): secrets, secrets/proj, snapshots, snapshots/proj,
         // tokens, tokens/proj, tokens/proj/slack, tokens/proj/gitlab,
-        // tokens/proj/empty-service, ide-bridge
-        assert_eq!(dirs.len(), 10, "expected 10 dirs, got: {dirs:?}");
+        // tokens/proj/github, tokens/proj/empty-service, ide-bridge
+        assert_eq!(dirs.len(), 11, "expected 11 dirs, got: {dirs:?}");
         assert!(dirs.contains(&data_dir.join("secrets")));
         assert!(dirs.contains(&data_dir.join("secrets/proj")));
         assert!(dirs.contains(&data_dir.join("snapshots")));
@@ -280,16 +282,19 @@ mod tests {
         assert!(dirs.contains(&data_dir.join("tokens/proj")));
         assert!(dirs.contains(&data_dir.join("tokens/proj/slack")));
         assert!(dirs.contains(&data_dir.join("tokens/proj/gitlab")));
+        assert!(dirs.contains(&data_dir.join("tokens/proj/github")));
         assert!(dirs.contains(&data_dir.join("tokens/proj/empty-service")));
         assert!(dirs.contains(&data_dir.join("ide-bridge")));
 
-        // Expected files (6): secrets/proj/worker-auth-token,
+        // Expected files (7): secrets/proj/worker-auth-token,
         // tokens/proj/slack/token.txt, tokens/proj/gitlab/key.txt,
-        // snapshots/proj/snapshot.json, ide-bridge/1234.lock, bundle-state.json
-        assert_eq!(files.len(), 6, "expected 6 files, got: {files:?}");
+        // tokens/proj/github/key.txt, snapshots/proj/snapshot.json,
+        // ide-bridge/1234.lock, bundle-state.json
+        assert_eq!(files.len(), 7, "expected 7 files, got: {files:?}");
         assert!(files.contains(&data_dir.join("secrets/proj/worker-auth-token")));
         assert!(files.contains(&data_dir.join("tokens/proj/slack/token.txt")));
         assert!(files.contains(&data_dir.join("tokens/proj/gitlab/key.txt")));
+        assert!(files.contains(&data_dir.join("tokens/proj/github/key.txt")));
         assert!(files.contains(&data_dir.join("snapshots/proj/snapshot.json")));
         assert!(files.contains(&data_dir.join("ide-bridge/1234.lock")));
         assert!(files.contains(&data_dir.join("bundle-state.json")));
@@ -347,6 +352,7 @@ mod tests {
         assert_eq!(get_mode(&data_dir.join("tokens/proj")), 0o700);
         assert_eq!(get_mode(&data_dir.join("tokens/proj/slack")), 0o700);
         assert_eq!(get_mode(&data_dir.join("tokens/proj/gitlab")), 0o700);
+        assert_eq!(get_mode(&data_dir.join("tokens/proj/github")), 0o700);
         assert_eq!(get_mode(&data_dir.join("tokens/proj/empty-service")), 0o700);
         assert_eq!(get_mode(&data_dir.join("ide-bridge")), 0o700);
 

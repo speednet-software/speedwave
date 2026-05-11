@@ -57,6 +57,7 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_WORKER}
       - WORKER_REDMINE_URL=http://mcp-redmine:${PORT_WORKER}
       - WORKER_GITLAB_URL=http://mcp-gitlab:${PORT_WORKER}
+      - WORKER_GITHUB_URL=http://mcp-github:${PORT_WORKER}
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:${PORT_WORKER}
     networks:
       - ${NETWORK_NAME}
@@ -164,6 +165,34 @@ services:
         limits:
           cpus: '0.5'
           memory: 128m
+
+  mcp-github:
+    image: ${IMAGE_MCP_GITHUB}
+    pull_policy: never
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_github
+    read_only: true
+    user: "${CONTAINER_USER}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - ${TOKENS_DIR}/github:/tokens:ro
+    environment:
+      - PORT=${PORT_WORKER}
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          # 256m (not the 128m other API workers use): Octokit composed with the
+          # throttling + retry plugins has a heavier resident footprint than
+          # @gitbeaker, and `octokit.paginate` buffers full result sets in memory
+          # — a `listIssues({state:'all'})` on a busy repo OOM-kills a 128m cap.
+          memory: 256m
 
   mcp-playwright:
     image: ${IMAGE_MCP_PLAYWRIGHT}
