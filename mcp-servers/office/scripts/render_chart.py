@@ -16,7 +16,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from script_runner import main, ok, fail  # noqa: E402
+from script_runner import atomic_save, fail, main, ok  # noqa: E402
 
 
 def _validate(spec: dict) -> None:
@@ -94,7 +94,7 @@ def _run(argv: list[str]) -> None:
         if spec.get("ylabel") and kind != "pie":
             ax.set_ylabel(str(spec["ylabel"]))
         fig.tight_layout()
-        fig.savefig(output, format=fmt)
+        atomic_save(output, lambda p: fig.savefig(p, format=fmt))
     finally:
         plt.close(fig)
     ok(path=output)

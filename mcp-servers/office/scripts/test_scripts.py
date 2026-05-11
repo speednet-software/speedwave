@@ -295,7 +295,11 @@ def test_render_chart_png(tmp_path: Path, ctype: str) -> None:
         "data": {"labels": ["A", "B", "C"], "series": [{"name": "s1", "values": [1.0, 2.0, 3.0]}]},
     }
     run_script("render_chart.py", str(out), json.dumps(spec))
-    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    data = out.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(data) > 100  # a complete (atomically-written) PNG, not a truncated one
+    # No `.tmp-<uuid>` sibling left behind by atomic_save.
+    assert not list(tmp_path.glob(f"{ctype}.png.tmp-*"))
 
 
 @needs_matplotlib
