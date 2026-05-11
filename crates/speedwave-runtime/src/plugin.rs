@@ -1756,8 +1756,13 @@ fn build_single_plugin_image(
     if let Some(plugins_dir) = plugin_dir.parent() {
         clear_image_pending_for(plugins_dir, plugin_dir, &manifest.slug);
     } else {
-        // Defensive — should not happen since plugin_dir always has a parent.
-        let _ = std::fs::remove_file(plugin_dir.join(".image_pending"));
+        // Unreachable: a plugin dir always has a parent. Don't touch the
+        // signed tree here as a "fallback" — that's exactly what the
+        // mutable-state relocation removed.
+        log::warn!(
+            "plugin dir {} has no parent — skipping image_pending cleanup",
+            plugin_dir.display()
+        );
     }
 
     // Clean up temporary build context if it differs from plugin_dir
@@ -3401,6 +3406,35 @@ mod tests {
         assert!(!image_pending_marker_for(&plugins, "evil-legacy").exists());
     }
 
+    /// A hardlinked `.image_pending` (`nlink > 1`) must not be relocated:
+    /// an attacker who pre-creates `<plugin>/.image_pending` as a hardlink
+    /// to some file they want moved would otherwise get a free `rename`
+    /// out of the plugin tree. The `nlink` guard leaves it in place; the
+    /// verifier then fails on the unexpected in-tree file, which is the
+    /// correct outcome for a tampered tree.
+    #[cfg(unix)]
+    #[test]
+    fn test_migrate_rejects_hardlinked_image_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("evil-legacy");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // A file outside the plugin tree that the attacker would like
+        // `migrate_legacy_image_pending` to move for them.
+        let decoy = tmp.path().join("decoy.txt");
+        std::fs::write(&decoy, b"do not touch").unwrap();
+        let marker = plugin_dir.join(".image_pending");
+        std::fs::hard_link(&decoy, &marker).unwrap();
+
+        migrate_legacy_image_pending(&plugins, &plugin_dir, "evil-legacy");
+
+        // Hardlinked marker stays put; the decoy is untouched; nothing
+        // was relocated into the state dir.
+        assert!(marker.exists());
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"do not touch");
+        assert!(!image_pending_marker_for(&plugins, "evil-legacy").exists());
+    }
+
     /// Two threads racing to install the same slug must not corrupt the
     /// destination tree. `install_plugin_with_base` holds an exclusive
     /// flock on `<plugins>/.install.lock`, copies into a
@@ -4899,6 +4933,41 @@ mod tests {
             err.to_string().contains("exceeds maximum"),
             "expected upper-bound rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_non_positive_or_nonfinite_cpu_limit() {
+        // "nan"/"inf" parse to NaN/inf; "0"/"-1" parse to non-positive
+        // values. All four must be rejected by the
+        // `!cores.is_finite() || cores <= 0.0` guard, not silently passed
+        // through into `cpus: <value>` in the rendered compose.
+        for bad in ["nan", "inf", "-inf", "0", "-1", "-0.5"] {
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = PluginManifest {
+                name: "Test".to_string(),
+                service_id: None,
+                slug: "test-cpu".to_string(),
+                version: "1.0.0".to_string(),
+                description: "test".to_string(),
+                port: None,
+                image_tag: None,
+                resources: vec![],
+                token_mount: TokenMount::ReadOnly,
+                auth_fields: vec![],
+                settings_schema: None,
+                speedwave_compat: None,
+                extra_env: None,
+                mem_limit: None,
+                cpu_limit: Some(bad.to_string()),
+                requires_integrations: vec![],
+            };
+            let err =
+                validate_manifest(&manifest, dir.path()).expect_err("cpu_limit must be rejected");
+            assert!(
+                err.to_string().contains("positive"),
+                "expected positivity rejection for '{bad}', got: {err}"
+            );
+        }
     }
 
     #[test]
