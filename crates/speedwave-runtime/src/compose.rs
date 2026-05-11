@@ -100,6 +100,10 @@ pub fn render_compose(
         &build::image_ref(build::IMAGE_MCP_ATLASSIAN, &bundle_manifest.bundle_id),
     );
     yaml = yaml.replace(
+        "${IMAGE_MCP_OFFICE}",
+        &build::image_ref(build::IMAGE_MCP_OFFICE, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
         "${IMAGE_MCP_PLAYWRIGHT}",
         &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
     );
@@ -2538,9 +2542,11 @@ services:
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
       - WORKER_GITHUB_URL=http://mcp-github:3000
       - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
+      - WORKER_OFFICE_URL=http://mcp-office:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
+      - speedwave_test_network_office
 
   mcp-slack:
     image: speedwave-mcp-slack:latest
@@ -2559,6 +2565,24 @@ services:
       - PORT=3000
     networks:
       - speedwave_test_network
+
+  mcp-office:
+    image: speedwave-mcp-office:latest
+    container_name: speedwave_test_mcp_office
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    volumes:
+      - /home/user/projects/test:/workspace:rw
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network_office
 
   mcp-playwright:
     image: speedwave-mcp-playwright:latest
@@ -2580,6 +2604,9 @@ services:
 networks:
   speedwave_test_network:
     driver: bridge
+  speedwave_test_network_office:
+    driver: bridge
+    internal: true
 "#;
 
     #[test]
@@ -5804,6 +5831,7 @@ services:
             gitlab: true,
             github: true,
             atlassian: true,
+            office: true,
             playwright: true,
             ..ResolvedIntegrationsConfig::default()
         };
@@ -6683,9 +6711,11 @@ services:
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
       - WORKER_GITHUB_URL=http://mcp-github:3000
       - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
+      - WORKER_OFFICE_URL=http://mcp-office:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
+      - speedwave_test_network_office
 
   mcp-slack:
     image: speedwave-mcp-slack:latest
@@ -6796,6 +6826,24 @@ services:
     networks:
       - speedwave_test_network
 
+  mcp-office:
+    image: speedwave-mcp-office:latest
+    container_name: speedwave_test_mcp_office
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    volumes:
+      - /home/user/projects/test:/workspace:rw
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network_office
+
   mcp-playwright:
     image: speedwave-mcp-playwright:latest
     container_name: speedwave_test_mcp_playwright
@@ -6816,6 +6864,9 @@ services:
 networks:
   speedwave_test_network:
     driver: bridge
+  speedwave_test_network_office:
+    driver: bridge
+    internal: true
 "#;
 
     fn all_enabled_integrations() -> ResolvedIntegrationsConfig {
@@ -6826,6 +6877,7 @@ networks:
             gitlab: true,
             github: true,
             atlassian: true,
+            office: true,
             playwright: true,
             ..Default::default()
         }

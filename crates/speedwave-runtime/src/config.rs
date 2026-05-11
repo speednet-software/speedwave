@@ -76,6 +76,7 @@ pub struct IntegrationsConfig {
     pub gitlab: Option<IntegrationConfig>,
     pub github: Option<IntegrationConfig>,
     pub atlassian: Option<IntegrationConfig>,
+    pub office: Option<IntegrationConfig>,
     pub playwright: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
     #[serde(default)]
@@ -93,6 +94,7 @@ impl IntegrationsConfig {
             "gitlab" => self.gitlab = Some(cfg),
             "github" => self.github = Some(cfg),
             "atlassian" => self.atlassian = Some(cfg),
+            "office" => self.office = Some(cfg),
             "playwright" => self.playwright = Some(cfg),
             _ => return false,
         }
@@ -121,6 +123,7 @@ pub struct ResolvedIntegrationsConfig {
     pub gitlab: bool,
     pub github: bool,
     pub atlassian: bool,
+    pub office: bool,
     pub playwright: bool,
     pub os_reminders: bool,
     pub os_calendar: bool,
@@ -142,6 +145,7 @@ impl ResolvedIntegrationsConfig {
             "gitlab" => Some(self.gitlab),
             "github" => Some(self.github),
             "atlassian" => Some(self.atlassian),
+            "office" => Some(self.office),
             "playwright" => Some(self.playwright),
             _ => None,
         }
@@ -334,6 +338,7 @@ fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &Int
     apply_toggle(&mut result.gitlab, &layer.gitlab);
     apply_toggle(&mut result.github, &layer.github);
     apply_toggle(&mut result.atlassian, &layer.atlassian);
+    apply_toggle(&mut result.office, &layer.office);
     apply_toggle(&mut result.playwright, &layer.playwright);
     if let Some(ref os) = layer.os {
         apply_toggle(&mut result.os_reminders, &os.reminders);
@@ -962,6 +967,7 @@ mod tests {
         assert!(!r.gitlab, "gitlab should be disabled");
         assert!(!r.github, "github should be disabled");
         assert!(!r.atlassian, "atlassian should be disabled");
+        assert!(!r.office, "office should be disabled");
         assert!(!r.playwright, "playwright should be disabled");
         assert!(!r.os_reminders, "os_reminders should be disabled");
         assert!(!r.os_calendar, "os_calendar should be disabled");
@@ -1110,6 +1116,7 @@ mod tests {
             gitlab: None,
             github: None,
             atlassian: None,
+            office: None,
             playwright: None,
             os: Some(OsIntegrationsConfig {
                 reminders: Some(IntegrationConfig {
@@ -1166,6 +1173,7 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
                     os: None,
                     plugins: None,
@@ -1197,6 +1205,7 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
                     os: Some(OsIntegrationsConfig {
                         reminders: Some(IntegrationConfig {
@@ -1241,6 +1250,7 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
                     os: None,
                     plugins: None,
@@ -1312,6 +1322,7 @@ mod tests {
             gitlab: false,
             github: false,
             atlassian: false,
+            office: false,
             ..Default::default()
         };
         assert_eq!(r.is_service_enabled("slack"), Some(true));
@@ -1320,6 +1331,7 @@ mod tests {
         assert_eq!(r.is_service_enabled("gitlab"), Some(false));
         assert_eq!(r.is_service_enabled("github"), Some(false));
         assert_eq!(r.is_service_enabled("atlassian"), Some(false));
+        assert_eq!(r.is_service_enabled("office"), Some(false));
     }
 
     #[test]
@@ -1408,6 +1420,12 @@ mod tests {
         ));
         assert!(cfg.set_service(
             "github",
+            IntegrationConfig {
+                enabled: Some(true)
+            }
+        ));
+        assert!(cfg.set_service(
+            "office",
             IntegrationConfig {
                 enabled: Some(true)
             }
@@ -1521,6 +1539,7 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
                     os: None,
                     plugins: Some(HashMap::from([(

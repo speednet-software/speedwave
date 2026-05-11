@@ -542,6 +542,17 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: None,
     },
     McpServiceDescriptor {
+        config_key: "office",
+        compose_name: "mcp-office",
+        worker_env: "WORKER_OFFICE_URL",
+        display_name: "Office documents",
+        description: "Read, write, convert Word/Excel/PowerPoint/PDF; render charts",
+        // A pure file processor — no service credentials. Operates on /workspace files only.
+        auth_fields: &[],
+        credential_files: &[],
+        badge: Some("NEW"),
+    },
+    McpServiceDescriptor {
         config_key: "playwright",
         compose_name: "mcp-playwright",
         worker_env: "WORKER_PLAYWRIGHT_URL",
@@ -624,6 +635,7 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-gitlab",
     "mcp-github",
     "mcp-atlassian",
+    "mcp-office",
     "mcp-playwright",
 ];
 
@@ -636,6 +648,7 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "gitlab",
     "github",
     "atlassian",
+    "office",
     "playwright",
     "os",
 ];
@@ -908,7 +921,7 @@ mod tests {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
         // Explicit field enumeration — update this when adding/removing MCP fields.
         // Using a const to force a compile-time reminder when struct changes.
-        const EXPECTED_MCP_FIELDS: usize = 7; // slack, sharepoint, redmine, gitlab, github, atlassian, playwright
+        const EXPECTED_MCP_FIELDS: usize = 8; // slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright
         let _ = (
             resolved.slack,
             resolved.sharepoint,
@@ -916,6 +929,7 @@ mod tests {
             resolved.gitlab,
             resolved.github,
             resolved.atlassian,
+            resolved.office,
             resolved.playwright,
         );
         assert_eq!(
@@ -1007,7 +1021,7 @@ mod tests {
     /// public resources (e.g. Playwright scrapes public URLs). Kept as a
     /// small explicit allowlist so forgetting to declare auth for a new
     /// service that actually needs it still fails this test.
-    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright"];
+    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright", "office"];
 
     #[test]
     fn test_every_service_has_auth_fields() {

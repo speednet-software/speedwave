@@ -36,6 +36,7 @@ Container memory limits are defined in `containers/compose.template.yml`. The Cl
 - **MCP Hub:** 512 MiB (fixed)
 - **MCP workers:** 128 MiB each (fixed), except:
   - `mcp-github` — 256 MiB (Octokit composed with the throttling + retry plugins, plus `octokit.paginate` buffering full result sets, OOM-kills a 128 MiB cap on a busy repo)
+  - `mcp-office` — 1 GiB (`cpus: 1.0`); LibreOffice headless on a non-trivial document needs the headroom. Attached only to an `internal: true` compose network (no egress) — see ADR-055
   - `mcp-playwright` — 2048 MiB (`cpus: 2.0`) due to Chromium requirements
 
 **Minimum requirement:** 8 GiB RAM. Speedwave warns at startup if the host has less than 8 GiB.

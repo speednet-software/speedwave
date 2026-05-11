@@ -12,6 +12,7 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 | GitHub      | Code hosting       | `speedwave_<project>_mcp_github`     | `~/.speedwave/tokens/<project>/github/`     |
 | Atlassian   | Jira & Confluence  | `speedwave_<project>_mcp_atlassian`  | `~/.speedwave/tokens/<project>/atlassian/`  |
 | Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`    |
+| Office      | Word/Excel/PPT/PDF | `speedwave_<project>_mcp_office`     | N/A (no credentials)                        |
 | Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                        |
 | OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                          |
 
@@ -81,15 +82,16 @@ Mail and Notes tools use AppleScript-based automation and have different paramet
 
 Each MCP integration requires specific credentials to function. Fields marked as optional do not block the "Configured" status — the integration works without them.
 
-| Integration | Required Fields                                                 | Optional Fields                                      |
-| ----------- | --------------------------------------------------------------- | ---------------------------------------------------- |
-| Slack       | `bot_token`, `user_token`                                       | —                                                    |
-| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                    |
-| GitLab      | `token`, `host_url`                                             | —                                                    |
-| GitHub      | `token`                                                         | —                                                    |
+| Integration | Required Fields                                                 | Optional Fields                                                        |
+| ----------- | --------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Slack       | `bot_token`, `user_token`                                       | —                                                                      |
+| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                                      |
+| GitLab      | `token`, `host_url`                                             | —                                                                      |
+| GitHub      | `token`                                                         | —                                                                      |
 | Atlassian   | `site_url`, `email`, `api_token`                                | `jira_project_keys`, `confluence_space_keys` (allowlists; empty = all) |
-| Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project) |
-| Playwright  | _(none — no credentials required)_                              | —                                                    |
+| Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project)                   |
+| Office      | _(none — no credentials required)_                              | —                                                                      |
+| Playwright  | _(none — no credentials required)_                              | —                                                                      |
 
 ### GitHub — Code Hosting
 
@@ -172,6 +174,35 @@ Inside a worker, Speedwave's convention is: use the service's official SDK (or a
 
 33 tools. Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
 Confluence: `listSpaces`, `getSpace`, `searchPages`, `getPage`, `getPageByTitle`, `createPage`, `updatePage`, `getPageChildren`, `addPageComment`, `getPageComments`, `addPageLabels`, `getPageLabels`, `listAttachments`.
+
+### Office — Documents
+
+The Office integration is a built-in MCP worker for **Word, Excel, PowerPoint, and PDF** files. It is a pure file processor: it has **no credentials** (no `/tokens` mount), **no network egress** (attached only to an `internal: true` compose network — see [ADR-055](../adr/ADR-055-built-in-office-document-worker.md)), and its only window onto the host is the project workspace mounted read-write. Generated files are written under `/workspace/.speedwave-office/`.
+
+It is a thin TypeScript worker on `@speedwave/mcp-shared` plus Python support-scripts invoked via `spawn` — the `presale` plugin's hybrid pattern — gluing mature tools: `markitdown` and SheetJS for extraction, `pandoc` for Markdown↔document conversion, `weasyprint` for HTML/Markdown→PDF, LibreOffice headless for Office→PDF and Office↔Office conversion, `python-docx`/`openpyxl`/`python-pptx` for creating and editing Office files (including native Excel/PowerPoint charts), `pypdf`/`pikepdf` for PDF manipulation, and `matplotlib` for standalone chart images. Per [ADR-053](../adr/ADR-053-worker-implementation-own-vs-wrap-official-mcp.md) this is an own thin worker rather than wrapping an upstream MCP server: `microsoft/markitdown-mcp` covers read only (not create/edit/PDF/charts), and the other community servers are single-maintainer or Windows-only COM-based.
+
+#### When to use Office vs reading files directly
+
+- To turn an existing `.docx`/`.xlsx`/`.pptx`/`.pdf` into Markdown (to read or summarize), use `readDocument` — it picks the best engine per format (SheetJS for `.xlsx`/`.xls`/`.xlsb`/`.ods`, `markitdown` for `.docx`/`.pptx`/`.pdf`, with `pdftotext`/`pandoc`/`python-docx` fallbacks). For just the raw text layer of a PDF, use `readPdfText`.
+- To produce a PDF: from Markdown use `markdownToPdf`; from HTML use `htmlToPdf` (only local resources under `/workspace` are loaded — no remote `http(s)`); from an existing Office file use `officeToPdf` (a true LibreOffice render).
+- To produce an editable Office file: from Markdown use `markdownToDocx` / `markdownToPptx`; from a structured spec (headings/tables/cells/slides/native charts) use `createDocx` / `createXlsx` / `createPptx`; to modify an existing one use `editDocx` / `editXlsx` / `editPptx`.
+- To make a chart image to embed in a PDF/doc/deck, use `renderChart` (PNG or SVG); for a native, editable chart inside an Excel/PowerPoint file, use the `charts`/`chart` keys of `createXlsx` / `createPptx`.
+- For PDF surgery: `mergePdf`, `splitPdf`, `rotatePdf`, `watermarkPdf`, `fillPdfForm`, `pdfMetadata`.
+
+The full `spec`/`ops` DSL and the `convertOffice` conversion matrix are normative in [ADR-055](../adr/ADR-055-built-in-office-document-worker.md). Inputs are paths under `/workspace` by preference; inline `markdown`/`html`/`spec` is accepted only up to ~200 KB.
+
+#### Limitations
+
+- `convertOffice` supports a curated matrix only — `.docx→{pdf,odt,txt,html,rtf}`, `.odt→{pdf,docx}`, `.pptx→{pdf,odp}`, `.odp→{pdf,pptx}`, `.xlsx→{pdf,ods,csv}`, `.ods→{pdf,xlsx,csv}`. Anything outside it (e.g. `xlsx→docx`) is rejected, because such conversions are lossy and not useful.
+- No OCR / scanned-PDF text extraction in v1 (the `docling` ML pipeline is deliberately excluded to keep the image size down).
+- No "editable `.docx` from a PDF" at full fidelity — `readDocument` gives you the PDF as Markdown, which covers the realistic case.
+- `python-docx` has no native chart objects, so a chart inside a `.docx` is an image (`renderChart` + an `image` element). Native charts are available in `.xlsx` and `.pptx`.
+- HTML→PDF and Markdown→PDF load no remote resources (no egress) — reference images as local files under `/workspace`.
+- LibreOffice conversions are serialized by an in-worker mutex (`soffice --headless` is not reentrant), so parallel `officeToPdf` calls queue.
+
+#### Tool surface
+
+21 tools. Read: `readDocument`, `readPdfText`, `pdfMetadata`. Markdown/HTML→document: `markdownToDocx`, `markdownToPptx`, `markdownToPdf`, `htmlToPdf`. Charts: `renderChart`. Create/edit Office: `createDocx`, `editDocx`, `createXlsx`, `editXlsx`, `createPptx`, `editPptx`. Office→PDF / Office↔Office: `officeToPdf`, `convertOffice`. PDF manipulation: `mergePdf`, `splitPdf`, `rotatePdf`, `watermarkPdf`, `fillPdfForm`.
 
 ### Redmine Configuration Wizard
 

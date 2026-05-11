@@ -1,6 +1,6 @@
 # Speedwave Documentation
 
-Welcome to the Speedwave documentation. Speedwave is an AI platform that connects Claude Code with external services (Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar) — shipped as a single installable application.
+Welcome to the Speedwave documentation. Speedwave is an AI platform that connects Claude Code with external services (Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar) plus a built-in Office documents worker (Word/Excel/PowerPoint/PDF) — shipped as a single installable application.
 
 ## Getting Started
 
@@ -12,7 +12,7 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 
 - [CLI Usage](guides/cli.md) — terminal-based Claude Code via `speedwave`
 - [Desktop App](guides/desktop.md) — chat UI, project management, system integrations
-- [Integrations](guides/integrations.md) — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar
+- [Integrations](guides/integrations.md) — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Office documents, Mail, Calendar
 - [IDE Bridge](guides/ide-bridge.md) — VS Code / JetBrains integration
 
 ## Troubleshooting
