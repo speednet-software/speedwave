@@ -194,33 +194,70 @@ fn clear_image_pending_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
     let _ = std::fs::remove_file(plugin_dir.join(".image_pending"));
 }
 
+/// Moves a legacy marker into the plugin-state dir. Returns `true` only
+/// on a clean relocation. Tries the cheap same-FS `rename` first (which
+/// only re-points the dirent — safe even for a hardlink). On cross-FS
+/// (`rename` fails, e.g. `~/.speedwave/` on a separate volume): Unix
+/// falls back to `write(target) + unlink(legacy)` (hardlinks were ruled
+/// out by the `nlink` check before this is reached); Windows refuses the
+/// fallback entirely because `std::fs::Metadata` exposes no link count,
+/// so an NTFS hardlink can't be excluded. Whenever this returns `false`
+/// the legacy file is still in the tree and audit fails on the next load.
+fn relocate_legacy_marker(slug: &str, legacy: &Path, target: &Path) -> bool {
+    if std::fs::rename(legacy, target).is_ok() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        log::warn!(
+            "plugin '{slug}': cannot move .image_pending across filesystems on Windows \
+             (link count unknown); leaving legacy marker — audit will refuse this plugin"
+        );
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        if let Err(e) = std::fs::write(target, b"") {
+            log::warn!(
+                "plugin '{slug}': failed to write replacement marker {}: {e}",
+                target.display()
+            );
+            return false;
+        }
+        if let Err(e) = std::fs::remove_file(legacy) {
+            log::warn!(
+                "plugin '{slug}': wrote replacement marker but failed to remove legacy {}: {e}; \
+                 audit will refuse this plugin on next load",
+                legacy.display()
+            );
+            return false;
+        }
+        true
+    }
+}
+
 /// Migrates the pre-PR2 in-tree `.image_pending` marker out of the
 /// signed plugin tree before the digest is computed. Without this, every
 /// MCP plugin installed under an older Speedwave release fails signature
-/// verification on first launch under a runtime-invariant build (the
-/// in-tree marker was not part of the signed tree, so its presence
-/// changes the digest). Idempotent — a missing marker is a no-op.
+/// verification on first launch under a runtime-invariant build — the
+/// in-tree marker was never part of the signed tree, so its presence
+/// changes the digest. Idempotent; missing marker is a no-op.
 ///
-/// Only the *root-level* `.image_pending` is migrated, and only if it
-/// is a regular file (not a symlink): both rules close the obvious
-/// "attacker plants a symlinked .image_pending and triggers a copy of
-/// host content into plugin-state" angle. The new marker location is
-/// `<plugin-state>/<slug>/image_pending`.
+/// Only a *root-level, regular-file* `.image_pending` is migrated — a
+/// symlink (or a hardlink, on Unix where we can detect it) is left in
+/// place so the verifier fails loudly rather than us silently relocating
+/// attacker-planted content. Whenever the marker cannot be fully moved
+/// the legacy file stays put and audit fails on the next load; we only
+/// log "migrated" on a clean move.
 ///
 /// Run BEFORE every load-side signature check that observes a tree the
-/// user might be upgrading from — `audit_all`, `list_verified_*`,
-/// `list_for_ui`. Subsequent verifications then see a tree free of the
-/// legacy marker and the digest matches what was signed.
+/// user might be upgrading from — `audit_all`, `list_verified_*`.
 fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
     let legacy = plugin_dir.join(".image_pending");
     let Ok(meta) = std::fs::symlink_metadata(&legacy) else {
-        return; // no marker, nothing to migrate
+        return;
     };
     if !meta.file_type().is_file() {
-        // Symlink, dir, or anything other than a regular file — refuse
-        // to act. Removing a symlink the user planted would silently
-        // hide tamper from the verifier; we want the verifier to fail
-        // loudly instead.
         log::warn!(
             "plugin '{}': legacy .image_pending is not a regular file ({:?}); leaving untouched",
             slug,
@@ -228,15 +265,6 @@ fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &st
         );
         return;
     }
-    // Hardlink defence: a regular-file marker can still be a hardlink
-    // pointing into the user's home (e.g. `~/.aws/credentials`). On
-    // POSIX a regular file's link count tells us. We refuse to touch
-    // multi-link files — moving them under our control isn't a leak
-    // (rename only changes the dirent, not the inode permissions),
-    // but `unlink` in the cross-FS fallback would decrement the link
-    // count on a file we have no business managing. The verifier will
-    // then fail loudly on the still-present `.image_pending`, which
-    // is the right outcome for a tampered tree.
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -259,65 +287,7 @@ fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &st
         return;
     }
     let target = target_dir.join("image_pending");
-    // Try the cheap atomic path first: same-FS rename. `rename` only
-    // re-points the directory entry — it never touches the inode's
-    // link count or permissions, so even a hardlinked marker is safe
-    // to move this way. On cross-FS (rare — `~/.speedwave/` mounted on
-    // a separate volume) the behaviour differs by platform:
-    //
-    //   - Unix: `rename` failed (EXDEV). We've already ruled out
-    //     hardlinks above (nlink check), so the cross-FS fallback
-    //     `write(target) + unlink(legacy)` is safe.
-    //
-    //   - Windows: `std::fs::Metadata` exposes no link count, so we
-    //     cannot rule out an NTFS hardlink. We refuse the unlink
-    //     fallback entirely — `write(target)` is harmless, but
-    //     `remove_file(legacy)` could decrement the link count on a
-    //     file the attacker hardlinked from elsewhere. We leave the
-    //     legacy marker in place; the verifier then fails audit on
-    //     the next load, which is the correct outcome for a tree we
-    //     can't safely normalise.
-    //
-    // In every "couldn't fully migrate" path, the legacy marker stays
-    // in the signed tree and audit fails loudly on the next load —
-    // never a silent "migrated" log.
-    let migrated = match std::fs::rename(&legacy, &target) {
-        Ok(()) => true,
-        Err(_rename_err) => {
-            #[cfg(windows)]
-            {
-                log::warn!(
-                    "plugin '{}': cannot rename .image_pending across filesystems on Windows \
-                     (link count unknown); leaving legacy marker in place — audit will refuse \
-                     this plugin on next load",
-                    slug
-                );
-                false
-            }
-            #[cfg(not(windows))]
-            {
-                if let Err(e) = std::fs::write(&target, b"") {
-                    log::warn!(
-                        "plugin '{}': failed to write replacement marker {}: {e}",
-                        slug,
-                        target.display()
-                    );
-                    false
-                } else if let Err(e) = std::fs::remove_file(&legacy) {
-                    log::warn!(
-                        "plugin '{}': created replacement marker but failed to remove legacy file {}: {e}; \
-                         audit will refuse this plugin on next load",
-                        slug,
-                        legacy.display()
-                    );
-                    false
-                } else {
-                    true
-                }
-            }
-        }
-    };
-    if migrated {
+    if relocate_legacy_marker(slug, &legacy, &target) {
         log::info!(
             "plugin '{}': migrated legacy .image_pending to {}",
             slug,
@@ -1070,6 +1040,10 @@ fn remove_plugin_with_base(
     };
 
     std::fs::remove_dir_all(&plugin_dir)?;
+    // Drop the cached signature verdict for this path — install does
+    // the symmetric thing, and a stale entry would otherwise linger
+    // for the lifetime of a long-running Desktop process.
+    signing::invalidate_cache(&plugin_dir);
     // Mutable state lives outside the signed tree (PR2). Wipe it too, so a
     // subsequent reinstall starts from a clean state and we don't leak a
     // stale `image_pending` marker for a plugin that no longer exists.
@@ -1117,7 +1091,11 @@ pub struct VerifiedPlugin {
 
 /// Reasons a plugin can fail the load-time audit. UI shows this so users
 /// can tell *why* a plugin was rejected instead of seeing a generic error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Serializes to the snake_case names the frontend `models/plugin.ts`
+/// `PluginVerificationStatus` union mirrors (`verified`,
+/// `missing_signature`, …).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VerificationStatus {
     /// Signature verified and manifest validated.
     Verified,
@@ -3134,27 +3112,16 @@ mod tests {
         );
     }
 
-    /// Pre-PR2 installs left a `.image_pending` marker inside the
-    /// signed tree. Once the runtime treats the signature as a runtime
-    /// invariant, that file changes the digest and verification fails
-    /// on first launch — every existing user with an MCP plugin would
-    /// be hard-failed unless we migrate the marker out of the tree
-    /// before computing the digest.
-    ///
-    /// This test exercises the full chain WITHOUT the unsigned bypass:
-    /// it signs the tree with a fresh test key, drops a legacy
-    /// `.image_pending` afterwards (simulating the upgrade scenario),
-    /// runs the migration, and asserts that the post-migration digest
-    /// matches the digest at signing time — i.e. that signature
-    /// verification with the same test key would now succeed. A
-    /// no-op `migrate_legacy_image_pending` would leave the legacy
-    /// marker in the tree, the digest would differ, and this test
-    /// would fail. The earlier (R2-flagged) version of this test ran
-    /// under `UnsignedBypassGuard` and passed even with a no-op
-    /// migration; that defeated its purpose.
+    /// Pre-PR2 installs left `.image_pending` inside the signed tree;
+    /// once the signature is a runtime invariant that file shifts the
+    /// digest and verification fails on the upgrade. The migration must
+    /// restore the tree to the as-signed state. This test signs a tree
+    /// with a fresh test key, drops a legacy marker, migrates, then
+    /// re-verifies with the same key — a no-op migration would leave
+    /// the marker and the verify would fail. No unsigned bypass.
     #[test]
-    fn test_migration_restores_signed_digest() {
-        use crate::signing::{compute_plugin_digest, generate_keypair, sign_plugin};
+    fn test_migration_restores_verifiable_tree() {
+        use crate::signing::{generate_keypair, sign_plugin, verify_plugin_signature_with_key};
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
         let plugin_dir = plugins.join("legacy-mcp");
@@ -3165,41 +3132,22 @@ mod tests {
         )
         .unwrap();
 
-        // Sign the *clean* tree (state at the time of plugin authoring,
-        // before the runtime ever creates a marker).
-        let (priv_key, _pub_key) = generate_keypair();
+        let (priv_key, pub_key) = generate_keypair();
         sign_plugin(&plugin_dir, &priv_key).unwrap();
-        let signed_digest = compute_plugin_digest(&plugin_dir).unwrap();
+        let pub_key: [u8; 32] = pub_key.try_into().unwrap();
 
-        // Simulate the pre-PR2 install behaviour: dump a marker into
-        // the signed tree.
+        // Simulate the pre-PR2 install: marker dumped into the signed tree.
         std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
-
-        // Pre-migration, the tree's digest no longer matches what was
-        // signed — the legacy marker is hashed in.
-        let pre_migration_digest = compute_plugin_digest(&plugin_dir).unwrap();
-        assert_ne!(
-            pre_migration_digest, signed_digest,
-            "sanity check: legacy marker must alter the digest, otherwise the test proves nothing"
+        verify_plugin_signature_with_key(&plugin_dir, &pub_key).expect_err(
+            "sanity: legacy marker must break verification, else the test proves nothing",
         );
 
         migrate_legacy_image_pending(&plugins, &plugin_dir, "legacy-mcp");
 
-        // Post-migration, the tree must be byte-identical to the
-        // signed state, and the marker must live in plugin-state/.
-        let post_migration_digest = compute_plugin_digest(&plugin_dir).unwrap();
-        assert_eq!(
-            post_migration_digest, signed_digest,
-            "migration must restore the digest to the as-signed state"
-        );
-        assert!(
-            !plugin_dir.join(".image_pending").exists(),
-            "legacy marker must be removed from the signed tree"
-        );
-        assert!(
-            image_pending_marker_for(&plugins, "legacy-mcp").exists(),
-            "marker must land in plugin-state/<slug>/image_pending"
-        );
+        verify_plugin_signature_with_key(&plugin_dir, &pub_key)
+            .expect("migration must restore a tree that verifies against the original key");
+        assert!(!plugin_dir.join(".image_pending").exists());
+        assert!(image_pending_marker_for(&plugins, "legacy-mcp").exists());
     }
 
     /// Wires the migration test through `audit_all_in_dir` to pin the

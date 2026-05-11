@@ -1436,13 +1436,9 @@ mod tests {
     }
 
     // ── plugin audit skip-list ────────────────────────────────────────────
-    //
-    // The skip-list decides which CLI actions can run with a tampered
-    // plugin on disk. A regression that adds `Update` or `Run` to the
-    // list would silently disable the hard-fail invariant; a regression
-    // that *removes* `PluginRemove` or `PluginList` would lock the user
-    // out of the recovery path. Both are silent — neither shows up as a
-    // panic or compile error. Pin the contract here.
+    // Pin which actions run with a tampered plugin on disk: a regression
+    // either way (extra runtime action skipped, or recovery action gated)
+    // is silent without these.
 
     #[test]
     fn skip_plugin_audit_skips_recovery_actions() {

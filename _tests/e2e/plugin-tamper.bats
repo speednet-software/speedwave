@@ -84,12 +84,9 @@ EOF
     [[ "$output" == *"evil"* ]]
 }
 
-# Two plugins side-by-side: one tampered, one fine. The skip-list's
-# whole point is that the user can `plugin remove <bad>` even when
-# `<good>` is also installed. Without an explicit two-plugin scenario,
-# recovery could regress (e.g. someone wires `plugin remove` through
-# `list_verified_plugins`, which fails on the bad one) and the
-# single-plugin tests would still pass.
+# Recovery must target only the named plugin even when a good (or, here,
+# another bad) one is co-installed — otherwise a regression that wires
+# `plugin remove` through `list_verified_plugins` would break it.
 @test "speedwave plugin remove targets only the bad plugin" {
     make_unsigned_plugin_dir "evil"
     make_unsigned_plugin_dir "also-evil"
@@ -99,11 +96,10 @@ EOF
     [ -d "$SPEEDWAVE_DATA_DIR/plugins/also-evil" ]
 }
 
+# The tolerant lister must surface every directory so the user can see
+# which one is broken — hiding unverified plugins would make UI recovery
+# impossible.
 @test "speedwave plugin list shows both verified and unverified entries" {
-    # The tolerant lister surfaces every directory; the user must see
-    # *which* one is broken, not just that "something" is wrong. A
-    # filter that hid unverified plugins would make recovery
-    # impossible in the UI without dropping to the shell.
     make_unsigned_plugin_dir "evil"
     make_unsigned_plugin_dir "also-evil"
     run "$SPEEDWAVE_BIN" plugin list

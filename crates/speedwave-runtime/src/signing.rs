@@ -199,7 +199,7 @@ pub fn verify_plugin_signature_with_key(
 
 /// Computes a deterministic SHA-256 digest of all files in the plugin directory,
 /// excluding the SIGNATURE file. Files are sorted by relative path for determinism.
-pub(crate) fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
+fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
     use sha2::{Digest, Sha256};
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();

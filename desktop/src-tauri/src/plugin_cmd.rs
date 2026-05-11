@@ -27,14 +27,12 @@ pub(crate) struct PluginStatusEntry {
     pub(crate) token_mount: String,
     pub(crate) settings_schema: Option<serde_json::Value>,
     pub(crate) requires_integrations: Vec<String>,
-    /// Outcome of `runtime::plugin::list_for_ui` for this entry. See the
-    /// `verification_status` enum on the frontend for the full set —
-    /// `"verified"` means the plugin is usable; anything else disables
-    /// the enable toggle and credential editing in the UI but keeps the
-    /// remove button active so the user can still recover.
-    pub(crate) verification_status: String,
-    /// Human-readable diagnostic when `verification_status != "verified"`.
-    /// `None` when the plugin is verified.
+    /// Outcome of `runtime::plugin::list_for_ui` for this entry.
+    /// Serializes to snake_case (`verified`, `missing_signature`, …).
+    /// Anything but `Verified` disables the enable toggle and
+    /// credential editing in the UI but keeps the remove button active.
+    pub(crate) verification_status: plugin::VerificationStatus,
+    /// Human-readable diagnostic when `verification_status != Verified`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) verification_error: Option<String>,
 }
@@ -95,7 +93,6 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
 
     let mut entries = Vec::new();
     for ui in &ui_entries {
-        let status_str = verification_status_to_string(&ui.verification_status);
         // For entries without a parseable manifest, surface what we know
         // (slug = directory name) and a clear status; everything else
         // gets sensible empty defaults.
@@ -113,7 +110,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
                 token_mount: "ro".to_string(),
                 settings_schema: None,
                 requires_integrations: Vec::new(),
-                verification_status: status_str,
+                verification_status: ui.verification_status.clone(),
                 verification_error: ui.verification_error.clone(),
             });
             continue;
@@ -170,27 +167,12 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             token_mount,
             settings_schema: manifest.settings_schema.clone(),
             requires_integrations: manifest.requires_integrations.clone(),
-            verification_status: status_str,
+            verification_status: ui.verification_status.clone(),
             verification_error: ui.verification_error.clone(),
         });
     }
 
     Ok(PluginsResponse { plugins: entries })
-}
-
-/// String representation matching the frontend `VerificationStatus`
-/// union. Kept narrow on purpose — the runtime enum is in Rust and this
-/// is the only translation point. Frontend `models/plugin.ts` mirrors
-/// these literals.
-fn verification_status_to_string(s: &plugin::VerificationStatus) -> String {
-    match s {
-        plugin::VerificationStatus::Verified => "verified",
-        plugin::VerificationStatus::MissingSignature => "missing_signature",
-        plugin::VerificationStatus::InvalidSignature => "invalid_signature",
-        plugin::VerificationStatus::DirSlugMismatch => "dir_slug_mismatch",
-        plugin::VerificationStatus::ManifestInvalid => "manifest_invalid",
-    }
-    .to_string()
 }
 
 fn is_plugin_configured(
@@ -724,7 +706,7 @@ mod tests {
             token_mount: "ro".into(),
             settings_schema: None,
             requires_integrations: vec![],
-            verification_status: "verified".into(),
+            verification_status: plugin::VerificationStatus::Verified,
             verification_error: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -758,7 +740,7 @@ mod tests {
             token_mount: "ro".into(),
             settings_schema: Some(schema),
             requires_integrations: vec!["sharepoint".into()],
-            verification_status: "verified".into(),
+            verification_status: plugin::VerificationStatus::Verified,
             verification_error: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
