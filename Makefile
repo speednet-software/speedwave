@@ -33,7 +33,7 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets verify-bundled-assets \
-        test-rust test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
+        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
@@ -287,7 +287,19 @@ test-rust:
 	@# Parallel cargo-test threads race on those paths and surface `os error 2`
 	@# from `render_compose`. Run serially to keep the suite deterministic.
 	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime -p speedwave-cli -- --test-threads=1
+	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
+	@# is off by default — the CLI never enables it — so the default run above
+	@# doesn't compile the `transcription` module. Test it explicitly here.
+	$(MAKE) test-transcription
 	@echo "✅ Rust tests passed"
+
+test-transcription:
+	@echo "🧪 Testing speedwave-runtime with the audio-transcription feature..."
+	@# whisper-rs / sherpa-onnx / cpal are added to this feature in later phases
+	@# (1b/1c/4) and need `cmake` + network access at build time then; for now
+	@# the feature only pulls in `hound` (WAV I/O), so a plain cargo build works.
+	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime --features audio-transcription -- --test-threads=1
+	@echo "✅ audio-transcription tests passed"
 
 test-cli:
 	@echo "🧪 Testing CLI..."
