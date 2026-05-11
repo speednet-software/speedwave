@@ -9,7 +9,12 @@ pub fn cleanup_project_dirs(project: &str) {
 
 /// Best-effort cleanup of project directories under a given data directory.
 fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
-    for sub in &["tokens", "compose", "context", "claude-home"] {
+    for sub in &[
+        "tokens",
+        "compose",
+        "context",
+        crate::consts::CLAUDE_HOME_SUBDIR,
+    ] {
         let dir = data_dir.join(sub).join(project);
         if dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&dir) {
@@ -38,7 +43,9 @@ fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
         data_dir.join("tokens").join(project).join("github"),
         data_dir.join("compose").join(project),
         data_dir.join("context").join(project),
-        data_dir.join("claude-home").join(project),
+        data_dir
+            .join(crate::consts::CLAUDE_HOME_SUBDIR)
+            .join(project),
     ];
     for dir in &dirs_to_create {
         create_dir_all_secure(dir)?;
@@ -250,7 +257,9 @@ mod tests {
             data_dir.join("tokens").join("modecheck").join("github"),
             data_dir.join("compose").join("modecheck"),
             data_dir.join("context").join("modecheck"),
-            data_dir.join("claude-home").join("modecheck"),
+            data_dir
+                .join(crate::consts::CLAUDE_HOME_SUBDIR)
+                .join("modecheck"),
         ];
         for dir in &dirs {
             let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
@@ -391,7 +400,12 @@ mod tests {
         );
 
         // Verify rollback: project directories should have been cleaned up
-        for sub in &["tokens", "compose", "context", "claude-home"] {
+        for sub in &[
+            "tokens",
+            "compose",
+            "context",
+            crate::consts::CLAUDE_HOME_SUBDIR,
+        ] {
             let dir = data_dir.join(sub).join("rollback-test");
             assert!(
                 !dir.exists(),

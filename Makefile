@@ -195,10 +195,20 @@ build-runtime:
 build-cli:
 	cargo build -p speedwave-cli
 
+# Release-profile build of the CLI, used as a dependency of `build-tauri`
+# so the bundled CLI shipped inside the .app/.exe/.dmg is a release
+# binary. With a debug binary, the `SPEEDWAVE_ALLOW_UNSIGNED` bypass in
+# `signing::unsigned_bypass_active` would still be live in shipped
+# artifacts (it is `cfg(debug_assertions)`-gated, which only flips off
+# in the release profile). Keep `build-cli` (debug) untouched so
+# `make dev` and ad-hoc developer runs are not slowed down.
+build-cli-release:
+	cargo build -p speedwave-cli --release
+
 build-desktop:
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli build-angular build-mcp build-os-cli download-nodejs
+build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
@@ -206,9 +216,9 @@ build-tauri: build-cli build-angular build-mcp build-os-cli download-nodejs
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
-	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
-	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
+	cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@$(MAKE) verify-bundled-assets
@@ -352,12 +362,21 @@ coverage-html: build-mcp
 test-e2e: build-cli
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	SPEEDWAVE_BIN=./target/debug/speedwave-cli bats _tests/e2e/speedwave.bats
+	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/plugin-tamper.bats
+
+# Plugin tamper / signature-bypass E2E. Runs against the *release* CLI
+# so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be
+# compiled out — see ADR-051 ("Build hygiene").
+test-e2e-plugin-tamper-release: build-cli-release
+	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	SPEEDWAVE_BIN=./target/release/speedwave bats _tests/e2e/plugin-tamper.bats
 
 test-entrypoint:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	bats _tests/entrypoint/entrypoint.bats
 	bats _tests/entrypoint/install-claude.bats
 	bats _tests/entrypoint/statusline.bats
+	bats _tests/entrypoint/osc52-copy.bats
 	@echo "✅ Entrypoint tests passed"
 
 test-ci:

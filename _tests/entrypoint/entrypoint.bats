@@ -347,6 +347,25 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# ~/.claude.json onboarding pre-seed (ADR-051)
+# ---------------------------------------------------------------------------
+
+@test "creates ~/.claude.json with hasCompletedOnboarding when absent" {
+    [ ! -e "${TEST_HOME}/.claude.json" ]
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    [ -f "${TEST_HOME}/.claude.json" ]
+    grep -q '"hasCompletedOnboarding": true' "${TEST_HOME}/.claude.json"
+}
+
+@test "does not overwrite an existing ~/.claude.json" {
+    printf '{"my":"existing-state"}' > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    [ "$(cat "${TEST_HOME}/.claude.json")" = '{"my":"existing-state"}' ]
+}
+
+# ---------------------------------------------------------------------------
 # Statusline: symlink from resources
 # ---------------------------------------------------------------------------
 

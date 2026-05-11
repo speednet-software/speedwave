@@ -100,6 +100,9 @@ Each `SPEEDWAVE_DATA_DIR` value creates a fully independent Speedwave instance:
 - **Compose projects** — project prefix derived from the same basename
 - **Data files** — config, logs, setup markers, cached downloads
 - **Tokens** — per-project service credentials (`<data_dir>/tokens/<project>/`)
+- **Claude home** — per-project Claude Code credentials, sessions, and
+  onboarding state (`<data_dir>/claude-home/<project>/`). Logging in to Claude
+  in one instance does **not** authenticate the other.
 - **Plugins** — installed plugins (`<data_dir>/plugins/<slug>/`)
 - **MCP OS worker** — PID file, auth token, port file, log file
 

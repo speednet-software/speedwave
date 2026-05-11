@@ -258,9 +258,7 @@ pub(crate) fn merge_log_sources(sources: LogSources) -> String {
 
     // Apply the sanitizer once to the merged buffer (idempotent — sources are
     // already individually sanitized, this is a defence-in-depth pass).
-    speedwave_runtime::log_sanitizer::sanitize(&format!(
-        "{compose}{desktop}{mcp_os}{claude}"
-    ))
+    speedwave_runtime::log_sanitizer::sanitize(&format!("{compose}{desktop}{mcp_os}{claude}"))
 }
 
 /// Reads every host-side log file, fetches the compose stream, and returns a

@@ -415,7 +415,10 @@ mod tests {
         // unit-test runs. If this fails on CI it indicates a sandbox issue
         // worth diagnosing — not silent skip.
         let dir = desktop_log_dir();
-        assert!(dir.is_some(), "desktop_log_dir must resolve under a normal home dir");
+        assert!(
+            dir.is_some(),
+            "desktop_log_dir must resolve under a normal home dir"
+        );
     }
 
     #[cfg(target_os = "macos")]

@@ -4,7 +4,7 @@ use crate::defaults;
 use crate::plugin::{self, PluginManifest};
 use crate::runtime::ContainerRuntime;
 use crate::{build, bundle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use strum::EnumProperty;
 
 /// Converts a host path to the path seen by the container engine.
@@ -48,7 +48,7 @@ pub fn render_compose(
     crate::validation::validate_project_name(project_name)?;
     let data_dir = consts::data_dir();
     let tokens_dir = resolve_tokens_dir(project_name);
-    let claude_home = data_dir.join("claude-home").join(project_name);
+    let claude_home = crate::claude_home::claude_home_dir(data_dir, project_name);
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
@@ -481,6 +481,15 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 /// - Injects WORKER_<PLUGIN>_URL into mcp-hub environment
 /// - Adds plugin resource volume mounts to claude container
 /// - Sets SPEEDWAVE_PLUGINS env var in claude container
+///
+/// Loads plugins via [`plugin::list_verified_plugins`], which fails the
+/// compose render if any installed plugin has a missing/invalid signature
+/// or a directory/manifest slug mismatch — a missing fail-closed loader
+/// here would let an attacker who tampered with one plugin still get the
+/// rest of the compose to render and run. Manifests are re-validated at
+/// render time so a post-install tamper that only changed the manifest
+/// (not enough to change the digest, e.g. a different field semantic)
+/// would still be caught by the same code that gates install.
 fn apply_plugins(
     yaml: &str,
     project_name: &str,
@@ -489,7 +498,33 @@ fn apply_plugins(
     network_name: &str,
     tokens_dir: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let plugins = plugin::list_installed_plugins()?;
+    let plugins = plugin::list_verified_plugins()?;
+    apply_plugins_from_verified(
+        yaml,
+        project_name,
+        project_dir,
+        integrations,
+        network_name,
+        tokens_dir,
+        &plugins,
+    )
+}
+
+/// Test-friendly variant of [`apply_plugins`] — accepts a pre-built
+/// list of `VerifiedPlugin` instead of consulting the on-disk
+/// `~/.speedwave/plugins/`. Production callers go through
+/// `apply_plugins`; tests inject crafted scenarios (forged manifest,
+/// dangling `claude-resources` symlink, slug collision) without
+/// touching the user's real data dir.
+fn apply_plugins_from_verified(
+    yaml: &str,
+    project_name: &str,
+    project_dir: &str,
+    integrations: &ResolvedIntegrationsConfig,
+    network_name: &str,
+    tokens_dir: &std::path::Path,
+    plugins: &[plugin::VerifiedPlugin],
+) -> anyhow::Result<String> {
     if plugins.is_empty() {
         return Ok(yaml.to_string());
     }
@@ -497,9 +532,19 @@ fn apply_plugins(
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
     let mut plugin_slugs: Vec<String> = Vec::new();
 
-    for manifest in &plugins {
+    for vp in plugins {
+        let manifest = &vp.manifest;
+        let plugin_dir = vp.dir.as_path();
         let slug = &manifest.slug;
         let service_id = manifest.service_id.as_deref();
+
+        // Re-validate the manifest at render time. The signature already
+        // covers the manifest bytes, but re-running validate_manifest gives
+        // us a single rendering of the post-install rules (built-in slug
+        // collision, reserved env keys, mem/cpu caps) — useful when
+        // validate_manifest grows new rules and we don't want any installed
+        // plugin to silently survive a stricter ruleset.
+        plugin::validate_manifest(manifest, plugin_dir)?;
 
         // Check if plugin is enabled (by service_id for MCP plugins, by slug otherwise)
         let plugin_key = service_id.unwrap_or(slug);
@@ -518,12 +563,21 @@ fn apply_plugins(
                 tokens_dir,
                 project_dir,
             )?;
-            // Insert into doc["services"]["mcp-<service_id>"]
+            // Insert into doc["services"]["mcp-<service_id>"]. Refuse to
+            // overwrite a built-in service already present in the YAML —
+            // validate_manifest blocks the obvious "slug: hub" case at
+            // install, but a future change there should not silently
+            // re-open the door here. serde_yaml_ng's mapping insert
+            // overwrites on key collision; we want a hard failure instead.
+            let compose_name = plugin::derive_compose_name(sid);
             if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
-                services.insert(
-                    serde_yaml_ng::Value::String(plugin::derive_compose_name(sid)),
-                    service_value,
-                );
+                let key = serde_yaml_ng::Value::String(compose_name.clone());
+                if services.contains_key(&key) {
+                    anyhow::bail!(
+                        "plugin '{slug}' would overwrite existing compose service '{compose_name}'"
+                    );
+                }
+                services.insert(key, service_value);
             }
             // Inject WORKER_*_URL into hub. All workers share PORT_WORKER —
             // each container has its own network namespace, so port reuse is
@@ -548,17 +602,20 @@ fn apply_plugins(
             inject_worker_env(&mut doc, &worker_env, &url);
         }
 
-        // Mount claude-resources to claude container
-        if let Ok(plugins_base) = plugin::plugins_base_dir() {
-            let plugin_resources = plugins_base.join(slug).join("claude-resources");
-            if plugin_resources.exists() {
-                let mount = format!(
-                    "{}:/speedwave/plugins/{}:ro",
-                    to_engine_path(&plugin_resources)?,
-                    slug
-                );
-                add_claude_volume(&mut doc, &mount);
-            }
+        // Mount claude-resources to claude container. The resources dir
+        // must be a *real* directory inside the verified plugin tree —
+        // a symlink (or anything that escapes the tree under canonicalize)
+        // would let an attacker bind-mount /etc into the claude container.
+        let plugin_resources = vp.dir.join("claude-resources");
+        if plugin_resources.exists() {
+            ensure_resources_dir_safe(plugin_dir, &plugin_resources)
+                .map_err(|e| anyhow::anyhow!("plugin '{slug}': claude-resources unsafe: {e}"))?;
+            let mount = format!(
+                "{}:/speedwave/plugins/{}:ro",
+                to_engine_path(&plugin_resources)?,
+                slug
+            );
+            add_claude_volume(&mut doc, &mount);
         }
     }
 
@@ -570,11 +627,24 @@ fn apply_plugins(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Reads the Anthropic API key from the secrets directory and injects it
-/// into the claude service environment. If no key file exists, returns
-/// the YAML unchanged.
+/// Injects the Anthropic API key (legacy credential) into the `claude`
+/// service environment when one is stored at
+/// `secrets/<project>/anthropic_api_key`. OAuth credentials are managed by
+/// Claude Code itself inside the `CLAUDE_HOME` bind-mount — Speedwave never
+/// reads or writes them. On the host they live at
+/// `<data_dir>/claude-home/<project>/.claude/.credentials.json`. See ADR-052.
 pub fn apply_auth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
-    let key_path = consts::data_dir()
+    apply_auth_config_in(yaml, project, consts::data_dir())
+}
+
+/// Testable variant: resolves the legacy API key path under an explicit
+/// data directory.
+pub(crate) fn apply_auth_config_in(
+    yaml: &str,
+    project: &str,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<String> {
+    let key_path = data_dir
         .join("secrets")
         .join(project)
         .join("anthropic_api_key");
@@ -1012,6 +1082,61 @@ fn ide_host_override() -> &'static str {
     {
         consts::WSL_HOST // "host.speedwave.internal"
     }
+}
+
+/// Verifies that a plugin's `claude-resources` directory and every entry
+/// underneath it is a real, non-symlink path inside the canonicalised
+/// plugin directory. Bind-mounting `claude-resources` into the claude
+/// container makes every file beneath it readable from inside; without
+/// this check, an attacker could:
+///
+///   - replace `claude-resources` itself with a symlink to `/etc`, so
+///     the container sees host configuration files at
+///     `/speedwave/plugins/<slug>/`, or
+///
+///   - drop `claude-resources/skills/foo.md → ~/.ssh/id_rsa` so the
+///     mount surfaces user secrets one level deeper.
+///
+/// The plugin signing model has no notion of legitimate symlinks, so
+/// any encountered symlink is fatal — same invariant as
+/// `compute_plugin_digest` in `signing.rs`.
+fn ensure_resources_dir_safe(plugin_dir: &Path, resources: &Path) -> anyhow::Result<()> {
+    use std::fs;
+    let resources_meta = fs::symlink_metadata(resources)?;
+    if resources_meta.file_type().is_symlink() {
+        anyhow::bail!("claude-resources is a symlink: {}", resources.display());
+    }
+    if !resources_meta.is_dir() {
+        anyhow::bail!(
+            "claude-resources is not a directory: {}",
+            resources.display()
+        );
+    }
+    let canonical_plugin = plugin_dir.canonicalize()?;
+    let canonical_resources = resources.canonicalize()?;
+    if !canonical_resources.starts_with(&canonical_plugin) {
+        anyhow::bail!(
+            "claude-resources canonicalises outside plugin dir: {} -> {}",
+            resources.display(),
+            canonical_resources.display()
+        );
+    }
+    walk_reject_symlinks(resources)
+}
+
+fn walk_reject_symlinks(dir: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = std::fs::symlink_metadata(&path)?.file_type();
+        if ft.is_symlink() {
+            anyhow::bail!("claude-resources contains symlink: {}", path.display());
+        }
+        if ft.is_dir() {
+            walk_reject_symlinks(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Injects a WORKER_*_URL environment variable into the mcp-hub service.
@@ -1544,6 +1669,7 @@ impl SecurityCheck {
                 let allowed = [
                     "ANTHROPIC_AUTH_TOKEN",
                     "ANTHROPIC_API_KEY",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
                     "DISABLE_AUTOUPDATER",
                 ];
 
@@ -7947,5 +8073,358 @@ services:
                 env
             );
         }
+    }
+
+    // ── apply_auth_config: OAuth + API key + precedence ────────────────────
+
+    /// Minimal compose YAML with just the claude service so apply_auth_config
+    /// can write into the environment sequence without dragging the whole
+    /// template into the test fixture.
+    fn auth_test_yaml() -> &'static str {
+        r#"
+services:
+  claude:
+    image: speedwave-claude:latest
+    environment:
+      - CLAUDE_VERSION=1.0.3
+"#
+    }
+
+    fn write_api_key_in(data_dir: &std::path::Path, project: &str, key: &str) {
+        let dir = data_dir.join("secrets").join(project);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("anthropic_api_key"), key).unwrap();
+    }
+
+    #[test]
+    fn apply_auth_config_in_api_key_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_api_key_in(tmp.path(), "test", "sk-ant-api-1234");
+
+        let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
+        let has_api_key = result.contains("ANTHROPIC_API_KEY=sk-ant-api-1234");
+        assert!(has_api_key, "API key must be injected when stored");
+    }
+
+    #[test]
+    fn apply_auth_config_in_neither_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
+        let has_api_key = result.contains("ANTHROPIC_API_KEY=");
+        assert!(!has_api_key);
+    }
+
+    #[test]
+    fn apply_auth_config_in_empty_api_key_returns_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_api_key_in(tmp.path(), "test", "");
+        let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
+        let has_api_key = result.contains("ANTHROPIC_API_KEY=");
+        assert!(!has_api_key);
+    }
+
+    // ── SecurityCheck regression: CLAUDE_CODE_OAUTH_TOKEN allowlisted ──────
+
+    #[test]
+    fn test_security_check_oauth_token_allowed() {
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-aaaaaaaaaaaaaaaaaaaa
+"#;
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
+            "CLAUDE_CODE_OAUTH_TOKEN must be allowlisted in claude container; got {:?}",
+            violations
+        );
+    }
+
+    #[test]
+    fn test_security_check_other_token_still_blocked() {
+        // Defence-in-depth: allowlist must NOT widen to arbitrary *_TOKEN.
+        // MCP_OS_AUTH_TOKEN must remain forbidden in claude container.
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - MCP_OS_AUTH_TOKEN=secret-uuid
+"#;
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
+            "MCP_OS_AUTH_TOKEN must still trigger NoTokensClaude violation"
+        );
+    }
+
+    #[test]
+    fn test_ensure_resources_dir_safe_accepts_real_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        let resources = plugin.join("claude-resources");
+        std::fs::create_dir_all(resources.join("skills")).unwrap();
+        std::fs::write(resources.join("skills").join("ok.md"), b"hi").unwrap();
+        super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect("real directory tree must be accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_resources_dir_safe_rejects_root_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        std::fs::create_dir_all(&plugin).unwrap();
+        // Symlink the entire claude-resources dir to /etc — without this
+        // check, the bind-mount would surface /etc inside the claude
+        // container as /speedwave/plugins/<slug>/.
+        let resources = plugin.join("claude-resources");
+        std::os::unix::fs::symlink("/etc", &resources).unwrap();
+
+        let err = super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect_err("symlinked claude-resources must be rejected");
+        assert!(err.to_string().contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_resources_dir_safe_rejects_nested_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        let resources = plugin.join("claude-resources");
+        let skills = resources.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        // Real symlink deep in the tree — also fatal because the bind
+        // mount surfaces every entry, including nested ones.
+        std::os::unix::fs::symlink("/etc/passwd", skills.join("evil.md")).unwrap();
+
+        let err = super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect_err("nested symlink in claude-resources must be rejected");
+        assert!(err.to_string().contains("symlink"));
+    }
+
+    /// `claude-resources/` must be a real directory on disk, not a
+    /// regular file dressed up as the resources root. Without this,
+    /// `add_claude_volume` would still emit a bind-mount entry whose
+    /// host source is a single file — and depending on the engine
+    /// either fails opaquely at start, or surfaces the file in place
+    /// of a directory inside the container.
+    #[test]
+    fn test_ensure_resources_dir_safe_rejects_non_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let resources = plugin.join("claude-resources");
+        std::fs::write(&resources, b"not a dir").unwrap();
+
+        let err = super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect_err("non-directory claude-resources must be rejected");
+        assert!(err.to_string().contains("not a directory"));
+    }
+
+    // ── apply_plugins_from_verified — render-time invariants ─────────
+
+    /// Builds a minimal valid YAML doc for `apply_plugins_from_verified`
+    /// to mutate. The shape mirrors `compose.template.yml` enough that
+    /// the renderer can find `services.claude` and `services.mcp-hub`.
+    fn fixture_compose_yaml() -> &'static str {
+        r#"
+services:
+  claude:
+    image: speedwave-claude:test
+    environment: []
+    volumes: []
+  mcp-hub:
+    image: speedwave-mcp-hub:test
+    environment: []
+"#
+    }
+
+    fn fixture_integrations_with_enabled(slug: &str) -> ResolvedIntegrationsConfig {
+        let mut cfg = ResolvedIntegrationsConfig::default();
+        cfg.plugins.insert(slug.to_string(), true);
+        cfg
+    }
+
+    fn fixture_verified_plugin(
+        slug: &str,
+        service_id: Option<&str>,
+        plugin_dir: &Path,
+        mem_limit: Option<&str>,
+    ) -> plugin::VerifiedPlugin {
+        // MCP plugins (service_id present) require a Containerfile per
+        // validate_manifest. Stub one in the fixture dir so apply_plugins
+        // re-validation passes the existence check and proceeds to the
+        // render-time invariants we actually want to test.
+        if service_id.is_some() {
+            std::fs::create_dir_all(plugin_dir).ok();
+            std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").ok();
+        }
+        let manifest = plugin::PluginManifest {
+            name: slug.into(),
+            service_id: service_id.map(String::from),
+            slug: slug.into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: mem_limit.map(String::from),
+            cpu_limit: None,
+            requires_integrations: vec![],
+        };
+        plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
+    }
+
+    /// `apply_plugins` re-runs `validate_manifest` so a manifest whose
+    /// fields would now fail the (potentially stricter) ruleset is
+    /// rejected at render time, not silently rendered. We can't
+    /// hand-craft a "post-install rule violation" without breaking
+    /// other tests, so we verify the call chain by passing a
+    /// manifest with a value that would fail the cap (`mem_limit`
+    /// above PLUGIN_MEM_LIMIT_MAX_MIB).
+    #[test]
+    fn test_apply_plugins_revalidates_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("evil");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // 999g is far above the 16 GiB cap. Re-validation must reject.
+        let vp = fixture_verified_plugin("evil", Some("evil"), &plugin_dir, Some("999g"));
+        let result = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            "test-project",
+            "/tmp/test",
+            &fixture_integrations_with_enabled("evil"),
+            "test-net",
+            tmp.path(),
+            &[vp],
+        );
+        let err = result.expect_err("oversized mem_limit must be rejected at render");
+        assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    /// `apply_plugins` MUST reject a plugin whose derived compose name
+    /// would overwrite an existing `services.<name>` entry. Without
+    /// this check, `serde_yaml_ng`'s mapping insert silently replaces
+    /// the built-in entry — defeating the hub's zero-token guarantee.
+    /// The slug-collision rule in `validate_manifest` already blocks
+    /// the obvious "slug: hub" case at install, so the render-time
+    /// check is defence in depth — but a regression in either layer
+    /// is invisible without a test that pins the contract.
+    #[test]
+    fn test_apply_plugins_rejects_compose_name_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("decoy");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // We can't construct a manifest with `slug: "hub"` —
+        // `validate_manifest` rejects it. Instead, hand-build YAML
+        // that already contains the service name a plugin would
+        // produce, and pass a plugin whose service_id derives that
+        // name. Pre-populating `services.mcp-decoy` simulates the
+        // race where two render passes try to claim the same name.
+        let yaml = r#"
+services:
+  claude:
+    image: speedwave-claude:test
+    environment: []
+    volumes: []
+  mcp-hub:
+    image: speedwave-mcp-hub:test
+    environment: []
+  mcp-decoy:
+    image: pre-existing:test
+"#;
+        let cfg = fixture_integrations_with_enabled("decoy");
+        let vp = fixture_verified_plugin("decoy", Some("decoy"), &plugin_dir, None);
+        let err = super::apply_plugins_from_verified(
+            yaml,
+            "test-project",
+            "/tmp/test",
+            &cfg,
+            "test-net",
+            tmp.path(),
+            &[vp],
+        )
+        .expect_err("collision must abort the render");
+        assert!(
+            err.to_string().contains("would overwrite"),
+            "expected collision rejection, got: {err}"
+        );
+    }
+
+    /// Sanity: a verified plugin not blocked by validate_manifest and
+    /// not colliding renders successfully. Pins the happy path so a
+    /// regression that always returns Err (e.g. someone tightening
+    /// validate_manifest in a way that breaks all in-tree manifests)
+    /// is caught here rather than at the user's first launch.
+    #[test]
+    fn test_apply_plugins_renders_enabled_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("ok-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let cfg = fixture_integrations_with_enabled("ok-plugin");
+        let vp = fixture_verified_plugin("ok-plugin", Some("ok-plugin"), &plugin_dir, None);
+        let yaml = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            "test-project",
+            "/tmp/test",
+            &cfg,
+            "test-net",
+            tmp.path(),
+            &[vp],
+        )
+        .expect("happy path must render");
+        assert!(
+            yaml.contains("mcp-ok-plugin"),
+            "rendered YAML must contain plugin service"
+        );
+        assert!(yaml.contains("SPEEDWAVE_PLUGINS=ok-plugin"));
+    }
+
+    /// If the canonical resolution of `claude-resources` escapes the
+    /// canonical plugin tree, the helper bails. We can't trivially
+    /// build such a path without symlinks (which `walk_reject_symlinks`
+    /// already catches), but we can at least pin the invariant by
+    /// verifying that a deeply-nested real directory tree IS accepted
+    /// — regression test for "I broke the canonicalize check by
+    /// being too strict".
+    #[test]
+    fn test_ensure_resources_dir_safe_accepts_deep_nesting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        let deep = plugin.join("claude-resources/skills/sub/deeper");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("ok.md"), b"hi").unwrap();
+        super::ensure_resources_dir_safe(&plugin, &plugin.join("claude-resources"))
+            .expect("deep real-directory tree must be accepted");
     }
 }

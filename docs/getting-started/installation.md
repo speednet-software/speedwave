@@ -92,9 +92,46 @@ If a check fails, the command prints the failing rule and a remediation hint, th
 
 The Desktop app surfaces the same checks plus per-container health and IDE-bridge status, refreshed every 5 s.
 
+## Logging in to Anthropic
+
+After the setup wizard finishes, log in to your Claude account so Claude Code can run inside the container without prompting on every start. Two equivalent paths:
+
+- **From the Desktop app** — open Settings → Authentication and click **Open terminal and log in**. Speedwave opens a system terminal running `speedwave login --project <name>`. Type `/login` at Claude's prompt and follow the OAuth flow. Claude Code saves your credentials inside the container automatically when the flow completes.
+- **From the CLI** — `cd` into your registered project directory and run:
+
+  ```bash
+  speedwave login
+  ```
+
+  or pass `--project <name>` if you want to log in for a project other than the one matched by your current directory. Type `/login` at Claude's prompt.
+
+Credentials are stored by Claude Code at `~/.speedwave/claude-home/<project>/.claude/.credentials.json` (the per-project CLAUDE_HOME bind-mount) and are available on every subsequent `speedwave` start. To log out, run `speedwave logout` (or `speedwave logout --project <name>`). Credentials are per-project — logging in for one project does not authenticate another. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the full rationale.
+
+If you prefer using a Console API key instead of OAuth, set it from Settings → Authentication → API key.
+
+### Terminal compatibility for "press c to copy URL"
+
+When Claude Code shows the OAuth URL, pressing `c` asks the terminal to copy it via [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Operating-System-Commands). Whether this works depends on your terminal:
+
+| Terminal                                                                                          | OSC 52     |
+| ------------------------------------------------------------------------------------------------- | ---------- |
+| iTerm2 (with Settings → General → Selection → "Applications in terminal may access clipboard" ON) | ✅         |
+| Alacritty, WezTerm, Ghostty, kitty, foot                                                          | ✅ default |
+| Windows Terminal                                                                                  | ✅ default |
+| KDE konsole                                                                                       | ✅ default |
+| VS Code integrated terminal                                                                       | ✅ default |
+| Apple Terminal.app                                                                                | ❌         |
+| gnome-terminal                                                                                    | ❌ default |
+| Bare `cmd.exe`                                                                                    | ❌         |
+
+If your terminal does not support OSC 52, the URL still appears on screen — select it with your mouse, or paste the auth code Claude Code prompts for. The login flow itself works on every terminal.
+
+**macOS:** when you click "Open terminal and log in" in Settings, Speedwave prefers iTerm2 if installed (in `/Applications/` or `~/Applications/`) and falls back to Apple Terminal.app. Install iTerm2 to get `c`-to-copy out of the box.
+
 ## See Also
 
 - [ADR-002: Lima as VM Manager on macOS](../adr/ADR-002-lima-as-vm-manager-on-macos.md)
 - [ADR-003: Bundled nerdctl-full on Linux](../adr/ADR-003-bundled-nerdctl-full-on-linux.md)
 - [ADR-004: WSL2 + nerdctl on Windows](../adr/ADR-004-wsl2-and-nerdctl-on-windows.md)
 - [ADR-021: Bundled Dependencies and Zero-Install Strategy](../adr/ADR-021-bundled-dependencies-and-zero-install-strategy.md)
+- [ADR-052: Anthropic OAuth Login Flow](../adr/ADR-052-anthropic-oauth-login-flow.md)

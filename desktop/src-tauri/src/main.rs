@@ -10,6 +10,7 @@
 mod auth;
 mod auth_commands;
 mod chat;
+mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
@@ -26,7 +27,9 @@ mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
 mod oauth_cmd;
+mod oauth_login_cmd;
 mod patch_emitter;
+mod path_util;
 mod plugin_cmd;
 mod queue_cmd;
 mod reconcile;
@@ -940,6 +943,59 @@ fn ensure_mcp_os_running(
     }
 }
 
+/// Shows the audit-failure dialog and terminates the process. Returns
+/// only via `process::exit`.
+///
+/// macOS / Windows: native `blocking_show()`. Linux: the dialog plugin
+/// queues onto the (not-yet-running) Tauri event loop and would
+/// deadlock or silently drop, so we skip it — the caller already
+/// logged the body via `log::error!`. Downgrade recorded in ADR-051.
+fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> ! {
+    #[cfg(not(target_os = "linux"))]
+    {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+        let _ = app
+            .dialog()
+            .message(body)
+            .title("Plugin verification failed")
+            .kind(MessageDialogKind::Error)
+            .blocking_show();
+        std::process::exit(1);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (app, body); // unused on this path
+        std::process::exit(1);
+    }
+}
+
+/// Formats the per-plugin failures from `plugin::audit_all` into a
+/// user-actionable dialog message. Tells the user what failed and how
+/// to recover via CLI/manual cleanup — Settings UI is unreachable
+/// while the audit fails.
+fn format_audit_failure_message(failures: &[(String, String)]) -> String {
+    let mut body = String::from(
+        "Speedwave detected one or more plugins that no longer match their\n\
+         original signed contents. For your safety, the app cannot start until\n\
+         the affected plugins are removed or reinstalled.\n\n\
+         Affected plugins:\n",
+    );
+    for (slug, reason) in failures {
+        body.push_str(&format!("  • {slug}: {reason}\n"));
+    }
+    body.push_str(
+        "\nHow to recover:\n\
+         1. Open Terminal and run `speedwave plugin remove <slug>` for each\n\
+            affected plugin (CLI commands always work even when this dialog\n\
+            blocks the UI).\n\
+         2. Reinstall a fresh signed plugin via `speedwave plugin install\n\
+            <path/to/plugin.zip>`.\n\n\
+         Alternatively, manually delete the affected plugin directory under\n\
+         `~/.speedwave/plugins/<slug>/` and restart Speedwave.",
+    );
+    body
+}
+
 // ---------------------------------------------------------------------------
 // Application entry point
 // ---------------------------------------------------------------------------
@@ -1098,6 +1154,7 @@ fn main() {
                 })
                 .build()
         })
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -1123,6 +1180,36 @@ fn main() {
                 .and_then(|l| parse_log_level(&l))
                 .unwrap_or(log::LevelFilter::Info);
             log::set_max_level(initial_level);
+
+            clipboard_bridge::spawn(app.handle().clone());
+
+            // Hard-fail on tampered plugins. `plugin::audit_all` re-verifies
+            // every plugin under `~/.speedwave/plugins/`; failures are
+            // collected and shown to the user in one dialog. Recovery
+            // path is the CLI (`speedwave plugin remove <slug>`) or
+            // manual deletion — Settings UI is behind this gate.
+            //
+            // Hard-fail semantics: the dialog shows the user every failed
+            // plugin synchronously, then the process exits. Returning
+            // `Ok(())` from `setup` would let Tauri continue starting
+            // the webview and registering command handlers — a tampered
+            // plugin would still be inert (`#[tauri::command]` callers
+            // go through the verified-only command gates), but the
+            // command surface would be live for unrelated calls. We
+            // refuse to bring the rest of the app online at all: the
+            // dialog is shown via the OS-native blocking path on
+            // platforms where it is reliable, and the process exits the
+            // moment the user dismisses it (or after a timeout fallback
+            // on Linux, where blocking-show can deadlock).
+            if let Err(failures) = speedwave_runtime::plugin::audit_all() {
+                let body = format_audit_failure_message(&failures);
+                log::error!("plugin audit failed:\n{}", body);
+                // Diverges (`-> !`) — `process::exit` is the last call.
+                // No `Ok(())` / `Err(...)` follows because Tauri must
+                // not bring up the webview / command surface for a
+                // tampered plugin set.
+                show_audit_failure_dialog_and_exit(app.handle(), body);
+            }
 
             // Clean up old rotated log files (max 10 kept)
             cleanup_old_logs(10);
@@ -1416,6 +1503,7 @@ fn main() {
             auth_commands::save_api_key,
             auth_commands::delete_api_key,
             auth_commands::get_auth_status,
+            oauth_login_cmd::start_oauth_login,
             // URL opener
             url_validation::open_url,
             // Platform
@@ -1618,6 +1706,39 @@ fn main() {
 mod tests {
     use super::*;
     use config::{ProjectUserEntry, SpeedwaveUserConfig};
+
+    #[test]
+    fn format_audit_failure_message_lists_every_failure_and_recovery_steps() {
+        let failures = vec![
+            (
+                "acme-tools".to_string(),
+                "SIGNATURE file not present".to_string(),
+            ),
+            (
+                "widget".to_string(),
+                "Ed25519 verification failed".to_string(),
+            ),
+        ];
+        let msg = format_audit_failure_message(&failures);
+        // Every affected slug appears, with its reason.
+        assert!(msg.contains("acme-tools: SIGNATURE file not present"));
+        assert!(msg.contains("widget: Ed25519 verification failed"));
+        // Recovery instructions point at the CLI (Settings is unreachable here).
+        assert!(msg.contains("speedwave plugin remove"));
+        assert!(msg.contains("speedwave plugin install"));
+        assert!(msg.contains("~/.speedwave/plugins/"));
+    }
+
+    #[test]
+    fn format_audit_failure_message_handles_single_failure() {
+        let msg = format_audit_failure_message(&[("solo".to_string(), "tampered".to_string())]);
+        assert!(msg.contains("solo: tampered"));
+        assert_eq!(
+            msg.matches('•').count(),
+            1,
+            "exactly one bullet for one failure"
+        );
+    }
 
     /// Extracts the body of a function from source code by matching `{`/`}`
     /// counting braces.  Used by structural tests to assert on function contents.

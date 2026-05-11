@@ -10,9 +10,9 @@ describe('AuthTerminalComponent', () => {
   let fixture: ComponentFixture<AuthTerminalComponent>;
   let mockTauri: MockTauriService;
 
-  const SAMPLE_COMMAND = "cd '/Users/test/Projects' && speedwave";
+  const SAMPLE_COMMAND = "cd '/Users/test/Projects' && speedwave login --project 'test-project'";
   const SAMPLE_COMMAND_WITH_PREFIX =
-    "export SPEEDWAVE_DATA_DIR='/Users/test/.speedwave-dev' && cd '/Users/test/Projects' && speedwave";
+    "export SPEEDWAVE_DATA_DIR='/Users/test/.speedwave-dev' && cd '/Users/test/Projects' && speedwave login --project 'test-project'";
 
   beforeEach(async () => {
     vi.useFakeTimers();
@@ -217,6 +217,23 @@ describe('AuthTerminalComponent', () => {
     expect(note).not.toContain('On Windows');
   });
 
+  it('does not set error or crash when get_platform rejects', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return { oauth_authenticated: false };
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') throw 'platform probe failed';
+      return undefined;
+    };
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    expect(component.error).toBe('');
+    expect(component.isWindows).toBe(false);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
   it('shows Windows note on Windows platform', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') return { oauth_authenticated: false };
@@ -233,7 +250,8 @@ describe('AuthTerminalComponent', () => {
   });
 
   it('displays PowerShell-shaped command on Windows', async () => {
-    const WIN_COMMAND = "Set-Location 'C:\\Users\\test\\Projects'; speedwave";
+    const WIN_COMMAND =
+      "Set-Location 'C:\\Users\\test\\Projects'; speedwave login --project 'test-project'";
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') return { oauth_authenticated: false };
       if (cmd === 'get_auth_command') return WIN_COMMAND;
@@ -266,5 +284,79 @@ describe('AuthTerminalComponent', () => {
     invokeSpy.mockClear();
     vi.advanceTimersByTime(10000);
     expect(invokeSpy).not.toHaveBeenCalled();
+  });
+
+  // ── Open terminal primary button ─────────────────────────────────────────
+
+  it('renders the primary "Open terminal" button', async () => {
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.detectChanges();
+    const btn = (fixture.nativeElement as HTMLElement).querySelector(
+      '[data-testid="auth-open-terminal"]'
+    ) as HTMLButtonElement;
+    expect(btn).toBeTruthy();
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent?.trim()).toBe('Open terminal and log in');
+  });
+
+  it('shows "Or run this command yourself" hint above the copy block', async () => {
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.detectChanges();
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('Or run this command yourself');
+  });
+
+  it('invokes start_oauth_login when the primary button is clicked', async () => {
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.detectChanges();
+
+    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+    component.openTerminal();
+    expect(invokeSpy).toHaveBeenCalledWith('start_oauth_login', { project: 'test-project' });
+  });
+
+  it('clears any previous error when openTerminal is invoked', async () => {
+    component.error = 'previous error';
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    component.openTerminal();
+    // Error is cleared synchronously before the Tauri call returns.
+    expect(component.error).toBe('');
+  });
+
+  it('sets error and re-enables the button when start_oauth_login fails', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return { oauth_authenticated: false };
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
+      if (cmd === 'start_oauth_login') throw 'no terminal found';
+      return undefined;
+    };
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+
+    component.openTerminal();
+    await vi.advanceTimersByTimeAsync(0);
+    // Allow the .finally() microtask to flush.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(component.error).toBe('no terminal found');
+    expect(component.opening).toBe(false);
+  });
+
+  it('keeps polling running after openTerminal is invoked', async () => {
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    component.openTerminal();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+    vi.advanceTimersByTime(3000);
+    expect(invokeSpy).toHaveBeenCalledWith('get_auth_status', { project: 'test-project' });
   });
 });

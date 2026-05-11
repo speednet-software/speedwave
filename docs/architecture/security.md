@@ -39,6 +39,14 @@ Each MCP worker container mounts **only its own** service credentials:
 
 **Exception:** SharePoint uses `:rw` mount for OAuth token refresh (see [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)).
 
+Anthropic OAuth credentials are managed entirely by Claude Code inside the `CLAUDE_HOME` bind-mount (`~/.speedwave/claude-home/<project>/.claude/.credentials.json`); Speedwave does not touch them. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the login-flow rationale.
+
+### Clipboard wrappers (OSC 52)
+
+The `claude` image bakes `/usr/local/bin/{pbcopy,xclip,xsel,wl-copy,clip.exe}` as five symlinks to one shell script (`osc52-copy.sh`) that base64-encodes stdin and writes an [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Operating-System-Commands) sequence to `/dev/tty`. Compatible host terminals interpret it as a clipboard write request — incompatible terminals ignore it.
+
+The wrapper is **write-only by design**: it never reads the host clipboard (OSC 52 query/paste would require a terminal-side response handshake and would leak host clipboard contents into the container). It touches only its own stdin and `/dev/tty`, runs as the unprivileged container user, and adds no new mounts. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
+
 ## Threat Model
 
 When implementing any feature, ask these questions:
@@ -46,6 +54,20 @@ When implementing any feature, ask these questions:
 1. **Does this require relaxing any of the above principles?** If yes — find a different approach.
 2. **Does this add a new attack surface?** Document it and mitigate it.
 3. **Does this require mounting host filesystem into a container?** Minimize scope, use `:ro` wherever possible.
+
+### Local attacker with home-directory write access
+
+Speedwave's threat model includes a non-privileged process running as the same user — a malicious npm `postinstall` script, a browser exploit, or any locally-executed code that can write under `~/`. The container hardening above stops a _compromised container_ from escaping; it does not stop a _host_ process from rewriting the files Speedwave reads.
+
+`~/.speedwave/plugins/<slug>/` is writable by the user, so any path that reads from it is in this attacker's reach. Plugin Ed25519 signatures are therefore enforced as a **runtime invariant**, not just an install gate (see [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md)):
+
+- Every read of a plugin tree (compose render, image build, claude-resources mount, UI listing) goes through `signing::verify_plugin_signature_cached` — the cache is keyed by canonical path AND content digest, so any byte change to any file forces a fresh Ed25519 check.
+- Mutable per-plugin state lives at `~/.speedwave/plugin-state/<slug>/`, not under `plugins/<slug>/`, so writing the `image_pending` marker does not invalidate the digest.
+- `plugin::compute_plugin_digest` rejects symlinks. Without this, an attacker dropping `claude-resources/skills/foo.md → /etc/passwd` could fold arbitrary host content into the digest of an otherwise-innocent tree.
+- Install is atomic: lock + staging dir on the same filesystem + `rename` swap + cleanup, so a concurrent install or a crash mid-replace cannot leave a half-A/half-B Frankenstein.
+- Startup runs `plugin::audit_all` — the Desktop blocks with a recovery dialog (Tauri 2 `tauri-plugin-dialog`) on any failure; the CLI exits 2. Recovery commands (`plugin remove`, `plugin install`, `plugin list`, `init`) skip the audit so users can always reach the recovery path.
+
+`~/.speedwave/tokens/<project>/<service_id>/<key>` is mode 0600 by `set_owner_only` and lives outside the plugin tree, so token files are not part of the plugin signature surface — but they are also write-protected against unprivileged tampering by filesystem ACLs.
 
 ### Security Boundaries
 
@@ -139,6 +161,18 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 | `PLUGIN_NO_EXTRA_VOLUMES`        | Plugin services | No volumes beyond `/tokens` and `/workspace`                                    |
 | `PLUGIN_MISSING_TOKENS_MOUNT`    | Plugin services | `/tokens` mount is present                                                      |
 | `PLUGIN_MISSING_WORKSPACE_MOUNT` | Plugin services | `/workspace` mount is present                                                   |
+
+### Plugin Manifest Validation
+
+`validate_manifest` (`crates/speedwave-runtime/src/plugin.rs`) is run both at install time and at every load-side path (compose render, image build). Beyond the basic slug/version/format checks it enforces:
+
+- **`extra_env` reserved keys** — a plugin must not inject env vars that Speedwave reserves (`PORT`, auto-injected) or that are dynamic-linker / language-runtime / shell-environment hijack vectors (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is `consts::RESERVED_ENV_KEYS` (SSOT — see CLAUDE.md), matched case-insensitively.
+- **`token_mount: read_write`** — rejected unconditionally for plugins. `:rw` is reserved for built-in services (currently SharePoint only, for OAuth refresh — [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)). Built-in service slugs are blocked earlier in the function, so any plugin reaching this check is by definition unauthorised.
+- **`mem_limit` / `cpu_limit`** — parsed numerically and bounded by `PLUGIN_MEM_LIMIT_MAX_MIB` / `PLUGIN_CPU_LIMIT_MAX`. An explicit `0` (Docker's "no limit") is rejected so a plugin cannot bypass the cap.
+- **Slug collision** — a slug whose derived compose name (`mcp-<slug>`) or whose bare form matches a built-in service is rejected, so a plugin cannot shadow `mcp-hub`, `claude`, etc. via a silent YAML-mapping overwrite.
+- **`settings_schema`** — must be a JSON object ≤ 64 KiB. Full Draft-7 validation of saved settings happens desktop-side in `plugin_save_settings` (the runtime crate has no JSON-Schema dependency).
+
+See [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md) for the full rationale and the runtime-invariant model.
 
 ### SharePoint Volume Rules
 
@@ -271,16 +305,35 @@ chat access. Enforced at two layers:
   prompts for interactive login on stdin while the frontend waits for
   stream-json on stdout.
 
-- **Frontend (`ProjectStateService`):** After containers are running, calls
-  `get_auth_status`. If neither OAuth nor API key is configured, sets status to
-  `auth_required` — an overlay displays a CLI command (`get_auth_command`) for
-  the user to copy into their own terminal to complete OAuth login. The command
-  is displayed as text only (never executed by the app), eliminating shell
-  injection risk. When the Desktop app's data directory differs from the
-  default (`~/.speedwave`), the command includes an
-  `export SPEEDWAVE_DATA_DIR=...` prefix. The value comes from the Desktop
-  app's own data directory, which is determined at process start and never
-  re-read from the terminal session's environment.
+- **Frontend (`ProjectStateService` / `AuthTerminalComponent`):** After
+  containers are running, calls `get_auth_status`. If neither OAuth nor API key
+  is configured, the auth overlay offers two ways to log in:
+  - **Primary — "Open terminal and log in" (`start_oauth_login`).** Spawns the
+    host's terminal application (iTerm2 → Apple Terminal on macOS; PowerShell on
+    Windows; gnome-terminal/konsole/xterm on Linux) running `speedwave login`,
+    so the user types `/login` at Claude Code's prompt. The command string
+    handed to the terminal is built by `build_auth_command_for_platform` (same
+    renderer as the copy-paste fallback), and every component that flows into it
+    is constrained: the project name passes `validate_project_name` and is
+    shell/PowerShell-quoted; the macOS AppleScript path additionally rejects
+    control characters and only accepts a `$SHELL` that is a plain absolute path
+    (otherwise falls back to `/bin/zsh`). Speedwave never performs OAuth itself
+    and never sees the token — Claude Code owns the credential lifecycle.
+  - **Fallback — copy-paste command (`get_auth_command`).** The same command
+    string, shown as text for the user to run in any terminal of their choice.
+    When the Desktop app's data directory differs from the default
+    (`~/.speedwave`), the command includes an `export SPEEDWAVE_DATA_DIR=...`
+    prefix (PowerShell: `$env:SPEEDWAVE_DATA_DIR = '...'`). The value comes from
+    the Desktop app's own data directory, determined at process start and never
+    re-read from the terminal session's environment.
+
+  A complementary host-side helper, the **clipboard bridge** (`clipboard_bridge.rs`),
+  watches `<data_dir>/claude-home/<project>/.clipboard-bridge` — a file written
+  by the in-container `osc52-copy.sh` wrapper — and copies new content to the
+  host clipboard (deduplicated, capped at 64 KB, opened with a single
+  size-limited read so a container cannot swap in a huge payload between a
+  size check and the read). This makes Claude Code's "press `c` to copy the
+  auth URL" work even in terminals that ignore OSC 52 (e.g. Apple Terminal).
 
 ## Binary Authenticity
 

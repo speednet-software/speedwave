@@ -1099,7 +1099,12 @@ mod tests {
         let mut cfg = OsIntegrationsConfig::default();
         for svc in speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES {
             assert!(
-                cfg.set_service(svc.config_key, IntegrationConfig { enabled: Some(true) }),
+                cfg.set_service(
+                    svc.config_key,
+                    IntegrationConfig {
+                        enabled: Some(true)
+                    }
+                ),
                 "set_service must accept '{}'",
                 svc.config_key
             );
@@ -1542,11 +1547,9 @@ mod tests {
             r#"{"granted": false, "status": "denied", "error": "tccutil reset Reminders pl.speedwave.desktop.reminders"}"#,
         );
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("tccutil reset Reminders pl.speedwave.desktop.reminders")
-        );
+        assert!(result
+            .unwrap_err()
+            .contains("tccutil reset Reminders pl.speedwave.desktop.reminders"));
     }
 
     #[test]
@@ -1788,11 +1791,8 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission_with_timeout(
-            "reminders",
-            false,
-            std::time::Duration::from_secs(2),
-        );
+        let result =
+            check_os_permission_with_timeout("reminders", false, std::time::Duration::from_secs(2));
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         assert!(

@@ -7,6 +7,25 @@ export interface PluginAuthField {
   is_secret: boolean;
 }
 
+/**
+ * Outcome of `runtime::plugin::list_for_ui` for a single plugin.
+ * `'verified'` is the only state that allows the user to enable the
+ * plugin or save credentials; every other state surfaces in
+ * `verification_error` so users can see what went wrong and how to
+ * recover (the remove button stays available regardless).
+ *
+ * Mirrors the `VerificationStatus` enum in
+ * `crates/speedwave-runtime/src/plugin.rs`, which derives
+ * `#[serde(rename_all = "snake_case")]` — the literals here must
+ * stay in sync with that derive.
+ */
+export type PluginVerificationStatus =
+  | 'verified'
+  | 'missing_signature'
+  | 'invalid_signature'
+  | 'dir_slug_mismatch'
+  | 'manifest_invalid';
+
 /** Status and configuration details for an installed plugin. */
 export interface PluginStatusEntry {
   slug: string;
@@ -21,6 +40,10 @@ export interface PluginStatusEntry {
   token_mount: string;
   settings_schema: JsonSchema | null;
   requires_integrations: string[];
+  /** Verdict from the runtime audit. `'verified'` means usable. */
+  verification_status: PluginVerificationStatus;
+  /** Diagnostic when `verification_status !== 'verified'`. */
+  verification_error?: string;
 }
 
 /** A single property within a JSON Schema. */
