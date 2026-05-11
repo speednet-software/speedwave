@@ -101,6 +101,30 @@ teardown() {
     [ "$osc_line" -gt "$claude_line" ]
 }
 
+# ── SSOT cross-check with the host watcher ──────────────────────────────────
+
+@test "bridge filename matches BRIDGE_FILENAME in clipboard_bridge.rs" {
+    # The shell wrapper writes ~/.clipboard-bridge; the Rust watcher looks for
+    # the same name. If one side is renamed without the other, the bridge
+    # silently stops working — this test catches that.
+    local rs="$BATS_TEST_DIRNAME/../../desktop/src-tauri/src/clipboard_bridge.rs"
+    grep -q 'BRIDGE_FILENAME: &str = ".clipboard-bridge"' "$rs"
+    grep -q '\.clipboard-bridge' "$OSC52"
+}
+
+# ── Error reporting ─────────────────────────────────────────────────────────
+
+@test "reports a stderr error when the bridge file cannot be written" {
+    # HOME points at a path whose parent is not a directory → cannot create
+    # ~/.clipboard-bridge. The wrapper must still exit 0 (so Claude's "press c"
+    # detection keeps working) but print a diagnostic to stderr.
+    local notadir="$TMP_HOME/regular-file"
+    printf 'x' > "$notadir"
+    run bash -c "printf 'hello' | HOME='$notadir' bash '$OSC52'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"failed to write clipboard bridge file"* ]]
+}
+
 # ── Security ────────────────────────────────────────────────────────────────
 
 @test "script is write-only — no curl, wget, secrets, or anthropic touchpoints" {

@@ -189,7 +189,7 @@ pub fn detect_package_manager() -> String {
     // PATH — we never invoke them here.
     const MANAGERS: &[&str] = &["apt", "dnf", "pacman", "zypper", "dpkg"];
     for m in MANAGERS {
-        if which_in_path(m).is_some() {
+        if crate::path_util::which_in_path(m).is_some() {
             return (*m).to_string();
         }
     }
@@ -210,18 +210,6 @@ pub fn install_management_kind() -> InstallManagementKind {
             InstallManagementKind::Bundled
         }
     }
-}
-
-/// Minimal `which` — looks for `name` on `$PATH`. Returns `Some(path)` if found.
-fn which_in_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------

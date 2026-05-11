@@ -22,9 +22,9 @@ enum CliAction {
     PluginEnable { service_id: String, project: String },
     PluginDisable { service_id: String, project: String },
     Check,
-    Init(Option<String>),   // optional project name
-    Login(Option<String>),  // optional --project override
-    Logout(Option<String>), // optional --project override
+    Init(Option<String>), // optional explicit project name (default: derive from dir name)
+    Login(Option<String>), // optional --project override (default: resolve from CWD)
+    Logout(Option<String>), // optional --project override (default: resolve from CWD)
     SelfUpdate,
     Update,
     Run, // default: compose_up + exec
@@ -487,16 +487,10 @@ fn main() -> anyhow::Result<()> {
             None => resolve_project(&user_config)?,
         };
         validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
-        let claude_home = consts::data_dir().join("claude-home").join(&project_name);
-        let creds = claude_home.join(".claude").join(".credentials.json");
-        let claude_json = claude_home.join(".claude.json");
-        let mut removed = 0;
-        for path in [&creds, &claude_json] {
-            if path.exists() {
-                std::fs::remove_file(path)?;
-                removed += 1;
-            }
-        }
+        let removed = speedwave_runtime::claude_home::remove_claude_credentials(
+            consts::data_dir(),
+            &project_name,
+        )?;
         if removed == 0 {
             println!(
                 "No Claude credentials found for project '{}'.",
@@ -1069,10 +1063,10 @@ mod tests {
 
     #[test]
     fn print_help_lists_login_and_logout() {
-        // Compile-time check on the string literal in print_help: tests can't
-        // capture stdout directly without involving a subprocess, but we can
-        // verify the documentation lines exist in the source so user-facing
-        // help stays in sync with the CliAction variants.
+        // Source-level check: `include_str!` embeds main.rs at compile time,
+        // then we assert at runtime that the `print_help` body mentions both
+        // subcommands. Avoids subprocess-based stdout capture while keeping
+        // user-facing help in sync with the CliAction variants.
         let source = include_str!("main.rs");
         let help_start = source
             .find("fn print_help() {")

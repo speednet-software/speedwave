@@ -37,7 +37,9 @@ fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
         data_dir.join("tokens").join(project).join("gitlab"),
         data_dir.join("compose").join(project),
         data_dir.join("context").join(project),
-        data_dir.join("claude-home").join(project),
+        data_dir
+            .join(crate::consts::CLAUDE_HOME_SUBDIR)
+            .join(project),
     ];
     for dir in &dirs_to_create {
         create_dir_all_secure(dir)?;
@@ -248,7 +250,9 @@ mod tests {
             data_dir.join("tokens").join("modecheck").join("gitlab"),
             data_dir.join("compose").join("modecheck"),
             data_dir.join("context").join("modecheck"),
-            data_dir.join("claude-home").join("modecheck"),
+            data_dir
+                .join(crate::consts::CLAUDE_HOME_SUBDIR)
+                .join("modecheck"),
         ];
         for dir in &dirs {
             let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;

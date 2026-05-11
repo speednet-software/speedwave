@@ -279,16 +279,35 @@ chat access. Enforced at two layers:
   prompts for interactive login on stdin while the frontend waits for
   stream-json on stdout.
 
-- **Frontend (`ProjectStateService`):** After containers are running, calls
-  `get_auth_status`. If neither OAuth nor API key is configured, sets status to
-  `auth_required` — an overlay displays a CLI command (`get_auth_command`) for
-  the user to copy into their own terminal to complete OAuth login. The command
-  is displayed as text only (never executed by the app), eliminating shell
-  injection risk. When the Desktop app's data directory differs from the
-  default (`~/.speedwave`), the command includes an
-  `export SPEEDWAVE_DATA_DIR=...` prefix. The value comes from the Desktop
-  app's own data directory, which is determined at process start and never
-  re-read from the terminal session's environment.
+- **Frontend (`ProjectStateService` / `AuthTerminalComponent`):** After
+  containers are running, calls `get_auth_status`. If neither OAuth nor API key
+  is configured, the auth overlay offers two ways to log in:
+  - **Primary — "Open terminal and log in" (`start_oauth_login`).** Spawns the
+    host's terminal application (iTerm2 → Apple Terminal on macOS; PowerShell on
+    Windows; gnome-terminal/konsole/xterm on Linux) running `speedwave login`,
+    so the user types `/login` at Claude Code's prompt. The command string
+    handed to the terminal is built by `build_auth_command_for_platform` (same
+    renderer as the copy-paste fallback), and every component that flows into it
+    is constrained: the project name passes `validate_project_name` and is
+    shell/PowerShell-quoted; the macOS AppleScript path additionally rejects
+    control characters and only accepts a `$SHELL` that is a plain absolute path
+    (otherwise falls back to `/bin/zsh`). Speedwave never performs OAuth itself
+    and never sees the token — Claude Code owns the credential lifecycle.
+  - **Fallback — copy-paste command (`get_auth_command`).** The same command
+    string, shown as text for the user to run in any terminal of their choice.
+    When the Desktop app's data directory differs from the default
+    (`~/.speedwave`), the command includes an `export SPEEDWAVE_DATA_DIR=...`
+    prefix (PowerShell: `$env:SPEEDWAVE_DATA_DIR = '...'`). The value comes from
+    the Desktop app's own data directory, determined at process start and never
+    re-read from the terminal session's environment.
+
+  A complementary host-side helper, the **clipboard bridge** (`clipboard_bridge.rs`),
+  watches `<data_dir>/claude-home/<project>/.clipboard-bridge` — a file written
+  by the in-container `osc52-copy.sh` wrapper — and copies new content to the
+  host clipboard (deduplicated, capped at 64 KB, opened with a single
+  size-limited read so a container cannot swap in a huge payload between a
+  size check and the read). This makes Claude Code's "press `c` to copy the
+  auth URL" work even in terminals that ignore OSC 52 (e.g. Apple Terminal).
 
 ## Binary Authenticity
 

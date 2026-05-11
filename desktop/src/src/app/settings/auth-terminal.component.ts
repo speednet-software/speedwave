@@ -111,10 +111,17 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
         this.error = err;
         this.cdr.markForCheck();
       });
-    this.tauri.invoke<string>('get_platform').then((platform) => {
-      this.isWindows = platform === 'windows';
-      this.cdr.markForCheck();
-    });
+    this.tauri
+      .invoke<string>('get_platform')
+      .then((platform) => {
+        this.isWindows = platform === 'windows';
+        this.cdr.markForCheck();
+      })
+      .catch((err: unknown) => {
+        // Non-fatal: the Windows PowerShell hint just won't show. Login still
+        // works. Log so the failure isn't completely invisible.
+        console.warn('auth-terminal: get_platform failed:', err);
+      });
     this.startPolling();
   }
 
@@ -179,8 +186,14 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
           }
           this.done.emit(true);
         }
-      } catch {
-        // Container may not be running — keep polling
+      } catch (err: unknown) {
+        // Expected while the container is still starting; log anything that
+        // doesn't look like that so a real regression (e.g. the command
+        // disappearing) leaves a trace instead of an infinite silent poll.
+        const msg = typeof err === 'string' ? err : String(err);
+        if (!/container|not running|starting/i.test(msg)) {
+          console.debug('auth-terminal: get_auth_status poll error:', err);
+        }
       }
     }, 3000);
   }

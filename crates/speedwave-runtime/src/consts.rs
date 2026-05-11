@@ -3,6 +3,11 @@ pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
 pub const LIMA_VM_NAME: &str = "speedwave";
 pub const LIMA_SUBDIR: &str = "lima";
 pub const DATA_DIR: &str = ".speedwave";
+/// Per-project Claude Code home directory under the data dir
+/// (`<data_dir>/claude-home/<project>/`) — holds credentials, sessions, and
+/// the `.clipboard-bridge` file. This is the SSOT; do not hard-code the
+/// `"claude-home"` literal at call sites.
+pub const CLAUDE_HOME_SUBDIR: &str = "claude-home";
 pub const CLI_BINARY: &str = "speedwave";
 pub const COMPOSE_PREFIX: &str = "speedwave";
 /// Port on which `mcp-hub` listens inside the compose network.

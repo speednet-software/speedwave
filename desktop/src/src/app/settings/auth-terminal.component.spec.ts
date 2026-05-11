@@ -217,6 +217,23 @@ describe('AuthTerminalComponent', () => {
     expect(note).not.toContain('On Windows');
   });
 
+  it('does not set error or crash when get_platform rejects', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return { oauth_authenticated: false };
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') throw 'platform probe failed';
+      return undefined;
+    };
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    expect(component.error).toBe('');
+    expect(component.isWindows).toBe(false);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
   it('shows Windows note on Windows platform', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') return { oauth_authenticated: false };

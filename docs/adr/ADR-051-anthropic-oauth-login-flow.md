@@ -72,29 +72,58 @@ Render the login flow as an in-app pseudo-terminal panel. **Rejected** — adds 
 - The user must type `/login` once at Claude's prompt — one extra keypress vs. a hypothetical "fully automatic" flow. Acceptable; the alternative was a brittle stdout parser.
 - Per-project credentials (one `CLAUDE_HOME` per project) means logging into project A does not authenticate project B. A user with N projects logs in N times. Acceptable: tokens are valid one year[^1], and project isolation is a load-bearing security property.
 
-### Step 9 (post-decision): OSC 52 clipboard bridge
+### Addendum: clipboard bridge for the "press `c` to copy URL" hint
 
-After the storage and login-flow design above shipped, a complementary shell-side fix landed for the original "press `c` to copy URL" problem. The `claude` image now bakes five clipboard-binary symlinks (`pbcopy`, `xclip`, `xsel`, `wl-copy`, `clip.exe`) at `/usr/local/bin/`, all pointing to one `osc52-copy.sh` that base64-encodes stdin and writes an OSC 52 escape sequence to `/dev/tty`. When Claude Code's TUI probes for any of these names, the wrapper handles the URL and the host terminal — if it supports OSC 52 — copies it to the system clipboard.
+Claude Code's TUI prints "press `c` to copy URL" and, on `c`, probes for
+`pbcopy` / `xclip` / `xsel` / `wl-copy` / `clip.exe` (OSC 52 as a last resort).
+Our hardened container has none of those binaries and no path to the host
+clipboard. The `claude` image therefore bakes five symlinks at
+`/usr/local/bin/` (all the names above), all pointing at one `osc52-copy.sh`
+which sends the URL down **two write-only channels**:
 
-This is an **incremental improvement, not a complete fix**. OSC 52 is honored by the majority of modern terminal emulators[^3] (iTerm2 with the option enabled, Alacritty, WezTerm, Ghostty, Windows Terminal, konsole, VS Code) and ignored by Apple Terminal.app and gnome-terminal default. Users on unsupported terminals continue to mouse-select the URL or paste the auth code as before.
+1. **File bridge (primary).** Atomically writes the URL to
+   `~/.clipboard-bridge` inside the container (i.e. on the host at
+   `<data_dir>/claude-home/<project>/.clipboard-bridge`). The Desktop process
+   runs a watcher (`desktop/src-tauri/src/clipboard_bridge.rs`) that tails this
+   directory, reads the file with a single size-limited read (≤ 64 KB; this
+   collapses the check-then-act window a separate `stat`+`read` would leave),
+   deduplicates by content, and copies it to the host clipboard. This channel
+   works in **any** terminal — including Apple Terminal — but only when the
+   Desktop app is running.
+2. **OSC 52 (secondary).** Base64-encodes the URL and writes
+   `ESC]52;c;<base64>BEL` to `/dev/tty`. Honored by most modern emulators
+   (iTerm2 with the option on, Alacritty, WezTerm, Ghostty, Windows Terminal,
+   konsole, VS Code)[^3]; ignored by Apple Terminal.app and default
+   gnome-terminal. This channel is the only one available to **CLI-only** users
+   (no Desktop app), at the cost of terminal support.
 
-The wrapper is **write-only by design**: OSC 52 paste/query would require a terminal-side response handshake most emulators reject and would leak host clipboard contents into the container. Out of scope. See `docs/architecture/security.md` "Clipboard wrappers (OSC 52)".
+Both channels are **write-only by design**: OSC 52 paste/query would require a
+terminal-side response handshake most emulators reject and would leak host
+clipboard contents into the container. Out of scope. See
+`docs/architecture/security.md` "Authentication Gate".
 
-Implementation: `containers/osc52-copy.sh`, `containers/Containerfile.claude` (image-time `COPY` + symlinks), `_tests/entrypoint/osc52-copy.bats` (15 host-side tests).
+On macOS the Desktop spawn path additionally **prefers iTerm2** over
+Terminal.app (`oauth_login_cmd::open_terminal_with_command` probes
+`/Applications/iTerm.app` and `~/Applications/iTerm.app`), because iTerm2 honors
+OSC 52 so `c`-to-copy works there even without the Desktop watcher running. If
+iTerm2 is absent or its `osascript` invocation fails, it falls back to
+Terminal.app.
 
-### Step 10 (post-decision): macOS prefers iTerm2 over Apple Terminal
-
-Apple Terminal.app does not honor OSC 52 — running the Step 9 wrapper inside it copies nothing. To make `c`-to-copy work out of the box on macOS for users who have iTerm2 installed (the majority that cares), `oauth_login_cmd::open_terminal_with_command` now probes for iTerm2 in `/Applications/iTerm.app` or `~/Applications/iTerm.app` and spawns it via `osascript` (`tell application "iTerm" to create window with default profile command "<cmd>"`). If iTerm2 is missing or its `osascript` invocation fails, the function falls back to Apple Terminal.app — same behavior as before.
-
-Implementation: `desktop/src-tauri/src/oauth_login_cmd.rs::open_terminal_with_command` (macOS branch refactored into `iterm2_installed`, `spawn_iterm2`, `spawn_apple_terminal`).
+Implementation: `containers/osc52-copy.sh`, `containers/Containerfile.claude`
+(image-time `COPY` + symlinks), `desktop/src-tauri/src/clipboard_bridge.rs`,
+`desktop/src-tauri/src/oauth_login_cmd.rs`, `_tests/entrypoint/osc52-copy.bats`.
 
 ## Implementation
 
 - `crates/speedwave-cli/src/main.rs` — `CliAction::Login`/`CliAction::Logout` dispatch
+- `crates/speedwave-runtime/src/claude_home.rs` — `claude_home_dir()` (compose mount + CLI) and `remove_claude_credentials()` (logout); SSOT for the per-project claude-home path layout
+- `crates/speedwave-runtime/src/consts.rs` — `CLAUDE_HOME_SUBDIR` constant
 - `containers/entrypoint.sh` — pre-creates `~/.claude.json`
-- `desktop/src-tauri/src/oauth_login_cmd.rs` — `start_oauth_login` Tauri command + per-OS terminal spawn
-- `desktop/src-tauri/src/clipboard_bridge.rs` — host clipboard watcher
-- `desktop/src-tauri/src/auth_commands.rs` (`get_auth_status`, `build_auth_command_for_platform`) — Desktop integration
+- `containers/osc52-copy.sh` + `containers/Containerfile.claude` — clipboard wrapper symlinks
+- `desktop/src-tauri/src/oauth_login_cmd.rs` — `start_oauth_login` Tauri command, per-OS terminal spawn, `$SHELL` sanitisation for the iTerm2 path
+- `desktop/src-tauri/src/clipboard_bridge.rs` — host clipboard watcher (size-capped, deduplicated)
+- `desktop/src-tauri/src/path_util.rs` — shared `which_in_path` helper
+- `desktop/src-tauri/src/auth_commands.rs` (`get_auth_status`, `build_auth_command_for_platform`, `resolve_project_dirs`) — Desktop integration
 - `desktop/src/src/app/settings/auth-terminal.component.ts` — primary "Open terminal" button + secondary copy fallback
 
 ## References

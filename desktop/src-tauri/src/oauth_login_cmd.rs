@@ -1,15 +1,17 @@
 //! Tauri command: open the host's terminal application running
 //! `speedwave login` for the chosen project.
 //!
-//! Why a system terminal? `claude setup-token` (the OAuth interactive flow we
-//! delegate to inside the container) requires a real TTY. Tauri commands have
-//! no TTY, and embedding xterm.js + node-pty would add a heavy frontend
+//! Why a system terminal? Claude Code's `/login` (the OAuth interactive flow
+//! the user triggers at the TUI prompt) requires a real TTY. Tauri commands
+//! have no TTY, and embedding xterm.js + node-pty would add a heavy frontend
 //! dependency just to host one interactive command. Spawning the OS-native
 //! terminal keeps the host invariants (no PTY in the desktop), reuses the CLI
 //! TTY path that already works, and gives the user an experience identical to
-//! "open Terminal and run …" but without copy-paste friction.
+//! "open Terminal and run …" but without copy-paste friction. The actual
+//! OAuth flow itself happens inside Claude Code in the container — Speedwave
+//! never sees or stores the token.
 
-use crate::auth_commands::build_auth_command_for_platform;
+use crate::auth_commands::{build_auth_command_for_platform, resolve_project_dirs};
 use crate::types::check_project;
 
 /// Returns true when `s` contains any control character (`< 0x20` or DEL).
@@ -31,17 +33,39 @@ pub(crate) fn escape_for_applescript(s: &str) -> anyhow::Result<String> {
     Ok(s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Delegates to `auth_commands::build_auth_command_for_platform` — the two
-/// surfaces (`get_auth_command` for copy-paste, `start_oauth_login` for
-/// auto-spawn) must produce identical strings, so we share one renderer.
-pub(crate) fn build_login_command_str(
-    project: &str,
-    project_dir: &str,
-    data_dir: &std::path::Path,
-    default_data_dir: Option<&std::path::Path>,
-    is_windows: bool,
-) -> String {
-    build_auth_command_for_platform(project, project_dir, data_dir, default_data_dir, is_windows)
+const DEFAULT_LOGIN_SHELL: &str = "/bin/zsh";
+
+/// Whether `s` is a plain absolute path safe to use as argv[0] in iTerm2's
+/// word-split `command "<str>"` — i.e. no whitespace, no shell metacharacters.
+#[cfg(target_os = "macos")]
+fn is_safe_shell_path(s: &str) -> bool {
+    s.starts_with('/')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'.' | b'-'))
+}
+
+/// Validates a candidate shell path (typically `$SHELL`), falling back to
+/// `DEFAULT_LOGIN_SHELL` when it's missing or not a plain absolute path.
+/// Pure — takes the candidate so it's testable without mutating the env.
+#[cfg(target_os = "macos")]
+fn sanitize_login_shell(candidate: Option<&str>) -> String {
+    match candidate {
+        Some(s) if is_safe_shell_path(s) => s.to_string(),
+        Some(s) => {
+            log::warn!(
+                "SHELL='{s}' is not a plain absolute path; using {DEFAULT_LOGIN_SHELL} for iTerm2 spawn"
+            );
+            DEFAULT_LOGIN_SHELL.to_string()
+        }
+        None => DEFAULT_LOGIN_SHELL.to_string(),
+    }
+}
+
+/// Returns a login shell to wrap the command in for iTerm2 — `$SHELL` if it is
+/// a plain absolute path, otherwise `/bin/zsh` (macOS default).
+#[cfg(target_os = "macos")]
+fn safe_login_shell() -> String {
+    sanitize_login_shell(std::env::var("SHELL").ok().as_deref())
 }
 
 /// True iff `iTerm.app` exists in any of `roots`. Pure path check — testable
@@ -72,7 +96,7 @@ fn spawn_iterm2(cmd: &str) -> anyhow::Result<()> {
     // We do NOT chain a follow-up interactive shell — Claude is the foreground
     // process that owns the TTY for the entire session. iTerm2 closes the
     // window on shell exit per its profile setting.
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let shell = safe_login_shell();
     let inner_escaped = cmd.replace('\'', "'\\''");
     let wrapped = format!("{shell} -ilc '{inner_escaped}'");
     let escaped = escape_for_applescript(&wrapped)?;
@@ -113,22 +137,29 @@ fn spawn_apple_terminal(cmd: &str) -> anyhow::Result<()> {
 #[cfg(target_os = "macos")]
 fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     if iterm2_installed() {
-        if let Err(e) = spawn_iterm2(cmd) {
-            log::warn!("iTerm2 spawn failed ({e}); falling back to Apple Terminal");
-            return spawn_apple_terminal(cmd);
+        match spawn_iterm2(cmd) {
+            Ok(()) => return Ok(()),
+            Err(iterm_err) => {
+                log::warn!("iTerm2 spawn failed ({iterm_err}); falling back to Apple Terminal");
+                return spawn_apple_terminal(cmd).map_err(|apple_err| {
+                    anyhow::anyhow!(
+                        "iTerm2 failed ({iterm_err}); Apple Terminal also failed: {apple_err}"
+                    )
+                });
+            }
         }
-        return Ok(());
     }
     spawn_apple_terminal(cmd)
 }
 
-/// Spawns a new PowerShell console window running `cmd`. `build_login_command_str`
-/// emits PowerShell syntax (`Set-Location`, `$env:`, `;`), so we must spawn
-/// PowerShell — not `cmd.exe`. Prefers `pwsh.exe` (PowerShell 7+) when on PATH.
-/// `-NoExit` keeps the window open so the user can read output and paste.
+/// Spawns a new PowerShell console window running `cmd`.
+/// `build_auth_command_for_platform` emits PowerShell syntax (`Set-Location`,
+/// `$env:`, `;`) on Windows, so we must spawn PowerShell — not `cmd.exe`.
+/// Prefers `pwsh.exe` (PowerShell 7+) when on PATH. `-NoExit` keeps the window
+/// open so the user can read output and paste.
 #[cfg(target_os = "windows")]
 fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
-    let ps = if which_in_path("pwsh.exe") {
+    let ps = if crate::path_util::which_in_path("pwsh.exe").is_some() {
         "pwsh.exe"
     } else {
         "powershell.exe"
@@ -142,17 +173,6 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn which_in_path(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .and_then(|p| {
-            std::env::split_paths(&p)
-                .find(|d| d.join(bin).is_file())
-                .map(|_| ())
-        })
-        .is_some()
-}
-
 /// Spawns a Linux terminal running `cmd`. Tries gnome-terminal, konsole, then
 /// xterm in order. After `cmd` completes the user sees a clear success/failure
 /// line, then drops to an interactive shell so they can keep working or close
@@ -161,28 +181,21 @@ fn which_in_path(bin: &str) -> bool {
 fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     let inner = format!("{cmd} && echo 'Login completed.' || echo 'Login failed.'; exec bash");
 
-    // gnome-terminal: -- means "the rest is the command"
-    let r = std::process::Command::new("gnome-terminal")
-        .args(["--", "bash", "-c", &inner])
-        .status();
-    if matches!(r, Ok(s) if s.success()) {
-        return Ok(());
-    }
-
-    // konsole: -e accepts a command-string after argv[0]
-    let r = std::process::Command::new("konsole")
-        .args(["-e", "bash", "-c", &inner])
-        .status();
-    if matches!(r, Ok(s) if s.success()) {
-        return Ok(());
-    }
-
-    // xterm fallback
-    let r = std::process::Command::new("xterm")
-        .args(["-e", "bash", "-c", &inner])
-        .status();
-    if matches!(r, Ok(s) if s.success()) {
-        return Ok(());
+    // (binary, args-before-the-command)
+    let attempts: [(&str, &[&str]); 3] = [
+        ("gnome-terminal", &["--", "bash", "-c"]),
+        ("konsole", &["-e", "bash", "-c"]),
+        ("xterm", &["-e", "bash", "-c"]),
+    ];
+    for (bin, prefix) in attempts {
+        let mut command = std::process::Command::new(bin);
+        command.args(prefix).arg(&inner);
+        match command.status() {
+            Ok(s) if s.success() => return Ok(()),
+            Ok(s) => log::debug!("{bin} exited with status {s}; trying next terminal"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("{bin} spawn error: {e}; trying next terminal"),
+        }
     }
 
     anyhow::bail!(
@@ -200,21 +213,14 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         log::info!("start_oauth_login: project={project}");
 
-        let user_config = speedwave_runtime::config::load_user_config()
-            .map_err(|e| format!("Failed to load config: {e}"))?;
-        let project_dir = user_config
-            .find_project(&project)
-            .map(|p| p.dir.clone())
-            .ok_or_else(|| format!("project '{}' not found in config", project))?;
+        let (project_dir, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
 
-        let data_dir = speedwave_runtime::consts::data_dir();
-        let default_data_dir =
-            dirs::home_dir().map(|h| h.join(speedwave_runtime::consts::DATA_DIR));
-
-        let cmd = build_login_command_str(
+        // Same renderer as get_auth_command's copy-paste fallback, so the
+        // auto-spawned command and the one a user could paste are identical.
+        let cmd = build_auth_command_for_platform(
             &project,
             &project_dir,
-            data_dir,
+            &data_dir,
             default_data_dir.as_deref(),
             cfg!(target_os = "windows"),
         );
@@ -230,8 +236,8 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[cfg(target_os = "macos")]
     use super::*;
-    use std::path::Path;
 
     // -- escape_for_applescript (macOS only) --
 
@@ -286,18 +292,68 @@ mod tests {
         assert!(escape_for_applescript("foo\0bar").is_err());
     }
 
-    // -- build_login_command_str: delegation sanity (full coverage in auth_commands tests) --
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn escape_applescript_rejects_del() {
+        // DEL (0x7f) is in the rejected control-char set.
+        assert!(escape_for_applescript("foo\x7fbar").is_err());
+    }
+
+    // -- sanitize_login_shell (pure; no env mutation) --
 
     #[test]
-    fn build_login_command_str_delegates_to_build_auth_command_for_platform() {
-        let cmd = build_login_command_str(
-            "foo",
-            "/proj",
-            Path::new("/data"),
-            Some(Path::new("/data")),
-            false,
+    #[cfg(target_os = "macos")]
+    fn sanitize_shell_accepts_plain_absolute_path() {
+        assert_eq!(sanitize_login_shell(Some("/bin/bash")), "/bin/bash");
+        assert_eq!(
+            sanitize_login_shell(Some("/usr/local/bin/fish")),
+            "/usr/local/bin/fish"
         );
-        assert_eq!(cmd, "cd '/proj' && speedwave login --project 'foo'");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sanitize_shell_rejects_value_with_spaces() {
+        assert_eq!(
+            sanitize_login_shell(Some("/bin/zsh -c 'echo pwned'")),
+            DEFAULT_LOGIN_SHELL
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sanitize_shell_rejects_semicolon_and_metachars() {
+        assert_eq!(
+            sanitize_login_shell(Some("/bin/zsh;touch /tmp/x")),
+            DEFAULT_LOGIN_SHELL
+        );
+        assert_eq!(
+            sanitize_login_shell(Some("/bin/zsh\"")),
+            DEFAULT_LOGIN_SHELL
+        );
+        assert_eq!(
+            sanitize_login_shell(Some("/bin/zsh$(id)")),
+            DEFAULT_LOGIN_SHELL
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sanitize_shell_rejects_relative_path() {
+        assert_eq!(sanitize_login_shell(Some("zsh")), DEFAULT_LOGIN_SHELL);
+        assert_eq!(sanitize_login_shell(Some("bin/zsh")), DEFAULT_LOGIN_SHELL);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sanitize_shell_falls_back_when_unset() {
+        assert_eq!(sanitize_login_shell(None), DEFAULT_LOGIN_SHELL);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sanitize_shell_rejects_empty_string() {
+        assert_eq!(sanitize_login_shell(Some("")), DEFAULT_LOGIN_SHELL);
     }
 
     // -- iterm2_installed --

@@ -179,6 +179,24 @@ fn build_auth_command(
     )
 }
 
+/// Resolves the inputs both auth surfaces need: the project's directory (from
+/// user config), the active data dir, and the default data dir (for the
+/// `SPEEDWAVE_DATA_DIR` pin decision). Shared so `get_auth_command` (copy-paste)
+/// and `start_oauth_login` (auto-spawn) cannot drift.
+pub(crate) fn resolve_project_dirs(
+    project: &str,
+) -> Result<(String, std::path::PathBuf, Option<std::path::PathBuf>), String> {
+    let user_config = speedwave_runtime::config::load_user_config()
+        .map_err(|e| format!("Failed to load config: {e}"))?;
+    let project_dir = user_config
+        .find_project(project)
+        .map(|p| p.dir.clone())
+        .ok_or_else(|| format!("project '{project}' not found in config"))?;
+    let data_dir = speedwave_runtime::consts::data_dir().clone();
+    let default_data_dir = dirs::home_dir().map(|h| h.join(speedwave_runtime::consts::DATA_DIR));
+    Ok((project_dir, data_dir, default_data_dir))
+}
+
 /// Returns a CLI command string for the user to copy into their terminal
 /// to authenticate with Claude Code.
 ///
@@ -191,22 +209,11 @@ pub async fn get_auth_command(project: String) -> Result<String, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         log::info!("get_auth_command: project={project}");
-
-        let user_config = speedwave_runtime::config::load_user_config()
-            .map_err(|e| format!("Failed to load config: {e}"))?;
-        let project_dir = user_config
-            .find_project(&project)
-            .map(|p| p.dir.clone())
-            .ok_or_else(|| format!("project '{}' not found in config", project))?;
-
-        let data_dir = speedwave_runtime::consts::data_dir();
-        let default_data_dir =
-            dirs::home_dir().map(|h| h.join(speedwave_runtime::consts::DATA_DIR));
-
+        let (project_dir, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
         Ok(build_auth_command(
             &project,
             &project_dir,
-            data_dir,
+            &data_dir,
             default_data_dir.as_deref(),
         ))
     })

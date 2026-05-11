@@ -29,6 +29,7 @@ mod mcp_os_process;
 mod oauth_cmd;
 mod oauth_login_cmd;
 mod patch_emitter;
+mod path_util;
 mod plugin_cmd;
 mod queue_cmd;
 mod reconcile;

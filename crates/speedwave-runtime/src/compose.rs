@@ -48,7 +48,7 @@ pub fn render_compose(
     crate::validation::validate_project_name(project_name)?;
     let data_dir = consts::data_dir();
     let tokens_dir = resolve_tokens_dir(project_name);
-    let claude_home = data_dir.join("claude-home").join(project_name);
+    let claude_home = crate::claude_home::claude_home_dir(data_dir, project_name);
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
@@ -569,8 +569,9 @@ fn apply_plugins(
 /// Injects the Anthropic API key (legacy credential) into the `claude`
 /// service environment when one is stored at
 /// `secrets/<project>/anthropic_api_key`. OAuth credentials are managed by
-/// Claude Code itself inside the `CLAUDE_HOME` mount (~/.claude/.credentials.json)
-/// — Speedwave does not touch them. See ADR-051.
+/// Claude Code itself inside the `CLAUDE_HOME` bind-mount — Speedwave never
+/// reads or writes them. On the host they live at
+/// `<data_dir>/claude-home/<project>/.claude/.credentials.json`. See ADR-051.
 pub fn apply_auth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     apply_auth_config_in(yaml, project, consts::data_dir())
 }
