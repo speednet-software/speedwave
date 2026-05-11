@@ -621,31 +621,35 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         std::fs::write(dir.join("plugin.json"), r#"{"name":"ok"}"#).unwrap();
-        // Sign with a non-Speednet key — verify_plugin_signature_cached will
-        // reject (and cache the rejection) because the embedded prod key
-        // doesn't match. The point is to check that the cache observes the
-        // post-tamper state, not to assert success.
+        // Sign with a non-Speednet key — verify_plugin_signature_cached
+        // rejects (and caches the rejection) because the embedded prod
+        // key doesn't match. We're checking that the *cached digest*
+        // tracks the on-disk content, not the verdict value.
         let _pk = sign_with_fresh_key(dir);
-        let first = verify_plugin_signature_cached(dir);
-        assert!(first.is_err(), "non-prod-key signature must be rejected");
+        assert!(verify_plugin_signature_cached(dir).is_err());
+        let key = cache_key(dir).expect("dir must canonicalize");
+        let digest_before = cache()
+            .lock()
+            .unwrap()
+            .get(&key)
+            .expect("cache populated after first verify")
+            .content_digest;
 
-        // Tamper. Cache key is `(canonical_path, content_digest)` — a
-        // content change forces a re-verify, which still fails (different
-        // digest, signature won't match), but the *verdict path* must run
-        // again. We confirm by clearing the cache and asserting parity:
-        // re-verify after invalidation matches behaviour after content
-        // change (both go through the full Ed25519 path).
+        // Tamper. The cache is keyed by `(canonical_path, content_digest)`;
+        // changing a file changes the digest, so the next verify must
+        // recompute and overwrite the cache entry — not short-circuit on
+        // the stale one.
         std::fs::write(dir.join("plugin.json"), r#"{"name":"changed"}"#).unwrap();
-        let second = verify_plugin_signature_cached(dir);
-        assert!(second.is_err());
+        assert!(verify_plugin_signature_cached(dir).is_err());
+        let digest_after = cache()
+            .lock()
+            .unwrap()
+            .get(&key)
+            .expect("cache still populated after re-verify")
+            .content_digest;
         assert_ne!(
-            first.as_ref().err().map(|e| e.to_string()),
-            second
-                .as_ref()
-                .err()
-                .map(|e| e.to_string())
-                .map(|_| String::new()),
-            "verdict should be recomputed for new content (sanity)"
+            digest_before, digest_after,
+            "content change must force the cache to store a fresh digest"
         );
     }
 

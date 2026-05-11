@@ -635,10 +635,9 @@ pub(crate) fn validate_manifest(
     // are sourced from `consts::RESERVED_ENV_KEYS` and rejected case-insensitively.
     if let Some(ref env) = manifest.extra_env {
         for (k, v) in env {
-            let k_upper = k.to_ascii_uppercase();
             if consts::RESERVED_ENV_KEYS
                 .iter()
-                .any(|reserved| reserved.eq_ignore_ascii_case(&k_upper))
+                .any(|reserved| reserved.eq_ignore_ascii_case(k))
             {
                 anyhow::bail!(
                     "extra_env key '{}' is reserved (auto-injected by Speedwave or a dangerous runtime hijack vector)",
@@ -1569,6 +1568,9 @@ fn build_pending_from_dir(
             continue;
         }
         let slug = entry.file_name().to_string_lossy().to_string();
+        if is_transient_plugin_dir(&slug) {
+            continue;
+        }
         let plugin_dir = entry.path();
         // Pending markers may live in two places: the new state directory
         // (`<plugin-state-base>/<slug>/image_pending`, written by installs
@@ -4635,7 +4637,7 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_mem_limit_exceeding_cap() {
-        // 999g exceeds PLUGIN_MEM_LIMIT_MAX_MIB (8192 MiB = 8 GiB).
+        // 999g (≈ 1 TiB) far exceeds PLUGIN_MEM_LIMIT_MAX_MIB.
         let dir = tempfile::tempdir().unwrap();
         let manifest = PluginManifest {
             name: "Test".to_string(),

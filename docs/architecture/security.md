@@ -49,7 +49,7 @@ When implementing any feature, ask these questions:
 
 ### Local attacker with home-directory write access
 
-Speedwave's threat model includes a non-privileged process running as the same user — a malicious npm `postinstall` script, a browser exploit, or any locally-executed code that can write under `~/`. The container hardening above stops a *compromised container* from escaping; it does not stop a *host* process from rewriting the files Speedwave reads.
+Speedwave's threat model includes a non-privileged process running as the same user — a malicious npm `postinstall` script, a browser exploit, or any locally-executed code that can write under `~/`. The container hardening above stops a _compromised container_ from escaping; it does not stop a _host_ process from rewriting the files Speedwave reads.
 
 `~/.speedwave/plugins/<slug>/` is writable by the user, so any path that reads from it is in this attacker's reach. Plugin Ed25519 signatures are therefore enforced as a **runtime invariant**, not just an install gate (see [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md)):
 
@@ -153,6 +153,18 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 | `PLUGIN_NO_EXTRA_VOLUMES`        | Plugin services | No volumes beyond `/tokens` and `/workspace`                                    |
 | `PLUGIN_MISSING_TOKENS_MOUNT`    | Plugin services | `/tokens` mount is present                                                      |
 | `PLUGIN_MISSING_WORKSPACE_MOUNT` | Plugin services | `/workspace` mount is present                                                   |
+
+### Plugin Manifest Validation
+
+`validate_manifest` (`crates/speedwave-runtime/src/plugin.rs`) is run both at install time and at every load-side path (compose render, image build). Beyond the basic slug/version/format checks it enforces:
+
+- **`extra_env` reserved keys** — a plugin must not inject env vars that Speedwave reserves (`PORT`, auto-injected) or that are dynamic-linker / language-runtime / shell-environment hijack vectors (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is `consts::RESERVED_ENV_KEYS` (SSOT — see CLAUDE.md), matched case-insensitively.
+- **`token_mount: read_write`** — rejected unconditionally for plugins. `:rw` is reserved for built-in services (currently SharePoint only, for OAuth refresh — [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)). Built-in service slugs are blocked earlier in the function, so any plugin reaching this check is by definition unauthorised.
+- **`mem_limit` / `cpu_limit`** — parsed numerically and bounded by `PLUGIN_MEM_LIMIT_MAX_MIB` / `PLUGIN_CPU_LIMIT_MAX`. An explicit `0` (Docker's "no limit") is rejected so a plugin cannot bypass the cap.
+- **Slug collision** — a slug whose derived compose name (`mcp-<slug>`) or whose bare form matches a built-in service is rejected, so a plugin cannot shadow `mcp-hub`, `claude`, etc. via a silent YAML-mapping overwrite.
+- **`settings_schema`** — must be a JSON object ≤ 64 KiB. Full Draft-7 validation of saved settings happens desktop-side in `plugin_save_settings` (the runtime crate has no JSON-Schema dependency).
+
+See [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md) for the full rationale and the runtime-invariant model.
 
 ### SharePoint Volume Rules
 
