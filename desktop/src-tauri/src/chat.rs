@@ -3925,6 +3925,7 @@ mod tests {
             projects: vec![],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         let result = ChatSession::prepare_args("nonexistent", &user_config, None, None);
@@ -3948,6 +3949,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         let result =
@@ -3967,6 +3969,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         let result = ChatSession::prepare_args(
@@ -3990,6 +3993,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         let result = ChatSession::prepare_args("myproject", &user_config, None, None);
@@ -4011,6 +4015,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
@@ -4034,6 +4039,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";

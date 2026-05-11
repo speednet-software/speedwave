@@ -32,7 +32,7 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
-        build-native-macos build-os-cli bundle-native-assets verify-bundled-assets \
+        build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
@@ -214,6 +214,7 @@ build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nod
 	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@scripts/bundle-build-context.sh
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
+	@$(MAKE) bundle-static-licenses
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe
@@ -255,6 +256,16 @@ test-swift:
 
 bundle-native-assets:
 	@scripts/bundle-native-assets.sh
+
+# Copy the static third-party licenses we keep in-repo (whisper.cpp, sherpa-onnx,
+# onnxruntime, cpal, transcription model weights — ADR-056) into the bundled
+# THIRD-PARTY-LICENSES/ dir, alongside the lima/nodejs/nerdctl licenses the
+# download-* targets fetch there. The static dir is VCS-tracked; the bundled
+# dir is generated.
+bundle-static-licenses:
+	@mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
+	@cp desktop/src-tauri/licenses-static/* desktop/src-tauri/THIRD-PARTY-LICENSES/
+	@echo "✅ Static third-party licenses copied into THIRD-PARTY-LICENSES/"
 
 verify-bundled-assets:
 ifeq ($(OS),Windows_NT)

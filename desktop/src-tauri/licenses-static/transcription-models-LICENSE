@@ -1,0 +1,32 @@
+Speech-recognition and speaker-diarization model weights downloaded on demand
+by Speedwave's meeting-transcription feature. These files are NOT bundled in
+the installer — they are fetched (with SHA-256 verification) from the upstream
+hosts listed below the first time the user enables a model, and stored under
+`~/.speedwave/models/`.
+
+--- Whisper speech-to-text weights (ggml format) ---
+
+OpenAI Whisper model weights, repackaged in whisper.cpp's `ggml` format.
+
+Upstream: https://huggingface.co/ggerganov/whisper.cpp
+Original model: https://github.com/openai/whisper
+License: MIT (OpenAI's Whisper models are released under the MIT license; the
+ggml repackaging adds no additional restrictions).
+
+--- Speaker-diarization models (ONNX) ---
+
+The diarization pipeline uses two ONNX models published by k2-fsa as
+"sherpa-onnx pretrained models":
+
+  * a speaker-segmentation model derived from pyannote/segmentation-3.0
+  * a speaker-embedding model derived from NVIDIA NeMo's TitaNet
+
+Upstream: https://github.com/k2-fsa/sherpa-onnx/releases (speaker-segmentation
+and speaker-embedding archives)
+Underlying model licenses:
+  * pyannote segmentation: MIT
+  * NeMo TitaNet embedding: CC-BY-4.0 (NVIDIA NeMo model card)
+
+Speedwave only downloads and runs these weights locally; it does not
+redistribute them. If you redistribute a copy of `~/.speedwave/models/`, the
+above licenses apply to the respective files.

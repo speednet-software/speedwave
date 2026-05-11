@@ -4,7 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${1:-$REPO_ROOT/desktop/src-tauri}"
-PACKAGES=(reminders calendar mail notes)
+PACKAGES=(reminders calendar mail notes audio-capture)
 
 if [[ "$(uname)" != "Darwin" ]]; then
   echo "Skipping native asset bundling on non-macOS host"

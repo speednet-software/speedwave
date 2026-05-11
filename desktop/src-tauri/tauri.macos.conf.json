@@ -12,7 +12,8 @@
       "reminders-cli": "reminders-cli",
       "calendar-cli": "calendar-cli",
       "mail-cli": "mail-cli",
-      "notes-cli": "notes-cli"
+      "notes-cli": "notes-cli",
+      "audio-capture-cli": "audio-capture-cli"
     }
   }
 }

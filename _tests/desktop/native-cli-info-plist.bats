@@ -27,19 +27,22 @@ setup() {
     fi
     REPO_ROOT="$BATS_TEST_DIRNAME/../.."
     # Sub-identifier mapping — must match SharedCLI/Utilities.swift::subBundleIdentifier
+    # (and, for audio-capture, native/macos/audio-capture/Resources/Info.plist).
     declare -gA EXPECTED_BUNDLE_ID=(
         [calendar]="pl.speedwave.desktop.calendar"
         [reminders]="pl.speedwave.desktop.reminders"
         [mail]="pl.speedwave.desktop.mail"
         [notes]="pl.speedwave.desktop.notes"
+        [audio-capture]="pl.speedwave.desktop.audio-capture"
     )
     declare -gA EXPECTED_USAGE_KEY=(
         [calendar]="NSCalendarsFullAccessUsageDescription"
         [reminders]="NSRemindersFullAccessUsageDescription"
         [mail]="NSAppleEventsUsageDescription"
         [notes]="NSAppleEventsUsageDescription"
+        [audio-capture]="NSAudioCaptureUsageDescription"
     )
-    SERVICES=(calendar reminders mail notes)
+    SERVICES=(calendar reminders mail notes audio-capture)
 }
 
 # Returns the path to the binary for a service, picking universal first then arch-specific.

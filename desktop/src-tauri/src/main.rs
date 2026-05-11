@@ -1620,6 +1620,10 @@ fn main() {
             // CloudStorage TCC
             system_settings_cmd::open_files_folders_pane,
             cloudstorage_cmd::detect_cloudstorage_path,
+            // Meeting-transcription TCC (ADR-056) — deep-links to the macOS
+            // Microphone / Audio Recording privacy panes for permission recovery.
+            system_settings_cmd::open_microphone_pane,
+            system_settings_cmd::open_audio_capture_pane,
         ])
         .on_window_event(move |window, event| {
             match event {
@@ -2051,6 +2055,7 @@ mod tests {
             ],
             active_project: Some("alpha".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
         }
     }
@@ -2121,6 +2126,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 

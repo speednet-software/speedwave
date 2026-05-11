@@ -85,6 +85,7 @@ desktop/src-tauri/calendar-cli
 desktop/src-tauri/mail-cli
 desktop/src-tauri/notes-cli
 desktop/src-tauri/reminders-cli
+desktop/src-tauri/audio-capture-cli
 
 # Bundled container build context and mcp-os (copied before Tauri build)
 desktop/src-tauri/build-context/
