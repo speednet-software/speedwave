@@ -14,8 +14,14 @@ Output: {"ok": true, ...} (metadata adds {"metadata": {...}}).
 from __future__ import annotations
 
 import json
+import sys
 
-from script_runner import main, ok, fail
+from script_runner import atomic_save, main, ok, fail
+
+
+def _write_pdf(writer, dest: str) -> None:
+    """Write a pypdf ``PdfWriter`` to ``dest`` atomically (tmp file + rename)."""
+    atomic_save(dest, lambda p: writer.write(p))
 
 
 def _open_reader(path: str):
@@ -48,8 +54,7 @@ def _merge(output: str, inputs: list[str]) -> None:
     for path in inputs:
         for page in _open_reader(path).pages:
             writer.add_page(page)
-    with open(output, "wb") as fh:
-        writer.write(fh)
+    _write_pdf(writer, output)
     ok(path=output, pages=len(writer.pages))
 
 
@@ -65,8 +70,7 @@ def _split(src: str, output: str, start: int, end: int) -> None:
     writer = PdfWriter()
     for i in range(start - 1, end):
         writer.add_page(reader.pages[i])
-    with open(output, "wb") as fh:
-        writer.write(fh)
+    _write_pdf(writer, output)
     ok(path=output, pages=len(writer.pages))
 
 
@@ -89,8 +93,7 @@ def _rotate(src: str, output: str, degrees: int, pages_csv: str) -> None:
         if idx in pages:
             page.rotate(degrees)
         writer.add_page(page)
-    with open(output, "wb") as fh:
-        writer.write(fh)
+    _write_pdf(writer, output)
     ok(path=output, rotated=sorted(pages))
 
 
@@ -106,8 +109,7 @@ def _watermark(src: str, watermark: str, output: str) -> None:
     for page in reader.pages:
         page.merge_page(stamp)
         writer.add_page(page)
-    with open(output, "wb") as fh:
-        writer.write(fh)
+    _write_pdf(writer, output)
     ok(path=output, pages=len(writer.pages))
 
 
@@ -123,8 +125,11 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
             writer.update_page_form_field_values(page, str_fields, auto_regenerate=False)
         except Exception:  # noqa: BLE001 — a page without form fields is fine; keep going
             pass
+    flattened = False
     if flatten:
         # Best-effort flatten: drop the AcroForm so values render as static content.
+        # Touches a private pypdf attribute (`_root_object`); if a pypdf upgrade renames it this
+        # silently degrades to a non-flat form, so emit a warning on stderr (the worker surfaces it).
         try:
             from pypdf.generic import NameObject
 
@@ -133,11 +138,13 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
                     {NameObject("/NeedAppearances"): writer._root_object["/AcroForm"].get("/NeedAppearances", False)}
                 )
             writer.set_need_appearances_writer(True)
-        except Exception:  # noqa: BLE001 — flatten is opportunistic
-            pass
-    with open(output, "wb") as fh:
-        writer.write(fh)
-    ok(path=output, fields=list(str_fields.keys()))
+            flattened = True
+        except Exception as exc:  # noqa: BLE001 — flatten is opportunistic; report and continue
+            sys.stderr.write(
+                f"warning: could not flatten AcroForm ({type(exc).__name__}: {exc}); returning a non-flat form\n"
+            )
+    _write_pdf(writer, output)
+    ok(path=output, fields=list(str_fields.keys()), flattened=flattened)
 
 
 def _run(argv: list[str]) -> None:

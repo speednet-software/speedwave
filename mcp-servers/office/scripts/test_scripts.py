@@ -390,3 +390,32 @@ def test_python_docx_extract(tmp_path: Path) -> None:
 
 def test_python_docx_extract_usage_error(tmp_path: Path) -> None:
     run_script_expect_fail("python_docx_extract.py")  # missing arg
+
+
+# ── weasyprint_render.py ─────────────────────────────────────────────────────
+
+
+def test_weasyprint_render_usage_error(tmp_path: Path) -> None:
+    # Usage validation runs before weasyprint is imported, so this works on any interpreter.
+    run_script_expect_fail("weasyprint_render.py")  # no args
+    run_script_expect_fail("weasyprint_render.py", "only-one-arg")
+
+
+@needs_matplotlib  # weasyprint and matplotlib share the cairo/pango stack; if matplotlib renders, weasyprint can too
+def test_weasyprint_render_html_to_pdf(tmp_path: Path) -> None:
+    pytest.importorskip("weasyprint", reason="weasyprint not installed")
+    src = tmp_path / "page.html"
+    src.write_text("<html><head><style>@page{size:A4;margin:18mm}</style></head><body><h1>Hi</h1></body></html>")
+    dst = tmp_path / "out.pdf"
+    run_script("weasyprint_render.py", str(src), str(dst), f"file://{tmp_path}/")
+    assert is_pdf(dst)
+
+
+@needs_matplotlib
+def test_weasyprint_render_rejects_remote_resource(tmp_path: Path) -> None:
+    pytest.importorskip("weasyprint", reason="weasyprint not installed")
+    src = tmp_path / "page.html"
+    src.write_text('<html><body><img src="https://example.com/x.png"></body></html>')
+    dst = tmp_path / "out.pdf"
+    # WeasyPrint surfaces the url_fetcher ValueError → the script exits non-zero.
+    run_script_expect_fail("weasyprint_render.py", str(src), str(dst), f"file://{tmp_path}/")

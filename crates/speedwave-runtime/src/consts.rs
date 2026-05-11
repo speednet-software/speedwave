@@ -1001,6 +1001,7 @@ mod tests {
             ("gitlab", 2),
             ("github", 1),
             ("atlassian", 5),
+            ("office", 0),
             ("playwright", 0),
         ];
         for &(key, count) in expected {

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from script_runner import main, ok, fail
+from script_runner import atomic_save, main, ok, fail
 
 
 def _chart_class(kind: str):
@@ -77,7 +77,7 @@ def _create(output: str, spec: dict) -> None:
         fail("spec.sheets must be non-empty")
     for i, sheet_spec in enumerate(sheets):
         _write_sheet(wb, sheet_spec, first=(i == 0))
-    wb.save(output)
+    atomic_save(output, wb.save)
     ok(path=output)
 
 
@@ -101,7 +101,7 @@ def _edit(src: str, output: str, ops: list) -> None:
             _add_chart(ws, op["chart"])
         else:
             fail(f"unknown op: {kind}")
-    wb.save(output)
+    atomic_save(output, wb.save)
     ok(path=output)
 
 

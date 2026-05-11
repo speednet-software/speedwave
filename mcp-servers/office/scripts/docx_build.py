@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from script_runner import main, ok, fail
+from script_runner import atomic_save, main, ok, fail
 
 
 def _add_element(doc, el: dict) -> None:
@@ -49,7 +49,7 @@ def _create(output: str, spec: dict) -> None:
     doc = Document()
     for el in spec.get("elements", []):
         _add_element(doc, el)
-    doc.save(output)
+    atomic_save(output, doc.save)
     ok(path=output)
 
 
@@ -87,7 +87,7 @@ def _edit(src: str, output: str, ops: list) -> None:
             el.getparent().remove(el)
         else:
             fail(f"unknown op: {kind}")
-    doc.save(output)
+    atomic_save(output, doc.save)
     ok(path=output)
 
 

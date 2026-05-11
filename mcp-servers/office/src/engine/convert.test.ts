@@ -6,32 +6,39 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { resolveInputFile, resolveOutputPath, atomicMoveOnto, runOk, fakeFs, readdir } = vi.hoisted(
-  () => ({
-    resolveInputFile: vi.fn(async (p: string) => `/workspace/${p}`),
-    resolveOutputPath: vi.fn(
-      async (n: string | undefined, base: string) => `/workspace/.speedwave-office/${n ?? base}`
-    ),
-    atomicMoveOnto: vi.fn(async () => undefined),
-    runOk: vi.fn(async () => ({
-      code: 0,
-      stdout: '<p>html</p>',
-      stderr: '',
-      stdoutTruncated: false,
-      stderrTruncated: false,
-      timedOut: false,
-    })),
-    fakeFs: {} as Record<string, string>,
-    readdir: vi.fn(async () => ['out.pdf'] as string[]),
-  })
-);
+const {
+  resolveInputFile,
+  resolveOutputPath,
+  atomicMoveOnto,
+  runOk,
+  runPythonScript,
+  fakeFs,
+  readdir,
+} = vi.hoisted(() => ({
+  resolveInputFile: vi.fn(async (p: string) => `/workspace/${p}`),
+  resolveOutputPath: vi.fn(
+    async (n: string | undefined, base: string) => `/workspace/.speedwave-office/${n ?? base}`
+  ),
+  atomicMoveOnto: vi.fn(async () => undefined),
+  runOk: vi.fn(async () => ({
+    code: 0,
+    stdout: '<p>html</p>',
+    stderr: '',
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    timedOut: false,
+  })),
+  runPythonScript: vi.fn(async () => ({ ok: true })),
+  fakeFs: {} as Record<string, string>,
+  readdir: vi.fn(async () => ['out.pdf'] as string[]),
+}));
 vi.mock('../path-policy.js', () => ({
   resolveInputFile,
   resolveOutputPath,
   atomicMoveOnto,
   PathPolicyError: class PathPolicyError extends Error {},
 }));
-vi.mock('../subprocess.js', () => ({ runOk }));
+vi.mock('../subprocess.js', () => ({ runOk, runPythonScript }));
 vi.mock('../lo-queue.js', () => ({ libreOfficeQueue: { run: <T>(fn: () => Promise<T>) => fn() } }));
 vi.mock('../config.js', () => ({ TIMEOUT_LIBREOFFICE_MS: 1000, MAX_INLINE_BYTES: 100 }));
 vi.mock('node:fs/promises', async (orig) => {
@@ -62,6 +69,8 @@ import {
 
 beforeEach(() => {
   runOk.mockClear();
+  runPythonScript.mockClear();
+  runPythonScript.mockResolvedValue({ ok: true });
   resolveInputFile.mockClear();
   resolveOutputPath.mockClear();
   atomicMoveOnto.mockClear();
@@ -73,10 +82,10 @@ beforeEach(() => {
 });
 
 describe('markdownToPdf', () => {
-  it('accepts inline markdown, runs pandoc then the weasyprint shim', async () => {
+  it('accepts inline markdown, runs pandoc then the weasyprint render script', async () => {
     const r = await markdownToPdf({ markdown: '# Hi' }, 'doc.pdf');
     expect(r).toMatchObject({ format: 'pdf', bytes: 321 });
-    // pandoc + python weasyprint shim each invoked.
+    // pandoc converts md→html, then weasyprint_render.py renders html→pdf.
     expect(runOk).toHaveBeenCalledWith('pandoc', [
       '-f',
       'markdown',
@@ -84,10 +93,14 @@ describe('markdownToPdf', () => {
       'html',
       expect.stringMatching(/office-in-.*\.md$/),
     ]);
-    expect(runOk).toHaveBeenCalledWith(
-      expect.stringContaining('python3'),
-      expect.arrayContaining([expect.stringMatching(/weasy-shim-.*\.py$/)])
+    expect(runPythonScript).toHaveBeenCalledWith(
+      'weasyprint_render.py',
+      expect.arrayContaining([
+        expect.stringMatching(/office-html-.*\.html$/),
+        expect.stringMatching(/office-pdf-.*\.pdf$/),
+      ])
     );
+    expect(atomicMoveOnto).toHaveBeenCalled();
   });
 
   it('accepts a path input', async () => {
@@ -121,19 +134,19 @@ describe('htmlToPdf', () => {
     fakeFs['/workspace/frag.html'] = '<p>just a fragment</p>';
     resolveInputFile.mockResolvedValueOnce('/workspace/frag.html');
     await htmlToPdf({ path: 'frag.html' });
-    expect(runOk).toHaveBeenCalled();
+    expect(runPythonScript).toHaveBeenCalledWith('weasyprint_render.py', expect.any(Array));
   });
 
   it('leaves a full document without a head untouched (no head to inject into)', async () => {
     fakeFs['/workspace/nohead.html'] = '<html><body>no head</body></html>';
     resolveInputFile.mockResolvedValueOnce('/workspace/nohead.html');
     await htmlToPdf({ path: 'nohead.html' });
-    expect(runOk).toHaveBeenCalled();
+    expect(runPythonScript).toHaveBeenCalledWith('weasyprint_render.py', expect.any(Array));
   });
 
   it('accepts inline html', async () => {
     await htmlToPdf({ html: '<p>x</p>' });
-    expect(runOk).toHaveBeenCalled();
+    expect(runPythonScript).toHaveBeenCalledWith('weasyprint_render.py', expect.any(Array));
   });
 });
 

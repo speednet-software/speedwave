@@ -8,7 +8,7 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { runOk } from '../subprocess.js';
+import { runOk, runPythonScript } from '../subprocess.js';
 import { libreOfficeQueue } from '../lo-queue.js';
 import { ignoreError } from '../util.js';
 import {
@@ -81,45 +81,20 @@ img { max-width: 100%; }
 </style></head><body>${bodyHtml}</body></html>`;
 }
 
-/** A WeasyPrint `url_fetcher` (passed via a tiny Python shim) that only resolves `file://` URLs under `/workspace`. */
-const WEASYPRINT_LOCALONLY_FETCHER = `
-import sys, weasyprint
-from weasyprint import default_url_fetcher
-def fetcher(url, timeout=10, ssl_context=None):
-    if not url.startswith('file:'):
-        raise ValueError('remote resources are not allowed: ' + url)
-    from urllib.parse import urlparse, unquote
-    p = unquote(urlparse(url).path)
-    import os
-    rp = os.path.realpath(p)
-    if not (rp == '/workspace' or rp.startswith('/workspace/')):
-        raise ValueError('resource outside /workspace: ' + url)
-    return default_url_fetcher(url, timeout=timeout, ssl_context=ssl_context)
-src, dst, base = sys.argv[1], sys.argv[2], sys.argv[3]
-weasyprint.HTML(filename=src, base_url=base, url_fetcher=fetcher).write_pdf(dst)
-print('{"ok": true}')
-`;
-
 /**
- * Render an HTML file to PDF via WeasyPrint, restricting resource loading to `file://` under `/workspace`.
+ * Render an HTML file to PDF via WeasyPrint (`scripts/weasyprint_render.py`), which restricts
+ * resource loading to `file://` under `/workspace` and writes the PDF atomically. The script's
+ * output path is a `/tmp` file we then move onto the validated destination.
  * @param htmlAbs - Absolute path of the source HTML.
  * @param baseUrl - Base URL for resolving relative resources (a `file://` URL under `/workspace`).
  * @param destAbs - Absolute destination path for the PDF (already validated).
  */
 async function htmlFileToPdf(htmlAbs: string, baseUrl: string, destAbs: string): Promise<void> {
   const tmpPdf = path.join(os.tmpdir(), `office-pdf-${randomUUID()}.pdf`);
-  const tmpShim = path.join(os.tmpdir(), `weasy-shim-${randomUUID()}.py`);
-  await fsp.writeFile(tmpShim, WEASYPRINT_LOCALONLY_FETCHER);
   try {
-    await runOk(`${process.env.OFFICE_VENV ?? '/opt/office-venv'}/bin/python3`, [
-      tmpShim,
-      htmlAbs,
-      tmpPdf,
-      baseUrl,
-    ]);
+    await runPythonScript('weasyprint_render.py', [htmlAbs, tmpPdf, baseUrl]);
     await atomicMoveOnto(tmpPdf, destAbs);
   } finally {
-    await fsp.rm(tmpShim, { force: true }).catch(ignoreError);
     await fsp.rm(tmpPdf, { force: true }).catch(ignoreError);
   }
 }
@@ -282,7 +257,7 @@ export const CONVERT_MATRIX: Readonly<Record<string, ReadonlySet<string>>> = {
 async function libreOfficeConvert(srcAbs: string, target: string): Promise<string> {
   return libreOfficeQueue.run(async () => {
     const outDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'office-lo-'));
-    const profile = `file://${path.join(os.tmpdir(), `lo-profile-${randomUUID()}`)}`;
+    const profilePath = path.join(os.tmpdir(), `lo-profile-${randomUUID()}`);
     try {
       await runOk(
         'soffice',
@@ -291,7 +266,7 @@ async function libreOfficeConvert(srcAbs: string, target: string): Promise<strin
           '--norestore',
           '--nologo',
           '--nofirststartwizard',
-          `-env:UserInstallation=${profile}`,
+          `-env:UserInstallation=file://${profilePath}`,
           '--convert-to',
           target,
           '--outdir',
@@ -313,9 +288,7 @@ async function libreOfficeConvert(srcAbs: string, target: string): Promise<strin
     } finally {
       await fsp.rm(outDir, { recursive: true, force: true }).catch(ignoreError);
       // The per-call profile dir is small; clean it up best-effort.
-      await fsp
-        .rm(profile.replace('file://', ''), { recursive: true, force: true })
-        .catch(ignoreError);
+      await fsp.rm(profilePath, { recursive: true, force: true }).catch(ignoreError);
     }
   });
 }

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from script_runner import main, ok, fail
+from script_runner import atomic_save, main, ok, fail
 
 
 _CHART_XL = {
@@ -93,7 +93,7 @@ def _create(output: str, spec: dict) -> None:
         fail("spec.slides must be non-empty")
     for slide_spec in slides:
         _add_slide(prs, slide_spec)
-    prs.save(output)
+    atomic_save(output, prs.save)
     ok(path=output)
 
 
@@ -124,7 +124,7 @@ def _edit(src: str, output: str, ops: list) -> None:
             xml_slides.remove(slide_ids[idx])
         else:
             fail(f"unknown op: {kind}")
-    prs.save(output)
+    atomic_save(output, prs.save)
     ok(path=output)
 
 

@@ -9,9 +9,30 @@ error also on stderr. The TypeScript ``runPythonScript`` helper enforces this co
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
+import uuid
 from typing import Any, Callable
+
+
+def atomic_save(dest: str, write_fn: Callable[[str], None]) -> None:
+    """Write to a sibling ``*.tmp-<uuid>`` via ``write_fn(tmp_path)``, then ``os.replace`` it onto ``dest``.
+
+    Mirrors the TypeScript-layer ``atomicWrite``/``atomicMoveOnto`` so a SIGKILL mid-write leaves
+    either the previous file or the temp file (which is cleaned up), never a half-written ``dest``.
+    ``write_fn`` may be ``open(p, "wb").write`` style or a library's ``save(p)``.
+    """
+    tmp = f"{dest}.tmp-{uuid.uuid4().hex}"
+    try:
+        write_fn(tmp)
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def ok(**fields: Any) -> None:
