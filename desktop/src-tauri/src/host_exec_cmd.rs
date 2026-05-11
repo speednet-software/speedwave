@@ -357,7 +357,19 @@ mod tests {
 
     #[test]
     fn resolve_executable_rejects_paths_and_dotdot() {
-        for bad in ["/usr/bin/docker", "..", "a/b", "x\\y", "", "a\0b"] {
+        // Path separators, `..`, empty, NUL, and line breaks (`\n` / `\r` —
+        // rejected via `host_exec::has_control_chars`) must all be refused;
+        // callers pass a bare command name.
+        for bad in [
+            "/usr/bin/docker",
+            "..",
+            "a/b",
+            "x\\y",
+            "",
+            "a\0b",
+            "a\nb",
+            "a\rb",
+        ] {
             assert!(
                 host_exec_resolve_executable(bad.to_string()).is_err(),
                 "{bad:?} should be rejected (not a bare command name)"
