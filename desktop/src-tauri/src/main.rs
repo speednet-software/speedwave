@@ -19,6 +19,7 @@ mod fs_perms;
 mod git_cmd;
 mod health;
 mod history;
+mod host_exec_cmd;
 mod host_exec_process;
 mod host_path;
 mod http_util;
@@ -993,10 +994,9 @@ fn ensure_mcp_os_running(
 ///
 /// Before spawning, this writes the *current* config snapshot
 /// (`<data_dir>/host-exec/<project>/config.json`, `chmod 600`) from the
-/// resolved config so the worker sees the up-to-date whitelist. (Step 6's
-/// `host_exec_save_settings` re-writes it on edits and respawns; step 5 wires
-/// the hub re-discovery.)
-fn ensure_host_exec_running(
+/// resolved config so the worker sees the up-to-date whitelist.
+/// (`host_exec_cmd::host_exec_save_settings` re-writes it on edits and respawns.)
+pub(crate) fn ensure_host_exec_running(
     host_exec: &SharedHostExec,
     app_handle: &tauri::AppHandle,
     project: &str,
@@ -1089,7 +1089,7 @@ fn ensure_host_exec_running(
 /// Write the `host_exec` config snapshot JSON to `path` with `chmod 600`
 /// (current-user-only ACL on Windows). The snapshot may contain recipe `env`
 /// values (possibly secrets) — ADR-054.
-fn write_host_exec_config_snapshot(
+pub(crate) fn write_host_exec_config_snapshot(
     path: &std::path::Path,
     snapshot: &serde_json::Value,
 ) -> std::io::Result<()> {
@@ -1856,10 +1856,16 @@ fn main() {
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,
-            // host_exec (ADR-054) — settings commands land in step 6's
-            // host_exec_cmd.rs; this one forwards the per-recipe confirmation
-            // reply (host-exec://confirm-request → host_exec_confirm_reply).
+            // host_exec (ADR-054): per-recipe confirmation reply
+            // (host-exec://confirm-request → host_exec_confirm_reply), plus the
+            // Integrations-tab settings commands (status / toggle / edit the
+            // whitelist / resolve an executable for the "browse…" picker).
             host_exec_process::host_exec_confirm_reply,
+            host_exec_cmd::get_host_exec,
+            host_exec_cmd::set_host_exec_enabled,
+            host_exec_cmd::host_exec_save_settings,
+            host_exec_cmd::host_exec_load_settings,
+            host_exec_cmd::host_exec_resolve_executable,
             // Plugins
             plugin_cmd::get_plugins,
             plugin_cmd::peek_plugin_manifest,
