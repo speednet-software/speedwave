@@ -97,7 +97,13 @@ pub enum HostExecConfirm {
 /// (compilation, full-match against the supplied value) are checked in the
 /// `host_exec` worker in JavaScript `RegExp` — Rust only sanity-checks the
 /// `pattern` string length and the `max_len` ceiling (ADR-054).
+///
+/// Serialised `camelCase` (`maxLen`) so the on-disk JSON — both the user
+/// config (`~/.speedwave/config.json`, which is camelCase throughout) and the
+/// per-project worker snapshot (`<data_dir>/host-exec/<project>/config.json`,
+/// read by the TypeScript worker which expects `maxLen`) — uses one casing.
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct HostExecParam {
     /// Parameter name — `snake_case`, unique within the recipe; the `{name}`
     /// token in `args` that this entry defines.
@@ -109,7 +115,7 @@ pub struct HostExecParam {
     pub pattern: String,
     /// Optional upper bound on the supplied value's length (≤
     /// `HOST_EXEC_PARAM_MAX_LEN`). If omitted, `HOST_EXEC_PARAM_MAX_LEN`
-    /// applies.
+    /// applies. Serialised as `maxLen`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_len: Option<usize>,
 }
@@ -117,7 +123,11 @@ pub struct HostExecParam {
 /// One whitelisted command a `host_exec` worker may run on the host, in the
 /// project directory. Exposed to Claude as the MCP tool `host_exec.<name>()`.
 /// See ADR-054 for the full validation rules.
+///
+/// Serialised `camelCase` (`cwdSub`) — see [`HostExecParam`] for why (the user
+/// config and the TypeScript worker snapshot both use camelCase).
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct HostExecRecipe {
     /// Recipe name — `^[a-z][a-z0-9_]{0,63}$` (snake_case, so the hub's
     /// `toCamelCase` bridge exposes it as a valid JS identifier
@@ -139,7 +149,7 @@ pub struct HostExecRecipe {
     /// Optional subdirectory inside the project directory to run in (monorepo
     /// support). Relative, no `..`, no absolute path, no NUL; the worker
     /// canonicalises `projectDir/cwdSub` and asserts it stays under the
-    /// project root with no symlink escape.
+    /// project root with no symlink escape. Serialised as `cwdSub`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd_sub: Option<String>,
     /// Named parameters this recipe accepts from Claude. A `{name}` in `args`
@@ -1550,6 +1560,22 @@ mod tests {
             }],
         };
         let json = serde_json::to_string(&cfg).unwrap();
+        // The on-disk JSON must use camelCase keys — both the user config and
+        // the TypeScript worker snapshot expect `cwdSub` / `maxLen`, never the
+        // Rust field names `cwd_sub` / `max_len` (regression guard for the
+        // worker-snapshot contract — `host_exec/src/types.ts`).
+        assert!(
+            json.contains("\"cwdSub\""),
+            "JSON must use camelCase cwdSub"
+        );
+        assert!(
+            json.contains("\"maxLen\""),
+            "JSON must use camelCase maxLen"
+        );
+        assert!(
+            !json.contains("cwd_sub") && !json.contains("max_len"),
+            "JSON must not leak Rust snake_case field names"
+        );
         let back: HostExecConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.enabled, Some(true));
         assert_eq!(back.commands.len(), 1);
@@ -1559,6 +1585,15 @@ mod tests {
         assert_eq!(r.params.as_ref().unwrap()[0].name, "sql");
         assert_eq!(r.params.as_ref().unwrap()[0].max_len, Some(600));
         assert_eq!(r.confirm, HostExecConfirm::Ask);
+        // camelCase also parses *back* (what the user writes / the worker reads).
+        let from_camel: HostExecRecipe = serde_json::from_str(
+            r#"{ "name": "t", "exec": "./gradlew", "args": ["{tgt}"],
+                 "cwdSub": "frontend",
+                 "params": [{ "name": "tgt", "pattern": "^[a-z]+$", "maxLen": 30 }] }"#,
+        )
+        .unwrap();
+        assert_eq!(from_camel.cwd_sub.as_deref(), Some("frontend"));
+        assert_eq!(from_camel.params.as_ref().unwrap()[0].max_len, Some(30));
         // `confirm` defaults when omitted
         let minimal: HostExecRecipe =
             serde_json::from_str(r#"{ "name": "t", "exec": "./gradlew", "args": ["test"] }"#)
