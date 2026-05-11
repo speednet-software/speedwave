@@ -376,6 +376,7 @@ test-entrypoint:
 	bats _tests/entrypoint/entrypoint.bats
 	bats _tests/entrypoint/install-claude.bats
 	bats _tests/entrypoint/statusline.bats
+	bats _tests/entrypoint/osc52-copy.bats
 	@echo "✅ Entrypoint tests passed"
 
 test-ci:

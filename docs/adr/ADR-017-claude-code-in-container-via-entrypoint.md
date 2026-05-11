@@ -51,6 +51,10 @@ This volume survives Speedwave updates. Claude Code is re-installed only when `C
 
 `entrypoint.sh` copies the custom "Speedwave" output style to `~/.claude/output-styles/Speedwave.md` on first start. Claude Code supports custom output styles via `.md` files in this directory.[^37]
 
+## Onboarding Pre-Seed (`~/.claude.json`)
+
+`entrypoint.sh` pre-creates `~/.claude.json` with `{ "hasCompletedOnboarding": true, "installMethod": "native" }` when the file is absent (guarded by `[ ! -f ]` so it never overwrites user state). Without this, Claude Code treats every fresh container as a brand-new install and re-runs the onboarding/login wizard even when `~/.claude/.credentials.json` is already present from a prior `speedwave login`. See ADR-052.
+
 ## Why Not Install on Host
 
 - Host installation would bypass all container security controls (ADR-009)

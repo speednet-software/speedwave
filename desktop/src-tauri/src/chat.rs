@@ -221,14 +221,10 @@ fn validate_slot(
         anyhow::bail!("invalid question index {question_idx} for tool_use_id: {tool_use_id}");
     }
     let slot = entry.answers.get(question_idx).ok_or_else(|| {
-        anyhow::anyhow!(
-            "answers/questions length mismatch for tool_use_id: {tool_use_id}"
-        )
+        anyhow::anyhow!("answers/questions length mismatch for tool_use_id: {tool_use_id}")
     })?;
     if slot.is_some() {
-        anyhow::bail!(
-            "question {question_idx} already answered for tool_use_id: {tool_use_id}"
-        );
+        anyhow::bail!("question {question_idx} already answered for tool_use_id: {tool_use_id}");
     }
     Ok(())
 }
@@ -1124,7 +1120,10 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<ser
                  cannot build a complete answers map (refer to log for count)"
             );
         }
-        answers.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        answers.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
     }
     updated_input["answers"] = serde_json::Value::Object(answers);
 
@@ -1686,10 +1685,7 @@ impl ChatSession {
         answer: &str,
     ) -> anyhow::Result<()> {
         if answer.len() > MAX_ASK_USER_ANSWER_LEN {
-            anyhow::bail!(
-                "answer too long (max {} bytes)",
-                MAX_ASK_USER_ANSWER_LEN
-            );
+            anyhow::bail!("answer too long (max {} bytes)", MAX_ASK_USER_ANSWER_LEN);
         }
 
         let child = self
@@ -1802,9 +1798,7 @@ impl ChatSession {
                 map.insert(tool_use_id.to_string(), to_insert);
             }
             Err(poison_err) => {
-                log::error!(
-                    "failed to restore pending request: mutex poisoned: {poison_err}"
-                );
+                log::error!("failed to restore pending request: mutex poisoned: {poison_err}");
             }
         }
     }
@@ -3467,7 +3461,11 @@ mod tests {
         );
     }
 
-    fn make_partial(req_id: &str, qs: &[(&str, &str)], answers: Vec<Option<String>>) -> PartialAnswers {
+    fn make_partial(
+        req_id: &str,
+        qs: &[(&str, &str)],
+        answers: Vec<Option<String>>,
+    ) -> PartialAnswers {
         let questions: Vec<AskUserQuestionItem> = qs
             .iter()
             .map(|(q, h)| AskUserQuestionItem {
@@ -3525,11 +3523,7 @@ mod tests {
 
     #[test]
     fn build_ask_user_response_multi_passes_through_multi_select_value() {
-        let partial = make_partial(
-            "req_multi",
-            &[("Pick", "h")],
-            vec![Some("A, B".into())],
-        );
+        let partial = make_partial("req_multi", &[("Pick", "h")], vec![Some("A, B".into())]);
         let resp = build_ask_user_response_multi(&partial).expect("must succeed");
         assert_eq!(
             resp["response"]["response"]["updatedInput"]["answers"]["Pick"],
@@ -3577,11 +3571,7 @@ mod tests {
         let mut s = ChatSession::new("test-project");
         s.pending_requests.lock().unwrap().insert(
             "tool-x".into(),
-            make_partial(
-                "r1",
-                &[("Q", "")],
-                vec![None],
-            ),
+            make_partial("r1", &[("Q", "")], vec![None]),
         );
         let err = s
             .submit_question_answer("tool-x", 0, "yes")
@@ -3715,12 +3705,7 @@ mod tests {
         let big = "x".repeat(20_000);
         let partial = make_partial(
             "req_oversize",
-            &[
-                ("Q0", "h"),
-                ("Q1", "h"),
-                ("Q2", "h"),
-                ("Q3", "h"),
-            ],
+            &[("Q0", "h"), ("Q1", "h"), ("Q2", "h"), ("Q3", "h")],
             vec![
                 Some(big.clone()),
                 Some(big.clone()),
@@ -3756,9 +3741,7 @@ mod tests {
         }
     }
 
-    fn unwrap_ask_chunk(
-        chunk: StreamChunk,
-    ) -> (String, Vec<AskUserQuestionItem>, usize) {
+    fn unwrap_ask_chunk(chunk: StreamChunk) -> (String, Vec<AskUserQuestionItem>, usize) {
         match chunk {
             StreamChunk::AskUserQuestion {
                 tool_id,

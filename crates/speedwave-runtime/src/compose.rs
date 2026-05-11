@@ -48,7 +48,7 @@ pub fn render_compose(
     crate::validation::validate_project_name(project_name)?;
     let data_dir = consts::data_dir();
     let tokens_dir = resolve_tokens_dir(project_name);
-    let claude_home = data_dir.join("claude-home").join(project_name);
+    let claude_home = crate::claude_home::claude_home_dir(data_dir, project_name);
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
@@ -623,11 +623,24 @@ fn apply_plugins_from_verified(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Reads the Anthropic API key from the secrets directory and injects it
-/// into the claude service environment. If no key file exists, returns
-/// the YAML unchanged.
+/// Injects the Anthropic API key (legacy credential) into the `claude`
+/// service environment when one is stored at
+/// `secrets/<project>/anthropic_api_key`. OAuth credentials are managed by
+/// Claude Code itself inside the `CLAUDE_HOME` bind-mount — Speedwave never
+/// reads or writes them. On the host they live at
+/// `<data_dir>/claude-home/<project>/.claude/.credentials.json`. See ADR-052.
 pub fn apply_auth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
-    let key_path = consts::data_dir()
+    apply_auth_config_in(yaml, project, consts::data_dir())
+}
+
+/// Testable variant: resolves the legacy API key path under an explicit
+/// data directory.
+pub(crate) fn apply_auth_config_in(
+    yaml: &str,
+    project: &str,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<String> {
+    let key_path = data_dir
         .join("secrets")
         .join(project)
         .join("anthropic_api_key");
@@ -1652,6 +1665,7 @@ impl SecurityCheck {
                 let allowed = [
                     "ANTHROPIC_AUTH_TOKEN",
                     "ANTHROPIC_API_KEY",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
                     "DISABLE_AUTOUPDATER",
                 ];
 
@@ -8024,6 +8038,113 @@ services:
                 env
             );
         }
+    }
+
+    // ── apply_auth_config: OAuth + API key + precedence ────────────────────
+
+    /// Minimal compose YAML with just the claude service so apply_auth_config
+    /// can write into the environment sequence without dragging the whole
+    /// template into the test fixture.
+    fn auth_test_yaml() -> &'static str {
+        r#"
+services:
+  claude:
+    image: speedwave-claude:latest
+    environment:
+      - CLAUDE_VERSION=1.0.3
+"#
+    }
+
+    fn write_api_key_in(data_dir: &std::path::Path, project: &str, key: &str) {
+        let dir = data_dir.join("secrets").join(project);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("anthropic_api_key"), key).unwrap();
+    }
+
+    #[test]
+    fn apply_auth_config_in_api_key_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_api_key_in(tmp.path(), "test", "sk-ant-api-1234");
+
+        let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
+        let has_api_key = result.contains("ANTHROPIC_API_KEY=sk-ant-api-1234");
+        assert!(has_api_key, "API key must be injected when stored");
+    }
+
+    #[test]
+    fn apply_auth_config_in_neither_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
+        let has_api_key = result.contains("ANTHROPIC_API_KEY=");
+        assert!(!has_api_key);
+    }
+
+    #[test]
+    fn apply_auth_config_in_empty_api_key_returns_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_api_key_in(tmp.path(), "test", "");
+        let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
+        let has_api_key = result.contains("ANTHROPIC_API_KEY=");
+        assert!(!has_api_key);
+    }
+
+    // ── SecurityCheck regression: CLAUDE_CODE_OAUTH_TOKEN allowlisted ──────
+
+    #[test]
+    fn test_security_check_oauth_token_allowed() {
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-aaaaaaaaaaaaaaaaaaaa
+"#;
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
+            "CLAUDE_CODE_OAUTH_TOKEN must be allowlisted in claude container; got {:?}",
+            violations
+        );
+    }
+
+    #[test]
+    fn test_security_check_other_token_still_blocked() {
+        // Defence-in-depth: allowlist must NOT widen to arbitrary *_TOKEN.
+        // MCP_OS_AUTH_TOKEN must remain forbidden in claude container.
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - MCP_OS_AUTH_TOKEN=secret-uuid
+"#;
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
+            "MCP_OS_AUTH_TOKEN must still trigger NoTokensClaude violation"
+        );
     }
 
     #[test]

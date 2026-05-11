@@ -26,6 +26,8 @@ This renders compose for the current bundle, starts containers for the project, 
 ```
 speedwave                      # default: compose_up + exec claude in container
 speedwave init [name]          # register CWD as a project
+speedwave login [--project <name>]   # OAuth login: opens claude TUI for /login
+speedwave logout [--project <name>]  # delete Claude credentials for the project
 speedwave check                # run OS prereq + security checks, exit 0/1
 speedwave update               # rebuild current bundle images + recreate containers
 speedwave self-update          # download latest CLI from GitHub Releases
@@ -44,6 +46,8 @@ speedwave --help | -h | help   # print usage and exit (no runtime required)
   cd ~/projects/acme && speedwave init my-app # registers as "my-app"
   ```
   If the directory is already registered, prints the existing project name and exits.
+- **`speedwave login [--project <name>]`** — runs `compose_up`, then exec's into the Claude container and starts an interactive `claude` session. Type `/login` at Claude's prompt to walk through the Anthropic OAuth flow (browser sign-in, paste-back code if the localhost callback can't reach the host). Claude Code stores credentials inside the container at `~/.claude/.credentials.json`, persisted on the host via the per-project `CLAUDE_HOME` bind-mount. If `--project <name>` is omitted, uses the project matched by CWD. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
+- **`speedwave logout [--project <name>]`** — deletes Claude Code's credential files (`.credentials.json`, `.claude.json`) from the project's `CLAUDE_HOME` mount. No runtime required. Idempotent — succeeds even when nothing is stored.
 - **`speedwave check`** — runs OS prerequisite checks (WSL2 on Windows, uidmap on Linux) and compose security validation (cap_drop, token isolation, port binding, etc.), exits 0 on success or 1 on failure with detailed violation messages and remediation steps. Note: `check` is diagnostic-only — it reports permission violations but does NOT auto-fix them. All container start paths (`speedwave`, update, rollback) auto-fix file permissions before running SecurityCheck. `check` (and every other runtime command except `--help`, `self-update`, `init`, and the `plugin install`/`list`/`remove` recovery commands) first runs the **plugin signature audit**: if any plugin under `~/.speedwave/plugins/` no longer matches its signed contents, the command prints the affected plugins to stderr and exits `2` before doing anything else. Recover with `speedwave plugin remove <slug>` or by deleting the plugin directory.
 - **`speedwave update`** — rebuilds the built-in images for the current `bundle_id` and recreates containers with the current bundle manifest
 - **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases, replaces the current binary, and automatically rebuilds container images if the version changed.

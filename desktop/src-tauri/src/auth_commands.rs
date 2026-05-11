@@ -63,7 +63,7 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
 
 /// Shell-escape a string for use inside single quotes (POSIX standard).
 /// Each embedded single-quote becomes: close-quote, backslash-escaped quote, open-quote.
-fn shell_escape_single_quoted(s: &str) -> String {
+pub(crate) fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
@@ -82,7 +82,7 @@ fn shell_escape_single_quoted(s: &str) -> String {
 /// the `\\?\` prefix; neither PowerShell `Set-Location` nor `cd` handles
 /// these, and they are not user-readable. This helper unifies the path so
 /// the rendered command is paste-ready.
-fn strip_windows_extended_length_prefix(path: &str) -> &str {
+pub(crate) fn strip_windows_extended_length_prefix(path: &str) -> &str {
     let b = path.as_bytes();
     if b.len() >= 7
         && b[0] == b'\\'
@@ -102,7 +102,7 @@ fn strip_windows_extended_length_prefix(path: &str) -> &str {
 /// Escapes a string for safe interpolation inside a PowerShell single-quoted
 /// literal. PowerShell single-quote literals are literal — only embedded
 /// single quotes need doubling.
-fn ps_escape_single_quoted(s: &str) -> String {
+pub(crate) fn ps_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "''")
 }
 
@@ -112,7 +112,12 @@ fn ps_escape_single_quoted(s: &str) -> String {
 /// '\'' escape). The flag is taken as a parameter — not derived inside the
 /// function from `cfg!()` — so both branches are reachable from unit tests
 /// on any host, including macOS/Linux where `make test-desktop` runs.
-fn build_auth_command_for_platform(
+///
+/// The trailing command is `speedwave login --project '<project>'` — once
+/// stored, the OAuth token is per-project, so the exact name is bound into
+/// the copy-paste so it works regardless of CWD.
+pub(crate) fn build_auth_command_for_platform(
+    project: &str,
     project_dir: &str,
     data_dir: &std::path::Path,
     default_data_dir: Option<&std::path::Path>,
@@ -126,28 +131,32 @@ fn build_auth_command_for_platform(
         let ddir = strip_windows_extended_length_prefix(&data_dir_str);
         if needs_env_pin {
             format!(
-                "$env:{} = '{}'; Set-Location '{}'; speedwave",
+                "$env:{} = '{}'; Set-Location '{}'; speedwave login --project '{}'",
                 speedwave_runtime::consts::DATA_DIR_ENV,
                 ps_escape_single_quoted(ddir),
                 ps_escape_single_quoted(pdir),
+                ps_escape_single_quoted(project),
             )
         } else {
             format!(
-                "Set-Location '{}'; speedwave",
+                "Set-Location '{}'; speedwave login --project '{}'",
                 ps_escape_single_quoted(pdir),
+                ps_escape_single_quoted(project),
             )
         }
     } else if needs_env_pin {
         format!(
-            "export {}='{}' && cd '{}' && speedwave",
+            "export {}='{}' && cd '{}' && speedwave login --project '{}'",
             speedwave_runtime::consts::DATA_DIR_ENV,
             shell_escape_single_quoted(&data_dir_str),
             shell_escape_single_quoted(project_dir),
+            shell_escape_single_quoted(project),
         )
     } else {
         format!(
-            "cd '{}' && speedwave",
+            "cd '{}' && speedwave login --project '{}'",
             shell_escape_single_quoted(project_dir),
+            shell_escape_single_quoted(project),
         )
     }
 }
@@ -156,16 +165,36 @@ fn build_auth_command_for_platform(
 /// delegates to `build_auth_command_for_platform`. Keeping this wrapper
 /// preserves the existing call-site in `get_auth_command` unchanged.
 fn build_auth_command(
+    project: &str,
     project_dir: &str,
     data_dir: &std::path::Path,
     default_data_dir: Option<&std::path::Path>,
 ) -> String {
     build_auth_command_for_platform(
+        project,
         project_dir,
         data_dir,
         default_data_dir,
         cfg!(target_os = "windows"),
     )
+}
+
+/// Resolves the inputs both auth surfaces need: the project's directory (from
+/// user config), the active data dir, and the default data dir (for the
+/// `SPEEDWAVE_DATA_DIR` pin decision). Shared so `get_auth_command` (copy-paste)
+/// and `start_oauth_login` (auto-spawn) cannot drift.
+pub(crate) fn resolve_project_dirs(
+    project: &str,
+) -> Result<(String, std::path::PathBuf, Option<std::path::PathBuf>), String> {
+    let user_config = speedwave_runtime::config::load_user_config()
+        .map_err(|e| format!("Failed to load config: {e}"))?;
+    let project_dir = user_config
+        .find_project(project)
+        .map(|p| p.dir.clone())
+        .ok_or_else(|| format!("project '{project}' not found in config"))?;
+    let data_dir = speedwave_runtime::consts::data_dir().clone();
+    let default_data_dir = dirs::home_dir().map(|h| h.join(speedwave_runtime::consts::DATA_DIR));
+    Ok((project_dir, data_dir, default_data_dir))
 }
 
 /// Returns a CLI command string for the user to copy into their terminal
@@ -180,21 +209,11 @@ pub async fn get_auth_command(project: String) -> Result<String, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         log::info!("get_auth_command: project={project}");
-
-        let user_config = speedwave_runtime::config::load_user_config()
-            .map_err(|e| format!("Failed to load config: {e}"))?;
-        let project_dir = user_config
-            .find_project(&project)
-            .map(|p| p.dir.clone())
-            .ok_or_else(|| format!("project '{}' not found in config", project))?;
-
-        let data_dir = speedwave_runtime::consts::data_dir();
-        let default_data_dir =
-            dirs::home_dir().map(|h| h.join(speedwave_runtime::consts::DATA_DIR));
-
+        let (project_dir, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
         Ok(build_auth_command(
+            &project,
             &project_dir,
-            data_dir,
+            &data_dir,
             default_data_dir.as_deref(),
         ))
     })
@@ -234,17 +253,22 @@ mod tests {
     #[test]
     fn build_auth_command_default_data_dir() {
         let cmd = build_auth_command(
+            "myproj",
             "/Users/test/Projects",
             std::path::Path::new("/Users/test/.speedwave"),
             Some(std::path::Path::new("/Users/test/.speedwave")),
         );
-        assert_eq!(cmd, "cd '/Users/test/Projects' && speedwave");
+        assert_eq!(
+            cmd,
+            "cd '/Users/test/Projects' && speedwave login --project 'myproj'"
+        );
         assert!(!cmd.contains("export"));
     }
 
     #[test]
     fn build_auth_command_custom_data_dir() {
         let cmd = build_auth_command(
+            "myproj",
             "/Users/test/Projects",
             std::path::Path::new("/Users/test/.speedwave-dev"),
             Some(std::path::Path::new("/Users/test/.speedwave")),
@@ -255,12 +279,13 @@ mod tests {
         )));
         assert!(cmd.contains("/Users/test/.speedwave-dev"));
         assert!(cmd.contains("cd '/Users/test/Projects'"));
-        assert!(cmd.ends_with("&& speedwave"));
+        assert!(cmd.ends_with("speedwave login --project 'myproj'"));
     }
 
     #[test]
     fn build_auth_command_custom_data_dir_quotes_value() {
         let cmd = build_auth_command(
+            "p",
             "/proj",
             std::path::Path::new("/Users/test/.speedwave-dev"),
             Some(std::path::Path::new("/Users/test/.speedwave")),
@@ -270,13 +295,19 @@ mod tests {
 
     #[test]
     fn build_auth_command_no_default_data_dir() {
-        let cmd = build_auth_command("/projects", std::path::Path::new("/data/.speedwave"), None);
-        assert_eq!(cmd, "cd '/projects' && speedwave");
+        let cmd = build_auth_command(
+            "p",
+            "/projects",
+            std::path::Path::new("/data/.speedwave"),
+            None,
+        );
+        assert_eq!(cmd, "cd '/projects' && speedwave login --project 'p'");
     }
 
     #[test]
     fn build_auth_command_quotes_paths_with_spaces() {
         let cmd = build_auth_command(
+            "p",
             "/Users/John Smith/My Projects",
             std::path::Path::new("/Users/John Smith/.speedwave"),
             Some(std::path::Path::new("/Users/John Smith/.speedwave")),
@@ -287,18 +318,20 @@ mod tests {
     #[test]
     fn build_auth_command_escapes_single_quotes_in_project_dir() {
         let cmd = build_auth_command(
+            "p",
             "/Users/O'Brien/project",
             std::path::Path::new("/Users/O'Brien/.speedwave"),
             Some(std::path::Path::new("/Users/O'Brien/.speedwave")),
         );
         assert!(cmd.contains("O'\\''Brien"));
         assert!(cmd.contains("cd '"));
-        assert!(cmd.ends_with("&& speedwave"));
+        assert!(cmd.ends_with("speedwave login --project 'p'"));
     }
 
     #[test]
     fn build_auth_command_escapes_single_quotes_in_data_dir() {
         let cmd = build_auth_command(
+            "p",
             "/projects",
             std::path::Path::new("/Users/O'Brien/.speedwave-dev"),
             Some(std::path::Path::new("/Users/O'Brien/.speedwave")),
@@ -310,6 +343,7 @@ mod tests {
     #[test]
     fn build_auth_command_quotes_paths_with_special_chars() {
         let cmd = build_auth_command(
+            "p",
             "/Users/test/proj&ect",
             std::path::Path::new("/Users/test/.speedwave"),
             Some(std::path::Path::new("/Users/test/.speedwave")),
@@ -320,6 +354,7 @@ mod tests {
     #[test]
     fn build_auth_command_unicode_paths() {
         let cmd = build_auth_command(
+            "p",
             "/Users/tëst/プロジェクト",
             std::path::Path::new("/Users/tëst/.speedwave"),
             Some(std::path::Path::new("/Users/tëst/.speedwave")),
@@ -331,6 +366,7 @@ mod tests {
     fn build_auth_command_trailing_slash_does_not_cause_mismatch() {
         // Rust's Path normalizes trailing slashes: Path("/a/") == Path("/a")
         let cmd = build_auth_command(
+            "p",
             "/projects",
             std::path::Path::new("/Users/test/.speedwave/"),
             Some(std::path::Path::new("/Users/test/.speedwave")),
@@ -339,12 +375,13 @@ mod tests {
             !cmd.contains("export"),
             "trailing slash should not trigger export prefix (Path normalizes)"
         );
-        assert_eq!(cmd, "cd '/projects' && speedwave");
+        assert_eq!(cmd, "cd '/projects' && speedwave login --project 'p'");
     }
 
     #[test]
     fn build_auth_command_ordering() {
         let cmd = build_auth_command(
+            "p",
             "/proj",
             std::path::Path::new("/data-dev"),
             Some(std::path::Path::new("/data")),
@@ -359,11 +396,40 @@ mod tests {
     #[test]
     fn build_auth_command_empty_project_dir() {
         let cmd = build_auth_command(
+            "p",
             "",
             std::path::Path::new("/data"),
             Some(std::path::Path::new("/data")),
         );
-        assert_eq!(cmd, "cd '' && speedwave");
+        assert_eq!(cmd, "cd '' && speedwave login --project 'p'");
+    }
+
+    #[test]
+    fn build_auth_command_includes_project_in_login_argument() {
+        // Sanity check: the project name actually flows into the trailing
+        // `--project '<name>'`. Catches a future bug where the call-site in
+        // get_auth_command forgets to thread `project` through.
+        let cmd = build_auth_command(
+            "specific-project-name",
+            "/proj",
+            std::path::Path::new("/data"),
+            Some(std::path::Path::new("/data")),
+        );
+        assert!(cmd.contains("--project 'specific-project-name'"));
+    }
+
+    #[test]
+    fn build_auth_command_escapes_single_quote_in_project_name() {
+        // Defensive: validate_project_name forbids `'`, but the renderer
+        // must defensively escape — otherwise relaxing validation later
+        // would silently break the output.
+        let cmd = build_auth_command(
+            "weird'name",
+            "/proj",
+            std::path::Path::new("/data"),
+            Some(std::path::Path::new("/data")),
+        );
+        assert!(cmd.contains("--project 'weird'\\''name'"));
     }
 
     // -- strip_windows_extended_length_prefix tests --
@@ -481,12 +547,16 @@ mod tests {
     #[test]
     fn build_auth_command_for_platform_windows_default_data_dir() {
         let cmd = build_auth_command_for_platform(
+            "myproj",
             r"C:\Users\test\Projects",
             std::path::Path::new(r"C:\Users\test\.speedwave"),
             Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
             true,
         );
-        assert_eq!(cmd, r"Set-Location 'C:\Users\test\Projects'; speedwave");
+        assert_eq!(
+            cmd,
+            r"Set-Location 'C:\Users\test\Projects'; speedwave login --project 'myproj'"
+        );
         assert!(!cmd.contains("&&"));
         assert!(!cmd.contains("export"));
         assert!(!cmd.starts_with("cd "));
@@ -495,6 +565,7 @@ mod tests {
     #[test]
     fn build_auth_command_for_platform_windows_custom_data_dir() {
         let cmd = build_auth_command_for_platform(
+            "myproj",
             r"C:\Users\test\Projects",
             std::path::Path::new(r"C:\Users\test\.speedwave-dev"),
             Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
@@ -510,6 +581,7 @@ mod tests {
         let sw_pos = cmd.find("; speedwave").unwrap();
         assert!(env_pos < loc_pos);
         assert!(loc_pos < sw_pos);
+        assert!(cmd.ends_with("speedwave login --project 'myproj'"));
         assert!(!cmd.contains("&&"));
         assert!(!cmd.contains("export "));
     }
@@ -518,6 +590,7 @@ mod tests {
     fn build_auth_command_for_platform_strips_extended_length_prefix_issue_612() {
         // Regression test for GitHub issue #612 — reproduces the exact failing input
         let cmd = build_auth_command_for_platform(
+            "p",
             r"\\?\C:\Users\NikodemDeja\testproject",
             std::path::Path::new(r"C:\Users\NikodemDeja\.speedwave"),
             Some(std::path::Path::new(r"C:\Users\NikodemDeja\.speedwave")),
@@ -525,7 +598,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            r"Set-Location 'C:\Users\NikodemDeja\testproject'; speedwave"
+            r"Set-Location 'C:\Users\NikodemDeja\testproject'; speedwave login --project 'p'"
         );
         assert!(!cmd.contains(r"\\?\"));
         assert!(!cmd.contains(" && "));
@@ -536,6 +609,7 @@ mod tests {
     #[test]
     fn build_auth_command_for_platform_windows_escapes_single_quote_in_path() {
         let cmd = build_auth_command_for_platform(
+            "p",
             r"C:\Users\O'Brien\proj",
             std::path::Path::new(r"C:\Users\O'Brien\.speedwave"),
             Some(std::path::Path::new(r"C:\Users\O'Brien\.speedwave")),
@@ -548,6 +622,7 @@ mod tests {
     #[test]
     fn build_auth_command_for_platform_windows_unicode_path() {
         let cmd = build_auth_command_for_platform(
+            "p",
             r"C:\Users\test\プロジェクト",
             std::path::Path::new(r"C:\Users\test\.speedwave"),
             Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
@@ -560,6 +635,7 @@ mod tests {
     fn build_auth_command_for_platform_windows_no_double_ampersand() {
         // Defence-in-depth: no Windows output may contain " && "
         let cmd_no_env = build_auth_command_for_platform(
+            "p",
             r"C:\proj",
             std::path::Path::new(r"C:\.speedwave"),
             Some(std::path::Path::new(r"C:\.speedwave")),
@@ -568,6 +644,7 @@ mod tests {
         assert!(!cmd_no_env.contains(" && "));
 
         let cmd_with_env = build_auth_command_for_platform(
+            "p",
             r"C:\proj",
             std::path::Path::new(r"C:\.speedwave-dev"),
             Some(std::path::Path::new(r"C:\.speedwave")),
@@ -581,6 +658,7 @@ mod tests {
         // Custom data dir containing a `'` must use PS doubling (`''`),
         // never POSIX backslash escaping (`'\''`). Closes review gap.
         let cmd = build_auth_command_for_platform(
+            "p",
             r"C:\proj",
             std::path::Path::new(r"C:\Users\O'Brien\.speedwave-dev"),
             Some(std::path::Path::new(r"C:\Users\O'Brien\.speedwave")),
@@ -601,6 +679,7 @@ mod tests {
         // set to a clean, paste-ready path — not the raw extended-length
         // form which subsequent tools would mishandle.
         let cmd = build_auth_command_for_platform(
+            "p",
             r"C:\proj",
             std::path::Path::new(r"\\?\C:\Users\test\.speedwave-dev"),
             Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
@@ -615,11 +694,39 @@ mod tests {
     fn build_auth_command_for_platform_windows_passthrough_bare_drive() {
         // \\?\C: (bare drive, no separator) must pass through unchanged
         let cmd = build_auth_command_for_platform(
+            "p",
             r"\\?\C:",
             std::path::Path::new(r"C:\.speedwave"),
             Some(std::path::Path::new(r"C:\.speedwave")),
             true,
         );
         assert!(cmd.contains(r"Set-Location '\\?\C:'"));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_escapes_single_quote_in_project_name() {
+        // Defensive escaping for project names containing `'`. validate_project_name
+        // forbids them — but renderer must escape regardless.
+        let cmd = build_auth_command_for_platform(
+            "weird'name",
+            r"C:\proj",
+            std::path::Path::new(r"C:\.speedwave"),
+            Some(std::path::Path::new(r"C:\.speedwave")),
+            true,
+        );
+        assert!(cmd.contains("--project 'weird''name'"));
+    }
+
+    // ── AuthStatusResponse wire-format ─────────────────────────────────────
+
+    #[test]
+    fn auth_status_response_serializes_two_fields() {
+        let resp = crate::types::AuthStatusResponse {
+            api_key_configured: true,
+            oauth_authenticated: false,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["api_key_configured"], true);
+        assert_eq!(json["oauth_authenticated"], false);
     }
 }
