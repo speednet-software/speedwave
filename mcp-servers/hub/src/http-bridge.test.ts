@@ -2022,4 +2022,458 @@ describe('http-bridge', () => {
       expect(callCount).toBe(4);
     });
   });
+
+  describe('classifyHealthError via MCP ping error codes', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      clearWorkerCache();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('classifies ENOTFOUND errors (DNS_ERROR) from ping failures', async () => {
+      // Throw an error with code=ENOTFOUND so classifyHealthError returns DNS_ERROR.
+      // postPing's catch block calls classifyHealthError; the /health fallback also fails.
+      const dnsError = Object.assign(new Error('getaddrinfo ENOTFOUND mcp-slack'), {
+        code: 'ENOTFOUND',
+      });
+      fetchMock.mockRejectedValue(dnsError);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+      // classifyHealthError returned DNS_ERROR which is logged inside postPing's catch
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('DNS_ERROR'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('classifies ECONNREFUSED errors (CONNECTION_REFUSED) from ping failures', async () => {
+      const connError = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3001'), {
+        code: 'ECONNREFUSED',
+      });
+      fetchMock.mockRejectedValue(connError);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('CONNECTION_REFUSED'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('returns error code as-is for unknown error codes', async () => {
+      // An error with a code that is not ENOTFOUND or ECONNREFUSED hits line 214 (return code)
+      const customError = Object.assign(new Error('custom error'), { code: 'ECUSTOM' });
+      fetchMock.mockRejectedValue(customError);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('ECUSTOM'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('performMcpInitialize error paths', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      _clearWorkerSessionCacheForTesting();
+      clearWorkerCache();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      _clearWorkerSessionCacheForTesting();
+      vi.restoreAllMocks();
+    });
+
+    it('returns null when notifications/initialized is rejected (!ok response)', async () => {
+      // performMcpInitialize is exercised via callWorker's 400 session-recovery flow.
+      // Step 1: tools/call → 400 "not initialized" (triggers initialize handshake)
+      // Step 2: initialize → success
+      // Step 3: notifications/initialized → 500 (not ok) → performMcpInitialize returns null
+      // Step 4: ensureWorkerSession throws because performMcpInitialize returned null
+      let callCount = 0;
+      fetchMock.mockImplementation((_url: string, options: { body: string }) => {
+        callCount++;
+        const body = JSON.parse(options.body ?? '{}');
+
+        if (callCount === 1) {
+          // tools/call → 400 not initialized
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            headers: new Headers({ 'content-type': 'text/plain' }),
+            text: async () => 'Server not initialized',
+          });
+        }
+        if (callCount === 2 && body.method === 'initialize') {
+          // initialize → success
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({
+              'content-type': 'application/json',
+              'Mcp-Session-Id': 'sess-abc',
+            }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: {
+                protocolVersion: '2025-11-25',
+                capabilities: {},
+                serverInfo: { name: 'test', version: '1' },
+              },
+            }),
+            text: async () =>
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: body.id,
+                result: {
+                  protocolVersion: '2025-11-25',
+                  capabilities: {},
+                  serverInfo: { name: 'test', version: '1' },
+                },
+              }),
+          });
+        }
+        if (callCount === 3 && body.method === 'notifications/initialized') {
+          // notifications/initialized → 500 (not ok) → performMcpInitialize returns null
+          return Promise.resolve({
+            ok: false,
+            status: 500,
+            headers: new Headers(),
+            text: async () => 'Internal Server Error',
+          });
+        }
+        return Promise.reject(new Error(`Unexpected call #${callCount}: ${body.method}`));
+      });
+
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await expect(callWorker('gitlab', 'test_tool', {})).rejects.toThrow(
+        'Worker gitlab: initialize handshake failed'
+      );
+
+      // Line 290-293: console.error was called about notifications/initialized rejection
+      const errorCalls = errorSpy.mock.calls.map((c) => c.join(' '));
+      expect(errorCalls.some((m) => m.includes('notifications/initialized rejected'))).toBe(true);
+
+      errorSpy.mockRestore();
+    });
+
+    it('returns null when initialize fetch throws (network error during handshake)', async () => {
+      // Same flow as above but step 2 (initialize) throws instead of returning !ok
+      let callCount = 0;
+      fetchMock.mockImplementation((_url: string, options: { body: string }) => {
+        callCount++;
+        const body = JSON.parse(options.body ?? '{}');
+
+        if (callCount === 1) {
+          // tools/call → 400 not initialized
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            headers: new Headers({ 'content-type': 'text/plain' }),
+            text: async () => 'Server not initialized',
+          });
+        }
+        if (callCount === 2 && body.method === 'initialize') {
+          // initialize → network error (performMcpInitialize catch block lines 298-302)
+          return Promise.reject(new Error('network error during initialize'));
+        }
+        return Promise.reject(new Error(`Unexpected call #${callCount}: ${body.method}`));
+      });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await expect(callWorker('gitlab', 'test_tool', {})).rejects.toThrow(
+        'Worker gitlab: initialize handshake failed'
+      );
+
+      // Line 299-301: console.warn was called about the handshake failure
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('initialize handshake failed'))).toBe(true);
+
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('callWorker non-session 400/404 responses', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      _clearWorkerSessionCacheForTesting();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      _clearWorkerSessionCacheForTesting();
+      vi.restoreAllMocks();
+    });
+
+    it('throws when 400 response body does not match session-issue patterns (line 724)', async () => {
+      // A 400 response whose body does NOT contain "not initialized" or session keywords
+      // hits line 724: throw new Error(`Worker ${service} returned ${response.status}: ...`)
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 400,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        text: async () => 'Bad Request: invalid parameters',
+      });
+
+      await expect(callWorker('gitlab', 'test_tool', {})).rejects.toThrow(
+        'Worker gitlab returned 400: Bad Request: invalid parameters'
+      );
+    });
+
+    it('throws when 404 response body does not contain session or not-found keywords', async () => {
+      // For 404, looksLikeSessionIssue requires body to contain "session" or "not found".
+      // A body that contains neither hits the else branch (line 710 / previously 724).
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 404,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        text: async () => 'endpoint unavailable',
+      });
+
+      await expect(callWorker('gitlab', 'test_tool', {})).rejects.toThrow(
+        'Worker gitlab returned 404:'
+      );
+    });
+  });
+
+  describe('classifyHealthError non-Error and AbortError/TLS paths', () => {
+    // classifyHealthError is private; we exercise it via isWorkerAvailable which
+    // calls checkWorkerHealth → postPing → catch(classifyHealthError).
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      clearWorkerCache();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('classifies a thrown non-Error value as UNKNOWN', async () => {
+      // Throwing a string (not an Error instance) hits line 208:
+      //   if (!(error instanceof Error)) return 'UNKNOWN'
+      fetchMock.mockRejectedValue('plain string error');
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+      // classifyHealthError returned UNKNOWN for the non-Error throw
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('UNKNOWN'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('classifies AbortError (name=AbortError) as TIMEOUT', async () => {
+      // Throwing an error with name=AbortError hits line 209:
+      //   if (error.name === 'AbortError') return 'TIMEOUT'
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      fetchMock.mockRejectedValue(abortError);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('TIMEOUT'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('classifies TLS error messages as TLS_ERROR', async () => {
+      // Throwing an error with "TLS" in the message hits line 216:
+      //   if (error.message.includes('TLS') || error.message.includes('SSL')) return 'TLS_ERROR'
+      const tlsError = new Error('TLS handshake failed');
+      fetchMock.mockRejectedValue(tlsError);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('TLS_ERROR'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('classifies SSL error messages as TLS_ERROR', async () => {
+      // 'SSL' in message also hits the TLS_ERROR branch (line 216 OR condition)
+      const sslError = new Error('SSL certificate verification failed');
+      fetchMock.mockRejectedValue(sslError);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('TLS_ERROR'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('performMcpInitialize result.error and notifResponse.text() error paths', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      _clearWorkerSessionCacheForTesting();
+      clearWorkerCache();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      _clearWorkerSessionCacheForTesting();
+      vi.restoreAllMocks();
+    });
+
+    it('returns null when initialize response contains a JSON-RPC error field', async () => {
+      // performMcpInitialize line 266: if (result.error) return null
+      // Triggered when the initialize response body has { error: {...} } in the JSON.
+      // We exercise this via callWorker's 400 recovery flow.
+      let callCount = 0;
+      fetchMock.mockImplementation((_url: string, options: { body: string }) => {
+        callCount++;
+        const body = JSON.parse(options.body ?? '{}');
+
+        if (callCount === 1) {
+          // tools/call → 400 not initialized
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            headers: new Headers({ 'content-type': 'text/plain' }),
+            text: async () => 'Server not initialized',
+          });
+        }
+        if (callCount === 2 && body.method === 'initialize') {
+          // initialize → 200 but with JSON-RPC error in body (line 266: result.error)
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              error: { code: -32600, message: 'Invalid Request' },
+            }),
+            text: async () =>
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: body.id,
+                error: { code: -32600, message: 'Invalid Request' },
+              }),
+          });
+        }
+        return Promise.reject(new Error(`Unexpected call #${callCount}`));
+      });
+
+      // ensureWorkerSession throws because performMcpInitialize returned null
+      await expect(callWorker('gitlab', 'test_tool', {})).rejects.toThrow(
+        'Worker gitlab: initialize handshake failed'
+      );
+      // initialize was called exactly once (callCount = 2)
+      expect(callCount).toBe(2);
+    });
+
+    it('swallows notifResponse.text() rejection gracefully', async () => {
+      // Line 288: await notifResponse.text().catch(() => undefined)
+      // When text() rejects, the .catch callback fires and returns undefined.
+      // This keeps the socket reusable even if draining the body fails.
+      let callCount = 0;
+      fetchMock.mockImplementation((_url: string, options: { body: string }) => {
+        callCount++;
+        const body = JSON.parse(options.body ?? '{}');
+
+        if (callCount === 1) {
+          // tools/call → 400 not initialized
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            headers: new Headers({ 'content-type': 'text/plain' }),
+            text: async () => 'Server not initialized',
+          });
+        }
+        if (callCount === 2 && body.method === 'initialize') {
+          // initialize → success
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({
+              'content-type': 'application/json',
+              'Mcp-Session-Id': 'sess-drain-test',
+            }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: {
+                protocolVersion: '2025-11-25',
+                capabilities: {},
+                serverInfo: { name: 'test', version: '1' },
+              },
+            }),
+            text: async () =>
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: body.id,
+                result: {
+                  protocolVersion: '2025-11-25',
+                  capabilities: {},
+                  serverInfo: { name: 'test', version: '1' },
+                },
+              }),
+          });
+        }
+        if (callCount === 3 && body.method === 'notifications/initialized') {
+          // notifications response: ok=true but text() rejects (line 288 .catch fires)
+          return Promise.resolve({
+            ok: true,
+            status: 202,
+            headers: new Headers(),
+            text: async () => {
+              throw new Error('body drain failed');
+            },
+          });
+        }
+        if (callCount === 4) {
+          // Retry tools/call → success
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: { content: [{ type: 'text', text: '{"ok":true}' }] },
+            }),
+          });
+        }
+        return Promise.reject(new Error(`Unexpected call #${callCount}`));
+      });
+
+      // Should succeed despite text() rejecting on the notification response
+      const result = await callWorker('gitlab', 'test_tool', {});
+      expect(result).toEqual({ ok: true });
+      expect(callCount).toBe(4);
+    });
+  });
 });

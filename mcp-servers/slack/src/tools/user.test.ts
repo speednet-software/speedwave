@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { withSetupGuidance } from '@speedwave/mcp-shared';
-import { handleGetUsers } from './user-tools.js';
+import { handleGetUsers, createUserTools } from './user-tools.js';
 import type { SlackClients } from '../client.js';
 
 // Mock the client module
@@ -222,5 +222,58 @@ describe('user-tools', () => {
         email: 'complete.user@example.com',
       });
     });
+  });
+});
+
+describe('createUserTools (null clients — not configured)', () => {
+  it('returns one tool definition when clients are null', () => {
+    const tools = createUserTools(null);
+    expect(tools).toHaveLength(1);
+    expect(tools[0].tool.name).toBe('getUsers');
+  });
+
+  it('getUsers handler returns NOT_CONFIGURED error when clients are null', async () => {
+    const tools = createUserTools(null);
+    const getUsersHandler = tools[0].handler;
+
+    const result = await getUsersHandler({ email: 'alice@example.com' });
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('NOT_CONFIGURED');
+    expect(parsed.message).toBeTruthy();
+  });
+});
+
+describe('createUserTools (with clients — configured path)', () => {
+  let mockClients: SlackClients;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockClients = {
+      bot: {} as any,
+      user: {} as any,
+    };
+  });
+
+  it('getUsers handler routes to handler when clients are configured', async () => {
+    const mockUser = {
+      user: {
+        id: 'U1234567890',
+        name: 'alice',
+        real_name: 'Alice',
+        email: 'alice@example.com',
+      },
+    };
+    vi.mocked(client.getUsers).mockResolvedValue(mockUser);
+
+    const tools = createUserTools(mockClients);
+    const getUsersHandler = tools[0].handler;
+
+    const result = await getUsersHandler({ email: 'alice@example.com' });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.user.id).toBe('U1234567890');
   });
 });

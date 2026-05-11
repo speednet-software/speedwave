@@ -173,6 +173,10 @@ export function validateWorkerUrl(url: string): boolean {
   if (parsed.pathname !== '/') return false;
   if (parsed.search !== '') return false;
   if (parsed.hash !== '') return false;
+  // The password sub-condition is defense-in-depth: the raw-hostname check above already
+  // rejects any URL with credentials (they shift the colon position). The branch is kept
+  // for correctness but is unreachable in practice — hence c8 ignore on the || right side.
+  /* c8 ignore next */
   if (parsed.username !== '' || parsed.password !== '') return false;
 
   return true;

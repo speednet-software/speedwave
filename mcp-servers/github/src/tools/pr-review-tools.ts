@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -340,18 +338,6 @@ const createPrReviewCommentTool: Tool = {
  * @param client - GitHub client instance (null when the service is not configured)
  */
 export function createPrReviewTools(client: GitHubClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitHub'));
-  if (!client) {
-    return [
-      { tool: listPrCommitsTool, handler: unconfigured },
-      { tool: listPrReviewsTool, handler: unconfigured },
-      { tool: createPrReviewTool, handler: unconfigured },
-      { tool: listPrCommentsTool, handler: unconfigured },
-      { tool: createPrCommentTool, handler: unconfigured },
-      { tool: createPrReviewCommentTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listPrCommitsTool,

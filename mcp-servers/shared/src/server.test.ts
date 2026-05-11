@@ -899,6 +899,31 @@ describe('server', () => {
 
         expect(deleteRoute).toBeDefined();
       });
+
+      it('DELETE route on / invokes handleMCPDelete — returns 400 when session header missing', () => {
+        // Covers line 281: handleMCPDelete(req, res) call inside app.delete('/', ...)
+        // We call the DELETE route handler directly with a request missing the session header.
+        const server = createMCPServer({
+          name: 'delete-test',
+          version: '1.0.0',
+          port: 3000,
+        });
+
+        const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
+        const deleteRoute = routes.find(
+          (layer: any) => layer.route?.path === '/' && layer.route?.methods?.delete
+        );
+
+        expect(deleteRoute).toBeDefined();
+
+        const req = createMockRequest({}, {});
+        const res = createMockResponse();
+
+        deleteRoute.route.stack[0].handle(req, res, vi.fn());
+
+        // handleMCPDelete returns 400 when Mcp-Session-Id header is missing
+        expect(res.status).toHaveBeenCalledWith(400);
+      });
     });
 
     describe('Method Not Allowed (405)', () => {
@@ -1149,6 +1174,36 @@ describe('server', () => {
         await server.stop();
 
         expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('stopped'));
+      }, 10000);
+
+      it('rejects stop() promise when server.close() calls back with an error', async () => {
+        // Covers line 343: the reject(err) branch in stop()
+        const server = createMCPServer({
+          name: 'stop-error-test',
+          version: '1.0.0',
+          port: 3122,
+        });
+
+        await server.start();
+
+        // Patch the internal http.Server's close to call back with an error
+        const httpServer = (server.app as any).listen ? null : null; // unused — we access it differently
+
+        // Access the underlying server instance via the closure by re-starting
+        // the server and then forcing close to error. We spy on the net.Server.close.
+        const net = await import('net');
+        const originalClose = net.Server.prototype.close;
+        net.Server.prototype.close = function (cb?: (err?: Error) => void) {
+          if (cb) cb(new Error('forced close error'));
+          return this;
+        };
+
+        try {
+          await expect(server.stop()).rejects.toThrow('forced close error');
+        } finally {
+          net.Server.prototype.close = originalClose;
+          // Restore so subsequent tests are unaffected; actual server may already be closed
+        }
       }, 10000);
     });
 
@@ -1927,6 +1982,102 @@ describe('server', () => {
       expect(next3).toHaveBeenCalled();
 
       vi.useRealTimers();
+    });
+
+    it('cleanup interval deletes IP entry when all timestamps are expired (hits.delete branch)', () => {
+      // Covers line 195: hits.delete(ip) — when all timestamps for an IP are expired
+      vi.useFakeTimers();
+
+      const server = createMCPServer({
+        name: 'rate-cleanup-delete',
+        version: '1.0.0',
+        port: 3000,
+        rateLimit: { maxRequests: 10, windowMs: 1_000 }, // 1-second window
+      });
+
+      const layers = (server.app as any).router.stack;
+      const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
+
+      // Make a request at t=0 for IP 10.0.1.1
+      const req = createMockRequest({}, {});
+      (req as any).path = '/';
+      (req as any).ip = '10.0.1.1';
+      rlLayer.handle(req, createMockResponse(), vi.fn());
+
+      // Advance past 5-min cleanup interval. At that time the timestamp is 5*60_001ms old
+      // which is > 1s window → expired. hits.delete(ip) should fire.
+      vi.advanceTimersByTime(5 * 60_000 + 1);
+
+      // After cleanup, the IP entry was deleted. Making another request should pass (new bucket).
+      const resAfterCleanup = createMockResponse();
+      const nextAfterCleanup = vi.fn();
+      rlLayer.handle(req, resAfterCleanup, nextAfterCleanup);
+      expect(nextAfterCleanup).toHaveBeenCalled();
+
+      vi.useRealTimers();
+    });
+
+    it('cleanup interval prunes expired timestamps but keeps IP when some are still valid (hits.set branch)', () => {
+      // Covers line 197: hits.set(ip, valid) — when some timestamps expired but others are still valid
+      // windowMs must be > cleanup interval (5 min) so a timestamp from t=0 is still valid at cleanup
+      vi.useFakeTimers();
+
+      const server = createMCPServer({
+        name: 'rate-cleanup-partial',
+        version: '1.0.0',
+        port: 3000,
+        rateLimit: { maxRequests: 10, windowMs: 6 * 60_000 }, // 6-min window
+      });
+
+      const layers = (server.app as any).router.stack;
+      const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
+
+      // Make a request at t=0
+      const req = createMockRequest({}, {});
+      (req as any).path = '/';
+      (req as any).ip = '10.0.1.2';
+      rlLayer.handle(req, createMockResponse(), vi.fn());
+
+      // Advance just past the 5-min cleanup interval
+      // Timestamp is 5*60_001ms old, which is < 6*60_000ms window → still valid
+      // Cleanup fires: valid.length == 1 > 0 → hits.set(ip, valid) fires (line 197)
+      vi.advanceTimersByTime(5 * 60_000 + 1);
+
+      // Verify the bucket was kept (request still passes, IP still tracked)
+      const resAfterCleanup = createMockResponse();
+      const nextAfterCleanup = vi.fn();
+      rlLayer.handle(req, resAfterCleanup, nextAfterCleanup);
+      expect(nextAfterCleanup).toHaveBeenCalled();
+
+      vi.useRealTimers();
+    });
+  });
+
+  describe('Method Not Allowed (405) handler', () => {
+    it('returns 405 with Allow header for unsupported HTTP methods on /', async () => {
+      const server = createMCPServer({
+        name: 'test-server',
+        version: '1.0.0',
+        port: 3000,
+      });
+
+      const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
+      // app.all() registers the last route on '/'; it comes after POST and DELETE routes
+      const allRoutes = routes.filter((layer: any) => layer.route?.path === '/');
+      // The app.all catch-all is the last of the '/' routes
+      const catchAllRoute = allRoutes[allRoutes.length - 1];
+
+      expect(catchAllRoute).toBeDefined();
+
+      const req = createMockRequest({}, {});
+      const res = createMockResponse();
+
+      // Call the handler directly — it receives (_req, res) so we pass req and res
+      catchAllRoute.route.stack[0].handle(req, res, vi.fn());
+
+      expect(res.setHeader).toHaveBeenCalledWith('Allow', 'POST, DELETE');
+      expect(res.status).toHaveBeenCalledWith(405);
+      expect(res.json).toHaveBeenCalledWith({ error: 'Method Not Allowed' });
     });
   });
 

@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -197,15 +195,6 @@ const createOrUpdateFileTool: Tool = {
  * @param client - GitHub client instance (null when the service is not configured)
  */
 export function createRepositoryTools(client: GitHubClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitHub'));
-  if (!client) {
-    return [
-      { tool: getTreeTool, handler: unconfigured },
-      { tool: getFileContentsTool, handler: unconfigured },
-      { tool: createOrUpdateFileTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: getTreeTool,

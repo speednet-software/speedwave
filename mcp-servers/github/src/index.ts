@@ -44,7 +44,7 @@ async function main(): Promise<void> {
     name: SERVER_NAME,
     version: '1.0.0',
     port: PORT,
-    host: '0.0.0.0', // inside container — must be reachable from Docker network
+    host: '0.0.0.0', // bind all interfaces — must be reachable from the container network
     tools,
     auth: { token: AUTH_TOKEN },
     healthCheck: async () => {

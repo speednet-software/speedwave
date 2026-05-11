@@ -119,6 +119,7 @@ const PII_VALIDATORS: Partial<Record<PIIType, (value: string) => boolean>> = {
  * @returns True if valid, false otherwise
  */
 function validatePESEL(pesel: string): boolean {
+  /* c8 ignore next — PESEL regex /\b\d{11}\b/ always matches exactly 11 digits */
   if (pesel.length !== 11) return false;
   const weights = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3];
   let sum = 0;
@@ -135,6 +136,7 @@ function validatePESEL(pesel: string): boolean {
  * @returns True if valid, false otherwise
  */
 function validateNIP(nip: string): boolean {
+  /* c8 ignore next — NIP regex /\b\d{10}\b/ always matches exactly 10 digits */
   if (nip.length !== 10) return false;
   const weights = [6, 5, 7, 2, 3, 4, 5, 6, 7];
   let sum = 0;
@@ -152,6 +154,7 @@ function validateNIP(nip: string): boolean {
  */
 function validateLuhn(number: string): boolean {
   const digits = number.replace(/\D/g, '');
+  /* c8 ignore next — CARD regex constrains to 13–19 digit patterns */
   if (digits.length < 13 || digits.length > 19) return false;
 
   let sum = 0;
@@ -177,6 +180,7 @@ function validateLuhn(number: string): boolean {
  */
 function validateIBAN(iban: string): boolean {
   const cleaned = iban.replace(/\s/g, '').toUpperCase();
+  /* c8 ignore next — IBAN regex constrains to 15–34 character patterns */
   if (cleaned.length < 15 || cleaned.length > 34) return false;
 
   // Move first 4 chars to end
@@ -250,6 +254,7 @@ function tokenizeSensitiveValue(value: string, context: PIIContext): string {
   const existingToken = context.valueToToken.get(cacheKey);
   if (existingToken) {
     const entry = context.tokens.get(existingToken);
+    /* c8 ignore next — tokens and valueToToken maps are always in sync */
     if (entry) {
       entry.accessCount++;
       entry.lastAccessed = new Date();
@@ -356,6 +361,7 @@ function tokenizeString(text: string, context: PIIContext): string {
       const existingToken = context.valueToToken.get(cacheKey);
       if (existingToken) {
         const entry = context.tokens.get(existingToken);
+        /* c8 ignore next — tokens and valueToToken maps are always in sync */
         if (entry) {
           entry.accessCount++;
           entry.lastAccessed = new Date();

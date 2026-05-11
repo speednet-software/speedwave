@@ -8,6 +8,7 @@ import {
   handleSendChannel,
   handleGetChannelMessages,
   handleListChannelIds,
+  createChannelTools,
 } from './channel-tools.js';
 import type { SlackClients } from '../client.js';
 
@@ -360,5 +361,107 @@ describe('channel-tools', () => {
 
       expect(client.getChannels).toHaveBeenCalledWith(mockClients, { types: 'public_channel' });
     });
+  });
+});
+
+describe('createChannelTools (null clients — not configured)', () => {
+  it('returns three tool definitions when clients are null', () => {
+    const tools = createChannelTools(null);
+    expect(tools).toHaveLength(3);
+    expect(tools.map((t) => t.tool.name)).toEqual([
+      'sendChannel',
+      'getChannelMessages',
+      'listChannelIds',
+    ]);
+  });
+
+  it('sendChannel handler returns NOT_CONFIGURED error when clients are null', async () => {
+    const tools = createChannelTools(null);
+    const sendHandler = tools.find((t) => t.tool.name === 'sendChannel')!.handler;
+
+    const result = await sendHandler({ channel: '#general', message: 'hi' });
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('NOT_CONFIGURED');
+    expect(parsed.message).toBeTruthy();
+  });
+
+  it('getChannelMessages handler returns NOT_CONFIGURED error when clients are null', async () => {
+    const tools = createChannelTools(null);
+    const readHandler = tools.find((t) => t.tool.name === 'getChannelMessages')!.handler;
+
+    const result = await readHandler({ channel: '#general' });
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('NOT_CONFIGURED');
+  });
+
+  it('listChannelIds handler returns NOT_CONFIGURED error when clients are null', async () => {
+    const tools = createChannelTools(null);
+    const listHandler = tools.find((t) => t.tool.name === 'listChannelIds')!.handler;
+
+    const result = await listHandler({});
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('NOT_CONFIGURED');
+  });
+});
+
+describe('createChannelTools (with clients — configured path)', () => {
+  let mockClients: SlackClients;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockClients = {
+      bot: {} as any,
+      user: {} as any,
+    };
+  });
+
+  it('sendChannel handler routes to handler when clients are configured', async () => {
+    const mockResult = { ok: true, ts: '1234567890.123456', channel: 'C1234567890' };
+    vi.mocked(client.sendChannel).mockResolvedValue(mockResult);
+
+    const tools = createChannelTools(mockClients);
+    const sendHandler = tools.find((t) => t.tool.name === 'sendChannel')!.handler;
+
+    const result = await sendHandler({ channel: '#general', message: 'Hello!' });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed).toEqual(mockResult);
+  });
+
+  it('getChannelMessages handler routes to handler when clients are configured', async () => {
+    const mockMessages = [{ user: 'U123', text: 'Hi', ts: '12345.67890', type: 'message' }];
+    vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages });
+
+    const tools = createChannelTools(mockClients);
+    const readHandler = tools.find((t) => t.tool.name === 'getChannelMessages')!.handler;
+
+    const result = await readHandler({ channel: '#general' });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.messages).toEqual(mockMessages);
+  });
+
+  it('listChannelIds handler routes to handler when clients are configured', async () => {
+    const mockChannels = [
+      { id: 'C123', name: 'general', is_channel: true, is_private: false, is_member: true },
+    ];
+    vi.mocked(client.getChannels).mockResolvedValue({ channels: mockChannels });
+
+    const tools = createChannelTools(mockClients);
+    const listHandler = tools.find((t) => t.tool.name === 'listChannelIds')!.handler;
+
+    const result = await listHandler({});
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.channels).toHaveLength(1);
   });
 });

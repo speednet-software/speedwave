@@ -35,20 +35,20 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
 /// purely a recovery path for tampered or pre-existing trees).
 fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
     validation::validate_project_name(project)?;
-    let tokens_dir = data_dir.join("tokens").join(project);
-    let mut dirs_to_create: Vec<std::path::PathBuf> = vec![
+    let tokens_root = data_dir.join("tokens").join(project);
+    let mut dirs_to_create = vec![
         data_dir.join("compose").join(project),
         data_dir.join("context").join(project),
         data_dir
             .join(crate::consts::CLAUDE_HOME_SUBDIR)
             .join(project),
     ];
-    // Per-service token directories — derived from TOGGLEABLE_MCP_SERVICES (the
-    // SSOT) so a new integration doesn't need a parallel edit here. Services
-    // with no credential files (e.g. Playwright) get no token directory.
+    // One token dir per credential-bearing service — derived from the SSOT so adding a
+    // service is a single edit in consts.rs (services with no `credential_files`, e.g.
+    // playwright, get no token dir).
     for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
         if !svc.credential_files.is_empty() {
-            dirs_to_create.push(tokens_dir.join(svc.config_key));
+            dirs_to_create.push(tokens_root.join(svc.config_key));
         }
     }
     for dir in &dirs_to_create {
@@ -259,8 +259,8 @@ mod tests {
                 .join(crate::consts::CLAUDE_HOME_SUBDIR)
                 .join("modecheck"),
         ];
-        // Every credential-bearing service must have a token directory created
-        // (derived from the same SSOT init_project_dirs_in uses).
+        // One token dir per credential-bearing service — same SSOT-derived set as
+        // init_project_dirs_in. (At minimum: slack, sharepoint, redmine, gitlab, github, atlassian.)
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             if !svc.credential_files.is_empty() {
                 dirs.push(
@@ -271,9 +271,14 @@ mod tests {
                 );
             }
         }
-        // Sanity: at least Slack and the new Atlassian worker are in that set.
-        assert!(dirs.iter().any(|d| d.ends_with("slack")));
-        assert!(dirs.iter().any(|d| d.ends_with("atlassian")));
+        assert!(
+            dirs.iter().any(|d| d.ends_with("modecheck/github")),
+            "github token dir must be among the created dirs"
+        );
+        assert!(
+            dirs.iter().any(|d| d.ends_with("modecheck/atlassian")),
+            "atlassian token dir must be among the created dirs"
+        );
         for dir in &dirs {
             let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
             assert_eq!(

@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { withValidation } from './validation.js';
-import { GitHubClient } from '../client.js';
+import { GitLabClient } from '../client.js';
 import { notConfiguredMessage, jsonResult } from '@speedwave/mcp-shared';
 
 afterEach(() => {
@@ -23,15 +23,15 @@ describe('withValidation', () => {
 
     expect(handlerCalled).toBe(false);
     expect(result).toEqual({
-      content: [{ type: 'text', text: `Error: ${notConfiguredMessage('GitHub')}` }],
+      content: [{ type: 'text', text: `Error: ${notConfiguredMessage('GitLab')}` }],
       isError: true,
     });
   });
 
   it('invokes the handler with the client and params and returns its result on success', async () => {
-    // `new GitHubClient` makes no network calls until a method is invoked, so it is safe to construct.
-    const client = new GitHubClient({ token: 'x' });
-    let seenClient: GitHubClient | undefined;
+    // `new GitLabClient` makes no network calls until a method is invoked, so it is safe to construct.
+    const client = new GitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
+    let seenClient: GitLabClient | undefined;
     let seenParams: { name: string } | undefined;
     const wrapped = withValidation<{ name: string }>(client, async (c, params) => {
       seenClient = c;
@@ -39,16 +39,16 @@ describe('withValidation', () => {
       return jsonResult({ greeting: `hi ${params.name}` });
     });
 
-    const result = await wrapped({ name: 'octocat' });
+    const result = await wrapped({ name: 'tanuki' });
 
     expect(seenClient).toBe(client);
-    expect(seenParams).toEqual({ name: 'octocat' });
-    expect(result).toEqual(jsonResult({ greeting: 'hi octocat' }));
+    expect(seenParams).toEqual({ name: 'tanuki' });
+    expect(result).toEqual(jsonResult({ greeting: 'hi tanuki' }));
   });
 
-  it('formats errors thrown by the handler via GitHubClient.formatError, and logs non-Octokit errors', async () => {
+  it('formats errors thrown by the handler via GitLabClient.formatError, and logs non-GitBeaker errors', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const client = new GitHubClient({ token: 'x' });
+    const client = new GitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
     const wrapped = withValidation<undefined>(client, async () => {
       throw new Error('boom from handler');
     });
@@ -59,25 +59,25 @@ describe('withValidation', () => {
       content: [{ type: 'text', text: 'Error: boom from handler' }],
       isError: true,
     });
-    // A plain Error (no numeric `status`) is a programming bug — it must be logged.
+    // A plain Error (name !== "Gitbeaker…") is a programming bug — it must be logged.
     expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Unexpected (non-Octokit) error'),
+      expect.stringContaining('Unexpected (non-GitBeaker) error'),
       expect.any(Error)
     );
   });
 
-  it('formats categorized API errors (e.g. 401) thrown by the handler without logging them', async () => {
+  it('does not log GitBeaker request errors as bugs', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const client = new GitHubClient({ token: 'x' });
+    const client = new GitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
     const wrapped = withValidation<undefined>(client, async () => {
-      throw { status: 401, message: 'Bad credentials' };
+      const gbError = new Error('404 Not Found');
+      gbError.name = 'GitbeakerRequestError';
+      throw gbError;
     });
 
     const result = await wrapped(undefined);
 
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('Authentication failed');
-    // An Octokit-style error (numeric `status`) is expected — don't log it as a bug.
     expect(errSpy).not.toHaveBeenCalled();
   });
 });

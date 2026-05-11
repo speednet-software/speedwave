@@ -20,7 +20,7 @@
  * ✅ AsyncFunction sandbox (restricted globals, no eval/require)
  * ✅ Execution timeout (2 min standard, 5 min for long operations like file transfers)
  * ✅ PII tokenization (sensitive data never reaches model)
- * ✅ Docker network isolation (no exposed ports)
+ * ✅ Container network isolation (no exposed ports)
  * ✅ Rate limiting (100 req/min per session)
  */
 
@@ -253,12 +253,12 @@ async function main() {
   // Start Server
   //═══════════════════════════════════════════════════════════════════════════════
 
-  // inside container — must be reachable from Docker network
+  // bind all interfaces — must be reachable from the container network
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`${ts()} ✅ Speedwave Code Executor MCP Server running on port ${PORT}`);
     console.log(`${ts()} 📡 MCP Protocol: Streamable HTTP (JSON-RPC 2.0 + optional SSE)`);
     console.log(
-      `${ts()} 🔒 Security: AsyncFunction sandbox, PII tokenization, Docker network isolation`
+      `${ts()} 🔒 Security: AsyncFunction sandbox, PII tokenization, container network isolation`
     );
     console.log(`${ts()} 📋 Endpoints:`);
     console.log(`${ts()}    POST /              - MCP protocol endpoint`);
@@ -269,7 +269,9 @@ async function main() {
     console.log(`${ts()}    2. execute_code     - JavaScript execution in sandbox`);
   });
 
-  // Graceful shutdown handler
+  // Graceful shutdown handler — only reachable via OS signals at runtime, not in unit tests.
+  // The lambdas registered with process.on() are also only invoked by OS signals, never in tests.
+  /* c8 ignore start */
   const gracefulShutdown = (signal: string) => {
     console.log(`${ts()} \n📴 Received ${signal}, shutting down gracefully...`);
     server.close(() => {
@@ -285,6 +287,7 @@ async function main() {
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  /* c8 ignore stop */
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -338,7 +341,8 @@ export function createHubApp(rpcHandler: JSONRPCHandler): Express {
   return app;
 }
 
-// Run server
+// Run server — the catch callback is only reachable when main() rejects at runtime
+/* c8 ignore next 4 */
 main().catch((error) => {
   console.error(`${ts()} Fatal error:`, error);
   process.exit(1);

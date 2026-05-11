@@ -29,6 +29,7 @@ The user-level config file stores project definitions, the active project, IDE s
         "sharepoint": { "enabled": false },
         "redmine": { "enabled": false },
         "gitlab": { "enabled": true },
+        "github": { "enabled": false },
         "os": {
           "reminders": { "enabled": true },
           "calendar": { "enabled": true },

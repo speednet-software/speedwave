@@ -152,14 +152,7 @@ export async function initializeRegistry(): Promise<void> {
 
   console.log(`${ts()} [tool-registry] Initializing dynamic registry...`);
 
-  const enabledServices = getEnabledServices();
-
   for (const service of SERVICE_NAMES) {
-    if (!enabledServices.has(service)) {
-      _registry[service] = {};
-      continue;
-    }
-
     const tools = await discoverWithStartupRetry(service);
     _registry[service] = tools;
     console.log(`${ts()} [tool-registry] ${service}: ${Object.keys(tools).length} tools loaded`);
@@ -202,6 +195,8 @@ let _refreshInProgress = false;
  * Start background refresh of all enabled services.
  */
 function _startBackgroundRefresh(): void {
+  /* c8 ignore next — guard for re-entrant callers; initializeRegistry() only
+   * calls this once (returns early on duplicate calls via _initialized flag) */
   if (_refreshInterval) return;
 
   const REFRESH_MS = 5 * 60 * 1000; // 5 minutes
@@ -209,11 +204,8 @@ function _startBackgroundRefresh(): void {
     if (_refreshInProgress) return; // Skip overlapping refresh
     _refreshInProgress = true;
     try {
-      const enabled = getEnabledServices();
       for (const service of SERVICE_NAMES) {
-        if (enabled.has(service)) {
-          await refreshServiceTools(service);
-        }
+        await refreshServiceTools(service);
       }
     } finally {
       _refreshInProgress = false;
@@ -221,6 +213,8 @@ function _startBackgroundRefresh(): void {
   }, REFRESH_MS);
 
   // Don't prevent process from exiting
+  /* c8 ignore next 3 — in Node.js setInterval always returns a Timeout with .unref();
+   * the false branch only fires in browser-like environments (setInterval returns a number) */
   if (_refreshInterval && typeof _refreshInterval === 'object' && 'unref' in _refreshInterval) {
     _refreshInterval.unref();
   }

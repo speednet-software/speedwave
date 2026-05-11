@@ -601,6 +601,18 @@ describe('RedmineClient', () => {
       expect(call[1].issue.description).not.toContain('<form');
       expect(call[1].issue.description).toContain('Safe text');
     });
+
+    it('should throw when subject is empty string', async () => {
+      await expect(client.createIssue({ project_id: 'test-project', subject: '' })).rejects.toThrow(
+        'Subject cannot be empty'
+      );
+    });
+
+    it('should throw when subject is whitespace only', async () => {
+      await expect(
+        client.createIssue({ project_id: 'test-project', subject: '   ' })
+      ).rejects.toThrow('Subject cannot be empty');
+    });
   });
 
   describe('updateIssue', () => {
@@ -1644,6 +1656,55 @@ describe('RedmineClient', () => {
       // Note: We can't easily test the setTimeout delay without useFakeTimers
       // which vitest handles differently. The important part is the retry count logic.
     });
+
+    it('should pass response through the success handler', () => {
+      const interceptorCall = mockInterceptors.response.use.mock.calls[0];
+      const successHandler = interceptorCall[0];
+
+      const mockResponse = { data: { issue: { id: 1 } }, status: 200 };
+      const result = successHandler(mockResponse);
+
+      expect(result).toBe(mockResponse);
+    });
+
+    it('should call axios instance with config on retry after delay', async () => {
+      vi.useFakeTimers();
+
+      const interceptorCall = mockInterceptors.response.use.mock.calls[0];
+      const errorHandler = interceptorCall[1];
+
+      // Make mockAxiosInstance callable as a function (it is used as this.client(config))
+      const callableInstance = Object.assign(
+        vi.fn().mockResolvedValue({ data: { retried: true } }),
+        mockAxiosInstance
+      );
+      const newClient = new RedmineClient(config);
+      // Access the private client and replace it with our callable version
+      (newClient as any).client = callableInstance;
+
+      // Grab the NEW interceptor registered by newClient
+      const newInterceptorCall =
+        mockInterceptors.response.use.mock.calls[
+          mockInterceptors.response.use.mock.calls.length - 1
+        ];
+      const newErrorHandler = newInterceptorCall[1];
+
+      const mockError = {
+        config: { url: '/test', __retryCount: 0 } as Record<string, unknown>,
+        message: 'Network error',
+      };
+
+      const retryPromise = newErrorHandler(mockError);
+
+      // Advance timers to trigger the setTimeout delay (2^1 * 1000 = 2000ms)
+      await vi.advanceTimersByTimeAsync(2001);
+
+      await retryPromise;
+
+      expect(callableInstance).toHaveBeenCalledWith(mockError.config);
+
+      vi.useRealTimers();
+    });
   });
 
   //═══════════════════════════════════════════════════════════════════════════════
@@ -2153,6 +2214,121 @@ describe('RedmineClient', () => {
 
         expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects.json', {
           params: { limit: 100, offset: 0 },
+        });
+      });
+
+      it('should filter projects by active status when unscoped', async () => {
+        const activeProject = { ...scopedProject, status: 1 };
+        const closedProject = {
+          id: 99,
+          identifier: 'closed-proj',
+          name: 'Closed',
+          status: 5,
+          is_public: false,
+          created_on: '2024-01-01T00:00:00Z',
+          updated_on: '2024-01-01T00:00:00Z',
+        };
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            projects: [activeProject, closedProject],
+            total_count: 2,
+          },
+        });
+
+        const result = await client.listProjects({ status: 'active' });
+
+        expect(result.projects).toHaveLength(1);
+        expect(result.projects[0].identifier).toBe('my-project');
+      });
+
+      it('should filter projects by closed status when unscoped', async () => {
+        const activeProject = { ...scopedProject, status: 1 };
+        // status 9 = closed per REDMINE_STATUS_MAP
+        const closedProject = {
+          id: 99,
+          identifier: 'closed-proj',
+          name: 'Closed',
+          status: 9,
+          is_public: false,
+          created_on: '2024-01-01T00:00:00Z',
+          updated_on: '2024-01-01T00:00:00Z',
+        };
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            projects: [activeProject, closedProject],
+            total_count: 2,
+          },
+        });
+
+        const result = await client.listProjects({ status: 'closed' });
+
+        expect(result.projects).toHaveLength(1);
+        expect(result.projects[0].identifier).toBe('closed-proj');
+      });
+
+      it('should return all projects when status is "all" unscoped', async () => {
+        const projects = [
+          scopedProject,
+          { ...scopedProject, id: 99, identifier: 'other', status: 5 },
+        ];
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects, total_count: 2 },
+        });
+
+        const result = await client.listProjects({ status: 'all' });
+
+        expect(result.projects).toHaveLength(2);
+      });
+
+      it('should pass custom limit and offset when unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects: [], total_count: 0 },
+        });
+
+        await client.listProjects({ limit: 25, offset: 50 });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects.json', {
+          params: { limit: 25, offset: 50 },
+        });
+      });
+    });
+
+    // ─── showProject() include option ───────────────────────────────────
+
+    describe('showProject() include option', () => {
+      it('should pass include param when options.include is non-empty', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        await client.showProject('my-project', { include: ['trackers', 'issue_categories'] });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project.json', {
+          params: { include: 'trackers,issue_categories' },
+        });
+      });
+
+      it('should not pass include param when options.include is empty array', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        await client.showProject('my-project', { include: [] });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project.json', {
+          params: {},
+        });
+      });
+
+      it('should not pass include param when no options provided', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        await client.showProject('my-project');
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project.json', {
+          params: {},
         });
       });
     });

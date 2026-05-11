@@ -297,6 +297,59 @@ describe('pii-tokenizer', () => {
     });
   });
 
+  describe('IBAN tokenization', () => {
+    it('tokenizes a valid Polish IBAN', () => {
+      const context = createPIIContext();
+      // Valid Polish IBAN (mod-97 check digit = 1)
+      // PL61109010140000071219812874 is a well-known valid test IBAN
+      const data = { account: 'PL61109010140000071219812874' };
+      const result = tokenizePII(data, context) as Record<string, string>;
+
+      expect(result.account).toMatch(/\[IBAN:TOKEN_[A-F0-9]+\]/);
+    });
+
+    it('does not tokenize an IBAN with invalid checksum', () => {
+      const context = createPIIContext();
+      // Deliberately wrong check digits (mod-97 != 1)
+      const data = { account: 'PL99109010140000071219812874' };
+      const result = tokenizePII(data, context) as Record<string, string>;
+
+      // Should remain unchanged because checksum fails
+      expect(result.account).toBe('PL99109010140000071219812874');
+    });
+
+    it('does not tokenize IBAN shorter than 15 chars', () => {
+      const context = createPIIContext();
+      const data = { account: 'PL6110901' };
+      const result = tokenizePII(data, context) as Record<string, string>;
+
+      expect(result.account).toBe('PL6110901');
+    });
+  });
+
+  describe('sensitive key token limit', () => {
+    it('returns original value when token limit is reached for sensitive field', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // Limit to 1 token so the second sensitive field cannot be tokenized
+      const limitedContext = createPIIContext(1, 30000);
+
+      const data = {
+        password: 'secret1',
+        token: 'secret2', // Should NOT be tokenized — limit reached
+      };
+
+      const result = tokenizePII(data, limitedContext) as Record<string, string>;
+
+      // First sensitive field is tokenized
+      expect(result.password).toMatch(/\[SENSITIVE_FIELD:TOKEN_[A-F0-9]+\]/);
+      // Second sensitive field is returned as-is (limit exhausted)
+      expect(result.token).toBe('secret2');
+
+      vi.restoreAllMocks();
+    });
+  });
+
   describe('roundtrip', () => {
     it('preserves data through tokenize/detokenize cycle', () => {
       const context = createPIIContext();
@@ -435,6 +488,16 @@ describe('pii-tokenizer', () => {
       const result = detokenizePII(input, context) as string;
 
       expect(result).toBe('Start first@example.com middle second@example.com end');
+    });
+
+    it('leaves a valid-hex token unchanged when it is not in the context map', () => {
+      // Token pattern matches [A-Z_]+:TOKEN_[A-F0-9]+ — covers the false branch of `if (entry)` in detokenizeString
+      const context = createPIIContext();
+      // Do NOT add [EMAIL:TOKEN_DEADBEEF] to context — it has a valid hex suffix but is unknown
+      const input = 'Contact [EMAIL:TOKEN_DEADBEEF] for help';
+      const result = detokenizePII(input, context) as string;
+      // Unknown token should be left as-is
+      expect(result).toBe('Contact [EMAIL:TOKEN_DEADBEEF] for help');
     });
   });
 

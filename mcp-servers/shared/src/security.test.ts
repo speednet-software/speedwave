@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   validateJSONRPCMessage,
   validateOrigin,
@@ -6,6 +6,7 @@ import {
   validateSessionId,
   validateToolName,
   validateWorkerUrl,
+  loadToken,
 } from './security.js';
 
 describe('security', () => {
@@ -197,6 +198,17 @@ describe('security', () => {
           jsonrpc: '2.0',
           method: 'a'.repeat(200),
           id: 1,
+        })
+      ).toBe(true);
+    });
+
+    it('accepts response with result field but no id field (branch: id not in message)', () => {
+      // Covers the false branch of `if ('id' in message)` — a valid response with
+      // result/error but without an id property (unusual but valid per JSON-RPC)
+      expect(
+        validateJSONRPCMessage({
+          jsonrpc: '2.0',
+          result: { data: 'ok' },
         })
       ).toBe(true);
     });
@@ -464,6 +476,12 @@ describe('security', () => {
     it('rejects URL with fragment', () => {
       expect(validateWorkerUrl('http://mcp-slack:3000#frag')).toBe(false);
     });
+
+    it('rejects URL with password but no username (password !== ""  branch)', () => {
+      // Covers the second part of: parsed.username !== '' || parsed.password !== ''
+      // URL spec: `http://:password@mcp-slack:3000` sets empty username and non-empty password
+      expect(validateWorkerUrl('http://:secret@mcp-slack:3000')).toBe(false);
+    });
   });
 
   describe('validateOrigin', () => {
@@ -508,6 +526,70 @@ describe('security', () => {
 
     it('allows missing origin when allowedOrigins is undefined', () => {
       expect(validateOrigin(undefined)).toBe(true);
+    });
+  });
+
+  describe('loadToken', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('returns trimmed token content on success', async () => {
+      const { default: fs } = await import('fs/promises');
+      vi.spyOn(fs, 'readFile').mockResolvedValue('  my-token-value\n  ' as unknown as Uint8Array);
+
+      const result = await loadToken('/tokens/test/token');
+      expect(result).toBe('my-token-value');
+    });
+
+    it('throws with ENOENT message when token file is not found', async () => {
+      const { default: fs } = await import('fs/promises');
+      const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      vi.spyOn(fs, 'readFile').mockRejectedValue(err);
+
+      await expect(loadToken('/tokens/missing/token')).rejects.toThrow(
+        'Token file not found: /tokens/missing/token'
+      );
+    });
+
+    it('throws with EACCES message when permission is denied', async () => {
+      const { default: fs } = await import('fs/promises');
+      const err = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      vi.spyOn(fs, 'readFile').mockRejectedValue(err);
+
+      await expect(loadToken('/tokens/protected/token')).rejects.toThrow(
+        'Permission denied reading token file: /tokens/protected/token'
+      );
+    });
+
+    it('throws with EISDIR message when path is a directory', async () => {
+      const { default: fs } = await import('fs/promises');
+      const err = Object.assign(new Error('EISDIR'), { code: 'EISDIR' });
+      vi.spyOn(fs, 'readFile').mockRejectedValue(err);
+
+      await expect(loadToken('/tokens/dir/')).rejects.toThrow(
+        'Token path is a directory, not a file: /tokens/dir/'
+      );
+    });
+
+    it('throws generic message for unknown error codes (e.g. EIO)', async () => {
+      const { default: fs } = await import('fs/promises');
+      const err = Object.assign(new Error('Input/output error'), { code: 'EIO' });
+      vi.spyOn(fs, 'readFile').mockRejectedValue(err);
+
+      await expect(loadToken('/tokens/broken/token')).rejects.toThrow(
+        'Failed to read token file: /tokens/broken/token (Input/output error)'
+      );
+    });
+
+    it('throws generic message for non-Error thrown values', async () => {
+      const { default: fs } = await import('fs/promises');
+      // Non-Error object with no .code — goes to the catch-else branch and String() fallback
+      vi.spyOn(fs, 'readFile').mockRejectedValue('raw string error');
+
+      await expect(loadToken('/tokens/raw/token')).rejects.toThrow(
+        'Failed to read token file: /tokens/raw/token (raw string error)'
+      );
     });
   });
 });

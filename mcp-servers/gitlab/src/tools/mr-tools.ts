@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
@@ -440,19 +438,6 @@ const getMrChangesTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: listMrIdsTool, handler: unconfigured },
-      { tool: getMrFullTool, handler: unconfigured },
-      { tool: createMergeRequestTool, handler: unconfigured },
-      { tool: approveMergeRequestTool, handler: unconfigured },
-      { tool: mergeMergeRequestTool, handler: unconfigured },
-      { tool: updateMergeRequestTool, handler: unconfigured },
-      { tool: getMrChangesTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listMrIdsTool,

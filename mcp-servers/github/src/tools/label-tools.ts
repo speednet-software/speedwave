@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -125,14 +123,6 @@ const createLabelTool: Tool = {
  * @param client - GitHub client instance (null when the service is not configured)
  */
 export function createLabelTools(client: GitHubClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitHub'));
-  if (!client) {
-    return [
-      { tool: listLabelsTool, handler: unconfigured },
-      { tool: createLabelTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listLabelsTool,

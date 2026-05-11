@@ -2,14 +2,7 @@
  * Project Tools - 3 tools for GitLab project operations
  */
 
-import {
-  Tool,
-  ToolDefinition,
-  jsonResult,
-  errorResult,
-  notConfiguredMessage,
-  READ_ONLY_ANNOTATIONS,
-} from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition, jsonResult, READ_ONLY_ANNOTATIONS } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -180,15 +173,6 @@ const searchCodeTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createProjectTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: listProjectIdsTool, handler: unconfigured },
-      { tool: getProjectFullTool, handler: unconfigured },
-      { tool: searchCodeTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listProjectIdsTool,

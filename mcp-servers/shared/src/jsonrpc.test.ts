@@ -857,6 +857,156 @@ describe('jsonrpc', () => {
         const listResult = result.response!.result as { tools: unknown[] };
         expect(listResult.tools).toHaveLength(5);
       });
+
+      it('creates auto-reconnect session when provided sessionId is not found in tools/list', async () => {
+        // Covers the second-OR branch of: if (!sessionId || !sessionManager.getSession(sessionId))
+        // sessionId is provided but session doesn't exist — auto-reconnect fires
+        registerNTools(handler, 1);
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          id: 1,
+        };
+
+        // Use a valid UUID that does not exist in the session store
+        const nonExistentSession = '660e8400-e29b-41d4-a716-446655440099';
+        const result = await handler.processRequest(request, nonExistentSession);
+
+        // Should still return the tools list (auto-reconnect handled it)
+        expect(result.response!.error).toBeUndefined();
+        const listResult = result.response!.result as { tools: unknown[] };
+        expect(listResult.tools).toHaveLength(1);
+      });
+
+      it('skips auto-reconnect when tools/list is called with a valid existing sessionId', async () => {
+        // Covers the false branch of: if (!sessionId || !sessionManager.getSession(sessionId))
+        // — both conditions are false: sessionId is non-null AND session exists
+        registerNTools(handler, 2);
+
+        // First create a session via initialize
+        const initRequest = {
+          jsonrpc: '2.0',
+          method: 'initialize',
+          id: 1,
+          params: {
+            protocolVersion: '2024-11-05',
+            clientInfo: { name: 'test', version: '1.0' },
+            capabilities: {},
+          },
+        };
+        const initResult = await handler.processRequest(initRequest, null);
+        const existingSession = initResult.sessionId!;
+        expect(existingSession).toBeDefined();
+
+        // Now call tools/list with the valid existing session
+        const listResult = await handler.processRequest(
+          { jsonrpc: '2.0', method: 'tools/list', id: 2 },
+          existingSession
+        );
+
+        expect(listResult.response!.error).toBeUndefined();
+        const list = listResult.response!.result as { tools: unknown[] };
+        expect(list.tools).toHaveLength(2);
+      });
+    });
+
+    describe('tools/call session auto-reconnect', () => {
+      it('creates auto-reconnect session when provided sessionId is not found in tools/call', async () => {
+        // Covers the second-OR branch of: if (!sessionId || !sessionManager.getSession(sessionId))
+        // for the handleToolsCall path
+        const tool = {
+          name: 'reconnect_tool',
+          description: 'Test tool',
+          inputSchema: { type: 'object' as const, properties: {} },
+        };
+        const toolHandler = vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'ok' }],
+        });
+        handler.registerTool(tool, toolHandler);
+
+        const nonExistentSession = '770e8400-e29b-41d4-a716-446655440099';
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/call',
+          id: 1,
+          params: { name: 'reconnect_tool', arguments: {} },
+        };
+
+        const result = await handler.processRequest(request, nonExistentSession);
+
+        expect(result.response!.error).toBeUndefined();
+        expect(toolHandler).toHaveBeenCalled();
+      });
+
+      it('skips auto-reconnect when tools/call uses a valid existing sessionId', async () => {
+        // Covers the false branch: both !sessionId and !getSession(sessionId) are false
+        const tool = {
+          name: 'session_tool',
+          description: 'Test tool',
+          inputSchema: { type: 'object' as const, properties: {} },
+        };
+        const toolHandler = vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'ok' }],
+        });
+        handler.registerTool(tool, toolHandler);
+
+        // Create session via initialize
+        const initResult = await handler.processRequest(
+          {
+            jsonrpc: '2.0',
+            method: 'initialize',
+            id: 1,
+            params: {
+              protocolVersion: '2024-11-05',
+              clientInfo: { name: 'test', version: '1.0' },
+              capabilities: {},
+            },
+          },
+          null
+        );
+        const existingSession = initResult.sessionId!;
+
+        const callResult = await handler.processRequest(
+          {
+            jsonrpc: '2.0',
+            method: 'tools/call',
+            id: 2,
+            params: { name: 'session_tool', arguments: {} },
+          },
+          existingSession
+        );
+
+        expect(callResult.response!.error).toBeUndefined();
+        expect(toolHandler).toHaveBeenCalled();
+      });
+    });
+
+    describe('tools/call with more than 10 registered tools', () => {
+      it('truncates tool list with ellipsis in log when >10 tools are registered', async () => {
+        // Covers line 394: registeredTools.length > 10 ? '...' : '' ternary
+        const tools = Array.from({ length: 12 }, (_, i) => ({
+          name: `tool_${String(i).padStart(3, '0')}`,
+          description: `Tool ${i}`,
+          inputSchema: { type: 'object' as const, properties: {} },
+        }));
+        for (const tool of tools) {
+          handler.registerTool(tool, vi.fn().mockResolvedValue({ content: [] }));
+        }
+
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/call',
+          id: 1,
+          params: { name: 'nonexistent_tool', arguments: {} },
+        };
+
+        const result = await handler.processRequest(request, null);
+
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.MethodNotFound);
+        // Verify ellipsis was logged
+        expect(console.error).toHaveBeenCalledWith(expect.stringContaining('...'));
+      });
     });
 
     describe('ProcessRequestResult shape', () => {
@@ -903,6 +1053,48 @@ describe('jsonrpc', () => {
         );
         expect(initResult.sessionId).toBeDefined();
       });
+    });
+  });
+
+  describe('processRequest outer catch', () => {
+    it('returns InternalError when a handler method throws unexpectedly', async () => {
+      // Covers lines 184-188: outer try-catch in processRequest.
+      // sessionManager.createSession is called inside handleInitialize; if it throws,
+      // the outer catch fires (handleInitialize has no catch of its own).
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const localHandler = new JSONRPCHandler({ name: 'outer-catch-test', version: '1.0.0' });
+
+      const { sessionManager } = await import('./session.js');
+      const origCreate = sessionManager.createSession.bind(sessionManager);
+      (sessionManager as any).createSession = () => {
+        throw new Error('session store unavailable');
+      };
+
+      try {
+        const request = {
+          jsonrpc: '2.0',
+          method: 'initialize',
+          id: 99,
+          params: {
+            protocolVersion: '2024-11-05',
+            clientInfo: { name: 'test', version: '1.0' },
+            capabilities: {},
+          },
+        };
+
+        const result = await localHandler.processRequest(request, null);
+
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InternalError);
+        expect(result.response!.id).toBe(99);
+      } finally {
+        (sessionManager as any).createSession = origCreate;
+        vi.restoreAllMocks();
+      }
     });
   });
 

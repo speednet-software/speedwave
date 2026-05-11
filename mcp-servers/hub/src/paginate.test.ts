@@ -135,6 +135,44 @@ describe('paginate', () => {
       expect(mockFetcher).toHaveBeenCalledTimes(1);
     });
 
+    it('extracts items when fetcher returns a plain array (no wrapper object)', async () => {
+      // When the fetched response is itself an array (none of the known keys match),
+      // extractItems falls through all key checks and returns the array directly
+      // via the `if (Array.isArray(result))` branch.
+      const mockFetcher = vi
+        .fn()
+        .mockResolvedValueOnce([{ id: 1 }, { id: 2 }] as unknown as {
+          items: Array<{ id: number }>;
+        })
+        .mockResolvedValue({ items: [] } as { items: Array<{ id: number }> });
+
+      const pages: Array<{ items: Array<{ id: number }> }> = [];
+      for await (const page of paginate(mockFetcher)) {
+        pages.push(page);
+      }
+
+      expect(pages).toHaveLength(1);
+      expect(pages[0].items).toHaveLength(2);
+      expect(pages[0].items[0]).toEqual({ id: 1 });
+      expect(pages[0].items[1]).toEqual({ id: 2 });
+    });
+
+    it('returns empty page when response has no known keys and is not an array', async () => {
+      // extractItems: no known key found, result is not an array → return [] (line 198)
+      const mockFetcher = vi
+        .fn()
+        .mockResolvedValueOnce({ count: 5, status: 'ok' } as unknown as { items: unknown[] })
+        .mockResolvedValue({ items: [] } as { items: unknown[] });
+
+      const pages: unknown[] = [];
+      for await (const page of paginate(mockFetcher)) {
+        pages.push(page);
+      }
+
+      // extractItems returns [] so the page has zero items → pagination stops immediately
+      expect(pages).toHaveLength(0);
+    });
+
     it('extracts items from different response shapes', async () => {
       const responseShapes = [
         { issues: [{ id: 1 }], total_count: 1 },
