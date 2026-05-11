@@ -1,12 +1,14 @@
-# ADR-051: Speedwave-Native Anthropic OAuth Login Flow
+# ADR-051: Claude Code Login Surface + Clipboard Bridge
 
 **Status:** Accepted
 
 **Date:** 2026-05-06
 
+> **Naming clarification:** an earlier draft called this "Speedwave-native OAuth login flow". That name is wrong and was deliberately dropped: Speedwave does **not** perform OAuth and does **not** handle Anthropic tokens — Claude Code's `/login` owns the entire credential lifecycle. A literally Speedwave-native flow (Speedwave opening `console.anthropic.com/oauth/authorize`, running its own loopback callback, capturing the token) would violate Anthropic's Consumer Terms, which reserve OAuth for Claude Code and Claude.ai (clarified Feb 2026 — see [^1]). This ADR is about a _launch surface_ + a _clipboard bridge_, nothing more.
+
 ## Context
 
-After a fresh install, users could not complete the Anthropic OAuth login from inside the `claude` container:
+After a fresh install, users could not conveniently complete the Anthropic login from inside the `claude` container:
 
 1. **The "press `c` to copy URL" hint does not work in our container.** Claude Code's TUI prints the suggestion unconditionally whenever stdout is a TTY — but the runtime path that backs it (`pbcopy`/`xclip`/`wl-copy`/`clip.exe`, with OSC 52 as a final fallback) has no working channel from our container to the host clipboard. We mount no X11/Wayland sockets, drop all capabilities (`cap_drop: ALL`), and Apple Terminal strips OSC 52 by default.
 2. **Manual mouse-select copies only the visible URL slice.** The OAuth URL is ~300 bytes; once it wraps in an 80-column terminal, dragging selects only the visible fragment plus newlines.
