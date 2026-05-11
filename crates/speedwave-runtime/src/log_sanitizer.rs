@@ -39,7 +39,10 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         // GitLab tokens: glpat- prefixed (20+ alphanumeric/hyphen chars)
         (r"glpat-[A-Za-z0-9\-]{20,}", "***REDACTED_GITLAB_TOKEN***"),
         // Atlassian Cloud API tokens: ATATT prefixed (long base64url-ish payload)
-        (r"ATATT[A-Za-z0-9_\-]{20,}", "***REDACTED_ATLASSIAN_TOKEN***"),
+        (
+            r"ATATT[A-Za-z0-9_\-]{20,}",
+            "***REDACTED_ATLASSIAN_TOKEN***",
+        ),
         // Anthropic API keys: sk-ant- prefixed
         (r"sk-ant-[A-Za-z0-9_-]+", "***REDACTED_ANTHROPIC_KEY***"),
         // URL userinfo credentials: ://user:password@host — redact password

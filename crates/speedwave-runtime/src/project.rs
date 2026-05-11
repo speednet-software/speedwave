@@ -263,7 +263,12 @@ mod tests {
         // (derived from the same SSOT init_project_dirs_in uses).
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             if !svc.credential_files.is_empty() {
-                dirs.push(data_dir.join("tokens").join("modecheck").join(svc.config_key));
+                dirs.push(
+                    data_dir
+                        .join("tokens")
+                        .join("modecheck")
+                        .join(svc.config_key),
+                );
             }
         }
         // Sanity: at least Slack and the new Atlassian worker are in that set.

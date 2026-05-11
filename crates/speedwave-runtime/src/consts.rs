@@ -1159,7 +1159,10 @@ mod tests {
         // and Atlassian's optional Jira-project / Confluence-space allowlists.
         let expected: std::collections::HashMap<&str, Vec<&str>> = [
             ("redmine", vec!["project_id"]),
-            ("atlassian", vec!["jira_project_keys", "confluence_space_keys"]),
+            (
+                "atlassian",
+                vec!["jira_project_keys", "confluence_space_keys"],
+            ),
         ]
         .into_iter()
         .collect();
