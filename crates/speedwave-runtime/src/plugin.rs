@@ -1038,11 +1038,14 @@ fn remove_plugin_with_base(
         None
     };
 
-    std::fs::remove_dir_all(&plugin_dir)?;
-    // Drop the cached signature verdict for this path — install does
-    // the symmetric thing, and a stale entry would otherwise linger
-    // for the lifetime of a long-running Desktop process.
+    // Drop the cached signature verdict BEFORE removing the directory —
+    // `invalidate_cache` resolves its key via `canonicalize`, which
+    // fails once the path is gone, so doing this after `remove_dir_all`
+    // would be a no-op and the stale entry would linger for the
+    // lifetime of a long-running Desktop process. Install does the
+    // symmetric thing on `dest`.
     signing::invalidate_cache(&plugin_dir);
+    std::fs::remove_dir_all(&plugin_dir)?;
     // Mutable state lives outside the signed tree (PR2). Wipe it too, so a
     // subsequent reinstall starts from a clean state and we don't leak a
     // stale `image_pending` marker for a plugin that no longer exists.
@@ -1268,9 +1271,31 @@ pub fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
     let mut out = Vec::new();
     let read_dir = match std::fs::read_dir(plugins_dir) {
         Ok(rd) => rd,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            log::warn!(
+                "list_for_ui: cannot read plugins dir {} ({e})",
+                plugins_dir.display()
+            );
+            return Vec::new();
+        }
     };
-    for entry in read_dir.flatten() {
+    for item in read_dir {
+        let entry = match item {
+            Ok(e) => e,
+            Err(e) => {
+                // A directory entry we can't read — surface it as an
+                // unverified entry so the UI shows *something* rather
+                // than silently presenting a shorter list than reality.
+                out.push(PluginListEntry {
+                    slug: "<unreadable-entry>".into(),
+                    dir: plugins_dir.to_path_buf(),
+                    manifest: None,
+                    verification_status: VerificationStatus::ManifestInvalid,
+                    verification_error: Some(format!("cannot read directory entry: {e}")),
+                });
+                continue;
+            }
+        };
         let Ok(ft) = entry.file_type() else { continue };
         if !ft.is_dir() {
             continue;
@@ -1281,7 +1306,7 @@ pub fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
         }
         let plugin_dir = entry.path();
         // The UI lister is intentionally read-only. Migration of the
-        // pre-PR2 in-tree `.image_pending` marker is performed by
+        // legacy in-tree `.image_pending` marker is performed by
         // `verify_one_plugin_dir` (used by `audit_all` and
         // `list_verified_plugins`); both fire well before any user-
         // initiated UI list. If a hypothetical race shows a legacy
@@ -1377,8 +1402,26 @@ pub fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, String)>>
         Ok(rd) => rd,
         Err(e) => return Err(vec![("<plugins-base>".into(), e.to_string())]),
     };
-    for entry in read_dir.flatten() {
-        let Ok(ft) = entry.file_type() else { continue };
+    for item in read_dir {
+        // A directory entry that can't be read is itself an audit
+        // failure — never silently skipped. Otherwise an attacker who
+        // can make a specific plugin's `DirEntry` raise an I/O error
+        // (e.g. on a filesystem returning intermittent EIO) would
+        // escape the audit, which would then return `Ok(())`.
+        let entry = match item {
+            Ok(e) => e,
+            Err(e) => {
+                failures.push(("<unreadable-entry>".into(), e.to_string()));
+                continue;
+            }
+        };
+        let Ok(ft) = entry.file_type() else {
+            failures.push((
+                entry.file_name().to_string_lossy().to_string(),
+                "cannot stat directory entry".into(),
+            ));
+            continue;
+        };
         if !ft.is_dir() {
             continue;
         }
@@ -1431,11 +1474,17 @@ fn ensure_plugin_images_from_dir(
     // First: build any pending (newly-installed) images for enabled plugins.
     build_pending_from_dir(runtime, Some(enabled_service_ids), plugins_dir)?;
 
-    // Second: check image existence and rebuild any missing images.
-    let plugins = list_installed_from_dir(plugins_dir)?;
+    // Second: check image existence and rebuild any missing images. Use the
+    // fail-closed verified loader — the manifest's `image_tag` decides which
+    // OCI image gets the "already exists, skip rebuild" treatment, so a
+    // tampered tree must not reach this loop. This path runs after startup
+    // but also from the Desktop reconcile (post-startup), where no fresh
+    // audit has gated it.
+    let plugins = list_verified_from_dir(plugins_dir)?;
     let mut errors: Vec<String> = Vec::new();
 
-    for manifest in &plugins {
+    for vp in &plugins {
+        let manifest = &vp.manifest;
         let sid = match manifest.service_id.as_deref() {
             Some(s) => s,
             None => continue, // resource-only plugin, no image
@@ -1445,7 +1494,7 @@ fn ensure_plugin_images_from_dir(
             continue; // not enabled for this project
         }
 
-        let plugin_dir = plugins_dir.join(&manifest.slug);
+        let plugin_dir = vp.dir.as_path();
         if !plugin_dir.join("Containerfile").exists() {
             log::warn!(
                 "Plugin '{}' has service_id but no Containerfile — skipping image check",
@@ -1462,7 +1511,7 @@ fn ensure_plugin_images_from_dir(
                 tag,
                 plugin_dir.display()
             );
-            if let Err(e) = build_single_plugin_image(runtime, manifest, &plugin_dir) {
+            if let Err(e) = build_single_plugin_image(runtime, manifest, plugin_dir) {
                 errors.push(format!("plugin '{}': {e}", manifest.slug));
             }
         }
@@ -1504,15 +1553,17 @@ fn ensure_all_plugin_images_from_dir(
         return Ok(());
     }
 
-    let plugins = list_installed_from_dir(plugins_dir)?;
+    // Fail-closed verified loader — see `ensure_plugin_images_from_dir`.
+    let plugins = list_verified_from_dir(plugins_dir)?;
     let mut errors: Vec<String> = Vec::new();
 
-    for manifest in &plugins {
+    for vp in &plugins {
+        let manifest = &vp.manifest;
         if manifest.service_id.is_none() {
             continue; // resource-only plugin, no image
         }
 
-        let plugin_dir = plugins_dir.join(&manifest.slug);
+        let plugin_dir = vp.dir.as_path();
         if !plugin_dir.join("Containerfile").exists() {
             continue;
         }
@@ -1525,7 +1576,7 @@ fn ensure_all_plugin_images_from_dir(
                 tag,
                 plugin_dir.display()
             );
-            if let Err(e) = build_single_plugin_image(runtime, manifest, &plugin_dir) {
+            if let Err(e) = build_single_plugin_image(runtime, manifest, plugin_dir) {
                 errors.push(format!("plugin '{}': {e}", manifest.slug));
             }
         }
@@ -5438,9 +5489,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_plugin_images_no_containerfile() {
+    fn test_ensure_plugin_images_rejects_mcp_plugin_without_containerfile() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        // Create a plugin with service_id but no Containerfile
+        // An MCP plugin (service_id present) with no Containerfile fails
+        // `validate_manifest` inside the verified loader — `ensure_plugin_images`
+        // now fails closed rather than warn-and-skip.
         let plugin_dir = tmp.path().join("my-mcp");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
@@ -5458,9 +5512,10 @@ mod tests {
         // No Containerfile created
 
         let rt = TrackingRuntime::new(&[]);
-        // Should warn and skip, not error
-        ensure_plugin_images_from_dir(&rt, &["my-mcp"], tmp.path()).unwrap();
-        assert_eq!(rt.build_call_count(), 0, "no Containerfile means skip");
+        let err = ensure_plugin_images_from_dir(&rt, &["my-mcp"], tmp.path())
+            .expect_err("MCP plugin without Containerfile must fail the verified loader");
+        assert!(err.to_string().contains("Containerfile"));
+        assert_eq!(rt.build_call_count(), 0);
     }
 
     #[test]
@@ -5567,17 +5622,26 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_plugin_images_invalid_manifest_json() {
+    fn test_ensure_plugin_images_rejects_invalid_manifest_json() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        // Plugin dir with invalid plugin.json and no .image_pending
+        // Plugin dir with invalid plugin.json — even with the unsigned
+        // bypass active, the verified loader's manifest parse fails, so
+        // the whole image-ensure pass must fail closed rather than
+        // silently skip the bad plugin.
         let plugin_dir = tmp.path().join("bad-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(plugin_dir.join("plugin.json"), "NOT VALID JSON").unwrap();
 
         let rt = TrackingRuntime::new(&[]);
-        // list_installed_from_dir skips invalid manifests with a warning
-        ensure_plugin_images_from_dir(&rt, &["bad-plugin"], tmp.path()).unwrap();
-        assert_eq!(rt.build_call_count(), 0, "invalid manifest is skipped");
+        let err = ensure_plugin_images_from_dir(&rt, &["bad-plugin"], tmp.path())
+            .expect_err("invalid manifest must fail the verified loader");
+        assert!(err.to_string().contains("bad-plugin"));
+        assert_eq!(
+            rt.build_call_count(),
+            0,
+            "no build attempted on a failed load"
+        );
     }
 
     #[test]

@@ -444,28 +444,8 @@ pub fn save_plugin_credentials(
     // Verified-only: writing credentials for an unverified plugin is an
     // attack — the manifest's `auth_fields` allowlist (and `service_id`,
     // which decides the on-disk token path) come from a manifest we
-    // can't trust until the signature checks out. Find the matching
-    // entry via the tolerant lister so a *different* tampered plugin
-    // doesn't poison this lookup.
-    let entries = plugin::list_for_ui();
-    let entry = entries
-        .iter()
-        .find(|e| e.slug == slug)
-        .ok_or_else(|| format!("plugin '{}' not found", slug))?;
-    if entry.verification_status != plugin::VerificationStatus::Verified {
-        return Err(format!(
-            "plugin '{}' cannot accept credentials: {}",
-            slug,
-            entry
-                .verification_error
-                .as_deref()
-                .unwrap_or("verification failed")
-        ));
-    }
-    let manifest = entry
-        .manifest
-        .as_ref()
-        .ok_or_else(|| format!("plugin '{}' has no manifest", slug))?;
+    // can't trust until the signature checks out.
+    let manifest = require_verified_with_manifest(&slug)?;
 
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
     let allowed_keys: Vec<&str> = manifest
@@ -636,30 +616,53 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     check_project(&project)?;
     log::info!("delete_plugin_credentials: project={project} slug={slug}");
 
-    // Recovery action: a user must be able to clear the credentials
-    // of a tampered plugin even if its signature no longer verifies —
-    // this is the cleanup half of `remove_plugin`. So we use the
-    // tolerant lister and accept any installed dir, not only verified
-    // ones. The slug came from validated UI state; per-field paths are
-    // still constrained by the manifest's `auth_fields` allowlist.
+    // Recovery action: a user must be able to clear the credentials of
+    // a tampered plugin even if its signature no longer verifies — this
+    // is the cleanup half of `remove_plugin`. We use the tolerant
+    // lister and tolerate a missing/unparseable manifest. The token
+    // directory is identified by `service_id` (or the slug when the
+    // manifest is absent), and EVERY path we touch is canonicalised and
+    // checked to stay inside that directory — a tampered `plugin.json`
+    // with an `auth_field` key like `../../../other-project/token`
+    // must not let us delete outside the service token dir.
     let entries = plugin::list_for_ui();
-    let entry = entries
-        .iter()
-        .find(|e| e.slug == slug)
-        .ok_or_else(|| format!("plugin '{}' not found", slug))?;
-    let manifest = entry
-        .manifest
-        .as_ref()
-        .ok_or_else(|| format!("plugin '{}' has no manifest", slug))?;
+    let entry = entries.iter().find(|e| e.slug == slug);
+    let manifest = entry.and_then(|e| e.manifest.as_ref());
+    let sid = manifest
+        .and_then(|m| m.service_id.as_deref())
+        .unwrap_or(slug.as_str());
 
-    let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-
-    // Delete token files (no config lock needed for filesystem ops)
     let svc_dir = token_dir_for(&project, sid)?;
-    for field in &manifest.auth_fields {
-        let path = svc_dir.join(&field.key);
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    if svc_dir.exists() {
+        // Which token files to delete: the manifest's auth_fields if we
+        // have a (possibly unverified) manifest, otherwise everything in
+        // the service token dir (slug-based cleanup, mirroring
+        // `remove_plugin`).
+        let keys: Vec<String> = match manifest {
+            Some(m) => m.auth_fields.iter().map(|f| f.key.clone()).collect(),
+            None => std::fs::read_dir(&svc_dir)
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect(),
+        };
+        let svc_canon = svc_dir.canonicalize().map_err(|e| e.to_string())?;
+        for key in &keys {
+            let path = svc_dir.join(key);
+            // Path-traversal guard: canonicalise and confirm it stays
+            // inside the service token dir before unlinking.
+            match path.canonicalize() {
+                Ok(canon) if canon.starts_with(&svc_canon) => {
+                    std::fs::remove_file(&canon).map_err(|e| e.to_string())?;
+                }
+                Ok(canon) => {
+                    return Err(format!(
+                        "refusing to delete '{}': resolves outside the plugin's token dir",
+                        canon.display()
+                    ));
+                }
+                Err(_) => { /* file doesn't exist — nothing to delete */ }
+            }
         }
     }
 

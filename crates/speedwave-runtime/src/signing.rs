@@ -91,28 +91,50 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, CacheEntry>> {
 /// different path strings (e.g. with and without symlinks earlier in
 /// the path) — both would resolve to the same key, so a verdict
 /// learned via one path is reused via the other instead of forking the
-/// cache. We do *not* fall back to the raw path on canonicalize
-/// failure: a non-existent plugin dir simply has no cache entry.
+/// cache. A canonicalize failure on a path that does not exist is
+/// normal (plugin not installed yet, or just removed); a failure on a
+/// path that *does* exist is unusual (permission error on a parent, a
+/// symlink loop) and is logged — the caller then runs uncached.
 fn cache_key(plugin_dir: &Path) -> Option<PathBuf> {
-    plugin_dir.canonicalize().ok()
+    match plugin_dir.canonicalize() {
+        Ok(p) => Some(p),
+        Err(_) if !plugin_dir.exists() => None,
+        Err(e) => {
+            log::warn!(
+                "cannot canonicalize plugin dir {} ({e}); signature caching disabled for this path",
+                plugin_dir.display()
+            );
+            None
+        }
+    }
 }
 
-/// Drops any cached verdict for `plugin_dir`. Call after install or
-/// removal so the next verify path observes the new on-disk state
-/// instead of a stale verdict.
+/// Locks the verdict cache, recovering from a poisoned mutex by taking
+/// the inner value. A poison means a thread panicked while holding the
+/// lock — for this cache, the held data is just `(digest, verdict)`
+/// pairs, so recovering is safe and far better than every subsequent
+/// call silently skipping the cache (which would also silently defeat
+/// `invalidate_cache`). The poison is logged once per recovery.
+fn lock_cache() -> std::sync::MutexGuard<'static, HashMap<PathBuf, CacheEntry>> {
+    cache().lock().unwrap_or_else(|poisoned| {
+        log::error!("signing verdict cache mutex was poisoned; recovering inner value");
+        poisoned.into_inner()
+    })
+}
+
+/// Drops any cached verdict for `plugin_dir`. Call this *before*
+/// removing the plugin directory (canonicalize fails once the path is
+/// gone) and after install, so the next verify path observes the new
+/// on-disk state instead of a stale verdict.
 pub fn invalidate_cache(plugin_dir: &Path) {
     if let Some(key) = cache_key(plugin_dir) {
-        if let Ok(mut map) = cache().lock() {
-            map.remove(&key);
-        }
+        lock_cache().remove(&key);
     }
 }
 
 #[cfg(test)]
 fn invalidate_cache_all() {
-    if let Ok(mut map) = cache().lock() {
-        map.clear();
-    }
+    lock_cache().clear();
 }
 
 /// Verifies a plugin's Ed25519 signature, caching the verdict. The cache
@@ -137,11 +159,9 @@ pub fn verify_plugin_signature_cached(plugin_dir: &Path) -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("digest must be 32 bytes"))?;
 
     if let Some(key) = cache_key(plugin_dir) {
-        if let Ok(map) = cache().lock() {
-            if let Some(entry) = map.get(&key) {
-                if entry.content_digest == digest_arr {
-                    return entry.verified.clone().map_err(|msg| anyhow::anyhow!(msg));
-                }
+        if let Some(entry) = lock_cache().get(&key) {
+            if entry.content_digest == digest_arr {
+                return entry.verified.clone().map_err(|msg| anyhow::anyhow!(msg));
             }
         }
     }
@@ -152,15 +172,13 @@ pub fn verify_plugin_signature_cached(plugin_dir: &Path) -> anyhow::Result<()> {
         Err(e) => Err(e.to_string()),
     };
     if let Some(key) = cache_key(plugin_dir) {
-        if let Ok(mut map) = cache().lock() {
-            map.insert(
-                key,
-                CacheEntry {
-                    content_digest: digest_arr,
-                    verified: stored,
-                },
-            );
-        }
+        lock_cache().insert(
+            key,
+            CacheEntry {
+                content_digest: digest_arr,
+                verified: stored,
+            },
+        );
     }
     verified
 }

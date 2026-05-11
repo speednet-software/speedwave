@@ -531,28 +531,53 @@ fn main() -> anyhow::Result<()> {
             service_id,
             project,
         } => {
-            let manifests = plugin::list_installed_plugins()?;
-            let manifest = manifests
+            // Enabling requires a *verified* plugin — the same gate the
+            // Desktop `set_plugin_enabled` command enforces. The
+            // startup audit already ran (PluginEnable is not in the
+            // skip-list), but a plugin tampered between two audit runs
+            // must still be rejected here. `list_for_ui` is tolerant
+            // (other unverified plugins don't block the lookup) and
+            // exposes `verification_status` per entry.
+            let entries = plugin::list_for_ui();
+            let entry = entries
                 .iter()
-                .find(|m| m.service_id.as_deref() == Some(service_id))
+                .find(|e| {
+                    e.manifest.as_ref().map(|m| m.service_id.as_deref()) == Some(Some(service_id))
+                        || e.slug == *service_id
+                })
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "No installed plugin with service_id '{}'. Run `speedwave plugin list` to see installed plugins.",
                         service_id
                     )
                 })?;
+            if entry.verification_status != plugin::VerificationStatus::Verified {
+                return Err(anyhow::anyhow!(
+                    "plugin '{}' cannot be enabled: {}. Reinstall a signed plugin or remove it.",
+                    service_id,
+                    entry
+                        .verification_error
+                        .as_deref()
+                        .unwrap_or("signature verification failed")
+                ));
+            }
+            let display_name = entry
+                .manifest
+                .as_ref()
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| service_id.clone());
             let mut user_config = config::load_user_config()?;
-            let entry = user_config
+            let cfg_entry = user_config
                 .projects
                 .iter_mut()
                 .find(|p| p.name == *project)
                 .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
             integrations.set_plugin_enabled(service_id, true);
             config::save_user_config(&user_config)?;
             println!(
                 "Plugin '{}' (service_id: {}) enabled for project '{}'",
-                manifest.name, service_id, project
+                display_name, service_id, project
             );
             std::process::exit(0);
         }
@@ -560,28 +585,39 @@ fn main() -> anyhow::Result<()> {
             service_id,
             project,
         } => {
-            let manifests = plugin::list_installed_plugins()?;
-            let manifest = manifests
+            // Disabling does NOT require verification — the user must
+            // always be able to turn off a bad plugin. Use the tolerant
+            // lister so an unverified plugin elsewhere doesn't block it.
+            let entries = plugin::list_for_ui();
+            let entry = entries
                 .iter()
-                .find(|m| m.service_id.as_deref() == Some(service_id))
+                .find(|e| {
+                    e.manifest.as_ref().map(|m| m.service_id.as_deref()) == Some(Some(service_id))
+                        || e.slug == *service_id
+                })
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "No installed plugin with service_id '{}'. Run `speedwave plugin list` to see installed plugins.",
                         service_id
                     )
                 })?;
+            let display_name = entry
+                .manifest
+                .as_ref()
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| service_id.clone());
             let mut user_config = config::load_user_config()?;
-            let entry = user_config
+            let cfg_entry = user_config
                 .projects
                 .iter_mut()
                 .find(|p| p.name == *project)
                 .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
             integrations.set_plugin_enabled(service_id, false);
             config::save_user_config(&user_config)?;
             println!(
                 "Plugin '{}' (service_id: {}) disabled for project '{}'",
-                manifest.name, service_id, project
+                display_name, service_id, project
             );
             std::process::exit(0);
         }
