@@ -195,18 +195,19 @@ pub fn host_exec_load_settings(project: String) -> Result<Vec<HostExecRecipe>, S
 /// Resolve an executable name on the recovered host `PATH` — a `which`-style
 /// lookup for the UI's "browse…" picker when `PATH` discovery can't find a
 /// recipe's `exec` (e.g. `docker` / `gradle`). Returns the first absolute path
-/// found, or `None`. Rejects names containing path separators or `..` (callers
-/// should pass a bare command name; an explicit path doesn't need resolving).
+/// found, or `None`. Rejects names containing path separators, `..`, NUL, or a
+/// line break (callers should pass a bare command name; an explicit path
+/// doesn't need resolving).
 #[tauri::command]
 pub fn host_exec_resolve_executable(name: String) -> Result<Option<String>, String> {
     if name.is_empty()
         || name.contains('/')
         || name.contains('\\')
         || name.contains("..")
-        || name.contains('\0')
+        || speedwave_runtime::host_exec::has_control_chars(&name)
     {
         return Err(
-            "host_exec_resolve_executable: pass a bare command name (no path separators or '..')"
+            "host_exec_resolve_executable: pass a bare command name (no path separators, '..', NUL, or newlines)"
                 .to_string(),
         );
     }
@@ -294,7 +295,11 @@ fn respawn_host_exec_worker(host_exec: &crate::reconcile::SharedHostExec, projec
 /// running, do nothing — the next chat/container start renders fresh. Mirrors
 /// the recreate path in `containers_cmd`/`reconcile`; failures are logged, not
 /// fatal (the config change stands regardless).
-fn recreate_project_containers_if_running(project: &str) {
+///
+/// Visible crate-wide because the watchdog (`main::start_host_exec_watchdog`)
+/// also needs to call it after a successful `proc.respawn()` so the hub
+/// picks up the worker's new dynamic port.
+pub(crate) fn recreate_project_containers_if_running(project: &str) {
     let rt = speedwave_runtime::runtime::detect_runtime();
     if !rt.is_available() {
         log::debug!("recreate_project_containers_if_running: runtime not available — skipping");

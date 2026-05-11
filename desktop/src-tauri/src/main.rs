@@ -1089,6 +1089,14 @@ pub(crate) fn ensure_host_exec_running(
 /// Write the `host_exec` config snapshot JSON to `path` with `chmod 600`
 /// (current-user-only ACL on Windows). The snapshot may contain recipe `env`
 /// values (possibly secrets) — ADR-054.
+///
+/// **Windows TOCTOU window (known limitation):** the Windows path writes the
+/// file then tightens the ACL with `icacls`, so the content is briefly
+/// readable by other users on a multi-user box. Same gap as
+/// `host_exec_process::write_restricted_file` / `mcp_os_process`; the fix
+/// (temp file + `rename`, or pre-create with a restricted ACL) is tracked as a
+/// follow-up alongside extracting this trio into a shared `fs_util` helper —
+/// see the PR #645 review.
 pub(crate) fn write_host_exec_config_snapshot(
     path: &std::path::Path,
     snapshot: &serde_json::Value,
@@ -1161,43 +1169,60 @@ fn start_host_exec_watchdog(host_exec: SharedHostExec, _app_handle: tauri::AppHa
             if HOST_EXEC_WATCHDOG_STOP.load(Ordering::Relaxed) {
                 break;
             }
-            let mut map = match host_exec.lock() {
-                Ok(g) => g,
-                Err(e) => {
-                    log::error!("host_exec watchdog: map mutex poisoned: {e}");
-                    break;
-                }
-            };
-            if map.is_empty() {
-                // Nothing to watch right now — keep looping; a project may
-                // enable host_exec later (ensure_host_exec_running resets the
-                // stop flag).
-                drop(map);
-                continue;
-            }
-            // Collect names first so we don't hold an iterator while mutating.
-            let names: Vec<String> = map.keys().cloned().collect();
-            for name in names {
-                let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
-                if alive {
+            // Respawn dead workers under the lock; collect the names that
+            // were successfully respawned so we can fire `recreate_project_containers_if_running`
+            // AFTER releasing the lock (recreate shells out and may take a
+            // few seconds — we don't want to block other handlers on the map).
+            let respawned: Vec<String> = {
+                let mut map = match host_exec.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        log::error!("host_exec watchdog: map mutex poisoned: {e}");
+                        break;
+                    }
+                };
+                if map.is_empty() {
+                    // Nothing to watch right now — keep looping; a project may
+                    // enable host_exec later (ensure_host_exec_running resets
+                    // the stop flag).
                     continue;
                 }
-                if let Some(proc) = map.get_mut(&name) {
-                    log::warn!("host_exec watchdog: worker for '{name}' unhealthy — respawning");
-                    match proc.respawn() {
-                        Ok(port) => {
-                            log::info!("host_exec watchdog: respawned '{name}' (port {port})");
-                            // NOTE: step 5 adds the hub re-discovery for this
-                            // project here (recreate the project's hub
-                            // container so it picks up the new
-                            // WORKER_HOST_EXEC_URL — analogous to
-                            // reconcile::reconcile_compose_port for mcp-os).
-                        }
-                        Err(e) => {
-                            log::error!("host_exec watchdog: respawn of '{name}' failed: {e}")
+                // Collect names first so we don't hold an iterator while mutating.
+                let names: Vec<String> = map.keys().cloned().collect();
+                let mut respawned = Vec::new();
+                for name in names {
+                    let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
+                    if alive {
+                        continue;
+                    }
+                    if let Some(proc) = map.get_mut(&name) {
+                        log::warn!(
+                            "host_exec watchdog: worker for '{name}' unhealthy — respawning"
+                        );
+                        match proc.respawn() {
+                            Ok(port) => {
+                                log::info!(
+                                    "host_exec watchdog: respawned '{name}' (port {port})"
+                                );
+                                respawned.push(name);
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "host_exec watchdog: respawn of '{name}' failed: {e}"
+                                )
+                            }
                         }
                     }
                 }
+                respawned
+            };
+            // Now that the lock is released, recreate the project's hub
+            // container so it picks up the new `WORKER_HOST_EXEC_URL` port —
+            // otherwise the hub keeps routing to the dead port and host_exec
+            // tools are silently unreachable until the next chat restart.
+            // Best-effort; failures are logged inside the helper.
+            for name in respawned {
+                host_exec_cmd::recreate_project_containers_if_running(&name);
             }
         }
         log::info!("host_exec watchdog: stopped");

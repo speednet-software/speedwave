@@ -191,19 +191,30 @@ describe('spawnRecipe', () => {
     'SIGKILLs the whole process group on timeout (grandchild dies)',
     async () => {
       // Grandchild: ignores SIGTERM, writes its pid to a file, then sleeps long.
+      // The pid-file path goes through `process.argv`, not string-interpolated
+      // into the source — CodeQL flagged the old `${JSON.stringify(pidFile)}`
+      // pattern as `js/bad-code-sanitization` even though `dir` is a
+      // `mkdtemp`-controlled path. Keeping both `grandchildSrc` and
+      // `recipeSrc` as constant strings removes any code-construction-from-data.
+      //
+      // NB: with `node -e <code> <arg1> <arg2>`, Node strips `-e` AND `<code>`
+      // from argv, so the first trailing arg is `process.argv[1]`, not [2].
       const pidFile = path.join(dir, 'grandchild.pid');
-      const grandchildSrc = `process.on('SIGTERM',()=>{}); require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(()=>{}, 120_000);`;
+      const grandchildSrc =
+        "process.on('SIGTERM',()=>{}); " +
+        "require('fs').writeFileSync(process.argv[1], String(process.pid)); " +
+        'setTimeout(()=>{}, 120_000);';
       // Recipe: spawn the grandchild in the SAME process group (no `detached`),
       // wait for it to write its pid file, then sleep long itself.
-      const recipeSrc = `
-      const cp=require('child_process'), fs=require('fs');
-      cp.spawn(process.execPath,['-e',${JSON.stringify(grandchildSrc)}],{stdio:'ignore'});
-      const wait=()=>{ if(fs.existsSync(${JSON.stringify(pidFile)})) { setTimeout(()=>{}, 120_000); } else { setTimeout(wait, 50); } };
-      wait();
-    `;
+      const recipeSrc =
+        "const cp=require('child_process'), fs=require('fs'); " +
+        'const grandchildSrc=process.argv[1], pidFile=process.argv[2]; ' +
+        "cp.spawn(process.execPath,['-e',grandchildSrc,pidFile],{stdio:'ignore'}); " +
+        'const wait=()=>{ if(fs.existsSync(pidFile)) { setTimeout(()=>{}, 120_000); } else { setTimeout(wait, 50); } }; ' +
+        'wait();';
       const r = await spawnRecipe(
         NODE,
-        ['-e', recipeSrc],
+        ['-e', recipeSrc, grandchildSrc, pidFile],
         dir,
         'tree',
         '.',

@@ -1,9 +1,17 @@
 /**
- * Worker-side constants for `host_exec`. These mirror the Rust SSOT in
+ * Worker-side constants for `host_exec`. Most mirror the Rust SSOT in
  * `crates/speedwave-runtime/src/consts.rs` (the `HOST_EXEC_*` constants) — the
  * worker is a separate process and cannot import the Rust values, so they are
  * duplicated here with this pointer. If you change one side, change the other
  * (and the ADR-054 numbers).
+ *
+ * **Exception — {@link CONFIRM_TIMEOUT_MS} is INTENTIONALLY larger than the
+ * Rust `HOST_EXEC_CONFIRM_TIMEOUT_MS` (130 s vs 120 s).** The Tauri side times
+ * out the frontend-reply wait at 120 s and stops waiting; the worker's own
+ * guard (this constant) fires ~10 s later, producing the "confirmation
+ * unavailable" tool error rather than a spurious "denied". The gap MUST be
+ * preserved — do not "fix" the TS value to match Rust. See the
+ * {@link CONFIRM_TIMEOUT_MS} comment and ADR-054 §"Confirmation flow".
  * @module host_exec/constants
  */
 
@@ -18,8 +26,15 @@ export const COMMAND_TIMEOUT_MS = envInt('HOST_EXEC_TIMEOUT_MS', 420_000);
 /**
  * How long the worker waits for the per-recipe confirmation reply on the
  * confirm channel before failing closed (MCP tool error "confirmation
- * unavailable"). This is the *worker's* guard; the Tauri side has its own,
- * shorter, frontend-reply timeout. Overridable via `HOST_EXEC_CONFIRM_TIMEOUT_MS`.
+ * unavailable"). This is the *worker's* guard.
+ *
+ * **Intentionally longer than the Tauri side's `HOST_EXEC_CONFIRM_TIMEOUT_MS`
+ * (Rust: 120_000 ms; here: 130_000 ms.)** The Tauri side times out the
+ * frontend-reply wait first and stops writing a reply; this guard then fires
+ * and yields the "confirmation unavailable" tool error — not a misleading
+ * "denied by user". If these were equal (or this one were shorter), a slow
+ * frontend could race the worker into reporting a spurious denial. Keep the
+ * ~10 s gap. Overridable via `HOST_EXEC_CONFIRM_TIMEOUT_MS` (tests shorten it).
  */
 export const CONFIRM_TIMEOUT_MS = envInt('HOST_EXEC_CONFIRM_TIMEOUT_MS', 130_000);
 

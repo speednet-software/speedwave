@@ -71,8 +71,10 @@ fn exec_basename_lower(exec: &str) -> String {
 }
 
 /// True if `value` contains characters that must never appear in a config
-/// string destined for argv / env / a JSON snapshot: NUL or a line break.
-fn has_control_chars(value: &str) -> bool {
+/// string destined for argv / env / a JSON snapshot, or in a command name a
+/// Tauri command resolves: NUL or a line break (`\n` / `\r`). Public so the
+/// Desktop crate's `host_exec_resolve_executable` can reuse it.
+pub fn has_control_chars(value: &str) -> bool {
     value.contains('\0') || value.contains('\n') || value.contains('\r')
 }
 

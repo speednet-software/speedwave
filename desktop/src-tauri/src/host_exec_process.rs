@@ -1103,13 +1103,23 @@ fn drain_and_read_port(
 }
 
 // ---------------------------------------------------------------------------
-// Restricted file write (chmod 600 / icacls) — same as mcp_os_process.
+// Restricted file write (chmod 600 / icacls) — same shape as mcp_os_process.
+// (This is the third occurrence of the pattern; extracting it to a shared
+// `speedwave_runtime` helper is tracked as a follow-up so the icacls/chmod
+// drift between copies can't reappear — see the PR #645 review.)
 // ---------------------------------------------------------------------------
 
 /// Write `content` to `path` with `chmod 600` on Unix (current-user-only ACL
 /// via `icacls` on Windows). The token / port / PID / config-snapshot files all
 /// use this — the config snapshot in particular may contain recipe `env` values
 /// (possibly secrets), so it must not be world-readable (ADR-054).
+///
+/// **Windows TOCTOU window (known limitation, shared with `mcp_os_process`):**
+/// the Windows path writes the file first, then tightens the ACL with `icacls`,
+/// so on a multi-user box the content is briefly readable by other users. The
+/// Unix path has no gap (it `OpenOptions::mode(0o600)` at creation). Fixing
+/// this (write to a temp file + `rename`, or pre-create with a restricted ACL)
+/// is tracked as a follow-up alongside the `fs_util` extraction.
 fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
     if path.is_dir() {
         log::warn!(
@@ -1132,6 +1142,7 @@ fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
     }
     #[cfg(windows)]
     {
+        // TOCTOU window — see the doc comment above.
         std::fs::write(path, content)?;
         let status = speedwave_runtime::binary::system_command("icacls")
             .args([

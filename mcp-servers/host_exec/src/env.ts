@@ -55,10 +55,10 @@ export const SAFE_ENV_KEYS: readonly string[] = [
   'COMSPEC',
   'NUMBER_OF_PROCESSORS',
   'PROCESSOR_ARCHITECTURE',
-  // Build toolchains commonly relied on (read-only locators, not hijack vectors)
+  // Build toolchains — pure locators (point at an install dir or cache; not
+  // code-injection vectors).
   'JAVA_HOME',
   'GRADLE_USER_HOME',
-  'MAVEN_OPTS',
   'M2_HOME',
   'ANDROID_HOME',
   'ANDROID_SDK_ROOT',
@@ -66,6 +66,13 @@ export const SAFE_ENV_KEYS: readonly string[] = [
   'GOROOT',
   'CARGO_HOME',
   'RUSTUP_HOME',
+  // Build toolchains — JVM-launcher modifiers, NOT pure locators. `MAVEN_OPTS`
+  // (and `GRADLE_OPTS` if ever added) can carry `-javaagent:...`, which loads
+  // arbitrary Java code into the build JVM. We pass it through because it is
+  // the *user's own* value from their login shell — the same trust level as
+  // everything else on this allowlist — but it is called out separately so
+  // nobody mistakes it for an inert path variable.
+  'MAVEN_OPTS',
   // The host's Docker — a `docker` recipe needs this to find the daemon when
   // it's not the default socket (Colima/OrbStack/etc.). Not on RESERVED_ENV_KEYS.
   'DOCKER_HOST',
