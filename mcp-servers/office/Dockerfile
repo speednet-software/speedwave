@@ -73,11 +73,12 @@ COPY --from=builder /build/office/dist ./dist
 COPY --from=builder /build/office/node_modules ./node_modules
 COPY office/scripts ./scripts
 
-# Workspace mount point + scratch dirs (LibreOffice profile, matplotlib config).
-# `markitdown` console entry point lives in the venv — expose it on PATH.
+# Workspace mount point. `markitdown` console entry point lives in the venv — expose it on PATH.
+# NOTE: /tmp/lo (HOME) and /tmp/mpl (MPLCONFIGDIR) are NOT created here — compose mounts a fresh
+# empty tmpfs over /tmp at container start, so they are (re)created by the CMD wrapper instead.
 ENV PATH="/opt/office-venv/bin:${PATH}"
-RUN mkdir -p /workspace /tmp/lo /tmp/mpl \
-    && chown -R node:node /workspace /tmp/lo /tmp/mpl /app /app/../shared
+RUN mkdir -p /workspace \
+    && chown -R node:node /workspace /app /app/../shared
 
 USER node
 
@@ -94,4 +95,6 @@ ENV PORT=3000 \
     MPLCONFIGDIR=/tmp/mpl \
     OFFICE_VENV=/opt/office-venv
 
-CMD ["node", "dist/index.js"]
+# /tmp is a fresh empty tmpfs at container start (see the compose `tmpfs:` mount) — recreate the
+# LibreOffice profile dir (HOME) and the matplotlib config dir (MPLCONFIGDIR) before launching Node.
+CMD ["/bin/sh", "-c", "mkdir -p /tmp/lo /tmp/mpl && exec node dist/index.js"]

@@ -63,16 +63,52 @@ async function materializeTextInput(
   return { filePath: tmp, isTemp: true };
 }
 
+/** A CSS named page size (`@page size`), e.g. `A4`, `Letter`, `A3 landscape`. Case-insensitive. */
+const PAGE_SIZE_KEYWORD = /^(A[0-5]|B[0-5]|letter|legal|ledger)(\s+(portrait|landscape))?$/i;
+/** A CSS `<length>` token: a number (optional sign/decimal) followed by a unit, or `0`. */
+const CSS_LENGTH = /^[+-]?(\d+(\.\d+)?|\.\d+)(cm|mm|in|px|pt|pc|q)$|^0$/i;
 /**
- * Build a minimal print-oriented HTML wrapper around `bodyHtml` with `@page` rules from `opts`.
+ * True if `value` is one to four space-separated CSS `<length>` tokens (the `margin` shorthand).
+ * @param value - The candidate margin string.
+ */
+function isCssMargin(value: string): boolean {
+  const parts = value.trim().split(/\s+/);
+  return parts.length >= 1 && parts.length <= 4 && parts.every((p) => CSS_LENGTH.test(p));
+}
+
+/**
+ * Validate `opts` and build the safe `@page` declaration (`size: …; margin: …;`). Rejects anything
+ * that is not a CSS page-size keyword / `<length>` pair (size) or one-to-four CSS lengths (margin),
+ * so caller-supplied option strings cannot inject arbitrary CSS into the rendered document.
+ * @param opts - Page-rendering options.
+ * @returns The validated `size: <...>; margin: <...>;` string for an `@page` block.
+ * @throws {PathPolicyError} If `pageSize` or `margin` is not a recognized CSS value.
+ */
+function pageRuleBody(opts: PdfOptions): string {
+  const rawSize = (opts.pageSize ?? 'A4').trim();
+  if (!PAGE_SIZE_KEYWORD.test(rawSize) && !isCssMargin(rawSize)) {
+    throw new PathPolicyError(
+      `pageSize must be a CSS page-size keyword (A4, Letter, …) or "<width> <height>" lengths, got: ${rawSize}`
+    );
+  }
+  const size = opts.landscape ? `${rawSize} landscape` : rawSize;
+  const margin = (opts.margin ?? '18mm').trim();
+  if (!isCssMargin(margin)) {
+    throw new PathPolicyError(
+      `margin must be one to four CSS lengths (e.g. "18mm"), got: ${margin}`
+    );
+  }
+  return `size: ${size}; margin: ${margin};`;
+}
+
+/**
+ * Build a minimal print-oriented HTML wrapper around `bodyHtml` with a validated `@page` rule from `opts`.
  * @param bodyHtml - The HTML body fragment to wrap.
  * @param opts - Page-rendering options.
  */
 function wrapPrintHtml(bodyHtml: string, opts: PdfOptions): string {
-  const size = `${opts.pageSize ?? 'A4'}${opts.landscape ? ' landscape' : ''}`;
-  const margin = opts.margin ?? '18mm';
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-@page { size: ${size}; margin: ${margin}; }
+@page { ${pageRuleBody(opts)} }
 body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.5; }
 pre, code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 pre { background:#f6f8fa; padding:12px; border-radius:6px; overflow:auto; }
@@ -161,11 +197,9 @@ export async function htmlToPdf(
 ): Promise<FileResult> {
   const { filePath, isTemp } = await materializeTextInput(input, '.html');
   try {
-    // If the HTML looks like a fragment, wrap it; otherwise inject our @page rule before </head>.
+    // If the HTML looks like a fragment, wrap it; otherwise inject our (validated) @page rule before </head>.
     const raw = await fsp.readFile(filePath, 'utf8');
-    const pageRule = `<style>@page{size:${opts.pageSize ?? 'A4'}${
-      opts.landscape ? ' landscape' : ''
-    };margin:${opts.margin ?? '18mm'};}</style>`;
+    const pageRule = `<style>@page { ${pageRuleBody(opts)} }</style>`;
     let finalHtml: string;
     if (/<html[\s>]/i.test(raw)) {
       finalHtml = /<\/head>/i.test(raw) ? raw.replace(/<\/head>/i, `${pageRule}</head>`) : raw;
@@ -189,6 +223,38 @@ export async function htmlToPdf(
 }
 
 /**
+ * Markdown (path or inline) → another format via pandoc, writing to a `/tmp` file first and then
+ * `atomicMoveOnto` the validated destination — so a SIGKILL mid-write never leaves a partial `dest`.
+ * @param input - The Markdown source.
+ * @param writer - Pandoc output writer (`"docx"` | `"pptx"`).
+ * @param defaultBase - Default base filename when `outName` is omitted.
+ * @param outName - Output filename/path (optional).
+ * @param overwrite - Permit overwriting an existing output (default false).
+ * @returns The {@link FileResult} for the produced file.
+ */
+async function markdownViaPandoc(
+  input: TextInput,
+  writer: 'docx' | 'pptx',
+  defaultBase: string,
+  outName?: string,
+  overwrite = false
+): Promise<FileResult> {
+  const { filePath, isTemp } = await materializeTextInput(input, '.md');
+  const tmpOut = path.join(os.tmpdir(), `office-pandoc-${randomUUID()}.${writer}`);
+  try {
+    const dest = await resolveOutputPath(outName, defaultBase, overwrite);
+    await runOk('pandoc', ['-f', 'markdown', '-t', writer, '-o', tmpOut, filePath]);
+    await atomicMoveOnto(tmpOut, dest);
+    return fileResult(dest, writer);
+  } finally {
+    if (isTemp) {
+      await fsp.rm(filePath, { force: true }).catch(ignoreError);
+    }
+    await fsp.rm(tmpOut, { force: true }).catch(ignoreError);
+  }
+}
+
+/**
  * Markdown (path or inline) → `.docx` via pandoc.
  * @param input - The Markdown source.
  * @param outName - Output filename/path (optional).
@@ -200,16 +266,7 @@ export async function markdownToDocx(
   outName?: string,
   overwrite = false
 ): Promise<FileResult> {
-  const { filePath, isTemp } = await materializeTextInput(input, '.md');
-  try {
-    const dest = await resolveOutputPath(outName, `document-${Date.now()}.docx`, overwrite);
-    await runOk('pandoc', ['-f', 'markdown', '-t', 'docx', '-o', dest, filePath]);
-    return fileResult(dest, 'docx');
-  } finally {
-    if (isTemp) {
-      await fsp.rm(filePath, { force: true }).catch(ignoreError);
-    }
-  }
+  return markdownViaPandoc(input, 'docx', `document-${Date.now()}.docx`, outName, overwrite);
 }
 
 /**
@@ -224,16 +281,7 @@ export async function markdownToPptx(
   outName?: string,
   overwrite = false
 ): Promise<FileResult> {
-  const { filePath, isTemp } = await materializeTextInput(input, '.md');
-  try {
-    const dest = await resolveOutputPath(outName, `presentation-${Date.now()}.pptx`, overwrite);
-    await runOk('pandoc', ['-f', 'markdown', '-t', 'pptx', '-o', dest, filePath]);
-    return fileResult(dest, 'pptx');
-  } finally {
-    if (isTemp) {
-      await fsp.rm(filePath, { force: true }).catch(ignoreError);
-    }
-  }
+  return markdownViaPandoc(input, 'pptx', `presentation-${Date.now()}.pptx`, outName, overwrite);
 }
 
 /** Normative Office↔Office conversion matrix: source extension → set of allowed target formats. */

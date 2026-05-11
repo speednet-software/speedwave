@@ -33,24 +33,24 @@ export function truncate(text: string, maxChars: number): { content: string; tru
 
 /**
  * Render a parsed SheetJS workbook to Markdown: one `## SheetName` heading per sheet,
- * followed by the sheet as a CSV-derived Markdown table.
+ * followed by the sheet's used range as a Markdown table.
  * @param wb - The parsed workbook.
  * @returns A Markdown string covering every sheet.
  */
 function workbookToMarkdown(wb: XLSX.WorkBook): string {
   // Escape backslash first, then pipe — otherwise a literal `\|` in a cell would round-trip as
   // `\\|` (escaped backslash + cell-breaking pipe) instead of `\\\|` (escaped backslash + escaped pipe).
-  const escape = (cell: string): string => cell.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+  const escape = (cell: unknown): string =>
+    (cell == null ? '' : String(cell)).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
   const parts: string[] = [];
   for (const name of wb.SheetNames) {
     const sheet = wb.Sheets[name];
     parts.push(`## ${name}`);
-    // `sheet_to_csv` emits a rectangular grid over the sheet's used range.
-    const rows = XLSX.utils
-      .sheet_to_csv(sheet)
-      .split(/\r?\n/)
-      .filter((r) => r.length > 0)
-      .map((r) => r.split(',').map(escape));
+    // Array-of-arrays over the used range — handles cells that contain commas/quotes/newlines
+    // correctly (a CSV round-trip + `split(',')` would corrupt those).
+    const grid = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, blankrows: false });
+    const width = grid.reduce((w, r) => Math.max(w, r.length), 0);
+    const rows = grid.map((r) => Array.from({ length: width }, (_, i) => escape(r[i])));
     if (rows.length === 0) {
       parts.push('_(empty)_');
       continue;

@@ -148,19 +148,49 @@ describe('htmlToPdf', () => {
     await htmlToPdf({ html: '<p>x</p>' });
     expect(runPythonScript).toHaveBeenCalledWith('weasyprint_render.py', expect.any(Array));
   });
+
+  it('accepts an explicit page size given as two CSS lengths', async () => {
+    const r = await htmlToPdf({ html: '<p>x</p>' }, undefined, {
+      pageSize: '210mm 297mm',
+      margin: '0',
+    });
+    expect(r.format).toBe('pdf');
+  });
+
+  it('rejects a pageSize that is not a CSS keyword or length pair (CSS injection guard)', async () => {
+    await expect(
+      htmlToPdf({ html: '<p>x</p>' }, undefined, { pageSize: 'A4} body{display:none' })
+    ).rejects.toThrow(/pageSize must be/);
+  });
+
+  it('rejects a margin that is not a CSS length', async () => {
+    await expect(
+      htmlToPdf({ html: '<p>x</p>' }, undefined, { margin: '18mm; color:red' })
+    ).rejects.toThrow(/margin must be/);
+  });
 });
 
 describe('markdownToDocx / markdownToPptx', () => {
-  it('runs pandoc with the docx writer', async () => {
+  it('runs pandoc with the docx writer, writing to a temp file then moving onto the destination', async () => {
     const r = await markdownToDocx({ markdown: '# x' }, 'd.docx');
     expect(r.format).toBe('docx');
-    expect(runOk).toHaveBeenCalledWith('pandoc', expect.arrayContaining(['-t', 'docx']));
+    expect(runOk).toHaveBeenCalledWith('pandoc', [
+      '-f',
+      'markdown',
+      '-t',
+      'docx',
+      '-o',
+      expect.stringMatching(/office-pandoc-.*\.docx$/),
+      expect.stringMatching(/office-in-.*\.md$/),
+    ]);
+    expect(atomicMoveOnto).toHaveBeenCalled();
   });
 
   it('runs pandoc with the pptx writer (path input)', async () => {
     const r = await markdownToPptx({ path: 'x.md' }, 'p.pptx');
     expect(r.format).toBe('pptx');
     expect(runOk).toHaveBeenCalledWith('pandoc', expect.arrayContaining(['-t', 'pptx']));
+    expect(atomicMoveOnto).toHaveBeenCalled();
   });
 
   it('runs pandoc with the pptx writer (inline markdown — exercises temp-file cleanup)', async () => {

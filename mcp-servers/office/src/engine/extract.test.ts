@@ -31,9 +31,13 @@ vi.mock('node:fs/promises', async (orig) => {
 import * as XLSX from 'xlsx';
 function makeWorkbookBuffer(): Buffer {
   const wb = XLSX.utils.book_new();
-  // A ragged sheet: the header row is 3 wide, a later row is 1 wide — exercises the
-  // short-row padding path in `workbookToMarkdown`.
-  const ws = XLSX.utils.aoa_to_sheet([['Name', 'Score', 'Note'], ['Ada', 10, 'first'], ['Bo|b']]);
+  // Ragged sheet: header row is 3 wide, a later row is 1 wide (short-row padding path). One cell
+  // contains a comma and one contains a pipe — exercises both the comma-safe parsing and pipe-escaping.
+  const ws = XLSX.utils.aoa_to_sheet([
+    ['Name', 'Score', 'Note'],
+    ['Ada', 10, 'hello, world'],
+    ['Bo|b'],
+  ]);
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([]), 'Empty');
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
@@ -60,14 +64,15 @@ describe('truncate', () => {
 });
 
 describe('readDocumentToMarkdown — spreadsheets (SheetJS)', () => {
-  it('renders an .xlsx to Markdown tables, escaping pipes, padding short rows, with a heading per sheet', async () => {
+  it('renders an .xlsx to Markdown tables — pipes escaped, commas kept in-cell, short rows padded', async () => {
     fileBytes['/workspace/data.xlsx'] = makeWorkbookBuffer();
     const r = await readDocumentToMarkdown('data.xlsx');
     expect(r.engine).toBe('sheetjs');
     expect(r.content).toContain('## Sheet1');
     expect(r.content).toContain('| Name | Score | Note |');
-    expect(r.content).toContain('Bo\\|b');
-    // The short row "Bo|b" is padded out to the table width.
+    // A cell containing a comma stays in one column (not split): `| Ada | 10 | hello, world |`.
+    expect(r.content).toContain('| Ada | 10 | hello, world |');
+    // The pipe in "Bo|b" is escaped, and the short row is padded to the table width.
     expect(r.content).toMatch(/\| Bo\\\|b \| {2}\| {2}\|/);
     expect(r.content).toContain('## Empty');
     expect(r.content).toContain('_(empty)_');
