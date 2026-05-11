@@ -188,7 +188,11 @@ services:
       resources:
         limits:
           cpus: '0.5'
-          memory: 128m
+          # 256m (not the 128m other API workers use): Octokit composed with the
+          # throttling + retry plugins has a heavier resident footprint than
+          # @gitbeaker, and `octokit.paginate` buffers full result sets in memory
+          # — a `listIssues({state:'all'})` on a busy repo OOM-kills a 128m cap.
+          memory: 256m
 
   mcp-playwright:
     image: ${IMAGE_MCP_PLAYWRIGHT}
