@@ -545,14 +545,16 @@ pub(crate) fn validate_manifest(
         );
     }
 
-    // Slug must not collide with built-in compose service names. Without this,
-    // a plugin with slug "hub" would derive compose name "mcp-hub" and silently
-    // overwrite the built-in hub entry on YAML mapping insert — defeating the
-    // hub's zero-token guarantee.
+    // Slug must not collide with built-in compose service names. Two
+    // ways a slug can clash: (a) its derived name `mcp-<slug>` is a
+    // built-in (e.g. slug "hub" → "mcp-hub"); (b) the bare slug itself
+    // is a built-in compose name (e.g. "claude" — built-ins like the
+    // claude container use the bare name, not "mcp-claude"). Either
+    // way a serde_yaml_ng mapping insert would silently overwrite the
+    // built-in entry — defeating, e.g., the hub's zero-token guarantee.
     let derived_compose = derive_compose_name(&manifest.slug);
     if consts::BUILT_IN_SERVICES.contains(&derived_compose.as_str())
-        || manifest.slug == "hub"
-        || manifest.slug == "claude"
+        || consts::BUILT_IN_SERVICES.contains(&manifest.slug.as_str())
     {
         anyhow::bail!(
             "Plugin slug '{}' would produce compose name '{}' which conflicts with a built-in service",
@@ -759,6 +761,13 @@ fn parse_mem_limit_to_mib(s: &str) -> anyhow::Result<u64> {
     let n: u64 = num_part
         .parse()
         .map_err(|_| anyhow::anyhow!("Invalid mem_limit '{}': not a valid number", s))?;
+    // Docker treats `mem_limit: 0` (and `0m`, `0g`, …) as "no limit",
+    // which would let a plugin bypass PLUGIN_MEM_LIMIT_MAX_MIB. Bare
+    // sub-MiB values like `512000` are fine — they round to 0 MiB but
+    // still cap the container; only an explicit zero is the escape.
+    if n == 0 {
+        anyhow::bail!("mem_limit must be greater than zero (got '{}')", s);
+    }
     let bytes = match unit.map(|c| c.to_ascii_lowercase()) {
         None | Some('b') => n,
         Some('k') => n
@@ -4845,11 +4854,17 @@ mod tests {
         assert_eq!(parse_mem_limit_to_mib("2g").unwrap(), 2048);
         assert_eq!(parse_mem_limit_to_mib("1G").unwrap(), 1024);
         assert_eq!(parse_mem_limit_to_mib("1024K").unwrap(), 1);
-        // 512000 bare bytes → 0 MiB after integer division
+        // 512000 bare bytes → 0 MiB after integer division, but still
+        // a real cap (non-zero n), so accepted.
         assert_eq!(parse_mem_limit_to_mib("512000").unwrap(), 0);
         assert!(parse_mem_limit_to_mib("").is_err());
         assert!(parse_mem_limit_to_mib("abc").is_err());
         assert!(parse_mem_limit_to_mib("1x").is_err());
+        // Explicit zero means "no limit" in Docker — must be rejected
+        // so a plugin can't bypass PLUGIN_MEM_LIMIT_MAX_MIB.
+        assert!(parse_mem_limit_to_mib("0").is_err());
+        assert!(parse_mem_limit_to_mib("0m").is_err());
+        assert!(parse_mem_limit_to_mib("0g").is_err());
     }
 
     // --- build_pending_from_dir error accumulation tests ---
