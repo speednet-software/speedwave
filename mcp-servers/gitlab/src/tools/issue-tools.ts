@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -269,17 +267,6 @@ const closeIssueTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createIssueTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: listIssuesTool, handler: unconfigured },
-      { tool: getIssueTool, handler: unconfigured },
-      { tool: createIssueTool, handler: unconfigured },
-      { tool: updateIssueTool, handler: unconfigured },
-      { tool: closeIssueTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listIssuesTool,

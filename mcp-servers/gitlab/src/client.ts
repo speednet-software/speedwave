@@ -175,42 +175,6 @@ export class GitLabClient {
     };
   }
 
-  /**
-   * Maps GitLab API commit response to standardized GitLabCommit type.
-   * Handles both camelCase and snake_case field name variations from the API.
-   * @param c - Raw commit response object from GitLab API
-   * @returns Normalized commit with consistent field names and types
-   */
-  private mapCommitResponse(c: Record<string, unknown>): GitLabCommit {
-    return {
-      id: String(c.id),
-      short_id: String(c.shortId || c.short_id || ''),
-      title: String(c.title),
-      message: String(c.message),
-      author_name: String(c.authorName || c.author_name || ''),
-      author_email: String(c.authorEmail || c.author_email || ''),
-      created_at: String(c.createdAt || c.created_at || ''),
-    };
-  }
-
-  /**
-   * Maps GitLab API pipeline response to standardized GitLabPipeline type.
-   * Normalizes pipeline status, timing, and reference information.
-   * @param p - Raw pipeline response object from GitLab API
-   * @returns Normalized pipeline with consistent field names and types
-   */
-  private mapPipelineResponse(p: Record<string, unknown>): GitLabPipeline {
-    return {
-      id: p.id as number,
-      status: String(p.status),
-      ref: String(p.ref),
-      sha: String(p.sha),
-      web_url: String(p.webUrl || p.web_url || ''),
-      created_at: String(p.createdAt || p.created_at || ''),
-      updated_at: String(p.updatedAt || p.updated_at || ''),
-    };
-  }
-
   //═════════════════════════════════════════════════════════════════════════════
   // Error Handling
   //═════════════════════════════════════════════════════════════════════════════
@@ -1472,7 +1436,7 @@ export class GitLabClient {
  *
  * IMPORTANT: Returns null (not throws) when tokens are missing or invalid.
  * This enables "graceful degradation" - server starts even without config:
- * - User can run `speedwave up` without configuring all integrations
+ * - User can run `speedwave` (no subcommand) without configuring all integrations
  * - Healthcheck reports `configured: false` for unconfigured services
  * - Tools return clear "not configured" error when called
  *
