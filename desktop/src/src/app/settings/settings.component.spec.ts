@@ -112,6 +112,12 @@ describe('SettingsComponent', () => {
     expect(advancedEl).not.toBeNull();
   });
 
+  it('renders TranscriptionSectionComponent', () => {
+    fixture.detectChanges();
+    const el = fixture.nativeElement.querySelector('app-transcription-section');
+    expect(el).not.toBeNull();
+  });
+
   it('reloads project info on project_switch_succeeded event', async () => {
     const projectState = TestBed.inject(ProjectStateService);
     await projectState.init();

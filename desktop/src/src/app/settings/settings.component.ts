@@ -14,6 +14,7 @@ import { UiStateService } from '../services/ui-state.service';
 import { AuthSectionComponent } from './auth-section/auth-section.component';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
+import { TranscriptionSectionComponent } from './transcription-section/transcription-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ProjectList } from '../models/update';
@@ -46,6 +47,7 @@ const THEME_CARDS: readonly ThemeCard[] = [
     LlmProviderComponent,
     AuthSectionComponent,
     AdvancedSectionComponent,
+    TranscriptionSectionComponent,
     UpdateSectionComponent,
     ProjectPillComponent,
   ],
@@ -147,6 +149,8 @@ const THEME_CARDS: readonly ThemeCard[] = [
             shortcut: <span class="kbd">&#8984;T</span> cycles themes
           </p>
         </section>
+
+        <app-transcription-section (errorOccurred)="error = $event" />
 
         <app-advanced-section
           (errorOccurred)="error = $event"

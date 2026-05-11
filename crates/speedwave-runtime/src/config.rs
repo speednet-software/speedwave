@@ -192,12 +192,29 @@ pub struct SelectedIde {
     pub port: u16,
 }
 
+/// Meeting-transcription preferences (ADR-056). Top-level user config only —
+/// **not** part of `ProjectRepoConfig` (a checked-in repo file must not be
+/// able to turn on host-audio recording — privacy-sensitive host capability).
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct TranscriptionConfig {
+    /// Feature toggle. `None` or `Some(false)` keeps the feature off.
+    pub enabled: Option<bool>,
+    /// Default Whisper model key for the live pass (e.g. `"small"`).
+    pub default_live_model: Option<String>,
+    /// Default forced language (`"pl"` / `"en"`).
+    pub default_language: Option<String>,
+    /// Keep `audio.wav` after the offline pass finishes. Default = keep.
+    pub keep_audio_after_finalize: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct SpeedwaveUserConfig {
     pub projects: Vec<ProjectUserEntry>,
     pub active_project: Option<String>,
     pub selected_ide: Option<SelectedIde>,
     pub log_level: Option<String>,
+    /// Meeting-transcription preferences (ADR-056). Top-level (not per-project).
+    pub transcription: Option<TranscriptionConfig>,
 }
 
 impl SpeedwaveUserConfig {
@@ -223,6 +240,14 @@ impl SpeedwaveUserConfig {
         self.active_project
             .as_deref()
             .and_then(|n| self.find_project(n))
+    }
+
+    /// `true` if the user toggled meeting transcription on (top-level only).
+    pub fn transcription_enabled(&self) -> bool {
+        self.transcription
+            .as_ref()
+            .and_then(|t| t.enabled)
+            .unwrap_or(false)
     }
 }
 
@@ -465,9 +490,86 @@ fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // ---- TranscriptionConfig (ADR-056 Phase 3) ------------------------------
+
+    #[test]
+    fn transcription_disabled_by_default() {
+        let cfg = SpeedwaveUserConfig::default();
+        assert!(!cfg.transcription_enabled(), "off by default");
+        assert!(cfg.transcription.is_none());
+    }
+
+    #[test]
+    fn transcription_enabled_only_when_user_set_it() {
+        let cfg = SpeedwaveUserConfig {
+            transcription: Some(TranscriptionConfig {
+                enabled: Some(true),
+                default_language: Some("pl".to_string()),
+                default_live_model: Some("small".to_string()),
+                keep_audio_after_finalize: Some(true),
+            }),
+            ..Default::default()
+        };
+        assert!(cfg.transcription_enabled());
+
+        let cfg_off = SpeedwaveUserConfig {
+            transcription: Some(TranscriptionConfig {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!cfg_off.transcription_enabled());
+
+        let cfg_none = SpeedwaveUserConfig {
+            transcription: Some(TranscriptionConfig::default()),
+            ..Default::default()
+        };
+        assert!(!cfg_none.transcription_enabled(), "enabled: None is off");
+    }
+
+    #[test]
+    fn transcription_config_round_trips_through_serde() {
+        let cfg = SpeedwaveUserConfig {
+            transcription: Some(TranscriptionConfig {
+                enabled: Some(true),
+                default_language: Some("en".to_string()),
+                default_live_model: Some("large-v3-turbo".to_string()),
+                keep_audio_after_finalize: Some(false),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.transcription, cfg.transcription,
+            "round-trip preserves the field"
+        );
+    }
+
+    #[test]
+    fn repo_config_cannot_enable_transcription() {
+        // Decision 13: a checked-in repo .speedwave.json must not turn on host-
+        // audio recording. ProjectRepoConfig has no `transcription` field, so
+        // any unknown `transcription` key in a repo file is silently ignored.
+        let repo_json = r#"{
+            "claude": null,
+            "integrations": null,
+            "transcription": { "enabled": true, "default_language": "pl" }
+        }"#;
+        let parsed: ProjectRepoConfig = serde_json::from_str(repo_json).expect("repo parse");
+        // The repo struct has no transcription field; the json is ignored.
+        let json_back = serde_json::to_string(&parsed).expect("repo reserialize");
+        assert!(
+            !json_back.contains("transcription"),
+            "repo config must not surface a transcription field; got {json_back}"
+        );
+    }
 
     #[test]
     fn test_default_config_has_expected_env() {
@@ -579,6 +681,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 
@@ -627,6 +730,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 
@@ -721,6 +825,7 @@ mod tests {
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -745,6 +850,7 @@ mod tests {
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 
@@ -766,6 +872,7 @@ mod tests {
             projects: vec![],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 
@@ -788,6 +895,7 @@ mod tests {
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 
@@ -821,6 +929,7 @@ mod tests {
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         save_user_config_to(&config_v1, &config_path).unwrap();
@@ -836,6 +945,7 @@ mod tests {
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         save_user_config_to(&config_v2, &config_path).unwrap();
@@ -857,6 +967,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: Some("debug".to_string()),
+            transcription: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SpeedwaveUserConfig = serde_json::from_str(&json).unwrap();
@@ -895,6 +1006,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         }
     }
@@ -943,6 +1055,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -1174,6 +1287,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 
@@ -1214,6 +1328,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 
@@ -1249,6 +1364,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 
@@ -1534,6 +1650,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
 
@@ -1565,6 +1682,7 @@ mod tests {
             ],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
         }
     }
@@ -1639,6 +1757,7 @@ mod tests {
             ],
             active_project: Some("beta".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         let entry = config.active_project_entry();
@@ -1664,6 +1783,7 @@ mod tests {
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
         };
         assert!(

@@ -106,7 +106,24 @@ The `/logs` route hosts a single page that combines container logs, host-side se
 
 **Log timestamps.** `nerdctl compose logs` and `wsl compose logs` now run with `--timestamps`, so every container log line carries an ISO date. The renderer also accepts the bracketed `[HH:MM:SS]` format emitted by some application loggers and prefixes it with the host's current date — note the day prefix is a hint when the container clock or timezone diverges from the host.
 
+## Meeting transcription
+
+A separate, **opt-in** Desktop integration that records system audio + microphone on the host, transcribes it locally with whisper.cpp, and assigns provisional speaker labels with sherpa-onnx. Lives on its own tab (⌘4) and is off by default.
+
+**Enabling.** Settings → Meeting transcription → toggle on. The toggle is a user-level preference (`~/.speedwave/config.json`) — repository `.speedwave.json` cannot enable it (privacy invariant from ADR-056). With the toggle off, the tab shows an empty-state that links back to Settings.
+
+**What runs locally vs. over the network.** Audio inference (Whisper transcription, sherpa diarization) runs locally — no audio leaves the machine for inference. Model downloads use the network (≈75 MiB for `small`, up to ≈2.9 GiB for `large-v3`). "Send to Claude" uploads the rendered transcript text to your configured LLM provider. The UI states this on every relevant surface.
+
+**Provisional speaker labels.** Live `[Speaker N]` chips appear as the recording proceeds, but they are best-effort: live diarization is delayed and unstable under crosstalk, and the offline pass after stop can re-cluster speakers. Click a chip to rename a speaker; rename survives the offline merge whenever the temporal overlap is unambiguous. The markdown export carries an "approximate labels" footer.
+
+**Per-OS requirements.** macOS 14.4+ (CoreAudio process taps), Windows 10 build 20348+ for per-app capture (older Windows 10 falls back to system-wide audio only), Linux requires PipeWire (`pw-record`) or PulseAudio (`parec`).
+
+**Acceleration.** v1 ships CPU + Metal backends. CUDA / Vulkan are explicitly out of scope for v1 (separate CI toolchain and bundling decisions — tracked as follow-up).
+
+See [ADR-056](../adr/ADR-056-host-side-audio-transcription.md) for the full design and trade-offs.
+
 ## See Also
 
 - [ADR-005: Two Interfaces — CLI and Desktop](../adr/ADR-005-two-interfaces-cli-and-desktop.md)
 - [ADR-006: Chat UI via claude -p --stream-json](../adr/ADR-006-chat-ui-via-stream-json.md)
+- [ADR-056: Host-Side Audio Capture and Local Meeting Transcription](../adr/ADR-056-host-side-audio-transcription.md)

@@ -43,19 +43,21 @@ fn cap_name(name: &str) -> String {
     name.trim().chars().take(MAX_SPEAKER_NAME_LEN).collect()
 }
 
-// ---- 1) feature-toggle commands (real persistence lands in Phase 3) -------
+// ---- 1) feature-toggle commands (top-level user config, ADR-056 §13) ------
 
 #[tauri::command]
 pub async fn transcription_enabled() -> Result<bool, String> {
-    // Phase 3 wires this to the top-level user config; until then the feature
-    // is reported as disabled so the UI's empty-state renders by default.
-    Ok(false)
+    let cfg = speedwave_runtime::config::load_user_config().map_err(|e| e.to_string())?;
+    Ok(cfg.transcription_enabled())
 }
 
 #[tauri::command]
-pub async fn set_transcription_enabled(_enabled: bool) -> Result<(), String> {
-    // Stub — Phase 3 persists this to the user config.
-    Ok(())
+pub async fn set_transcription_enabled(enabled: bool) -> Result<(), String> {
+    let mut cfg = speedwave_runtime::config::load_user_config().map_err(|e| e.to_string())?;
+    let mut tr = cfg.transcription.unwrap_or_default();
+    tr.enabled = Some(enabled);
+    cfg.transcription = Some(tr);
+    speedwave_runtime::config::save_user_config(&cfg).map_err(|e| e.to_string())
 }
 
 // ---- 2) capability + source listing ---------------------------------------
