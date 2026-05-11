@@ -236,6 +236,7 @@ build-native-macos:
 		cd $(CURDIR)/native/macos/calendar && swift build -c release && \
 		cd $(CURDIR)/native/macos/mail && swift build -c release && \
 		cd $(CURDIR)/native/macos/notes && swift build -c release && \
+		cd $(CURDIR)/native/macos/audio-capture && swift build -c release && \
 		echo "✅ macOS native CLI binaries built"; \
 	fi
 
@@ -245,7 +246,7 @@ test-swift:
 	@if [ "$$(uname)" != "Darwin" ]; then \
 		echo "⬚  Skipping Swift tests (not macOS)"; \
 	else \
-		for pkg in shared reminders calendar mail notes; do \
+		for pkg in shared reminders calendar mail notes audio-capture; do \
 			echo "Testing $$pkg..." && \
 			(cd $(CURDIR)/native/macos/$$pkg && swift test) || exit 1; \
 		done && \

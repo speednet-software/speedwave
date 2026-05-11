@@ -4,6 +4,8 @@
 
 pub mod accel;
 pub mod audio;
+#[cfg(target_os = "macos")]
+pub mod audio_macos;
 pub mod diarizer;
 pub mod model_catalog;
 pub mod model_store;
@@ -47,10 +49,18 @@ pub fn models_dir() -> PathBuf {
     crate::consts::data_dir().join(crate::consts::MODELS_SUBDIR)
 }
 
-/// Resolves the `AudioCapture` backend for this host. Phase 1a:
-/// `FileAudioCapture` everywhere; Phase 4 adds the real per-OS backends.
+/// Resolves the `AudioCapture` backend for this host. macOS uses the bundled
+/// `audio-capture-cli` (CoreAudio process taps); other platforms still fall
+/// back to `FileAudioCapture` until their Phase 4 backends land.
 pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
-    Box::new(FileAudioCapture::new())
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(audio_macos::MacOsAudioCapture::new())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Box::new(FileAudioCapture::new())
+    }
 }
 
 /// Orchestration facade — owns the capture backend (+ later, a transcriber /
@@ -115,11 +125,20 @@ mod tests {
     }
 
     #[test]
-    fn detect_audio_capture_returns_the_file_backend_for_now() {
-        let cap = detect_audio_capture();
-        // Phase 1a: every platform gets FileAudioCapture (file input only).
-        assert!(!cap.capabilities().supports_system_audio);
-        assert!(!cap.capabilities().supports_per_process);
+    fn detect_audio_capture_picks_the_host_backend() {
+        let caps = detect_audio_capture().capabilities();
+        // macOS has a real backend (the audio-capture-cli); other platforms
+        // still fall back to FileAudioCapture (file input only) until their
+        // Phase 4 backends land.
+        if cfg!(target_os = "macos") {
+            assert!(caps.supports_system_audio);
+            assert!(caps.supports_per_process);
+        } else {
+            assert!(!caps.supports_system_audio);
+            assert!(!caps.supports_per_process);
+        }
+        // Every backend annotates a UI note.
+        assert!(caps.note.is_some());
     }
 
     #[test]
@@ -160,7 +179,8 @@ mod tests {
     }
 
     #[test]
-    fn engine_default_uses_the_host_backend() {
+    #[cfg(not(target_os = "macos"))]
+    fn engine_default_uses_the_file_backend_off_macos() {
         let engine = TranscriptionEngine::default();
         // With the file backend, capturing without a path fails cleanly.
         // (`Box<dyn AudioStream>` has no Debug, so match the error out.)
@@ -171,5 +191,17 @@ mod tests {
                 "expected Unsupported, got {e:?}"
             ),
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn engine_default_uses_the_macos_backend() {
+        // On macOS the default engine wraps the real CLI-backed capture; we
+        // only assert the capability shape here — spawning the CLID is an
+        // integration concern (and may need TCC), not a unit test.
+        let engine = TranscriptionEngine::default();
+        let caps = engine.capture_capabilities();
+        assert!(caps.supports_system_audio);
+        assert!(caps.supports_per_process);
     }
 }
