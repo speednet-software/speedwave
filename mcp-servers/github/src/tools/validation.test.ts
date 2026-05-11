@@ -2,10 +2,14 @@
  * Tests for the withValidation wrapper (client null-check + error formatting).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { withValidation } from './validation.js';
 import { GitHubClient } from '../client.js';
 import { notConfiguredMessage, jsonResult } from '@speedwave/mcp-shared';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('withValidation', () => {
   it('returns a "not configured" error when the client is null (handler is never invoked)', async () => {
@@ -42,7 +46,8 @@ describe('withValidation', () => {
     expect(result).toEqual(jsonResult({ greeting: 'hi octocat' }));
   });
 
-  it('formats errors thrown by the handler via GitHubClient.formatError', async () => {
+  it('formats errors thrown by the handler via GitHubClient.formatError, and logs non-Octokit errors', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const client = new GitHubClient({ token: 'x' });
     const wrapped = withValidation<undefined>(client, async () => {
       throw new Error('boom from handler');
@@ -54,9 +59,15 @@ describe('withValidation', () => {
       content: [{ type: 'text', text: 'Error: boom from handler' }],
       isError: true,
     });
+    // A plain Error (no numeric `status`) is a programming bug — it must be logged.
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Unexpected (non-Octokit) error'),
+      expect.any(Error)
+    );
   });
 
-  it('formats categorized API errors (e.g. 401) thrown by the handler', async () => {
+  it('formats categorized API errors (e.g. 401) thrown by the handler without logging them', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const client = new GitHubClient({ token: 'x' });
     const wrapped = withValidation<undefined>(client, async () => {
       throw { status: 401, message: 'Bad credentials' };
@@ -66,5 +77,7 @@ describe('withValidation', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('Authentication failed');
+    // An Octokit-style error (numeric `status`) is expected — don't log it as a bug.
+    expect(errSpy).not.toHaveBeenCalled();
   });
 });

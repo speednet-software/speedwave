@@ -6,38 +6,20 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
+import { GitHubWorkflowRun } from '../types.js';
 import { withValidation } from './validation.js';
 
-interface RawWorkflowRun {
-  id: number;
-  name?: string;
-  status: string;
-  conclusion: string | null;
-  head_branch: string;
-  head_sha: string;
-  html_url: string;
-}
-
 /**
- * Maps a normalized workflow run to the compact summary returned by `listWorkflowRuns`.
+ * Maps a normalized workflow run to the compact summary returned by `listWorkflowRuns`
+ * (drops `created_at`/`updated_at` — those are exposed by `getWorkflowRun`).
  * @param r - Normalized workflow run from the GitHub client
  * @returns Compact `{ id, name, status, conclusion, head_branch, head_sha, html_url }` summary
  */
-function runSummary(r: RawWorkflowRun): {
-  id: number;
-  name: string | undefined;
-  status: string;
-  conclusion: string | null;
-  head_branch: string;
-  head_sha: string;
-  html_url: string;
-} {
+function runSummary(r: GitHubWorkflowRun): Omit<GitHubWorkflowRun, 'created_at' | 'updated_at'> {
   return {
     id: r.id,
     name: r.name,
@@ -214,7 +196,7 @@ const getRunLogsTool: Tool = {
 
 const rerunWorkflowTool: Tool = {
   name: 'rerunWorkflow',
-  description: 'Re-runs a completed workflow run.',
+  description: 'Re-runs a workflow run.',
   annotations: WRITE_ANNOTATIONS,
   _meta: { deferLoading: true },
   keywords: ['github', 'actions', 'workflow', 'run', 'rerun', 'retry', 'ci'],
@@ -417,19 +399,6 @@ const downloadArtifactTool: Tool = {
  * @param client - GitHub client instance (null when the service is not configured)
  */
 export function createActionsTools(client: GitHubClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitHub'));
-  if (!client) {
-    return [
-      { tool: listWorkflowRunsTool, handler: unconfigured },
-      { tool: getWorkflowRunTool, handler: unconfigured },
-      { tool: getRunLogsTool, handler: unconfigured },
-      { tool: rerunWorkflowTool, handler: unconfigured },
-      { tool: triggerWorkflowTool, handler: unconfigured },
-      { tool: listWorkflowRunArtifactsTool, handler: unconfigured },
-      { tool: downloadArtifactTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listWorkflowRunsTool,

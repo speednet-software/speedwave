@@ -36,7 +36,7 @@ import type {
   ConnectionTestResult,
 } from './types.js';
 
-// Re-export the key types so consumers (tools/domains) can import them from the client too.
+// Re-export the key types so consumers (the tools layer) can import them from the client too.
 export type {
   GitHubConfig,
   GitHubRepo,
@@ -79,11 +79,31 @@ const MAX_PER_PAGE = 100;
  * @param what - What was being downloaded, for the error message (e.g. "workflow run logs")
  * @returns The non-empty redirect URL
  */
+/**
+ * `true` if `url` is a syntactically valid absolute `https://` URL. Used to keep
+ * GitHub-supplied download URLs (`Location` headers, `archive_download_url`) from
+ * carrying a `file://`, `http://`, or metadata-service address to the model — see
+ * `.claude/rules/security.md`. (Inert in v1 since the API base is github.com, but
+ * preemptively closes the vector if GHES / a config-driven base URL is ever added.)
+ * @param url - Candidate URL string
+ * @returns Whether the string parses as an `https:` URL
+ */
+function isHttpsUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function extractRedirectUrl(res: unknown, what: string): string {
   const r = res as { url?: unknown; headers?: { location?: unknown } };
   const url = String(r.headers?.location || r.url || '');
   if (!url) {
     throw new Error(`GitHub returned no download URL for ${what}`);
+  }
+  if (!isHttpsUrl(url)) {
+    throw new Error(`GitHub returned a non-HTTPS download URL for ${what}`);
   }
   return url;
 }
@@ -113,6 +133,45 @@ interface OctokitErrorLike {
   response?: { headers?: Record<string, string | undefined> };
 }
 
+/** Coarse category of a GitHub API failure — shared by `formatError` and `testConnection`. */
+type ErrorCategory =
+  | 'auth'
+  | 'permission'
+  | 'not_found'
+  | 'validation'
+  | 'network'
+  | 'server'
+  | 'unknown';
+
+/**
+ * Classifies an Octokit-style error into a coarse {@link ErrorCategory}, the single place
+ * that knows which HTTP status / message substring means what. `formatError` turns the
+ * category (plus the raw error) into a user-facing string; `testConnection` exposes it
+ * directly so callers can branch on `auth` vs `network` etc.
+ * @param error - The thrown value (an Octokit RequestError or anything else)
+ * @returns The matched error category
+ */
+function classifyOctokitError(error: unknown): ErrorCategory {
+  const err = (error || {}) as OctokitErrorLike;
+  const status = typeof err.status === 'number' ? err.status : undefined;
+  const message = err.message || '';
+  if (status === 401 || message.includes('Bad credentials')) return 'auth';
+  if (status === 403) return 'permission';
+  if (status === 404) return 'not_found';
+  if (status === 422) return 'validation';
+  if (status && status >= 500 && status < 600) return 'server';
+  if (
+    message.includes('getaddrinfo') ||
+    message.includes('ECONNREFUSED') ||
+    message.includes('ETIMEDOUT') ||
+    message.includes('ENOTFOUND') ||
+    /network\s+(error|failed|timeout)/i.test(message)
+  ) {
+    return 'network';
+  }
+  return 'unknown';
+}
+
 //═══════════════════════════════════════════════════════════════════════════════
 // Client Class
 //═══════════════════════════════════════════════════════════════════════════════
@@ -134,6 +193,9 @@ export class GitHubClient {
    * @param config - Client configuration containing the authentication token and optional base URL
    */
   constructor(config: GitHubConfig) {
+    if (!config.token || config.token.trim() === '') {
+      throw new Error('GitHubClient requires a non-empty authentication token.');
+    }
     this.config = config;
     this.octokit = new MyOctokit({
       auth: config.token,
@@ -157,7 +219,7 @@ export class GitHubClient {
           retryCount: number
         ): boolean => {
           console.warn(
-            `${ts()} GitHub secondary rate limit for ${options.method} ${options.url}, retrying after ${retryAfter}s`
+            `${ts()} GitHub secondary rate limit for ${options.method} ${options.url}, retrying after ${retryAfter}s (attempt ${retryCount})`
           );
           return retryCount < 2;
         },
@@ -375,11 +437,14 @@ export class GitHubClient {
    * @returns Normalized artifact
    */
   private mapArtifact(a: Record<string, unknown>): GitHubWorkflowRunArtifact {
+    const downloadUrl = String(a.archive_download_url || '');
     return {
       id: Number(a.id),
       name: String(a.name || ''),
       size_in_bytes: Number(a.size_in_bytes || 0),
-      archive_download_url: String(a.archive_download_url || ''),
+      // Drop anything that isn't a plain https:// URL — never hand a file://, http://,
+      // or metadata-service address to the model (see isHttpsUrl).
+      archive_download_url: isHttpsUrl(downloadUrl) ? downloadUrl : '',
       expired: Boolean(a.expired),
     };
   }
@@ -476,46 +541,35 @@ export class GitHubClient {
     const status = typeof err.status === 'number' ? err.status : undefined;
     const message = err.message || '';
 
-    if (status === 401 || message.includes('Bad credentials')) {
-      return withSetupGuidance('Authentication failed. Check your GitHub token.');
-    }
-
-    if (status === 403) {
-      const remaining = err.response?.headers?.['x-ratelimit-remaining'];
-      if (remaining === '0') {
-        return 'GitHub API rate limit exceeded. Try again later.';
+    switch (classifyOctokitError(error)) {
+      case 'auth':
+        return withSetupGuidance('Authentication failed. Check your GitHub token.');
+      case 'permission': {
+        if (err.response?.headers?.['x-ratelimit-remaining'] === '0') {
+          return 'GitHub API rate limit exceeded. Try again later.';
+        }
+        return "Permission denied. Your GitHub fine-grained PAT may be missing a required permission (e.g. Issues, Pull requests, Contents, or Actions: Read/Write). Check the token's repository permissions.";
       }
-      return "Permission denied. Your GitHub fine-grained PAT may be missing a required permission (e.g. Issues, Pull requests, Contents, or Actions: Read/Write). Check the token's repository permissions.";
+      case 'not_found':
+        return 'Resource not found in GitHub. Check the owner/repo and that your token has access.';
+      case 'validation':
+        return `GitHub validation error: ${message || 'invalid request'}`;
+      case 'server': {
+        // `server` ⟹ classifyOctokitError saw a 5xx status, so `status` is a number here.
+        const s = status as number;
+        const messages: Record<number, string> = {
+          500: 'GitHub server error. Please try again later.',
+          502: 'GitHub bad gateway. The server may be overloaded.',
+          503: 'GitHub service unavailable. The server is temporarily down.',
+          504: 'GitHub gateway timeout. The request took too long.',
+        };
+        return messages[s] ?? `GitHub server error (${s}). Please try again later.`;
+      }
+      case 'network':
+        return withSetupGuidance('Network error reaching GitHub.');
+      case 'unknown':
+        return message || 'GitHub API error';
     }
-
-    if (status === 404) {
-      return 'Resource not found in GitHub. Check the owner/repo and that your token has access.';
-    }
-
-    if (status === 422) {
-      return `GitHub validation error: ${message || 'invalid request'}`;
-    }
-
-    // 5xx - Server errors
-    if (status && status >= 500 && status < 600) {
-      if (status === 500) return 'GitHub server error. Please try again later.';
-      if (status === 502) return 'GitHub bad gateway. The server may be overloaded.';
-      if (status === 503) return 'GitHub service unavailable. The server is temporarily down.';
-      if (status === 504) return 'GitHub gateway timeout. The request took too long.';
-      return `GitHub server error (${status}). Please try again later.`;
-    }
-
-    if (
-      message.includes('getaddrinfo') ||
-      message.includes('ECONNREFUSED') ||
-      message.includes('ETIMEDOUT') ||
-      message.includes('ENOTFOUND') ||
-      /network\s+(error|failed|timeout)/i.test(message)
-    ) {
-      return withSetupGuidance('Network error reaching GitHub.');
-    }
-
-    return message || 'GitHub API error';
   }
 
   /**
@@ -530,21 +584,11 @@ export class GitHubClient {
       const errorMessage = GitHubClient.formatError(error);
       console.error(`${ts()} GitHub connection test failed:`, errorMessage);
 
-      const err = (error || {}) as OctokitErrorLike;
-      const status = typeof err.status === 'number' ? err.status : undefined;
-      const message = err.message || '';
-
-      let errorType: ConnectionTestResult['errorType'] = 'unknown';
-      if (status === 401 || message.includes('Bad credentials')) errorType = 'auth';
-      else if (status === 403) errorType = 'permission';
-      else if (status === 404) errorType = 'not_found';
-      else if (
-        message.includes('getaddrinfo') ||
-        message.includes('ECONNREFUSED') ||
-        message.includes('ETIMEDOUT') ||
-        message.includes('ENOTFOUND')
-      )
-        errorType = 'network';
+      const category = classifyOctokitError(error);
+      // `validation` / `server` aren't expected for getAuthenticated() and aren't part of
+      // ConnectionTestResult's narrower set — fold them into 'unknown'.
+      const errorType: ConnectionTestResult['errorType'] =
+        category === 'validation' || category === 'server' ? 'unknown' : category;
 
       return { success: false, error: errorMessage, errorType };
     }
@@ -1251,15 +1295,21 @@ export class GitHubClient {
     options: { ref?: string; recursive?: boolean } = {}
   ): Promise<GitHubTreeItem[]> {
     this.validateRequired({ owner, repo });
-    let treeSha = options.ref;
-    if (!treeSha) {
+    let treeRef = options.ref;
+    if (!treeRef) {
       const repository = await this.getRepo(owner, repo);
-      treeSha = repository.default_branch;
+      treeRef = repository.default_branch;
+      if (!treeRef) {
+        throw new Error(
+          `Cannot resolve a tree for ${owner}/${repo}: the repository has no default branch. ` +
+            `Pass an explicit 'ref' (branch, tag, or commit SHA).`
+        );
+      }
     }
     const res = await this.octokit.rest.git.getTree({
       owner,
       repo,
-      tree_sha: treeSha,
+      tree_sha: treeRef,
       recursive: options.recursive ? '1' : undefined,
     });
     const tree = Array.isArray((res.data as Record<string, unknown>).tree)
@@ -1837,7 +1887,7 @@ export class GitHubClient {
  *
  * IMPORTANT: Returns null (not throws) when the token is missing or invalid.
  * This enables "graceful degradation" - the server starts even without config:
- * - User can run `speedwave up` without configuring all integrations
+ * - User can run `speedwave` (no subcommand) without configuring all integrations
  * - Healthcheck reports the service as unconfigured
  * - Tools return a clear "not configured" error when called
  *
@@ -1854,8 +1904,6 @@ export async function initializeGitHubClient(): Promise<GitHubClient | null> {
       return null;
     }
 
-    // github.com only in v1 — no host_url file (unlike GitLab). baseUrl stays default (https://api.github.com).
-    // (If a future version adds GHES, read base_url here.)
     const client = new GitHubClient({ token });
 
     const connectionResult = await client.testConnection();
@@ -1867,7 +1915,10 @@ export async function initializeGitHubClient(): Promise<GitHubClient | null> {
     console.log(`${ts()} ✅ GitHub client initialized`);
     return client;
   } catch (error) {
-    console.warn(`${ts()} Failed to initialize GitHub client: ${error}`);
+    // Broad catch is intentional (graceful degradation), but surface the full error —
+    // a permissions error on /tokens/token must be distinguishable from a missing token.
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    console.warn(`${ts()} Failed to initialize GitHub client: ${detail}`);
     return null;
   }
 }

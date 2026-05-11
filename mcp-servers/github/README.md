@@ -57,8 +57,7 @@ github/
     ├── index.ts            # MCP server bootstrap (auth, tool registration, health check)
     ├── client.ts           # GitHubClient class — @octokit/rest wrapper + initializeGitHubClient()
     ├── types.ts            # GitHub API type definitions
-    ├── tools/              # Tool definitions with handlers (per domain) + validation.ts
-    └── domains/            # Thin per-domain client interfaces
+    └── tools/              # Tool definitions with handlers (per domain) + validation.ts
 ```
 
 ## Token Configuration
