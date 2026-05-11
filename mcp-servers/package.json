@@ -15,6 +15,7 @@
     "sharepoint",
     "redmine",
     "gitlab",
+    "github",
     "os"
   ],
   "scripts": {
