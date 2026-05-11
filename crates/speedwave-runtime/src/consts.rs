@@ -30,6 +30,94 @@ pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
+
+/// Subdirectory under the data dir holding per-project `host_exec` worker state
+/// (`<data_dir>/host-exec/<project>/{config.json,auth-token,port,pid,log}`).
+/// Unlike `mcp-os` (one global process, one set of state files), `host_exec`
+/// is per-project — see ADR-054. This is the SSOT; do not hard-code the
+/// `"host-exec"` literal at call sites.
+pub const HOST_EXEC_SUBDIR: &str = "host-exec";
+/// File name (within `<data_dir>/host-exec/<project>/`) of the validated
+/// per-project whitelist snapshot the `host_exec` worker reads. Written by the
+/// Tauri side with `0o600` (it may contain recipe `env` values, possibly
+/// secrets — ADR-054).
+pub const HOST_EXEC_CONFIG_FILE: &str = "config.json";
+/// File name of the per-project `host_exec` worker's bearer token (`0o600`).
+pub const HOST_EXEC_AUTH_TOKEN_FILE: &str = "auth-token";
+/// File name of the per-project `host_exec` worker's listening port.
+pub const HOST_EXEC_PORT_FILE: &str = "port";
+/// File name of the per-project `host_exec` worker's PID (for stale-process
+/// cleanup on the next session).
+pub const HOST_EXEC_PID_FILE: &str = "pid";
+/// File name of the per-project `host_exec` worker's log. Records every call —
+/// recipe name, full argv, cwd, exit code, status, duration, the confirmation
+/// decision — with recipe `env` values redacted. Surfaced in the diagnostics /
+/// system-health views.
+pub const HOST_EXEC_LOG_FILE: &str = "log";
+
+/// Per-command timeout (ms) for a `host_exec` recipe. On expiry the worker
+/// kills the recipe's whole process group with `SIGKILL`. 7 minutes leaves
+/// headroom for a long Gradle/Maven build while keeping the total per-call
+/// budget — `HOST_EXEC_TIMEOUT_MS` + `HOST_EXEC_CONFIRM_TIMEOUT_MS` + margin —
+/// under the hub's 600 s long-operation timeout (ADR-054 §Timeout budget).
+pub const HOST_EXEC_TIMEOUT_MS: u64 = 420_000;
+/// How long the `host_exec` worker waits for the user's per-recipe
+/// confirmation reply before failing closed (MCP tool error
+/// "confirmation unavailable"). Counted against the same hub call budget as
+/// the command, hence kept short relative to `HOST_EXEC_TIMEOUT_MS`.
+pub const HOST_EXEC_CONFIRM_TIMEOUT_MS: u64 = 120_000;
+/// Per-stream output cap (bytes) for a `host_exec` recipe. Each of
+/// stdout/stderr is truncated to the last `HOST_EXEC_MAX_OUTPUT_BYTES` (the
+/// tail — for compile/test failures the end is what matters) and the result's
+/// `truncated` flag is set. 64 KiB is generous for a build/test log tail while
+/// bounding what gets dumped into Claude's context.
+pub const HOST_EXEC_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Per-stream output cap (lines) for a `host_exec` recipe, applied alongside
+/// `HOST_EXEC_MAX_OUTPUT_BYTES` (whichever limit is hit first). Guards against
+/// a flood of short lines that stays under the byte cap.
+pub const HOST_EXEC_MAX_OUTPUT_LINES: usize = 2000;
+/// Upper bound (bytes) on a recipe parameter's value, and a hard ceiling on
+/// the `maxLen` a recipe may declare for one of its parameters. Bounds what an
+/// attacker can wedge through a regex-validated parameter.
+pub const HOST_EXEC_PARAM_MAX_LEN: usize = 65536;
+/// Upper bound (chars) on a recipe parameter's regex `pattern` string. The
+/// pattern's *semantics* (does it compile, does the supplied value match) are
+/// validated in the `host_exec` worker, in JavaScript `RegExp`, since the
+/// worker is what executes it — doing it in Rust's `regex` crate too would
+/// invite engine drift (ADR-054). Rust only sanity-checks the string here.
+pub const HOST_EXEC_PARAM_PATTERN_MAX_LEN: usize = 4096;
+
+/// `exec` basenames a `host_exec` recipe may NOT use: direct shell / eval
+/// launchers whose whole job is "run an arbitrary string". Banning these
+/// closes the obvious `{"exec":"bash","args":["-c","{cmd}"]}` vector — it is
+/// **defense in depth, not a guarantee** that whitelisted recipes can't run
+/// arbitrary code (`npm run` / `make` / `gradle` / `docker compose` all run
+/// repo-controlled code, often via `/bin/sh` themselves), and it is a
+/// **basename** check — `./node_modules/.bin/node` bypasses the `node` ban by
+/// being a path, not the name `node` (a documented residual; the recipe author
+/// chose it). See ADR-054 §"Hard ban on direct shell/eval launchers".
+///
+/// `node` / `python` / `make` / `npm` / `npx` / `pnpm` / `yarn` are *not* on
+/// this list — a literal sub-command (`make test`, `npm run build`) is fine;
+/// they are rejected only when an `args` element is a *bare parameter token*
+/// (the "parameterised meta-invocation" rule in `host_exec::validate_*`).
+///
+/// Compared case-insensitively, on the `exec` path's basename. SSOT —
+/// referenced from `host_exec::validate_host_exec_config()`.
+pub const HOST_EXEC_SHELL_LAUNCHERS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "env", "xargs", "find", "ssh", "sshpass",
+];
+
+/// `exec` basenames that are meta-tools (interpreters / package-script
+/// runners): a *literal* sub-command argument is allowed, but a recipe whose
+/// `args` contains a *bare parameter token* (the whole element is `{param}`)
+/// is rejected — that is "run whatever Claude types" through a meta-tool.
+/// Compared case-insensitively, on the `exec` path's basename. SSOT —
+/// referenced from `host_exec::validate_host_exec_config()`.
+pub const HOST_EXEC_META_TOOLS: &[&str] = &[
+    "node", "deno", "python", "python3", "perl", "ruby", "make", "npm", "npx", "pnpm", "yarn",
+];
+
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
@@ -629,6 +717,13 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
 
 /// Built-in service IDs (logical names, not compose names).
 /// Used by plugin install to prevent slug collisions.
+///
+/// `host_exec` is here even though it has no compose service — it is a
+/// host-side worker (like `os`/`mcp-os`) reached via `WORKER_HOST_EXEC_URL`
+/// on the hub (ADR-054). It is the first multi-word entry; the hub builds the
+/// worker env var as `WORKER_${id.toUpperCase()}_URL` and treats `_`
+/// literally, so `host_exec` → `WORKER_HOST_EXEC_URL` (a hyphen would give the
+/// broken `WORKER_HOST-EXEC_URL`).
 pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "slack",
     "sharepoint",
@@ -638,6 +733,7 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "atlassian",
     "playwright",
     "os",
+    "host_exec",
 ];
 
 /// Environment variable names that plugins are forbidden from setting via

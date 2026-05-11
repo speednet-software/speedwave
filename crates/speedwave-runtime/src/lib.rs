@@ -10,6 +10,7 @@ pub mod config;
 pub mod consts;
 pub mod defaults;
 pub mod fs_security;
+pub mod host_exec;
 pub mod log_sanitizer;
 pub mod os_prereqs;
 pub mod plugin;
