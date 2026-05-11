@@ -48,6 +48,8 @@ import {
 
 /** A `deferLoading: false` `_meta` marker — tool is shown to Claude upfront (not behind `search_tools`). */
 const SHOWN = { deferLoading: false } as const;
+/** Shown upfront, but a slow tool (LibreOffice/weasyprint) — needs the `long` timeout class. */
+const SHOWN_LONG = { deferLoading: false, timeoutClass: 'long' } as const;
 /** A `deferLoading: true` `_meta` marker for slow tools (LibreOffice/weasyprint/matplotlib). */
 const DEFERRED_LONG = { deferLoading: true, timeoutClass: 'long' } as const;
 /** A `deferLoading: true` `_meta` marker for standard-cost tools. */
@@ -272,7 +274,7 @@ const markdownToPdfTool: Tool = {
     'For an EXISTING .docx/.pptx/.xlsx use `officeToPdf` — this tool does not read Office formats. For HTML input use `htmlToPdf`. ' +
     'To embed a chart, first call `renderChart` to produce a PNG/SVG under /workspace, then reference it as `![](path)` in the markdown.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: SHOWN,
+  _meta: SHOWN_LONG,
   keywords: ['markdown', 'pdf', 'render', 'document', 'report', 'export', 'convert'],
   inputSchema: {
     type: 'object',
@@ -398,7 +400,7 @@ const createDocxTool: Tool = {
     'Create a .docx from a structured spec: { elements: [ { type: "heading", level, text } | { type: "paragraph", text, bold?, italic? } | { type: "table", header, rows } | { type: "image", path } | { type: "pagebreak" } ] }. ' +
     'Image paths must be under /workspace (this is where a `renderChart` PNG goes). To modify an existing .docx use `editDocx`. From Markdown, use `markdownToDocx`.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: SHOWN,
+  _meta: DEFERRED,
   keywords: ['docx', 'word', 'create', 'document', 'write', 'generate', 'report'],
   inputSchema: {
     type: 'object',
@@ -436,7 +438,7 @@ const createXlsxTool: Tool = {
     'Create an .xlsx from a spec: { sheets: [ { name, rows: (string|number|null)[][], freeze?: "A2", charts?: [ { type: "bar"|"line"|"pie"|"scatter", title?, dataRange: "Sheet1!B1:B10", categoriesRange?, anchor: "E2" } ] } ] }. ' +
     'Supports native, editable Excel charts. To modify an existing workbook use `editXlsx`. To read one use `readDocument`.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: SHOWN,
+  _meta: DEFERRED,
   keywords: ['xlsx', 'excel', 'spreadsheet', 'create', 'workbook', 'chart', 'write', 'generate'],
   inputSchema: {
     type: 'object',

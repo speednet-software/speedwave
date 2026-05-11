@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 
-from _io import main, ok, fail
+from script_runner import main, ok, fail
 
 
 def _open_reader(path: str):

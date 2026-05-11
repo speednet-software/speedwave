@@ -16,7 +16,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from _io import main, ok, fail  # noqa: E402
+from script_runner import main, ok, fail  # noqa: E402
 
 
 def _validate(spec: dict) -> None:

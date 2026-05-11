@@ -7,7 +7,7 @@ Output: ``{"ok": true, "markdown": "..."}``
 from __future__ import annotations
 
 from markdown_utils import join_blocks, rows_to_markdown_table
-from _io import main, ok, fail
+from script_runner import main, ok, fail
 
 
 def _heading_level(style_name: str) -> int | None:

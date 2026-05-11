@@ -176,7 +176,7 @@ pub fn render_compose(
     yaml = apply_worker_auth_tokens(&yaml, project_name, integrations)?;
 
     // Filter services based on integrations config
-    yaml = apply_integrations_filter(&yaml, integrations)?;
+    yaml = apply_integrations_filter(&yaml, integrations, &network_name)?;
 
     Ok(yaml)
 }
@@ -854,6 +854,7 @@ fn apply_worker_auth_tokens_with_dir(
 fn apply_integrations_filter(
     yaml: &str,
     integrations: &ResolvedIntegrationsConfig,
+    network_name: &str,
 ) -> anyhow::Result<String> {
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
 
@@ -869,12 +870,16 @@ fn apply_integrations_filter(
     };
 
     let mut enabled_names: Vec<&str> = Vec::new();
+    let mut office_enabled = false;
 
     for svc in consts::TOGGLEABLE_MCP_SERVICES {
         let (config_key, compose_name, worker_env) =
             (svc.config_key, svc.compose_name, svc.worker_env);
         if service_enabled(config_key) {
             enabled_names.push(config_key);
+            if config_key == "office" {
+                office_enabled = true;
+            }
         } else {
             // Remove the service container from compose
             if let Some(services) = doc.get_mut("services") {
@@ -884,6 +889,26 @@ fn apply_integrations_filter(
             }
             // Remove WORKER_*_URL from hub environment
             remove_hub_env_var(&mut doc, worker_env);
+        }
+    }
+
+    // The office worker has its own egress-less network (ADR-055). When office is disabled,
+    // drop the network definition and the hub's attachment to it, so the rendered compose
+    // has no dangling internal network.
+    if !office_enabled {
+        let office_network = format!("{network_name}_office");
+        if let Some(networks) = doc.get_mut("networks") {
+            if let Some(map) = networks.as_mapping_mut() {
+                map.remove(serde_yaml_ng::Value::String(office_network.clone()));
+            }
+        }
+        if let Some(nets) = doc
+            .get_mut("services")
+            .and_then(|s| s.get_mut("mcp-hub"))
+            .and_then(|h| h.get_mut("networks"))
+            .and_then(|n| n.as_sequence_mut())
+        {
+            nets.retain(|n| n.as_str() != Some(office_network.as_str()));
         }
     }
 
@@ -3283,7 +3308,9 @@ services:
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations.github = false;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
         let services = doc.get("services").and_then(|s| s.as_mapping()).unwrap();
@@ -3305,7 +3332,9 @@ services:
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations.playwright = false;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
         let services = doc.get("services").and_then(|s| s.as_mapping()).unwrap();
@@ -5507,7 +5536,8 @@ services:
         integrations.slack = false;
 
         let yaml = serde_yaml_ng::to_string(&doc).unwrap();
-        let filtered = apply_integrations_filter(&yaml, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
 
         let filtered_doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let filtered_services = filtered_doc.get("services").unwrap().as_mapping().unwrap();
@@ -5524,7 +5554,9 @@ services:
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations.gitlab = false;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
         // Check hub environment does not contain WORKER_GITLAB_URL
@@ -5554,7 +5586,9 @@ services:
         integrations.gitlab = true;
         integrations.os_calendar = true;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
         let enabled_var =
@@ -5571,7 +5605,9 @@ services:
     fn test_integrations_filter_all_disabled_keeps_claude_and_hub() {
         let integrations = ResolvedIntegrationsConfig::default();
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
@@ -5588,7 +5624,9 @@ services:
         integrations.os_notes = true;
         // reminders and mail remain false (default)
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
         let disabled_os_var = find_env_value(&env, "DISABLED_OS_SERVICES=")
@@ -5608,7 +5646,9 @@ services:
         integrations.os_mail = true;
         integrations.os_notes = true;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
 
@@ -5616,6 +5656,74 @@ services:
             find_env_value(&env, "DISABLED_OS_SERVICES=").is_none(),
             "DISABLED_OS_SERVICES should not be present when all OS integrations enabled"
         );
+    }
+
+    #[test]
+    fn test_integrations_filter_office_enabled_keeps_service_and_office_network() {
+        let mut integrations = all_enabled_integrations();
+        integrations.office = true;
+        let filtered = apply_integrations_filter(
+            VALID_COMPOSE_ALL_WORKERS,
+            &integrations,
+            "speedwave_test_network",
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-office".into())));
+        let office_nets: Vec<&str> = services
+            .get(serde_yaml_ng::Value::String("mcp-office".into()))
+            .and_then(|s| s.get("networks"))
+            .and_then(|n| n.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(office_nets, vec!["speedwave_test_network_office"]);
+        let hub_nets: Vec<&str> = services
+            .get(serde_yaml_ng::Value::String("mcp-hub".into()))
+            .and_then(|s| s.get("networks"))
+            .and_then(|n| n.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(hub_nets.contains(&"speedwave_test_network"));
+        assert!(hub_nets.contains(&"speedwave_test_network_office"));
+        assert!(doc
+            .get("networks")
+            .and_then(|n| n.get("speedwave_test_network_office"))
+            .is_some());
+        let env = get_hub_env_seq(&doc);
+        assert!(env.iter().any(|e| e.starts_with("WORKER_OFFICE_URL=")));
+    }
+
+    #[test]
+    fn test_integrations_filter_office_disabled_removes_service_and_office_network() {
+        let mut integrations = all_enabled_integrations();
+        integrations.office = false;
+        let filtered = apply_integrations_filter(
+            VALID_COMPOSE_ALL_WORKERS,
+            &integrations,
+            "speedwave_test_network",
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(!services.contains_key(&serde_yaml_ng::Value::String("mcp-office".into())));
+        assert!(doc
+            .get("networks")
+            .and_then(|n| n.get("speedwave_test_network_office"))
+            .is_none());
+        let hub_nets: Vec<&str> = services
+            .get(serde_yaml_ng::Value::String("mcp-hub".into()))
+            .and_then(|s| s.get("networks"))
+            .and_then(|n| n.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(hub_nets, vec!["speedwave_test_network"]);
+        let env = get_hub_env_seq(&doc);
+        assert!(!env.iter().any(|e| e.starts_with("WORKER_OFFICE_URL=")));
+        let enabled = find_env_value(&env, "ENABLED_SERVICES=").unwrap_or_default();
+        assert!(!enabled.split(',').any(|s| s == "office"));
     }
 
     #[test]
@@ -5705,7 +5813,9 @@ services:
     fn test_all_disabled_removes_all_mcp_services() {
         let integrations = ResolvedIntegrationsConfig::default(); // all false
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
@@ -5753,7 +5863,8 @@ services:
     fn test_all_disabled_passes_security_check() {
         let integrations = ResolvedIntegrationsConfig::default(); // all false
         let yaml = valid_compose_yaml();
-        let filtered = apply_integrations_filter(&yaml, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &filtered,
@@ -5777,7 +5888,9 @@ services:
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations.slack = true;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 

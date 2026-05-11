@@ -1,20 +1,18 @@
-"""Tests for the dependency-free Python helpers (`markdown_utils`, `_io`).
+"""Tests for the dependency-free Python helpers (`markdown_utils`, `script_runner`).
 
-The format/PDF/chart scripts (`docx_build.py`, `xlsx_build.py`, `pptx_build.py`, `pdf_ops.py`,
-`render_chart.py`, `python_docx_extract.py`) drive third-party libraries (python-docx, openpyxl,
-python-pptx, pypdf, pikepdf, matplotlib) that are installed in the worker image's venv, not in the
-host/CI Python — so they are exercised by the image build and the TypeScript layer's mocked tests
-rather than here. These helpers have no external imports and run anywhere.
+These have no third-party imports and run on any interpreter. The library-driven scripts
+(`docx_build.py`, `xlsx_build.py`, `pptx_build.py`, `pdf_ops.py`, `render_chart.py`,
+`python_docx_extract.py`) are covered by `test_scripts.py`, which self-skips when its deps
+(python-docx / openpyxl / python-pptx / pypdf / matplotlib) are absent.
 """
 
 from __future__ import annotations
 
-import io
 import json
 import sys
 
 import markdown_utils
-import _io
+import script_runner
 
 
 def test_rows_to_markdown_table_basic() -> None:
@@ -41,7 +39,7 @@ def test_join_blocks_skips_empty() -> None:
 
 def test_io_ok_prints_json_and_exits_zero(capsys) -> None:
     try:
-        _io.ok(value=7)
+        script_runner.ok(value=7)
     except SystemExit as exc:
         assert exc.code == 0
     out = json.loads(capsys.readouterr().out)
@@ -50,7 +48,7 @@ def test_io_ok_prints_json_and_exits_zero(capsys) -> None:
 
 def test_io_fail_prints_json_and_exits_one(capsys) -> None:
     try:
-        _io.fail("boom")
+        script_runner.fail("boom")
     except SystemExit as exc:
         assert exc.code == 1
     captured = capsys.readouterr()
@@ -65,7 +63,7 @@ def test_io_main_turns_exceptions_into_failure(capsys) -> None:
     saved_argv = sys.argv
     sys.argv = ["script.py"]
     try:
-        _io.main(bad)
+        script_runner.main(bad)
     except SystemExit as exc:
         assert exc.code == 1
     finally:
@@ -80,12 +78,12 @@ def test_io_main_passes_argv_tail(capsys) -> None:
 
     def collect(argv: list[str]) -> None:
         received.extend(argv)
-        _io.ok()
+        script_runner.ok()
 
     saved_argv = sys.argv
     sys.argv = ["script.py", "a", "b"]
     try:
-        _io.main(collect)
+        script_runner.main(collect)
     except SystemExit:
         pass
     finally:

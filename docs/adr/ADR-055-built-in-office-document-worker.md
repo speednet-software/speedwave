@@ -34,7 +34,7 @@ A **plugin** (sibling repo) is rejected because this is a core capability users 
 
 ### Own thin worker, not wrapping an upstream MCP server (ADR-053 gate)
 
-Upstream MCP servers exist — `microsoft/markitdown-mcp`,[^10] `GongRzhe/Office-Word-MCP-Server`,[^11] `dvejsada/mcp-ms-office-documents`,[^12] `jenstangen1/pptx-xlsx-mcp`[^13] — but the four-point wrap gate from ADR-053 is not met: (a) `markitdown-mcp` covers **read only** (file → Markdown) — not create/edit, not PDF generation, not Office↔Office conversion, not charts — so "an official MCP server that is mature and covers the need" fails;[^10] (b) `pptx-xlsx-mcp` drives Office via `pywin32` COM automation — Windows-only, useless in a Linux container;[^13] (c) the rest are single-maintainer community projects; (d) the "generic infrastructure, not a domain integration" condition is borderline for document processing, but the absence of any single mature upstream covering the full scope settles it toward an own thin worker that glues mature **libraries/CLIs** — `markitdown`,[^10] `pandoc`,[^14] LibreOffice headless,[^9] `weasyprint`,[^15] `pypdf`/`pikepdf`,[^16][^17] `python-docx`/`openpyxl`/`python-pptx`,[^18][^19][^20] `matplotlib`,[^21] SheetJS.[^22] The wheel we are not reinventing is the document toolchain; we reinvent only the tool definitions and glue.
+Upstream MCP servers exist — `microsoft/markitdown-mcp`,[^10] `GongRzhe/Office-Word-MCP-Server`,[^11] `dvejsada/mcp-ms-office-documents`,[^12] `jenstangen1/pptx-xlsx-mcp`[^13] — but the four-point wrap gate from ADR-053 is not met: (a) `markitdown-mcp` covers **read only** (file → Markdown) — not create/edit, not PDF generation, not Office↔Office conversion, not charts — so "an official MCP server that is mature and covers the need" fails;[^10] (b) `pptx-xlsx-mcp` drives Office via `pywin32` COM automation — Windows-only, useless in a Linux container;[^13] (c) the rest are single-maintainer community projects; (d) the "generic infrastructure, not a domain integration" condition is borderline for document processing, but the absence of any single mature upstream covering the full scope settles it toward an own thin worker that glues mature **libraries/CLIs** — `markitdown`,[^10] `pandoc`,[^14] LibreOffice headless,[^9] `weasyprint`,[^15] `pypdf`,[^16] `python-docx`/`openpyxl`/`python-pptx`,[^18][^19][^20] `matplotlib`,[^21] SheetJS.[^22] The wheel we are not reinventing is the document toolchain; we reinvent only the tool definitions and glue.
 
 ### Full scope in v1 — with the DSL frozen here
 
@@ -48,7 +48,7 @@ I/O contract: input is a `/workspace` **path by preference**; inline `markdown`/
 
 - `readDocument(path, maxChars?=4000)` → `{ markdown, bytes, truncated }`. Multi-engine, best-output-wins: SheetJS for `.xlsx`/`.xls`/`.xlsb`/`.ods` (native TypeScript, no subprocess, reads the legacy formats `markitdown` does not — `XLSX.utils.sheet_to_csv`/`sheet_to_html` → Markdown tables);[^22] `markitdown` as primary for `.docx`/`.pptx`/`.pdf`;[^10] `pdftotext -layout`/`pandoc`/`python-docx` as fallback. Extraction engine ported from `presale` (`src/extraction/`, `scripts/python_docx_extract.py`, `scripts/markdown_utils.py`).[^2] No `docling`/OCR in v1 (the ML models add ~500 MB).[^2]
 - `readPdfText(path, maxChars?=4000)` → `{ text, bytes, truncated }` (`pdftotext -layout`).
-- `pdfMetadata(path)` → `{ pages, title, author, producer, encrypted, … }` (`pikepdf`).[^17]
+- `pdfMetadata(path)` → `{ pages, title, author, producer, encrypted, … }` (`pypdf`).[^16]
 
 **Markdown/HTML → document**
 
@@ -104,7 +104,7 @@ I/O contract: input is a `/workspace` **path by preference**; inline `markdown`/
   - (Full N×N is excluded — e.g. `xlsx→docx` is lossy and not useful; documented in the integrations guide.)
 - LibreOffice operational design (not just `HOME`): each invocation gets its own profile (`-env:UserInstallation=file:///tmp/lo-<uuid>`) because LibreOffice does not tolerate concurrent instances on one profile;[^23] all `soffice` invocations are serialized by an in-worker mutex/queue because `soffice --headless` is not reentrant;[^23] flags `--headless --norestore --nologo --nofirststartwizard --convert-to <fmt> --outdir <tmp> <in>`; macros are not enabled (no `--script-provider`); fonts are installed in the image (`fonts-liberation`, `fonts-dejavu-core`) so PDFs do not render with tofu; `HOME=/tmp/lo`, `XDG_CACHE_HOME=/tmp`, `XDG_CONFIG_HOME=/tmp`; the output is copied from `/tmp` to `/workspace/.speedwave-office/` atomically. Concurrency is tested (two parallel `officeToPdf` calls → both succeed, no corruption). Container limits start at `mem_limit: 1g` and `tmpfs: /tmp:size=512m` (LibreOffice on a non-trivial `.pptx` can use 400–800 MB) and are tuned during verification.
 
-**PDF manipulation** (`pypdf`/`pikepdf` — pure Python, light)[^16][^17]
+**PDF manipulation** (`pypdf` — pure Python, light)[^16]
 
 - `mergePdf(paths[], outName?)`; `splitPdf(path, ranges[], outName?)` (`ranges` = `[[1,3],[5,5]]`, 1-indexed; each range → a separate file); `rotatePdf(path, pages[], degrees, outName?)` (`degrees` ∈ {90,180,270}); `watermarkPdf(path, watermarkPath, outName?)` (watermark is a single-page PDF, stamped on every page); `fillPdfForm(path, fields:{name:value}, outName?)` (AcroForm; `flatten` defaults to `true`).
 
@@ -195,8 +195,6 @@ This is part of the decision, not an implementation detail:
 [^15]: WeasyPrint — HTML/CSS → PDF; custom `url_fetcher` to restrict resource loading: <https://doc.courtbouillon.org/weasyprint/stable/api_reference.html#weasyprint.default_url_fetcher>
 
 [^16]: pypdf — pure-Python PDF library (merge, split, rotate, stamp, forms): <https://pypdf.readthedocs.io/en/stable/>
-
-[^17]: pikepdf — Python bindings to QPDF for PDF inspection and repair (metadata, encryption): <https://pikepdf.readthedocs.io/en/latest/>
 
 [^18]: python-docx — create and update `.docx`; no native chart support: <https://python-docx.readthedocs.io/en/latest/>
 

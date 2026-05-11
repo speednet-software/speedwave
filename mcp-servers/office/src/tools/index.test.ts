@@ -136,11 +136,29 @@ describe('tool metadata', () => {
     }
   });
 
-  it('shows readDocument, markdownToPdf, createDocx, createXlsx upfront and defers the rest', () => {
+  it('shows readDocument and markdownToPdf upfront and defers the rest', () => {
     const shown = defs
       .filter((d) => (d.tool._meta as { deferLoading?: boolean }).deferLoading === false)
       .map((d) => d.tool.name);
-    expect(shown.sort()).toEqual(['createDocx', 'createXlsx', 'markdownToPdf', 'readDocument']);
+    expect(shown.sort()).toEqual(['markdownToPdf', 'readDocument']);
+  });
+
+  it('marks LibreOffice/weasyprint/matplotlib tools with timeoutClass long', () => {
+    const longTools = new Set([
+      'markdownToPdf',
+      'htmlToPdf',
+      'renderChart',
+      'officeToPdf',
+      'convertOffice',
+    ]);
+    for (const { tool } of defs) {
+      const tc = (tool._meta as { timeoutClass?: string }).timeoutClass;
+      if (longTools.has(tool.name)) {
+        expect(tc).toBe('long');
+      } else {
+        expect(tc).toBeUndefined();
+      }
+    }
   });
 
   it('re-exports the conversion matrix', () => {

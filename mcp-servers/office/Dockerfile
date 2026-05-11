@@ -22,6 +22,16 @@ RUN cd shared && npm run build
 
 COPY office/package*.json ./office/
 RUN --mount=type=cache,target=/root/.npm cd office && npm install
+# SheetJS is distributed from the SheetJS CDN, not the public npm registry — verify the tarball's
+# SHA-256 in the Containerfile (per .claude/rules/security.md) and reinstall the verified copy over
+# whatever `npm install` fetched. Keep the version + hash aligned with office/package.json's `xlsx` dep.
+RUN cd office \
+    && SHEETJS_VERSION=0.20.3 \
+    && SHEETJS_SHA256=8dc73fc3b00203e72d176e85b50938627c7b086e607c682e8d3c22c02bb99fe8 \
+    && wget -q -O /tmp/xlsx.tgz "https://cdn.sheetjs.com/xlsx-${SHEETJS_VERSION}/xlsx-${SHEETJS_VERSION}.tgz" \
+    && echo "${SHEETJS_SHA256}  /tmp/xlsx.tgz" | sha256sum -c - \
+    && npm install --no-save /tmp/xlsx.tgz \
+    && rm /tmp/xlsx.tgz
 COPY office/src ./office/src
 COPY office/tsconfig.json ./office/
 RUN cd office && npm run build

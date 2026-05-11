@@ -1,6 +1,6 @@
 /**
  * PDF manipulation — merge, split, rotate, watermark, fill AcroForm, read metadata.
- * All operations run in the bundled Python venv via `scripts/pdf_ops.py` (pypdf/pikepdf).
+ * All operations run in the bundled Python venv via `scripts/pdf_ops.py` (pypdf).
  * @module mcp-office/engine/pdf-ops
  */
 

@@ -12,10 +12,10 @@ A **pure file processor**: no service credentials, no `/tokens` mount, **no netw
 - `src/path-policy.ts` — `/workspace` confinement, symlink guard, atomic writes, `overwrite:false` default, default output dir `/workspace/.speedwave-office/`.
 - `src/subprocess.ts` — hardened `spawn` (timeout/SIGKILL, bounded stdout/stderr) + `runPythonScript`.
 - `src/lo-queue.ts` — serializes all `soffice` invocations (LibreOffice headless is not reentrant).
-- `scripts/*.py` — Python support-scripts run in the venv at `/opt/office-venv`: `docx_build.py`, `xlsx_build.py`, `pptx_build.py`, `pdf_ops.py`, `render_chart.py`, `python_docx_extract.py`, `markdown_utils.py`, `_io.py`.
-- `Dockerfile` — multi-stage: alpine builder for the TS, Debian runtime with `libreoffice-writer/calc/impress`, `poppler-utils`, `pandoc`, the Python venv (markitdown, python-docx, openpyxl, python-pptx, pypdf, pikepdf, matplotlib, weasyprint), and fonts.
+- `scripts/*.py` — Python support-scripts run in the venv at `/opt/office-venv`: `docx_build.py`, `xlsx_build.py`, `pptx_build.py`, `pdf_ops.py`, `render_chart.py`, `python_docx_extract.py`; helpers `markdown_utils.py`, `script_runner.py` (the stdout-JSON / exit-code convention); tests `test_helpers.py`, `test_scripts.py`.
+- `Dockerfile` — multi-stage: alpine builder for the TS, Debian runtime with `libreoffice-writer/calc/impress`, `poppler-utils`, `pandoc`, the Python venv (markitdown, python-docx, openpyxl, python-pptx, pypdf, matplotlib, weasyprint), and fonts.
 
 ## Tests
 
 - TypeScript: `npm test` (vitest; coverage thresholds 100/100/90/100). Run from `mcp-servers/` as part of `make test-mcp`.
-- Python: `npm run test:py` (pytest over `scripts/`), or `python3 -m pytest scripts -q`.
+- Python: `make test-mcp-office-py` (builds a venv from `requirements.txt` + pytest, runs `scripts/`), or — if the worker's Python deps are already on PATH — `npm run test:py`. `test_helpers.py` (the dependency-free `script_runner`/`markdown_utils` helpers) runs anywhere; `test_scripts.py` (the library-driven scripts) self-skips when the deps are absent, and the matplotlib-render cases self-skip on too-new Python interpreters.
