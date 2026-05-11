@@ -8148,10 +8148,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
         };
-        plugin::VerifiedPlugin {
-            manifest,
-            dir: plugin_dir.to_path_buf(),
-        }
+        plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
     }
 
     /// `apply_plugins` re-runs `validate_manifest` so a manifest whose

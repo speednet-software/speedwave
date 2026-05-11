@@ -1700,6 +1700,39 @@ mod tests {
     use super::*;
     use config::{ProjectUserEntry, SpeedwaveUserConfig};
 
+    #[test]
+    fn format_audit_failure_message_lists_every_failure_and_recovery_steps() {
+        let failures = vec![
+            (
+                "acme-tools".to_string(),
+                "SIGNATURE file not present".to_string(),
+            ),
+            (
+                "widget".to_string(),
+                "Ed25519 verification failed".to_string(),
+            ),
+        ];
+        let msg = format_audit_failure_message(&failures);
+        // Every affected slug appears, with its reason.
+        assert!(msg.contains("acme-tools: SIGNATURE file not present"));
+        assert!(msg.contains("widget: Ed25519 verification failed"));
+        // Recovery instructions point at the CLI (Settings is unreachable here).
+        assert!(msg.contains("speedwave plugin remove"));
+        assert!(msg.contains("speedwave plugin install"));
+        assert!(msg.contains("~/.speedwave/plugins/"));
+    }
+
+    #[test]
+    fn format_audit_failure_message_handles_single_failure() {
+        let msg = format_audit_failure_message(&[("solo".to_string(), "tampered".to_string())]);
+        assert!(msg.contains("solo: tampered"));
+        assert_eq!(
+            msg.matches('•').count(),
+            1,
+            "exactly one bullet for one failure"
+        );
+    }
+
     /// Extracts the body of a function from source code by matching `{`/`}`
     /// counting braces.  Used by structural tests to assert on function contents.
     ///

@@ -1091,6 +1091,17 @@ pub struct VerifiedPlugin {
     pub dir: PathBuf,
 }
 
+impl VerifiedPlugin {
+    /// Constructs a `VerifiedPlugin`. Only callers that have just run
+    /// the full verification (`verify_one_plugin_dir`) — or test code
+    /// — should reach this; prefer it over the literal struct syntax so
+    /// the "this pair has been verified" intent is explicit at the
+    /// construction site.
+    pub(crate) fn new(manifest: PluginManifest, dir: PathBuf) -> Self {
+        Self { manifest, dir }
+    }
+}
+
 /// Reasons a plugin can fail the load-time audit. UI shows this so users
 /// can tell *why* a plugin was rejected instead of seeing a generic error.
 /// Serializes to the snake_case names the frontend `models/plugin.ts`
@@ -1112,15 +1123,62 @@ pub enum VerificationStatus {
     ManifestInvalid,
 }
 
-/// One entry in the tolerant UI listing. `manifest` is `None` when even
-/// the manifest could not be parsed; `verification_error` carries the
-/// human-readable reason a plugin was rejected.
+/// One entry in the tolerant UI listing.
+///
+/// The fields are correlated: a `Verified` entry always has
+/// `manifest: Some(_)` and `verification_error: None`; a non-`Verified`
+/// entry always has `verification_error: Some(_)` and may or may not
+/// have a parseable manifest. That correlation is enforced by the two
+/// constructors below — prefer them over the literal struct syntax so
+/// the invariant can't be silently broken at a new construction site.
+#[derive(Debug)]
 pub struct PluginListEntry {
     pub slug: String,
     pub dir: PathBuf,
     pub manifest: Option<PluginManifest>,
     pub verification_status: VerificationStatus,
     pub verification_error: Option<String>,
+}
+
+impl PluginListEntry {
+    /// Constructs a `Verified` entry. The manifest is required (a
+    /// verified plugin always parsed its manifest) and the error is
+    /// always `None`.
+    pub(crate) fn verified(slug: String, dir: PathBuf, manifest: PluginManifest) -> Self {
+        Self {
+            slug,
+            dir,
+            manifest: Some(manifest),
+            verification_status: VerificationStatus::Verified,
+            verification_error: None,
+        }
+    }
+
+    /// Constructs a failed entry. `status` must not be `Verified`
+    /// (debug-asserted) and `error` is always recorded so the UI never
+    /// shows "unknown error" for a rejected plugin. `manifest` is
+    /// optional — it's `Some` when the file parsed but a later check
+    /// failed, `None` when the file is missing or unparseable.
+    pub(crate) fn failed(
+        slug: String,
+        dir: PathBuf,
+        status: VerificationStatus,
+        error: String,
+        manifest: Option<PluginManifest>,
+    ) -> Self {
+        debug_assert_ne!(
+            status,
+            VerificationStatus::Verified,
+            "PluginListEntry::failed called with Verified status"
+        );
+        Self {
+            slug,
+            dir,
+            manifest,
+            verification_status: status,
+            verification_error: Some(error),
+        }
+    }
 }
 
 /// Returns true for entries that should be excluded from any user-facing
@@ -1189,7 +1247,7 @@ pub fn list_verified_plugins() -> anyhow::Result<Vec<VerifiedPlugin>> {
 }
 
 /// Test-friendly variant of [`list_verified_plugins`].
-pub fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<VerifiedPlugin>> {
+pub(crate) fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<VerifiedPlugin>> {
     if !plugins_dir.exists() {
         return Ok(vec![]);
     }
@@ -1242,10 +1300,7 @@ fn verify_one_plugin_dir(
     }
     validate_manifest(&manifest, plugin_dir)
         .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': manifest validation failed: {e}"))?;
-    Ok(VerifiedPlugin {
-        manifest,
-        dir: plugin_dir.to_path_buf(),
-    })
+    Ok(VerifiedPlugin::new(manifest, plugin_dir.to_path_buf()))
 }
 
 /// Tolerant lister for the Desktop UI. Never returns `Err` — every
@@ -1264,7 +1319,7 @@ pub fn list_for_ui() -> Vec<PluginListEntry> {
 }
 
 /// Test-friendly variant of [`list_for_ui`].
-pub fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
+pub(crate) fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
     if !plugins_dir.exists() {
         return Vec::new();
     }
@@ -1286,13 +1341,13 @@ pub fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
                 // A directory entry we can't read — surface it as an
                 // unverified entry so the UI shows *something* rather
                 // than silently presenting a shorter list than reality.
-                out.push(PluginListEntry {
-                    slug: "<unreadable-entry>".into(),
-                    dir: plugins_dir.to_path_buf(),
-                    manifest: None,
-                    verification_status: VerificationStatus::ManifestInvalid,
-                    verification_error: Some(format!("cannot read directory entry: {e}")),
-                });
+                out.push(PluginListEntry::failed(
+                    "<unreadable-entry>".into(),
+                    plugins_dir.to_path_buf(),
+                    VerificationStatus::ManifestInvalid,
+                    format!("cannot read directory entry: {e}"),
+                    None,
+                ));
                 continue;
             }
         };
@@ -1327,57 +1382,42 @@ fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry 
         .ok()
         .and_then(|s| serde_json::from_str::<PluginManifest>(&s).ok());
 
-    let make_entry = |status: VerificationStatus,
-                      err: Option<String>,
-                      m: Option<PluginManifest>|
-     -> PluginListEntry {
-        PluginListEntry {
-            slug: dir_name.to_string(),
-            dir: plugin_dir.to_path_buf(),
-            manifest: m,
-            verification_status: status,
-            verification_error: err,
-        }
+    let slug = dir_name.to_string();
+    let dir = plugin_dir.to_path_buf();
+    let failed = |status: VerificationStatus, err: String, m: Option<PluginManifest>| {
+        PluginListEntry::failed(slug.clone(), dir.clone(), status, err, m)
     };
 
     let Some(m) = manifest else {
-        return make_entry(
+        return failed(
             VerificationStatus::ManifestInvalid,
-            Some("plugin.json missing or unparseable".into()),
+            "plugin.json missing or unparseable".into(),
             None,
         );
     };
 
     if m.slug != dir_name {
         let mismatch_err = format!("directory name does not match manifest slug '{}'", m.slug);
-        return make_entry(
-            VerificationStatus::DirSlugMismatch,
-            Some(mismatch_err),
-            Some(m),
-        );
+        return failed(VerificationStatus::DirSlugMismatch, mismatch_err, Some(m));
     }
     if !plugin_dir.join("SIGNATURE").exists() {
-        return make_entry(
+        return failed(
             VerificationStatus::MissingSignature,
-            Some("SIGNATURE file not present".into()),
+            "SIGNATURE file not present".into(),
             Some(m),
         );
     }
     if let Err(e) = signing::verify_plugin_signature(plugin_dir) {
-        return make_entry(
+        return failed(
             VerificationStatus::InvalidSignature,
-            Some(crate::log_sanitizer::sanitize(&e.to_string())),
+            crate::log_sanitizer::sanitize(&e.to_string()),
             Some(m),
         );
     }
     if let Err(e) = validate_manifest(&m, plugin_dir) {
-        return make_entry(
-            VerificationStatus::ManifestInvalid,
-            Some(e.to_string()),
-            Some(m),
-        );
+        return failed(VerificationStatus::ManifestInvalid, e.to_string(), Some(m));
     }
-    make_entry(VerificationStatus::Verified, None, Some(m))
+    PluginListEntry::verified(slug, dir, m)
 }
 
 /// Audits every installed plugin and returns a list of `(slug, reason)`
@@ -1393,7 +1433,7 @@ pub fn audit_all() -> Result<(), Vec<(String, String)>> {
 }
 
 /// Test-friendly variant of [`audit_all`].
-pub fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, String)>> {
+pub(crate) fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, String)>> {
     if !plugins_dir.exists() {
         return Ok(());
     }
@@ -3055,6 +3095,29 @@ mod tests {
         std::fs::write(plugin_dir.join("plugin.json"), manifest).unwrap();
     }
 
+    /// The frontend `PluginVerificationStatus` union in
+    /// `models/plugin.ts` mirrors these exact snake_case literals — if
+    /// this test changes, that file must change too.
+    #[test]
+    fn test_verification_status_serializes_to_snake_case() {
+        let cases = [
+            (VerificationStatus::Verified, "\"verified\""),
+            (
+                VerificationStatus::MissingSignature,
+                "\"missing_signature\"",
+            ),
+            (
+                VerificationStatus::InvalidSignature,
+                "\"invalid_signature\"",
+            ),
+            (VerificationStatus::DirSlugMismatch, "\"dir_slug_mismatch\""),
+            (VerificationStatus::ManifestInvalid, "\"manifest_invalid\""),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(serde_json::to_string(&status).unwrap(), expected);
+        }
+    }
+
     #[test]
     fn test_list_for_ui_reports_dir_slug_mismatch() {
         let _g = UnsignedBypassGuard::new();
@@ -3122,6 +3185,49 @@ mod tests {
         let failures =
             audit_all_in_dir(&plugins).expect_err("audit must report the unsigned plugin");
         assert!(failures.iter().any(|(slug, _)| slug == "pasted"));
+    }
+
+    /// A plugin dir that *has* a `SIGNATURE` file, but one that was
+    /// produced with a non-production key — the file is present so it's
+    /// not `MissingSignature`, but Ed25519 verification against the
+    /// embedded production key fails, so it must be `InvalidSignature`.
+    /// Runs WITHOUT the unsigned bypass (the bypass would short-circuit
+    /// verification before the signature is even checked).
+    #[test]
+    fn test_list_for_ui_reports_invalid_signature() {
+        use crate::signing::{generate_keypair, sign_plugin};
+        let _g = unsigned_env_lock();
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("forged");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"x","slug":"forged","version":"1.0.0","description":"x"}"#,
+        )
+        .unwrap();
+        let (priv_key, _pub_key) = generate_keypair();
+        sign_plugin(&plugin_dir, &priv_key).unwrap();
+        // Wrong signing key → SIGNATURE present, but production verify fails.
+        signing::invalidate_cache(&plugin_dir);
+
+        let entries = list_for_ui_from_dir(&plugins);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].slug, "forged");
+        assert_eq!(
+            entries[0].verification_status,
+            VerificationStatus::InvalidSignature,
+            "a SIGNATURE that fails production verification must be InvalidSignature, not MissingSignature"
+        );
+        assert!(
+            entries[0].verification_error.is_some(),
+            "InvalidSignature must carry a diagnostic"
+        );
+
+        // Fail-closed loader rejects the whole set.
+        list_verified_from_dir(&plugins)
+            .expect_err("list_verified must reject when any plugin's signature is invalid");
     }
 
     #[test]
@@ -4685,13 +4791,20 @@ mod tests {
             "LD_PRELOAD",
             "ld_preload",
             "LD_LIBRARY_PATH",
+            "LD_AUDIT",
             "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FORCE_FLAT_NAMESPACE",
             "NODE_OPTIONS",
             "PYTHONPATH",
+            "PYTHONSTARTUP",
             "PATH",
             "HOME",
+            "SHELL",
             "IFS",
             "BASH_ENV",
+            "ENV",
+            "PORT",
         ] {
             let dir = tempfile::tempdir().unwrap();
             let mut env = HashMap::new();
