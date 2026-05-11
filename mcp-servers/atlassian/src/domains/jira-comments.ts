@@ -5,9 +5,10 @@
  */
 
 import type { AtlassianClient } from '../client.js';
-import { assertJiraProjectAllowed, toAdf } from '../adf.js';
+import { toAdf } from '../adf.js';
+import { assertJiraIssueKeyAllowed } from '../scope.js';
 import type { AdfDoc, JiraComment, JiraWorklog } from '../types.js';
-import { mapUser } from './jira-issues.js';
+import { mapUser } from './normalizers.js';
 
 /** Client for Jira comments and worklog. */
 export interface JiraCommentsClient {
@@ -36,11 +37,9 @@ export interface JiraCommentsClient {
  * @returns A {@link JiraCommentsClient}.
  */
 export function createJiraCommentsClient(client: AtlassianClient): JiraCommentsClient {
-  const enforce = (issueIdOrKey: string): void => {
-    if (client.jiraProjectKeys.length === 0) return;
-    const m = /^([A-Za-z][A-Za-z0-9_]+)-\d+$/.exec(issueIdOrKey.trim());
-    assertJiraProjectAllowed(m ? m[1] : undefined, client.jiraProjectKeys);
-  };
+  // Enforce the Jira project allowlist for an issue ref (see assertJiraIssueKeyAllowed).
+  const enforce = (issueIdOrKey: string): void =>
+    assertJiraIssueKeyAllowed(issueIdOrKey, client.jiraProjectKeys);
 
   return {
     async add(issueIdOrKey, body) {

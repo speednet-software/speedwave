@@ -36,7 +36,7 @@ vi.mock('./auth.js', () => ({
 }));
 
 import { AtlassianClient, initializeAtlassianClient } from './client.js';
-import { ScopeError } from './adf.js';
+import { ScopeError } from './scope.js';
 import type { AtlassianConfig } from './types.js';
 
 const CONFIG: AtlassianConfig = {
@@ -116,6 +116,15 @@ describe('construction', () => {
     });
     expect(c.jiraProjectKeys).toEqual(['PROJ']);
     expect(c.confluenceSpaceKeys).toEqual(['DEV']);
+  });
+
+  it.each([
+    ['http (not https)', 'http://acme.atlassian.net'],
+    ['wrong domain', 'https://evil.example.com'],
+    ['has a path', 'https://acme.atlassian.net/wiki'],
+    ['not a URL', 'acme.atlassian.net'],
+  ])('throws for an invalid siteUrl: %s', (_label, siteUrl) => {
+    expect(() => new AtlassianClient({ ...CONFIG, siteUrl })).toThrow(/atlassian\.net/);
   });
 });
 
@@ -375,17 +384,23 @@ describe('formatError', () => {
 
   it('plain Error → scrubbed message', () => {
     const msg = AtlassianClient.formatError(
-      new Error('failed with Basic Zm9vOmJhcg== and ATATT3xLEAKEDtoken')
+      new Error('failed with Basic Zm9vOmJhcg== and ATATT3xLEAKEDtokenABCDEFGHIJ1234567890')
     );
     expect(msg).not.toMatch(/Zm9vOmJhcg==/);
-    expect(msg).not.toMatch(/ATATT3xLEAKEDtoken/);
+    expect(msg).not.toMatch(/ATATT3xLEAKED/);
     expect(msg).toMatch(/REDACTED/);
   });
 
   it('non-Error value → scrubbed string', () => {
-    expect(AtlassianClient.formatError('boom: ATATT3xANOTHERtoken')).toMatch(
+    expect(AtlassianClient.formatError('boom: ATATT3xANOTHERtokenKLMNOPQRSTU1234567890')).toMatch(
       /REDACTED_ATLASSIAN_TOKEN/
     );
+  });
+
+  it('a short ATATT-prefixed string (under 20 chars after the prefix) is not redacted', () => {
+    // The scrub() regex requires {20,} to match log_sanitizer.rs — short
+    // strings are not real Atlassian tokens and pass through unchanged.
+    expect(AtlassianClient.formatError('value: ATATTshort')).toMatch(/ATATTshort/);
   });
 
   it('axios 4xx with no status fields and no body', () => {

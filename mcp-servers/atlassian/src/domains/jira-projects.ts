@@ -5,9 +5,10 @@
  */
 
 import type { AtlassianClient } from '../client.js';
-import { assertJiraProjectAllowed, filterByAllowlist } from '../adf.js';
+import { assertJiraProjectAllowed, filterByAllowlist } from '../scope.js';
+import { deriveBrowseUrl } from '../url.js';
 import type { JiraIssueType, JiraProject } from '../types.js';
-import { mapUser } from './jira-issues.js';
+import { mapUser } from './normalizers.js';
 
 /** Client for Jira project operations. */
 export interface JiraProjectsClient {
@@ -70,13 +71,14 @@ export function mapProject(raw: unknown): JiraProject {
     name: String(o.name ?? ''),
     project_type_key: o.projectTypeKey ? String(o.projectTypeKey) : undefined,
     lead: o.lead ? mapUser(o.lead) : null,
-    url: o.self ? deriveProjectUrl(String(o.self), String(o.key ?? '')) : undefined,
+    url: o.self ? deriveBrowseUrl(String(o.self), String(o.key ?? '')) : undefined,
   };
 }
 
 /**
  * Map a raw Jira issue type to {@link JiraIssueType}.
  * @param raw - The raw object as returned by the Atlassian REST API.
+ * @returns The normalised issue type.
  */
 export function mapIssueType(raw: unknown): JiraIssueType {
   const o = (raw ?? {}) as Record<string, unknown>;
@@ -86,17 +88,4 @@ export function mapIssueType(raw: unknown): JiraIssueType {
     description: o.description ? String(o.description) : undefined,
     subtask: Boolean(o.subtask ?? false),
   };
-}
-
-/**
- * Build the human `/browse/KEY` project URL from a project's `self` API URL.
- * @param selfUrl - The resource's `self` API URL.
- * @param key - The Jira issue or project key.
- */
-function deriveProjectUrl(selfUrl: string, key: string): string | undefined {
-  try {
-    return `${new URL(selfUrl).origin}/browse/${key}`;
-  } catch {
-    return undefined;
-  }
 }

@@ -5,7 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createConfluencePagesClient } from './confluence-pages.js';
-import { ScopeError } from '../adf.js';
+import { ScopeError } from '../scope.js';
 import type { AtlassianClient } from '../client.js';
 
 function stubClient(spaceKeys: string[] = []) {
@@ -62,7 +62,8 @@ describe('search (CQL via v1)', () => {
       limit: 100,
     });
     expect(res).toHaveLength(1);
-    expect(res[0]).toMatchObject({ id: '1', title: 'P', space_key: 'DEV', version: 2 });
+    // v1 search results carry no usable version detail → null ("unknown").
+    expect(res[0]).toMatchObject({ id: '1', title: 'P', space_key: 'DEV', version: null });
   });
 
   it('drops pages outside the space allowlist', async () => {
@@ -228,6 +229,15 @@ describe('update', () => {
     expect(page.version).toBe(4);
   });
 
+  it('wraps a plain-text body before PUTting', async () => {
+    client.get.mockResolvedValueOnce(v2Page()).mockResolvedValueOnce({ key: 'DEV' });
+    client.put.mockResolvedValueOnce(v2Page({ version: { number: 4 } }));
+    const c = createConfluencePagesClient(client);
+    await c.update('123', { body: { text: 'a & b' } });
+    const sent = client.put.mock.calls[0][1] as { body: { representation: string; value: string } };
+    expect(sent.body).toEqual({ representation: 'storage', value: '<p>a &amp; b</p>' });
+  });
+
   it('keeps the existing title and omits body when not provided', async () => {
     client.get.mockResolvedValueOnce(v2Page()).mockResolvedValueOnce({ key: 'DEV' });
     client.put.mockResolvedValueOnce(v2Page({ version: { number: 4 } }));
@@ -245,6 +255,19 @@ describe('update', () => {
     await expect(c.update('123', { title: 'x' })).rejects.toThrow(ScopeError);
     expect(client.put).not.toHaveBeenCalled();
   });
+
+  it('primes the space-key cache so a following get() needs no extra space GET', async () => {
+    // update(): page GET + space GET (primes cache) + PUT.
+    client.get.mockResolvedValueOnce(v2Page()).mockResolvedValueOnce({ key: 'DEV' });
+    client.put.mockResolvedValueOnce(v2Page({ version: { number: 4 } }));
+    // get(): page GET only — space key for spaceId 900 is already cached.
+    client.get.mockResolvedValueOnce(v2Page());
+    const c = createConfluencePagesClient(client);
+    await c.update('123', { title: 'x' });
+    await c.get('123');
+    // 3 GETs (update's page + update's space + get's page), not 4.
+    expect(client.get).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('getChildren', () => {
@@ -260,8 +283,34 @@ describe('getChildren', () => {
       title: 'Child',
       parent_id: '123',
       space_id: '',
-      version: 0,
+      version: null,
     });
+  });
+
+  it('does not resolve the page space when no allowlist is configured (single GET)', async () => {
+    client.get.mockResolvedValueOnce({ results: [] });
+    const c = createConfluencePagesClient(client);
+    await c.getChildren('123');
+    expect(client.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('enforces the space allowlist before listing children', async () => {
+    client = stubClient(['DEV']);
+    client.get
+      .mockResolvedValueOnce(v2Page()) // page lookup for enforcement
+      .mockResolvedValueOnce({ key: 'OPS' }); // space lookup → outside allowlist
+    const c = createConfluencePagesClient(client);
+    await expect(c.getChildren('123')).rejects.toThrow(ScopeError);
+  });
+
+  it('lists children when the page space is in the allowlist', async () => {
+    client = stubClient(['DEV']);
+    client.get
+      .mockResolvedValueOnce(v2Page()) // page lookup
+      .mockResolvedValueOnce({ key: 'DEV' }) // space lookup → allowed
+      .mockResolvedValueOnce({ results: [{ id: '124', status: 'current', title: 'Child' }] });
+    const c = createConfluencePagesClient(client);
+    expect((await c.getChildren('123'))[0]).toMatchObject({ id: '124', title: 'Child' });
   });
 
   it('handles a missing results array and default limit', async () => {
@@ -319,7 +368,7 @@ describe('normalisation edge cases', () => {
     });
   });
 
-  it('mapV2ChildPage handles a child with a version object', async () => {
+  it('mapV2ChildPage maps a child page (version is always null — re-fetch to update)', async () => {
     client.get.mockResolvedValueOnce({
       results: [{ id: 'c1', spaceId: '900', parentId: '1', version: { number: 5 } }],
     });
@@ -328,7 +377,7 @@ describe('normalisation edge cases', () => {
       id: 'c1',
       space_id: '900',
       parent_id: '1',
-      version: 5,
+      version: null,
     });
   });
 
@@ -342,7 +391,7 @@ describe('normalisation edge cases', () => {
       space_id: '',
       space_key: undefined,
       parent_id: null,
-      version: 0,
+      version: null,
       web_url: undefined,
     });
   });

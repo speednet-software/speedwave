@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createJiraProjectsClient } from './jira-projects.js';
-import { ScopeError } from '../adf.js';
+import { ScopeError } from '../scope.js';
 import type { AtlassianClient } from '../client.js';
 
 function stubClient(projectKeys: string[] = []) {

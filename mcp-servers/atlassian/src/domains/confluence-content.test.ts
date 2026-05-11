@@ -5,7 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createConfluenceContentClient } from './confluence-content.js';
-import { ScopeError } from '../adf.js';
+import { ScopeError } from '../scope.js';
 import type { AtlassianClient } from '../client.js';
 
 function stubClient(spaceKeys: string[] = []) {
@@ -124,6 +124,13 @@ describe('getComments', () => {
       'body-format': 'storage',
     });
   });
+
+  it('enforces the space allowlist before reading comments', async () => {
+    client = stubClient(['DEV']);
+    client.get.mockResolvedValueOnce({ spaceId: '900' }).mockResolvedValueOnce({ key: 'OPS' });
+    const c = createConfluenceContentClient(client);
+    await expect(c.getComments('123')).rejects.toThrow(ScopeError);
+  });
 });
 
 describe('addLabels', () => {
@@ -161,6 +168,13 @@ describe('getLabels', () => {
     const c = createConfluenceContentClient(client);
     expect(await c.getLabels('123')).toEqual([]);
     expect(client.get).toHaveBeenCalledWith('/wiki/api/v2/pages/123/labels', { limit: 50 });
+  });
+
+  it('enforces the space allowlist before reading labels', async () => {
+    client = stubClient(['DEV']);
+    client.get.mockResolvedValueOnce({ spaceId: '900' }).mockResolvedValueOnce({ key: 'OPS' });
+    const c = createConfluenceContentClient(client);
+    await expect(c.getLabels('123')).rejects.toThrow(ScopeError);
   });
 });
 
@@ -205,10 +219,17 @@ describe('listAttachments', () => {
       download_url: undefined,
     });
   });
+
+  it('enforces the space allowlist before listing attachments', async () => {
+    client = stubClient(['DEV']);
+    client.get.mockResolvedValueOnce({ spaceId: '900' }).mockResolvedValueOnce({ key: 'OPS' });
+    const c = createConfluenceContentClient(client);
+    await expect(c.listAttachments('123')).rejects.toThrow(ScopeError);
+  });
 });
 
-describe('scope enforcement is a no-op without an allowlist', () => {
-  it('does not resolve the page space when confluenceSpaceKeys is empty', async () => {
+describe('space-allowlist enforcement', () => {
+  it('is skipped (single GET) when confluenceSpaceKeys is empty', async () => {
     client.get.mockResolvedValueOnce({ results: [] }); // getLabels
     const c = createConfluenceContentClient(client);
     await c.getLabels('123');

@@ -1,12 +1,8 @@
 /**
- * Helpers for Atlassian content formats and project/space scope enforcement.
+ * Atlassian content-format helpers: Atlassian Document Format (Jira Cloud v3
+ * write payloads) and Confluence "storage representation" bodies.
  *
- * - {@link textToAdf}: plain text → minimal Atlassian Document Format document
- *   (Jira Cloud REST v3 requires ADF for `description`, comment bodies, etc.).
- * - {@link toAdf}: accept either plain text or a pre-built ADF object.
- * - {@link storageBody}: wrap text/HTML as a Confluence "storage representation" body.
- * - {@link assertJiraProjectAllowed} / {@link assertConfluenceSpaceAllowed}: throw
- *   {@link ScopeError} when an allowlist is configured and the key is not in it.
+ * Access-control / scope-enforcement primitives live in `./scope.ts`.
  * @module mcp-atlassian/adf
  */
 
@@ -31,7 +27,7 @@ export function textToAdf(text: string): AdfDoc {
 }
 
 /**
- * Narrow check: is `value` already a `{ type: 'doc', ... }` ADF object?
+ * Narrow check: is `value` already a `{ version: 1, type: 'doc', ... }` ADF object?
  * @param value - The value to test.
  * @returns `true` if `value` looks like an ADF document.
  */
@@ -40,6 +36,7 @@ export function isAdfDoc(value: unknown): value is AdfDoc {
     typeof value === 'object' &&
     value !== null &&
     (value as { type?: unknown }).type === 'doc' &&
+    (value as { version?: unknown }).version === 1 &&
     Array.isArray((value as { content?: unknown }).content)
   );
 }
@@ -55,9 +52,10 @@ export function toAdf(body: string | AdfDoc): AdfDoc {
 }
 
 /**
- * Wrap a Confluence page/comment body as a "storage representation" value object.
+ * Wrap a value as a Confluence "storage representation" body object.
  * The caller is responsible for the content already being valid storage XHTML
- * (for tool-generated text, escape it first via {@link textToStorage}).
+ * (for tool-generated plain text, escape it first via {@link textToStorage} or
+ * use {@link resolveBodyPayload}).
  * @param value - Storage-format body string.
  * @returns Confluence body value object.
  */
@@ -80,92 +78,21 @@ export function textToStorage(text: string): string {
   return `<p>${escaped}</p>`;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Scope enforcement
-//═══════════════════════════════════════════════════════════════════════════════
-
-/** Thrown when an operation targets a project/space outside the configured allowlist. */
-export class ScopeError extends Error {
-  /**
-   * Create a scope-violation error.
-   * @param message - Human-readable explanation of the violation.
-   */
-  constructor(message: string) {
-    super(message);
-    this.name = 'ScopeError';
-  }
-}
+/** A Confluence page/comment body supplied to create/update: raw storage XHTML, or plain text. */
+export type StorageBodyInput = { storage?: string; text?: string };
 
 /**
- * Throw {@link ScopeError} if `allowlist` is non-empty and `key` is not in it.
- * Comparison is case-insensitive (Atlassian keys are upper-case). A missing/empty
- * `key` with a configured allowlist is also rejected — callers must resolve the
- * key before the check.
- * @param key - Project/space key to check (may be `undefined`).
- * @param allowlist - Configured allowed keys (empty = unrestricted).
- * @param kind - `'Jira project'` or `'Confluence space'`, for the error message.
+ * Resolve a {@link StorageBodyInput} to a Confluence storage-representation body
+ * object: `storage` (raw XHTML) takes precedence; otherwise `text` is HTML-escaped
+ * and wrapped in a `<p>`. The single source of truth for body resolution shared
+ * by the Confluence page and content domains.
+ * @param body - The body input (`storage` and/or `text`).
+ * @returns The Confluence body value object.
  */
-function assertAllowed(
-  key: string | undefined,
-  allowlist: readonly string[],
-  kind: 'Jira project' | 'Confluence space'
-): void {
-  if (allowlist.length === 0) return;
-  const allowed = allowlist.map((k) => k.trim().toUpperCase());
-  const normalized = (key ?? '').trim().toUpperCase();
-  if (!normalized) {
-    throw new ScopeError(
-      `Cannot determine the ${kind} key for this operation; access is restricted to: ${allowed.join(', ')}`
-    );
-  }
-  if (!allowed.includes(normalized)) {
-    throw new ScopeError(
-      `${kind} '${normalized}' is outside the allowed list (${allowed.join(', ')})`
-    );
-  }
-}
-
-/**
- * Enforce the Jira project allowlist for `key` (see {@link assertAllowed}).
- * @param key - Jira project key to check (may be `undefined`).
- * @param allowlist - Configured allowed project keys (empty = unrestricted).
- */
-export function assertJiraProjectAllowed(
-  key: string | undefined,
-  allowlist: readonly string[]
-): void {
-  assertAllowed(key, allowlist, 'Jira project');
-}
-
-/**
- * Enforce the Confluence space allowlist for `key` (see {@link assertAllowed}).
- * @param key - Confluence space key to check (may be `undefined`).
- * @param allowlist - Configured allowed space keys (empty = unrestricted).
- */
-export function assertConfluenceSpaceAllowed(
-  key: string | undefined,
-  allowlist: readonly string[]
-): void {
-  assertAllowed(key, allowlist, 'Confluence space');
-}
-
-/**
- * Filter a list of items to those whose key is in the allowlist. When the
- * allowlist is empty the list passes through unchanged.
- * @param items - Items to filter.
- * @param keyOf - Extracts the project/space key from an item.
- * @param allowlist - Configured allowed keys (empty = unrestricted).
- * @returns The filtered (or original) list.
- */
-export function filterByAllowlist<T>(
-  items: T[],
-  keyOf: (item: T) => string | undefined,
-  allowlist: readonly string[]
-): T[] {
-  if (allowlist.length === 0) return items;
-  const allowed = allowlist.map((k) => k.trim().toUpperCase());
-  return items.filter((item) => {
-    const k = (keyOf(item) ?? '').trim().toUpperCase();
-    return k.length > 0 && allowed.includes(k);
-  });
+export function resolveBodyPayload(body: StorageBodyInput): {
+  representation: 'storage';
+  value: string;
+} {
+  if (body.storage !== undefined) return storageBody(body.storage);
+  return storageBody(textToStorage(body.text ?? ''));
 }

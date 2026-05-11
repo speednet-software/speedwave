@@ -131,7 +131,7 @@ If a token is missing a permission, the worker returns the GitHub `403` body ver
 
 ### Atlassian — Jira & Confluence
 
-The Atlassian integration is a built-in MCP worker for **Atlassian Cloud** — Jira (issues, comments, worklog, projects, and Agile boards/sprints) and Confluence (pages, comments, labels, attachments). It is built on a thin `axios` HTTP client over the Jira Cloud REST v3 + Agile 1.0 APIs and the Confluence Cloud REST v2 API (CQL search uses the v1 search endpoint, which has no v2 equivalent).
+The Atlassian integration is a built-in MCP worker for **Atlassian Cloud** — Jira (issues, comments, worklog, projects, and Agile boards/sprints) and Confluence (spaces, pages, comments, labels, attachments). It is built on a thin `axios` HTTP client over the Jira Cloud REST v3 + Agile 1.0 APIs and the Confluence Cloud REST v2 API; CQL search and bulk label-add use the v1 endpoints (which have no v2 equivalent).
 
 #### Authentication
 
@@ -155,7 +155,7 @@ Because the worker authenticates as a real account, it can reach everything that
 
 #### Scope and limitations
 
-- **Atlassian Cloud only.** Jira Data Center / Server (self-hosted) is not supported in v1 — there is no on-prem PAT field. (A future version may add Bearer-PAT support.)
+- **Atlassian Cloud only.** Jira Data Center / Server (self-hosted) is not supported — there is no on-prem PAT field.
 - **Enhanced JQL search.** `searchIssues` uses `POST /rest/api/3/search/jql` with an opaque `nextPageToken` cursor (the old `startAt`-based `/rest/api/3/search` is being removed by Atlassian).
 - **CQL search is best-effort for scoping.** The v1 `/content/search` endpoint that backs `searchPages` returns less metadata than v2 reads; when a space allowlist is set, results whose space can't be resolved are dropped.
 - **Per-request retry.** Read / idempotent calls retry transient `5xx` (and `429`, honouring `Retry-After`); write calls retry only `429`, never `5xx`, so a server error mid-write surfaces rather than risking a duplicated side effect.
@@ -170,8 +170,8 @@ Inside a worker, Speedwave's convention is: use the service's official SDK (or a
 
 #### Tool surface
 
-Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
-Confluence: `searchPages`, `getPage`, `getPageByTitle`, `createPage`, `updatePage`, `getPageChildren`, `addPageComment`, `getPageComments`, `addPageLabels`, `getPageLabels`, `listAttachments`.
+35 tools. Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
+Confluence: `listSpaces`, `getSpace`, `searchPages`, `getPage`, `getPageByTitle`, `createPage`, `updatePage`, `getPageChildren`, `addPageComment`, `getPageComments`, `addPageLabels`, `getPageLabels`, `listAttachments`.
 
 ### Redmine Configuration Wizard
 

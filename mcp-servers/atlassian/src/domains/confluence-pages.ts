@@ -5,12 +5,14 @@
  * @module mcp-atlassian/domains/confluence-pages
  */
 
+import { ts } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
-import { assertConfluenceSpaceAllowed, storageBody, textToStorage } from '../adf.js';
+import { resolveBodyPayload, type StorageBodyInput } from '../adf.js';
+import { assertConfluenceSpaceAllowed, filterByAllowlist } from '../scope.js';
 import type { ConfluencePage } from '../types.js';
 
-/** A page body supplied to create/update: raw storage XHTML, or plain text. */
-type BodyInput = { storage?: string; text?: string };
+/** A full Confluence page — like {@link ConfluencePage} but with a known version. */
+type FullPage = ConfluencePage & { version: number };
 
 /** Client for Confluence page operations. */
 export interface ConfluencePagesClient {
@@ -32,14 +34,17 @@ export interface ConfluencePagesClient {
   create(params: {
     spaceKey: string;
     title: string;
-    body: BodyInput;
+    body: StorageBodyInput;
     parentId?: string;
   }): Promise<ConfluencePage>;
   /**
    * Update a page (v2). The current version is fetched automatically and
    * incremented. Only provided fields change.
    */
-  update(pageId: string, params: { title?: string; body?: BodyInput }): Promise<ConfluencePage>;
+  update(
+    pageId: string,
+    params: { title?: string; body?: StorageBodyInput }
+  ): Promise<ConfluencePage>;
   /** List the direct child pages of a page (v2). */
   getChildren(pageId: string, options?: { limit?: number }): Promise<ConfluencePage[]>;
 }
@@ -62,7 +67,16 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       const key = sp.key ? String(sp.key) : undefined;
       if (key) spaceKeyCache.set(spaceId, key);
       return key;
-    } catch {
+    } catch (error) {
+      // A 404 just means the space isn't visible (treat as unresolvable). Any
+      // other error (401/403/429/timeout) is surfaced via the log so a flaky
+      // network doesn't masquerade as a "space not allowed" configuration error.
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (status !== 404) {
+        console.warn(
+          `${ts()} [mcp-atlassian] Failed to resolve Confluence space id '${spaceId}': ${error}`
+        );
+      }
       return undefined;
     }
   };
@@ -82,20 +96,12 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     return String(id);
   };
 
-  const enrich = async (page: ConfluencePage): Promise<ConfluencePage> => {
+  // Resolve the page's space key, enforce the allowlist, and return the enriched page.
+  const enrich = async <T extends ConfluencePage>(page: T): Promise<T> => {
     const key = page.space_key ?? (await resolveSpaceKey(page.space_id));
     const enriched = { ...page, space_key: key };
     assertConfluenceSpaceAllowed(key, client.confluenceSpaceKeys);
     return enriched;
-  };
-
-  /**
-   * Build the v2 `body` payload from a {@link BodyInput}.
-   * @param body - The page/comment body to send (raw storage XHTML, or plain text).
-   */
-  const bodyPayload = (body: BodyInput): { representation: 'storage'; value: string } => {
-    if (body.storage !== undefined) return storageBody(body.storage);
-    return storageBody(textToStorage(body.text ?? ''));
   };
 
   return {
@@ -107,10 +113,9 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       const pages = (res.results ?? [])
         .map(mapV1SearchResult)
         .filter((p): p is ConfluencePage => p !== null);
-      // Best-effort space-key enforcement: drop pages outside the allowlist.
-      if (client.confluenceSpaceKeys.length === 0) return pages;
-      const allowed = client.confluenceSpaceKeys.map((k) => k.toUpperCase());
-      return pages.filter((p) => p.space_key && allowed.includes(p.space_key.toUpperCase()));
+      // Best-effort space-key enforcement: v1 search results carry a space key,
+      // so drop any whose space is outside the allowlist.
+      return filterByAllowlist(pages, (p) => p.space_key, client.confluenceSpaceKeys);
     },
 
     async get(pageId, options = {}) {
@@ -142,7 +147,7 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
         spaceId,
         status: 'current',
         title,
-        body: bodyPayload(body),
+        body: resolveBodyPayload(body),
       };
       if (parentId) data.parentId = parentId;
       const raw = await client.post<unknown>('/wiki/api/v2/pages', data);
@@ -161,7 +166,7 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
         title: title ?? page.title,
         version: { number: page.version + 1 },
       };
-      if (body !== undefined) data.body = bodyPayload(body);
+      if (body !== undefined) data.body = resolveBodyPayload(body);
       const raw = await client.put<unknown>(
         `/wiki/api/v2/pages/${encodeURIComponent(pageId)}`,
         data
@@ -170,6 +175,13 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     },
 
     async getChildren(pageId, options = {}) {
+      // Enforce the space allowlist before listing children: this is a pageId
+      // read like every other Confluence pageId op, so it must be scoped too.
+      if (client.confluenceSpaceKeys.length > 0) {
+        await enrich(
+          mapV2Page(await client.get<unknown>(`/wiki/api/v2/pages/${encodeURIComponent(pageId)}`))
+        );
+      }
       const res = await client.get<{ results?: unknown[] }>(
         `/wiki/api/v2/pages/${encodeURIComponent(pageId)}/children`,
         { limit: Math.min(Math.max(options.limit ?? 25, 1), 100) }
@@ -185,10 +197,12 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Map a v2 page object to {@link ConfluencePage}.
+ * Map a v2 page object to {@link ConfluencePage}. A full page response always
+ * carries a version, so the result type narrows `version` to `number`.
  * @param raw - The raw object as returned by the Atlassian REST API.
+ * @returns The normalised page.
  */
-export function mapV2Page(raw: unknown): ConfluencePage {
+export function mapV2Page(raw: unknown): FullPage {
   const o = (raw ?? {}) as Record<string, unknown>;
   const version = (o.version ?? {}) as Record<string, unknown>;
   const body = (o.body ?? {}) as Record<string, unknown>;
@@ -207,8 +221,11 @@ export function mapV2Page(raw: unknown): ConfluencePage {
 }
 
 /**
- * Map a v2 child-page object (no spaceId/version) to {@link ConfluencePage}.
+ * Map a v2 child-page object to {@link ConfluencePage}. Child-listing responses
+ * carry no `spaceId` or `version` detail, so `version` is `null` ("unknown") —
+ * callers must re-fetch the page via `getPage` before updating it.
  * @param raw - The raw object as returned by the Atlassian REST API.
+ * @returns The normalised (partial) page.
  */
 export function mapV2ChildPage(raw: unknown): ConfluencePage {
   const o = (raw ?? {}) as Record<string, unknown>;
@@ -218,19 +235,20 @@ export function mapV2ChildPage(raw: unknown): ConfluencePage {
     title: String(o.title ?? ''),
     space_id: o.spaceId != null ? String(o.spaceId) : '',
     parent_id: o.parentId != null ? String(o.parentId) : null,
-    version: Number((o.version as Record<string, unknown> | undefined)?.number ?? 0),
+    version: null,
   };
 }
 
 /**
  * Map a v1 `/content/search` result to {@link ConfluencePage} (best-effort).
+ * Search results omit version detail, so `version` is `null` ("unknown").
  * @param raw - The raw object as returned by the Atlassian REST API.
+ * @returns The normalised (partial) page, or `null` if the result isn't a page.
  */
 export function mapV1SearchResult(raw: unknown): ConfluencePage | null {
   const o = (raw ?? {}) as Record<string, unknown>;
   if (o.type && o.type !== 'page') return null;
   const space = (o.space ?? {}) as Record<string, unknown>;
-  const version = (o.version ?? {}) as Record<string, unknown>;
   const links = (o._links ?? {}) as Record<string, unknown>;
   return {
     id: String(o.id ?? ''),
@@ -239,7 +257,7 @@ export function mapV1SearchResult(raw: unknown): ConfluencePage | null {
     space_id: space.id != null ? String(space.id) : '',
     space_key: space.key ? String(space.key) : undefined,
     parent_id: null,
-    version: Number(version.number ?? 0),
+    version: null,
     web_url: links.webui ? String(links.webui) : undefined,
   };
 }

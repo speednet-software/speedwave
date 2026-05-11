@@ -2,8 +2,9 @@
  * Atlassian MCP Worker — type definitions.
  *
  * DTOs are hand-written (no external SDK): only the fields Speedwave's tools
- * actually expose are modelled. Jira Cloud REST v3 + Agile 1.0, Confluence
- * Cloud REST v2 (pages/comments/labels/attachments) and v1 (CQL search).
+ * actually expose are modelled. Jira Cloud REST v3 + Agile 1.0; Confluence
+ * Cloud REST v2 (spaces, pages, comments, label reads, attachments) plus v1 for
+ * CQL search and bulk label-add (v2 has no equivalent for those two).
  * @module mcp-atlassian/types
  */
 
@@ -88,7 +89,8 @@ export interface JiraIssue {
   reporter?: JiraUser | null;
   created: string;
   updated: string;
-  web_url: string;
+  /** Human `/browse/<key>` URL; absent if the API's `self` URL can't be parsed. */
+  web_url?: string;
 }
 
 /** Result of an enhanced JQL search (`POST /rest/api/3/search/jql`). */
@@ -200,8 +202,13 @@ export interface ConfluencePage {
   /** Space key, resolved for scope-guard checks; may be absent if not resolvable. */
   space_key?: string;
   parent_id?: string | null;
-  /** Current version number — required (+1) when updating. */
-  version: number;
+  /**
+   * Current version number. `null` when not known — child pages returned by
+   * `getChildren` don't carry a version, so it must be re-fetched (via `getPage`)
+   * before an update. A full page (from `getPage`/`createPage`/`updatePage`)
+   * always has a `number`.
+   */
+  version: number | null;
   /** Storage-representation body, when requested. */
   body_storage?: string;
   web_url?: string;

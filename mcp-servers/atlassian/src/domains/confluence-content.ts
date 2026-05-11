@@ -4,14 +4,16 @@
  * @module mcp-atlassian/domains/confluence-content
  */
 
+import { ts } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
-import { assertConfluenceSpaceAllowed, storageBody, textToStorage } from '../adf.js';
+import { resolveBodyPayload, type StorageBodyInput } from '../adf.js';
+import { assertConfluenceSpaceAllowed } from '../scope.js';
 import type { ConfluenceAttachment, ConfluenceComment, ConfluenceLabel } from '../types.js';
 
 /** Client for Confluence page-content operations. */
 export interface ConfluenceContentClient {
   /** Add a footer comment to a page. `body` is raw storage XHTML or plain text. */
-  addComment(pageId: string, body: { storage?: string; text?: string }): Promise<ConfluenceComment>;
+  addComment(pageId: string, body: StorageBodyInput): Promise<ConfluenceComment>;
   /** List footer comments on a page. */
   getComments(pageId: string, options?: { limit?: number }): Promise<ConfluenceComment[]>;
   /** Add labels to a page (each `prefix` defaults to `global`). */
@@ -44,7 +46,16 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
           `/wiki/api/v2/spaces/${encodeURIComponent(String(page.spaceId))}`
         );
         key = sp.key ? String(sp.key) : undefined;
-      } catch {
+      } catch (error) {
+        // A 404 just means the space isn't visible; any other error
+        // (401/403/429/timeout) is surfaced so a transient failure doesn't
+        // masquerade as a "space not allowed" configuration error.
+        const status = (error as { response?: { status?: number } })?.response?.status;
+        if (status !== 404) {
+          console.warn(
+            `${ts()} [mcp-atlassian] Failed to resolve Confluence space id '${page.spaceId}': ${error}`
+          );
+        }
         key = undefined;
       }
     }
@@ -54,13 +65,9 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
   return {
     async addComment(pageId, body) {
       await enforcePage(pageId);
-      const value =
-        body.storage !== undefined
-          ? storageBody(body.storage)
-          : storageBody(textToStorage(body.text ?? ''));
       const raw = await client.post<unknown>('/wiki/api/v2/footer-comments', {
         pageId,
-        body: value,
+        body: resolveBodyPayload(body),
       });
       return mapComment(raw, pageId);
     },

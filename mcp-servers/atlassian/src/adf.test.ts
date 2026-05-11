@@ -1,5 +1,6 @@
 /**
- * Tests for ADF / Confluence-storage helpers and project/space scope guards.
+ * Tests for ADF / Confluence-storage helpers. Scope-enforcement primitives are
+ * tested in `scope.test.ts`.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -9,10 +10,7 @@ import {
   toAdf,
   storageBody,
   textToStorage,
-  ScopeError,
-  assertJiraProjectAllowed,
-  assertConfluenceSpaceAllowed,
-  filterByAllowlist,
+  resolveBodyPayload,
 } from './adf.js';
 
 describe('textToAdf', () => {
@@ -66,8 +64,10 @@ describe('isAdfDoc / toAdf', () => {
     ['null', null],
     ['a string', 'doc'],
     ['wrong type field', { type: 'paragraph', content: [] }],
-    ['missing content array', { type: 'doc' }],
-    ['content not an array', { type: 'doc', content: 'x' }],
+    ['wrong version', { version: 2, type: 'doc', content: [] }],
+    ['missing version', { type: 'doc', content: [] }],
+    ['missing content array', { version: 1, type: 'doc' }],
+    ['content not an array', { version: 1, type: 'doc', content: 'x' }],
   ])('rejects %s', (_label, value) => {
     expect(isAdfDoc(value)).toBe(false);
   });
@@ -87,7 +87,7 @@ describe('isAdfDoc / toAdf', () => {
   });
 });
 
-describe('storageBody / textToStorage', () => {
+describe('storageBody / textToStorage / resolveBodyPayload', () => {
   it('wraps a value as a storage representation object', () => {
     expect(storageBody('<p>hi</p>')).toEqual({ representation: 'storage', value: '<p>hi</p>' });
   });
@@ -105,50 +105,22 @@ describe('storageBody / textToStorage', () => {
     // @ts-expect-error — exercising the runtime guard
     expect(textToStorage(undefined)).toBe('<p></p>');
   });
-});
 
-describe('scope guards', () => {
-  it('no-op when the allowlist is empty', () => {
-    expect(() => assertJiraProjectAllowed('ANYTHING', [])).not.toThrow();
-    expect(() => assertConfluenceSpaceAllowed(undefined, [])).not.toThrow();
+  it('resolveBodyPayload prefers raw storage over text', () => {
+    expect(resolveBodyPayload({ storage: '<h1>x</h1>', text: 'ignored' })).toEqual({
+      representation: 'storage',
+      value: '<h1>x</h1>',
+    });
   });
 
-  it('passes when the key is in the allowlist (case-insensitive)', () => {
-    expect(() => assertJiraProjectAllowed('proj', ['PROJ', 'OPS'])).not.toThrow();
+  it('resolveBodyPayload escapes + wraps a text body when no storage given', () => {
+    expect(resolveBodyPayload({ text: 'a & b' })).toEqual({
+      representation: 'storage',
+      value: '<p>a &amp; b</p>',
+    });
   });
 
-  it('throws ScopeError when the key is outside the allowlist', () => {
-    expect(() => assertJiraProjectAllowed('OTHER', ['PROJ'])).toThrow(ScopeError);
-    expect(() => assertJiraProjectAllowed('OTHER', ['PROJ'])).toThrow(/outside the allowed list/);
-  });
-
-  it('throws ScopeError when the key cannot be determined but a list is configured', () => {
-    expect(() => assertConfluenceSpaceAllowed(undefined, ['DEV'])).toThrow(ScopeError);
-    expect(() => assertConfluenceSpaceAllowed('  ', ['DEV'])).toThrow(/Cannot determine/);
-  });
-
-  it('ScopeError carries the right name', () => {
-    const err = new ScopeError('x');
-    expect(err.name).toBe('ScopeError');
-    expect(err).toBeInstanceOf(Error);
-  });
-});
-
-describe('filterByAllowlist', () => {
-  const items = [{ k: 'PROJ' }, { k: 'OPS' }, { k: 'OTHER' }, { k: undefined }];
-
-  it('returns the list unchanged when the allowlist is empty', () => {
-    expect(filterByAllowlist(items, (i) => i.k, [])).toBe(items);
-  });
-
-  it('keeps only items whose key is in the allowlist', () => {
-    expect(filterByAllowlist(items, (i) => i.k, ['proj', 'ops'])).toEqual([
-      { k: 'PROJ' },
-      { k: 'OPS' },
-    ]);
-  });
-
-  it('drops items with no resolvable key when an allowlist is set', () => {
-    expect(filterByAllowlist(items, (i) => i.k, ['PROJ'])).toEqual([{ k: 'PROJ' }]);
+  it('resolveBodyPayload treats an absent text body as the empty paragraph', () => {
+    expect(resolveBodyPayload({})).toEqual({ representation: 'storage', value: '<p></p>' });
   });
 });

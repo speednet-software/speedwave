@@ -15,22 +15,7 @@ import {
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createConfluenceContentClient } from '../domains/confluence-content.js';
-import { withValidation } from './validation.js';
-
-/**
- * Resolve `{ bodyStorage?, bodyText? }` tool input to the domain `{ storage?, text? }` shape.
- * @param p - The tool input.
- * @param p.bodyStorage - Body as raw storage-representation XHTML (takes precedence).
- * @param p.bodyText - Body as plain text (used when `bodyStorage` is absent).
- * @returns The domain-shaped body input.
- */
-function bodyInput(p: { bodyStorage?: string; bodyText?: string }): {
-  storage?: string;
-  text?: string;
-} {
-  if (p.bodyStorage !== undefined) return { storage: p.bodyStorage };
-  return { text: p.bodyText ?? '' };
-}
+import { toStorageBodyInput, withValidation } from './validation.js';
 
 const addPageCommentTool: Tool = {
   name: 'addPageComment',
@@ -206,7 +191,7 @@ export function createConfluenceContentTools(client: AtlassianClient | null): To
       tool: addPageCommentTool,
       handler: withValidation(client, async (_c, params) => {
         const p = params as { pageId: string; bodyStorage?: string; bodyText?: string };
-        return jsonResult({ comment: await content.addComment(p.pageId, bodyInput(p)) });
+        return jsonResult({ comment: await content.addComment(p.pageId, toStorageBodyInput(p)) });
       }),
     },
     {

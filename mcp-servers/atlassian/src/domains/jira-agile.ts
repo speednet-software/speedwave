@@ -5,7 +5,12 @@
  */
 
 import type { AtlassianClient } from '../client.js';
-import { assertJiraProjectAllowed, filterByAllowlist } from '../adf.js';
+import {
+  ScopeError,
+  assertJiraIssueKeyAllowed,
+  assertJiraProjectAllowed,
+  filterByAllowlist,
+} from '../scope.js';
 import type { JiraBoard, JiraBoardConfiguration, JiraSprint } from '../types.js';
 
 /** Client for Jira Agile operations. */
@@ -47,6 +52,29 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
     return board;
   };
 
+  /**
+   * Enforce the project allowlist for a sprint whose board ID may be absent.
+   * The Agile API can omit `originBoardId` (e.g. for some closed/cross-board
+   * sprints); when that happens and an allowlist is configured we cannot prove
+   * the sprint is in scope, so we fail closed rather than leak it.
+   * @param sprintId - The sprint ID (for the error message only).
+   * @param boardId - The sprint's `originBoardId`, or `undefined` if absent.
+   */
+  const enforceSprintBoard = async (
+    sprintId: number,
+    boardId: number | undefined
+  ): Promise<void> => {
+    if (boardId !== undefined) {
+      await enforceBoard(boardId);
+      return;
+    }
+    if (client.jiraProjectKeys.length > 0) {
+      throw new ScopeError(
+        `Cannot determine the board for sprint ${sprintId}; access is restricted to: ${client.jiraProjectKeys.join(', ')}`
+      );
+    }
+  };
+
   return {
     async listBoards(options = {}) {
       const params: Record<string, unknown> = {
@@ -85,7 +113,7 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
     async getSprint(sprintId) {
       const raw = await client.get<unknown>(`/rest/agile/1.0/sprint/${sprintId}`);
       const sprint = mapSprint(raw);
-      if (sprint.board_id !== undefined) await enforceBoard(sprint.board_id);
+      await enforceSprintBoard(sprintId, sprint.board_id);
       return sprint;
     },
 
@@ -93,10 +121,15 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
       const sprint = await client.get<{ originBoardId?: number }>(
         `/rest/agile/1.0/sprint/${sprintId}`
       );
-      if (typeof sprint.originBoardId === 'number') await enforceBoard(sprint.originBoardId);
-      await client.post<void>(`/rest/agile/1.0/sprint/${sprintId}/issue`, {
-        issues: issueKeysOrIds.slice(0, 50),
-      });
+      await enforceSprintBoard(
+        sprintId,
+        typeof sprint.originBoardId === 'number' ? sprint.originBoardId : undefined
+      );
+      // The board check covers the sprint's project; each issue can still belong
+      // to a different project, so validate every key against the allowlist too.
+      const issues = issueKeysOrIds.slice(0, 50);
+      for (const ref of issues) assertJiraIssueKeyAllowed(ref, client.jiraProjectKeys);
+      await client.post<void>(`/rest/agile/1.0/sprint/${sprintId}/issue`, { issues });
     },
   };
 }

@@ -5,7 +5,7 @@
  */
 
 import type { AtlassianClient } from '../client.js';
-import { assertConfluenceSpaceAllowed, filterByAllowlist } from '../adf.js';
+import { assertConfluenceSpaceAllowed, filterByAllowlist } from '../scope.js';
 import type { ConfluenceSpace } from '../types.js';
 
 /** Client for Confluence space operations. */

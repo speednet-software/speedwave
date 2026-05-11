@@ -15,22 +15,7 @@ import {
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createConfluencePagesClient } from '../domains/confluence-pages.js';
-import { withValidation } from './validation.js';
-
-/**
- * Resolve `{ bodyStorage?, bodyText? }` tool input to the domain `{ storage?, text? }` shape.
- * @param p - The tool input.
- * @param p.bodyStorage - Body as raw storage-representation XHTML (takes precedence).
- * @param p.bodyText - Body as plain text (used when `bodyStorage` is absent).
- * @returns The domain-shaped body input.
- */
-function bodyInput(p: { bodyStorage?: string; bodyText?: string }): {
-  storage?: string;
-  text?: string;
-} {
-  if (p.bodyStorage !== undefined) return { storage: p.bodyStorage };
-  return { text: p.bodyText ?? '' };
-}
+import { toStorageBodyInput, withValidation } from './validation.js';
 
 const searchPagesTool: Tool = {
   name: 'searchPages',
@@ -302,7 +287,7 @@ export function createConfluencePageTools(client: AtlassianClient | null): ToolD
           page: await pages.create({
             spaceKey: p.spaceKey,
             title: p.title,
-            body: bodyInput(p),
+            body: toStorageBodyInput(p),
             parentId: p.parentId,
           }),
         });
@@ -321,7 +306,7 @@ export function createConfluencePageTools(client: AtlassianClient | null): ToolD
         return jsonResult({
           page: await pages.update(p.pageId, {
             title: p.title,
-            body: hasBody ? bodyInput(p) : undefined,
+            body: hasBody ? toStorageBodyInput(p) : undefined,
           }),
         });
       }),

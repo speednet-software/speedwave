@@ -107,6 +107,16 @@ describe('readCredentials', () => {
     expect(await readCredentials()).toBeNull();
   });
 
+  it('returns null when email is missing', async () => {
+    fsFrom({ site_url: 'https://acme.atlassian.net', api_token: 'ATATT3xSecret' });
+    expect(await readCredentials()).toBeNull();
+  });
+
+  it('returns null when email is empty', async () => {
+    fsFrom({ site_url: 'https://acme.atlassian.net', email: '  ', api_token: 'ATATT3xSecret' });
+    expect(await readCredentials()).toBeNull();
+  });
+
   it('returns null when api_token is empty', async () => {
     fsFrom({ site_url: 'https://acme.atlassian.net', email: 'bot@acme.com', api_token: '   ' });
     expect(await readCredentials()).toBeNull();

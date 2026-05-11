@@ -40,6 +40,14 @@ The tool **count** ("~110 tools") is deliberately *not* an argument against wrap
 
 → **GitHub gets an own thin worker, `mcp-servers/github/`, built on `@octokit/rest` (with `@octokit/plugin-throttling` and `@octokit/plugin-retry`), mirroring `mcp-servers/gitlab/`.**
 
+### Application to Atlassian (Jira + Confluence)
+
+Same outcome as GitHub, for the same kind of reasons. Atlassian publishes an official MCP server (the hosted **Rovo MCP Server** at `mcp.atlassian.com`), so "just write an own worker" again needs justifying — and the four-point gate is not met: condition (2) fails (the Rovo server is a cloud-hosted bridge, not an npm package — there is nothing to `npm install` and run in `mcp-servers/`; it cannot be self-hosted at all), and condition (3) fails (integrating with the Jira/Confluence API is a domain integration, not generic infrastructure). Independently, the "Rejected alternative B"-style objection applies even more strongly here than to GitHub's remote endpoint: using Rovo headless means a worker sending its credential to an Atlassian-operated endpoint and the integration depending on that service's availability — incompatible with the token-free-hub posture (the hub has zero tokens; a worker holds only its own credential, mounted read-only).
+
+There is no official Atlassian Node SDK, and the popular community libraries (`jira.js`, `confluence.js`) are single-maintainer projects with no sponsorship — a bus-factor-1 dependency that would hold the account credential inside the worker. Per the in-worker-client convention (official/large SDK if one exists — Slack/`@slack/web-api`, GitHub/`@octokit/rest`, GitLab/`@gitbeaker/rest` — otherwise a thin `axios` client like Redmine), Atlassian gets a thin `axios` client: Basic auth is a single header, JQL pagination is a `nextPageToken` loop, rate limiting is `429 + Retry-After`.
+
+→ **Atlassian gets an own thin worker, `mcp-servers/atlassian/`, built on a thin `axios` HTTP client (no external SDK), covering Jira Cloud REST v3 + Agile 1.0 and Confluence Cloud REST v2 (plus v1 for CQL search and bulk label-add).**
+
 ### Retroactive explanation of existing workers
 
 - `slack`, `sharepoint`, `redmine`, `gitlab` — **own workers**, because no official MCP server exists for them (only community/archived servers).

@@ -5,7 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createJiraIssuesClient } from './jira-issues.js';
-import { ScopeError } from '../adf.js';
+import { ScopeError } from '../scope.js';
 import type { AtlassianClient } from '../client.js';
 
 /** Minimal AtlassianClient stub. */
@@ -104,6 +104,26 @@ describe('search (enhanced JQL)', () => {
     const res = await c.search({ jql: 'x' });
     expect(res.issues).toEqual([]);
     expect(res.is_last).toBe(true);
+  });
+
+  it('filters out result issues whose project is outside the allowlist', async () => {
+    client = stubClient(['PROJ']);
+    client.post.mockResolvedValueOnce({
+      issues: [rawIssue(), rawIssue({ key: 'OTHER-9' }, { project: { key: 'OTHER' } })],
+      isLast: true,
+    });
+    const c = createJiraIssuesClient(client);
+    const res = await c.search({ jql: 'project in (PROJ, OTHER)' });
+    expect(res.issues.map((i) => i.key)).toEqual(['PROJ-1']);
+  });
+
+  it('passes results through unchanged when no allowlist is configured', async () => {
+    client.post.mockResolvedValueOnce({
+      issues: [rawIssue(), rawIssue({ key: 'OTHER-9' }, { project: { key: 'OTHER' } })],
+      isLast: true,
+    });
+    const c = createJiraIssuesClient(client);
+    expect((await c.search({ jql: 'x' })).issues).toHaveLength(2);
   });
 });
 
@@ -326,10 +346,10 @@ describe('normalisation edge cases', () => {
     expect((await c.get('ABC-7')).project_key).toBe('ABC');
   });
 
-  it('handles a bad self URL (no web_url)', async () => {
+  it('omits web_url when the self URL is unparseable', async () => {
     client.get.mockResolvedValueOnce(rawIssue({ self: 'not a url' }));
     const c = createJiraIssuesClient(client);
-    expect((await c.get('PROJ-1')).web_url).toBe('');
+    expect((await c.get('PROJ-1')).web_url).toBeUndefined();
   });
 
   it('handles null assignee/reporter', async () => {
@@ -358,7 +378,7 @@ describe('normalisation edge cases', () => {
       reporter: null,
       created: '',
       updated: '',
-      web_url: '',
+      web_url: undefined,
     });
   });
 

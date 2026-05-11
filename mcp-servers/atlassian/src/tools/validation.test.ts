@@ -5,7 +5,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { withValidation } from './validation.js';
 import { AtlassianClient } from '../client.js';
-import { ScopeError } from '../adf.js';
+import { ScopeError } from '../scope.js';
 
 const FAKE_CLIENT = {} as AtlassianClient;
 
@@ -30,12 +30,12 @@ describe('withValidation', () => {
 
   it('turns a thrown Error into a sanitized error result', async () => {
     const wrapped = withValidation(FAKE_CLIENT, async () => {
-      throw new Error('boom near ATATT3xLEAKEDtoken');
+      throw new Error('boom near ATATT3xLEAKEDtokenABCDEFGHIJ1234567890');
     });
     const res = await wrapped({});
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/REDACTED_ATLASSIAN_TOKEN/);
-    expect(res.content[0].text).not.toMatch(/ATATT3xLEAKEDtoken/);
+    expect(res.content[0].text).not.toMatch(/ATATT3xLEAKED/);
   });
 
   it('passes a ScopeError message through verbatim', async () => {

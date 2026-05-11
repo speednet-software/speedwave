@@ -1193,6 +1193,26 @@ mod tests {
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("offline_access"));
     }
 
+    /// `credential_files` must be a superset of `auth_fields[*].key`: the UI
+    /// collects values for the auth fields and the credential-file list is what
+    /// `save_integration_credentials` (Desktop) is allowed to write/read. A
+    /// field whose key isn't a permitted credential file would be silently
+    /// dropped on save.
+    #[test]
+    fn test_credential_files_superset_of_auth_fields() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            for field in svc.auth_fields {
+                assert!(
+                    svc.credential_files.contains(&field.key),
+                    "service '{}': auth field '{}' is not in credential_files {:?}",
+                    svc.config_key,
+                    field.key,
+                    svc.credential_files,
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_find_mcp_service_found() {
         assert!(find_mcp_service("slack").is_some());

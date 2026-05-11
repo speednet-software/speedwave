@@ -19,7 +19,7 @@ import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
 import { ts, withSetupGuidance, TIMEOUTS } from '@speedwave/mcp-shared';
 import { readCredentials } from './auth.js';
 import type { AtlassianConfig, ConnectionTestResult } from './types.js';
-import { ScopeError } from './adf.js';
+import { ScopeError } from './scope.js';
 
 export type { AtlassianConfig, ConnectionTestResult } from './types.js';
 
@@ -84,8 +84,16 @@ export class AtlassianClient {
   /**
    * Build the client from a resolved configuration.
    * @param config - Resolved worker configuration (from `/tokens`).
+   * @throws If `config.siteUrl` is not an `https://*.atlassian.net` origin
+   *   (`readCredentials` already enforces this, but a directly-constructed
+   *   config must not bypass the SSRF-prevention guard).
    */
   constructor(config: AtlassianConfig) {
+    if (!/^https:\/\/[^/]+\.atlassian\.net$/.test(config.siteUrl)) {
+      throw new Error(
+        `AtlassianClient: siteUrl must be an https://*.atlassian.net origin (got: ${config.siteUrl})`
+      );
+    }
     this.config = config;
     const basic = Buffer.from(`${config.email}:${config.apiToken}`).toString('base64');
     this.http = axios.create({
@@ -290,13 +298,15 @@ export class AtlassianClient {
 
   /**
    * Defensive scrub: redact anything that looks like a credential.
+   * The `ATATT…` pattern must stay in sync with the `ATATT` rule in
+   * `crates/speedwave-runtime/src/log_sanitizer.rs` (`{20,}` suffix).
    * @param message - A message that may contain credential material.
    * @returns The message with Basic-auth blobs and Atlassian tokens redacted.
    */
   private static scrub(message: string): string {
     return message
       .replace(/Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic ***REDACTED***')
-      .replace(/ATATT[A-Za-z0-9_-]{10,}/g, '***REDACTED_ATLASSIAN_TOKEN***');
+      .replace(/ATATT[A-Za-z0-9_-]{20,}/g, '***REDACTED_ATLASSIAN_TOKEN***');
   }
 }
 

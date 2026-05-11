@@ -3,9 +3,9 @@
  *
  * Isolated Jira & Confluence (Atlassian Cloud) MCP server with per-service token
  * isolation. Built on a thin `axios` HTTP client (no external Atlassian SDK —
- * see `docs/guides/integrations.md` for the rationale). Exposes ~33 tools across
+ * see `docs/guides/integrations.md` for the rationale). Exposes 35 tools across
  * Jira (issues, comments, projects, Agile boards/sprints) and Confluence
- * (pages, comments, labels, attachments).
+ * (spaces, pages, comments, labels, attachments).
  * @module mcp-atlassian
  */
 
@@ -47,7 +47,7 @@ async function main(): Promise<void> {
     name: SERVER_NAME,
     version: '1.0.0',
     port: PORT,
-    host: '0.0.0.0', // inside container — must be reachable from Docker network
+    host: '0.0.0.0', // inside container — must be reachable from the container network
     tools,
     auth: { token: AUTH_TOKEN },
     healthCheck: async () => {

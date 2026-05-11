@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createJiraAgileClient } from './jira-agile.js';
-import { ScopeError } from '../adf.js';
+import { ScopeError } from '../scope.js';
 import type { AtlassianClient } from '../client.js';
 
 function stubClient(projectKeys: string[] = []) {
@@ -159,10 +159,18 @@ describe('sprints', () => {
     expect(await c.getSprint(42)).toMatchObject({ id: 42, board_id: 7 });
   });
 
-  it('gets a sprint with no board id (no scope check needed)', async () => {
+  it('gets a sprint with no board id when no allowlist is configured', async () => {
     client.get.mockResolvedValueOnce(rawSprint({ originBoardId: undefined }));
     const c = createJiraAgileClient(client);
     expect((await c.getSprint(42)).board_id).toBeUndefined();
+  });
+
+  it('fails closed: rejects a sprint with no board id when an allowlist is configured', async () => {
+    client = stubClient(['ALLOWED']);
+    client.get.mockResolvedValue(rawSprint({ originBoardId: undefined }));
+    const c = createJiraAgileClient(client);
+    await expect(c.getSprint(42)).rejects.toThrow(ScopeError);
+    await expect(c.getSprint(42)).rejects.toThrow(/Cannot determine the board/);
   });
 });
 
@@ -180,7 +188,16 @@ describe('moveIssuesToSprint', () => {
     expect((sent[1] as { issues: string[] }).issues).toHaveLength(50);
   });
 
-  it('skips the board scope check when the sprint has no originBoardId', async () => {
+  it('forwards exactly 50 issues to the domain when given 60', async () => {
+    client.get.mockResolvedValueOnce({}); // sprint lookup, no originBoardId, no allowlist → ok
+    client.post.mockResolvedValueOnce(undefined);
+    const c = createJiraAgileClient(client);
+    const many = Array.from({ length: 60 }, (_, i) => `PROJ-${i}`);
+    await c.moveIssuesToSprint(42, many);
+    expect((client.post.mock.calls[0][1] as { issues: string[] }).issues).toHaveLength(50);
+  });
+
+  it('skips the board scope check when the sprint has no originBoardId and no allowlist', async () => {
     client.get.mockResolvedValueOnce({}); // sprint lookup, no originBoardId
     client.post.mockResolvedValueOnce(undefined);
     const c = createJiraAgileClient(client);
@@ -190,6 +207,14 @@ describe('moveIssuesToSprint', () => {
     });
   });
 
+  it('fails closed: rejects when the sprint has no originBoardId and an allowlist is configured', async () => {
+    client = stubClient(['ALLOWED']);
+    client.get.mockResolvedValueOnce({}); // sprint lookup, no originBoardId
+    const c = createJiraAgileClient(client);
+    await expect(c.moveIssuesToSprint(42, ['ALLOWED-1'])).rejects.toThrow(ScopeError);
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
   it('rejects when the sprint board is outside the allowlist', async () => {
     client = stubClient(['ALLOWED']);
     client.get
@@ -197,6 +222,29 @@ describe('moveIssuesToSprint', () => {
       .mockResolvedValueOnce(rawBoard({ location: { projectKey: 'OTHER' } }));
     const c = createJiraAgileClient(client);
     await expect(c.moveIssuesToSprint(42, ['OTHER-1'])).rejects.toThrow(ScopeError);
+  });
+
+  it('rejects when an issue key is outside the allowlist even if the sprint board is in scope', async () => {
+    client = stubClient(['ALLOWED']);
+    client.get
+      .mockResolvedValueOnce({ originBoardId: 7 })
+      .mockResolvedValueOnce(rawBoard({ location: { projectKey: 'ALLOWED' } }));
+    const c = createJiraAgileClient(client);
+    await expect(c.moveIssuesToSprint(42, ['ALLOWED-1', 'OTHER-9'])).rejects.toThrow(ScopeError);
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('accepts in-scope issue keys when the sprint board is in scope', async () => {
+    client = stubClient(['ALLOWED']);
+    client.get
+      .mockResolvedValueOnce({ originBoardId: 7 })
+      .mockResolvedValueOnce(rawBoard({ location: { projectKey: 'ALLOWED' } }));
+    client.post.mockResolvedValueOnce(undefined);
+    const c = createJiraAgileClient(client);
+    await c.moveIssuesToSprint(42, ['ALLOWED-1', 'ALLOWED-2']);
+    expect(client.post).toHaveBeenCalledWith('/rest/agile/1.0/sprint/42/issue', {
+      issues: ['ALLOWED-1', 'ALLOWED-2'],
+    });
   });
 });
 

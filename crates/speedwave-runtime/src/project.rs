@@ -35,19 +35,22 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
 /// purely a recovery path for tampered or pre-existing trees).
 fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
     validation::validate_project_name(project)?;
-    let dirs_to_create = [
-        data_dir.join("tokens").join(project).join("slack"),
-        data_dir.join("tokens").join(project).join("sharepoint"),
-        data_dir.join("tokens").join(project).join("redmine"),
-        data_dir.join("tokens").join(project).join("gitlab"),
-        data_dir.join("tokens").join(project).join("github"),
-        data_dir.join("tokens").join(project).join("atlassian"),
+    let tokens_dir = data_dir.join("tokens").join(project);
+    let mut dirs_to_create: Vec<std::path::PathBuf> = vec![
         data_dir.join("compose").join(project),
         data_dir.join("context").join(project),
         data_dir
             .join(crate::consts::CLAUDE_HOME_SUBDIR)
             .join(project),
     ];
+    // Per-service token directories — derived from TOGGLEABLE_MCP_SERVICES (the
+    // SSOT) so a new integration doesn't need a parallel edit here. Services
+    // with no credential files (e.g. Playwright) get no token directory.
+    for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+        if !svc.credential_files.is_empty() {
+            dirs_to_create.push(tokens_dir.join(svc.config_key));
+        }
+    }
     for dir in &dirs_to_create {
         create_dir_all_secure(dir)?;
     }
@@ -249,20 +252,23 @@ mod tests {
 
         init_project_dirs_in("modecheck", &data_dir).unwrap();
 
-        let dirs = [
-            data_dir.join("tokens").join("modecheck"),
-            data_dir.join("tokens").join("modecheck").join("slack"),
-            data_dir.join("tokens").join("modecheck").join("sharepoint"),
-            data_dir.join("tokens").join("modecheck").join("redmine"),
-            data_dir.join("tokens").join("modecheck").join("gitlab"),
-            data_dir.join("tokens").join("modecheck").join("github"),
-            data_dir.join("tokens").join("modecheck").join("atlassian"),
+        let mut dirs = vec![
             data_dir.join("compose").join("modecheck"),
             data_dir.join("context").join("modecheck"),
             data_dir
                 .join(crate::consts::CLAUDE_HOME_SUBDIR)
                 .join("modecheck"),
         ];
+        // Every credential-bearing service must have a token directory created
+        // (derived from the same SSOT init_project_dirs_in uses).
+        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+            if !svc.credential_files.is_empty() {
+                dirs.push(data_dir.join("tokens").join("modecheck").join(svc.config_key));
+            }
+        }
+        // Sanity: at least Slack and the new Atlassian worker are in that set.
+        assert!(dirs.iter().any(|d| d.ends_with("slack")));
+        assert!(dirs.iter().any(|d| d.ends_with("atlassian")));
         for dir in &dirs {
             let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
             assert_eq!(

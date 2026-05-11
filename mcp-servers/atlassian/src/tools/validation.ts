@@ -14,6 +14,7 @@ import {
   notConfiguredMessage,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
+import type { StorageBodyInput } from '../adf.js';
 
 /**
  * Wrap a tool handler with client-presence and error handling.
@@ -39,4 +40,22 @@ export function withValidation<T>(
       return errorResult(AtlassianClient.formatError(error));
     }
   };
+}
+
+/**
+ * Map a Confluence body tool input (`{ bodyStorage?, bodyText? }`) to the domain
+ * {@link StorageBodyInput} shape (`{ storage?, text? }`). `bodyStorage` (raw
+ * storage-representation XHTML) takes precedence; otherwise `bodyText` is used
+ * (an absent text body becomes the empty string).
+ * @param p - The tool input fragment.
+ * @param p.bodyStorage - Body as raw storage-representation XHTML (takes precedence).
+ * @param p.bodyText - Body as plain text (used when `bodyStorage` is absent).
+ * @returns The domain-shaped body input.
+ */
+export function toStorageBodyInput(p: {
+  bodyStorage?: string;
+  bodyText?: string;
+}): StorageBodyInput {
+  if (p.bodyStorage !== undefined) return { storage: p.bodyStorage };
+  return { text: p.bodyText ?? '' };
 }

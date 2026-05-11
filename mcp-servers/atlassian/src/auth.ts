@@ -75,8 +75,9 @@ async function readAllowlist(name: string): Promise<string[]> {
 
 /**
  * Validate and normalise the site URL: must be `https://`, host must end in
- * `.atlassian.net` (Cloud only in v1), no path/query/fragment. Returns the
- * normalised `https://host` form, or `null` if invalid.
+ * `.atlassian.net` (Atlassian Cloud only — Server/Data Center is not supported),
+ * no path/query/fragment. Returns the normalised `https://host` form, or `null`
+ * if invalid.
  * @param raw - Raw `site_url` credential value.
  * @returns Normalised origin, or `null` if invalid.
  */
@@ -91,8 +92,9 @@ export function normalizeSiteUrl(raw: string): string | null {
   const host = url.hostname.toLowerCase();
   if (!host.endsWith('.atlassian.net')) return null;
   // Reject embedded credentials / non-default ports / paths to avoid surprises.
+  // (The WHATWG URL parser always sets `pathname` to at least `/` for https:.)
   if (url.username || url.password || (url.port && url.port !== '443')) return null;
-  if (url.pathname !== '/' && url.pathname !== '') return null;
+  if (url.pathname !== '/') return null;
   return `https://${host}`;
 }
 
