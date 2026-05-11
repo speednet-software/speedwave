@@ -17,6 +17,7 @@
     "gitlab",
     "github",
     "atlassian",
+    "office",
     "os"
   ],
   "scripts": {

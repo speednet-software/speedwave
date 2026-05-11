@@ -28,6 +28,7 @@ export default {
         'mcp-gitlab',
         'mcp-github',
         'mcp-atlassian',
+        'mcp-office',
         'mcp-playwright',
         'mcp-os',
         'containers',
