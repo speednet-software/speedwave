@@ -361,8 +361,9 @@ coverage-html: build-mcp
 
 test-e2e: build-cli
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	SPEEDWAVE_BIN=./target/debug/speedwave-cli bats _tests/e2e/speedwave.bats
+	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/speedwave.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/plugin-tamper.bats
+	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/host-exec.bats
 
 # Plugin tamper / signature-bypass E2E. Runs against the *release* CLI
 # so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be

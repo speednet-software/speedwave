@@ -19,6 +19,9 @@ mod fs_perms;
 mod git_cmd;
 mod health;
 mod history;
+mod host_exec_cmd;
+mod host_exec_process;
+mod host_path;
 mod http_util;
 mod ide_bridge;
 mod integrations_cmd;
@@ -58,7 +61,11 @@ use std::sync::{Arc, Mutex};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
-use reconcile::{ExitCleanupContext, SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs};
+use reconcile::{
+    ExitCleanupContext, SharedAutoCheckHandle, SharedHostExec, SharedIdeBridge, SharedMcpOs,
+};
+
+pub(crate) use host_path::recovered_host_path;
 
 /// Joins a cleanup thread handle with a watchdog that force-exits after
 /// `EXIT_CLEANUP_TIMEOUT_SECS`. If the cleanup thread panics, exits with
@@ -130,6 +137,12 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// to prevent the watchdog from respawning mcp-os during shutdown.
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Stop flag for the per-project `host_exec` watchdog thread. Set during exit
+/// cleanup (in `run_exit_cleanup`, alongside `WATCHDOG_STOP`) so the watchdog
+/// does not respawn a worker mid-shutdown.
+static HOST_EXEC_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // ---------------------------------------------------------------------------
 // Chat commands
 // ---------------------------------------------------------------------------
@@ -150,6 +163,7 @@ fn start_session_inner(
     resume_session_id: Option<&str>,
     compose_arc: ComposeLock,
     session_arc: SharedChatSession,
+    host_exec_arc: SharedHostExec,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     // Pre-flight: verify Claude is authenticated.  `check_claude_auth`
@@ -167,6 +181,13 @@ fn start_session_inner(
             return Err(MSG_NOT_AUTHENTICATED.to_string());
         }
     }
+
+    // Start this project's `host_exec` worker on demand if the project has it
+    // enabled (no-op otherwise, or if it's already running). Best-effort — a
+    // spawn failure must not block the chat from starting; `host_exec` tools
+    // simply won't be available until the watchdog retries (step 5 wires the
+    // hub re-discovery).
+    ensure_host_exec_running(&host_exec_arc, &app_handle, project);
 
     // Extract old session and stop it outside the lock.
     log::info!("start_session_inner: extracting old session");
@@ -198,13 +219,22 @@ async fn start_chat(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
     compose_lock: tauri::State<'_, ComposeLock>,
+    host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
     check_project(&project)?;
     log::info!("start_chat: project={project}");
     let session_arc = state.inner().clone();
     let compose_arc = compose_lock.inner().clone();
+    let host_exec_arc = host_exec.inner().clone();
     tokio::task::spawn_blocking(move || {
-        start_session_inner(&project, None, compose_arc, session_arc, app_handle)
+        start_session_inner(
+            &project,
+            None,
+            compose_arc,
+            session_arc,
+            host_exec_arc,
+            app_handle,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -328,18 +358,21 @@ async fn resume_conversation(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
     compose_lock: tauri::State<'_, ComposeLock>,
+    host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
     check_project(&project)?;
     history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
     log::info!("resume_conversation: project={project}");
     let session_arc = state.inner().clone();
     let compose_arc = compose_lock.inner().clone();
+    let host_exec_arc = host_exec.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
             Some(&session_id),
             compose_arc,
             session_arc,
+            host_exec_arc,
             app_handle,
         )
     })
@@ -385,6 +418,7 @@ async fn switch_project(
     name: String,
     app: tauri::AppHandle,
     chat_state: tauri::State<'_, SharedChatSession>,
+    host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
     use containers_cmd::{switch_project_core, teardown_and_restore, teardown_only, SwitchResult};
 
@@ -400,6 +434,15 @@ async fn switch_project(
         Ok(prev)
     })
     .map_err(|e| e.to_string())?;
+
+    // Tear down the previous project's `host_exec` worker (its containers go
+    // down below; the new project's worker is spawned on demand by the next
+    // chat/container start — see `ensure_host_exec_running`). Best-effort.
+    if let Some(ref prev) = previous {
+        if prev != &name {
+            reconcile::teardown_host_exec_for_project(host_exec.inner(), prev);
+        }
+    }
 
     use tauri::Emitter;
     let _ = app.emit(
@@ -943,6 +986,224 @@ fn ensure_mcp_os_running(
     }
 }
 
+/// Start the per-project `host_exec` worker for `project` if the project has
+/// `host_exec` enabled and no worker is running yet. No-op when the integration
+/// is disabled (or the project is unknown / its dir can't be resolved). Holds
+/// the shared-map mutex for the spawn so two callers don't double-spawn the
+/// same project's worker; the spawn can block up to ~10 s (the port handshake).
+///
+/// Before spawning, this writes the *current* config snapshot
+/// (`<data_dir>/host-exec/<project>/config.json`, `chmod 600`) from the
+/// resolved config so the worker sees the up-to-date whitelist.
+/// (`host_exec_cmd::host_exec_save_settings` re-writes it on edits and respawns.)
+pub(crate) fn ensure_host_exec_running(
+    host_exec: &SharedHostExec,
+    app_handle: &tauri::AppHandle,
+    project: &str,
+) {
+    let mut map = match host_exec.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!("ensure_host_exec_running: map mutex poisoned: {e}");
+            return;
+        }
+    };
+    if let Some(proc) = map.get(project) {
+        if proc.is_alive() {
+            return; // already running and healthy
+        }
+        // A dead-but-still-mapped worker — drop it; we'll respawn below.
+        log::warn!("host_exec[{project}]: stale worker in the map — replacing");
+        if let Some(mut dead) = map.remove(project) {
+            let _ = dead.stop();
+            dead.cleanup_files();
+        }
+    }
+
+    // Resolve the project dir + the resolved config (which knows whether
+    // `host_exec` is enabled and what the whitelist is — user-config only).
+    let user_config = match config::load_user_config() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("ensure_host_exec_running: cannot load user config: {e}");
+            return;
+        }
+    };
+    let project_dir = match user_config.find_project(project) {
+        Some(p) => std::path::PathBuf::from(&p.dir),
+        None => {
+            log::warn!("ensure_host_exec_running: unknown project '{project}'");
+            return;
+        }
+    };
+    let resolved = config::resolve_integrations(&project_dir, &user_config, project);
+    if !resolved.host_exec {
+        log::debug!("ensure_host_exec_running: host_exec disabled for '{project}' — not spawning");
+        return;
+    }
+
+    // Write the config snapshot (`{ projectDir, commands }`), chmod 600 — it may
+    // hold recipe `env` values (possibly secrets), ADR-054.
+    let state_dir = speedwave_runtime::host_exec::host_exec_project_dir(
+        speedwave_runtime::consts::data_dir(),
+        project,
+    );
+    if let Err(e) = std::fs::create_dir_all(&state_dir) {
+        log::warn!("ensure_host_exec_running: cannot create state dir for '{project}': {e}");
+        return;
+    }
+    let snapshot = config::host_exec_config_snapshot(&project_dir, &resolved.host_exec_commands);
+    let config_path = state_dir.join(speedwave_runtime::consts::HOST_EXEC_CONFIG_FILE);
+    if let Err(e) = write_host_exec_config_snapshot(&config_path, &snapshot) {
+        log::warn!("ensure_host_exec_running: cannot write config snapshot for '{project}': {e}");
+        return;
+    }
+
+    let script = match speedwave_runtime::build::resolve_host_exec_script() {
+        Some(s) => s.to_string_lossy().to_string(),
+        None => {
+            log::warn!(
+                "ensure_host_exec_running: host_exec worker script not found — \
+                 host_exec will be unavailable for '{project}'"
+            );
+            return;
+        }
+    };
+    match host_exec_process::HostExecProcess::spawn_for(
+        project,
+        &project_dir,
+        &script,
+        recovered_host_path(),
+        app_handle.clone(),
+    ) {
+        Ok(proc) => {
+            log::info!("host_exec[{project}]: started (port {})", proc.port());
+            map.insert(project.to_string(), proc);
+            drop(map); // release before touching the watchdog flag
+            HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+        }
+        Err(e) => log::error!("host_exec[{project}]: spawn failed: {e}"),
+    }
+}
+
+/// Write the `host_exec` config snapshot JSON to `path` with `chmod 600`
+/// (current-user-only ACL on Windows). The snapshot may contain recipe `env`
+/// values (possibly secrets) — ADR-054.
+pub(crate) fn write_host_exec_config_snapshot(
+    path: &std::path::Path,
+    snapshot: &serde_json::Value,
+) -> std::io::Result<()> {
+    let body = serde_json::to_string_pretty(snapshot).unwrap_or_else(|_| "{}".to_string());
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(body.as_bytes())?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        std::fs::write(path, &body)?;
+        let status = speedwave_runtime::binary::system_command("icacls")
+            .args([
+                path.as_os_str(),
+                "/inheritance:r".as_ref(),
+                "/grant:r".as_ref(),
+            ])
+            .arg(format!(
+                "{}:(F)",
+                std::env::var("USERNAME").unwrap_or_default()
+            ))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if let Ok(s) = status {
+            if !s.success() {
+                log::warn!(
+                    "icacls on {} failed (exit {s}) — config snapshot may be readable",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, body);
+        Err(std::io::Error::other(
+            "unsupported platform for host_exec config snapshot",
+        ))
+    }
+}
+
+/// Per-project `host_exec` watchdog: one thread iterating the shared map,
+/// respawning any worker whose process has died (or stopped listening). On a
+/// respawn, the hub must re-discover the project's `host_exec` tools — step 5
+/// wires that (the simplest path is recreating the project's hub container via
+/// the existing `reconcile` logic, the same way the `mcp-os` watchdog does for
+/// a port change); for step 4 the respawn is logged and left at that.
+///
+/// Mirrors `start_mcp_os_watchdog`'s shape: 30 s checks, a cooldown after a run
+/// of unhealthy checks, and exit when `HOST_EXEC_WATCHDOG_STOP` is set or the
+/// map is gone.
+fn start_host_exec_watchdog(host_exec: SharedHostExec, _app_handle: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        use std::time::Duration;
+        const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+        loop {
+            std::thread::sleep(CHECK_INTERVAL);
+            if HOST_EXEC_WATCHDOG_STOP.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut map = match host_exec.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    log::error!("host_exec watchdog: map mutex poisoned: {e}");
+                    break;
+                }
+            };
+            if map.is_empty() {
+                // Nothing to watch right now — keep looping; a project may
+                // enable host_exec later (ensure_host_exec_running resets the
+                // stop flag).
+                drop(map);
+                continue;
+            }
+            // Collect names first so we don't hold an iterator while mutating.
+            let names: Vec<String> = map.keys().cloned().collect();
+            for name in names {
+                let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
+                if alive {
+                    continue;
+                }
+                if let Some(proc) = map.get_mut(&name) {
+                    log::warn!("host_exec watchdog: worker for '{name}' unhealthy — respawning");
+                    match proc.respawn() {
+                        Ok(port) => {
+                            log::info!("host_exec watchdog: respawned '{name}' (port {port})");
+                            // NOTE: step 5 adds the hub re-discovery for this
+                            // project here (recreate the project's hub
+                            // container so it picks up the new
+                            // WORKER_HOST_EXEC_URL — analogous to
+                            // reconcile::reconcile_compose_port for mcp-os).
+                        }
+                        Err(e) => {
+                            log::error!("host_exec watchdog: respawn of '{name}' failed: {e}")
+                        }
+                    }
+                }
+            }
+        }
+        log::info!("host_exec watchdog: stopped");
+    });
+}
+
 /// Shows the audit-failure dialog and terminates the process. Returns
 /// only via `process::exit`.
 ///
@@ -1047,9 +1308,11 @@ fn main() {
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
 
-    // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
+    // Shared state for IDE Bridge, mcp-os process, per-project host_exec
+    // workers, auto-check handle, and tray update version
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
+    let host_exec: SharedHostExec = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
     let update_version: SharedUpdateVersion = Arc::new(Mutex::new(None));
 
@@ -1058,11 +1321,12 @@ fn main() {
     let tray_available_setup = tray_available.clone();
     let tray_available_close = tray_available.clone();
 
-    // Bundle the three shared-state Arcs into a single context struct so each
-    // exit path only needs one clone instead of three parallel Arc clones.
+    // Bundle the shared-state Arcs into a single context struct so each exit
+    // path only needs one clone instead of several parallel Arc clones.
     let cleanup_ctx = ExitCleanupContext {
         ide_bridge: ide_bridge.clone(),
         mcp_os: mcp_os.clone(),
+        host_exec: host_exec.clone(),
         auto_check_handle: auto_check_handle.clone(),
     };
     let cleanup_ctx_window = cleanup_ctx.clone();
@@ -1170,6 +1434,7 @@ fn main() {
         .manage(compose_lock.clone())
         .manage(ide_bridge.clone())
         .manage(mcp_os.clone())
+        .manage(host_exec.clone())
         .manage(queue_service.clone())
         .manage(msg_store_registry.clone())
         .setup(move |app| {
@@ -1222,6 +1487,13 @@ fn main() {
                 }
             });
 
+            // Recover the user's login-shell PATH once, on a background thread
+            // so a slow shell rc doesn't delay `setup()`. The `host_exec`
+            // worker (and its recipes) need this — a GUI-launched app has only
+            // a stunted PATH. Idempotent; `recovered_host_path()` returns the
+            // cached value (or computes it lazily) afterwards. ADR-054 §PATH.
+            std::thread::spawn(host_path::init_recovered_host_path);
+
             if setup_started {
                 // Start IDE Bridge
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
@@ -1258,8 +1530,16 @@ fn main() {
                     app.handle().clone(),
                     compose_lock.clone(),
                 );
+
+                // Start the per-project host_exec watchdog. No worker is
+                // spawned here — host_exec is per-project and spawned on
+                // demand (ensure_host_exec_running), e.g. when a chat starts
+                // for a project that has it enabled (ADR-054). The watchdog
+                // simply respawns any that die.
+                HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+                start_host_exec_watchdog(host_exec.clone(), app.handle().clone());
             } else {
-                log::info!("setup not started, deferring IDE Bridge / mcp-os / link_cli until setup completes");
+                log::info!("setup not started, deferring IDE Bridge / mcp-os / host_exec / link_cli until setup completes");
             }
 
             // Start background auto-update check (store handle for cancellation)
@@ -1576,6 +1856,16 @@ fn main() {
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,
+            // host_exec (ADR-054): per-recipe confirmation reply
+            // (host-exec://confirm-request → host_exec_confirm_reply), plus the
+            // Integrations-tab settings commands (status / toggle / edit the
+            // whitelist / resolve an executable for the "browse…" picker).
+            host_exec_process::host_exec_confirm_reply,
+            host_exec_cmd::get_host_exec,
+            host_exec_cmd::set_host_exec_enabled,
+            host_exec_cmd::host_exec_save_settings,
+            host_exec_cmd::host_exec_load_settings,
+            host_exec_cmd::host_exec_resolve_executable,
             // Plugins
             plugin_cmd::get_plugins,
             plugin_cmd::peek_plugin_manifest,
