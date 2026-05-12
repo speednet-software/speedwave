@@ -614,7 +614,6 @@ mod tests {
     use std::collections::HashMap;
 
     /// Poll until `is_node_process(pid)` is true (fork/execve race on Linux CI).
-    #[cfg(unix)]
     fn wait_for_node_comm(pid: u32) {
         for _ in 0..40 {
             if is_node_process(pid) {
