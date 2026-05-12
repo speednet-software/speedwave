@@ -51,7 +51,7 @@ The user-level config file stores project definitions, the active project, IDE s
 
 ### `ui.beta_enabled`
 
-Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). When `true`, the Desktop app reveals hidden / work-in-progress UI surfaces and shows a small `BETA` badge in the corner. Default is off. Toggle it from the tray-icon menu → **Beta features** (the item appears once initial setup is complete), or edit this field directly. This is a UI surface gate only — it is **not** a security control and does not unlock any privileged capability. See [ADR-055](../adr/ADR-055-beta-features-toggle.md).
+Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). When `true`, the Desktop app reveals hidden / work-in-progress UI surfaces and shows a small `BETA` badge in the corner. Default is off. Toggle it from the tray-icon menu → **Beta features** (the item appears once initial setup is complete), or edit this field directly. This is a UI surface gate only — it is **not** a security control and does not unlock any privileged capability. See [ADR-058](../adr/ADR-058-beta-features-toggle.md).
 
 ## Per-Project: `.speedwave.json`
 
