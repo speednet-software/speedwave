@@ -10,9 +10,8 @@
 //! (`<data_dir>/host-exec/<project>/config.json`), (re)spawn or tear down the
 //! per-project worker, and — if the project's containers are running — recreate
 //! them so the hub re-discovers (or drops) the `host_exec` tools with the
-//! worker's current port. `host_exec_confirm_reply` (the per-recipe
-//! confirmation reply) lives in `host_exec_process` next to the reader thread
-//! that consumes it.
+//! worker's current port. There is no per-call confirmation — enabling
+//! host_exec (via the danger modal) is the consent (ADR-054).
 //!
 //! All `#[tauri::command]` functions here are registered in `main.rs`'s
 //! `invoke_handler!`.
@@ -20,6 +19,7 @@
 use crate::types::check_project;
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::config::{self, HostExecRecipe};
+use speedwave_runtime::host_exec_process::write_host_exec_config_snapshot;
 
 /// What the Desktop UI shows for `host_exec` in a project: whether it's
 /// enabled, and the current whitelist (so the recipe editor can render it).
@@ -59,7 +59,6 @@ pub fn get_host_exec(project: String) -> Result<HostExecStatus, String> {
 pub async fn set_host_exec_enabled(
     project: String,
     enabled: bool,
-    app: tauri::AppHandle,
     host_exec: tauri::State<'_, crate::reconcile::SharedHostExec>,
 ) -> Result<(), String> {
     check_project(&project)?;
@@ -80,7 +79,7 @@ pub async fn set_host_exec_enabled(
 
         // 2. (Re)spawn or tear down this project's worker.
         if enabled {
-            crate::ensure_host_exec_running(&host_exec_arc, &app, &project);
+            crate::ensure_host_exec_running(&host_exec_arc, &project);
         } else {
             crate::reconcile::teardown_host_exec_for_project(&host_exec_arc, &project);
         }
@@ -101,14 +100,13 @@ pub async fn set_host_exec_enabled(
 /// Validates the recipes (`host_exec::validate_host_exec_config` — the same
 /// rules the worker relies on) and only persists if valid (a readable error is
 /// returned otherwise, not a 500). Then: writes the chmod-600 worker snapshot,
-/// clears that project's confirmation cache (so an edited recipe re-prompts),
-/// respawns the worker if it's running, and recreates the project's containers
-/// (if running) so the hub re-discovers the updated tool set.
+/// respawns the worker if it's running (so it re-reads the whitelist), and
+/// recreates the project's containers (if running) so the hub re-discovers the
+/// updated tool set.
 #[tauri::command]
 pub async fn host_exec_save_settings(
     project: String,
     commands: Vec<HostExecRecipe>,
-    app: tauri::AppHandle,
     host_exec: tauri::State<'_, crate::reconcile::SharedHostExec>,
 ) -> Result<(), String> {
     check_project(&project)?;
@@ -153,20 +151,18 @@ pub async fn host_exec_save_settings(
         let snapshot =
             config::host_exec_config_snapshot(&project_dir, &resolved.host_exec_commands);
         let config_path = state_dir.join(speedwave_runtime::consts::HOST_EXEC_CONFIG_FILE);
-        crate::write_host_exec_config_snapshot(&config_path, &snapshot)
-            .map_err(|e| e.to_string())?;
+        write_host_exec_config_snapshot(&config_path, &snapshot).map_err(|e| e.to_string())?;
 
         // 4. If host_exec is enabled for this project, make the worker reflect
-        //    the new whitelist: respawn it if it's running (refreshes tools/list
-        //    and clears its confirmation cache), or spawn it via
-        //    `ensure_host_exec_running` if it's enabled but not currently up
-        //    (e.g. it died, or this is the first edit before a chat starts).
-        //    Disabled → nothing to do; the worker also re-reads its snapshot per
-        //    call regardless.
+        //    the new whitelist: respawn it if it's running (refreshes tools/list),
+        //    or spawn it via `ensure_host_exec_running` if it's enabled but not
+        //    currently up (e.g. it died, or this is the first edit before a chat
+        //    starts). Disabled → nothing to do; the worker also re-reads its
+        //    snapshot per call regardless.
         if resolved.host_exec {
             let was_running = respawn_host_exec_worker(&host_exec_arc, &project);
             if !was_running {
-                crate::ensure_host_exec_running(&host_exec_arc, &app, &project);
+                crate::ensure_host_exec_running(&host_exec_arc, &project);
             }
         }
 
@@ -250,12 +246,11 @@ pub fn host_exec_resolve_executable(name: String) -> Result<Option<String>, Stri
 // ---------------------------------------------------------------------------
 
 /// Respawn the project's `host_exec` worker if one is in the shared map (so it
-/// re-reads the whitelist and the hub gets a fresh `tools/list`); `respawn()`
-/// also clears that project's confirmation cache. Returns `true` if a worker
-/// was mapped (and a respawn was attempted), `false` if none was — so the
-/// caller can `ensure_host_exec_running` instead. On a respawn failure the dead
-/// worker is dropped (the watchdog / next chat start retries) and `true` is
-/// still returned (a worker *was* there).
+/// re-reads the whitelist and the hub gets a fresh `tools/list`). Returns `true`
+/// if a worker was mapped (and a respawn was attempted), `false` if none was —
+/// so the caller can `ensure_host_exec_running` instead. On a respawn failure
+/// the dead worker is dropped (the watchdog / next chat start retries) and
+/// `true` is still returned (a worker *was* there).
 fn respawn_host_exec_worker(host_exec: &crate::reconcile::SharedHostExec, project: &str) -> bool {
     match host_exec.lock() {
         Ok(mut map) => {
@@ -345,7 +340,6 @@ mod tests {
                 cwd_sub: None,
                 params: None,
                 env: None,
-                confirm: speedwave_runtime::config::HostExecConfirm::Ask,
             }],
         };
         let json = serde_json::to_string(&s).unwrap();

@@ -20,7 +20,6 @@ mod git_cmd;
 mod health;
 mod history;
 mod host_exec_cmd;
-mod host_exec_process;
 mod host_path;
 mod http_util;
 mod ide_bridge;
@@ -66,6 +65,7 @@ use reconcile::{
 };
 
 pub(crate) use host_path::recovered_host_path;
+use speedwave_runtime::host_exec_process::{write_host_exec_config_snapshot, HostExecProcess};
 
 /// Joins a cleanup thread handle with a watchdog that force-exits after
 /// `EXIT_CLEANUP_TIMEOUT_SECS`. If the cleanup thread panics, exits with
@@ -171,7 +171,7 @@ fn start_session_inner(
     // `port`/`auth-token` files already exist when `apply_host_exec_config`
     // renders it. If we just started it (fresh spawn), recreate the project's
     // containers so the hub re-renders with the URL. Best-effort.
-    let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, &app_handle, project);
+    let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, project);
     if host_exec_just_started {
         host_exec_cmd::recreate_project_containers_if_running(project);
     }
@@ -1003,11 +1003,7 @@ fn ensure_mcp_os_running(
 /// Returns `true` if it spawned a fresh worker (so the caller should recreate
 /// the project's containers — the hub needs the new `WORKER_HOST_EXEC_URL`),
 /// `false` if a worker was already running, disabled, or the spawn failed.
-pub(crate) fn ensure_host_exec_running(
-    host_exec: &SharedHostExec,
-    app_handle: &tauri::AppHandle,
-    project: &str,
-) -> bool {
+pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str) -> bool {
     let mut map = match host_exec.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1076,12 +1072,12 @@ pub(crate) fn ensure_host_exec_running(
             return false;
         }
     };
-    match host_exec_process::HostExecProcess::spawn_for(
+    match HostExecProcess::spawn_in(
         project,
         &project_dir,
         &script,
         recovered_host_path(),
-        app_handle.clone(),
+        speedwave_runtime::consts::data_dir(),
     ) {
         Ok(proc) => {
             log::info!("host_exec[{project}]: started (port {})", proc.port());
@@ -1097,64 +1093,6 @@ pub(crate) fn ensure_host_exec_running(
     }
 }
 
-/// Write the `host_exec` config snapshot JSON to `path` chmod 600
-/// (current-user-only ACL on Windows). The snapshot may hold recipe `env`
-/// values (possibly secrets) — ADR-054. Same Windows TOCTOU caveat as
-/// `host_exec_process::write_restricted_file`; extracting this trio into a
-/// shared `fs_util` helper is a tracked follow-up.
-pub(crate) fn write_host_exec_config_snapshot(
-    path: &std::path::Path,
-    snapshot: &serde_json::Value,
-) -> std::io::Result<()> {
-    let body = serde_json::to_string_pretty(snapshot).unwrap_or_else(|_| "{}".to_string());
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(body.as_bytes())?;
-        Ok(())
-    }
-    #[cfg(windows)]
-    {
-        std::fs::write(path, &body)?;
-        let status = speedwave_runtime::binary::system_command("icacls")
-            .args([
-                path.as_os_str(),
-                "/inheritance:r".as_ref(),
-                "/grant:r".as_ref(),
-            ])
-            .arg(format!(
-                "{}:(F)",
-                std::env::var("USERNAME").unwrap_or_default()
-            ))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if let Ok(s) = status {
-            if !s.success() {
-                log::warn!(
-                    "icacls on {} failed (exit {s}) — config snapshot may be readable",
-                    path.display()
-                );
-            }
-        }
-        Ok(())
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (path, body);
-        Err(std::io::Error::other(
-            "unsupported platform for host_exec config snapshot",
-        ))
-    }
-}
-
 /// Per-project `host_exec` watchdog: one thread iterating the shared map,
 /// respawning any worker whose process has died (or stopped listening). On a
 /// respawn, the hub must re-discover the project's `host_exec` tools — step 5
@@ -1165,7 +1103,7 @@ pub(crate) fn write_host_exec_config_snapshot(
 /// Mirrors `start_mcp_os_watchdog`'s shape: 30 s checks, a cooldown after a run
 /// of unhealthy checks, and exit when `HOST_EXEC_WATCHDOG_STOP` is set or the
 /// map is gone.
-fn start_host_exec_watchdog(host_exec: SharedHostExec, _app_handle: tauri::AppHandle) {
+fn start_host_exec_watchdog(host_exec: SharedHostExec) {
     std::thread::spawn(move || {
         use std::time::Duration;
         const CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -1567,7 +1505,7 @@ fn main() {
                 // for a project that has it enabled (ADR-054). The watchdog
                 // simply respawns any that die.
                 HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
-                start_host_exec_watchdog(host_exec.clone(), app.handle().clone());
+                start_host_exec_watchdog(host_exec.clone());
             } else {
                 log::info!("setup not started, deferring IDE Bridge / mcp-os / host_exec / link_cli until setup completes");
             }
@@ -1886,11 +1824,10 @@ fn main() {
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,
-            // host_exec (ADR-054): per-recipe confirmation reply
-            // (host-exec://confirm-request → host_exec_confirm_reply), plus the
-            // Integrations-tab settings commands (status / toggle / edit the
-            // whitelist / resolve an executable for the "browse…" picker).
-            host_exec_process::host_exec_confirm_reply,
+            // host_exec (ADR-054): Integrations-tab settings commands
+            // (status / toggle / edit the whitelist / resolve an executable for
+            // the "browse…" picker). No per-call confirmation — enabling
+            // host_exec is the consent.
             host_exec_cmd::get_host_exec,
             host_exec_cmd::set_host_exec_enabled,
             host_exec_cmd::host_exec_save_settings,

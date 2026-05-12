@@ -193,19 +193,6 @@ pub(crate) fn check_mcp_os_alive_in(data_dir: &std::path::Path) -> bool {
     std::net::TcpStream::connect_timeout(&addr, MCP_OS_POLL_TIMEOUT).is_ok()
 }
 
-/// Whether a per-project `host_exec` worker is listening on `port`
-/// (`127.0.0.1:<port>`). Unlike `is_mcp_os_alive`, this takes the port
-/// directly — `host_exec` is per-project and the caller
-/// (`HostExecProcess::is_alive`) already knows its worker is process-alive
-/// (`child.is_some()`), so a quick TCP probe is all that's needed here.
-pub(crate) fn is_host_exec_alive(port: u16) -> bool {
-    if port == 0 {
-        return false;
-    }
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    std::net::TcpStream::connect_timeout(&addr, MCP_OS_POLL_TIMEOUT).is_ok()
-}
-
 pub struct HealthMonitor;
 
 impl HealthMonitor {
@@ -1261,40 +1248,6 @@ mod tests {
             "PID alive + port listening should return true"
         );
         drop(listener);
-    }
-
-    // ── is_host_exec_alive tests ───────────────────────────────────────
-
-    #[test]
-    fn is_host_exec_alive_true_when_port_open() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(
-            super::is_host_exec_alive(port),
-            "a bound port should be reported alive"
-        );
-        drop(listener);
-    }
-
-    #[test]
-    fn is_host_exec_alive_false_when_port_closed() {
-        // Bind to get a free port, then drop the listener so the port is closed.
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-        assert!(
-            !super::is_host_exec_alive(port),
-            "a closed port should be reported not-alive"
-        );
-    }
-
-    #[test]
-    fn is_host_exec_alive_false_for_port_zero() {
-        assert!(
-            !super::is_host_exec_alive(0),
-            "port 0 is never a valid listening port"
-        );
     }
 
     #[test]

@@ -40,24 +40,10 @@ ctrlc = { version = "3", features = ["termination"] }
 dashmap = "6"
 futures-core = "0.3"
 json-patch = "4"
-# Hashes a `host_exec` recipe's serialized config for the confirmation-cache
-# key (ADR-054) — an edited recipe gets a fresh hash and re-prompts. Same
-# version as speedwave-runtime; RustCrypto, MIT/Apache, already in the tree.
-sha2 = "0.11"
 # JSON Schema validation for `plugin_save_settings` — refuses payloads
 # that don't match the plugin's manifest-declared `settings_schema`.
 # MIT-licensed; transitive deps already in the tree (regex, url, fancy-regex).
 jsonschema = { version = "0.46", default-features = false }
-
-[target.'cfg(unix)'.dependencies]
-# Maps an extra file descriptor (fd 3) into the `host_exec` worker so it can
-# write confirm-requests over it (ADR-054 §Confirmation flow). Unix-only — the
-# `pre_exec` it uses internally has no Windows equivalent; on Windows the
-# confirm channel is left unwired and the worker fails closed (see the NOTE in
-# host_exec_process.rs::spawn_in). Apache-2.0/MIT; the unsafe `pre_exec` lives
-# inside the crate, so `unsafe_code = "deny"` in [lints.rust] still holds for
-# this crate.
-command-fds = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

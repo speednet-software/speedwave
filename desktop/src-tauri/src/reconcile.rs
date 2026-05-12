@@ -1,9 +1,9 @@
 // Compose port reconciliation, exit cleanup, and resource directory resolution.
 
-use crate::host_exec_process;
 use crate::ide_bridge;
 use crate::mcp_os_process;
 use crate::types::BundleReconcileStatus;
+use speedwave_runtime::host_exec_process::HostExecProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -20,7 +20,7 @@ pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
 /// Shared map of per-project `host_exec` workers (ADR-054). Unlike `mcp-os`
 /// (one global instance), `host_exec` is per-project — one worker process per
 /// project, keyed by project name. Empty until a project enables `host_exec`.
-pub(crate) type SharedHostExec = Arc<Mutex<HashMap<String, host_exec_process::HostExecProcess>>>;
+pub(crate) type SharedHostExec = Arc<Mutex<HashMap<String, HostExecProcess>>>;
 
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
