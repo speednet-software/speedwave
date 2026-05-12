@@ -1107,7 +1107,7 @@ pub fn build_images() -> anyhow::Result<()> {
     // Build the active project's enabled set (+ claude/mcp-hub always). On a
     // fresh setup there is no active project, so only claude/mcp-hub are
     // built — workers come on demand when an integration is first enabled
-    // (ADR-056).
+    // (ADR-057).
     let active_integrations = {
         let user_config = config::load_user_config().unwrap_or_default();
         match user_config.active_project.as_deref() {

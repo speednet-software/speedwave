@@ -1,4 +1,4 @@
-# ADR-056: Lazy build of enabled worker container images
+# ADR-057: Lazy build of enabled worker container images
 
 ## Status
 

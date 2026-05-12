@@ -932,7 +932,7 @@ pub fn ensure_project_images_built(
 }
 
 /// Removes worker images that `project` no longer enables. Per-project scope
-/// (ADR-056): switching to a project that needs a pruned image triggers a
+/// (ADR-057): switching to a project that needs a pruned image triggers a
 /// lazy build. Warn-only — failure never blocks restart.
 fn prune_unused_worker_images(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
@@ -1055,7 +1055,7 @@ pub async fn restart_integration_containers(
             ));
         }
 
-        // Drop worker images this project no longer enables (ADR-056 per-project
+        // Drop worker images this project no longer enables (ADR-057 per-project
         // scope; other projects rebuild lazily on switch). Warn-only.
         prune_unused_worker_images(&*rt, &project);
 

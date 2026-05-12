@@ -540,7 +540,7 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
-        // Lazy build for the destination project (ADR-056).
+        // Lazy build for the destination project (ADR-057).
         if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&*rt, &project)
         {
             log::error!("recreate_project_containers: image build failed: {sanitized}");
