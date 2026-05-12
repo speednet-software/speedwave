@@ -375,10 +375,9 @@ fn main() -> anyhow::Result<()> {
             use std::io::Write;
             let sanitized =
                 speedwave_runtime::log_sanitizer::sanitize(&format!("{}", record.args()));
-            // ISO8601 local-time timestamp with millis — kept in sync with
-            // the desktop logger format so merged log views (e.g. user
-            // pasting CLI + desktop logs side-by-side) stay comparable.
-            let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z");
+            // One timestamp format for every Speedwave log line — see
+            // `speedwave_runtime::log_ts` (the Rust SSOT).
+            let ts = speedwave_runtime::log_ts::log_timestamp();
             writeln!(
                 buf,
                 "{ts} [{level}][{target}] {sanitized}",

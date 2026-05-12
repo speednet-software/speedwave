@@ -110,8 +110,8 @@ impl HostExecProcess {
 
         // Keep the audit log bounded; pre-create it chmod 600 so the worker's
         // `appendFile` (audit.ts) opens an already-restricted file.
-        truncate_log_if_oversized(&log_path, LOG_MAX_BYTES);
-        let _ = open_log_file(&log_path);
+        crate::log_file::truncate_if_oversized(&log_path, LOG_MAX_BYTES);
+        let _ = crate::log_file::open_log_file(&log_path);
 
         // Bearer token — chmod 600.
         write_restricted_file(&token_path, &token)?;
@@ -431,13 +431,13 @@ fn drain_and_read_port(
         let log_path_stderr = log_path.to_path_buf();
         let h = std::thread::spawn(move || {
             use std::io::BufRead;
-            let mut log_file = open_log_file(&log_path_stderr);
+            let mut log_file = crate::log_file::open_log_file(&log_path_stderr);
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines() {
                 match line {
                     Ok(line) => {
                         log::warn!("host_exec stderr: {line}");
-                        write_log_line(&mut log_file, "STDERR", &line);
+                        crate::log_file::write_log_line(&mut log_file, "STDERR", &line);
                     }
                     Err(_) => break,
                 }
@@ -450,7 +450,7 @@ fn drain_and_read_port(
     let log_path_stdout = log_path.to_path_buf();
     let h = std::thread::spawn(move || {
         use std::io::BufRead;
-        let mut log_file = open_log_file(&log_path_stdout);
+        let mut log_file = crate::log_file::open_log_file(&log_path_stdout);
         let reader = std::io::BufReader::new(stdout);
         let mut port_sent = false;
         for line in reader.lines() {
@@ -464,13 +464,13 @@ fn drain_and_read_port(
                                         anyhow::anyhow!("port {port} out of u16 range")
                                     }));
                                 port_sent = true;
-                                write_log_line(&mut log_file, "STDOUT", &line);
+                                crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
                                 continue;
                             }
                         }
                     }
                     log::debug!("host_exec: {line}");
-                    write_log_line(&mut log_file, "STDOUT", &line);
+                    crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
                 }
                 Err(_) => break,
             }
@@ -487,53 +487,6 @@ fn drain_and_read_port(
         Ok(result) => result.map(|port| (port, handles)),
         Err(_) => anyhow::bail!("timed out waiting for host_exec worker port announcement"),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Log helpers (a slimmed-down copy of desktop's `log_file`, sans the chrono
-// timestamp — the worker's audit JSON lines carry their own `ts`, and the
-// drain lines are debugging aids). Extracting a single shared log helper is a
-// tracked follow-up (ADR-054).
-// ---------------------------------------------------------------------------
-
-/// Open a log file for appending with `chmod 600` on Unix. `None` on error.
-fn open_log_file(path: &Path) -> Option<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.append(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    opts.open(path).ok()
-}
-
-/// Append `prefix: line` (or just `line` if `prefix` is empty) to the log.
-/// Errors are silently ignored.
-fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
-    use std::io::Write;
-    if let Some(ref mut f) = file {
-        if prefix.is_empty() {
-            let _ = writeln!(f, "{line}");
-        } else {
-            let _ = writeln!(f, "{prefix}: {line}");
-        }
-    }
-}
-
-/// Rotate a log file if it exceeds `max_bytes` by keeping the last half
-/// (line-aligned). Preserves the most recent entries. Best-effort.
-fn truncate_log_if_oversized(path: &Path, max_bytes: u64) {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) if c.len() as u64 > max_bytes => c,
-        _ => return,
-    };
-    let keep_from = content.len() / 2;
-    let tail = match content[keep_from..].find('\n') {
-        Some(pos) => &content[keep_from + pos + 1..],
-        None => &content[keep_from..],
-    };
-    let _ = std::fs::write(path, tail);
 }
 
 // ---------------------------------------------------------------------------
@@ -788,30 +741,6 @@ setTimeout(() => {}, 60000);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "now-a-file");
     }
 
-    // -- truncate_log_if_oversized ------------------------------------------
-
-    #[test]
-    fn truncate_log_keeps_tail_when_oversized() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("log");
-        let line = "x".repeat(99) + "\n";
-        let mut content = "OLD-MARKER\n".to_string();
-        while content.len() <= 4096 {
-            content.push_str(&line);
-        }
-        content.push_str("NEW-MARKER\n");
-        std::fs::write(&p, &content).unwrap();
-        truncate_log_if_oversized(&p, 2048);
-        let after = std::fs::read_to_string(&p).unwrap();
-        assert!(!after.contains("OLD-MARKER"));
-        assert!(after.contains("NEW-MARKER"));
-        // Small file: untouched.
-        let small = tmp.path().join("small");
-        std::fs::write(&small, "tiny\n").unwrap();
-        truncate_log_if_oversized(&small, 2048);
-        assert_eq!(std::fs::read_to_string(&small).unwrap(), "tiny\n");
-    }
-
     // -- kill_stale_by_pid_file ---------------------------------------------
 
     #[test]
@@ -955,9 +884,18 @@ setTimeout(() => {}, 60000);
         child.wait().ok();
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(log.exists());
-        assert!(std::fs::read_to_string(&log)
-            .unwrap()
-            .contains("starting up"));
+        let content = std::fs::read_to_string(&log).unwrap();
+        // Drain lines now carry the shared `<ISO> STDOUT: …` prefix.
+        let first = content.lines().next().unwrap();
+        let space = first.find(' ').unwrap();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&first[..space]).is_ok(),
+            "drain line must start with an RFC-3339 timestamp: {content}"
+        );
+        assert!(
+            content.contains("STDOUT: starting up"),
+            "content: {content}"
+        );
     }
 
     #[cfg(unix)]

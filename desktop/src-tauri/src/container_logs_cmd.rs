@@ -556,8 +556,7 @@ mod tests {
     #[test]
     fn read_tail_sanitized_reads_and_sanitizes() {
         let tmp = tempfile::tempdir().unwrap();
-        let log_content =
-            "[07-04-2026 14:30:00] SESSION: started\n[07-04-2026 14:30:01] STDERR: Bearer sk-ant-secret-key-abc\n[07-04-2026 14:30:02] SESSION: stopped\n";
+        let log_content = "2026-04-07T14:30:00.000+02:00 SESSION: started\n2026-04-07T14:30:01.000+02:00 STDERR: Bearer sk-ant-secret-key-abc\n2026-04-07T14:30:02.000+02:00 SESSION: stopped\n";
         let log_path = tmp.path().join("claude-session.log");
         std::fs::write(&log_path, log_content).unwrap();
 
@@ -637,6 +636,19 @@ mod tests {
                 "expected unbracketed {lvl} with trailing space (frontend LEVEL_RE needs \\s+), got: {out}"
             );
         }
+    }
+
+    #[test]
+    fn rewrite_desktop_level_handles_colon_offset_timestamp() {
+        // `log_ts::log_timestamp()` emits the RFC-3339 colon form `+02:00`;
+        // the timestamp still has no space, so the first-space split lands
+        // exactly at the start of `[LEVEL]`.
+        let line = "2026-05-12T14:34:02.814+02:00 [WARN][speedwave_desktop::x] msg";
+        let out = rewrite_desktop_bracketed_level(line);
+        assert_eq!(
+            out,
+            "2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] msg"
+        );
     }
 
     #[test]

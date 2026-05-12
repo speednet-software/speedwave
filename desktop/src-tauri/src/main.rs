@@ -25,7 +25,6 @@ mod http_util;
 mod ide_bridge;
 mod integrations_cmd;
 mod llm_cmd;
-mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
 mod oauth_cmd;
@@ -1352,7 +1351,7 @@ fn main() {
         .plugin({
             use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
             // Note: no timezone_strategy() here — the custom `.format(...)`
-            // below takes over and uses `chrono::Local::now()` directly, so
+            // below takes over and uses the shared `log_ts` SSOT directly, so
             // the plugin's TimezoneStrategy would be dead config.
             tauri_plugin_log::Builder::new()
                 .targets([
@@ -1371,13 +1370,9 @@ fn main() {
                 .format(move |callback, message, record| {
                     let sanitized =
                         speedwave_runtime::log_sanitizer::sanitize(&format!("{message}"));
-                    // ISO8601 local-time timestamp with millisecond precision.
-                    // Shipped in every log line so post-mortem timing analysis
-                    // (e.g. shutdown-sequence profiling) does not need a
-                    // separate overlay. `%.3f` keeps the millis in the
-                    // fractional-seconds slot; `%z` is the numeric UTC offset
-                    // from chrono::Local::now(), which reads the system timezone.
-                    let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z");
+                    // One timestamp format for every Speedwave log line — see
+                    // `speedwave_runtime::log_ts` (the Rust SSOT).
+                    let ts = speedwave_runtime::log_ts::log_timestamp();
                     callback.finish(format_args!(
                         "{ts} [{level}][{target}] {sanitized}",
                         level = record.level(),
