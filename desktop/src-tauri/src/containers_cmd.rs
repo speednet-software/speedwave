@@ -654,6 +654,26 @@ pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::Anthrop
     speedwave_runtime::defaults::ANTHROPIC_MODELS
 }
 
+/// One entry per built-in image, for the build-progress modal's display labels
+/// and the "~Ns" estimate. Same `image_name` value as the
+/// `worker_image_build_status` event so the frontend can join estimates ↔ events.
+#[derive(serde::Serialize)]
+pub struct WorkerImageBuildEstimate {
+    pub image_name: &'static str,
+    pub estimated_seconds: u32,
+}
+
+#[tauri::command]
+pub fn list_worker_image_build_estimates() -> Vec<WorkerImageBuildEstimate> {
+    speedwave_runtime::build::IMAGES
+        .iter()
+        .map(|img| WorkerImageBuildEstimate {
+            image_name: img.name,
+            estimated_seconds: img.estimated_build_seconds,
+        })
+        .collect()
+}
+
 /// Returns the display label of the Opus model that the dropdown's
 /// `(default)` option resolves to at runtime — used by the Settings UI to
 /// render an honest hint like *"Default — Opus 4.7 (switchable via /model)"*
