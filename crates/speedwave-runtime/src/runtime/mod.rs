@@ -87,7 +87,7 @@ pub trait ContainerRuntime: Send + Sync {
 
     /// Removes dangling images and build cache (not tagged images).
     ///
-    /// Used by `build_all_images` to recover from stale overlayfs snapshotter
+    /// Used by `build_images_for_bundle` to recover from stale overlayfs snapshotter
     /// state on containerd (containerd bug — "failed to rename:
     /// file exists" during layer extraction). Only removes dangling
     /// (untagged) images and build cache, so successfully-built tagged

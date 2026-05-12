@@ -1601,8 +1601,8 @@ mod tests {
             prepare_called: Arc::clone(&prepare_called),
         };
 
-        // build_all_images resolves the real build root, then calls prepare_build_context.
-        // Since our mock overrides prepare_build_context, the translated path should be used.
+        // build_images_for_bundle resolves the real build root, then calls
+        // prepare_build_context; the mock returns the translated path.
         let bundle_id = "test-bundle";
         let result = build_all_for_bundle(&rt, bundle_id);
         assert!(result.is_ok());
