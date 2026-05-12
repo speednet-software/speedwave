@@ -15,7 +15,7 @@ import type { HostExecConfigSnapshot, HostExecRecipe } from './types.js';
 function recipe(
   partial: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>
 ): HostExecRecipe {
-  return { args: [], confirm: 'ask', ...partial };
+  return { args: [], ...partial };
 }
 
 describe('readConfigSnapshot', () => {

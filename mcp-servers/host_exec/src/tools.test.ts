@@ -9,30 +9,12 @@ import {
   buildTools,
   renderCommand,
 } from './tools.js';
-import type { ConfirmReply, ConfirmRequest, ConfirmTransport } from './confirm.js';
 import type { HostExecConfigSnapshot, HostExecRecipe } from './types.js';
 
 const NODE = process.execPath;
 
-function recipe(
-  p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>
-): HostExecRecipe {
-  return { args: [], confirm: 'ask', ...p };
-}
-
-function autoTransport(decision: ConfirmReply['decision']): ConfirmTransport {
-  const cbs = new Set<(r: ConfirmReply) => void>();
-  return {
-    send(req: ConfirmRequest) {
-      setImmediate(() => {
-        for (const cb of cbs) cb({ type: 'confirm-reply', id: req.id, decision });
-      });
-    },
-    onReply(cb) {
-      cbs.add(cb);
-      return () => cbs.delete(cb);
-    },
-  };
+function recipe(p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>): HostExecRecipe {
+  return { args: [], ...p };
 }
 
 /** Extract the first text-content string from a tool result (for assertions). */
@@ -86,9 +68,7 @@ describe('buildInputSchema', () => {
 
 describe('buildToolDefinition', () => {
   it('names the tool after the recipe and renders the command + example', () => {
-    const t = buildToolDefinition(
-      recipe({ name: 'gradle_help', exec: './gradlew', args: ['help'] })
-    );
+    const t = buildToolDefinition(recipe({ name: 'gradle_help', exec: './gradlew', args: ['help'] }));
     expect(t.name).toBe('gradle_help');
     expect(t.description).toContain('`./gradlew help`');
     expect(t.description).toContain("project's directory");
@@ -162,7 +142,7 @@ describe('buildToolHandler / buildTools', () => {
     await writeSnapshot([
       recipe({ name: 'hi', exec: NODE, args: ['-e', 'process.stdout.write("yo")'] }),
     ]);
-    const handler = buildToolHandler('hi', configPath, autoTransport('allow'));
+    const handler = buildToolHandler('hi', configPath);
     const res = await handler({});
     expect(res.isError).toBeUndefined();
     const payload = JSON.parse(textOf(res));
@@ -174,18 +154,10 @@ describe('buildToolHandler / buildTools', () => {
 
   it('handler returns an MCP error result on a tool error', async () => {
     await writeSnapshot([recipe({ name: 'present', exec: NODE, args: ['-e', '0'] })]);
-    const handler = buildToolHandler('not-present', configPath, autoTransport('allow'));
+    const handler = buildToolHandler('not-present', configPath);
     const res = await handler({});
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/no host_exec recipe named 'not-present'/);
-  });
-
-  it('handler maps a denied confirmation to an error result', async () => {
-    await writeSnapshot([recipe({ name: 'hi', exec: NODE, args: ['-e', '0'] })]);
-    const handler = buildToolHandler('hi', configPath, autoTransport('deny'));
-    const res = await handler({});
-    expect(res.isError).toBe(true);
-    expect(textOf(res)).toMatch(/denied by the user/);
   });
 
   it('buildTools produces one {tool,handler} per recipe', async () => {
@@ -194,7 +166,7 @@ describe('buildToolHandler / buildTools', () => {
       recipe({ name: 'b', exec: NODE, args: ['-e', '0'] }),
     ]);
     const snap: HostExecConfigSnapshot = JSON.parse(await fs.readFile(configPath, 'utf-8'));
-    const defs = buildTools(snap.commands, configPath, autoTransport('allow'));
+    const defs = buildTools(snap.commands, configPath);
     expect(defs.map((d) => d.tool.name)).toEqual(['a', 'b']);
     expect(defs.every((d) => typeof d.handler === 'function')).toBe(true);
   });

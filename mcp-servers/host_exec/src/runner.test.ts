@@ -3,40 +3,13 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnRecipe, runRecipeCall, killTree } from './runner.js';
-import type { ConfirmReply, ConfirmRequest, ConfirmTransport } from './confirm.js';
 import type { HostExecConfigSnapshot, HostExecRecipe } from './types.js';
 
 const NODE = process.execPath;
 const onWindows = process.platform === 'win32';
 
-function recipe(
-  p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>
-): HostExecRecipe {
-  return { args: [], confirm: 'ask', ...p };
-}
-
-/** A confirm transport that auto-replies with a fixed decision. */
-function autoTransport(decision: ConfirmReply['decision'] | 'never'): ConfirmTransport & {
-  sent: ConfirmRequest[];
-} {
-  const cbs = new Set<(r: ConfirmReply) => void>();
-  const sent: ConfirmRequest[] = [];
-  return {
-    sent,
-    send(req) {
-      sent.push(req);
-      if (decision !== 'never') {
-        // reply on next tick so the awaiter has subscribed
-        setImmediate(() => {
-          for (const cb of cbs) cb({ type: 'confirm-reply', id: req.id, decision });
-        });
-      }
-    },
-    onReply(cb) {
-      cbs.add(cb);
-      return () => cbs.delete(cb);
-    },
-  };
+function recipe(p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>): HostExecRecipe {
+  return { args: [], ...p };
 }
 
 describe('spawnRecipe', () => {
@@ -131,6 +104,19 @@ describe('spawnRecipe', () => {
     expect(r.stdout).toBe('eof:0');
   });
 
+  it('keeps stdout and stderr separate', async () => {
+    const r = await spawnRecipe(
+      NODE,
+      ['-e', 'process.stdout.write("OUT"); process.stderr.write("ERR")'],
+      dir,
+      'streams',
+      '.',
+      { PATH: process.env.PATH }
+    );
+    expect(r.stdout).toBe('OUT');
+    expect(r.stderr).toBe('ERR');
+  });
+
   it('kills on timeout and reports killed_timeout', async () => {
     const start = Date.now();
     const r = await spawnRecipe(
@@ -180,6 +166,31 @@ describe('spawnRecipe', () => {
     expect(r.stdout).toBe('BUILD SUCCESSFUL\n');
   });
 
+  it('collapses \\r within a line (last segment wins, as a terminal renders it)', async () => {
+    const r = await spawnRecipe(
+      NODE,
+      ['-e', 'process.stdout.write("10%\\r50%\\r100%\\n")'],
+      dir,
+      'cr',
+      '.',
+      { PATH: process.env.PATH }
+    );
+    expect(r.stdout).toBe('100%\n');
+  });
+
+  it('decodes non-UTF-8 bytes lossily (no crash)', async () => {
+    const r = await spawnRecipe(
+      NODE,
+      ['-e', 'process.stdout.write(Buffer.from([0xff, 0xfe, 0x41]))'],
+      dir,
+      'bin',
+      '.',
+      { PATH: process.env.PATH }
+    );
+    expect(r.status).toBe('exited');
+    expect(r.stdout).toContain('A');
+  });
+
   // Process-tree kill: a recipe (like `npm test` / `gradle`) that forks a
   // long-lived grandchild which ignores SIGTERM but stays in the recipe's
   // process group (NOT detached). When the recipe times out, the worker
@@ -187,62 +198,59 @@ describe('spawnRecipe', () => {
   // bare `child.kill()` would leave it running. (Skipped on Windows, where the
   // kill path is `taskkill /T /F` and process groups don't apply the same way;
   // the Unix case is the one we can verify deterministically here.)
-  it.skipIf(onWindows)(
-    'SIGKILLs the whole process group on timeout (grandchild dies)',
-    async () => {
-      // Grandchild: ignores SIGTERM, writes its pid to a file, then sleeps long.
-      // The pid-file path goes through `process.argv`, not string-interpolated
-      // into the source — CodeQL flagged the old `${JSON.stringify(pidFile)}`
-      // pattern as `js/bad-code-sanitization` even though `dir` is a
-      // `mkdtemp`-controlled path. Keeping both `grandchildSrc` and
-      // `recipeSrc` as constant strings removes any code-construction-from-data.
-      //
-      // NB: with `node -e <code> <arg1> <arg2>`, Node strips `-e` AND `<code>`
-      // from argv, so the first trailing arg is `process.argv[1]`, not [2].
-      const pidFile = path.join(dir, 'grandchild.pid');
-      const grandchildSrc =
-        "process.on('SIGTERM',()=>{}); " +
-        "require('fs').writeFileSync(process.argv[1], String(process.pid)); " +
-        'setTimeout(()=>{}, 120_000);';
-      // Recipe: spawn the grandchild in the SAME process group (no `detached`),
-      // wait for it to write its pid file, then sleep long itself.
-      const recipeSrc =
-        "const cp=require('child_process'), fs=require('fs'); " +
-        'const grandchildSrc=process.argv[1], pidFile=process.argv[2]; ' +
-        "cp.spawn(process.execPath,['-e',grandchildSrc,pidFile],{stdio:'ignore'}); " +
-        'const wait=()=>{ if(fs.existsSync(pidFile)) { setTimeout(()=>{}, 120_000); } else { setTimeout(wait, 50); } }; ' +
-        'wait();';
-      const r = await spawnRecipe(
-        NODE,
-        ['-e', recipeSrc, grandchildSrc, pidFile],
-        dir,
-        'tree',
-        '.',
-        { PATH: process.env.PATH },
-        2000
-      );
-      expect(r.status).toBe('killed_timeout');
-      // Give the OS a moment, then read the grandchild pid and assert it's dead.
-      await new Promise((res) => setTimeout(res, 500));
-      const gcPid = Number.parseInt(await fs.readFile(pidFile, 'utf-8'), 10);
-      expect(Number.isInteger(gcPid)).toBe(true);
-      let alive = true;
-      try {
-        process.kill(gcPid, 0); // throws ESRCH if not alive
-      } catch {
-        alive = false;
-      }
-      if (alive) {
-        // best-effort cleanup if the assertion is about to fail
-        try {
-          process.kill(gcPid, 'SIGKILL');
-        } catch {
-          /* ignore */
-        }
-      }
-      expect(alive).toBe(false);
+  it.skipIf(onWindows)('SIGKILLs the whole process group on timeout (grandchild dies)', async () => {
+    // Grandchild: ignores SIGTERM, writes its pid to a file, then sleeps long.
+    // The pid-file path goes through `process.argv`, not string-interpolated
+    // into the source — CodeQL flagged the old `${JSON.stringify(pidFile)}`
+    // pattern as `js/bad-code-sanitization` even though `dir` is a
+    // `mkdtemp`-controlled path. Keeping both `grandchildSrc` and
+    // `recipeSrc` as constant strings removes any code-construction-from-data.
+    //
+    // NB: with `node -e <code> <arg1> <arg2>`, Node strips `-e` AND `<code>`
+    // from argv, so the first trailing arg is `process.argv[1]`, not [2].
+    const pidFile = path.join(dir, 'grandchild.pid');
+    const grandchildSrc =
+      "process.on('SIGTERM',()=>{}); " +
+      "require('fs').writeFileSync(process.argv[1], String(process.pid)); " +
+      'setTimeout(()=>{}, 120_000);';
+    // Recipe: spawn the grandchild in the SAME process group (no `detached`),
+    // wait for it to write its pid file, then sleep long itself.
+    const recipeSrc =
+      "const cp=require('child_process'), fs=require('fs'); " +
+      'const grandchildSrc=process.argv[1], pidFile=process.argv[2]; ' +
+      "cp.spawn(process.execPath,['-e',grandchildSrc,pidFile],{stdio:'ignore'}); " +
+      'const wait=()=>{ if(fs.existsSync(pidFile)) { setTimeout(()=>{}, 120_000); } else { setTimeout(wait, 50); } }; ' +
+      'wait();';
+    const r = await spawnRecipe(
+      NODE,
+      ['-e', recipeSrc, grandchildSrc, pidFile],
+      dir,
+      'tree',
+      '.',
+      { PATH: process.env.PATH },
+      2000
+    );
+    expect(r.status).toBe('killed_timeout');
+    // Give the OS a moment, then read the grandchild pid and assert it's dead.
+    await new Promise((res) => setTimeout(res, 500));
+    const gcPid = Number.parseInt(await fs.readFile(pidFile, 'utf-8'), 10);
+    expect(Number.isInteger(gcPid)).toBe(true);
+    let alive = true;
+    try {
+      process.kill(gcPid, 0); // throws ESRCH if not alive
+    } catch {
+      alive = false;
     }
-  );
+    if (alive) {
+      // best-effort cleanup if the assertion is about to fail
+      try {
+        process.kill(gcPid, 'SIGKILL');
+      } catch {
+        /* ignore */
+      }
+    }
+    expect(alive).toBe(false);
+  });
 });
 
 describe('killTree', () => {
@@ -308,12 +316,11 @@ describe('runRecipeCall', () => {
     await fs.rm(proj, { recursive: true, force: true });
   });
 
-  it('happy path: allowed recipe runs and returns a successful result', async () => {
+  it('happy path: allowed recipe runs immediately (no confirm prompt) and returns a successful result', async () => {
     await writeSnapshot([
       recipe({ name: 'hello', exec: NODE, args: ['-e', 'process.stdout.write("hi")'] }),
     ]);
-    const t = autoTransport('allow');
-    const out = await runRecipeCall(configPath, 'hello', {}, t, 1000, 5000);
+    const out = await runRecipeCall(configPath, 'hello', {}, 5000);
     expect(out.ok).toBe(true);
     if (out.ok) {
       expect(out.result.status).toBe('exited');
@@ -321,9 +328,6 @@ describe('runRecipeCall', () => {
       expect(out.result.stdout).toBe('hi');
       expect(out.result.command).toBe('hello');
     }
-    expect(t.sent).toHaveLength(1);
-    expect(t.sent[0].recipe).toBe('hello');
-    expect(t.sent[0].argv).toEqual([NODE, '-e', 'process.stdout.write("hi")']);
   });
 
   it('exit code != 0 is still a successful result with stderr', async () => {
@@ -334,7 +338,7 @@ describe('runRecipeCall', () => {
         args: ['-e', 'process.stderr.write("nope"); process.exit(2)'],
       }),
     ]);
-    const out = await runRecipeCall(configPath, 'fail', {}, autoTransport('allow'), 1000, 5000);
+    const out = await runRecipeCall(configPath, 'fail', {}, 5000);
     expect(out.ok).toBe(true);
     if (out.ok) {
       expect(out.result.status).toBe('exited');
@@ -345,7 +349,7 @@ describe('runRecipeCall', () => {
 
   it('unknown / removed recipe → tool error (fail closed)', async () => {
     await writeSnapshot([recipe({ name: 'present', exec: NODE, args: ['-e', '0'] })]);
-    const out = await runRecipeCall(configPath, 'absent', {}, autoTransport('allow'), 1000, 5000);
+    const out = await runRecipeCall(configPath, 'absent', {}, 5000);
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.message).toMatch(/no host_exec recipe named 'absent'/);
   });
@@ -359,14 +363,7 @@ describe('runRecipeCall', () => {
         params: [{ name: 'val', pattern: '[a-z]+' }],
       }),
     ]);
-    const out = await runRecipeCall(
-      configPath,
-      'echo',
-      { val: 'has spaces and 123' },
-      autoTransport('allow'),
-      1000,
-      5000
-    );
+    const out = await runRecipeCall(configPath, 'echo', { val: 'has spaces and 123' }, 5000);
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.message).toMatch(/does not match the required pattern/);
   });
@@ -376,35 +373,14 @@ describe('runRecipeCall', () => {
     const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'host-exec-out-')));
     await fs.symlink(outside, path.join(proj, 'link'), 'dir');
     await writeSnapshot([recipe({ name: 'x', exec: NODE, args: ['-e', '0'], cwdSub: 'link' })]);
-    const out = await runRecipeCall(configPath, 'x', {}, autoTransport('allow'), 1000, 5000);
+    const out = await runRecipeCall(configPath, 'x', {}, 5000);
     expect(out.ok).toBe(false);
     await fs.rm(outside, { recursive: true, force: true });
   });
 
-  it('user denies → tool error "denied by the user"', async () => {
-    await writeSnapshot([recipe({ name: 'hello', exec: NODE, args: ['-e', '0'] })]);
-    const out = await runRecipeCall(configPath, 'hello', {}, autoTransport('deny'), 1000, 5000);
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.message).toMatch(/denied by the user/);
-  });
-
-  it('confirmation never answered → tool error "confirmation unavailable" (fail closed)', async () => {
-    await writeSnapshot([recipe({ name: 'hello', exec: NODE, args: ['-e', '0'] })]);
-    const out = await runRecipeCall(
-      configPath,
-      'hello',
-      {},
-      autoTransport('never'),
-      150 /* short confirm timeout */,
-      5000
-    );
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.message).toMatch(/confirmation unavailable/);
-  });
-
   it('spawn_error from a missing binary is a successful result with status spawn_error', async () => {
     await writeSnapshot([recipe({ name: 'missing', exec: 'no-such-binary-abc-xyz', args: [] })]);
-    const out = await runRecipeCall(configPath, 'missing', {}, autoTransport('allow'), 1000, 5000);
+    const out = await runRecipeCall(configPath, 'missing', {}, 5000);
     expect(out.ok).toBe(true);
     if (out.ok) {
       expect(out.result.status).toBe('spawn_error');
@@ -414,26 +390,8 @@ describe('runRecipeCall', () => {
 
   it('malformed config snapshot → tool error (internal error)', async () => {
     await fs.writeFile(configPath, '{ broken', 'utf-8');
-    const out = await runRecipeCall(configPath, 'anything', {}, autoTransport('allow'), 1000, 5000);
+    const out = await runRecipeCall(configPath, 'anything', {}, 5000);
     expect(out.ok).toBe(false);
-  });
-
-  it('uses a fallback id when crypto.randomUUID is unavailable', async () => {
-    // Force the catch branch in newId().
-    const orig = (globalThis.crypto as Crypto).randomUUID;
-    (globalThis.crypto as { randomUUID: () => string }).randomUUID = () => {
-      throw new Error('no crypto');
-    };
-    try {
-      await writeSnapshot([
-        recipe({ name: 'hi', exec: NODE, args: ['-e', 'process.stdout.write("ok")'] }),
-      ]);
-      const out = await runRecipeCall(configPath, 'hi', {}, autoTransport('allow'), 1000, 5000);
-      expect(out.ok).toBe(true);
-      if (out.ok) expect(out.result.stdout).toBe('ok');
-    } finally {
-      (globalThis.crypto as { randomUUID: typeof orig }).randomUUID = orig;
-    }
   });
 
   it('writes an audit-log line with the full argv and redacted env keys', async () => {
@@ -448,13 +406,12 @@ describe('runRecipeCall', () => {
           env: { SPRING_PROFILES_ACTIVE: 'test', SOME_SECRET: 'sk-xxxx' },
         }),
       ]);
-      const out = await runRecipeCall(configPath, 'hello', {}, autoTransport('allow'), 1000, 5000);
+      const out = await runRecipeCall(configPath, 'hello', {}, 5000);
       expect(out.ok).toBe(true);
       const log = await fs.readFile(logFile, 'utf-8');
       const entry = JSON.parse(log.trim());
       expect(entry.recipe).toBe('hello');
       expect(entry.argv).toEqual([NODE, '-e', 'process.stdout.write("hi")']);
-      expect(entry.confirm).toBe('allow');
       expect(entry.status).toBe('exited');
       // env VALUES must NOT appear; only the sorted KEYS.
       expect(log).not.toContain('sk-xxxx');

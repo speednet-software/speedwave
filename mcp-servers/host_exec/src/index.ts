@@ -1,30 +1,16 @@
 /**
  * `host_exec` MCP worker — runs user-whitelisted project-toolchain commands on
- * the HOST, in the project directory, with no shell, with per-recipe
- * confirmation. **Per-project**: one worker process per project (each on its
- * own `127.0.0.1` port), spawned by the Tauri backend; the project's
- * `mcp-hub` reaches it via `WORKER_HOST_EXEC_URL` (gateway routing, ADR-010).
- * Not a container.
- *
- * Inputs (env, set by the Tauri parent):
- * - `PORT` — `0` lets the OS pick a free port (announced on stdout).
- * - `HOST_EXEC_AUTH_TOKEN` — Bearer token; required (the worker refuses to run
- *   without it).
- * - `HOST_EXEC_CONFIG_PATH` — path to the validated per-project whitelist
- *   snapshot (`<data_dir>/host-exec/<project>/config.json`). Read at startup to
- *   build the tools, and re-read on every tool call so a removed/disabled
- *   recipe fails closed.
- * - `HOST_EXEC_LOG_FILE` — per-project audit log path.
- * - fd 3 — extra pipe for confirm-requests (worker → Tauri); replies arrive on
- *   stdin. If absent, confirmations time out (fail closed).
- *
- * See ADR-054.
+ * the HOST, in the project directory, no shell. Per-project (one process per
+ * project on its own `127.0.0.1` port, spawned by Speedwave Desktop or CLI; the
+ * hub reaches it via `WORKER_HOST_EXEC_URL`). Not a container; no per-call
+ * confirmation (enabling host_exec is the consent — ADR-054). Env inputs:
+ * `PORT` (0 = OS picks), `HOST_EXEC_AUTH_TOKEN` (required), `HOST_EXEC_CONFIG_PATH`
+ * (the validated whitelist snapshot), `HOST_EXEC_LOG_FILE` (audit log).
  * @module host_exec
  */
 
 import { createMCPServer, ts } from '@speedwave/mcp-shared';
 import { readConfigSnapshot } from './config.js';
-import { openFd3, realConfirmChannel } from './confirm.js';
 import { buildTools } from './tools.js';
 
 const SERVER_NAME = 'host_exec';
@@ -62,10 +48,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Read the whitelist at startup to build the tools. If it is malformed, that
-  // is fatal (the Tauri side writes it from a validated config, so a parse
-  // error means something is badly wrong) — better to refuse to start than to
-  // expose a half-baked tool set.
+  // Read the whitelist at startup to build the tools. A parse error is fatal
+  // (the spawner writes it from a validated config) — refuse to start rather
+  // than expose a half-baked tool set.
   let snapshot;
   try {
     snapshot = await readConfigSnapshot(configPath);
@@ -74,8 +59,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const transport = realConfirmChannel(openFd3(), process.stdin);
-  const tools = buildTools(snapshot.commands, configPath, transport);
+  const tools = buildTools(snapshot.commands, configPath);
 
   const server = createMCPServer({
     name: SERVER_NAME,
@@ -86,9 +70,8 @@ async function main(): Promise<void> {
   });
 
   const actualPort = await server.start();
-  // Machine-readable port announcement on stdout — the Tauri parent scans
-  // stdout for this JSON object. (Confirm-requests go to fd 3, not stdout, so
-  // they never collide with this line.)
+  // Machine-readable port announcement on stdout — the spawner scans stdout
+  // for this JSON object.
   process.stdout.write(JSON.stringify({ port: actualPort }) + '\n');
   console.log(
     `${ts()} ${SERVER_NAME} started on port ${actualPort} for project '${snapshot.projectDir}' ` +

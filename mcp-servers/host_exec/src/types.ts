@@ -1,20 +1,11 @@
 /**
  * Shared types for the `host_exec` worker — the on-disk config snapshot the
- * Tauri side writes (mirrors the Rust `HostExecConfig` / `HostExecRecipe` in
+ * spawner writes (mirrors Rust `HostExecConfig`/`HostExecRecipe` in
  * `crates/speedwave-runtime/src/config.rs`) and the result contract returned to
- * Claude (ADR-054).
- *
- * The Rust side validates the config before writing the snapshot
- * (`host_exec::validate_host_exec_config`); this worker re-validates only the
- * parts it must enforce at runtime — the parameter regexes (compilation + a
- * full match against the value Claude supplied) and the `cwdSub` canonical-path
- * check, which need the project directory the Rust side does not have at
- * config-save time. It does not re-do the structural validation.
+ * Claude (ADR-054). The worker re-validates only the runtime-only parts (param
+ * regexes, the `cwdSub` canonical-path check); the structural validation is Rust's.
  * @module host_exec/types
  */
-
-/** When the per-recipe confirmation dialog is shown before a recipe runs. */
-export type HostExecConfirm = 'ask' | 'session' | 'always';
 
 /** One named parameter a recipe accepts from Claude. */
 export interface HostExecParam {
@@ -40,8 +31,6 @@ export interface HostExecRecipe {
   params?: HostExecParam[];
   /** Literal environment variables for the recipe (no Claude-supplied values). */
   env?: Record<string, string>;
-  /** When the per-recipe confirmation dialog is shown. */
-  confirm: HostExecConfirm;
 }
 
 /** The config snapshot file the worker reads (`<data_dir>/host-exec/<project>/config.json`). */
@@ -65,9 +54,8 @@ export type HostExecStatus =
  * The structured result returned to Claude as a (successful) ToolResult.
  * `exitCode !== 0` is **not** an MCP tool error — it is a successful result
  * carrying the command's exit code (ADR-054). MCP tool *errors* are reserved
- * for: unknown recipe, a parameter that fails its regex, a `cwdSub` escape, the
- * user declining (or the confirmation being unanswerable — fail closed), and a
- * `spawn_error`.
+ * for: unknown recipe, a parameter that fails its regex, a `cwdSub` escape, and
+ * a `spawn_error`.
  */
 export interface HostExecResult {
   /** How the execution ended. */

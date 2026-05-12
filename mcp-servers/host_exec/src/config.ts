@@ -1,12 +1,9 @@
 /**
- * Reads and uses the per-project config snapshot the Tauri side writes to
- * `HOST_EXEC_CONFIG_PATH`. The snapshot is re-read on every tool call (so a
- * removed/disabled recipe fails closed even before the hub re-discovers); the
- * structural validation already happened Rust-side (`validate_host_exec_config`),
- * so here we only do what needs the project directory: compile + full-match
- * recipe parameter regexes, and canonicalise `cwdSub` to confirm it stays under
- * the project root with no symlink escape (the algorithm
- * `compose.rs::ensure_resources_dir_safe` uses, re-implemented in TS).
+ * Reads/uses the per-project config snapshot at `HOST_EXEC_CONFIG_PATH`
+ * (re-read on every tool call → a removed recipe fails closed). Structural
+ * validation is Rust's (`validate_host_exec_config`); here we do only what
+ * needs the project dir: compile + full-match param regexes, and canonicalise
+ * `cwdSub` to confirm it stays under the project root (no symlink escape).
  * @module host_exec/config
  */
 

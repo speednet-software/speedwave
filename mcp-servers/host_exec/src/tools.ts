@@ -1,25 +1,19 @@
 /**
- * Builds the MCP tool definitions (and their handlers) from the per-project
- * recipe whitelist. One tool per recipe, named after the recipe; Claude calls
- * it as `host_exec.<camelCase(name)>()` via the hub's sandbox bridge. Each tool
- * declares only the recipe's parameters in its `inputSchema`, and a `_meta`
- * policy (`deferLoading: false` — there are few recipes and they are the point;
- * `timeoutClass: 'long'`; a `timeoutMs` covering the command timeout plus the
- * confirmation wait). The handler delegates to {@link runRecipeCall}: a
- * successful result (including `exitCode !== 0`) comes back as JSON; a tool
- * error (unknown recipe, bad parameter, `cwdSub` escape, denied/unanswerable
- * confirmation, spawn failure) comes back as an MCP error result. See ADR-054.
+ * Builds the MCP tool definitions + handlers from the per-project recipe
+ * whitelist — one tool per recipe (Claude calls it as
+ * `host_exec.<camelCase(name)>()`), each with only the recipe's params in
+ * `inputSchema` and a `_meta` policy (`deferLoading:false`, `timeoutClass:'long'`).
+ * No per-call confirmation (ADR-054).
  * @module host_exec/tools
  */
 
 import type { Tool, ToolDefinition, ToolHandler } from '@speedwave/mcp-shared';
 import { jsonResult, errorResult } from '@speedwave/mcp-shared';
-import type { ConfirmTransport } from './confirm.js';
 import { runRecipeCall } from './runner.js';
-import { COMMAND_TIMEOUT_MS, CONFIRM_TIMEOUT_MS } from './constants.js';
+import { COMMAND_TIMEOUT_MS } from './constants.js';
 import type { HostExecRecipe } from './types.js';
 
-/** Generous margin (ms) added on top of command + confirm for the hub's per-call budget. */
+/** Generous margin (ms) added on top of the command timeout for the hub's per-call budget. */
 const TIMEOUT_MARGIN_MS = 30_000;
 
 /**
@@ -108,12 +102,9 @@ export function buildToolDefinition(recipe: HostExecRecipe): Tool {
       // Show the recipe tools to Claude upfront — there are only a handful and
       // they are the reason host_exec exists.
       deferLoading: false,
-      // Build/test runs are long; the hub's long timeout is 600s. The per-call
-      // budget needs to cover the per-command timeout PLUS the confirmation
-      // wait; the hub honours timeoutMs after the small executor change (ADR-054
-      // §Timeout budget), otherwise this still fits under the 600s long timeout.
+      // Build/test runs are long; this fits under the hub's 600s long timeout.
       timeoutClass: 'long',
-      timeoutMs: COMMAND_TIMEOUT_MS + CONFIRM_TIMEOUT_MS + TIMEOUT_MARGIN_MS,
+      timeoutMs: COMMAND_TIMEOUT_MS + TIMEOUT_MARGIN_MS,
     },
   };
 }
@@ -125,16 +116,11 @@ export function buildToolDefinition(recipe: HostExecRecipe): Tool {
  * MCP tool result.
  * @param recipeName - The recipe name (the snapshot is the source of truth for its body).
  * @param configPath - `HOST_EXEC_CONFIG_PATH`.
- * @param transport - The confirm channel transport.
  * @returns The tool handler.
  */
-export function buildToolHandler(
-  recipeName: string,
-  configPath: string,
-  transport: ConfirmTransport
-): ToolHandler {
+export function buildToolHandler(recipeName: string, configPath: string): ToolHandler {
   return async (params: Record<string, unknown>) => {
-    const outcome = await runRecipeCall(configPath, recipeName, params, transport);
+    const outcome = await runRecipeCall(configPath, recipeName, params);
     if (outcome.ok) {
       return jsonResult(outcome.result);
     }
@@ -146,16 +132,11 @@ export function buildToolHandler(
  * Build all tool definitions (with handlers) for the recipes in a snapshot.
  * @param recipes - The whitelist from the config snapshot.
  * @param configPath - `HOST_EXEC_CONFIG_PATH`.
- * @param transport - The confirm channel transport.
  * @returns The list of `{ tool, handler }` pairs to pass to `createMCPServer`.
  */
-export function buildTools(
-  recipes: HostExecRecipe[],
-  configPath: string,
-  transport: ConfirmTransport
-): ToolDefinition[] {
+export function buildTools(recipes: HostExecRecipe[], configPath: string): ToolDefinition[] {
   return recipes.map((recipe) => ({
     tool: buildToolDefinition(recipe),
-    handler: buildToolHandler(recipe.name, configPath, transport),
+    handler: buildToolHandler(recipe.name, configPath),
   }));
 }

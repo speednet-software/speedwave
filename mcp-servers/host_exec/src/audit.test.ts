@@ -3,12 +3,11 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { auditRecipeCall } from './audit.js';
+import { LOG_MAX_BYTES } from './constants.js';
 import type { HostExecRecipe, HostExecResult } from './types.js';
 
-function recipe(
-  p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>
-): HostExecRecipe {
-  return { args: [], confirm: 'ask', ...p };
+function recipe(p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>): HostExecRecipe {
+  return { args: [], ...p };
 }
 
 const RESULT: HostExecResult = {
@@ -35,20 +34,14 @@ describe('auditRecipeCall', () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  it('appends a JSON line with recipe name, full argv, decision, and result fields', async () => {
+  it('appends a JSON line with recipe name, full argv, and result fields', async () => {
     const logFile = path.join(dir, 'log');
     process.env.HOST_EXEC_LOG_FILE = logFile;
-    await auditRecipeCall(
-      recipe({ name: 'test', exec: './gradlew', args: ['test'] }),
-      ['./gradlew', 'test'],
-      'allow',
-      RESULT
-    );
+    await auditRecipeCall(recipe({ name: 'test', exec: './gradlew', args: ['test'] }), ['./gradlew', 'test'], RESULT);
     const content = await fs.readFile(logFile, 'utf-8');
     const entry = JSON.parse(content.trim());
     expect(entry.recipe).toBe('test');
     expect(entry.argv).toEqual(['./gradlew', 'test']);
-    expect(entry.confirm).toBe('allow');
     expect(entry.status).toBe('exited');
     expect(entry.exitCode).toBe(0);
     expect(entry.envKeys).toEqual([]);
@@ -64,7 +57,6 @@ describe('auditRecipeCall', () => {
         env: { ZED: 'zzz', ALPHA: 'sk-secret-do-not-log', CI: 'true' },
       }),
       ['./t'],
-      'allow-session',
       RESULT
     );
     const content = await fs.readFile(logFile, 'utf-8');
@@ -77,17 +69,43 @@ describe('auditRecipeCall', () => {
   it('records "not_executed" when there is no result', async () => {
     const logFile = path.join(dir, 'log');
     process.env.HOST_EXEC_LOG_FILE = logFile;
-    await auditRecipeCall(recipe({ name: 't', exec: './t' }), ['./t'], 'deny', undefined);
+    await auditRecipeCall(recipe({ name: 't', exec: './t' }), ['./t'], undefined);
     const entry = JSON.parse((await fs.readFile(logFile, 'utf-8')).trim());
     expect(entry.status).toBe('not_executed');
     expect(entry.exitCode).toBeNull();
-    expect(entry.confirm).toBe('deny');
+  });
+
+  it('appends to a small existing log without truncating it', async () => {
+    const logFile = path.join(dir, 'log');
+    process.env.HOST_EXEC_LOG_FILE = logFile;
+    await fs.writeFile(logFile, 'PRIOR-LINE\n', 'utf-8');
+    await auditRecipeCall(recipe({ name: 't', exec: './t' }), ['./t'], RESULT);
+    const content = await fs.readFile(logFile, 'utf-8');
+    expect(content).toContain('PRIOR-LINE'); // small file is kept intact
+    expect(content.trim().split('\n')).toHaveLength(2);
+  });
+
+  it('truncates the log to the last ~half when it grows past LOG_MAX_BYTES', async () => {
+    const logFile = path.join(dir, 'log');
+    process.env.HOST_EXEC_LOG_FILE = logFile;
+    // Seed with > LOG_MAX_BYTES of newline-aligned junk, including a unique
+    // marker near the start (which truncation should drop) and near the end.
+    const blockLine = 'x'.repeat(199) + '\n';
+    let seed = 'START-MARKER\n';
+    while (Buffer.byteLength(seed, 'utf-8') <= LOG_MAX_BYTES) seed += blockLine;
+    seed += blockLine + 'END-MARKER\n';
+    await fs.writeFile(logFile, seed, 'utf-8');
+    await auditRecipeCall(recipe({ name: 't', exec: './t' }), ['./t'], RESULT);
+    const content = await fs.readFile(logFile, 'utf-8');
+    expect(content).not.toContain('START-MARKER');
+    expect(content).toContain('END-MARKER');
+    expect(content.trim().endsWith('}')).toBe(true); // the new audit line
   });
 
   it('does not throw when HOST_EXEC_LOG_FILE is unset (logs to stderr)', async () => {
     delete process.env.HOST_EXEC_LOG_FILE;
     await expect(
-      auditRecipeCall(recipe({ name: 't', exec: './t' }), ['./t'], 'allow', RESULT)
+      auditRecipeCall(recipe({ name: 't', exec: './t' }), ['./t'], RESULT)
     ).resolves.toBeUndefined();
   });
 
@@ -95,7 +113,7 @@ describe('auditRecipeCall', () => {
     // Point at a path whose parent directory does not exist → ENOENT on append.
     process.env.HOST_EXEC_LOG_FILE = path.join(dir, 'no-such-dir', 'log');
     await expect(
-      auditRecipeCall(recipe({ name: 't', exec: './t' }), ['./t'], 'allow', RESULT)
+      auditRecipeCall(recipe({ name: 't', exec: './t' }), ['./t'], RESULT)
     ).resolves.toBeUndefined();
   });
 });

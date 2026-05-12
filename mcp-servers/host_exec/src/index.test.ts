@@ -5,7 +5,7 @@
  * subprocess (the only way to exercise `process.exit(1)`); the entrypoint is
  * deliberately NOT imported here (importing it would run `main()` in the test
  * process). The successful-startup path is covered indirectly by the unit tests
- * (they exercise `createMCPServer`, the tools, the confirm channel, etc.).
+ * (they exercise `createMCPServer`, the tools, the runner, etc.).
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { execFile } from 'node:child_process';

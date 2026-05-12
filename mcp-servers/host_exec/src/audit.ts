@@ -1,13 +1,10 @@
 /**
- * Per-project audit log for `host_exec` (ADR-054). Each recipe invocation is
- * appended to `HOST_EXEC_LOG_FILE` (`<data_dir>/host-exec/<project>/log` — the
- * Tauri side pre-creates it `0600`; we re-assert `mode` here in case it
- * doesn't exist) with the recipe name, the **full resolved argv**, the cwd,
- * exit/status/duration, and the confirmation decision. Recipe `env` *values*
- * are redacted (keys only) — but the argv is logged verbatim, so a recipe
- * that substitutes a `{param}` token records whatever value Claude supplied
- * (which may be sensitive). Best-effort: a missing path or failed append goes
- * to stderr and execution continues.
+ * Per-project audit log for `host_exec` (ADR-054) — appends each recipe call
+ * (name, full resolved argv, cwd, exit/status/duration) to `HOST_EXEC_LOG_FILE`
+ * (`<data_dir>/host-exec/<project>/log`, `0600`). Recipe `env` *values* are
+ * redacted (keys only); the argv is logged verbatim. This is the only
+ * after-the-fact record (no per-call confirmation). Best-effort — errors go to
+ * stderr; the log is truncated to the tail past `LOG_MAX_BYTES`.
  * @module host_exec/audit
  */
 
@@ -24,8 +21,8 @@ import type { HostExecRecipe, HostExecResult } from './types.js';
  */
 async function truncateLogIfOversized(logPath: string): Promise<void> {
   try {
-    const size = (await stat(logPath)).size;
-    if (size <= LOG_MAX_BYTES) return;
+    const stats = await stat(logPath);
+    if (stats.size <= LOG_MAX_BYTES) return;
     const content = await readFile(logPath, 'utf-8');
     const keepFrom = Math.floor(content.length / 2);
     const nl = content.indexOf('\n', keepFrom);
@@ -40,15 +37,11 @@ async function truncateLogIfOversized(logPath: string): Promise<void> {
  * Append one audit-log line for a completed (or failed-to-start) recipe call.
  * @param recipe - The recipe that was invoked.
  * @param argv - The full resolved argv (`exec` first, then args with parameters substituted).
- * @param decision - The confirmation decision (`allow` / `allow-session` / `deny`),
- *   or `'auto'` when the Tauri side auto-allowed (always / warm cache), or
- *   `'n/a'` when no confirmation was reached (e.g. tool error before that).
  * @param result - The execution result, or `undefined` if execution did not happen.
  */
 export async function auditRecipeCall(
   recipe: HostExecRecipe,
   argv: string[],
-  decision: string,
   result: HostExecResult | undefined
 ): Promise<void> {
   const logPath = process.env.HOST_EXEC_LOG_FILE;
@@ -59,7 +52,6 @@ export async function auditRecipeCall(
       argv,
       cwd: result?.cwd ?? recipe.cwdSub ?? '.',
       envKeys: recipe.env ? Object.keys(recipe.env).sort() : [],
-      confirm: decision,
       status: result?.status ?? 'not_executed',
       exitCode: result?.exitCode ?? null,
       signal: result?.signal ?? null,
