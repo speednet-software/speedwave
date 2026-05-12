@@ -31,7 +31,9 @@ describe('ts', () => {
     const expectedMin = -new Date().getTimezoneOffset();
     const sign = offset[0] === '-' ? -1 : 1;
     const got = sign * (Number(offset.slice(1, 3)) * 60 + Number(offset.slice(4, 6)));
-    expect(got).toBe(expectedMin);
+    // `+0`/`−0` differ under Object.is; compare via Math.abs + sign.
+    expect(Math.abs(got)).toBe(Math.abs(expectedMin));
+    if (got !== 0) expect(Math.sign(got)).toBe(Math.sign(expectedMin));
   });
 
   // The container's `TZ` (host TZ, via `tz::detect_host_timezone` + `inject_host_timezone`)
