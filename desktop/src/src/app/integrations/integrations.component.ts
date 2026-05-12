@@ -592,17 +592,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     svc.enabled = next;
     this.cdr.markForCheck();
     try {
-      await this.tauri.invoke('set_integration_enabled', {
-        project: this.activeProject,
-        service: svc.service,
-        enabled: next,
-      });
-      // Forward the just-enabled service to the eventual restart so the
-      // backend can roll it back on a worker-image build failure.
-      if (next) {
-        this.projectState.pendingJustEnabled = svc.service;
-      }
-      this.projectState.requestRestart();
+      await this.applyServiceToggle(svc, next);
     } catch (e: unknown) {
       svc.enabled = previous;
       this.error = e instanceof Error ? e.message : String(e);
@@ -772,18 +762,32 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   async toggleService(svc: IntegrationStatusEntry, event: Event): Promise<void> {
     const enabled = (event.target as HTMLInputElement).checked;
     try {
-      await this.tauri.invoke('set_integration_enabled', {
-        project: this.activeProject,
-        service: svc.service,
-        enabled,
-      });
-      svc.enabled = enabled;
-      this.projectState.requestRestart();
+      await this.applyServiceToggle(svc, enabled);
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
       (event.target as HTMLInputElement).checked = !enabled;
     }
     this.cdr.markForCheck();
+  }
+
+  /**
+   * SSOT for "user flipped an MCP service toggle".
+   * Persists the new value, marks `pendingJustEnabled` on enable so a failed
+   * restart can roll it back, and requests the container restart.
+   * @param svc - the integration being toggled.
+   * @param enabled - target enabled state.
+   */
+  private async applyServiceToggle(svc: IntegrationStatusEntry, enabled: boolean): Promise<void> {
+    await this.tauri.invoke('set_integration_enabled', {
+      project: this.activeProject,
+      service: svc.service,
+      enabled,
+    });
+    svc.enabled = enabled;
+    if (enabled) {
+      this.projectState.pendingJustEnabled = svc.service;
+    }
+    this.projectState.requestRestart();
   }
 
   /**

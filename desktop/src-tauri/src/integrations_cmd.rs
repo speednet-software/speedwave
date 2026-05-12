@@ -978,6 +978,32 @@ pub fn ensure_project_images_built(
         .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))
 }
 
+/// Removes worker images of the current bundle that no project enables anymore.
+/// Warn-only — failure to prune never blocks restart success.
+fn prune_unused_worker_images(rt: &dyn speedwave_runtime::runtime::ContainerRuntime) {
+    let user_config = match speedwave_runtime::config::load_user_config() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("prune_unused_worker_images: load_user_config failed: {e}");
+            return;
+        }
+    };
+    let union = crate::integrations_union::union_integrations(&user_config);
+    let keep = speedwave_runtime::build::enabled_images(&union);
+    let manifest = match speedwave_runtime::bundle::load_current_bundle_manifest() {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("prune_unused_worker_images: load manifest failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) =
+        speedwave_runtime::build::prune_orphan_current_bundle_images(rt, &manifest.bundle_id, &keep)
+    {
+        log::warn!("prune_unused_worker_images failed: {e}");
+    }
+}
+
 /// Rolls a service back to `enabled: false`; called when on-demand build fails.
 fn rollback_integration_to_disabled(project: &str, service: &str) {
     let result = config::with_config_lock(|| {
@@ -1061,6 +1087,9 @@ pub async fn restart_integration_containers(
                 "Restart failed: {e}. Rolled back to previous configuration."
             ));
         }
+
+        // Drop worker images that no project enables anymore (warn-only).
+        prune_unused_worker_images(&*rt);
 
         Ok(())
     })
