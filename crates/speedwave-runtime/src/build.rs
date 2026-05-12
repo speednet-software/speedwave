@@ -32,6 +32,7 @@ pub const IMAGE_MCP_REDMINE: &str = "speedwave-mcp-redmine";
 pub const IMAGE_MCP_GITLAB: &str = "speedwave-mcp-gitlab";
 pub const IMAGE_MCP_GITHUB: &str = "speedwave-mcp-github";
 pub const IMAGE_MCP_ATLASSIAN: &str = "speedwave-mcp-atlassian";
+pub const IMAGE_MCP_OFFICE: &str = "speedwave-mcp-office";
 pub const IMAGE_MCP_PLAYWRIGHT: &str = "speedwave-mcp-playwright";
 
 pub const IMAGES: &[ImageDef] = &[
@@ -81,6 +82,12 @@ pub const IMAGES: &[ImageDef] = &[
         name: IMAGE_MCP_ATLASSIAN,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/atlassian/Dockerfile",
+        build_args: &[],
+    },
+    ImageDef {
+        name: IMAGE_MCP_OFFICE,
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/office/Dockerfile",
         build_args: &[],
     },
     ImageDef {
@@ -231,72 +238,131 @@ fn resolve_build_root_inner(
 /// Step 2 before 3 ensures `make dev` uses local sources (with hoisted
 /// `node_modules`) instead of a stale bundle path written by the installed app.
 pub fn resolve_mcp_os_script() -> Option<std::path::PathBuf> {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
-    resolve_mcp_os_script_inner(
+    let dev = repo_dev_path("mcp-servers/os/dist/index.js");
+    resolve_worker_script_inner(
+        "mcp-os",
+        &["mcp-os", "os", "dist", "index.js"],
         crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
         dev,
     )
 }
 
-/// Internal implementation that accepts an explicit home directory for testability.
 #[cfg(test)]
 fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
-    resolve_mcp_os_script_inner(home, dev)
+    let dev = repo_dev_path("mcp-servers/os/dist/index.js");
+    resolve_worker_script_inner("mcp-os", &["mcp-os", "os", "dist", "index.js"], home, dev)
 }
 
-/// Core resolution logic, separated for testability (dev_path can be overridden).
+/// Resolves the `host_exec` worker `index.js` (bundle → CARGO source → marker).
+/// Mirrors [`resolve_mcp_os_script`]; ADR-054.
+pub fn resolve_host_exec_script() -> Option<std::path::PathBuf> {
+    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
+    resolve_worker_script_inner(
+        "host_exec",
+        &["host_exec", "host_exec", "dist", "index.js"],
+        crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
+        dev,
+    )
+}
+
+#[cfg(test)]
+fn resolve_host_exec_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
+    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
+    resolve_worker_script_inner(
+        "host_exec",
+        &["host_exec", "host_exec", "dist", "index.js"],
+        home,
+        dev,
+    )
+}
+
+/// Build a `<repo-root>/<rel>` path for the dev-tree fallback. `None` when out of tree.
+fn repo_dev_path(rel: &str) -> Option<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|repo| repo.join(rel))
+}
+
+/// Test-only alias — implementation is `resolve_worker_script_inner`.
+#[cfg(test)]
 fn resolve_mcp_os_script_inner(
     home: Option<PathBuf>,
     dev_path: Option<PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    // 1. SPEEDWAVE_RESOURCES_DIR (production — Tauri bundle)
+    resolve_worker_script_inner(
+        "mcp-os",
+        &["mcp-os", "os", "dist", "index.js"],
+        home,
+        dev_path,
+    )
+}
+
+/// Test-only alias — implementation is `resolve_worker_script_inner`.
+#[cfg(test)]
+fn resolve_host_exec_script_inner(
+    home: Option<PathBuf>,
+    dev_path: Option<PathBuf>,
+) -> Option<std::path::PathBuf> {
+    resolve_worker_script_inner(
+        "host_exec",
+        &["host_exec", "host_exec", "dist", "index.js"],
+        home,
+        dev_path,
+    )
+}
+
+/// Resolve a host-side worker script via the three-tier fallback shared by all
+/// bundled workers (`mcp-os`, `host_exec`, …): SPEEDWAVE_RESOURCES_DIR (bundle)
+/// → repo source tree (`make dev`) → `~/.speedwave/resources-dir` marker (CLI).
+/// `bundled_subpath` is the path *inside* the resources dir; `label` drives logs.
+fn resolve_worker_script_inner(
+    label: &str,
+    bundled_subpath: &[&str],
+    home: Option<PathBuf>,
+    dev_path: Option<PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let join_subpath = |base: PathBuf| -> PathBuf {
+        let mut p = base;
+        for seg in bundled_subpath {
+            p = p.join(seg);
+        }
+        p
+    };
+
+    // 1. SPEEDWAVE_RESOURCES_DIR — production Tauri bundle.
     if let Ok(res) = std::env::var(crate::consts::BUNDLE_RESOURCES_ENV) {
-        let p = PathBuf::from(&res)
-            .join("mcp-os")
-            .join("os")
-            .join("dist")
-            .join("index.js");
+        let p = join_subpath(PathBuf::from(&res));
         if p.exists() {
             return Some(p);
         }
-        log::warn!("mcp-os not found at bundled path: {}", p.display());
+        log::warn!("{label} not found at bundled path: {}", p.display());
     }
 
-    // 2. Dev source tree — prefer local sources over marker so `make dev`
-    //    picks up hoisted node_modules from the workspace
+    // 2. Repo source tree — prefer local sources over the marker so `make dev`
+    //    picks up hoisted node_modules from the workspace.
     if let Some(ref p) = dev_path {
         if p.exists() {
             return dev_path;
         }
     }
 
-    // 3. Marker file (CLI reads Desktop's resources path)
+    // 3. Marker file — CLI reads Desktop's resources path.
     if let Some(ref home) = home {
         let marker = home
             .join(crate::consts::DATA_DIR)
             .join(crate::consts::RESOURCES_MARKER);
         if let Ok(dir) = std::fs::read_to_string(&marker) {
-            let p = PathBuf::from(dir.trim())
-                .join("mcp-os")
-                .join("os")
-                .join("dist")
-                .join("index.js");
+            let p = join_subpath(PathBuf::from(dir.trim()));
             if p.is_absolute() && p.exists() {
                 return Some(p);
             }
-            log::warn!("mcp-os not found at marker path: {}", p.display());
+            log::warn!("{label} not found at marker path: {}", p.display());
         }
     }
 
     if let Some(ref p) = dev_path {
-        log::warn!("mcp-os not found at dev path: {}", p.display());
+        log::warn!("{label} not found at dev path: {}", p.display());
     }
 
     None
@@ -1362,10 +1428,106 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_host_exec_script_dev_mode() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        // In dev mode with None home, it falls through to CARGO_MANIFEST_DIR.
+        // The worker dist may or may not exist depending on whether host_exec
+        // was built; just verify it doesn't panic.
+        let result = resolve_host_exec_script_with_home(None);
+        let _ = result;
+    }
+
+    #[test]
+    fn test_resolve_host_exec_script_from_env() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let script_path = tmp
+            .path()
+            .join("host_exec")
+            .join("host_exec")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "// stub").unwrap();
+        std::env::set_var(
+            crate::consts::BUNDLE_RESOURCES_ENV,
+            tmp.path().to_string_lossy().as_ref(),
+        );
+        let result = resolve_host_exec_script_inner(None, None);
+        assert_eq!(result, Some(script_path));
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn test_resolve_host_exec_script_from_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        let script_path = fake_resources
+            .join("host_exec")
+            .join("host_exec")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "// stub").unwrap();
+
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        // Pass None as dev_path to test marker fallback in isolation
+        let result = resolve_host_exec_script_inner(Some(fake_home), None);
+        assert_eq!(result, Some(script_path));
+    }
+
+    #[test]
+    fn test_resolve_host_exec_script_dev_path_beats_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+        let fake_dev = tmp.path().join("dev-repo");
+
+        let marker_script = fake_resources
+            .join("host_exec")
+            .join("host_exec")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(marker_script.parent().unwrap()).unwrap();
+        std::fs::write(&marker_script, "// marker").unwrap();
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        let dev_script = fake_dev.join("mcp-servers/host_exec/dist/index.js");
+        std::fs::create_dir_all(dev_script.parent().unwrap()).unwrap();
+        std::fs::write(&dev_script, "// dev").unwrap();
+
+        let result = resolve_host_exec_script_inner(Some(fake_home), Some(dev_script.clone()));
+        assert_eq!(result, Some(dev_script), "dev path should win over marker");
+    }
+
+    #[test]
+    fn test_resolve_host_exec_script_none_when_nothing_present() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home"); // no marker file
+        let dev_path = tmp.path().join("dev/mcp-servers/host_exec/dist/index.js"); // does not exist
+
+        let result = resolve_host_exec_script_inner(Some(fake_home), Some(dev_path));
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn test_images_count() {
         // Catalogue size, not build behaviour — the build set is filtered per
         // project by `enabled_images`. Bump this when adding a built-in worker.
-        assert_eq!(IMAGES.len(), 9);
+        assert_eq!(IMAGES.len(), 10);
     }
 
     #[test]

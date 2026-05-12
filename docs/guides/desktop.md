@@ -104,7 +104,7 @@ The `/logs` route hosts a single page that combines container logs, host-side se
 
 **Diagnostics export.** A button bundles the runtime log directory plus a compact summary into a ZIP. The path is shown in a modal with a copy-to-clipboard control; the file is opened in the host's file manager rather than auto-attached anywhere, so the user controls who sees it.
 
-**Log timestamps.** `nerdctl compose logs` and `wsl compose logs` now run with `--timestamps`, so every container log line carries an ISO date. The renderer also accepts the bracketed `[HH:MM:SS]` format emitted by some application loggers and prefixes it with the host's current date — note the day prefix is a hint when the container clock or timezone diverges from the host.
+**Log timestamps.** Every Speedwave-emitted log line carries one ISO-8601 timestamp in **local time with a colon offset** (`2026-05-12T14:34:02.814+02:00`) — Rust loggers via `speedwave-runtime`'s `log_ts::log_timestamp()`, MCP workers / the hub / plugins via `@speedwave/mcp-shared`'s `ts()` (which reads the container's `TZ`, propagated from the host by `tz::detect_host_timezone`). The `/logs` view **renders every timestamp in the host's local zone** regardless of how the source wrote it — so a worker's `+02:00` stamp and nerdctl's UTC `Z` stamp (compose-container lines additionally carry nerdctl's RFC-3339 prefix; `nerdctl compose logs` / `wsl compose logs` run with `--timestamps`) for the same instant appear identically; the raw value is in the `[title]` tooltip. A bare bracketed `[HH:MM:SS]` from external tooling is dated with the host's current day.
 
 ## Meeting transcription
 

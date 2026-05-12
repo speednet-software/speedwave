@@ -12,6 +12,10 @@ export const config = {
     './specs/04-navigation.spec.ts',
     './specs/05-settings.spec.ts',
     './specs/06-project-management.spec.ts',
+    // 08 runs BEFORE 07 (factory reset): 08 touches Host Exec state which
+    // the factory reset is expected to wipe out — so the ordering both
+    // validates Host Exec and lets the reset verify it's gone afterwards.
+    './specs/08-host-exec.spec.ts',
     './specs/07-factory-reset.spec.ts',
   ],
   maxInstances: 1,

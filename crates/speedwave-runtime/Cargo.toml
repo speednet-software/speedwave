@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "6"
 fs2 = "0.4"
@@ -88,6 +89,10 @@ windows-capture = ["dep:cpal"]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 # Local HTTP mock for the model-downloader tests (no real network in unit tests).
 mockito = "1"
+# Serialises tests that mutate the process-global environment
+# (`std::env::set_var`) — without it they race each other and concurrent
+# runtime tests.
+serial_test = "3"
 
 [lints]
 workspace = true

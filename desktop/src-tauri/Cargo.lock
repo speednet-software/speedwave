@@ -5238,6 +5238,7 @@ dependencies = [
  "async-stream",
  "base64 0.22.1",
  "bzip2",
+ "chrono",
  "cpal",
  "dashmap",
  "dirs",

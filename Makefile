@@ -352,6 +352,20 @@ test-os: build-mcp
 	cd mcp-servers/os && npx vitest run
 	@echo "✅ OS MCP server tests passed"
 
+# pytest for the office worker's Python support-scripts. Builds a throwaway venv from
+# mcp-servers/office/requirements.txt (+ pytest). Heavy (matplotlib/numpy) — not part of
+# `make test`; run it explicitly, or rely on the office image build to exercise the scripts.
+# Tests that need a real matplotlib render self-skip on too-new Python interpreters.
+test-mcp-office-py:
+	@PY=$$(command -v python3.12 || command -v python3.11 || command -v python3); \
+	echo "  building office Python test venv ($$PY)..."; \
+	rm -rf .office-test-venv && "$$PY" -m venv .office-test-venv; \
+	.office-test-venv/bin/pip install -q --upgrade pip; \
+	.office-test-venv/bin/pip install -q -r mcp-servers/office/requirements.txt pytest; \
+	.office-test-venv/bin/python -m pytest mcp-servers/office/scripts -q; \
+	rm -rf .office-test-venv
+	@echo "✅ Office Python script tests passed"
+
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
 coverage: coverage-rust coverage-mcp coverage-angular
@@ -385,8 +399,9 @@ coverage-html: build-mcp
 
 test-e2e: build-cli
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	SPEEDWAVE_BIN=./target/debug/speedwave-cli bats _tests/e2e/speedwave.bats
+	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/speedwave.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/plugin-tamper.bats
+	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/host-exec.bats
 
 # Plugin tamper / signature-bypass E2E. Runs against the *release* CLI
 # so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be
@@ -578,7 +593,7 @@ check-desktop-clippy: build-angular build-mcp
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && npx tsc
-	@for ws in shared hub slack sharepoint redmine gitlab github atlassian os; do \
+	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os host_exec; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && npx tsc --noEmit) || exit 1; \
 	done

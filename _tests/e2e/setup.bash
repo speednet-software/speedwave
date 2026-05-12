@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # E2E test helpers for Speedwave CLI
 
-# Path to the built CLI binary
+# Path to the built CLI binary. Several tests `cd` into a per-test tempdir
+# before running the binary, so a relative path (the default `make test-e2e`
+# passes one) would resolve against the tempdir and fail with "command not
+# found". Resolve to an absolute path here once, idempotently.
 export SPEEDWAVE_BIN="${SPEEDWAVE_BIN:-../../target/debug/speedwave}"
+case "$SPEEDWAVE_BIN" in
+    /*) ;;  # already absolute
+    *)  SPEEDWAVE_BIN="$(cd "$(dirname "$SPEEDWAVE_BIN")" && pwd)/$(basename "$SPEEDWAVE_BIN")"
+        export SPEEDWAVE_BIN
+        ;;
+esac
 
 # Temp directory for test artifacts
 setup() {

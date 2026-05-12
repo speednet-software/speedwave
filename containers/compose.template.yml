@@ -59,9 +59,12 @@ services:
       - WORKER_GITLAB_URL=http://mcp-gitlab:${PORT_WORKER}
       - WORKER_GITHUB_URL=http://mcp-github:${PORT_WORKER}
       - WORKER_ATLASSIAN_URL=http://mcp-atlassian:${PORT_WORKER}
+      - WORKER_OFFICE_URL=http://mcp-office:${PORT_WORKER}
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:${PORT_WORKER}
     networks:
       - ${NETWORK_NAME}
+      # Also on the egress-less office network so the hub can reach mcp-office (ADR-055).
+      - ${NETWORK_NAME}_office
     deploy:
       resources:
         limits:
@@ -219,6 +222,43 @@ services:
           cpus: '0.5'
           memory: 128m
 
+  # Office documents worker — a pure file processor: no service credentials, no /tokens mount,
+  # and NO network egress (attached only to the internal ${NETWORK_NAME}_office network — see ADR-055).
+  # Mounts the project workspace read-write; outputs land under /workspace/.speedwave-office/.
+  mcp-office:
+    image: ${IMAGE_MCP_OFFICE}
+    pull_policy: never
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_office
+    read_only: true
+    user: "${CONTAINER_USER}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # /tmp holds the LibreOffice per-call profile, matplotlib config, and conversion scratch space.
+    # LibreOffice headless on a non-trivial .pptx can use a few hundred MB of temp space + RAM.
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    volumes:
+      # No /tokens mount — this worker has no credentials. /workspace is its only window onto the host.
+      - ${PROJECT_DIR}:/workspace:rw
+    environment:
+      - PORT=${PORT_WORKER}
+      # Anti-DoS / resource limits. Defaults are baked into the worker; override here if needed.
+      - OFFICE_MAX_INPUT_BYTES=52428800
+      - OFFICE_MAX_PDF_PAGES=2000
+      - OFFICE_TIMEOUT_STANDARD_MS=60000
+      - OFFICE_TIMEOUT_LO_MS=120000
+    networks:
+      # Internal-only: no route to the gateway → no internet (defence in depth on top of the
+      # application-level local-only resource loading in weasyprint/pandoc/LibreOffice).
+      - ${NETWORK_NAME}_office
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1g
+
   mcp-playwright:
     image: ${IMAGE_MCP_PLAYWRIGHT}
     pull_policy: never
@@ -258,3 +298,8 @@ services:
 networks:
   ${NETWORK_NAME}:
     driver: bridge
+  # Egress-less network for mcp-office (ADR-055). Only mcp-office and mcp-hub attach to it;
+  # `internal: true` removes the gateway route so containers on it have no outbound internet.
+  ${NETWORK_NAME}_office:
+    driver: bridge
+    internal: true

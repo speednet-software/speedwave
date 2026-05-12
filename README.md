@@ -40,7 +40,7 @@ This means Claude's context window stays clean regardless of how many integratio
 ## Key Features
 
 - **Two interfaces** — Desktop app (chat UI with project management) and CLI (`speedwave` terminal command)
-- **Built-in integrations** — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar, Reminders, Notes
+- **Built-in integrations** — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar, Reminders, Notes, plus an Office documents worker (Word/Excel/PowerPoint/PDF)
 - **Plugin system** — extend with custom MCP services via Ed25519-signed plugins
 - **Cross-platform** — macOS, Linux, Windows with platform-native OS integrations
 - **Zero-install dependencies** — Lima, nerdctl, and containerd are bundled; no system-wide Docker or container runtime needed
