@@ -93,7 +93,7 @@ Each MCP integration requires specific credentials to function. Fields marked as
 
 ### Enabling an integration — first build on demand
 
-When you toggle an integration on for the first time in a project, Speedwave builds its worker container image on demand (ADR-055). The build is part of the "Restarting containers…" wait — first builds for heavy images (`playwright` Chromium ~5–10 min; future `office` LibreOffice ~3–7 min; others ~30 s–2 min) extend that wait accordingly; subsequent toggles are near-instant because the build is cached.
+When you toggle an integration on for the first time in a project, Speedwave builds its worker container image on demand (ADR-055). The build is part of the "Restarting containers…" wait. First builds of heavy images (e.g. `playwright`, which pulls Chromium) noticeably extend that wait; subsequent toggles are near-instant because the build is cached.
 
 If the build fails (network, disk), the integration row reverts to disabled — your running containers keep their prior configuration. Disabling an integration drops its worker image; re-enabling rebuilds.
 

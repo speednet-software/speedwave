@@ -40,7 +40,7 @@ Build only the images that the user actually needs:
 
 **Positive:**
 
-- First-start of a project with one enabled integration builds 3 images (`claude` + `mcp-hub` + that worker) instead of 9 (and instead of 10+ once `mcp-office` lands). Cold build of `mcp-playwright` (~5–10 min) and the future `mcp-office` (~3–7 min) only happens for users who actually use them.
+- First-start of a project with one enabled integration builds 3 images (`claude` + `mcp-hub` + that worker) instead of 9 (and instead of 10+ once `mcp-office` lands). Cold build of heavy images (`mcp-playwright` Chromium, future `mcp-office` LibreOffice) only happens for users who actually use them.
 - Lima VM disk pressure drops accordingly — disabled integrations occupy no space.
 - Reconcile after an app update rebuilds only what the user actually runs.
 - Snapshotter and transient retry logic (ADR-032 [^3]) operates on a smaller slice and on single-image builds — same code path, parametrised.
