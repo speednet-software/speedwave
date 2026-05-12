@@ -80,8 +80,20 @@ pub struct TranscriptSession {
 impl TranscriptSession {
     /// A new session in `Recording` state.
     pub fn new(language: Language, audio_source: AudioSourceInfo, audio_path: PathBuf) -> Self {
+        Self::new_with_id(Uuid::new_v4(), language, audio_source, audio_path)
+    }
+
+    /// Like `new`, but with a caller-chosen id — used when the audio-file path
+    /// (which lives under `<root>/<id>/`) must be known *before* the session is
+    /// created (so it's correct from the first persisted write).
+    pub fn new_with_id(
+        id: Uuid,
+        language: Language,
+        audio_source: AudioSourceInfo,
+        audio_path: PathBuf,
+    ) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id,
             created_at: rfc3339_now(),
             language,
             audio_source,
@@ -366,6 +378,26 @@ mod tests {
         assert_eq!(s.audio_path, Some(PathBuf::from("/tmp/a.wav")));
         // created_at parses as RFC 3339-ish (YYYY-MM-DDTHH:MM:SSZ).
         assert!(s.created_at.ends_with('Z') && s.created_at.len() == 20);
+    }
+
+    #[test]
+    fn new_with_id_uses_the_caller_supplied_id_and_path() {
+        let id = Uuid::new_v4();
+        let s = TranscriptSession::new_with_id(
+            id,
+            Language::En,
+            mk_source(),
+            PathBuf::from("/data/transcripts/x/audio.wav"),
+        );
+        assert_eq!(s.id, id);
+        assert_eq!(
+            s.audio_path,
+            Some(PathBuf::from("/data/transcripts/x/audio.wav"))
+        );
+        assert!(matches!(s.status, TranscriptStatus::Recording));
+        // `new` delegates to it with a fresh id.
+        let s2 = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
+        assert_ne!(s2.id, id);
     }
 
     #[test]

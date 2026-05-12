@@ -82,4 +82,13 @@ describe('ModelManagerComponent', () => {
   it('isDownloading tracks in-flight downloads', () => {
     expect(component.isDownloading('small')).toBe(false);
   });
+
+  it('emits "changed" after the list refreshes (so the parent re-checks recording readiness)', async () => {
+    const spy = vi.fn();
+    component.changed.subscribe(spy);
+    await component.ngOnInit(); // first refresh
+    expect(spy).toHaveBeenCalledTimes(1);
+    await component.download('large-v3'); // refresh again
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
 });

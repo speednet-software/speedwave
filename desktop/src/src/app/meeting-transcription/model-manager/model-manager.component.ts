@@ -124,6 +124,11 @@ interface ProgressState {
 export class ModelManagerComponent implements OnInit {
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
+  /**
+   * Emitted after the model list changes (download/delete) so the parent can
+   *  re-check whether recording is now possible.
+   */
+  readonly changed = output<void>();
 
   /** Whisper catalogue entries + on-disk status. */
   readonly whisper = signal<ModelStatusEntry[]>([]);
@@ -144,7 +149,7 @@ export class ModelManagerComponent implements OnInit {
     await this.refresh();
   }
 
-  /** Re-reads the model catalogue / disk status. */
+  /** Re-reads the model catalogue / disk status and notifies the parent. */
   async refresh(): Promise<void> {
     try {
       const ack = await this.transcription.listModels();
@@ -157,6 +162,7 @@ export class ModelManagerComponent implements OnInit {
       this.error.set(msg);
       this.errorOccurred.emit(msg);
     }
+    this.changed.emit();
     this.cdr.markForCheck();
   }
 

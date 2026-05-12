@@ -84,7 +84,7 @@ import { ModelManagerComponent } from './model-manager/model-manager.component';
         <div class="flex flex-1 gap-4 overflow-hidden p-6">
           <aside class="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
             <app-session-list (opened)="onOpenSession($event)" (errorOccurred)="onError($event)" />
-            <app-model-manager (errorOccurred)="onError($event)" />
+            <app-model-manager (errorOccurred)="onError($event)" (changed)="onModelsChanged()" />
           </aside>
           <main class="flex flex-1 flex-col gap-4 overflow-hidden">
             <app-recording-controls
@@ -107,6 +107,8 @@ import { ModelManagerComponent } from './model-manager/model-manager.component';
 export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   /** Left pane's recordings list (refreshed after start/stop/delete). */
   @ViewChild(SessionListComponent) private sessionList?: SessionListComponent;
+  /** Recording controls (re-checked when the model list changes). */
+  @ViewChild(RecordingControlsComponent) private recordingControls?: RecordingControlsComponent;
 
   /** `null` while loading, `true`/`false` once the toggle is known. */
   readonly enabled = signal<boolean | null>(null);
@@ -181,6 +183,11 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
    */
   onStopped(_sessionId: string): void {
     void this.sessionList?.refresh();
+  }
+
+  /** The model list changed — re-check whether recording is now possible. */
+  onModelsChanged(): void {
+    void this.recordingControls?.refreshModelAvailability();
   }
 
   /** Deep-links to the macOS Microphone / Audio Recording privacy panes. */

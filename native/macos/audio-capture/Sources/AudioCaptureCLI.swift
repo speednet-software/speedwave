@@ -140,15 +140,19 @@ func logErr(_ message: String) {
 // MARK: - Argument parsing
 
 /// Source for `--record --source`. `all` = system-wide tap; `pid:N` = single
-/// process; `all-except:N` = system minus one process (e.g. excluding the
-/// speaker so we don't double-capture our own output).
+/// process; `all-except:N` = system minus one process; `mic-only` = no system
+/// tap at all, just the microphone (uses the public AVCaptureDevice consent
+/// API, so the OS prompt fires — unlike CoreAudio process taps).
 enum AudioSource {
     case all
     case pid(pid_t)
     case allExcept(pid_t)
+    /// Microphone only, no system tap. Optional device UID (`nil` = default input).
+    case micOnly(String?)
 }
 
-/// Microphone selector for `--mic`. `none` keeps the stream omitted entirely.
+/// Microphone selector for `--mic` (mixes the mic in alongside a system tap).
+/// `none` keeps the second stream omitted entirely.
 enum MicSelector {
     case none
     case defaultDevice
@@ -161,8 +165,9 @@ struct RecordOptions {
     let mic: MicSelector
 }
 
-/// Parses `--record --source <s> --mic <m>` from argv (after the subcommand).
-/// Returns `nil` if any flag is missing or malformed — caller exits with usage.
+/// Parses `--record --source <s> [--mic <m>]` from argv (after the subcommand).
+/// `--mic` is optional and defaults to `none`. Returns `nil` if any flag is
+/// missing or malformed — caller exits with usage.
 func parseRecordOptions(_ args: [String]) -> RecordOptions? {
     var source: AudioSource?
     var mic: MicSelector = .none
@@ -175,6 +180,10 @@ func parseRecordOptions(_ args: [String]) -> RecordOptions? {
         case "--source":
             if val == "all" {
                 source = .all
+            } else if val == "mic-only" {
+                source = .micOnly(nil)
+            } else if val.hasPrefix("mic-only:") {
+                source = .micOnly(String(val.dropFirst("mic-only:".count)))
             } else if val.hasPrefix("pid:") {
                 guard let p = pid_t(val.dropFirst(4)) else { return nil }
                 source = .pid(p)
@@ -405,6 +414,27 @@ func runRecord(_ opts: RecordOptions) {
     signal(SIGTERM, cleanupHandler)
     signal(SIGINT, cleanupHandler)
 
+    // mic-only: no system tap, just the microphone on stream 0. Uses the public
+    // AVCaptureDevice consent API so the OS prompt fires.
+    if case .micOnly = opts.source {
+        guard requestMicrophoneAccess() else {
+            logErr(
+                "microphone access denied — grant it in System Settings → Privacy & Security → Microphone")
+            exit(2)
+        }
+        WriterQueue.shared.writeHeader(streams: ["mic"])
+        do {
+            try startMicEngine(session: session, selector: .defaultDevice, streamIndex: 0)
+        } catch {
+            logErr("mic record start failed: \(error.localizedDescription)")
+            session.teardown()
+            exit(1)
+        }
+        RunLoop.main.run()
+        return
+    }
+
+    // System tap (+ optionally the mic mixed in as stream 1).
     let streams: [String]
     switch opts.mic {
     case .none: streams = ["app"]
@@ -415,7 +445,13 @@ func runRecord(_ opts: RecordOptions) {
     do {
         try startSystemTap(session: session, source: opts.source)
         if case .none = opts.mic {} else {
-            try startMicEngine(session: session, selector: opts.mic)
+            // The mic prompt fires here too (public API), so a mixed capture
+            // gets at least the mic if the system-tap permission is missing.
+            if requestMicrophoneAccess() {
+                try startMicEngine(session: session, selector: opts.mic, streamIndex: 1)
+            } else {
+                logErr("microphone access denied — recording system audio only")
+            }
         }
     } catch {
         logErr("record start failed: \(error.localizedDescription)")
@@ -476,6 +512,11 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
         }
         description.processes = [obj]
         description.isExclusive = true
+    case .micOnly:
+        // Unreachable — runRecord handles mic-only before getting here.
+        throw NSError(
+            domain: "AudioCapture", code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "mic-only must not reach startSystemTap"])
     }
     description.uuid = UUID()
     description.muteBehavior = .unmuted
@@ -589,11 +630,36 @@ func inputStreamFormat(of device: AudioObjectID) -> AudioStreamBasicDescription 
     return fallback
 }
 
-/// Spins up an AVAudioEngine on the default (or named) microphone and tees its
-/// frames into the framed protocol as stream 1 — via the writer queue, not
-/// directly on the engine's tap thread.
+/// Requests microphone consent via the public `AVCaptureDevice` API. This DOES
+/// show the macOS consent prompt (the embedded `NSMicrophoneUsageDescription`
+/// supplies the text) — unlike CoreAudio process taps, which have no public
+/// trigger. Blocks until the user responds (or, if already decided, returns
+/// immediately). Returns `true` if access is granted.
+func requestMicrophoneAccess() -> Bool {
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .authorized:
+        return true
+    case .denied, .restricted:
+        return false
+    case .notDetermined:
+        let sema = DispatchSemaphore(value: 0)
+        var granted = false
+        AVCaptureDevice.requestAccess(for: .audio) { ok in
+            granted = ok
+            sema.signal()
+        }
+        sema.wait()
+        return granted
+    @unknown default:
+        return false
+    }
+}
+
+/// Spins up an AVAudioEngine on the default microphone and tees its frames into
+/// the framed protocol on `streamIndex` (0 for mic-only, 1 when mixed alongside
+/// a system tap) — via the writer queue, not on the engine's tap thread.
 @available(macOS 14.4, *)
-func startMicEngine(session: RecordSession, selector: MicSelector) throws {
+func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: UInt32) throws {
     let engine = AVAudioEngine()
     let inputNode = engine.inputNode
     let format = inputNode.outputFormat(forBus: 0)
@@ -616,7 +682,8 @@ func startMicEngine(session: RecordSession, selector: MicSelector) throws {
         else { return }
         let offset = activeSession?.offsetNs() ?? 0
         WriterQueue.shared.enqueue(
-            streamIndex: 1, interleaved: interleaved, format: interleavedFmt, offsetNs: offset)
+            streamIndex: streamIndex, interleaved: interleaved, format: interleavedFmt,
+            offsetNs: offset)
     }
 
     // The `selector` is plumbed so a future iteration can route to a named

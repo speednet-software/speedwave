@@ -19,6 +19,7 @@ describe('RecordingControlsComponent', () => {
   let svc: {
     getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
+    listModels: ReturnType<typeof vi.fn>;
     startRecording: ReturnType<typeof vi.fn>;
     stopRecording: ReturnType<typeof vi.fn>;
   };
@@ -32,11 +33,24 @@ describe('RecordingControlsComponent', () => {
     },
     backends: ['cpu', 'metal'],
   };
+  /** A model list with at least one downloaded Whisper model. */
+  const modelsWithSmall = {
+    whisper: [{ key: 'small', downloaded: true, size_bytes: 488_000_000, path: '/m/small' }],
+    diarization: [],
+    total_bytes_used: 488_000_000,
+  };
+  /** A model list with nothing downloaded. */
+  const modelsEmpty = {
+    whisper: [{ key: 'small', downloaded: false, size_bytes: 488_000_000, path: null }],
+    diarization: [],
+    total_bytes_used: 0,
+  };
 
   beforeEach(async () => {
     svc = {
       getCapabilities: vi.fn(async () => caps),
       listAudioSources: vi.fn(async () => SOURCES),
+      listModels: vi.fn(async () => modelsWithSmall),
       startRecording: vi.fn(
         async (): Promise<StartAck> => ({
           session_id: 'sess-1',
@@ -124,5 +138,33 @@ describe('RecordingControlsComponent', () => {
     await component.ngOnInit();
     component.onLanguage('de');
     expect(component.language()).toBe('pl');
+  });
+
+  it('enables Start when a Whisper model is downloaded; no "download a model" note', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.hasModel()).toBe(true);
+    expect(fixture.nativeElement.querySelector('[data-testid="no-model-note"]')).toBeNull();
+    const start = fixture.nativeElement.querySelector('[data-testid="start-btn"]');
+    expect(start.disabled).toBe(false);
+  });
+
+  it('disables Start and shows the "download a model" note when nothing is downloaded', async () => {
+    svc.listModels.mockResolvedValue(modelsEmpty);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.hasModel()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="no-model-note"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(true);
+  });
+
+  it('refreshModelAvailability re-enables Start once a model is downloaded', async () => {
+    svc.listModels.mockResolvedValue(modelsEmpty);
+    await component.ngOnInit();
+    expect(component.hasModel()).toBe(false);
+    // A download lands → the parent calls refreshModelAvailability().
+    svc.listModels.mockResolvedValue(modelsWithSmall);
+    await component.refreshModelAvailability();
+    expect(component.hasModel()).toBe(true);
   });
 });

@@ -119,4 +119,14 @@ describe('MeetingTranscriptionComponent', () => {
     await component.ngOnDestroy();
     expect(svc.detach).toHaveBeenCalled();
   });
+
+  it('re-checks recording readiness when the model list changes', async () => {
+    await mount(true);
+    // The model-manager re-loads the list once on init; calling onModelsChanged
+    // makes the recording-controls re-read it too — listModels gets called again.
+    svc.listModels.mockClear();
+    component.onModelsChanged();
+    await fixture.whenStable();
+    expect(svc.listModels).toHaveBeenCalled();
+  });
 });

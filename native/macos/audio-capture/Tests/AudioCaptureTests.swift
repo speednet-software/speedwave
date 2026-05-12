@@ -114,14 +114,30 @@ final class AudioCaptureTests: XCTestCase {
 
     func testAudioSourceCases() {
         let pid: pid_t = 42
-        let cases: [AudioSource] = [.all, .pid(pid), .allExcept(pid)]
-        XCTAssertEqual(cases.count, 3)
-        // Compile-time exhaustiveness — if a fourth variant lands the parser
-        // must learn it before this test will pass again.
+        let cases: [AudioSource] = [.all, .pid(pid), .allExcept(pid), .micOnly(nil), .micOnly("UID-1")]
+        XCTAssertEqual(cases.count, 5)
+        // Compile-time exhaustiveness — if a new variant lands the parser must
+        // learn it before this test will pass again.
         for c in cases {
             switch c {
-            case .all, .pid(_), .allExcept(_): break
+            case .all, .pid(_), .allExcept(_), .micOnly(_): break
             }
+        }
+    }
+
+    func testParseRecordOptionsMicOnly() {
+        // `--source mic-only` without `--mic` (mic-only IS the microphone).
+        let opts = parseRecordOptions(["--source", "mic-only"])
+        XCTAssertNotNil(opts)
+        if case .micOnly(let uid) = opts!.source { XCTAssertNil(uid) } else { XCTFail("expected micOnly") }
+        if case .none = opts!.mic {} else { XCTFail("mic defaults to none") }
+        // With a device UID.
+        let opts2 = parseRecordOptions(["--source", "mic-only:BuiltInMic"])
+        XCTAssertNotNil(opts2)
+        if case .micOnly(let uid) = opts2!.source {
+            XCTAssertEqual(uid, "BuiltInMic")
+        } else {
+            XCTFail("expected micOnly(_)")
         }
     }
 }

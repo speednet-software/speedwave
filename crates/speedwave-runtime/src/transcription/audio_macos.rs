@@ -67,15 +67,18 @@ impl AudioCapture for MacOsAudioCapture {
     fn capabilities(&self) -> CaptureCapabilities {
         // The CLI itself enforces macOS 14.4; if we're running at all on macOS
         // the safe assumption is "process taps available" — the CLI returns a
-        // clean error on older systems and `start()` surfaces it. Microphone
-        // capture is a v1 follow-up on macOS (the CLI always taps system audio
-        // and the driver consumes one stream), so it's advertised as off.
+        // clean error on older systems and `start()` surfaces it. The
+        // microphone is captured via the public AVCaptureDevice API (so the OS
+        // consent prompt fires); system-audio capture works only once the
+        // separate "Audio Recording" permission is granted (no public trigger
+        // yet — a follow-up; until then a system-source recording is silent).
         CaptureCapabilities {
             supports_per_process: true,
             supports_system_audio: true,
-            supports_microphone: false,
+            supports_microphone: true,
             note: Some(
-                "Requires macOS 14.4+ (CoreAudio process taps; system audio only)".to_string(),
+                "Requires macOS 14.4+. Microphone capture prompts for permission; system-audio capture needs the 'Audio Recording' permission granted in System Settings."
+                    .to_string(),
             ),
         }
     }
@@ -104,12 +107,16 @@ impl AudioCapture for MacOsAudioCapture {
         let entries: Vec<ProcessListEntry> = serde_json::from_slice(&output.stdout)
             .map_err(|e| CaptureError::Failed(format!("parse --list JSON: {e}")))?;
 
-        let mut sources = Vec::with_capacity(entries.len() + 1);
-        // "System (everything)" first; no microphone source on macOS v1 (see
-        // `capabilities`).
+        let mut sources = Vec::with_capacity(entries.len() + 2);
+        // "System (everything)" + the default microphone first.
         sources.push(AudioSourceInfo {
             source: AudioSource::SystemWide,
             label: "System (everything)".to_string(),
+            app_id: None,
+        });
+        sources.push(AudioSourceInfo {
+            source: AudioSource::Microphone { device: None },
+            label: "Microphone (default input)".to_string(),
             app_id: None,
         });
         for e in entries {
@@ -292,11 +299,10 @@ impl Drop for CliAudioStream {
 }
 
 /// Maps an `AudioSource` to the CLI's `--source` / `--mic` argument strings.
-/// macOS v1 captures system audio only: `Microphone` and `Mixed` are rejected
-/// because the CLI always taps the system stream (there's no "mic only" mode
-/// yet) and the driver consumes a single stream — wiring the mic in as a second
-/// "[You]" stream is a follow-up. `SystemWide` and `Process` always pass
-/// `--mic none`.
+/// `Microphone` → `mic-only` (the CLI uses the public AVCaptureDevice consent
+/// API and emits the mic on stream 0). `SystemWide`/`Process` tap the system
+/// with `--mic none`. `Mixed` (system + mic together) is still a follow-up —
+/// the driver consumes one stream and the CLI's mixed mode emits two.
 fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureError> {
     match source {
         AudioSource::SystemWide => Ok(("all".to_string(), "none".to_string())),
@@ -304,11 +310,15 @@ fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureE
             let pid = pid_of(selector)?;
             Ok((format!("pid:{pid}"), "none".to_string()))
         }
-        AudioSource::Microphone { .. } => Err(CaptureError::Unsupported(
-            "microphone capture isn't available on macOS yet — use System audio".to_string(),
-        )),
+        AudioSource::Microphone { device } => {
+            let src = match device {
+                Some(uid) => format!("mic-only:{uid}"),
+                None => "mic-only".to_string(),
+            };
+            Ok((src, "none".to_string()))
+        }
         AudioSource::Mixed { .. } => Err(CaptureError::Unsupported(
-            "mixed system+mic capture isn't available on macOS yet — use System audio".to_string(),
+            "mixed system+mic capture isn't available on macOS yet — pick System audio or the microphone".to_string(),
         )),
     }
 }
@@ -341,13 +351,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capabilities_advertise_per_process_but_not_microphone_on_macos() {
+    fn capabilities_advertise_per_process_and_microphone_on_macos() {
         let caps = MacOsAudioCapture::new().capabilities();
         assert!(caps.supports_per_process);
         assert!(caps.supports_system_audio);
         assert!(
-            !caps.supports_microphone,
-            "mic capture is a v1 follow-up on macOS"
+            caps.supports_microphone,
+            "mic capture works via AVCaptureDevice"
         );
         assert!(caps.note.as_deref().unwrap().contains("14.4"));
     }
@@ -370,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_source_is_rejected_on_macos() {
+    fn mixed_source_is_still_rejected_on_macos() {
         let src = AudioSource::Mixed {
             system: Box::new(AudioSource::SystemWide),
             mic: Some("BuiltInMic".to_string()),
@@ -382,18 +392,15 @@ mod tests {
     }
 
     #[test]
-    fn microphone_source_is_rejected_on_macos() {
-        assert!(matches!(
-            source_to_cli_args(&AudioSource::Microphone { device: None }).unwrap_err(),
-            CaptureError::Unsupported(_)
-        ));
-        assert!(matches!(
-            source_to_cli_args(&AudioSource::Microphone {
-                device: Some("BuiltInMic".to_string())
-            })
-            .unwrap_err(),
-            CaptureError::Unsupported(_)
-        ));
+    fn microphone_maps_to_mic_only() {
+        let (s, m) = source_to_cli_args(&AudioSource::Microphone { device: None }).unwrap();
+        assert_eq!(s, "mic-only");
+        assert_eq!(m, "none");
+        let (s2, _) = source_to_cli_args(&AudioSource::Microphone {
+            device: Some("BuiltInMicrophoneDevice".to_string()),
+        })
+        .unwrap();
+        assert_eq!(s2, "mic-only:BuiltInMicrophoneDevice");
     }
 
     #[test]

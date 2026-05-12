@@ -88,13 +88,20 @@ function accelLabel(backends: Backend[]): string {
         </p>
       }
 
+      @if (modelsKnown() && !hasModel()) {
+        <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]" data-testid="no-model-note">
+          No speech-to-text model is downloaded yet. Download one in the Models panel (the smallest,
+          'small', is about 488 MB) — downloads use the network.
+        </p>
+      }
+
       <div class="mt-3">
         @if (!recording()) {
           <button
             type="button"
-            class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
+            class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
             data-testid="start-btn"
-            [disabled]="busy() || sources().length === 0"
+            [disabled]="busy() || sources().length === 0 || (modelsKnown() && !hasModel())"
             (click)="start()"
           >
             {{ busy() ? 'starting…' : 'Start recording' }}
@@ -138,13 +145,17 @@ export class RecordingControlsComponent implements OnInit {
   readonly busy = signal(false);
   /** Local error string. */
   readonly error = signal('');
+  /** `false` until the model list has been read at least once. */
+  readonly modelsKnown = signal(false);
+  /** `true` if at least one Whisper model is downloaded (Start needs one). */
+  readonly hasModel = signal(false);
   /** The active session id (set on start, cleared on stop). */
   private activeSessionId: string | null = null;
 
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
 
-  /** Loads capabilities + source list on first paint. */
+  /** Loads capabilities + source list + model availability on first paint. */
   async ngOnInit(): Promise<void> {
     try {
       const caps = await this.transcription.getCapabilities();
@@ -159,6 +170,23 @@ export class RecordingControlsComponent implements OnInit {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
       this.errorOccurred.emit(msg);
+    }
+    await this.refreshModelAvailability();
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Re-reads whether a Whisper model is downloaded. The parent calls this after
+   * a model download finishes so the Start button un-disables.
+   */
+  async refreshModelAvailability(): Promise<void> {
+    try {
+      const ack = await this.transcription.listModels();
+      this.hasModel.set(ack.whisper.some((m) => m.downloaded));
+      this.modelsKnown.set(true);
+    } catch {
+      // Non-fatal — leave Start enabled and let start() surface any error.
+      this.modelsKnown.set(false);
     }
     this.cdr.markForCheck();
   }

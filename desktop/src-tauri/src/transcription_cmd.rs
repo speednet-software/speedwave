@@ -149,30 +149,25 @@ pub async fn start_transcription(
         return Err("per-app capture isn't supported on this host — use System audio".to_string());
     }
 
-    // Pick the live model: an explicit override, or the catalogue's
-    // recommendation for the compiled backends (`small` on CPU).
-    let live_key: String = match &live_model_override {
-        Some(k) => k.clone(),
-        None => transcription::recommended_live_model(&transcription::compiled_backends())
-            .key
-            .to_string(),
-    };
-    // The model must already be downloaded — we don't kick off a (potentially
-    // multi-GB) download implicitly. The UI prompts for it first.
+    // Pick the live model. An explicit override wins (and must be downloaded);
+    // otherwise we want the catalogue's recommendation for the compiled backends
+    // (`large-v3-turbo` on Metal, `small` on CPU), but if that's not downloaded
+    // we fall back to any downloaded Whisper model rather than failing — we
+    // never kick off a (potentially multi-GB) download implicitly. Only if
+    // *nothing* is downloaded do we error with a download hint.
     let store_arc = store.inner_clone();
     let models_arc = models.inner_clone();
-    {
-        let key = live_key.clone();
+    let recommended = transcription::recommended_live_model(&transcription::compiled_backends())
+        .key
+        .to_string();
+    let override_key = live_model_override.clone();
+    let live_key: String = {
         let m = models_arc.clone();
-        if !tokio::task::spawn_blocking(move || m.whisper_is_present_by_key(&key))
+        let rec = recommended.clone();
+        tokio::task::spawn_blocking(move || pick_live_model(&m, override_key.as_deref(), &rec))
             .await
-            .map_err(|e| format!("model check task panicked: {e}"))?
-        {
-            return Err(format!(
-                "Whisper model '{live_key}' isn't downloaded — download it first"
-            ));
-        }
-    }
+            .map_err(|e| format!("model pick task panicked: {e}"))??
+    };
     let whisper_path = {
         let key = live_key.clone();
         let m = models_arc.clone();
@@ -220,30 +215,27 @@ pub async fn start_transcription(
     };
 
     // Create the session, then start capture.
+    // The audio.wav path lives under `<root>/<id>/`, so we need the id before
+    // creating the session — pick it now so the path is correct from the first
+    // persisted write (no fragile post-create patch).
+    let session_id = Uuid::new_v4();
+    let session_dir = store.session_dir(session_id);
+    let audio_wav = session_dir.join("audio.wav");
     let label = source_label(capture.as_ref(), &audio_source);
-    let session_info = AudioSourceInfo {
-        source: audio_source.clone(),
-        label,
-        app_id: None,
-    };
-    let session = TranscriptSession::new(
+    let mut session = TranscriptSession::new_with_id(
+        session_id,
         lang,
-        session_info,
-        // audio.wav path is fixed under the session dir, set below.
-        std::path::PathBuf::new(),
+        AudioSourceInfo {
+            source: audio_source.clone(),
+            label,
+            app_id: None,
+        },
+        audio_wav.clone(),
     );
-    let session_id = session.id;
+    session.models_used.live = Some(live_key.clone());
     store
         .create(session)
         .map_err(|e| format!("store create: {e}"))?;
-    let session_dir = store.session_dir(session_id);
-    let audio_wav = session_dir.join("audio.wav");
-    // Patch the (now-correct) audio path into the persisted session.
-    {
-        let mut s = store.get(session_id).map_err(|e| e.to_string())?;
-        s.audio_path = Some(audio_wav.clone());
-        s.save(&session_dir).map_err(|e| e.to_string())?;
-    }
 
     let stream = capture.start(audio_source).map_err(|e| {
         // Mark the session failed so the UI shows the error, not a hang.
@@ -454,6 +446,40 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
         .map(|m| m.key)
 }
 
+/// Picks the model for the live pass:
+/// 1. `override_key` if given — must be downloaded, else an error.
+/// 2. The `recommended` model if it's downloaded.
+/// 3. Otherwise the first downloaded Whisper model (we don't auto-download a
+///    multi-GB file — the UI prompts for that).
+/// 4. If nothing is downloaded: an error with a download hint.
+fn pick_live_model(
+    models: &ModelStore,
+    override_key: Option<&str>,
+    recommended: &str,
+) -> Result<String, String> {
+    if let Some(k) = override_key {
+        if models.whisper_is_present_by_key(k) {
+            return Ok(k.to_string());
+        }
+        return Err(format!(
+            "Whisper model '{k}' isn't downloaded — download it first"
+        ));
+    }
+    if models.whisper_is_present_by_key(recommended) {
+        return Ok(recommended.to_string());
+    }
+    if let Some(any) = models.whisper_status().into_iter().find(|m| m.downloaded) {
+        log::info!(
+            "recommended live model '{recommended}' not downloaded — falling back to '{}'",
+            any.key
+        );
+        return Ok(any.key);
+    }
+    Err(format!(
+        "no Whisper model is downloaded — download one (e.g. '{recommended}') first"
+    ))
+}
+
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct SubscribeAck {
     /// Tauri event channel for the live stream.
@@ -610,15 +636,27 @@ pub async fn download_transcription_model(
 ) -> Result<(), String> {
     let key = model_id;
     let models = models.inner_clone();
-    // Long-blocking download — off the async runtime.
-    tokio::task::spawn_blocking(move || {
-        models.ensure_model(&key, &mut |p| {
-            let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
-        })
+    // Diarization keys pull both sherpa models; Whisper keys go to ensure_model.
+    let is_diarization = speedwave_runtime::transcription::diarization_model(&key).is_some();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        if is_diarization {
+            models
+                .ensure_diarization_models(&mut |p| {
+                    let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
+                })
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            models
+                .ensure_model(&key, &mut |p| {
+                    let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
+                })
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
     })
     .await
-    .map_err(|e| format!("download task panicked: {e}"))?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("download task panicked: {e}"))??;
     Ok(())
 }
 
@@ -753,6 +791,43 @@ mod tests {
         let store = ModelStore::with_root(dir.path());
         // Nothing downloaded → None.
         assert_eq!(pick_offline_model(&store), None);
+    }
+
+    #[test]
+    fn download_routing_distinguishes_whisper_from_diarization_keys() {
+        // download_transcription_model decides which ensure_* to call by
+        // whether the key is a diarization-catalogue key. Verify that split
+        // (the bug was: a diarization key went to ensure_model → "no such
+        // model in the catalogue").
+        use speedwave_runtime::transcription::{diarization_model, whisper_model};
+        assert!(diarization_model("pyannote-segmentation-3-0").is_some());
+        assert!(diarization_model("nemo-titanet-small").is_some());
+        assert!(whisper_model("pyannote-segmentation-3-0").is_none());
+        // A Whisper key is NOT a diarization key.
+        assert!(diarization_model("small").is_none());
+        assert!(whisper_model("small").is_some());
+    }
+
+    #[test]
+    fn pick_live_model_errors_with_a_download_hint_when_nothing_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        // No model on disk: an override errors naming that model; no override
+        // errors naming the recommended one — both with "download" guidance.
+        let e1 = pick_live_model(&store, Some("small"), "large-v3-turbo").unwrap_err();
+        assert!(e1.contains("'small'") && e1.contains("download"));
+        let e2 = pick_live_model(&store, None, "large-v3-turbo").unwrap_err();
+        assert!(e2.contains("download") && e2.contains("large-v3-turbo"));
+    }
+
+    #[test]
+    fn pick_live_model_uses_a_known_catalogue_key_for_the_override_error() {
+        // Sanity: the message references the requested key verbatim even for an
+        // unknown one (whisper_is_present_by_key returns false → error path).
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        let err = pick_live_model(&store, Some("nonexistent-model"), "small").unwrap_err();
+        assert!(err.contains("nonexistent-model"));
     }
 
     #[test]
