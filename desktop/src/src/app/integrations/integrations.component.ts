@@ -355,6 +355,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private projectState = inject(ProjectStateService);
   private logger = inject(LoggerService);
   private unsubProjectSettled: (() => void) | null = null;
+  private unsubStatusRefresher: (() => void) | null = null;
 
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {
@@ -377,6 +378,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       }
       await this.loadActiveProject();
       await this.loadIntegrations();
+    });
+    // After a failed restart (build/compose), backend may have rolled the
+    // just-enabled service back to disabled — refresh the rows to match.
+    this.unsubStatusRefresher = this.projectState.registerIntegrationStatusRefresher(() => {
+      void this.loadIntegrations();
     });
 
     this.tauri
@@ -418,6 +424,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     if (this.unsubProjectSettled) {
       this.unsubProjectSettled();
       this.unsubProjectSettled = null;
+    }
+    if (this.unsubStatusRefresher) {
+      this.unsubStatusRefresher();
+      this.unsubStatusRefresher = null;
     }
     if (this.unlistenOAuth) {
       this.unlistenOAuth();
@@ -587,6 +597,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         service: svc.service,
         enabled: next,
       });
+      // Forward the just-enabled service to the eventual restart so the
+      // backend can roll it back on a worker-image build failure.
+      if (next) {
+        this.projectState.pendingJustEnabled = svc.service;
+      }
       this.projectState.requestRestart();
     } catch (e: unknown) {
       svc.enabled = previous;

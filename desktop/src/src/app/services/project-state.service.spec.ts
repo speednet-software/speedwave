@@ -735,7 +735,12 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      expect(spy).toHaveBeenCalledWith('restart_integration_containers', { project: 'test' });
+      // justEnabled is null when no integration was just toggled — backend
+      // accepts an Option<String> and rolls back only the named service.
+      expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
+        project: 'test',
+        justEnabled: null,
+      });
       expect(service.needsRestart).toBe(false);
       expect(service.restarting).toBe(false);
       expect(service.restartError).toBe('');
@@ -759,6 +764,11 @@ describe('ProjectStateService', () => {
       };
 
       const promise = service.restartContainers();
+      // restartContainers preloads worker-image estimates and registers an
+      // event listener before invoking the restart command; allow those
+      // microtasks to settle so resolveInvoke is bound.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
 
       expect(states).toHaveLength(1);
       expect(states[0]).toEqual({ restarting: true, needsRestart: true });
@@ -920,6 +930,104 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(false);
       expect(service.restartError).toBe('');
       expect(cb).toHaveBeenCalledTimes(1);
+    });
+
+    it('restartContainers forwards pendingJustEnabled and clears it after', async () => {
+      service.requestRestart();
+      service.pendingJustEnabled = 'playwright';
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.restartContainers();
+
+      expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
+        project: 'test',
+        justEnabled: 'playwright',
+      });
+      expect(service.pendingJustEnabled).toBeNull();
+    });
+
+    it('worker_image_build_status drives buildingWorkerImage + buildSteps', async () => {
+      service.requestRestart();
+      let resolveInvoke!: () => void;
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'restart_integration_containers') {
+          return new Promise<void>((r) => {
+            resolveInvoke = r;
+          });
+        }
+        return Promise.resolve(undefined);
+      };
+
+      const promise = service.restartContainers();
+      // Allow estimates preload + listen registration to settle.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+
+      mockTauri.dispatchEvent('worker_image_build_status', {
+        phase: 'image_started',
+        image_name: 'speedwave-mcp-playwright',
+        estimated_seconds: 480,
+        current: 1,
+        total: 1,
+        message: '1 of 1: speedwave-mcp-playwright',
+      });
+      expect(service.buildingWorkerImage).toBe(true);
+      expect(service.buildSteps).toHaveLength(1);
+      expect(service.buildSteps[0].status).toBe('active');
+
+      mockTauri.dispatchEvent('worker_image_build_status', {
+        phase: 'image_done',
+        image_name: 'speedwave-mcp-playwright',
+        estimated_seconds: 480,
+        current: 1,
+        total: 1,
+        message: '',
+      });
+      expect(service.buildSteps[0].status).toBe('done');
+
+      resolveInvoke();
+      await promise;
+      expect(service.buildingWorkerImage).toBe(false);
+    });
+
+    it('failed build sets buildError and triggers integration status refresh', async () => {
+      service.requestRestart();
+      service.pendingJustEnabled = 'playwright';
+      const refresher = vi.fn();
+      service.registerIntegrationStatusRefresher(refresher);
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') {
+          // Emit a `failed` event before rejecting, mirroring backend order.
+          mockTauri.dispatchEvent('worker_image_build_status', {
+            phase: 'image_started',
+            image_name: 'speedwave-mcp-playwright',
+            estimated_seconds: 480,
+            current: 1,
+            total: 1,
+            message: '1 of 1',
+          });
+          mockTauri.dispatchEvent('worker_image_build_status', {
+            phase: 'failed',
+            image_name: 'speedwave-mcp-playwright',
+            estimated_seconds: 480,
+            current: 1,
+            total: 1,
+            message: '',
+            error: 'disk full',
+          });
+          throw new Error('Image build failed: disk full');
+        }
+        return undefined;
+      };
+
+      await service.restartContainers();
+
+      expect(service.buildError).toBe('disk full');
+      expect(refresher).toHaveBeenCalledTimes(1);
+      // pendingJustEnabled is cleared regardless of failure so the next
+      // toggle starts fresh.
+      expect(service.pendingJustEnabled).toBeNull();
     });
 
     it('project switch clears restart state', () => {

@@ -6,6 +6,9 @@ import type {
   ProjectList,
   ProjectSwitchFailedPayload,
 } from '../models/update';
+import type { WorkerImageBuildProgress } from '../models/integration';
+import type { SetupStep } from '../shared/progress-steps/progress-steps.component';
+import { WorkerImageEstimatesService } from './worker-image-estimates.service';
 import { CLOUDSTORAGE_TCC_PREFIX, cloudstorageProviderDisplayName } from './cloudstorage-prefix';
 
 /** Lifecycle status of the project + container lifecycle. */
@@ -50,6 +53,22 @@ export class ProjectStateService {
   restartError = '';
 
   /**
+   * Service the user just toggled on (forwarded to `restart_integration_containers`
+   * so the backend knows which row to roll back on a build failure). Set by
+   * the integrations component before `requestRestart()`; cleared after restart.
+   */
+  pendingJustEnabled: string | null = null;
+  /**
+   * True while on-demand worker images are being built — shell renders the
+   * blocking build overlay over the chat UI.
+   */
+  buildingWorkerImage = false;
+  /** Steps shown by the build overlay; one entry appended per image. */
+  buildSteps: SetupStep[] = [];
+  /** Last per-image build error (sanitized); when set the overlay shows retry. */
+  buildError = '';
+
+  /**
    * Structured error kind set when a CloudStorage TCC failure is detected.
    * `'cloudstorage_tcc_required'` routes the shell to `<app-cloudstorage-modal>`.
    * Reset to `undefined` at the start of every new project switch attempt.
@@ -62,6 +81,12 @@ export class ProjectStateService {
 
   private initialized = false;
   private tauri = inject(TauriService);
+  private estimates = inject(WorkerImageEstimatesService);
+  /**
+   * Set of integration status re-fetchers registered by the integrations component;
+   * called after a failed restart so the toggled-on row reverts to reality.
+   */
+  private statusRefreshers: Array<() => void> = [];
   private changeListeners: Array<() => void> = [];
   private readyListeners: Array<() => void> = [];
   private failedListeners: Array<(error: string) => void> = [];
@@ -319,21 +344,52 @@ export class ProjectStateService {
     this.notifyChange();
   }
 
-  /** Restarts integration containers to apply pending changes. */
+  /**
+   * Registers a status re-fetcher; the integrations component uses this so
+   * that on a failed enable (build/restart) the row visibly reverts.
+   * @param cb - Callback invoked after a failed restart so the caller can
+   *   re-fetch integration statuses and reflect the backend's rollback.
+   */
+  registerIntegrationStatusRefresher(cb: () => void): () => void {
+    this.statusRefreshers.push(cb);
+    return () => {
+      this.statusRefreshers = this.statusRefreshers.filter((l) => l !== cb);
+    };
+  }
+
+  /**
+   * Restarts integration containers, building any missing worker images on
+   * demand and showing per-image progress on a blocking overlay.
+   */
   async restartContainers(): Promise<void> {
     if (!this.activeProject || this.restarting) return;
     const project = this.activeProject;
+    const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
+    this.buildError = '';
+    this.buildingWorkerImage = false;
+    this.buildSteps = [];
     this.notifyChange();
+
+    // Preload estimates so step titles can show "~Ns" on the first event.
+    await this.estimates.list();
+
+    const unlisten = await this.tauri.listen<WorkerImageBuildProgress>(
+      'worker_image_build_status',
+      (e) => this.onWorkerImageBuildProgress(e.payload)
+    );
+
     let restartedOk = false;
     try {
-      await this.tauri.invoke('restart_integration_containers', { project });
+      await this.tauri.invoke('restart_integration_containers', {
+        project,
+        justEnabled,
+      });
       this.needsRestart = false;
       restartedOk = true;
       // Slash discovery is cached host-side for 10 min; compose recreate
-      // does not invalidate it. Without this nudge, the next slash-menu
-      // open returns the pre-restart list. Cache miss is non-fatal.
+      // does not invalidate it.
       try {
         await this.tauri.invoke('invalidate_slash_cache', { projectId: project });
       } catch (err: unknown) {
@@ -341,13 +397,59 @@ export class ProjectStateService {
       }
     } catch (e: unknown) {
       this.restartError = e instanceof Error ? e.message : String(e);
+      // The backend rolled back `justEnabled` to disabled — refresh the rows.
+      for (const cb of this.statusRefreshers) cb();
+    } finally {
+      unlisten();
     }
+
     this.restarting = false;
+    this.buildingWorkerImage = false;
+    this.pendingJustEnabled = null;
     this.notifyChange();
     if (restartedOk) {
       this.notifyReady();
       this.notifySettled();
     }
+  }
+
+  private onWorkerImageBuildProgress(p: WorkerImageBuildProgress): void {
+    const estimate = this.estimates.secondsFor(p.image_name);
+    const detail = estimate > 0 ? `~${Math.round(estimate / 60)} min` : '';
+    switch (p.phase) {
+      case 'image_started': {
+        this.buildingWorkerImage = true;
+        this.buildSteps = [
+          ...this.buildSteps.filter((s) => s.id !== p.image_name),
+          {
+            id: p.image_name,
+            title: p.image_name,
+            description: p.message,
+            detail,
+            status: 'active',
+          },
+        ];
+        break;
+      }
+      case 'image_done': {
+        this.buildSteps = this.buildSteps.map((s) =>
+          s.id === p.image_name ? { ...s, status: 'done' as const } : s
+        );
+        break;
+      }
+      case 'all_done': {
+        this.buildSteps = this.buildSteps.map((s) => ({ ...s, status: 'done' as const }));
+        break;
+      }
+      case 'failed': {
+        this.buildError = p.error ?? p.message;
+        this.buildSteps = this.buildSteps.map((s) =>
+          s.status === 'active' ? { ...s, status: 'error' as const, detail: this.buildError } : s
+        );
+        break;
+      }
+    }
+    this.notifyChange();
   }
 
   /** Dismisses the restart overlay without restarting. */
