@@ -11,6 +11,7 @@ pub mod audio_macos;
 #[cfg(windows)]
 pub mod audio_windows;
 pub mod diarizer;
+pub mod mix;
 pub mod model_catalog;
 pub mod model_store;
 pub mod transcriber;
@@ -24,6 +25,7 @@ pub use audio::{
     CaptureError, FileAudioCapture, ProcessSelector, CHUNK_DURATION, SAMPLE_RATE_HZ,
 };
 pub use diarizer::{DiarizeError, DiarizeOptions, Diarizer, SherpaDiarizer, SpeakerTurn};
+pub use mix::{mix_two, MixBuffer, MixSource};
 pub use model_catalog::{
     default_diarization_model, diarization_model, whisper_model, DiarizationModelInfo,
     DiarizationModelKind, ModelRole, Quantization, WhisperModelInfo, DIARIZATION_MODELS,

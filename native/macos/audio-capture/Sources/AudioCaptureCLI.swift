@@ -434,7 +434,17 @@ func runRecord(_ opts: RecordOptions) {
         return
     }
 
-    // System tap (+ optionally the mic mixed in as stream 1).
+    // System tap path. The system-audio TCC prompt has no public trigger, so
+    // request it via the private API first — without it the tap silently
+    // delivers zeroed buffers (ADR-056 decision 3).
+    guard preflightSystemAudioConsent() else {
+        logErr(
+            "system audio recording permission denied — grant it in System Settings → Privacy & Security → System Audio Recording Only")
+        exit(2)
+    }
+
+    // System tap (+ optionally the mic mixed in as stream 1; the Rust side
+    // sums streams 0 and 1 into one mono stream — see CliAudioStream).
     let streams: [String]
     switch opts.mic {
     case .none: streams = ["app"]
@@ -628,6 +638,35 @@ func inputStreamFormat(of device: AudioObjectID) -> AudioStreamBasicDescription 
     fallback.mChannelsPerFrame = 2
     fallback.mFormatID = kAudioFormatLinearPCM
     return fallback
+}
+
+/// Requests the "System Audio Recording" (TCC `kTCCServiceAudioCapture`) consent
+/// via the private `TCCAccessRequest` API — there is no public trigger for this
+/// prompt (decision 3, ADR-056). `dlopen`/`dlsym`-guarded: if the symbol is
+/// missing on a future macOS, returns `false` and the caller exits "permission
+/// unavailable" (the UI then deep-links the user to System Settings) — it does
+/// not crash. Blocks for the prompt result. Returns `true` if granted.
+func preflightSystemAudioConsent() -> Bool {
+    typealias TCCRequestFn = @convention(c) (
+        CFString, @escaping @convention(block) (Bool) -> Void
+    ) -> Void
+    guard let handle = dlopen(
+        "/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW),
+          let sym = dlsym(handle, "TCCAccessRequest")
+    else {
+        logErr("TCCAccessRequest unavailable — cannot prompt for System Audio Recording")
+        return false
+    }
+    let request = unsafeBitCast(sym, to: TCCRequestFn.self)
+    let service = "kTCCServiceAudioCapture" as CFString
+    let sema = DispatchSemaphore(value: 0)
+    var granted = false
+    request(service) { ok in
+        granted = ok
+        sema.signal()
+    }
+    sema.wait()
+    return granted
 }
 
 /// Requests microphone consent via the public `AVCaptureDevice` API. This DOES
