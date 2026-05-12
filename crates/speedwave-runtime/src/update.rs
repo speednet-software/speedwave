@@ -249,13 +249,18 @@ pub fn update_containers(
             log::warn!("Failed to prune old bundle images: {e}");
         }
     }
-    let images_rebuilt = build::build_all_images_for_bundle(runtime, &new_manifest.bundle_id)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Image rebuild failed: {}. Containers are still running with the previous version.",
-                e
-            )
-        })?;
+    let images_rebuilt = build::build_images_for_bundle(
+        runtime,
+        &build::enabled_images(&integrations),
+        &new_manifest.bundle_id,
+        None,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Image rebuild failed: {}. Containers are still running with the previous version.",
+            e
+        )
+    })?;
 
     // 7. Graceful shutdown — stop running containers before recreate.
     //    SIGTERM + timeout (compose default 10s) prevents killing active Claude sessions.
@@ -495,12 +500,12 @@ mod tests {
     fn test_build_before_compose_down_in_update_containers() {
         // **Why a structural (source-code) test?**
         //
-        // The key safety invariant: `build_all_images` must run BEFORE
+        // The key safety invariant: `build_images_for_bundle` must run BEFORE
         // `compose_down`. Building first means a failed build leaves running
         // containers untouched (containerd uses content-addressable storage,
         // so new images don't affect running containers).
         //
-        // A behavioral test would require mocking `build::build_all_images`
+        // A behavioral test would require mocking `build::build_images_for_bundle`
         // (a free function, not a trait method) plus `config::load_user_config`,
         // `compose::render_compose`, `SecurityCheck::run`, and filesystem I/O.
         // That level of test infrastructure isn't justified for a single
@@ -516,15 +521,15 @@ mod tests {
         let fn_body = &source[fn_start..];
 
         let build_pos = fn_body
-            .find("build::build_all_images")
-            .expect("build_all_images call must exist in update_containers");
+            .find("build::build_images_for_bundle")
+            .expect("build_images_for_bundle call must exist in update_containers");
         let down_pos = fn_body
             .find("runtime.compose_down(project)")
             .expect("compose_down call must exist in update_containers");
 
         assert!(
             build_pos < down_pos,
-            "Safety invariant violated: build_all_images (at byte offset {build_pos}) \
+            "Safety invariant violated: build_images_for_bundle (at byte offset {build_pos}) \
              must appear before compose_down (at byte offset {down_pos}) in \
              update_containers — building first ensures a failed build leaves \
              running containers untouched",
@@ -739,7 +744,7 @@ mod tests {
 
     #[test]
     fn test_prune_before_build_in_update_containers() {
-        // Structural test: prune_old_bundle_images must appear BEFORE build_all_images
+        // Structural test: prune_old_bundle_images must appear BEFORE build_images_for_bundle
         // inside update_containers — pruning first means old images are removed before
         // new ones are built, with no risk of removing newly-built images.
         let source = include_str!("update.rs");
@@ -753,13 +758,13 @@ mod tests {
             .find("prune_old_bundle_images")
             .expect("prune_old_bundle_images call must exist in update_containers");
         let build_pos = fn_body
-            .find("build::build_all_images")
-            .expect("build_all_images call must exist in update_containers");
+            .find("build::build_images_for_bundle")
+            .expect("build_images_for_bundle call must exist in update_containers");
 
         assert!(
             prune_pos < build_pos,
             "prune_old_bundle_images (at byte {prune_pos}) must appear before \
-             build_all_images (at byte {build_pos}) in update_containers"
+             build_images_for_bundle (at byte {build_pos}) in update_containers"
         );
     }
 
@@ -768,7 +773,7 @@ mod tests {
         // Structural test: render_compose in update_containers must pass Some(runtime),
         // not None — this ensures plugin images are checked/rebuilt during CLI updates.
         //
-        // A behavioral test is not feasible here because render_compose, build_all_images,
+        // A behavioral test is not feasible here because render_compose, build_images_for_bundle,
         // and config::load_user_config are all free functions (not trait methods), making
         // mocking prohibitively complex. The source-text test is the established pattern
         // in this file — see test_build_before_compose_down_in_update_containers.
@@ -811,7 +816,7 @@ mod tests {
         // the behavioral chain.
         //
         // This cross-file test is justified because update_containers depends on
-        // free functions (render_compose, build_all_images, load_user_config) that
+        // free functions (render_compose, build_images_for_bundle, load_user_config) that
         // cannot be mocked without major test infrastructure — the same reasoning
         // documented in test_build_before_compose_down_in_update_containers.
         let compose_source = include_str!("compose.rs");
