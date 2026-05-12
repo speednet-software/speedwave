@@ -685,9 +685,11 @@ describe('Security: validateLocalPath', () => {
 
       await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow();
 
-      // Timestamp is in the ts() prefix `[<ISO 8601, UTC>]`, not in the object.
+      // Timestamp is the `ts()` prefix `[<ISO 8601 with local offset>]`, not in the object.
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringMatching(/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\].*Security/),
+        expect.stringMatching(
+          /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(?:Z|[+-]\d{2}:\d{2})\].*Security/
+        ),
         expect.objectContaining({
           attackType: 'absolute_path',
         })

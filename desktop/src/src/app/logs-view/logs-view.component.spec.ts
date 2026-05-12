@@ -427,12 +427,14 @@ describe('parseLogLine', () => {
   });
 
   it('extracts the drain ISO timestamp and strips STDOUT: from an mcp-os line', () => {
+    // Drain prefix (Rust `log_file`, local offset) + the worker's own `ts()`
+    // (also local offset — same `TZ`); both are now `±HH:MM`, never `Z`.
     const line = parseLogLine(
-      'mcp-os | 2026-05-12T14:34:02.814+02:00 STDOUT: [2026-05-12T12:34:02.814Z] mcp-os started'
+      'mcp-os | 2026-05-12T14:34:02.814+02:00 STDOUT: [2026-05-12T14:34:02.810+02:00] mcp-os started'
     );
     expect(line.source).toBe('mcp-os');
     expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
-    expect(line.message).toBe('[2026-05-12T12:34:02.814Z] mcp-os started');
+    expect(line.message).toBe('[2026-05-12T14:34:02.810+02:00] mcp-os started');
     expect(line.message).not.toContain('STDOUT:');
   });
 
@@ -443,6 +445,8 @@ describe('parseLogLine', () => {
   });
 
   it('extracts the drain timestamp from a host-exec audit JSON line, keeping the JSON as message', () => {
+    // The audit JSON's `ts` field stays UTC `Z` (a JSON value, not a log-line
+    // prefix); only the drain prefix carries the local offset.
     const line = parseLogLine(
       'host-exec | 2026-05-12T14:34:02.814+02:00 {"ts":"2026-05-12T12:34:02.814Z","recipe":"docker_ps","status":"exited"}'
     );
@@ -461,6 +465,13 @@ describe('parseLogLine', () => {
   });
 
   it('parses a bare bracketed ISO timestamp via the extended BRACKETED_TIME_RE', () => {
+    // A worker `ts()` line with no drain/compose prefix — now local offset.
+    const line = parseLogLine('hub_1 | [2026-05-12T14:34:02.814+02:00] 🚀 Starting');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe('🚀 Starting');
+  });
+
+  it('still parses a bare bracketed UTC `Z` ISO timestamp (older logs / nerdctl)', () => {
     const line = parseLogLine('hub_1 | [2026-05-12T12:34:02.814Z] 🚀 Starting');
     expect(line.time).toBe('2026-05-12T12:34:02.814Z');
     expect(line.message).toBe('🚀 Starting');
@@ -921,9 +932,12 @@ describe('LogsViewComponent — status bar layout', () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return [
-        'speedwave_test_mcp-hub_1 | 2026-05-12T12:00:00.123456Z [2026-05-12T12:00:00.123Z] INFO container line',
+        // compose-container line: nerdctl `--timestamps` (UTC) + the worker's
+        // own `ts()` (local offset) inside the message.
+        'speedwave_test_mcp-hub_1 | 2026-05-12T12:00:00.123456Z [2026-05-12T14:00:00.123+02:00] INFO container line',
         'desktop | 2026-05-12T14:34:02.814+02:00 INFO [target] desktop line',
-        'mcp-os | 2026-05-12T14:34:03.000+02:00 STDOUT: [2026-05-12T12:34:03.000Z] mcp-os line',
+        'mcp-os | 2026-05-12T14:34:03.000+02:00 STDOUT: [2026-05-12T14:34:03.000+02:00] mcp-os line',
+        // audit JSON `ts` field stays UTC `Z`; the drain prefix is local offset.
         'host-exec | 2026-05-12T14:34:04.000+02:00 {"ts":"2026-05-12T12:34:04.000Z","recipe":"docker_ps","status":"exited"}',
         'claude | 2026-05-12T14:34:05.000+02:00 SESSION: started',
       ].join('\n');
