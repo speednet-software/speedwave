@@ -68,30 +68,6 @@ impl OsIntegrationsConfig {
     }
 }
 
-/// When the per-recipe confirmation dialog is shown before a `host_exec`
-/// recipe runs (ADR-054 §Confirmation flow). Serialised lowercase
-/// (`"ask"` / `"session"` / `"always"`).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum HostExecConfirm {
-    /// Prompt the user every time the recipe is invoked. The default — and the
-    /// default for any recipe `host_exec::is_state_changing_recipe` flags
-    /// (database clients, `docker compose up/down/exec/...`, migrations), which
-    /// may not be set to `Always`.
-    #[default]
-    Ask,
-    /// Prompt the first time the recipe is invoked with a given `argv`/`cwd`
-    /// in an app session, then silent for the rest of that session (the
-    /// confirmation cache is keyed on `(project, recipe, argv, cwd, config-hash)`,
-    /// so a changed recipe re-prompts).
-    Session,
-    /// Never prompt — the user has deliberately trusted this recipe in this
-    /// project. Only selectable when editing an existing recipe (not when
-    /// adding one), and behind a second warning dialog; rejected for
-    /// state-changing recipes.
-    Always,
-}
-
 /// One named parameter a `host_exec` recipe may accept from Claude, substituted
 /// into a fixed position in the recipe's `args`. The `pattern`'s *semantics*
 /// (compilation, full-match against the supplied value) are checked in the
@@ -163,9 +139,6 @@ pub struct HostExecRecipe {
     /// (ADR-054).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
-    /// When the per-recipe confirmation dialog is shown. Defaults to `Ask`.
-    #[serde(default)]
-    pub confirm: HostExecConfirm,
 }
 
 /// Per-project `host_exec` configuration. **User-config only** — the repo
@@ -1395,7 +1368,6 @@ mod tests {
             cwd_sub: None,
             params: None,
             env: None,
-            confirm: HostExecConfirm::Session,
         };
         let user_config = SpeedwaveUserConfig {
             projects: vec![ProjectUserEntry {
@@ -1419,10 +1391,7 @@ mod tests {
         assert!(resolved.host_exec, "host_exec enabled from user config");
         assert_eq!(resolved.host_exec_commands.len(), 1);
         assert_eq!(resolved.host_exec_commands[0].name, "test");
-        assert_eq!(
-            resolved.host_exec_commands[0].confirm,
-            HostExecConfirm::Session
-        );
+        assert_eq!(resolved.host_exec_commands[0].exec, "./gradlew");
     }
 
     /// `host_exec` is a security-class field — a repo-supplied whitelist (or
@@ -1440,7 +1409,7 @@ mod tests {
                     "hostExec": {{
                         "enabled": true,
                         "commands": [
-                            {{ "name": "evil", "exec": "./pwn", "args": [], "confirm": "always" }}
+                            {{ "name": "evil", "exec": "./pwn", "args": [] }}
                         ]
                     }}
                 }}
@@ -1469,7 +1438,7 @@ mod tests {
         write!(
             f,
             r#"{{ "integrations": {{ "hostExec": {{ "enabled": true, "commands": [
-                {{ "name": "evil", "exec": "./pwn", "args": [], "confirm": "always" }}
+                {{ "name": "evil", "exec": "./pwn", "args": [] }}
             ] }} }} }}"#
         )
         .unwrap();
@@ -1488,7 +1457,6 @@ mod tests {
                             cwd_sub: None,
                             params: None,
                             env: None,
-                            confirm: HostExecConfirm::Ask,
                         }],
                     }),
                     ..Default::default()
@@ -1522,7 +1490,6 @@ mod tests {
             cwd_sub: None,
             params: None,
             env: None,
-            confirm: HostExecConfirm::Ask,
         }]);
         // enabled flag preserved when setting commands
         assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(true));
@@ -1556,7 +1523,6 @@ mod tests {
                     max_len: Some(600),
                 }]),
                 env: Some(HashMap::from([("CI".to_string(), "true".to_string())])),
-                confirm: HostExecConfirm::Ask,
             }],
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -1584,7 +1550,6 @@ mod tests {
         assert_eq!(r.cwd_sub.as_deref(), Some("services/db"));
         assert_eq!(r.params.as_ref().unwrap()[0].name, "sql");
         assert_eq!(r.params.as_ref().unwrap()[0].max_len, Some(600));
-        assert_eq!(r.confirm, HostExecConfirm::Ask);
         // camelCase also parses *back* (what the user writes / the worker reads).
         let from_camel: HostExecRecipe = serde_json::from_str(
             r#"{ "name": "t", "exec": "./gradlew", "args": ["{tgt}"],
@@ -1594,11 +1559,16 @@ mod tests {
         .unwrap();
         assert_eq!(from_camel.cwd_sub.as_deref(), Some("frontend"));
         assert_eq!(from_camel.params.as_ref().unwrap()[0].max_len, Some(30));
-        // `confirm` defaults when omitted
+        // A stray `confirm` key in an old config is silently ignored (no
+        // deny_unknown_fields), so existing configs keep parsing.
+        let with_stray: HostExecRecipe = serde_json::from_str(
+            r#"{ "name": "t", "exec": "./gradlew", "args": ["test"], "confirm": "ask" }"#,
+        )
+        .unwrap();
+        assert_eq!(with_stray.name, "t");
         let minimal: HostExecRecipe =
             serde_json::from_str(r#"{ "name": "t", "exec": "./gradlew", "args": ["test"] }"#)
                 .unwrap();
-        assert_eq!(minimal.confirm, HostExecConfirm::Ask);
         assert!(minimal.params.is_none());
         assert!(minimal.cwd_sub.is_none());
         assert!(minimal.env.is_none());

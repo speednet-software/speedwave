@@ -22,9 +22,9 @@
 //! and the launcher ban is by basename so `./node_modules/.bin/node` slips
 //! past the `node` ban. The whitelist guarantees the *recipe name and argv
 //! shape* are the user's; it does not guarantee the *code that runs* is. The
-//! mitigations for that are opt-in + per-recipe confirmation + the enable-time
-//! danger modal + the host-side audit log (ADR-054 §Negative), not this
-//! validator.
+//! mitigations for that are opt-in + the enable-time danger modal (which is the
+//! consent for the whole project — there is no per-call confirmation) + the
+//! host-side audit log (ADR-054 §Negative), not this validator.
 
 use crate::config::{HostExecConfig, HostExecParam, HostExecRecipe};
 use crate::consts;
@@ -128,42 +128,15 @@ fn is_token_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// True if the recipe looks state-changing — a database client, a
-/// `docker compose` lifecycle command, or a migration runner. Such recipes may
-/// not be set to `HostExecConfirm::Always` (they cap at `Session`): the cost
-/// of an accidental destructive run is high enough that "the user clicked
-/// through the warning once" is not enough. Heuristic, and documented as such
-/// (the `always`-switch warning modal is the backstop); a recipe with a
-/// novel `exec` we don't recognise is the user's risk. Used both here (to
-/// reject `confirm: always`) and by the Desktop UI (to disable the `always`
-/// option for such recipes).
-pub fn is_state_changing_recipe(recipe: &HostExecRecipe) -> bool {
-    const DB_CLIENTS: &[&str] = &["psql", "mysql", "mysqlsh", "mongo", "mongosh", "sqlite3"];
-    const MIGRATION_HINTS: &[&str] = &["migrat", "flyway", "liquibase"];
-
-    let base = exec_basename_lower(&recipe.exec);
-    if DB_CLIENTS.contains(&base.as_str()) {
-        return true;
-    }
-    if is_container_lifecycle_recipe(recipe) {
-        return true;
-    }
-    if recipe.args.iter().any(|a| {
-        let al = a.to_ascii_lowercase();
-        MIGRATION_HINTS.iter().any(|h| al.contains(h))
-    }) {
-        return true;
-    }
-    false
-}
-
 /// True if `recipe` is a container-engine *lifecycle* command — `docker` /
 /// `docker-compose` / `podman` (`podman compose`) with `up` / `down` / `exec`
-/// / `rm` / `prune` in `args`. Such a recipe is `docker run` with arbitrary
-/// mounts/privileges from a compose file Claude can edit (`/workspace:rw`),
-/// i.e. effectively host root — so it gets stricter treatment than other
-/// state-changing recipes (`validate_host_exec_config` forces `confirm:"ask"`
-/// on it, not just bans `"always"`).
+/// / `rm` / `prune` in `args`. Such a recipe is effectively `docker run` with
+/// arbitrary mounts/privileges from a compose file Claude can edit
+/// (`/workspace:rw`), i.e. host root. This is **a UI warning hint, not an
+/// enforced restriction** — the Desktop add/edit dialog shows an amber notice
+/// when a recipe matches; validation does not reject it (enabling host_exec is
+/// the consent — ADR-054 §Negative). Mirrored client-side as
+/// `isContainerLifecycleRecipe` in `models/host-exec.ts`.
 pub fn is_container_lifecycle_recipe(recipe: &HostExecRecipe) -> bool {
     const LIFECYCLE: &[&str] = &["up", "down", "exec", "rm", "prune"];
     let base = exec_basename_lower(&recipe.exec);
@@ -328,33 +301,6 @@ fn validate_recipe(recipe: &HostExecRecipe, name_re: &regex::Regex) -> anyhow::R
         }
     }
 
-    // -- confirm -------------------------------------------------------------
-    if recipe.confirm == crate::config::HostExecConfirm::Always && is_state_changing_recipe(recipe)
-    {
-        anyhow::bail!(
-            "host_exec recipe '{}': confirm: \"always\" is not allowed for a state-changing \
-             recipe (database client / `docker compose up|down|exec|rm|prune` / migration) — \
-             the cost of an accidental run is too high; use \"ask\" or \"session\"",
-            recipe.name,
-        );
-    }
-    // A `docker`/`docker-compose`/`podman` lifecycle recipe must be `confirm: "ask"`
-    // — NOT `session`/`always`. Such a recipe is, by construction, `docker run`
-    // with whatever mounts/privileges the compose file (which Claude can edit via
-    // `/workspace:rw`) declares — effectively host root. `confirm:session` would
-    // let Claude re-run it silently after one approval with a rewritten compose
-    // file. So it must re-prompt every time. (See ADR-054 §Negative.)
-    if recipe.confirm != crate::config::HostExecConfirm::Ask && is_container_lifecycle_recipe(recipe)
-    {
-        anyhow::bail!(
-            "host_exec recipe '{}': a `docker`/`docker-compose`/`podman` lifecycle recipe \
-             (`up`/`down`/`exec`/`rm`/`prune`) must use confirm: \"ask\" — it can mount arbitrary \
-             host paths into a privileged container (effectively host root), and the compose file \
-             it runs is editable by Claude, so it must re-prompt on every invocation",
-            recipe.name,
-        );
-    }
-
     Ok(())
 }
 
@@ -460,7 +406,6 @@ fn validate_cwd_sub(recipe_name: &str, sub: &str) -> anyhow::Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::config::HostExecConfirm;
     use std::collections::HashMap;
 
     fn recipe(name: &str, exec: &str, args: &[&str]) -> HostExecRecipe {
@@ -471,7 +416,6 @@ mod tests {
             cwd_sub: None,
             params: None,
             env: None,
-            confirm: HostExecConfirm::Ask,
         }
     }
 
@@ -532,8 +476,6 @@ mod tests {
             pattern: "^SELECT .{0,500}$".to_string(),
             max_len: Some(600),
         }]);
-        // `docker compose exec` is state-changing → must not be `always`;
-        // `ask` (the default here) is fine.
         validate_host_exec_config(&cfg(vec![r])).unwrap();
     }
 
@@ -597,14 +539,15 @@ mod tests {
     }
 
     #[test]
-    fn confirm_session_on_a_state_changing_recipe_is_valid() {
+    fn db_client_recipe_with_a_param_is_valid() {
+        // No special treatment — a DB client recipe with a regex-constrained
+        // `{q}` is just a recipe (the enable consent + the audit log apply).
         let mut r = recipe("db_psql", "psql", &["-c", "{q}"]);
         r.params = Some(vec![HostExecParam {
             name: "q".to_string(),
             pattern: "^SELECT.*$".to_string(),
             max_len: None,
         }]);
-        r.confirm = HostExecConfirm::Session;
         validate_host_exec_config(&cfg(vec![r])).unwrap();
     }
 
@@ -806,7 +749,6 @@ mod tests {
                 max_len: None,
             },
         ]);
-        r.confirm = HostExecConfirm::Session; // psql is state-changing
         let err = validate_host_exec_config(&cfg(vec![r]))
             .unwrap_err()
             .to_string();
@@ -962,173 +904,38 @@ mod tests {
         assert!(validate_host_exec_config(&cfg(vec![r])).is_err());
     }
 
-    // -- confirm:always restriction ------------------------------------------
+    // -- container-lifecycle hint (UI warning, not enforced) -----------------
 
     #[test]
-    fn rejects_confirm_always_on_state_changing_recipes() {
-        // database client
-        let mut r = recipe("db", "psql", &["-c", "{q}"]);
-        r.params = Some(vec![HostExecParam {
-            name: "q".to_string(),
-            pattern: "^x$".to_string(),
-            max_len: None,
-        }]);
-        r.confirm = HostExecConfirm::Always;
-        assert!(validate_host_exec_config(&cfg(vec![r])).is_err());
-
-        // docker compose lifecycle
-        let mut r = recipe("up", "docker", &["compose", "up", "-d"]);
-        r.confirm = HostExecConfirm::Always;
-        assert!(validate_host_exec_config(&cfg(vec![r])).is_err());
-
-        let mut r = recipe("down", "docker-compose", &["down"]);
-        r.confirm = HostExecConfirm::Always;
-        assert!(validate_host_exec_config(&cfg(vec![r])).is_err());
-
-        // migration
-        let mut r = recipe("migrate", "./gradlew", &["flywayMigrate"]);
-        r.confirm = HostExecConfirm::Always;
-        assert!(validate_host_exec_config(&cfg(vec![r])).is_err());
-
-        let mut r = recipe("mig2", "./mvnw", &["liquibase:update"]);
-        r.confirm = HostExecConfirm::Always;
-        assert!(validate_host_exec_config(&cfg(vec![r])).is_err());
-    }
-
-    #[test]
-    fn container_lifecycle_recipe_must_be_confirm_ask() {
-        // `docker`/`docker-compose`/`podman` + a lifecycle verb ⇒ confirm must
-        // be "ask" (not session/always) — it's `docker run` with mounts/privs
-        // from a Claude-editable compose file (≈ host root); must re-prompt.
+    fn container_lifecycle_recipes_are_still_valid_but_flagged() {
+        // `docker`/`docker-compose`/`podman` + a lifecycle verb is a UI-warning
+        // hint only — `validate_host_exec_config` accepts it (the enable
+        // consent + the audit log are the controls now; ADR-054 §Negative).
         for (exec, args) in [
             ("docker", &["compose", "up", "-d"][..]),
             ("docker-compose", &["down"][..]),
             ("podman", &["compose", "up"][..]),
-            ("/usr/bin/docker", &["compose", "exec", "db", "sh"][..]),
-            ("docker", &["compose", "rm", "-f"][..]),
+            ("/usr/bin/docker", &["compose", "rm", "-f"][..]),
             ("docker", &["system", "prune"][..]),
         ] {
-            let mut r = recipe("c", exec, args);
-            r.confirm = HostExecConfirm::Session;
-            assert!(
-                validate_host_exec_config(&cfg(vec![r.clone()])).is_err(),
-                "{exec} {args:?} with confirm:session must be rejected"
-            );
-            r.confirm = HostExecConfirm::Always;
-            assert!(
-                validate_host_exec_config(&cfg(vec![r.clone()])).is_err(),
-                "{exec} {args:?} with confirm:always must be rejected"
-            );
-            r.confirm = HostExecConfirm::Ask;
+            let r = recipe("c", exec, args);
+            assert!(is_container_lifecycle_recipe(&r), "{exec} {args:?} should be flagged");
             validate_host_exec_config(&cfg(vec![r])).unwrap_or_else(|e| {
-                panic!("{exec} {args:?} with confirm:ask must be allowed; got: {e}")
+                panic!("{exec} {args:?} must still validate; got: {e}")
             });
         }
-        // Non-lifecycle docker (`ps`, `build`, `logs`) is unaffected — session OK.
+        // Non-lifecycle docker (`ps`, `build`, `logs`) is not flagged.
         for args in [
             &["compose", "ps"][..],
             &["build", "-t", "x", "."][..],
             &["compose", "logs"][..],
         ] {
-            let mut r = recipe("c", "docker", args);
-            r.confirm = HostExecConfirm::Session;
-            validate_host_exec_config(&cfg(vec![r.clone()])).unwrap_or_else(|e| {
-                panic!("docker {args:?} confirm:session should be allowed; got: {e}")
-            });
-            // ...but `build` IS state-changing-ish? no — only lifecycle verbs;
-            // `build` isn't on the list, so `always` is also fine here.
-            r.confirm = HostExecConfirm::Always;
-            // `compose logs`/`compose ps`/`build` are not state-changing either.
-            validate_host_exec_config(&cfg(vec![r])).unwrap_or_else(|e| {
-                panic!("docker {args:?} confirm:always should be allowed; got: {e}")
-            });
+            let r = recipe("c", "docker", args);
+            assert!(!is_container_lifecycle_recipe(&r), "docker {args:?} should not be flagged");
+            validate_host_exec_config(&cfg(vec![r])).unwrap();
         }
-    }
-
-    #[test]
-    fn allows_confirm_always_on_non_state_changing_recipes() {
-        let mut r = recipe("test", "./gradlew", &["test"]);
-        r.confirm = HostExecConfirm::Always;
-        validate_host_exec_config(&cfg(vec![r])).unwrap();
-
-        let mut r = recipe("fe_build", "npm", &["run", "build"]);
-        r.confirm = HostExecConfirm::Always;
-        validate_host_exec_config(&cfg(vec![r])).unwrap();
-
-        // `docker compose logs` / `ps` are read-only — not lifecycle verbs.
-        let mut r = recipe("compose_ps", "docker", &["compose", "ps"]);
-        r.confirm = HostExecConfirm::Always;
-        validate_host_exec_config(&cfg(vec![r])).unwrap();
-    }
-
-    #[test]
-    fn is_state_changing_recipe_classifies_correctly() {
-        assert!(is_state_changing_recipe(&recipe(
-            "x",
-            "psql",
-            &["-c", "SELECT 1"]
-        )));
-        assert!(is_state_changing_recipe(&recipe(
-            "x",
-            "/usr/bin/mysql",
-            &["-e", "..."]
-        )));
-        assert!(is_state_changing_recipe(&recipe(
-            "x",
-            "docker",
-            &["compose", "up", "-d"]
-        )));
-        assert!(is_state_changing_recipe(&recipe(
-            "x",
-            "docker",
-            &["compose", "exec", "db", "sh"]
-        )));
-        assert!(is_state_changing_recipe(&recipe(
-            "x",
-            "docker-compose",
-            &["down"]
-        )));
-        assert!(is_state_changing_recipe(&recipe(
-            "x",
-            "./gradlew",
-            &["flywayMigrate"]
-        )));
-        assert!(is_state_changing_recipe(&recipe(
-            "x",
-            "./mvnw",
-            &["liquibase:update"]
-        )));
-        assert!(is_state_changing_recipe(&recipe(
-            "x",
-            "rails",
-            &["db:migrate"]
-        ))); // "migrat" substring
-
-        assert!(!is_state_changing_recipe(&recipe(
-            "x",
-            "./gradlew",
-            &["test"]
-        )));
-        assert!(!is_state_changing_recipe(&recipe(
-            "x",
-            "npm",
-            &["run", "build"]
-        )));
-        assert!(!is_state_changing_recipe(&recipe(
-            "x",
-            "docker",
-            &["compose", "ps"]
-        )));
-        assert!(!is_state_changing_recipe(&recipe(
-            "x",
-            "docker",
-            &["compose", "logs"]
-        )));
-        assert!(!is_state_changing_recipe(&recipe(
-            "x",
-            "docker",
-            &["build", "-t", "x", "."]
-        )));
+        // A non-container exec is never flagged regardless of args.
+        assert!(!is_container_lifecycle_recipe(&recipe("c", "./gradlew", &["up"])));
     }
 
     // -- helper unit tests ---------------------------------------------------
@@ -1174,27 +981,7 @@ mod tests {
         assert_eq!(snap["commands"][0]["name"], "test");
         assert_eq!(snap["commands"][0]["exec"], "./gradlew");
         assert_eq!(snap["commands"][0]["args"][0], "test");
-        // `confirm` defaults to "ask" and is serialised lowercase.
-        assert_eq!(snap["commands"][0]["confirm"], "ask");
-    }
-
-    #[test]
-    fn host_exec_confirm_serde_lowercase() {
-        assert_eq!(
-            serde_json::to_value(HostExecConfirm::Ask).unwrap(),
-            serde_json::json!("ask")
-        );
-        assert_eq!(
-            serde_json::to_value(HostExecConfirm::Session).unwrap(),
-            serde_json::json!("session")
-        );
-        assert_eq!(
-            serde_json::to_value(HostExecConfirm::Always).unwrap(),
-            serde_json::json!("always")
-        );
-        assert_eq!(
-            serde_json::from_value::<HostExecConfirm>(serde_json::json!("session")).unwrap(),
-            HostExecConfirm::Session
-        );
+        // No `confirm` field — there is no per-call confirmation (ADR-054).
+        assert!(snap["commands"][0].get("confirm").is_none());
     }
 }

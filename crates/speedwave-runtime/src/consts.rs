@@ -57,15 +57,10 @@ pub const HOST_EXEC_LOG_FILE: &str = "log";
 
 /// Per-command timeout (ms) for a `host_exec` recipe. On expiry the worker
 /// kills the recipe's whole process group with `SIGKILL`. 7 minutes leaves
-/// headroom for a long Gradle/Maven build while keeping the total per-call
-/// budget — `HOST_EXEC_TIMEOUT_MS` + `HOST_EXEC_CONFIRM_TIMEOUT_MS` + margin —
-/// under the hub's 600 s long-operation timeout (ADR-054 §Timeout budget).
+/// headroom for a long Gradle/Maven build while keeping the command + margin
+/// under the hub's 600 s long-operation timeout (ADR-054 §"Reading a command's
+/// result").
 pub const HOST_EXEC_TIMEOUT_MS: u64 = 420_000;
-/// How long the `host_exec` worker waits for the user's per-recipe
-/// confirmation reply before failing closed (MCP tool error
-/// "confirmation unavailable"). Counted against the same hub call budget as
-/// the command, hence kept short relative to `HOST_EXEC_TIMEOUT_MS`.
-pub const HOST_EXEC_CONFIRM_TIMEOUT_MS: u64 = 120_000;
 /// Per-stream output cap (bytes) for a `host_exec` recipe. Each of
 /// stdout/stderr is truncated to the last `HOST_EXEC_MAX_OUTPUT_BYTES` (the
 /// tail — for compile/test failures the end is what matters) and the result's
