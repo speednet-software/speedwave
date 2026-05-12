@@ -1528,6 +1528,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            transcription: None,
             ui: None,
         };
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
@@ -1609,6 +1610,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            transcription: None,
             ui: None,
         };
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
