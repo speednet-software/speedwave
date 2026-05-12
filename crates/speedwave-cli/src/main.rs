@@ -735,6 +735,16 @@ fn main() -> anyhow::Result<()> {
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
 
+    // If `host_exec` is enabled, spawn its per-project worker BEFORE
+    // `render_compose` — `apply_host_exec_config` only injects
+    // `WORKER_HOST_EXEC_URL` / the token mount into the hub if the worker's
+    // `port`/`auth-token` files already exist (ADR-054). The CLI is one-shot:
+    // hold the handle for the run; it `exec`s nothing (it spawns+waits on
+    // `container_exec`), but `process::exit` below skips `Drop`, so the worker
+    // is killed by `kill_stale_by_pid_file` on the next run. No watchdog
+    // (one-shot) and no compose recreate (fresh render each run).
+    let _host_exec_worker = maybe_spawn_host_exec_worker(&project_name, &project_dir, &integrations);
+
     let compose_yml = compose::render_compose(
         &project_name,
         &project_dir.to_string_lossy(),
@@ -873,6 +883,56 @@ fn main() -> anyhow::Result<()> {
     // (where nerdctl translates SIGKILL → exit code 137).
     let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
     std::process::exit(code);
+}
+
+/// Spawn the per-project `host_exec` worker if the project has it enabled,
+/// returning the handle so it stays alive for the CLI run. Writes the chmod-600
+/// config snapshot from the resolved whitelist first (so the worker sees the
+/// current recipes), then `HostExecProcess::spawn_in`. Best-effort: a failure
+/// is logged and `None` returned — `host_exec` tools are then unavailable but
+/// the rest of the session still works. The CLI's inherited `PATH` is the
+/// login-shell `PATH` (it runs from a terminal), so the worker (and recipes)
+/// get the right `PATH` directly.
+fn maybe_spawn_host_exec_worker(
+    project_name: &str,
+    project_dir: &Path,
+    integrations: &config::ResolvedIntegrationsConfig,
+) -> Option<speedwave_runtime::host_exec_process::HostExecProcess> {
+    use speedwave_runtime::host_exec_process::{write_host_exec_config_snapshot, HostExecProcess};
+    if !integrations.host_exec {
+        return None;
+    }
+    let data_dir = consts::data_dir();
+    let state_dir = speedwave_runtime::host_exec::host_exec_project_dir(data_dir, project_name);
+    if let Err(e) = std::fs::create_dir_all(&state_dir) {
+        log::warn!("host_exec[{project_name}]: cannot create state dir: {e}");
+        return None;
+    }
+    let snapshot =
+        config::host_exec_config_snapshot(project_dir, &integrations.host_exec_commands);
+    let config_path = state_dir.join(consts::HOST_EXEC_CONFIG_FILE);
+    if let Err(e) = write_host_exec_config_snapshot(&config_path, &snapshot) {
+        log::warn!("host_exec[{project_name}]: cannot write config snapshot: {e}");
+        return None;
+    }
+    let script = match speedwave_runtime::build::resolve_host_exec_script() {
+        Some(s) => s.to_string_lossy().to_string(),
+        None => {
+            log::warn!("host_exec[{project_name}]: worker script not found — host_exec unavailable");
+            return None;
+        }
+    };
+    let host_path = std::env::var("PATH").unwrap_or_default();
+    match HostExecProcess::spawn_in(project_name, project_dir, &script, &host_path, data_dir) {
+        Ok(proc) => {
+            log::info!("host_exec[{project_name}]: started (port {})", proc.port());
+            Some(proc)
+        }
+        Err(e) => {
+            log::warn!("host_exec[{project_name}]: spawn failed: {e}");
+            None
+        }
+    }
 }
 
 /// Resolves project name from CWD path matching against configured projects.
@@ -1177,6 +1237,35 @@ mod tests {
         let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
         exec_cmd.extend_from_slice(&["--flag"]);
         assert_eq!(exec_cmd[0], "/usr/local/bin/claude");
+    }
+
+    #[test]
+    fn host_exec_worker_does_not_spawn_when_integration_disabled() {
+        // Disabled host_exec → no worker, no snapshot written. (The enabled
+        // path needs a fake worker + an injectable data dir; the e2e suite
+        // exercises it end-to-end.)
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = config::ResolvedIntegrationsConfig::default(); // host_exec: false
+        assert!(!integrations.host_exec);
+        let handle = maybe_spawn_host_exec_worker("proj", tmp.path(), &integrations);
+        assert!(handle.is_none(), "no worker should spawn when host_exec is disabled");
+    }
+
+    #[test]
+    fn host_exec_worker_is_spawned_before_render_compose() {
+        // Structural guard: the worker spawn must precede `render_compose` so
+        // `apply_host_exec_config` sees the port/auth-token files (ADR-054).
+        let source = include_str!("main.rs");
+        let spawn_idx = source
+            .find("maybe_spawn_host_exec_worker(&project_name")
+            .expect("the CLI must call maybe_spawn_host_exec_worker in main()");
+        let render_idx = source
+            .find("compose::render_compose(")
+            .expect("the CLI must call render_compose in main()");
+        assert!(
+            spawn_idx < render_idx,
+            "the host_exec worker must be spawned before render_compose"
+        );
     }
 
     #[test]
