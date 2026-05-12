@@ -130,6 +130,8 @@ export const HOST_EXEC_SHELL_LAUNCHERS: readonly string[] = [
   'find',
   'ssh',
   'sshpass',
+  'busybox',
+  'toybox',
 ];
 
 /**
@@ -151,6 +153,10 @@ export const HOST_EXEC_META_TOOLS: readonly string[] = [
   'npx',
   'pnpm',
   'yarn',
+  'awk',
+  'gawk',
+  'mawk',
+  'nawk',
 ];
 
 /**

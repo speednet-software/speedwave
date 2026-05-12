@@ -66,13 +66,10 @@ export const SAFE_ENV_KEYS: readonly string[] = [
   'GOROOT',
   'CARGO_HOME',
   'RUSTUP_HOME',
-  // Build toolchains — JVM-launcher modifiers, NOT pure locators. `MAVEN_OPTS`
-  // (and `GRADLE_OPTS` if ever added) can carry `-javaagent:...`, which loads
-  // arbitrary Java code into the build JVM. We pass it through because it is
-  // the *user's own* value from their login shell — the same trust level as
-  // everything else on this allowlist — but it is called out separately so
-  // nobody mistakes it for an inert path variable.
+  // JVM-launcher modifiers — can carry `-javaagent:` (arbitrary Java code into
+  // the build JVM). Trust level = user's login shell, same as the rest.
   'MAVEN_OPTS',
+  'GRADLE_OPTS',
   // The host's Docker — a `docker` recipe needs this to find the daemon when
   // it's not the default socket (Colima/OrbStack/etc.). Not on RESERVED_ENV_KEYS.
   'DOCKER_HOST',

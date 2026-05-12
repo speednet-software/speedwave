@@ -364,9 +364,12 @@ fn kill_stale_by_pid_file(pid_path: &Path) {
     let _ = std::fs::remove_file(pid_path);
 }
 
-/// Whether `pid` belongs to a `node` process (`ps` on Unix, `tasklist` on Windows).
+/// True if `pid` is a node process (`/proc/<pid>/comm` on Linux, `ps` on macOS).
 #[cfg(unix)]
 fn is_node_process(pid: u32) -> bool {
+    if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        return s.trim().contains("node");
+    }
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output();
@@ -610,6 +613,17 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashMap;
 
+    /// Poll until `is_node_process(pid)` is true (fork/execve race on Linux CI).
+    #[cfg(unix)]
+    fn wait_for_node_comm(pid: u32) {
+        for _ in 0..40 {
+            if is_node_process(pid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
     /// A minimal `host_exec`-worker stand-in: announces `{"port":N}` on stdout
     /// (binding 127.0.0.1) and then sleeps.
     const FAKE_WORKER_JS: &str = r#"
@@ -777,6 +791,8 @@ setTimeout(() => {}, 60000);
             .stderr(Stdio::null())
             .spawn();
         if let Ok(mut child) = child {
+            // Wait for execve so kill_stale_by_pid_file's is_node_process check sees "node".
+            wait_for_node_comm(child.id());
             let tmp = tempfile::tempdir().unwrap();
             let p = tmp.path().join("stale-pid");
             std::fs::write(&p, child.id().to_string()).unwrap();
@@ -848,6 +864,8 @@ setTimeout(() => {}, 60000);
             .stderr(Stdio::null())
             .spawn();
         if let Ok(mut child) = child {
+            // Wait for execve so /proc/<pid>/comm reflects "node".
+            wait_for_node_comm(child.id());
             assert!(is_node_process(child.id()));
             child.kill().ok();
             child.wait().ok();

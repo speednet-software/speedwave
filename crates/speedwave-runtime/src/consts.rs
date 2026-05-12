@@ -767,6 +767,10 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
     "IFS",
     "BASH_ENV",
     "ENV",
+    // host_exec worker-internal env (must never reach a recipe child)
+    "HOST_EXEC_AUTH_TOKEN",
+    "HOST_EXEC_CONFIG_PATH",
+    "HOST_EXEC_LOG_FILE",
 ];
 
 /// Upper bound for plugin `mem_limit`, normalised to MiB. A plugin requesting
@@ -886,7 +890,7 @@ mod tests {
         // A change here is deliberate — bumping this count signals a new
         // hijack vector was added (and the matching test in plugin.rs
         // should grow too). Catches accidental deletions.
-        assert_eq!(RESERVED_ENV_KEYS.len(), 16);
+        assert_eq!(RESERVED_ENV_KEYS.len(), 19);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
                 k,

@@ -8,7 +8,15 @@ describe('SAFE_ENV_KEYS', () => {
     }
   });
   it('includes the toolchain locators recipes commonly need', () => {
-    for (const k of ['PATH', 'HOME', 'JAVA_HOME', 'DOCKER_HOST', 'GRADLE_USER_HOME']) {
+    for (const k of [
+      'PATH',
+      'HOME',
+      'JAVA_HOME',
+      'DOCKER_HOST',
+      'GRADLE_USER_HOME',
+      'MAVEN_OPTS',
+      'GRADLE_OPTS',
+    ]) {
       expect(SAFE_ENV_KEYS).toContain(k);
     }
   });
