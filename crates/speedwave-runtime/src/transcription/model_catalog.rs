@@ -249,6 +249,10 @@ pub struct DiarizationModelInfo {
 /// CAM++ chosen over TitaNet-small for Apache-2.0 licence and lower EER —
 /// rationale and benchmarks in ADR-056. Sizes/SHA256/licences verified
 /// 2026-05-12.
+///
+/// The URLs below intentionally contain `speaker-recongition-models` (missing
+/// an "i") — that is the actual upstream k2-fsa release tag; verified
+/// 2026-05-12. The correctly-spelt path returns 404.
 pub const DIARIZATION_MODELS: &[DiarizationModelInfo] = &[
     DiarizationModelInfo {
         key: "pyannote-segmentation-3-0",

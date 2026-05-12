@@ -23,12 +23,20 @@ const LIVE_DECODE_EVERY_SECS: f32 = 5.0;
 
 /// Diarize the live buffer every N seconds of audio (cheaper than per-chunk).
 const LIVE_DIARIZE_EVERY_SECS: f32 = 10.0;
+/// Log a `warn` for every multiple of this many seconds of accumulated audio
+/// — long meetings keep the whole PCM buffer in RAM (`~115 MB / hour` at
+/// 16 kHz mono f32) and operators want a hint when something's running long.
+const PCM_WARN_STEP_SECS: f32 = 30.0 * 60.0;
 
 /// A stop signal shared with the driver task; flip it to `true` to ask the
-/// driver to wind down at the next chunk boundary.
+/// driver to wind down at the next chunk boundary. Carries a `Notify` the
+/// driver host can pulse once `run()` has actually exited, so the Tauri
+/// `stop_transcription` callsite can `await` the wind-down instead of
+/// spin-polling.
 #[derive(Debug, Clone, Default)]
 pub struct StopSignal {
     stopped: Arc<AtomicBool>,
+    finished: Arc<tokio::sync::Notify>,
 }
 
 impl StopSignal {
@@ -36,6 +44,7 @@ impl StopSignal {
     pub fn new() -> Self {
         Self {
             stopped: Arc::new(AtomicBool::new(false)),
+            finished: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -47,6 +56,18 @@ impl StopSignal {
     /// `true` once `stop()` was called.
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// The driver host calls this once `run()` has exited, releasing any
+    /// `await_finished()` waiters. Idempotent — wakes everyone permitted.
+    pub fn signal_finished(&self) {
+        self.finished.notify_waiters();
+    }
+
+    /// Resolves once `signal_finished()` is called. Callers should add a
+    /// timeout (`tokio::time::timeout`) so a wedged driver can't hang them.
+    pub async fn await_finished(&self) {
+        self.finished.notified().await;
     }
 }
 
@@ -104,6 +125,9 @@ pub struct TranscriptDriver {
     pcm: Vec<f32>,
     last_decode_at: f32,
     last_diarize_at: f32,
+    /// Last logged "PCM is big" threshold (in seconds), so we warn once per
+    /// step instead of every chunk.
+    next_pcm_warn_at: f32,
 }
 
 impl TranscriptDriver {
@@ -121,6 +145,7 @@ impl TranscriptDriver {
             pcm: Vec::new(),
             last_decode_at: 0.0,
             last_diarize_at: 0.0,
+            next_pcm_warn_at: PCM_WARN_STEP_SECS,
         }
     }
 
@@ -177,6 +202,16 @@ impl TranscriptDriver {
             self.pcm.extend_from_slice(&chunk.samples);
 
             let accumulated_secs = self.pcm.len() as f32 / SAMPLE_RATE_HZ as f32;
+            if accumulated_secs >= self.next_pcm_warn_at {
+                let mb = (self.pcm.len() * std::mem::size_of::<f32>()) / 1_000_000;
+                log::warn!(
+                    "transcript {} has accumulated {:.0} min of audio (~{mb} MB in RAM); \
+                     long meetings can pressure memory during the offline finalize pass",
+                    self.id,
+                    accumulated_secs / 60.0
+                );
+                self.next_pcm_warn_at += PCM_WARN_STEP_SECS;
+            }
             if accumulated_secs - self.last_decode_at >= LIVE_DECODE_EVERY_SECS {
                 self.decode_window()?;
                 self.last_decode_at = accumulated_secs;

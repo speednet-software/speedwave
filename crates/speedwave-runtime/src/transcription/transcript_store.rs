@@ -85,6 +85,11 @@ pub enum TranscriptEvent {
         #[serde(with = "speaker_name_map")]
         speaker_names: HashMap<SpeakerId, String>,
     },
+    /// The recorded WAV was discarded; re-transcription is no longer possible.
+    AudioDiscarded {
+        /// Monotonic seq.
+        seq: u64,
+    },
     /// The session reached `Done`; the snapshot reflects the final state.
     Finished {
         /// Monotonic seq.
@@ -103,6 +108,7 @@ impl TranscriptEvent {
             | TranscriptEvent::SpeakerRelabeled { seq, .. }
             | TranscriptEvent::FinalizeProgress { seq, .. }
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
+            | TranscriptEvent::AudioDiscarded { seq, .. }
             | TranscriptEvent::Finished { seq, .. } => *seq,
         }
     }
@@ -254,27 +260,31 @@ impl TranscriptStore {
         self.sessions.len()
     }
 
-    /// Loads `id` into cache if needed; returns its `Entry`.
+    /// Loads `id` into cache if needed; returns its `Entry`. Atomic against
+    /// concurrent callers: the entry actually living in `sessions` is the one
+    /// returned, so subscribers can never end up holding an orphaned `tx`.
     fn activate(&self, id: Uuid) -> Result<EntryHandle, StoreError> {
-        if let Some(e) = self.sessions.get(&id) {
-            return Ok(EntryHandle {
-                session: e.session.clone(),
-                tx: e.tx.clone(),
-            });
+        use dashmap::mapref::entry::Entry as MapEntry;
+        match self.sessions.entry(id) {
+            MapEntry::Occupied(e) => Ok(EntryHandle {
+                session: e.get().session.clone(),
+                tx: e.get().tx.clone(),
+            }),
+            MapEntry::Vacant(slot) => {
+                let session = TranscriptSession::load(&self.session_dir(id))?;
+                let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+                let entry = Entry {
+                    session: Arc::new(RwLock::new(session)),
+                    tx,
+                };
+                let handle = EntryHandle {
+                    session: entry.session.clone(),
+                    tx: entry.tx.clone(),
+                };
+                slot.insert(entry);
+                Ok(handle)
+            }
         }
-        let session = TranscriptSession::load(&self.session_dir(id))?;
-        let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
-        self.sessions.insert(
-            id,
-            Entry {
-                session: Arc::new(RwLock::new(session.clone())),
-                tx: tx.clone(),
-            },
-        );
-        Ok(EntryHandle {
-            session: Arc::new(RwLock::new(session)),
-            tx,
-        })
     }
 
     fn entry(&self, id: Uuid) -> Result<EntryHandle, StoreError> {
@@ -446,6 +456,29 @@ impl TranscriptStore {
     }
 
     /// Marks the session `Done` and emits `Finished`.
+    /// Drops the WAV (best-effort) and clears `audio_path` in the cached
+    /// session; emits `AudioDiscarded` so subscribers stay in sync.
+    pub fn discard_audio(&self, id: Uuid) -> Result<u64, StoreError> {
+        let mut path_to_remove: Option<PathBuf> = None;
+        let mut seq_out = 0;
+        self.with_session(id, |s, seq| {
+            seq_out = seq;
+            path_to_remove = s.audio_path.take();
+            TranscriptEvent::AudioDiscarded { seq }
+        })?;
+        if let Some(p) = path_to_remove {
+            if p.exists() {
+                // Best-effort: log but don't fail — the audio_path field is
+                // already cleared and persisted, so re-transcription is gone
+                // either way. A leftover file on disk is harmless.
+                if let Err(e) = std::fs::remove_file(&p) {
+                    log::warn!("could not remove discarded audio file {p:?}: {e}");
+                }
+            }
+        }
+        Ok(seq_out)
+    }
+
     pub fn finish(&self, id: Uuid) -> Result<u64, StoreError> {
         let mut seq_out = 0;
         self.with_session(id, |s, seq| {
@@ -697,6 +730,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discard_audio_updates_cache_persists_and_emits_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("a.wav");
+        std::fs::write(&wav, b"fakewav").unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&wav)).unwrap();
+
+        // Subscribe before the discard so we see the event live.
+        let mut events = store.subscribe(id).unwrap().events;
+        store.discard_audio(id).unwrap();
+
+        // 1) cache reflects the cleared path
+        assert!(store.get(id).unwrap().audio_path.is_none());
+        // 2) disk reflects the cleared path
+        let on_disk = TranscriptSession::load(&store.session_dir(id)).unwrap();
+        assert!(on_disk.audio_path.is_none());
+        // 3) the WAV file is gone
+        assert!(!wav.exists());
+        // 4) subscribers see the event
+        let ev = events.recv().await.unwrap();
+        assert!(matches!(ev, TranscriptEvent::AudioDiscarded { .. }));
+    }
+
+    #[tokio::test]
+    async fn discard_audio_is_idempotent_when_audio_path_is_already_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store.discard_audio(id).unwrap();
+        // Second call still increments seq (cheap to bump) and stays Ok.
+        store.discard_audio(id).unwrap();
+        assert!(store.get(id).unwrap().audio_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn discard_audio_on_unknown_id_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        assert!(matches!(
+            store.discard_audio(Uuid::new_v4()).unwrap_err(),
+            StoreError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_subscribe_on_a_disk_only_session_yields_a_single_entry() {
+        // Guards against the previous activate() race: two concurrent
+        // subscribers used to load the session twice and the first caller
+        // could end up holding a tx that was not the one in the map.
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        // Evict from cache so the next subscribe goes through `activate`.
+        store.sessions.remove(&id);
+
+        let store = Arc::new(store);
+        let s1 = store.clone();
+        let s2 = store.clone();
+        let h1 = tokio::task::spawn_blocking(move || s1.subscribe(id));
+        let h2 = tokio::task::spawn_blocking(move || s2.subscribe(id));
+        let Subscription { events: mut e1, .. } = h1.await.unwrap().unwrap();
+        let Subscription { events: mut e2, .. } = h2.await.unwrap().unwrap();
+
+        // Emit one event and require *both* subscribers to see it.
+        store.set_status(id, TranscriptStatus::Recording).unwrap();
+        let ev1 = e1.recv().await.unwrap();
+        let ev2 = e2.recv().await.unwrap();
+        assert_eq!(ev1.seq(), ev2.seq());
+        // And only one Entry survives.
+        assert_eq!(store.active_count(), 1);
+    }
+
+    #[tokio::test]
     async fn mutators_on_an_unknown_id_return_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
@@ -745,7 +851,8 @@ mod tests {
                 segments: vec![seg(0.0, 1.0, "f")],
                 speaker_names: HashMap::new(),
             },
-            TranscriptEvent::Finished { seq: 8 },
+            TranscriptEvent::AudioDiscarded { seq: 8 },
+            TranscriptEvent::Finished { seq: 9 },
         ] {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
@@ -755,6 +862,7 @@ mod tests {
                 TranscriptEvent::SpeakerRelabeled { seq, .. } => *seq,
                 TranscriptEvent::FinalizeProgress { seq, .. } => *seq,
                 TranscriptEvent::FinalSegmentsReady { seq, .. } => *seq,
+                TranscriptEvent::AudioDiscarded { seq } => *seq,
                 TranscriptEvent::Finished { seq } => *seq,
             };
             assert_eq!(ev.seq(), expected);
