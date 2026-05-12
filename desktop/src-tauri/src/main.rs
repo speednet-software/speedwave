@@ -455,8 +455,11 @@ async fn switch_project(
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, rt| {
             check_project(proj)?;
+            // Lazy build for the destination project (ADR-057).
+            if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
+                return Err(format!("Image build failed: {sanitized}"));
+            }
             // compose_down(prev) already handled by switch_project_core step 2.
-            // Here we only render the new compose and start containers.
             containers_cmd::render_and_save_compose(proj, rt)?;
             rt.compose_up_recreate(proj).map_err(|e| e.to_string())
         })

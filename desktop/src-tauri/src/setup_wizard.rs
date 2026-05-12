@@ -1104,7 +1104,23 @@ pub fn is_setup_complete() -> bool {
 pub fn build_images() -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
     rt.ensure_ready()?;
-    match build::build_all_images(rt.as_ref()) {
+    // Build the active project's enabled set (+ claude/mcp-hub always). On a
+    // fresh setup there is no active project, so only claude/mcp-hub are
+    // built — workers come on demand when an integration is first enabled
+    // (ADR-057).
+    let active_integrations = {
+        let user_config = config::load_user_config().unwrap_or_default();
+        match user_config.active_project.as_deref() {
+            Some(name) => match user_config.find_project(name) {
+                Some(p) => {
+                    config::resolve_integrations(std::path::Path::new(&p.dir), &user_config, name)
+                }
+                None => config::ResolvedIntegrationsConfig::default(),
+            },
+            None => config::ResolvedIntegrationsConfig::default(),
+        }
+    };
+    match build::build_enabled_images(rt.as_ref(), &active_integrations) {
         Ok(_) => {}
         Err(e)
             if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
@@ -1112,7 +1128,7 @@ pub fn build_images() -> anyhow::Result<()> {
         {
             log::warn!("snapshotter recovery failed after prune, restarting engine");
             rt.restart_container_engine()?;
-            build::build_all_images(rt.as_ref())?;
+            build::build_enabled_images(rt.as_ref(), &active_integrations)?;
         }
         Err(e) => return Err(e),
     }
@@ -4153,8 +4169,8 @@ networks:
             "build_images() must call restart_container_engine() in the recovery path"
         );
         assert!(
-            body.contains("build::build_all_images(rt.as_ref())?"),
-            "build_images() must retry build_all_images after engine restart"
+            body.contains("build::build_enabled_images(rt.as_ref(), &active_integrations)?"),
+            "build_images() must retry build_enabled_images after engine restart"
         );
     }
 

@@ -366,6 +366,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private projectState = inject(ProjectStateService);
   private logger = inject(LoggerService);
   private unsubProjectSettled: (() => void) | null = null;
+  private unsubStatusRefresher: (() => void) | null = null;
 
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {
@@ -388,6 +389,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       }
       await this.loadActiveProject();
       await this.loadIntegrations();
+    });
+    // After a failed restart (build/compose), backend may have rolled the
+    // just-enabled service back to disabled — refresh the rows to match.
+    this.unsubStatusRefresher = this.projectState.registerIntegrationStatusRefresher(() => {
+      void this.loadIntegrations();
     });
 
     this.tauri
@@ -429,6 +435,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     if (this.unsubProjectSettled) {
       this.unsubProjectSettled();
       this.unsubProjectSettled = null;
+    }
+    if (this.unsubStatusRefresher) {
+      this.unsubStatusRefresher();
+      this.unsubStatusRefresher = null;
     }
     if (this.unlistenOAuth) {
       this.unlistenOAuth();
@@ -593,12 +603,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     svc.enabled = next;
     this.cdr.markForCheck();
     try {
-      await this.tauri.invoke('set_integration_enabled', {
-        project: this.activeProject,
-        service: svc.service,
-        enabled: next,
-      });
-      this.projectState.requestRestart();
+      await this.applyServiceToggle(svc, next);
     } catch (e: unknown) {
       svc.enabled = previous;
       this.error = e instanceof Error ? e.message : String(e);
@@ -768,18 +773,32 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   async toggleService(svc: IntegrationStatusEntry, event: Event): Promise<void> {
     const enabled = (event.target as HTMLInputElement).checked;
     try {
-      await this.tauri.invoke('set_integration_enabled', {
-        project: this.activeProject,
-        service: svc.service,
-        enabled,
-      });
-      svc.enabled = enabled;
-      this.projectState.requestRestart();
+      await this.applyServiceToggle(svc, enabled);
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
       (event.target as HTMLInputElement).checked = !enabled;
     }
     this.cdr.markForCheck();
+  }
+
+  /**
+   * SSOT for "user flipped an MCP service toggle".
+   * Persists the new value, marks `pendingJustEnabled` on enable so a failed
+   * restart can roll it back, and requests the container restart.
+   * @param svc - the integration being toggled.
+   * @param enabled - target enabled state.
+   */
+  private async applyServiceToggle(svc: IntegrationStatusEntry, enabled: boolean): Promise<void> {
+    await this.tauri.invoke('set_integration_enabled', {
+      project: this.activeProject,
+      service: svc.service,
+      enabled,
+    });
+    svc.enabled = enabled;
+    if (enabled) {
+      this.projectState.pendingJustEnabled = svc.service;
+    }
+    this.projectState.requestRestart();
   }
 
   /**

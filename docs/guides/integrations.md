@@ -84,15 +84,21 @@ Mail and Notes tools use AppleScript-based automation and have different paramet
 
 Each MCP integration requires specific credentials to function. Fields marked as optional do not block the "Configured" status — the integration works without them.
 
-| Integration | Required Fields                                                 | Optional Fields                                      |
-| ----------- | --------------------------------------------------------------- | ---------------------------------------------------- |
-| Slack       | `bot_token`, `user_token`                                       | —                                                    |
-| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                    |
-| GitLab      | `token`, `host_url`                                             | —                                                    |
-| GitHub      | `token`                                                         | —                                                    |
+| Integration | Required Fields                                                 | Optional Fields                                                        |
+| ----------- | --------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Slack       | `bot_token`, `user_token`                                       | —                                                                      |
+| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                                      |
+| GitLab      | `token`, `host_url`                                             | —                                                                      |
+| GitHub      | `token`                                                         | —                                                                      |
 | Atlassian   | `site_url`, `email`, `api_token`                                | `jira_project_keys`, `confluence_space_keys` (allowlists; empty = all) |
-| Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project) |
-| Playwright  | _(none — no credentials required)_                              | —                                                    |
+| Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project)                   |
+| Playwright  | _(none — no credentials required)_                              | —                                                                      |
+
+### Enabling an integration — first build on demand
+
+When you toggle an integration on for the first time in a project, Speedwave builds its worker container image on demand (ADR-057). The build is part of the "Restarting containers…" wait. First builds of heavy images (e.g. `playwright`, which pulls Chromium) noticeably extend that wait; subsequent toggles are near-instant because the build is cached.
+
+If the build fails (network, disk), the integration row reverts to disabled — your running containers keep their prior configuration. Disabling an integration drops its worker image; re-enabling rebuilds.
 
 ### GitHub — Code Hosting
 

@@ -845,10 +845,37 @@ fn apply_worker_auth_tokens_with_dir(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
+/// Service IDs enabled by `integrations`, as the hub's `ENABLED_SERVICES` expects:
+/// built-in MCP config keys (`slack`, ...), `os` when any OS sub-integration is on,
+/// `host_exec` when enabled (host-side, no image — ADR-054), and enabled plugin
+/// service IDs. Excludes the always-on `claude` / `mcp-hub`.
+/// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`; `build::enabled_images`
+/// uses the same per-service predicate (`is_service_enabled`) on the `IMAGES` list.
+pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec<String> {
+    let mut ids: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .filter(|svc| integrations.is_service_enabled(svc.config_key) == Some(true))
+        .map(|svc| svc.config_key.to_string())
+        .collect();
+    if integrations.any_os_enabled() {
+        ids.push("os".to_string());
+    }
+    if integrations.host_exec {
+        ids.push("host_exec".to_string());
+    }
+    ids.extend(
+        integrations
+            .enabled_plugin_service_ids()
+            .into_iter()
+            .map(String::from),
+    );
+    ids
+}
+
 /// Filters compose services based on integrations config.
 /// - Removes disabled MCP service containers from the `services` map
 /// - Removes corresponding WORKER_*_URL from hub environment
-/// - Injects ENABLED_SERVICES env var into hub (comma-separated)
+/// - Injects ENABLED_SERVICES env var into hub (comma-separated) — see [`enabled_hub_service_ids`]
 /// - Injects DISABLED_OS_SERVICES env var into hub if any OS sub-integrations are disabled
 fn apply_integrations_filter(
     yaml: &str,
@@ -856,7 +883,6 @@ fn apply_integrations_filter(
 ) -> anyhow::Result<String> {
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
 
-    // Determine which services are enabled using the TOGGLEABLE_MCP_SERVICES constant
     let service_enabled = |key: &str| -> bool {
         integrations.is_service_enabled(key).unwrap_or_else(|| {
             log::warn!(
@@ -867,42 +893,21 @@ fn apply_integrations_filter(
         })
     };
 
-    let mut enabled_names: Vec<&str> = Vec::new();
-
+    // Drop disabled MCP worker containers + their hub env vars.
     for svc in consts::TOGGLEABLE_MCP_SERVICES {
-        let (config_key, compose_name, worker_env) =
-            (svc.config_key, svc.compose_name, svc.worker_env);
-        if service_enabled(config_key) {
-            enabled_names.push(config_key);
-        } else {
-            // Remove the service container from compose
-            if let Some(services) = doc.get_mut("services") {
-                if let Some(services_map) = services.as_mapping_mut() {
-                    services_map.remove(serde_yaml_ng::Value::String(compose_name.to_string()));
-                }
-            }
-            // Remove WORKER_*_URL from hub environment
-            remove_hub_env_var(&mut doc, worker_env);
+        if service_enabled(svc.config_key) {
+            continue;
         }
+        if let Some(services) = doc.get_mut("services") {
+            if let Some(services_map) = services.as_mapping_mut() {
+                services_map.remove(serde_yaml_ng::Value::String(svc.compose_name.to_string()));
+            }
+        }
+        remove_hub_env_var(&mut doc, svc.worker_env);
     }
 
-    // OS service is conditionally present — only added when at least one OS category is enabled
-    if integrations.any_os_enabled() {
-        enabled_names.push("os");
-    }
-
-    // host_exec is host-side (no compose service); list it for the hub (ADR-054).
-    if integrations.host_exec {
-        enabled_names.push("host_exec");
-    }
-
-    // Include enabled plugin service_ids
-    for sid in integrations.enabled_plugin_service_ids() {
-        enabled_names.push(sid);
-    }
-
-    // Inject ENABLED_SERVICES into hub
-    let enabled_csv = enabled_names.join(",");
+    // Inject ENABLED_SERVICES into hub (same predicate as build::enabled_images).
+    let enabled_csv = enabled_hub_service_ids(integrations).join(",");
     log::debug!("integrations filter: enabled_services={}", enabled_csv);
     inject_worker_env(&mut doc, "ENABLED_SERVICES", &enabled_csv);
 
@@ -5817,6 +5822,33 @@ services:
         assert!(enabled_var.contains("gitlab"));
         assert!(!enabled_var.contains("redmine"));
         assert!(enabled_var.contains("os"));
+    }
+
+    #[test]
+    fn test_enabled_hub_service_ids() {
+        let default_ids = enabled_hub_service_ids(&ResolvedIntegrationsConfig::default());
+        assert!(default_ids.is_empty());
+        assert!(!default_ids.contains(&"host_exec".to_string()));
+
+        let mut cfg = ResolvedIntegrationsConfig {
+            slack: true,
+            gitlab: true,
+            os_calendar: true,
+            host_exec: true,
+            ..ResolvedIntegrationsConfig::default()
+        };
+        cfg.plugins.insert("presale".to_string(), true);
+        cfg.plugins.insert("disabled-one".to_string(), false);
+        let ids = enabled_hub_service_ids(&cfg);
+        assert!(ids.contains(&"slack".to_string()));
+        assert!(ids.contains(&"gitlab".to_string()));
+        assert!(ids.contains(&"os".to_string()));
+        assert!(ids.contains(&"host_exec".to_string()));
+        assert!(ids.contains(&"presale".to_string()));
+        assert!(!ids.contains(&"redmine".to_string()));
+        assert!(!ids.contains(&"disabled-one".to_string()));
+        assert!(!ids.contains(&"claude".to_string()));
+        assert!(!ids.contains(&"mcp-hub".to_string()));
     }
 
     #[test]

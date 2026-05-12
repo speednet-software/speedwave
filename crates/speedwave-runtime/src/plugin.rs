@@ -803,7 +803,7 @@ pub fn peek_plugin_manifest(zip_path: &Path) -> anyhow::Result<PluginManifestSum
 ///   image built.
 /// * [`InstallOutcome::InstalledPendingBuild`] — plugin extracted; image
 ///   build failed. The `.image_pending` marker remains and the build is
-///   retried on the next launch via [`ensure_all_plugin_images`].
+///   retried on the next launch via [`ensure_plugin_images`].
 pub fn install_plugin(
     zip_path: &Path,
     runtime: Option<&dyn ContainerRuntime>,
@@ -981,7 +981,7 @@ fn install_plugin_with_base(
             // No runtime available — image was not built. Treat as deferred
             // so callers (CLI, Tauri auto-enable) don't enable an MCP plugin
             // whose worker cannot start. `.image_pending` retry will run on
-            // the next launch via `ensure_all_plugin_images`.
+            // the next launch via `ensure_plugin_images`.
             on_progress(PluginInstallProgress {
                 phase: "done_with_pending_build".to_string(),
                 message: "Plugin installed; image build deferred to next launch".to_string(),
@@ -1573,71 +1573,6 @@ fn ensure_plugin_images_from_dir(
     }
 }
 
-/// Ensures all installed MCP plugin images exist (global, best-effort for reconcile).
-///
-/// Checks every installed MCP plugin's image and rebuilds any that are missing.
-/// Unlike `ensure_plugin_images()`, this is not scoped to a project — it rebuilds
-/// all plugin images regardless of which projects use them.
-///
-/// Does **not** run the pending-build pass (`.image_pending` markers). Freshly
-/// installed plugins that haven't been built yet are handled at per-project
-/// startup via `ensure_plugin_images` → `build_pending_from_dir`.
-///
-/// Errors are accumulated but individual failures do not stop other plugins from
-/// being rebuilt. Use in the Desktop reconcile path (warn-only caller).
-pub fn ensure_all_plugin_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<()> {
-    let plugins_dir = plugins_base_dir()?;
-    ensure_all_plugin_images_from_dir(runtime, &plugins_dir)
-}
-
-/// Inner implementation of `ensure_all_plugin_images()` — accepts explicit plugins dir for testability.
-fn ensure_all_plugin_images_from_dir(
-    runtime: &dyn ContainerRuntime,
-    plugins_dir: &Path,
-) -> anyhow::Result<()> {
-    if !plugins_dir.exists() {
-        return Ok(());
-    }
-
-    // Fail-closed verified loader — see `ensure_plugin_images_from_dir`.
-    let plugins = list_verified_from_dir(plugins_dir)?;
-    let mut errors: Vec<String> = Vec::new();
-
-    for vp in &plugins {
-        let manifest = &vp.manifest;
-        if manifest.service_id.is_none() {
-            continue; // resource-only plugin, no image
-        }
-
-        let plugin_dir = vp.dir.as_path();
-        if !plugin_dir.join("Containerfile").exists() {
-            continue;
-        }
-
-        let tag = plugin_image_tag(manifest);
-        let exists = runtime.image_exists(&tag).unwrap_or(false);
-        if !exists {
-            log::info!(
-                "Plugin image '{}' missing — rebuilding from {}",
-                tag,
-                plugin_dir.display()
-            );
-            if let Err(e) = build_single_plugin_image(runtime, manifest, plugin_dir) {
-                errors.push(format!("plugin '{}': {e}", manifest.slug));
-            }
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "Some plugin images failed to rebuild:\n{}",
-            errors.join("\n")
-        )
-    }
-}
-
 /// Builds pending plugin images (`.image_pending` marker).
 ///
 /// When `enabled_service_ids` is `Some(list)`, only plugins whose `service_id` is in the list
@@ -1646,9 +1581,6 @@ fn ensure_all_plugin_images_from_dir(
 /// such plugins are silently skipped when filtering is active.
 ///
 /// When `enabled_service_ids` is `None`, all pending plugins are built — used in tests.
-/// Note: `ensure_all_plugin_images` does not call this function; it only rebuilds
-/// missing images. Pending builds are handled at per-project startup via
-/// `ensure_plugin_images`.
 fn build_pending_from_dir(
     runtime: &dyn ContainerRuntime,
     enabled_service_ids: Option<&[&str]>,
@@ -5371,7 +5303,7 @@ mod tests {
         );
     }
 
-    // --- TrackingRuntime: mock for ensure_plugin_images / ensure_all_plugin_images tests ---
+    // --- TrackingRuntime: mock for ensure_plugin_images tests ---
 
     use std::collections::HashSet;
     use std::sync::Mutex;
@@ -5604,43 +5536,6 @@ mod tests {
         );
     }
 
-    // --- Happy path: global ensure_all_plugin_images ---
-
-    #[test]
-    fn test_ensure_all_plugin_images_rebuilds_all_missing() {
-        let _g = UnsignedBypassGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
-        make_mcp_plugin_dir(tmp.path(), "plugin-b", "2.0.0");
-
-        let rt = TrackingRuntime::new(&[]); // no existing images
-        ensure_all_plugin_images_from_dir(&rt, tmp.path()).unwrap();
-
-        assert_eq!(
-            rt.build_call_count(),
-            2,
-            "both missing images should be built"
-        );
-        assert!(rt.was_built("speedwave-mcp-plugin-a:1.0.0"));
-        assert!(rt.was_built("speedwave-mcp-plugin-b:2.0.0"));
-    }
-
-    #[test]
-    fn test_ensure_all_plugin_images_skips_existing() {
-        let _g = UnsignedBypassGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
-
-        let rt = TrackingRuntime::new(&["speedwave-mcp-presale:1.4.6"]);
-        ensure_all_plugin_images_from_dir(&rt, tmp.path()).unwrap();
-
-        assert_eq!(
-            rt.build_call_count(),
-            0,
-            "existing image should not be rebuilt"
-        );
-    }
-
     // --- Error path tests ---
 
     #[test]
@@ -5774,22 +5669,6 @@ mod tests {
         ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
     }
 
-    #[test]
-    fn test_ensure_all_plugin_images_accumulates_build_errors() {
-        let _g = UnsignedBypassGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
-        make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
-
-        let rt = TrackingRuntime::failing(&[]);
-        let err = ensure_all_plugin_images_from_dir(&rt, tmp.path()).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Some plugin images failed to rebuild"),
-            "error should have header: {msg}"
-        );
-    }
-
     // --- Edge cases ---
 
     #[test]
@@ -5914,16 +5793,17 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0"); // will always fail to build
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0"); // will build successfully
 
-        // Phase 1: reconcile tries to rebuild all plugins — plugin-a fails
-        let rt_failing_a = TrackingRuntime::failing(&[]);
-        let all_result = ensure_all_plugin_images_from_dir(&rt_failing_a, tmp.path());
+        // Reconcile pass: union covers both enabled plugins; plugin-a fails but
+        // the error is accumulated, not short-circuited.
+        let rt_failing = TrackingRuntime::failing(&[]);
+        let union_result =
+            ensure_plugin_images_from_dir(&rt_failing, &["plugin-a", "plugin-b"], tmp.path());
         assert!(
-            all_result.is_err(),
-            "ensure_all should return error when plugin-a fails"
+            union_result.is_err(),
+            "reconcile-union should return error when plugin-a fails"
         );
 
-        // Phase 2a: project using only plugin-b — should succeed
-        // Simulate: plugin-b image was built successfully in another scenario
+        // Project using only plugin-b — succeeds (image already exists in this runtime).
         let rt_b_exists = TrackingRuntime::new(&["speedwave-mcp-plugin-b:1.0.0"]);
         let project_b_result =
             ensure_plugin_images_from_dir(&rt_b_exists, &["plugin-b"], tmp.path());
@@ -5933,7 +5813,7 @@ mod tests {
             project_b_result
         );
 
-        // Phase 2b: project using only plugin-a — should fail
+        // Project using only plugin-a — still fails.
         let rt_a_missing = TrackingRuntime::failing(&[]);
         let project_a_result =
             ensure_plugin_images_from_dir(&rt_a_missing, &["plugin-a"], tmp.path());
