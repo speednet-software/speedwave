@@ -14,6 +14,7 @@ import { ModalOverlayComponent } from '../../shell/modal-overlay/modal-overlay.c
 import {
   HOST_EXEC_META_TOOLS,
   HOST_EXEC_PARAM_NAME_RE,
+  HOST_EXEC_PRESETS,
   HOST_EXEC_RECIPE_NAME_RE,
   HOST_EXEC_RESERVED_ENV_KEYS,
   HOST_EXEC_SHELL_LAUNCHERS,
@@ -24,6 +25,8 @@ import {
   isBareParamArg,
   isContainerLifecycleRecipe,
   isStateChangingRecipe,
+  joinArgLine,
+  parseArgLine,
   renderRecipeCommand,
 } from '../../models/host-exec';
 
@@ -33,10 +36,12 @@ interface RecipeDraft {
   editing: boolean;
   /** The name the recipe had before editing — used to find/replace it. */
   originalName: string;
+  /** Selected starter-template key (empty = custom / none). */
+  presetKey: string;
   name: string;
   exec: string;
-  /** One textarea-friendly line per argument. */
-  args: string[];
+  /** Arguments as a single command-line string — parsed via `parseArgLine`. */
+  argLine: string;
   cwdSub: string;
   params: { name: string; pattern: string; maxLen: string }[];
   env: { key: string; value: string }[];
@@ -279,9 +284,31 @@ interface RecipeDraft {
             {{ draft.editing ? 'Edit ' + draft.originalName : 'Add a command to the whitelist' }}
           </h3>
 
-          <!-- name -->
+          <!-- preset starter -->
           <label
             class="mono mt-4 mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            for="host-exec-d-preset"
+            >start from a template
+            <span class="text-[var(--ink-dim)]"
+              >(fills the fields below — you edit everything)</span
+            ></label
+          >
+          <select
+            id="host-exec-d-preset"
+            data-testid="host-exec-d-preset"
+            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
+            [value]="draft.presetKey"
+            (change)="applyPreset(inputVal($event))"
+          >
+            <option value="">— custom —</option>
+            @for (p of presets; track p.key) {
+              <option [value]="p.key">{{ p.label }}</option>
+            }
+          </select>
+
+          <!-- name -->
+          <label
+            class="mono mt-3 mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
             for="host-exec-d-name"
             >name (snake_case)</label
           >
@@ -345,43 +372,72 @@ interface RecipeDraft {
             </p>
           }
 
-          <!-- args -->
-          <div
+          <!-- args — one command-line string -->
+          <label
             class="mono mt-3 mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            for="host-exec-d-argline"
+            >arguments —
+            <span class="text-[var(--ink-dim)]">type them as on a command line</span></label
           >
-            arguments — one per line;
-            <span class="text-[var(--ink-dim)]">{{ '{' }}name{{ '}' }}</span> tokens map to
-            parameters below
-          </div>
-          @for (a of draft.args; track $index; let i = $index) {
-            <div class="mb-1 flex items-stretch gap-2">
-              <input
-                type="text"
-                [value]="a"
-                (input)="draft.args[i] = inputVal($event)"
-                [attr.data-testid]="'host-exec-d-arg-' + i"
-                placeholder="test  /  --tests={class}  /  -PsomeFlag"
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
-              />
-              <button
-                type="button"
-                class="mono shrink-0 rounded border border-[var(--line)] px-2 text-[11px] text-[var(--ink-mute)] hover:text-red-400"
-                [attr.data-testid]="'host-exec-d-arg-rm-' + i"
-                (click)="removeArg(i)"
-                aria-label="remove argument"
+          <input
+            id="host-exec-d-argline"
+            type="text"
+            [value]="draft.argLine"
+            (input)="draft.argLine = inputVal($event)"
+            data-testid="host-exec-d-argline"
+            placeholder='ps -a    /    test --tests={class}    /    --filter "name=foo bar"'
+            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
+          />
+          <p class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">
+            Split on spaces (use <span class="text-[var(--ink-dim)]">&quot;quotes&quot;</span> for
+            an argument that contains a space). This is
+            <span class="text-[var(--ink-dim)]">not a shell</span> —
+            <span class="text-[var(--ink-dim)]">$VAR</span>,
+            <span class="text-[var(--ink-dim)]">&amp;&amp;</span>,
+            <span class="text-[var(--ink-dim)]">|</span>,
+            <span class="text-[var(--ink-dim)]">;</span> and globs are passed through literally,
+            never interpreted. Use
+            <span class="text-[var(--ink-dim)]">{{ '{' }}name{{ '}' }}</span> for a value Claude
+            supplies.
+          </p>
+          <!-- token-chip preview: exactly what will run -->
+          @if (draftArgParseError(); as perr) {
+            <p
+              class="mono mt-2 rounded border border-red-500/30 bg-red-500/5 px-2 py-1 text-[10.5px] text-red-300"
+              data-testid="host-exec-d-argline-error"
+            >
+              {{ perr }}
+            </p>
+          } @else {
+            <div
+              class="mono mt-2 flex flex-wrap items-center gap-1.5 rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1.5 text-[11px] text-[var(--ink-mute)]"
+              data-testid="host-exec-d-argv-preview"
+            >
+              <span class="text-[var(--ink-mute)]">→ runs:</span>
+              <span
+                class="rounded border border-teal-500/30 bg-[var(--bg-3)] px-1.5 py-0.5 text-teal-300"
+                >{{ draftExecBasename() }}</span
               >
-                ×
-              </button>
+              @if (draftArgv().length === 0) {
+                <span
+                  class="rounded border border-red-500/30 border-dashed bg-[var(--bg-3)] px-1.5 py-0.5 text-red-300"
+                  >(no args)</span
+                >
+              }
+              @for (a of draftArgv(); track $index) {
+                <span
+                  class="rounded border bg-[var(--bg-3)] px-1.5 py-0.5"
+                  [class.border-amber-500/30]="argHasToken(a)"
+                  [class.text-amber-300]="argHasToken(a)"
+                  [class.border-red-500/30]="a === ''"
+                  [class.text-red-300]="a === ''"
+                  [class.border-[var(--line-strong)]]="!argHasToken(a) && a !== ''"
+                  [class.text-[var(--ink-dim)]]="!argHasToken(a) && a !== ''"
+                  >{{ chipLabel(a) }}</span
+                >
+              }
             </div>
           }
-          <button
-            type="button"
-            class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[11px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
-            data-testid="host-exec-d-arg-add"
-            (click)="addArg()"
-          >
-            + argument
-          </button>
 
           <!-- params -->
           <div
@@ -564,6 +620,15 @@ interface RecipeDraft {
 })
 export class HostExecConfigComponent implements OnInit, OnDestroy {
   // ---- state -------------------------------------------------------------
+  /**
+   * The built-in recipe templates for the dialog's "start from a template"
+   * dropdown. A getter (not a field initializer) so the value is resolved on
+   * first access — sidesteps any module-init ordering quirk under the test
+   * bundler that left a field initializer reading `undefined`.
+   */
+  get presets(): typeof HOST_EXEC_PRESETS {
+    return HOST_EXEC_PRESETS;
+  }
   /** Whether host_exec is enabled for the active project. */
   enabled = false;
   /** The persisted whitelist (last loaded/saved). */
@@ -760,9 +825,10 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
     this.draft = {
       editing: false,
       originalName: '',
+      presetKey: '',
       name: '',
       exec: '',
-      args: [],
+      argLine: '',
       cwdSub: '',
       params: [],
       env: [],
@@ -780,9 +846,10 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
     this.draft = {
       editing: true,
       originalName: cmd.name,
+      presetKey: '',
       name: cmd.name,
       exec: cmd.exec,
-      args: [...cmd.args],
+      argLine: joinArgLine(cmd.args),
       cwdSub: cmd.cwdSub ?? '',
       params: (cmd.params ?? []).map((p) => ({
         name: p.name,
@@ -796,6 +863,33 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  /**
+   * Apply a starter template — fills name/exec/argLine/params (the user can
+   * then edit anything). `''` (custom) leaves the draft untouched.
+   * @param key - The preset key (`<option value>`).
+   */
+  applyPreset(key: string): void {
+    if (!this.draft) return;
+    this.draft.presetKey = key;
+    const p = HOST_EXEC_PRESETS.find((x) => x.key === key);
+    if (!p) {
+      this.cdr.markForCheck();
+      return;
+    }
+    this.draft.name = p.name;
+    this.draft.exec = p.exec;
+    this.draft.argLine = p.argLine;
+    this.draft.params = p.params.map((x) => ({
+      name: x.name,
+      pattern: x.pattern,
+      maxLen: x.maxLen != null ? String(x.maxLen) : '',
+    }));
+    this.execHint = p.execHint;
+    this.execHintWarn = false;
+    this.draftError = '';
+    this.cdr.markForCheck();
+  }
+
   /** Closes the dialog discarding the draft. */
   closeDialog(): void {
     this.draft = null;
@@ -803,19 +897,44 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /** Appends a blank argument row to the draft. */
-  addArg(): void {
-    this.draft?.args.push('');
-    this.cdr.markForCheck();
+  /** Parsed argv from the draft's command-line string (`[]` on a parse error). */
+  private draftArgvOrEmpty(): string[] {
+    if (!this.draft) return [];
+    const r = parseArgLine(this.draft.argLine);
+    return 'error' in r ? [] : r.args;
+  }
+  /** The argv list for the preview chips. */
+  draftArgv(): string[] {
+    return this.draftArgvOrEmpty();
+  }
+  /** A parse error for the argument line, or empty when it parses. */
+  draftArgParseError(): string {
+    if (!this.draft) return '';
+    const r = parseArgLine(this.draft.argLine);
+    return 'error' in r ? r.error : '';
+  }
+  /** The executable basename for the preview chip (`exec` placeholder if empty). */
+  draftExecBasename(): string {
+    const e = this.draft?.exec.trim() ?? '';
+    if (!e) return 'exec';
+    return e.split(/[/\\]/).pop() || e;
   }
   /**
-   * Removes the argument row at index `i` from the draft.
-   * @param i - The argument row index.
+   * True if an argv element carries a `{name}` parameter token (amber chip).
+   * @param arg - One parsed argv element.
    */
-  removeArg(i: number): void {
-    this.draft?.args.splice(i, 1);
-    this.cdr.markForCheck();
+  argHasToken(arg: string): boolean {
+    return argParamRefs(arg).length > 0;
   }
+  /**
+   * Label for an argv chip — quotes a token with a space, marks the empty one.
+   * @param arg - One parsed argv element.
+   */
+  chipLabel(arg: string): string {
+    if (arg === '') return '""(empty)';
+    return /\s/.test(arg) ? `"${arg}"` : arg;
+  }
+
   /** Appends a blank parameter row to the draft. */
   addParam(): void {
     this.draft?.params.push({ name: '', pattern: '', maxLen: '' });
@@ -881,13 +1000,13 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
   /** True if the *draft* is a container-lifecycle recipe (amber dialog warning). */
   draftIsContainerLifecycle(): boolean {
     if (!this.draft) return false;
-    return isContainerLifecycleRecipe({ exec: this.draft.exec, args: this.draft.args });
+    return isContainerLifecycleRecipe({ exec: this.draft.exec, args: this.draftArgvOrEmpty() });
   }
 
   /** True if the *draft* matches the broader state-changing heuristic (amber dialog warning). */
   draftIsStateChanging(): boolean {
     if (!this.draft) return false;
-    return isStateChangingRecipe({ exec: this.draft.exec, args: this.draft.args });
+    return isStateChangingRecipe({ exec: this.draft.exec, args: this.draftArgvOrEmpty() });
   }
 
   /** `host_exec_resolve_executable` — fills `exec` with the resolved path. */
@@ -994,9 +1113,10 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
     if (HOST_EXEC_SHELL_LAUNCHERS.includes(execBase)) {
       return `"${execBase}" is a shell / eval launcher and is not allowed — it would let Claude run arbitrary commands. Point Host Exec at the actual tool.`;
     }
-    const args = d.args;
+    const parsed = parseArgLine(d.argLine);
+    if ('error' in parsed) return parsed.error;
+    const args = parsed.args; // an empty list is valid — the recipe is just `exec`
     for (const a of args) {
-      if (a === '') return 'Arguments must not be empty — remove the blank row.';
       if (a.includes('\0') || a.includes('\n'))
         return 'Arguments must not contain NUL or newlines.';
     }
@@ -1092,9 +1212,10 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
       const draft: RecipeDraft = {
         editing: true,
         originalName: c.name,
+        presetKey: '',
         name: c.name,
         exec: c.exec,
-        args: [...c.args],
+        argLine: joinArgLine(c.args),
         cwdSub: c.cwdSub ?? '',
         params: (c.params ?? []).map((p) => ({
           name: p.name,

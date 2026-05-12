@@ -261,3 +261,178 @@ export function isContainerLifecycleRecipe(cmd: Pick<HostExecCommand, 'exec' | '
 export function renderRecipeCommand(cmd: Pick<HostExecCommand, 'exec' | 'args'>): string {
   return [cmd.exec, ...cmd.args].join(' ');
 }
+
+/** Result of {@link parseArgLine}: the parsed argv list, or a human-readable error. */
+export type ParsedArgLine = { args: string[] } | { error: string };
+
+/**
+ * Split a command-line-style argument string into an `args[]` list — splits on
+ * runs of whitespace, with `"double"` and `'single'` quotes grouping a token
+ * that contains spaces. **This is not a shell**: `$VAR`, `&&`, `|`, `;` and
+ * globs are kept verbatim (they become literal characters inside an argv
+ * element — `spawn` with `shell:false` never re-parses them). Used so the UI
+ * can offer a single "type it as on a command line" field instead of one input
+ * per argument; the resulting `args[]` is exactly what the worker receives.
+ * @param line - The raw argument line (no `exec` — just the args after it).
+ * @returns `{ args }` on success, `{ error }` on an unbalanced quote.
+ */
+export function parseArgLine(line: string): ParsedArgLine {
+  const out: string[] = [];
+  let cur = '';
+  let inSingle = false;
+  let inDouble = false;
+  let started = false; // whether the current token has any content (even empty `""`)
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      else cur += ch;
+      started = true;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
+      else cur += ch;
+      started = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      started = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      started = true;
+      continue;
+    }
+    if (ch === ' ' || ch === '\t') {
+      if (started) {
+        out.push(cur);
+        cur = '';
+        started = false;
+      }
+      continue;
+    }
+    cur += ch;
+    started = true;
+  }
+  if (inSingle || inDouble) return { error: 'Unbalanced quote in the argument line.' };
+  if (started) out.push(cur);
+  return { args: out };
+}
+
+/**
+ * Inverse of {@link parseArgLine} — render an `args[]` back into a single line
+ * (so the UI can load an existing recipe into the command-line field). Any
+ * token containing whitespace is wrapped in double quotes; an empty token
+ * becomes `""`. Round-trips with `parseArgLine` for the cases the field
+ * produces (it does not attempt to escape quotes-within-tokens — those don't
+ * occur in practice and `parseArgLine` wouldn't survive them either).
+ * @param args - The argument list.
+ * @returns A command-line string.
+ */
+export function joinArgLine(args: readonly string[]): string {
+  return args.map((a) => (a === '' || /\s/.test(a) ? `"${a}"` : a)).join(' ');
+}
+
+/** A starter template for the "Add command" dialog — prefills name/exec/args/params. */
+export interface HostExecPreset {
+  /** Stable key used as the `<option value>`. */
+  key: string;
+  /** Human label shown in the dropdown. */
+  label: string;
+  /** Suggested recipe name (snake_case). */
+  name: string;
+  /** Suggested executable. */
+  exec: string;
+  /** Suggested argument line (parsed via {@link parseArgLine} into `args[]`). */
+  argLine: string;
+  /** Suggested parameters (usually empty; named-test presets ship one). */
+  params: HostExecParam[];
+  /** A short note replacing the executable hint while this preset is selected. */
+  execHint: string;
+}
+
+/**
+ * Built-in recipe templates surfaced in the add/edit dialog. They mirror the
+ * stacks the team reported (Gradle, npm/yarn, Maven, Docker, repo shell
+ * scripts — see the SPW-83 discovery thread). Each one only *prefills* the
+ * fields — the user edits everything; nothing is whitelisted automatically.
+ */
+export const HOST_EXEC_PRESETS: readonly HostExecPreset[] = [
+  {
+    key: 'gradle-test',
+    label: 'Gradle · run tests  (./gradlew test)',
+    name: 'gradle_test',
+    exec: './gradlew',
+    argLine: 'test',
+    params: [],
+    execHint: 'A wrapper script in the project — runs against the project directory.',
+  },
+  {
+    key: 'gradle-test-named',
+    label: 'Gradle · run a named test',
+    name: 'gradle_test_named',
+    exec: './gradlew',
+    argLine: 'test --tests {test_class}',
+    params: [{ name: 'test_class', pattern: '^[A-Za-z][A-Za-z0-9_.$]*$', maxLen: 200 }],
+    execHint: 'A wrapper script in the project — runs against the project directory.',
+  },
+  {
+    key: 'npm-script',
+    label: 'npm / yarn · run a package script',
+    name: 'npm_build',
+    exec: './node_modules/.bin/yarn',
+    argLine: 'build',
+    params: [],
+    execHint: 'The project-local yarn binary — keeps Host Exec off the meta-runner ban list.',
+  },
+  {
+    key: 'mvn-goal',
+    label: 'Maven · run a goal  (mvn verify)',
+    name: 'mvn_verify',
+    exec: 'mvn',
+    argLine: 'verify',
+    params: [],
+    execHint: 'Resolved on the recovered host PATH (or pick an absolute path).',
+  },
+  {
+    key: 'docker-ps',
+    label: 'Docker · list running containers',
+    name: 'docker_ps',
+    exec: 'docker',
+    argLine: 'ps',
+    params: [],
+    execHint: 'Resolved on the recovered host PATH (or pick an absolute path).',
+  },
+  {
+    key: 'docker-ps-all',
+    label: 'Docker · list all containers (-a)',
+    name: 'docker_ps_all',
+    exec: 'docker',
+    argLine: 'ps -a',
+    params: [],
+    execHint: 'Resolved on the recovered host PATH (or pick an absolute path).',
+  },
+  {
+    key: 'docker-compose-up',
+    label: 'Docker compose · up -d  (⚠ lifecycle)',
+    name: 'compose_up',
+    exec: 'docker',
+    argLine: 'compose up -d',
+    params: [],
+    execHint:
+      'Resolved on the recovered host PATH. This is a container-lifecycle recipe — see the warning below.',
+  },
+  {
+    key: 'shell-script',
+    label: 'Shell script in the repo  (./scripts/…)',
+    name: 'run_script',
+    exec: './scripts/migrate.sh',
+    argLine: '',
+    params: [],
+    execHint:
+      'A script in the repo — Host Exec runs it directly (no shell launcher); the script itself does the work.',
+  },
+];

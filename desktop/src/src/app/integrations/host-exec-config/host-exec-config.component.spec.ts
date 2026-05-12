@@ -10,7 +10,11 @@ import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-import type { HostExecCommand, HostExecStatus } from '../../models/host-exec';
+import {
+  HOST_EXEC_PRESETS,
+  type HostExecCommand,
+  type HostExecStatus,
+} from '../../models/host-exec';
 
 function makeMockLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
@@ -292,7 +296,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'build_app';
       component.draft!.exec = './gradlew';
-      component.draft!.args = ['assemble'];
+      component.draft!.argLine = 'assemble';
       component.commitDraft();
       fixture.detectChanges();
       expect(component.draft).toBeNull();
@@ -316,7 +320,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'sh_cmd';
       component.draft!.exec = '/bin/bash';
-      component.draft!.args = ['-c', 'whoami'];
+      component.draft!.argLine = '-c whoami';
       component.commitDraft();
       expect(component.draftError).toContain('shell / eval launcher');
     });
@@ -326,7 +330,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'run_anything';
       component.draft!.exec = 'npm';
-      component.draft!.args = ['run', '{script}'];
+      component.draft!.argLine = 'run {script}';
       component.draft!.params = [{ name: 'script', pattern: '^[a-z:-]+$', maxLen: '' }];
       component.commitDraft();
       expect(component.draftError).toContain('bare parameter');
@@ -337,7 +341,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'npm_build';
       component.draft!.exec = 'npm';
-      component.draft!.args = ['run', 'build'];
+      component.draft!.argLine = 'run build';
       component.commitDraft();
       expect(component.draftError).toBe('');
       expect(component.commands[0].name).toBe('npm_build');
@@ -348,7 +352,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'broken';
       component.draft!.exec = './gradlew';
-      component.draft!.args = ['test', '--tests={class}'];
+      component.draft!.argLine = 'test --tests={class}';
       component.commitDraft();
       expect(component.draftError).toContain('{class}');
     });
@@ -358,7 +362,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'p';
       component.draft!.exec = './x';
-      component.draft!.args = ['{v}'];
+      component.draft!.argLine = '{v}';
       component.draft!.params = [{ name: 'v', pattern: '([unclosed', maxLen: '' }];
       component.commitDraft();
       expect(component.draftError).toContain('does not compile');
@@ -369,7 +373,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'p';
       component.draft!.exec = './x';
-      component.draft!.args = ['{v}'];
+      component.draft!.argLine = '{v}';
       component.draft!.params = [{ name: 'v', pattern: '.*', maxLen: '99999999' }];
       component.commitDraft();
       expect(component.draftError).toContain('max length');
@@ -380,6 +384,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'p';
       component.draft!.exec = './x';
+      component.draft!.argLine = 'go';
       component.draft!.cwdSub = '/etc';
       component.commitDraft();
       expect(component.draftError).toContain('relative path');
@@ -390,6 +395,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'p';
       component.draft!.exec = './x';
+      component.draft!.argLine = 'go';
       component.draft!.cwdSub = '../sibling';
       component.commitDraft();
       expect(component.draftError).toContain('".."');
@@ -400,6 +406,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'p';
       component.draft!.exec = './x';
+      component.draft!.argLine = 'go';
       component.draft!.env = [{ key: 'LD_PRELOAD', value: '/tmp/evil.so' }];
       component.commitDraft();
       expect(component.draftError).toContain('reserved');
@@ -410,6 +417,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'gradle_test';
       component.draft!.exec = './gradlew';
+      component.draft!.argLine = 'test';
       component.commitDraft();
       expect(component.draftError).toContain('already exists');
     });
@@ -432,7 +440,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'fe_test';
       component.draft!.exec = 'npm';
-      component.draft!.args = ['test', '--', '--watchAll=false', '--testPathPattern={pat}'];
+      component.draft!.argLine = 'test -- --watchAll=false --testPathPattern={pat}';
       component.draft!.cwdSub = 'frontend';
       component.draft!.params = [{ name: 'pat', pattern: '^[A-Za-z0-9_./-]+$', maxLen: '120' }];
       component.draft!.env = [{ key: 'CI', value: 'true' }];
@@ -460,7 +468,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'compose_up';
       component.draft!.exec = 'docker';
-      component.draft!.args = ['compose', 'up', '-d'];
+      component.draft!.argLine = 'compose up -d';
       fixture.detectChanges();
       expect(component.draftIsContainerLifecycle()).toBe(true);
       expect(q('[data-testid="host-exec-d-lifecycle-warn"]')).not.toBeNull();
@@ -475,7 +483,7 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'db_shell';
       component.draft!.exec = 'psql';
-      component.draft!.args = ['-c', '{q}'];
+      component.draft!.argLine = '-c {q}';
       component.draft!.params = [{ name: 'q', pattern: '^SELECT.*$', maxLen: '' }];
       fixture.detectChanges();
       expect(component.draftIsContainerLifecycle()).toBe(false);
@@ -489,12 +497,146 @@ describe('HostExecConfigComponent', () => {
       component.openAdd();
       component.draft!.name = 'gradle_test';
       component.draft!.exec = './gradlew';
-      component.draft!.args = ['test'];
+      component.draft!.argLine = 'test';
       fixture.detectChanges();
       expect(component.draftIsContainerLifecycle()).toBe(false);
       expect(component.draftIsStateChanging()).toBe(false);
       expect(q('[data-testid="host-exec-d-lifecycle-warn"]')).toBeNull();
       expect(q('[data-testid="host-exec-d-statechanging-warn"]')).toBeNull();
+    });
+
+    describe('command-line argument field', () => {
+      it('parses "ps -a" into two argv chips (not one literal "ps -a")', async () => {
+        await init(makeStatus({ enabled: true }));
+        component.openAdd();
+        component.draft!.exec = 'docker';
+        component.draft!.argLine = 'ps -a';
+        fixture.detectChanges();
+        expect(component.draftArgv()).toEqual(['ps', '-a']);
+        expect(component.draftArgParseError()).toBe('');
+        const preview = q('[data-testid="host-exec-d-argv-preview"]');
+        expect(preview?.textContent).toContain('docker');
+        expect(preview?.textContent).toContain('ps');
+        expect(preview?.textContent).toContain('-a');
+      });
+
+      it('honours quotes for an argument with a space', async () => {
+        await init(makeStatus({ enabled: true }));
+        component.openAdd();
+        component.draft!.exec = 'docker';
+        component.draft!.argLine = '--filter "name=foo bar"';
+        fixture.detectChanges();
+        expect(component.draftArgv()).toEqual(['--filter', 'name=foo bar']);
+      });
+
+      it('shows a parse error (and no preview) on an unbalanced quote, and rejects on commit', async () => {
+        await init(makeStatus({ enabled: true }));
+        component.openAdd();
+        component.draft!.name = 'p';
+        component.draft!.exec = './x';
+        component.draft!.argLine = '--filter "name=foo';
+        fixture.detectChanges();
+        expect(component.draftArgParseError()).toContain('Unbalanced quote');
+        expect(q('[data-testid="host-exec-d-argv-preview"]')).toBeNull();
+        expect(q('[data-testid="host-exec-d-argline-error"]')).not.toBeNull();
+        component.commitDraft();
+        expect(component.draftError).toContain('Unbalanced quote');
+      });
+
+      it('allows an empty argument line — the recipe is just the executable', async () => {
+        await init(makeStatus({ enabled: true }));
+        component.openAdd();
+        component.draft!.name = 'run_script';
+        component.draft!.exec = './scripts/migrate.sh';
+        component.draft!.argLine = '   ';
+        component.commitDraft();
+        expect(component.draftError).toBe('');
+        expect(component.commands.find((c) => c.name === 'run_script')?.args).toEqual([]);
+      });
+
+      it('does NOT interpret ; / && / globs — they pass through as literal argv elements', async () => {
+        await init(makeStatus({ enabled: true }));
+        component.openAdd();
+        component.draft!.exec = 'docker';
+        component.draft!.argLine = 'ps; rm -rf x';
+        fixture.detectChanges();
+        // `ps;` is a single (harmless) argument — docker would just reject it.
+        expect(component.draftArgv()).toEqual(['ps;', 'rm', '-rf', 'x']);
+      });
+
+      it('round-trips an existing recipe through the field on edit', async () => {
+        await init(
+          makeStatus({
+            enabled: true,
+            commands: [{ name: 'r', exec: './gradlew', args: ['test', '--tests={class}'] }],
+          })
+        );
+        component.openEdit(component.commands[0]);
+        expect(component.draft?.argLine).toBe('test --tests={class}');
+        expect(component.draftArgv()).toEqual(['test', '--tests={class}']);
+      });
+    });
+
+    describe('preset templates', () => {
+      it('exposes the preset list and the dropdown lists every one plus the "custom" sentinel', async () => {
+        await init(makeStatus({ enabled: true }));
+        // The component re-exports the model's preset list verbatim.
+        expect(component.presets).toBe(HOST_EXEC_PRESETS);
+        expect(component.presets.length).toBeGreaterThan(0);
+        component.openAdd();
+        fixture.detectChanges();
+        const sel = q('[data-testid="host-exec-d-preset"]') as HTMLSelectElement;
+        expect(sel).not.toBeNull();
+        const values = Array.from(sel.options).map((o) => o.value);
+        expect(values[0]).toBe(''); // the "— custom —" sentinel
+        for (const p of HOST_EXEC_PRESETS) expect(values).toContain(p.key);
+      });
+
+      it('applying a preset fills name / exec / argLine (and params for the named-test one)', async () => {
+        await init(makeStatus({ enabled: true }));
+        component.openAdd();
+        component.applyPreset('docker-ps-all');
+        expect(component.draft?.name).toBe('docker_ps_all');
+        expect(component.draft?.exec).toBe('docker');
+        expect(component.draft?.argLine).toBe('ps -a');
+        expect(component.draftArgv()).toEqual(['ps', '-a']);
+
+        component.applyPreset('gradle-test-named');
+        expect(component.draft?.name).toBe('gradle_test_named');
+        expect(component.draft?.argLine).toContain('{test_class}');
+        expect(component.draft?.params.some((p) => p.name === 'test_class')).toBe(true);
+      });
+
+      it('applying "— custom —" (empty key) leaves the draft untouched', async () => {
+        await init(makeStatus({ enabled: true }));
+        component.openAdd();
+        component.draft!.name = 'mine';
+        component.draft!.exec = './my-tool';
+        component.draft!.argLine = 'go --fast';
+        component.applyPreset('');
+        expect(component.draft?.name).toBe('mine');
+        expect(component.draft?.exec).toBe('./my-tool');
+        expect(component.draft?.argLine).toBe('go --fast');
+      });
+
+      it('a preset-filled recipe commits cleanly', async () => {
+        await init(makeStatus({ enabled: true }));
+        component.openAdd();
+        component.applyPreset('docker-ps');
+        component.commitDraft();
+        expect(component.draftError).toBe('');
+        expect(component.commands.some((c) => c.name === 'docker_ps')).toBe(true);
+        expect(component.commands.find((c) => c.name === 'docker_ps')?.args).toEqual(['ps']);
+      });
+
+      it('the docker-compose-up preset is flagged as container-lifecycle (amber warning)', async () => {
+        await init(makeStatus({ enabled: true }));
+        component.openAdd();
+        component.applyPreset('docker-compose-up');
+        fixture.detectChanges();
+        expect(component.draftIsContainerLifecycle()).toBe(true);
+        expect(q('[data-testid="host-exec-d-lifecycle-warn"]')).not.toBeNull();
+      });
     });
 
     describe('exec picker', () => {

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   HOST_EXEC_META_TOOLS,
   HOST_EXEC_PARAM_NAME_RE,
+  HOST_EXEC_PRESETS,
   HOST_EXEC_RECIPE_NAME_RE,
   HOST_EXEC_RESERVED_ENV_KEYS,
   HOST_EXEC_SHELL_LAUNCHERS,
@@ -10,6 +11,8 @@ import {
   isBareParamArg,
   isContainerLifecycleRecipe,
   isStateChangingRecipe,
+  joinArgLine,
+  parseArgLine,
   renderRecipeCommand,
 } from './host-exec';
 
@@ -151,6 +154,104 @@ describe('host-exec model helpers', () => {
         './gradlew test --tests={class}'
       );
       expect(renderRecipeCommand({ exec: 'docker', args: [] })).toBe('docker');
+    });
+  });
+
+  describe('parseArgLine', () => {
+    it('splits on runs of whitespace', () => {
+      expect(parseArgLine('ps -a')).toEqual({ args: ['ps', '-a'] });
+      expect(parseArgLine('  test   --watch  ')).toEqual({ args: ['test', '--watch'] });
+      expect(parseArgLine('compose\tup -d')).toEqual({ args: ['compose', 'up', '-d'] });
+    });
+    it('honours double and single quotes for an argument with a space', () => {
+      expect(parseArgLine('--filter "name=foo bar"')).toEqual({
+        args: ['--filter', 'name=foo bar'],
+      });
+      expect(parseArgLine("-c 'SELECT * FROM t'")).toEqual({ args: ['-c', 'SELECT * FROM t'] });
+      expect(parseArgLine('"two words" then one')).toEqual({
+        args: ['two words', 'then', 'one'],
+      });
+      // empty quoted token survives as ''
+      expect(parseArgLine('ps ""')).toEqual({ args: ['ps', ''] });
+    });
+    it('is NOT a shell — $VAR / && / | / ; / globs pass through literally', () => {
+      expect(parseArgLine('ps; rm -rf x')).toEqual({ args: ['ps;', 'rm', '-rf', 'x'] });
+      expect(parseArgLine('echo $HOME && echo done')).toEqual({
+        args: ['echo', '$HOME', '&&', 'echo', 'done'],
+      });
+      expect(parseArgLine('cat *.log | grep e')).toEqual({
+        args: ['cat', '*.log', '|', 'grep', 'e'],
+      });
+    });
+    it('keeps {name} tokens intact (whole token or embedded)', () => {
+      expect(parseArgLine('test --tests={class}')).toEqual({
+        args: ['test', '--tests={class}'],
+      });
+      expect(parseArgLine('-c {sql}')).toEqual({ args: ['-c', '{sql}'] });
+    });
+    it('errors on an unbalanced quote', () => {
+      expect(parseArgLine('--filter "name=foo')).toEqual({
+        error: 'Unbalanced quote in the argument line.',
+      });
+      expect(parseArgLine("-c 'SELECT")).toEqual({
+        error: 'Unbalanced quote in the argument line.',
+      });
+    });
+    it('empty / whitespace-only line → empty args', () => {
+      expect(parseArgLine('')).toEqual({ args: [] });
+      expect(parseArgLine('   \t  ')).toEqual({ args: [] });
+    });
+  });
+
+  describe('joinArgLine', () => {
+    it('joins with spaces, quoting tokens that contain whitespace or are empty', () => {
+      expect(joinArgLine(['ps', '-a'])).toBe('ps -a');
+      expect(joinArgLine(['--filter', 'name=foo bar'])).toBe('--filter "name=foo bar"');
+      expect(joinArgLine(['ps', ''])).toBe('ps ""');
+      expect(joinArgLine([])).toBe('');
+    });
+    it('round-trips with parseArgLine for the shapes the UI produces', () => {
+      for (const args of [
+        ['test'],
+        ['ps', '-a'],
+        ['test', '--tests={class}'],
+        ['-c', 'SELECT * FROM t'],
+        ['compose', 'up', '-d'],
+        ['ps', ''],
+      ]) {
+        expect(parseArgLine(joinArgLine(args))).toEqual({ args });
+      }
+    });
+  });
+
+  describe('HOST_EXEC_PRESETS', () => {
+    it('each preset is well-formed (snake_case name, parseable argLine, valid params)', () => {
+      expect(HOST_EXEC_PRESETS.length).toBeGreaterThan(0);
+      for (const p of HOST_EXEC_PRESETS) {
+        expect(HOST_EXEC_RECIPE_NAME_RE.test(p.name)).toBe(true);
+        const parsed = parseArgLine(p.argLine);
+        expect('args' in parsed).toBe(true);
+        if ('args' in parsed) {
+          // every {token} in the preset's args has a matching param
+          const paramNames = new Set(p.params.map((x) => x.name));
+          for (const a of parsed.args) {
+            for (const ref of argParamRefs(a)) expect(paramNames.has(ref)).toBe(true);
+          }
+        }
+        for (const param of p.params) {
+          expect(HOST_EXEC_PARAM_NAME_RE.test(param.name)).toBe(true);
+          expect(() => new RegExp(param.pattern)).not.toThrow();
+        }
+        expect(p.execHint.length).toBeGreaterThan(0);
+        expect(p.key.length).toBeGreaterThan(0);
+        expect(p.label.length).toBeGreaterThan(0);
+      }
+    });
+    it('the named-test gradle preset ships a `test_class` param token its argLine uses', () => {
+      const p = HOST_EXEC_PRESETS.find((x) => x.key === 'gradle-test-named');
+      expect(p).toBeDefined();
+      expect(p!.argLine).toContain('{test_class}');
+      expect(p!.params.some((x) => x.name === 'test_class')).toBe(true);
     });
   });
 });
