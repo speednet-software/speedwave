@@ -61,6 +61,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-052](ADR-052-anthropic-oauth-login-flow.md)                       | Claude Code Login Surface + Clipboard Bridge                               | Accepted              |
 | [ADR-053](ADR-053-worker-implementation-own-vs-wrap-official-mcp.md)   | Worker Implementation — Own Thin Worker vs Wrapping an Official MCP Server | Accepted              |
 | [ADR-054](ADR-054-host-exec-worker.md)                                 | `host_exec` — Per-Project Host-Side MCP Worker for the Project Toolchain   | Accepted              |
+| [ADR-057](ADR-057-single-log-timestamp-format.md)                      | Single Log Timestamp Format                                                | Accepted              |
 
 ## Creating a New ADR
 
