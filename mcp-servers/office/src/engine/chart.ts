@@ -6,9 +6,9 @@
  * @module mcp-office/engine/chart
  */
 
-import * as fsp from 'node:fs/promises';
 import { runPythonScript } from '../subprocess.js';
 import { resolveOutputPath } from '../path-policy.js';
+import { buildFileResult } from './file-result.js';
 import { ValidationError } from '../errors.js';
 import type { ChartSpec, FileResult } from '../types.js';
 
@@ -84,6 +84,5 @@ export async function renderChart(
   const fmt = validated.format ?? 'png';
   const dest = await resolveOutputPath(outName, `chart-${Date.now()}.${fmt}`, overwrite);
   await runPythonScript('render_chart.py', [dest, JSON.stringify(validated)]);
-  const bytes = (await fsp.stat(dest)).size;
-  return { path: dest, bytes, format: fmt, preview: '', truncated: false };
+  return buildFileResult(dest, fmt);
 }

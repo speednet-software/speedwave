@@ -35,17 +35,15 @@ export type TextInput = { path: string } | { markdown: string } | { html: string
  * inline content (≤ `MAX_INLINE_BYTES`) is written to a temp file with the given extension.
  * @param input - The text input (path or inline).
  * @param inlineExt - Extension to use for the temp file when content is inline (e.g. `".md"`, `".html"`).
- * @returns The path to use, whether it is a temp file the caller should delete, and the base URL
- *   for resolving relative resources (the source dir for a `/workspace` path; `/workspace` root for inline).
+ * @returns The path to use and whether it is a temp file the caller should delete.
  * @throws {ValidationError} When inline content exceeds the size cap, or when `input` has no recognized key.
  */
 async function materializeTextInput(
   input: TextInput,
   inlineExt: string
-): Promise<{ filePath: string; isTemp: boolean; baseUrl: string }> {
+): Promise<{ filePath: string; isTemp: boolean }> {
   if ('path' in input && typeof input.path === 'string') {
-    const filePath = await resolveInputFile(input.path);
-    return { filePath, isTemp: false, baseUrl: `file://${path.dirname(filePath)}/` };
+    return { filePath: await resolveInputFile(input.path), isTemp: false };
   }
   const inline = 'markdown' in input ? input.markdown : 'html' in input ? input.html : undefined;
   if (typeof inline !== 'string') {
@@ -58,9 +56,19 @@ async function materializeTextInput(
   }
   const tmp = path.join(os.tmpdir(), `office-in-${randomUUID()}${inlineExt}`);
   await fsp.writeFile(tmp, inline);
-  // Inline content lives in /tmp, which weasyprint's url_fetcher rejects; resolve relative
-  // `<img>` etc. against /workspace so `![](chart.png)` in inline markdown still works.
-  return { filePath: tmp, isTemp: true, baseUrl: `file://${WORKSPACE_ROOT}/` };
+  return { filePath: tmp, isTemp: true };
+}
+
+/**
+ * Base URL for WeasyPrint's `url_fetcher` so relative `<img>` etc. in the source resolve correctly.
+ * Inline content lives in `/tmp` (which `url_fetcher` rejects), so we point at `/workspace/` and let
+ * `![](chart.png)` still work; a `/workspace` path uses its own directory.
+ * @param filePath - The materialized file path.
+ * @param isTemp - Whether the materialization wrote to `/tmp` (inline content).
+ * @returns A `file://` base URL under `/workspace`.
+ */
+function baseUrlFor(filePath: string, isTemp: boolean): string {
+  return isTemp ? `file://${WORKSPACE_ROOT}/` : `file://${path.dirname(filePath)}/`;
 }
 
 /** A CSS named page size (`@page size`), e.g. `A4`, `Letter`, `A3 landscape`. Case-insensitive. */
@@ -122,15 +130,6 @@ img { max-width: 100%; }
 }
 
 /**
- * Build a print HTML wrapper around `bodyHtml`, validating `opts` to produce the `@page` rule.
- * @param bodyHtml - The HTML body fragment to wrap.
- * @param opts - Page-rendering options.
- */
-function wrapPrintHtml(bodyHtml: string, opts: PdfOptions): string {
-  return wrapPrintHtmlWithRule(bodyHtml, pageRuleBody(opts));
-}
-
-/**
  * Render an HTML file to PDF via WeasyPrint (`scripts/weasyprint_render.py`), which restricts
  * resource loading to `file://` under `/workspace` and writes the PDF atomically. The script's
  * output path is a `/tmp` file we then move onto the validated destination.
@@ -162,15 +161,15 @@ export async function markdownToPdf(
   opts: PdfOptions = {},
   overwrite = false
 ): Promise<FileResult> {
-  const { filePath, isTemp, baseUrl } = await materializeTextInput(input, '.md');
+  const { filePath, isTemp } = await materializeTextInput(input, '.md');
   try {
     const r = await runOk('pandoc', ['-f', 'markdown', '-t', 'html', filePath]);
-    const html = wrapPrintHtml(r.stdout, opts);
+    const html = wrapPrintHtmlWithRule(r.stdout, pageRuleBody(opts));
     const tmpHtml = path.join(os.tmpdir(), `office-html-${randomUUID()}.html`);
     await fsp.writeFile(tmpHtml, html);
     const dest = await resolveOutputPath(outName, `document-${Date.now()}.pdf`, overwrite);
     try {
-      await htmlFileToPdf(tmpHtml, baseUrl, dest);
+      await htmlFileToPdf(tmpHtml, baseUrlFor(filePath, isTemp), dest);
     } finally {
       await fsp.rm(tmpHtml, { force: true }).catch(ignoreError);
     }
@@ -196,7 +195,8 @@ export async function htmlToPdf(
   opts: PdfOptions = {},
   overwrite = false
 ): Promise<FileResult> {
-  const { filePath, isTemp, baseUrl } = await materializeTextInput(input, '.html');
+  const { filePath, isTemp } = await materializeTextInput(input, '.html');
+  const baseUrl = baseUrlFor(filePath, isTemp);
   try {
     // Validate `opts` once (throws on bad CSS), then reuse the rule body for both branches.
     const ruleBody = pageRuleBody(opts);

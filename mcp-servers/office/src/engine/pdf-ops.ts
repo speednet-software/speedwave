@@ -89,23 +89,15 @@ export async function splitPdf(
       throw new ValidationError(`Page range end ${r[1]} exceeds the ${MAX_PDF_PAGES}-page limit`);
     }
   }
-  // `outName` is the base for all parts; each gets a `-partN` suffix. We pass it via the
-  // `generatedBase` argument (the "no explicit outName" branch) because there is no single
-  // caller-supplied filename — every part is derived.
+  // Ranges write to independent output paths from the same read-only input — run in parallel.
   const base = (outName ?? `split-${Date.now()}.pdf`).replace(/\.pdf$/i, '');
-  const results: FileResult[] = [];
-  for (let i = 0; i < ranges.length; i++) {
-    const dest = await resolveOutputPath(undefined, `${base}-part${i + 1}.pdf`, overwrite);
-    await runPythonScript('pdf_ops.py', [
-      'split',
-      abs,
-      dest,
-      String(ranges[i][0]),
-      String(ranges[i][1]),
-    ]);
-    results.push(await buildFileResult(dest, 'pdf'));
-  }
-  return results;
+  return Promise.all(
+    ranges.map(async (range, i) => {
+      const dest = await resolveOutputPath(undefined, `${base}-part${i + 1}.pdf`, overwrite);
+      await runPythonScript('pdf_ops.py', ['split', abs, dest, String(range[0]), String(range[1])]);
+      return buildFileResult(dest, 'pdf');
+    })
+  );
 }
 
 /**

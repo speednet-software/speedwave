@@ -120,13 +120,19 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
     writer = PdfWriter()
     writer.append(reader)
     str_fields = {str(k): str(v) for k, v in fields.items()}
-    fill_warnings: list[str] = []
+    # pypdf raises when a page has no form fields (the common case for most of a PDF's pages),
+    # so we silently skip those and only flag if NO page accepted the fields — that means the
+    # caller asked to fill a form that doesn't exist in this PDF.
+    pages_filled = 0
     for page in writer.pages:
         try:
             writer.update_page_form_field_values(page, str_fields, auto_regenerate=False)
-        except Exception as exc:  # noqa: BLE001
-            # A page without form fields raises — expected; collect anything else so the worker surfaces it.
-            fill_warnings.append(f"{type(exc).__name__}: {exc}")
+            pages_filled += 1
+        except Exception:  # noqa: BLE001
+            pass
+    fill_warnings: list[str] = []
+    if pages_filled == 0:
+        fill_warnings.append("no AcroForm fields found in the input PDF — values not written")
     flattened = False
     if flatten:
         # Best-effort flatten via the private _root_object; degrades to a non-flat form on a pypdf rename.
