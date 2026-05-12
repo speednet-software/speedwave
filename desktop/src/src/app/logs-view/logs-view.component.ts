@@ -702,6 +702,10 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   private unsubProjectSettled: (() => void) | null = null;
   /** Live-tail poll handle — re-fetches the log buffer on the health cadence. */
   private logsTimer: ReturnType<typeof setInterval> | null = null;
+  /** Guard: a silent poll skips when the previous fetch hasn't returned yet. */
+  private refreshInFlight = false;
+  /** Last raw response — silent polls bail out when the buffer is byte-identical. */
+  private lastRaw = '';
 
   /**
    * Kicks off the initial log fetch + health refresh + polling. Re-runs the
@@ -762,6 +766,8 @@ export class LogsViewComponent implements OnInit, OnDestroy {
    * @param silent - True for the background poll.
    */
   protected async refresh(silent = false): Promise<void> {
+    // Skip silent ticks while a fetch is in flight — slow nerdctl shouldn't fan out.
+    if (silent && this.refreshInFlight) return;
     const project = this.projectState.activeProject;
     if (!project) {
       // Project transiently null during shell boot — quiet loading, no banner.
@@ -776,6 +782,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     }
     const stickToBottom = silent ? this.isAtBottom() : true;
     if (!silent) this.loading.set(true);
+    this.refreshInFlight = true;
     try {
       // `get_all_logs` merges host-side logs + `compose logs`. `<source> | …` prefix
       // is recognised by `parseLogLine` (COMPOSE_RE) — new sources auto-appear.
@@ -783,6 +790,10 @@ export class LogsViewComponent implements OnInit, OnDestroy {
         project,
         tail: LOGS_TAIL_LINES,
       });
+      this.error.set('');
+      // Skip the re-parse + signal write when the buffer is byte-identical (idle system).
+      if (silent && raw === this.lastRaw) return;
+      this.lastRaw = raw;
       const parsed = sortLogLinesByTime(
         raw
           .split(/\r?\n/)
@@ -790,12 +801,12 @@ export class LogsViewComponent implements OnInit, OnDestroy {
           .map(parseLogLine)
       );
       this.lines.set(parsed);
-      this.error.set('');
       if (stickToBottom) this.scrollToBottom();
       this.reconcileSourceFilter(parsed);
     } catch (e: unknown) {
       this.error.set(e instanceof Error ? e.message : String(e));
     } finally {
+      this.refreshInFlight = false;
       if (!silent) this.loading.set(false);
     }
   }

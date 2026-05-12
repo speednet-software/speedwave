@@ -199,149 +199,131 @@ fn resolve_build_root_inner(
 /// Step 2 before 3 ensures `make dev` uses local sources (with hoisted
 /// `node_modules`) instead of a stale bundle path written by the installed app.
 pub fn resolve_mcp_os_script() -> Option<std::path::PathBuf> {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
-    resolve_mcp_os_script_inner(
+    let dev = repo_dev_path("mcp-servers/os/dist/index.js");
+    resolve_worker_script_inner(
+        "mcp-os",
+        &["mcp-os", "os", "dist", "index.js"],
         crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
         dev,
     )
 }
 
-/// Internal implementation that accepts an explicit home directory for testability.
 #[cfg(test)]
 fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
-    resolve_mcp_os_script_inner(home, dev)
-}
-
-/// Core resolution logic, separated for testability (dev_path can be overridden).
-fn resolve_mcp_os_script_inner(
-    home: Option<PathBuf>,
-    dev_path: Option<PathBuf>,
-) -> Option<std::path::PathBuf> {
-    // 1. SPEEDWAVE_RESOURCES_DIR (production — Tauri bundle)
-    if let Ok(res) = std::env::var(crate::consts::BUNDLE_RESOURCES_ENV) {
-        let p = PathBuf::from(&res)
-            .join("mcp-os")
-            .join("os")
-            .join("dist")
-            .join("index.js");
-        if p.exists() {
-            return Some(p);
-        }
-        log::warn!("mcp-os not found at bundled path: {}", p.display());
-    }
-
-    // 2. Dev source tree — prefer local sources over marker so `make dev`
-    //    picks up hoisted node_modules from the workspace
-    if let Some(ref p) = dev_path {
-        if p.exists() {
-            return dev_path;
-        }
-    }
-
-    // 3. Marker file (CLI reads Desktop's resources path)
-    if let Some(ref home) = home {
-        let marker = home
-            .join(crate::consts::DATA_DIR)
-            .join(crate::consts::RESOURCES_MARKER);
-        if let Ok(dir) = std::fs::read_to_string(&marker) {
-            let p = PathBuf::from(dir.trim())
-                .join("mcp-os")
-                .join("os")
-                .join("dist")
-                .join("index.js");
-            if p.is_absolute() && p.exists() {
-                return Some(p);
-            }
-            log::warn!("mcp-os not found at marker path: {}", p.display());
-        }
-    }
-
-    if let Some(ref p) = dev_path {
-        log::warn!("mcp-os not found at dev path: {}", p.display());
-    }
-
-    None
+    let dev = repo_dev_path("mcp-servers/os/dist/index.js");
+    resolve_worker_script_inner("mcp-os", &["mcp-os", "os", "dist", "index.js"], home, dev)
 }
 
 /// Resolves the `host_exec` worker `index.js` (bundle → CARGO source → marker).
 /// Mirrors [`resolve_mcp_os_script`]; ADR-054.
 pub fn resolve_host_exec_script() -> Option<std::path::PathBuf> {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/host_exec/dist/index.js"));
-    resolve_host_exec_script_inner(
+    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
+    resolve_worker_script_inner(
+        "host_exec",
+        &["host_exec", "host_exec", "dist", "index.js"],
         crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
         dev,
     )
 }
 
-/// Internal implementation that accepts an explicit home directory for testability.
 #[cfg(test)]
 fn resolve_host_exec_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/host_exec/dist/index.js"));
-    resolve_host_exec_script_inner(home, dev)
+    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
+    resolve_worker_script_inner(
+        "host_exec",
+        &["host_exec", "host_exec", "dist", "index.js"],
+        home,
+        dev,
+    )
 }
 
-/// Core resolution logic, separated for testability (dev_path can be overridden).
+/// Build a `<repo-root>/<rel>` path for the dev-tree fallback. `None` when out of tree.
+fn repo_dev_path(rel: &str) -> Option<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|repo| repo.join(rel))
+}
+
+/// Test-only alias — implementation is `resolve_worker_script_inner`.
+#[cfg(test)]
+fn resolve_mcp_os_script_inner(
+    home: Option<PathBuf>,
+    dev_path: Option<PathBuf>,
+) -> Option<std::path::PathBuf> {
+    resolve_worker_script_inner(
+        "mcp-os",
+        &["mcp-os", "os", "dist", "index.js"],
+        home,
+        dev_path,
+    )
+}
+
+/// Test-only alias — implementation is `resolve_worker_script_inner`.
+#[cfg(test)]
 fn resolve_host_exec_script_inner(
     home: Option<PathBuf>,
     dev_path: Option<PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    // 1. SPEEDWAVE_RESOURCES_DIR (production — Tauri bundle)
+    resolve_worker_script_inner(
+        "host_exec",
+        &["host_exec", "host_exec", "dist", "index.js"],
+        home,
+        dev_path,
+    )
+}
+
+/// Resolve a host-side worker script via the three-tier fallback shared by all
+/// bundled workers (`mcp-os`, `host_exec`, …): SPEEDWAVE_RESOURCES_DIR (bundle)
+/// → repo source tree (`make dev`) → `~/.speedwave/resources-dir` marker (CLI).
+/// `bundled_subpath` is the path *inside* the resources dir; `label` drives logs.
+fn resolve_worker_script_inner(
+    label: &str,
+    bundled_subpath: &[&str],
+    home: Option<PathBuf>,
+    dev_path: Option<PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let join_subpath = |base: PathBuf| -> PathBuf {
+        let mut p = base;
+        for seg in bundled_subpath {
+            p = p.join(seg);
+        }
+        p
+    };
+
+    // 1. SPEEDWAVE_RESOURCES_DIR — production Tauri bundle.
     if let Ok(res) = std::env::var(crate::consts::BUNDLE_RESOURCES_ENV) {
-        let p = PathBuf::from(&res)
-            .join("host_exec")
-            .join("host_exec")
-            .join("dist")
-            .join("index.js");
+        let p = join_subpath(PathBuf::from(&res));
         if p.exists() {
             return Some(p);
         }
-        log::warn!(
-            "host_exec worker not found at bundled path: {}",
-            p.display()
-        );
+        log::warn!("{label} not found at bundled path: {}", p.display());
     }
 
-    // 2. Dev source tree — prefer local sources over marker so `make dev`
-    //    picks up hoisted node_modules from the workspace
+    // 2. Repo source tree — prefer local sources over the marker so `make dev`
+    //    picks up hoisted node_modules from the workspace.
     if let Some(ref p) = dev_path {
         if p.exists() {
             return dev_path;
         }
     }
 
-    // 3. Marker file (CLI reads Desktop's resources path)
+    // 3. Marker file — CLI reads Desktop's resources path.
     if let Some(ref home) = home {
         let marker = home
             .join(crate::consts::DATA_DIR)
             .join(crate::consts::RESOURCES_MARKER);
         if let Ok(dir) = std::fs::read_to_string(&marker) {
-            let p = PathBuf::from(dir.trim())
-                .join("host_exec")
-                .join("host_exec")
-                .join("dist")
-                .join("index.js");
+            let p = join_subpath(PathBuf::from(dir.trim()));
             if p.is_absolute() && p.exists() {
                 return Some(p);
             }
-            log::warn!("host_exec worker not found at marker path: {}", p.display());
+            log::warn!("{label} not found at marker path: {}", p.display());
         }
     }
 
     if let Some(ref p) = dev_path {
-        log::warn!("host_exec worker not found at dev path: {}", p.display());
+        log::warn!("{label} not found at dev path: {}", p.display());
     }
 
     None

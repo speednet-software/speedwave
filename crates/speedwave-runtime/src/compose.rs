@@ -957,93 +957,23 @@ fn apply_mcp_os_config(yaml: &str) -> anyhow::Result<String> {
     apply_mcp_os_config_with_path(yaml, &token_path, &port_path)
 }
 
-/// Testable version: accepts explicit paths instead of reading $HOME.
+/// Test-only alias preserved so existing fixtures keep working.
 fn apply_mcp_os_config_with_path(
     yaml: &str,
     token_path: &std::path::Path,
     port_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    // Single read attempt: don't pre-check `is_file()` before `read_to_string`.
-    // The desktop process respawns mcp-os and rewrites these files at runtime,
-    // so a TOCTOU between exists-check and read can bubble up `os error 2`
-    // and abort `render_compose`. Treat any read failure the same as the
-    // file being absent — mcp-os is simply not configured for this run —
-    // but log non-NotFound errors so permission/disk problems remain visible.
-    let token = match std::fs::read_to_string(token_path) {
-        Ok(s) => s.trim().to_string(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(yaml.to_string());
-        }
-        Err(e) => {
-            log::debug!("mcp-os token read failed ({e}); treating as not configured");
-            return Ok(yaml.to_string());
-        }
-    };
-    if token.is_empty() {
-        return Ok(yaml.to_string());
-    }
-
-    let port = match read_mcp_os_port(port_path) {
-        Some(p) => p,
-        None => {
-            // Port file missing — mcp-os not running, skip OS config
-            return Ok(yaml.to_string());
-        }
-    };
-    let worker_os_url = mcp_os_gateway_url(port);
-
-    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-    inject_worker_env(&mut doc, "WORKER_OS_URL", &worker_os_url);
-    add_hub_volume(
-        &mut doc,
-        &format!("{}:/secrets/os-auth-token:ro", to_engine_path(token_path)?),
-    );
-    Ok(serde_yaml_ng::to_string(&doc)?)
-}
-
-/// Read the mcp-os port from the port file written by McpOsProcess.
-/// Returns `None` if the file is missing or contains invalid data.
-fn read_mcp_os_port(port_path: &std::path::Path) -> Option<u16> {
-    let content = match std::fs::read_to_string(port_path) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-    match content.trim().parse::<u16>() {
-        Ok(p) => Some(p),
-        Err(e) => {
-            log::warn!("invalid mcp-os port file content '{}': {e}", content.trim());
-            None
-        }
-    }
-}
-
-/// Returns the URL where the mcp-os worker listens, as seen from inside a container.
-fn mcp_os_gateway_url(port: u16) -> String {
-    #[cfg(target_os = "macos")]
-    {
-        // host.lima.internal is set in /etc/hosts by Lima — stable regardless of IP changes
-        format!("http://host.lima.internal:{port}")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // nerdctl rootless: host.docker.internal via extra_hosts
-        format!("http://host.docker.internal:{port}")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        // Windows / fallback
-        format!("http://host.containers.internal:{port}")
-    }
-}
-
-/// Per-project `host_exec` URL as seen from inside the project's containers (ADR-054).
-fn host_exec_gateway_url(port: u16) -> String {
-    // Same gateway alias as host-side `mcp-os`; only the dynamic port differs.
-    mcp_os_gateway_url(port)
+    apply_worker_config(
+        yaml,
+        "mcp-os",
+        token_path,
+        port_path,
+        "WORKER_OS_URL",
+        "os-auth-token",
+    )
 }
 
 /// Injects `WORKER_HOST_EXEC_URL` + bearer-token mount into the hub if the worker is up.
-/// No-op when files are absent. Filename MUST be `host_exec-auth-token` (underscore).
 fn apply_host_exec_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     let state_dir = crate::host_exec::host_exec_project_dir(consts::data_dir(), project);
     let token_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
@@ -1051,55 +981,112 @@ fn apply_host_exec_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     apply_host_exec_config_with_paths(yaml, &token_path, &port_path)
 }
 
-/// Testable core of [`apply_host_exec_config`] with explicit file paths.
+/// Test-only alias preserved so existing fixtures keep working.
 fn apply_host_exec_config_with_paths(
     yaml: &str,
     token_path: &std::path::Path,
     port_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    // Same TOCTOU handling as `apply_mcp_os_config_with_path` — read failure ⇒ not running.
+    apply_worker_config(
+        yaml,
+        "host_exec",
+        token_path,
+        port_path,
+        "WORKER_HOST_EXEC_URL",
+        "host_exec-auth-token",
+    )
+}
+
+/// Inject `<env_var>=<gateway-url>` + mount `<token_path>:/secrets/<secret_name>:ro` into the
+/// hub iff token+port files are readable. No-op (returns unchanged YAML) when files absent —
+/// any read failure is treated as not running (avoids TOCTOU vs runtime respawn).
+fn apply_worker_config(
+    yaml: &str,
+    label: &str,
+    token_path: &std::path::Path,
+    port_path: &std::path::Path,
+    env_var: &str,
+    secret_name: &str,
+) -> anyhow::Result<String> {
     let token = match std::fs::read_to_string(token_path) {
         Ok(s) => s.trim().to_string(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(yaml.to_string()),
         Err(e) => {
-            log::debug!("host_exec token read failed ({e}); treating as not running");
+            log::debug!("{label} token read failed ({e}); treating as not running");
             return Ok(yaml.to_string());
         }
     };
     if token.is_empty() {
         return Ok(yaml.to_string());
     }
-    let port = match read_host_exec_port(port_path) {
+    let port = match read_worker_port_file(port_path, label) {
         Some(p) => p,
-        None => return Ok(yaml.to_string()), // port file missing/invalid — not running
+        None => return Ok(yaml.to_string()),
     };
-    let url = host_exec_gateway_url(port);
+    let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-    inject_worker_env(&mut doc, "WORKER_HOST_EXEC_URL", &url);
+    inject_worker_env(&mut doc, env_var, &url);
     add_hub_volume(
         &mut doc,
-        &format!(
-            "{}:/secrets/host_exec-auth-token:ro",
-            to_engine_path(token_path)?
-        ),
+        &format!("{}:/secrets/{secret_name}:ro", to_engine_path(token_path)?),
     );
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Read the `host_exec` worker's port from its (per-project) port file.
-fn read_host_exec_port(port_path: &std::path::Path) -> Option<u16> {
+/// Read a worker's `port` file. `None` when missing or unparseable; warns on invalid content.
+fn read_worker_port_file(port_path: &std::path::Path, label: &str) -> Option<u16> {
     let content = std::fs::read_to_string(port_path).ok()?;
     match content.trim().parse::<u16>() {
         Ok(p) => Some(p),
         Err(e) => {
             log::warn!(
-                "invalid host_exec port file content '{}': {e}",
+                "invalid {label} port file content '{}': {e}",
                 content.trim()
             );
             None
         }
     }
+}
+
+/// Test-only alias — implementation is `read_worker_port_file`.
+#[cfg(test)]
+fn read_mcp_os_port(port_path: &std::path::Path) -> Option<u16> {
+    read_worker_port_file(port_path, "mcp-os")
+}
+
+/// Test-only alias — implementation is `read_worker_port_file`.
+#[cfg(test)]
+fn read_host_exec_port(port_path: &std::path::Path) -> Option<u16> {
+    read_worker_port_file(port_path, "host_exec")
+}
+
+/// URL where a host-side worker listens, as seen from inside a container.
+fn worker_gateway_url(port: u16) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        format!("http://host.lima.internal:{port}")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        format!("http://host.docker.internal:{port}")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        format!("http://host.containers.internal:{port}")
+    }
+}
+
+/// Test-only alias — implementation is `worker_gateway_url`.
+#[cfg(test)]
+fn mcp_os_gateway_url(port: u16) -> String {
+    worker_gateway_url(port)
+}
+
+/// Test-only alias — implementation is `worker_gateway_url`.
+#[cfg(test)]
+fn host_exec_gateway_url(port: u16) -> String {
+    worker_gateway_url(port)
 }
 
 /// Returns the host IP/hostname reachable from inside the container/VM.

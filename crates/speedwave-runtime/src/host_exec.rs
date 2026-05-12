@@ -267,8 +267,7 @@ fn validate_param(recipe_name: &str, param: &HostExecParam) -> anyhow::Result<()
             consts::HOST_EXEC_PARAM_PATTERN_MAX_LEN,
         );
     }
-    if param.pattern.contains('\0') || param.pattern.contains('\n') || param.pattern.contains('\r')
-    {
+    if has_control_chars(&param.pattern) {
         anyhow::bail!(
             "host_exec recipe '{recipe_name}': parameter '{}' `pattern` must not contain NUL or \
              line breaks",
