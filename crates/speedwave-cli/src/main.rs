@@ -743,7 +743,8 @@ fn main() -> anyhow::Result<()> {
     // `container_exec`), but `process::exit` below skips `Drop`, so the worker
     // is killed by `kill_stale_by_pid_file` on the next run. No watchdog
     // (one-shot) and no compose recreate (fresh render each run).
-    let _host_exec_worker = maybe_spawn_host_exec_worker(&project_name, &project_dir, &integrations);
+    let _host_exec_worker =
+        maybe_spawn_host_exec_worker(&project_name, &project_dir, &integrations);
 
     let compose_yml = compose::render_compose(
         &project_name,
@@ -908,8 +909,7 @@ fn maybe_spawn_host_exec_worker(
         log::warn!("host_exec[{project_name}]: cannot create state dir: {e}");
         return None;
     }
-    let snapshot =
-        config::host_exec_config_snapshot(project_dir, &integrations.host_exec_commands);
+    let snapshot = config::host_exec_config_snapshot(project_dir, &integrations.host_exec_commands);
     let config_path = state_dir.join(consts::HOST_EXEC_CONFIG_FILE);
     if let Err(e) = write_host_exec_config_snapshot(&config_path, &snapshot) {
         log::warn!("host_exec[{project_name}]: cannot write config snapshot: {e}");
@@ -918,7 +918,9 @@ fn maybe_spawn_host_exec_worker(
     let script = match speedwave_runtime::build::resolve_host_exec_script() {
         Some(s) => s.to_string_lossy().to_string(),
         None => {
-            log::warn!("host_exec[{project_name}]: worker script not found — host_exec unavailable");
+            log::warn!(
+                "host_exec[{project_name}]: worker script not found — host_exec unavailable"
+            );
             return None;
         }
     };
@@ -1248,7 +1250,10 @@ mod tests {
         let integrations = config::ResolvedIntegrationsConfig::default(); // host_exec: false
         assert!(!integrations.host_exec);
         let handle = maybe_spawn_host_exec_worker("proj", tmp.path(), &integrations);
-        assert!(handle.is_none(), "no worker should spawn when host_exec is disabled");
+        assert!(
+            handle.is_none(),
+            "no worker should spawn when host_exec is disabled"
+        );
     }
 
     #[test]

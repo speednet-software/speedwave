@@ -459,10 +459,10 @@ fn drain_and_read_port(
                     if !port_sent {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
                             if let Some(port) = json.get("port").and_then(|v| v.as_u64()) {
-                                let _ = tx.send(
-                                    u16::try_from(port)
-                                        .map_err(|_| anyhow::anyhow!("port {port} out of u16 range")),
-                                );
+                                let _ =
+                                    tx.send(u16::try_from(port).map_err(|_| {
+                                        anyhow::anyhow!("port {port} out of u16 range")
+                                    }));
                                 port_sent = true;
                                 write_log_line(&mut log_file, "STDOUT", &line);
                                 continue;
@@ -722,7 +722,10 @@ setTimeout(() => {}, 60000);
             std::thread::sleep(std::time::Duration::from_millis(20));
             is_host_exec_alive(port)
         });
-        assert!(!alive, "nothing should be listening on a freed ephemeral port");
+        assert!(
+            !alive,
+            "nothing should be listening on a freed ephemeral port"
+        );
     }
 
     // -- write_host_exec_config_snapshot -------------------------------------
@@ -739,7 +742,10 @@ setTimeout(() => {}, 60000);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 
@@ -828,7 +834,10 @@ setTimeout(() => {}, 60000);
         let p = tmp.path().join("dead-pid");
         std::fs::write(&p, "99999999").unwrap();
         kill_stale_by_pid_file(&p);
-        assert!(!p.exists(), "PID file should be removed for a dead/unknown PID");
+        assert!(
+            !p.exists(),
+            "PID file should be removed for a dead/unknown PID"
+        );
     }
 
     #[test]
@@ -946,7 +955,9 @@ setTimeout(() => {}, 60000);
         child.wait().ok();
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(log.exists());
-        assert!(std::fs::read_to_string(&log).unwrap().contains("starting up"));
+        assert!(std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("starting up"));
     }
 
     #[cfg(unix)]
@@ -970,7 +981,10 @@ setTimeout(() => {}, 60000);
         let mut child = spawn_stdout_lines(&["warning", "no port here"]);
         let r = drain_and_read_port(&mut child, &log);
         assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("exited without announcing"));
+        assert!(r
+            .unwrap_err()
+            .to_string()
+            .contains("exited without announcing"));
         child.kill().ok();
         child.wait().ok();
     }
@@ -999,7 +1013,9 @@ setTimeout(() => {}, 60000);
             }
             let _ = tx.send(Err(anyhow::anyhow!("no port")));
         });
-        assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err());
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err());
         child.kill().ok();
         child.wait().ok();
     }
@@ -1026,7 +1042,11 @@ setTimeout(() => {}, 60000);
     fn apply_child_env_sets_recovered_path_not_inherited_path() {
         let mut cmd = Command::new("/bin/true");
         let env = FakeEnv(&[("PATH", "/inherited/bin"), ("HOME", "/home/t")]);
-        apply_child_env(&mut cmd, "/recovered/bin:/usr/local/bin:/opt/homebrew/bin", &env);
+        apply_child_env(
+            &mut cmd,
+            "/recovered/bin:/usr/local/bin:/opt/homebrew/bin",
+            &env,
+        );
         let c = captured_env(&cmd);
         assert_eq!(
             c.get("PATH").map(String::as_str),
@@ -1064,7 +1084,10 @@ setTimeout(() => {}, 60000);
         ]);
         apply_child_env(&mut cmd, "/p", &env);
         let c = captured_env(&cmd);
-        assert_eq!(c.get(consts::BUNDLE_RESOURCES_ENV).map(String::as_str), Some("/fake/Resources"));
+        assert_eq!(
+            c.get(consts::BUNDLE_RESOURCES_ENV).map(String::as_str),
+            Some("/fake/Resources")
+        );
         assert_eq!(c.get("SPEEDWAVE_PROD").map(String::as_str), Some("1"));
     }
 
@@ -1102,12 +1125,28 @@ setTimeout(() => {}, 60000);
             commands,
         );
 
-        let a = HostExecProcess::spawn_in("proj-a", &proj_a_dir, &script.to_string_lossy(), &host_path(), &data_dir);
-        let b = HostExecProcess::spawn_in("proj-b", &proj_b_dir, &script.to_string_lossy(), &host_path(), &data_dir);
+        let a = HostExecProcess::spawn_in(
+            "proj-a",
+            &proj_a_dir,
+            &script.to_string_lossy(),
+            &host_path(),
+            &data_dir,
+        );
+        let b = HostExecProcess::spawn_in(
+            "proj-b",
+            &proj_b_dir,
+            &script.to_string_lossy(),
+            &host_path(),
+            &data_dir,
+        );
         match (a, b) {
             (Ok(mut a), Ok(mut b)) => {
                 assert!(a.port() > 0 && b.port() > 0);
-                assert_ne!(a.port(), b.port(), "two workers must get two distinct ports");
+                assert_ne!(
+                    a.port(),
+                    b.port(),
+                    "two workers must get two distinct ports"
+                );
                 let a_dir = crate::host_exec::host_exec_project_dir(&data_dir, "proj-a");
                 let b_dir = crate::host_exec::host_exec_project_dir(&data_dir, "proj-b");
                 assert!(a_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE).exists());
@@ -1115,9 +1154,17 @@ setTimeout(() => {}, 60000);
                 assert!(a_dir.join(consts::HOST_EXEC_PORT_FILE).exists());
                 assert!(b_dir.join(consts::HOST_EXEC_PID_FILE).exists());
                 assert_eq!(a.token().len(), 36);
-                assert_ne!(a.token(), b.token(), "each worker gets its own bearer token");
+                assert_ne!(
+                    a.token(),
+                    b.token(),
+                    "each worker gets its own bearer token"
+                );
                 assert_eq!(
-                    std::fs::read_to_string(a.port_path()).unwrap().trim().parse::<u16>().unwrap(),
+                    std::fs::read_to_string(a.port_path())
+                        .unwrap()
+                        .trim()
+                        .parse::<u16>()
+                        .unwrap(),
                     a.port()
                 );
                 a.stop().unwrap();
@@ -1161,7 +1208,13 @@ setTimeout(() => {}, 60000);
         .unwrap();
 
         std::env::set_var("SUPER_SECRET_FROM_PARENT", "nope");
-        let proc = HostExecProcess::spawn_in("p", &proj_dir, &script.to_string_lossy(), &host_path(), &data_dir);
+        let proc = HostExecProcess::spawn_in(
+            "p",
+            &proj_dir,
+            &script.to_string_lossy(),
+            &host_path(),
+            &data_dir,
+        );
         std::env::remove_var("SUPER_SECRET_FROM_PARENT");
 
         if let Ok(mut proc) = proc {
@@ -1171,10 +1224,26 @@ setTimeout(() => {}, 60000);
             let json_part = line.split("ENVPROBE:").nth(1).unwrap_or("{}");
             let v: serde_json::Value =
                 serde_json::from_str(json_part.trim()).unwrap_or_else(|_| serde_json::json!({}));
-            assert_eq!(v.get("haveToken").and_then(|b| b.as_bool()), Some(true), "HOST_EXEC_AUTH_TOKEN must be set");
-            assert_eq!(v.get("haveConfig").and_then(|b| b.as_bool()), Some(true), "HOST_EXEC_CONFIG_PATH must be set");
-            assert_eq!(v.get("haveLog").and_then(|b| b.as_bool()), Some(true), "HOST_EXEC_LOG_FILE must be set");
-            assert_eq!(v.get("port0").and_then(|b| b.as_bool()), Some(true), "PORT must be 0 (OS picks)");
+            assert_eq!(
+                v.get("haveToken").and_then(|b| b.as_bool()),
+                Some(true),
+                "HOST_EXEC_AUTH_TOKEN must be set"
+            );
+            assert_eq!(
+                v.get("haveConfig").and_then(|b| b.as_bool()),
+                Some(true),
+                "HOST_EXEC_CONFIG_PATH must be set"
+            );
+            assert_eq!(
+                v.get("haveLog").and_then(|b| b.as_bool()),
+                Some(true),
+                "HOST_EXEC_LOG_FILE must be set"
+            );
+            assert_eq!(
+                v.get("port0").and_then(|b| b.as_bool()),
+                Some(true),
+                "PORT must be 0 (OS picks)"
+            );
             assert_eq!(
                 v.get("secret").and_then(|s| s.as_str()),
                 Some("absent"),
@@ -1199,7 +1268,13 @@ setTimeout(() => {}, 60000);
             serde_json::json!([]),
         );
         let script = write_fake_worker(tmp.path(), "fake.js");
-        let proc = HostExecProcess::spawn_in("p", &proj_dir, &script.to_string_lossy(), &host_path(), &data_dir);
+        let proc = HostExecProcess::spawn_in(
+            "p",
+            &proj_dir,
+            &script.to_string_lossy(),
+            &host_path(),
+            &data_dir,
+        );
         if let Ok(proc) = proc {
             let state = crate::host_exec::host_exec_project_dir(&data_dir, "p");
             let token = state.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
@@ -1229,11 +1304,21 @@ setTimeout(() => {}, 60000);
             serde_json::json!([]),
         );
         let script = write_fake_worker(tmp.path(), "fake.js");
-        if let Ok(mut proc) = HostExecProcess::spawn_in("p", &proj_dir, &script.to_string_lossy(), &host_path(), &data_dir) {
+        if let Ok(mut proc) = HostExecProcess::spawn_in(
+            "p",
+            &proj_dir,
+            &script.to_string_lossy(),
+            &host_path(),
+            &data_dir,
+        ) {
             match proc.respawn() {
                 Ok(new_port) => {
                     assert!(new_port > 0);
-                    assert_eq!(proc.data_dir(), data_dir, "data_dir is preserved across respawn");
+                    assert_eq!(
+                        proc.data_dir(),
+                        data_dir,
+                        "data_dir is preserved across respawn"
+                    );
                     assert!(proc.health_check(), "respawned worker should be alive");
                     assert!(!proc.config_path().as_os_str().is_empty());
                     assert!(!proc.pid_path().as_os_str().is_empty());
@@ -1258,7 +1343,13 @@ setTimeout(() => {}, 60000);
             serde_json::json!([]),
         );
         let script = write_fake_worker(tmp.path(), "fake.js");
-        if let Ok(mut proc) = HostExecProcess::spawn_in("p", &proj_dir, &script.to_string_lossy(), &host_path(), &data_dir) {
+        if let Ok(mut proc) = HostExecProcess::spawn_in(
+            "p",
+            &proj_dir,
+            &script.to_string_lossy(),
+            &host_path(),
+            &data_dir,
+        ) {
             proc.stop().unwrap();
             assert!(!proc.health_check(), "worker dead after stop");
             proc.stop().unwrap(); // idempotent
@@ -1279,7 +1370,13 @@ setTimeout(() => {}, 60000);
             serde_json::json!([]),
         );
         let script = write_fake_worker(tmp.path(), "fake.js");
-        if let Ok(mut proc) = HostExecProcess::spawn_in("p", &proj_dir, &script.to_string_lossy(), &host_path(), &data_dir) {
+        if let Ok(mut proc) = HostExecProcess::spawn_in(
+            "p",
+            &proj_dir,
+            &script.to_string_lossy(),
+            &host_path(),
+            &data_dir,
+        ) {
             assert!(proc.is_alive(), "live worker should report alive");
             proc.stop().unwrap();
             assert!(!proc.is_alive(), "stopped worker should report dead");

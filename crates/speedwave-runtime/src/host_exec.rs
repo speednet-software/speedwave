@@ -919,10 +919,12 @@ mod tests {
             ("docker", &["system", "prune"][..]),
         ] {
             let r = recipe("c", exec, args);
-            assert!(is_container_lifecycle_recipe(&r), "{exec} {args:?} should be flagged");
-            validate_host_exec_config(&cfg(vec![r])).unwrap_or_else(|e| {
-                panic!("{exec} {args:?} must still validate; got: {e}")
-            });
+            assert!(
+                is_container_lifecycle_recipe(&r),
+                "{exec} {args:?} should be flagged"
+            );
+            validate_host_exec_config(&cfg(vec![r]))
+                .unwrap_or_else(|e| panic!("{exec} {args:?} must still validate; got: {e}"));
         }
         // Non-lifecycle docker (`ps`, `build`, `logs`) is not flagged.
         for args in [
@@ -931,11 +933,18 @@ mod tests {
             &["compose", "logs"][..],
         ] {
             let r = recipe("c", "docker", args);
-            assert!(!is_container_lifecycle_recipe(&r), "docker {args:?} should not be flagged");
+            assert!(
+                !is_container_lifecycle_recipe(&r),
+                "docker {args:?} should not be flagged"
+            );
             validate_host_exec_config(&cfg(vec![r])).unwrap();
         }
         // A non-container exec is never flagged regardless of args.
-        assert!(!is_container_lifecycle_recipe(&recipe("c", "./gradlew", &["up"])));
+        assert!(!is_container_lifecycle_recipe(&recipe(
+            "c",
+            "./gradlew",
+            &["up"]
+        )));
     }
 
     // -- helper unit tests ---------------------------------------------------
