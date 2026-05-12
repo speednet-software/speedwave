@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { TauriService } from './tauri.service';
 import type {
   BundleReconcileStatus,
@@ -52,21 +52,14 @@ export class ProjectStateService {
   restarting = false;
   restartError = '';
 
-  /**
-   * Service the user just toggled on (forwarded to `restart_integration_containers`
-   * so the backend knows which row to roll back on a build failure). Set by
-   * the integrations component before `requestRestart()`; cleared after restart.
-   */
+  /** Service just toggled on; forwarded to backend for rollback on build fail. */
   pendingJustEnabled: string | null = null;
-  /**
-   * True while on-demand worker images are being built — shell renders the
-   * blocking build overlay over the chat UI.
-   */
-  buildingWorkerImage = false;
-  /** Steps shown by the build overlay; one entry appended per image. */
-  buildSteps: SetupStep[] = [];
-  /** Last per-image build error (sanitized); when set the overlay shows retry. */
-  buildError = '';
+  /** True while worker images are being built; gates the shell overlay. */
+  readonly buildingWorkerImage = signal(false);
+  /** Per-image steps for the build overlay. */
+  readonly buildSteps = signal<SetupStep[]>([]);
+  /** Last build error (sanitized); empty when no error. */
+  readonly buildError = signal('');
 
   /**
    * Structured error kind set when a CloudStorage TCC failure is detected.
@@ -367,9 +360,9 @@ export class ProjectStateService {
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
-    this.buildError = '';
-    this.buildingWorkerImage = false;
-    this.buildSteps = [];
+    this.buildError.set('');
+    this.buildingWorkerImage.set(false);
+    this.buildSteps.set([]);
     this.notifyChange();
 
     // Preload estimates so step titles can show "~Ns" on the first event.
@@ -404,7 +397,7 @@ export class ProjectStateService {
     }
 
     this.restarting = false;
-    this.buildingWorkerImage = false;
+    this.buildingWorkerImage.set(false);
     this.pendingJustEnabled = null;
     this.notifyChange();
     if (restartedOk) {
@@ -418,9 +411,9 @@ export class ProjectStateService {
     const detail = estimate > 0 ? `~${Math.round(estimate / 60)} min` : '';
     switch (p.phase) {
       case 'image_started': {
-        this.buildingWorkerImage = true;
-        this.buildSteps = [
-          ...this.buildSteps.filter((s) => s.id !== p.image_name),
+        this.buildingWorkerImage.set(true);
+        this.buildSteps.update((steps) => [
+          ...steps.filter((s) => s.id !== p.image_name),
           {
             id: p.image_name,
             title: p.image_name,
@@ -428,28 +421,30 @@ export class ProjectStateService {
             detail,
             status: 'active',
           },
-        ];
+        ]);
         break;
       }
       case 'image_done': {
-        this.buildSteps = this.buildSteps.map((s) =>
-          s.id === p.image_name ? { ...s, status: 'done' as const } : s
+        this.buildSteps.update((steps) =>
+          steps.map((s) => (s.id === p.image_name ? { ...s, status: 'done' as const } : s))
         );
         break;
       }
       case 'all_done': {
-        this.buildSteps = this.buildSteps.map((s) => ({ ...s, status: 'done' as const }));
+        this.buildSteps.update((steps) => steps.map((s) => ({ ...s, status: 'done' as const })));
         break;
       }
       case 'failed': {
-        this.buildError = p.error ?? p.message;
-        this.buildSteps = this.buildSteps.map((s) =>
-          s.status === 'active' ? { ...s, status: 'error' as const, detail: this.buildError } : s
+        const err = p.error ?? p.message;
+        this.buildError.set(err);
+        this.buildSteps.update((steps) =>
+          steps.map((s) =>
+            s.status === 'active' ? { ...s, status: 'error' as const, detail: err } : s
+          )
         );
         break;
       }
     }
-    this.notifyChange();
   }
 
   /** Dismisses the restart overlay without restarting. */
@@ -464,14 +459,11 @@ export class ProjectStateService {
    * @param name - The project name to switch to.
    */
   async switchProject(name: string): Promise<void> {
-    // Switching to a project whose enabled integrations don't yet have worker
-    // images for the current bundle triggers a lazy build (ADR-055), so we
-    // listen for worker_image_build_status while switch_project runs.
+    // Lazy build may fire during switch_project (ADR-055).
     await this.estimates.list();
-    this.buildError = '';
-    this.buildingWorkerImage = false;
-    this.buildSteps = [];
-    this.notifyChange();
+    this.buildError.set('');
+    this.buildingWorkerImage.set(false);
+    this.buildSteps.set([]);
     const unlisten = await this.tauri.listen<WorkerImageBuildProgress>(
       'worker_image_build_status',
       (e) => this.onWorkerImageBuildProgress(e.payload)
@@ -480,8 +472,7 @@ export class ProjectStateService {
       await this.tauri.invoke('switch_project', { name });
     } finally {
       unlisten();
-      this.buildingWorkerImage = false;
-      this.notifyChange();
+      this.buildingWorkerImage.set(false);
     }
   }
 

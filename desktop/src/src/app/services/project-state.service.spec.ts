@@ -971,9 +971,9 @@ describe('ProjectStateService', () => {
         total: 1,
         message: '1 of 1: speedwave-mcp-playwright',
       });
-      expect(service.buildingWorkerImage).toBe(true);
-      expect(service.buildSteps).toHaveLength(1);
-      expect(service.buildSteps[0].status).toBe('active');
+      expect(service.buildingWorkerImage()).toBe(true);
+      expect(service.buildSteps()).toHaveLength(1);
+      expect(service.buildSteps()[0].status).toBe('active');
 
       mockTauri.dispatchEvent('worker_image_build_status', {
         phase: 'image_done',
@@ -983,11 +983,11 @@ describe('ProjectStateService', () => {
         total: 1,
         message: '',
       });
-      expect(service.buildSteps[0].status).toBe('done');
+      expect(service.buildSteps()[0].status).toBe('done');
 
       resolveInvoke();
       await promise;
-      expect(service.buildingWorkerImage).toBe(false);
+      expect(service.buildingWorkerImage()).toBe(false);
     });
 
     it('failed build sets buildError and triggers integration status refresh', async () => {
@@ -1023,7 +1023,7 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      expect(service.buildError).toBe('disk full');
+      expect(service.buildError()).toBe('disk full');
       expect(refresher).toHaveBeenCalledTimes(1);
       // pendingJustEnabled is cleared regardless of failure so the next
       // toggle starts fresh.

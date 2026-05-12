@@ -105,7 +105,7 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
           </div>
         }
       }
-      @if (projectState.buildingWorkerImage) {
+      @if (projectState.buildingWorkerImage()) {
         <div
           class="fixed inset-0 z-[10000] flex flex-col items-center justify-center bg-black/75 backdrop-blur-sm"
           role="alertdialog"
@@ -116,8 +116,8 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
           <div class="w-full max-w-xl px-6">
             <h2 class="mono mb-4 text-[14px] text-[var(--ink)]">Building container images</h2>
             <app-progress-steps
-              [steps]="projectState.buildSteps"
-              [error]="projectState.buildError || null"
+              [steps]="projectState.buildSteps()"
+              [error]="projectState.buildError() || null"
               [showFooter]="false"
               [showBackButton]="false"
               (retry)="restartContainers()"
