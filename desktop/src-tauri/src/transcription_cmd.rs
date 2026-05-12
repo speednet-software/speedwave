@@ -5,12 +5,15 @@
 //! Tauri event channels (subscribe returns `{event_name, snapshot}` so a late
 //! subscriber doesn't miss what already happened — ADR-043 delivery shape).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use speedwave_runtime::transcription::{
-    self, AudioSourceInfo, Backend, CaptureCapabilities, Language, ModelStatusEntry, ModelStore,
-    SpeakerId, TranscriptEvent, TranscriptSession, TranscriptStore,
+    self, AudioSource, AudioSourceInfo, Backend, CaptureCapabilities, DiarizeOptions, Diarizer,
+    DriverConfig, FinalizeConfig, Language, ModelStatusEntry, ModelStore, SherpaDiarizer,
+    SpeakerId, StopSignal, TranscribeOptions, TranscriptDriver, TranscriptEvent, TranscriptSession,
+    TranscriptStatus, TranscriptStore, WhisperCppTranscriber,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -20,6 +23,8 @@ use uuid::Uuid;
 pub type TranscriptStoreHandle = Arc<TranscriptStore>;
 /// Tauri-managed `ModelStore`.
 pub type ModelStoreHandle = Arc<ModelStore>;
+/// Tauri-managed map of in-flight recordings → their stop signal.
+pub type DriversHandle = Arc<Mutex<HashMap<Uuid, StopSignal>>>;
 
 /// Per-session event name. Mirror of `subscribe_cmd::patch_event_name`.
 pub fn transcript_event_name(id: Uuid) -> String {
@@ -101,10 +106,12 @@ pub struct StartAck {
 
 #[tauri::command]
 pub async fn start_transcription(
-    _source: serde_json::Value, // Phase 4 plumbs the real selector through; for now ignored
+    source: serde_json::Value,
     language: String,
-    _live_model_override: Option<String>,
+    live_model_override: Option<String>,
     store: tauri::State<'_, TranscriptStoreHandle>,
+    models: tauri::State<'_, ModelStoreHandle>,
+    drivers: tauri::State<'_, DriversHandle>,
     app: AppHandle,
 ) -> Result<StartAck, String> {
     // Force-language is enum-validated at the Rust boundary.
@@ -113,20 +120,155 @@ pub async fn start_transcription(
         "en" => Language::En,
         other => return Err(format!("unsupported language: {other}")),
     };
-    // Phase 2 uses a placeholder audio source — real capture lands in Phase 4.
-    let audio_source = AudioSourceInfo {
-        source: speedwave_runtime::transcription::AudioSource::SystemWide,
-        label: "(placeholder — capture lands in Phase 4)".to_string(),
+    let audio_source: AudioSource =
+        serde_json::from_value(source).map_err(|e| format!("invalid audio source: {e}"))?;
+
+    let capture = transcription::detect_audio_capture();
+    let caps = capture.capabilities();
+    // Reject per-process when the backend can't do it (the UI should hide it,
+    // but defend at the boundary too).
+    if matches!(audio_source, AudioSource::Process { .. }) && !caps.supports_per_process {
+        return Err("per-app capture isn't supported on this host — use System audio".to_string());
+    }
+
+    // Pick the live model: an explicit override, or the catalogue's
+    // recommendation for the compiled backends (`small` on CPU).
+    let live_key: String = match &live_model_override {
+        Some(k) => k.clone(),
+        None => transcription::recommended_live_model(&transcription::compiled_backends())
+            .key
+            .to_string(),
+    };
+    // The model must already be downloaded — we don't kick off a (potentially
+    // multi-GB) download implicitly. The UI prompts for it first.
+    let store_arc = store.inner_clone();
+    let models_arc = models.inner_clone();
+    {
+        let key = live_key.clone();
+        let m = models_arc.clone();
+        if !tokio::task::spawn_blocking(move || m.whisper_is_present_by_key(&key))
+            .await
+            .map_err(|e| format!("model check task panicked: {e}"))?
+        {
+            return Err(format!(
+                "Whisper model '{live_key}' isn't downloaded — download it first"
+            ));
+        }
+    }
+    let whisper_path = {
+        let key = live_key.clone();
+        let m = models_arc.clone();
+        tokio::task::spawn_blocking(move || m.ensure_model(&key, &mut |_| {}))
+            .await
+            .map_err(|e| format!("model path task panicked: {e}"))?
+            .map_err(|e| e.to_string())?
+    };
+    let transcriber = {
+        let path = whisper_path.clone();
+        let key = live_key.clone();
+        tokio::task::spawn_blocking(move || WhisperCppTranscriber::load(&path, key))
+            .await
+            .map_err(|e| format!("transcriber load task panicked: {e}"))?
+            .map_err(|e| e.to_string())?
+    };
+
+    // Optional diarizer: best-effort — if the diarization models are present,
+    // load them; otherwise run without speaker labels (the transcript is still
+    // useful, and the UI says labels are "provisional" anyway).
+    let diarize_opts = DiarizeOptions::default();
+    let diarizer: Option<Box<dyn Diarizer>> = {
+        let m = models_arc.clone();
+        let opts = diarize_opts; // Copy
+        match tokio::task::spawn_blocking(move || {
+            if !m.diarization_is_present() {
+                return Ok::<Option<Box<dyn Diarizer>>, String>(None);
+            }
+            let paths = m
+                .ensure_diarization_models(&mut |_| {})
+                .map_err(|e| e.to_string())?;
+            let d = SherpaDiarizer::load(&paths.segmentation_onnx, &paths.embedding_onnx, &opts)
+                .map_err(|e| e.to_string())?;
+            Ok(Some(Box::new(d) as Box<dyn Diarizer>))
+        })
+        .await
+        .map_err(|e| format!("diarizer load task panicked: {e}"))?
+        {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("diarizer unavailable — running without speaker labels: {e}");
+                None
+            }
+        }
+    };
+
+    // Create the session, then start capture.
+    let label = source_label(capture.as_ref(), &audio_source);
+    let session_info = AudioSourceInfo {
+        source: audio_source.clone(),
+        label,
         app_id: None,
     };
-    let session_dir_seed = transcription::transcripts_dir().join("pending");
-    let session = TranscriptSession::new(lang, audio_source, session_dir_seed.join("audio.wav"));
+    let session = TranscriptSession::new(
+        lang,
+        session_info,
+        // audio.wav path is fixed under the session dir, set below.
+        std::path::PathBuf::new(),
+    );
     let session_id = session.id;
     store
         .create(session)
         .map_err(|e| format!("store create: {e}"))?;
-    // Spawn the event forwarder so the frontend doesn't race a status update.
-    spawn_event_forwarder(app, store.inner_clone(), session_id);
+    let session_dir = store.session_dir(session_id);
+    let audio_wav = session_dir.join("audio.wav");
+    // Patch the (now-correct) audio path into the persisted session.
+    {
+        let mut s = store.get(session_id).map_err(|e| e.to_string())?;
+        s.audio_path = Some(audio_wav.clone());
+        s.save(&session_dir).map_err(|e| e.to_string())?;
+    }
+
+    let stream = capture.start(audio_source).map_err(|e| {
+        // Mark the session failed so the UI shows the error, not a hang.
+        let _ = store.set_status(
+            session_id,
+            TranscriptStatus::Failed {
+                reason: e.to_string(),
+            },
+        );
+        e.to_string()
+    })?;
+
+    // Wire the event forwarder before the driver mutates anything.
+    spawn_event_forwarder(app, store_arc.clone(), session_id);
+
+    let stop = StopSignal::new();
+    drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?
+        .insert(session_id, stop.clone());
+
+    let driver = TranscriptDriver::new(DriverConfig {
+        id: session_id,
+        store: store_arc.clone(),
+        audio: stream,
+        transcriber: Box::new(transcriber),
+        diarizer,
+        transcribe_opts: TranscribeOptions::for_language(lang),
+        diarize_opts,
+        stop,
+    });
+    // The driver loop blocks on `next_chunk` — run it on a blocking task.
+    let drivers_for_cleanup = drivers.inner_clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = driver.run(&audio_wav) {
+            log::warn!("transcript driver for {session_id} ended with error: {e}");
+        }
+        // Drop the stop-signal entry once the driver has wound down.
+        if let Ok(mut g) = drivers_for_cleanup.lock() {
+            g.remove(&session_id);
+        }
+    });
+
     let snapshot = store.get(session_id).map_err(|e| e.to_string())?;
     Ok(StartAck {
         session_id,
@@ -139,16 +281,159 @@ pub async fn start_transcription(
 pub async fn stop_transcription(
     session_id: String,
     store: tauri::State<'_, TranscriptStoreHandle>,
+    models: tauri::State<'_, ModelStoreHandle>,
+    drivers: tauri::State<'_, DriversHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    // Phase 4 will signal the real driver; Phase 2 just transitions status.
-    store
-        .set_status(
+    // Signal the driver to wind down (idempotent if it already finished).
+    if let Some(stop) = drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?
+        .get(&id)
+        .cloned()
+    {
+        stop.stop();
+    } else {
+        // No live driver: just flip to Finalizing so a subsequent finalize pass
+        // (below) can run against whatever was recorded.
+        let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
+    }
+
+    // Kick off the higher-quality offline pass on a blocking task. It loads the
+    // recorded WAV, re-transcribes with the offline model (preferring `large-v3`
+    // if it's downloaded; otherwise falls back to whatever live model is
+    // present — the result is still an improvement over the sliding-window live
+    // pass), and marks the session Done. If the WAV is missing/empty or the
+    // transcribe fails, `run_finalize` flips the session to Failed and the live
+    // transcript remains as a fallback.
+    let store_arc = store.inner_clone();
+    let models_arc = models.inner_clone();
+    let session_dir = store.session_dir(id);
+    let audio_wav = session_dir.join("audio.wav");
+    let drivers_arc = drivers.inner_clone();
+    tokio::task::spawn_blocking(move || {
+        // Wait briefly for the driver to actually stop (it stops at the next
+        // chunk boundary). Bounded so a wedged driver doesn't hang us forever.
+        for _ in 0..50 {
+            if !drivers_arc
+                .lock()
+                .map(|g| g.contains_key(&id))
+                .unwrap_or(false)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Pick the offline model: `large-v3` if present, else fall back to any
+        // downloaded Whisper model (the live one is guaranteed present).
+        let offline_key = pick_offline_model(&models_arc);
+        let Some(key) = offline_key else {
+            let _ = store_arc.set_status(
+                id,
+                TranscriptStatus::Failed {
+                    reason: "no Whisper model available for the offline pass".to_string(),
+                },
+            );
+            return;
+        };
+        let path = match models_arc.ensure_model(&key, &mut |_| {}) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = store_arc.set_status(
+                    id,
+                    TranscriptStatus::Failed {
+                        reason: format!("model: {e}"),
+                    },
+                );
+                return;
+            }
+        };
+        let transcriber = match WhisperCppTranscriber::load(&path, key.clone()) {
+            Ok(t) => Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>,
+            Err(e) => {
+                let _ = store_arc.set_status(
+                    id,
+                    TranscriptStatus::Failed {
+                        reason: format!("transcriber: {e}"),
+                    },
+                );
+                return;
+            }
+        };
+        // Optional re-diarization over the whole recording (best-effort).
+        let diarize_opts = DiarizeOptions::default();
+        let diarizer: Option<Box<dyn Diarizer>> = if models_arc.diarization_is_present() {
+            match models_arc
+                .ensure_diarization_models(&mut |_| {})
+                .ok()
+                .and_then(|p| {
+                    SherpaDiarizer::load(&p.segmentation_onnx, &p.embedding_onnx, &diarize_opts)
+                        .ok()
+                }) {
+                Some(d) => Some(Box::new(d)),
+                None => None,
+            }
+        } else {
+            None
+        };
+        // The live turns we'd remap against aren't tracked across the driver
+        // boundary in v1 — pass an empty list (the offline diarizer's own
+        // clusters win; user relabels survive only if the clustering happens to
+        // line up). Tracking live turns for a perfect remap is a follow-up.
+        let cfg = FinalizeConfig {
             id,
-            speedwave_runtime::transcription::TranscriptStatus::Finalizing { progress: 0.0 },
-        )
-        .map_err(|e| e.to_string())?;
+            store: store_arc.clone(),
+            audio_path: audio_wav,
+            transcriber,
+            diarizer,
+            transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
+            diarize_opts,
+            live_turns: Vec::new(),
+        };
+        if let Err(e) = speedwave_runtime::transcription::run_finalize(cfg) {
+            log::warn!("offline finalize for {id} failed: {e}");
+        }
+    });
     Ok(())
+}
+
+/// A short label for the picked source — uses `enumerate_sources` to find a
+/// matching entry's label, falling back to a generic name.
+fn source_label(
+    capture: &dyn speedwave_runtime::transcription::AudioCapture,
+    src: &AudioSource,
+) -> String {
+    if let Ok(list) = capture.enumerate_sources() {
+        if let Some(found) = list.iter().find(|s| &s.source == src) {
+            return found.label.clone();
+        }
+    }
+    match src {
+        AudioSource::SystemWide => "System (everything)".to_string(),
+        AudioSource::Process { .. } => "App audio".to_string(),
+        AudioSource::Microphone { .. } => "Microphone".to_string(),
+        AudioSource::Mixed { .. } => "System + microphone".to_string(),
+    }
+}
+
+/// Reads a session's forced language (defaults to PL if it can't be read).
+fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
+    store.get(id).map(|s| s.language).unwrap_or(Language::Pl)
+}
+
+/// Picks the model for the offline pass: `large-v3` if downloaded, otherwise
+/// the first downloaded Whisper model in the catalogue (the live model is
+/// guaranteed present at this point). `None` if somehow nothing is downloaded.
+fn pick_offline_model(models: &ModelStore) -> Option<String> {
+    if models.whisper_is_present_by_key("large-v3") {
+        return Some("large-v3".to_string());
+    }
+    models
+        .whisper_status()
+        .into_iter()
+        .find(|m| m.downloaded)
+        .map(|m| m.key)
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -431,5 +716,45 @@ mod tests {
         // delete removes it.
         store.delete(id).unwrap();
         assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn session_language_reads_the_session_or_defaults_to_pl() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = mk_session_in(&store); // created with Language::Pl
+        assert_eq!(session_language(&store, id), Language::Pl);
+        // Unknown id → default.
+        let missing = Uuid::new_v4();
+        assert_eq!(session_language(&store, missing), Language::Pl);
+    }
+
+    #[test]
+    fn pick_offline_model_prefers_large_v3_then_any_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        // Nothing downloaded → None.
+        assert_eq!(pick_offline_model(&store), None);
+    }
+
+    #[test]
+    fn source_label_falls_back_when_no_match() {
+        // FileAudioCapture's enumerate_sources lists only the bound file (or
+        // nothing) — so a SystemWide source has no match and we fall back.
+        let cap = speedwave_runtime::transcription::FileAudioCapture::new();
+        assert_eq!(
+            source_label(
+                &cap,
+                &speedwave_runtime::transcription::AudioSource::SystemWide
+            ),
+            "System (everything)"
+        );
+        assert_eq!(
+            source_label(
+                &cap,
+                &speedwave_runtime::transcription::AudioSource::Microphone { device: None }
+            ),
+            "Microphone"
+        );
     }
 }

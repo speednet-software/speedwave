@@ -214,11 +214,28 @@ impl ModelStore {
         }
     }
 
-    fn diarization_is_present(&self, info: &DiarizationModelInfo) -> bool {
+    fn diarization_is_present_inner(&self, info: &DiarizationModelInfo) -> bool {
         match info.kind {
             DiarizationModelKind::Embedding => self.diarization_artifact_path(info).is_file(),
             DiarizationModelKind::Segmentation => self.segmentation_onnx_path(info).is_file(),
         }
+    }
+
+    /// `true` if the Whisper model with catalogue key `key` is downloaded.
+    /// Unknown keys return `false`.
+    pub fn whisper_is_present_by_key(&self, key: &str) -> bool {
+        whisper_model(key)
+            .map(|info| self.whisper_is_present(info))
+            .unwrap_or(false)
+    }
+
+    /// `true` if *both* default diarization models (segmentation + embedding)
+    /// are downloaded — i.e. `SherpaDiarizer::load` would succeed.
+    pub fn diarization_is_present(&self) -> bool {
+        DIARIZATION_MODELS
+            .iter()
+            .filter(|m| m.default)
+            .all(|m| self.diarization_is_present_inner(m))
     }
 
     /// Ensures the Whisper model with catalogue key `key` is present locally,
@@ -379,7 +396,7 @@ impl ModelStore {
         DIARIZATION_MODELS
             .iter()
             .map(|info| {
-                let present = self.diarization_is_present(info);
+                let present = self.diarization_is_present_inner(info);
                 let path = match info.kind {
                     DiarizationModelKind::Embedding => self.diarization_artifact_path(info),
                     DiarizationModelKind::Segmentation => self.segmentation_onnx_path(info),

@@ -1048,11 +1048,14 @@ fn main() {
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
     // Meeting-transcription stores (ADR-056). Active sessions live in memory;
-    // both stores walk the disk lazily on first access.
+    // both stores walk the disk lazily on first access. `transcript_drivers`
+    // maps an in-flight recording to its stop signal.
     let transcript_store: transcription_cmd::TranscriptStoreHandle =
         Arc::new(speedwave_runtime::transcription::TranscriptStore::new());
     let model_store: transcription_cmd::ModelStoreHandle =
         Arc::new(speedwave_runtime::transcription::ModelStore::new());
+    let transcript_drivers: transcription_cmd::DriversHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
     // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
@@ -1181,6 +1184,7 @@ fn main() {
         .manage(msg_store_registry.clone())
         .manage(transcript_store.clone())
         .manage(model_store.clone())
+        .manage(transcript_drivers.clone())
         .setup(move |app| {
             // Restore persisted log level (default: Info)
             let initial_level = config::load_user_config()
