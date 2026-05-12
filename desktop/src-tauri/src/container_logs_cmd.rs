@@ -272,8 +272,8 @@ pub(crate) struct LogSources {
 /// Composes the per-source log buffers into a single newline-separated string,
 /// block-by-block in a deterministic source order. Chronological interleaving
 /// is the frontend's job (`sortLogLinesByTime` in `logs-view.component.ts`) —
-/// every line now carries one ISO timestamp (ADR-057), so the renderer parses
-/// and merges them by instant; here we just concatenate.
+/// every line carries one ISO timestamp, so the renderer parses and merges
+/// them by instant; here we just concatenate.
 pub(crate) fn merge_log_sources(sources: LogSources) -> String {
     let compose = prefix_lines("compose", &sources.compose);
     let desktop = prefix_lines("desktop", &sources.desktop);

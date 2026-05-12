@@ -17,7 +17,7 @@ pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
 }
 
 /// Write `<ISO> [prefix: ]line` to the log. Errors silently ignored.
-/// Unbracketed ISO so `/logs` view's `ISO_TIME_RE` matches (ADR-057).
+/// Unbracketed ISO so `/logs` view's `ISO_TIME_RE` matches.
 pub fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
     use std::io::Write;
     if let Some(ref mut f) = file {

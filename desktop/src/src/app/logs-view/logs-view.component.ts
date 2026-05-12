@@ -52,10 +52,10 @@ export const LEVEL_CHIPS: readonly LogLevel[] = ['all', 'debug', 'info', 'warn',
 const FORCED_LOG_LEVEL = 'trace';
 
 const COMPOSE_RE = /^([\w.-]+)\s*\|\s*(.*)$/;
-// `[HH:MM:SS]` or `[<ISO>]`; ISO is `mcp-shared`'s `ts()` (ADR-057).
+// `[HH:MM:SS]` or `[<ISO>]`; ISO is `mcp-shared`'s `ts()`.
 const BRACKETED_TIME_RE =
   /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\]\s*(.*)$/;
-// ISO 8601 prefix (UTC, millis, or local-offset) — see ADR-057 for the SSOT format.
+// ISO 8601 prefix (UTC, millis, or local-offset) — SSOT format: `log_ts::log_timestamp()` / `mcp-shared`'s `ts()`.
 const ISO_TIME_RE =
   /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/;
 /** A parseable ISO date+time prefix — `formatTime` parses it and re-renders in the host's local zone. */
@@ -129,7 +129,7 @@ function stripContainerPrefix(container: string): string {
 }
 
 /**
- * Interleave per-source blocks into one chronological stream (ADR-057).
+ * Interleave per-source blocks into one chronological stream.
  * Lines without a parseable time inherit the previous line's instant.
  * @param lines - Parsed log lines in backend (block) order.
  */
