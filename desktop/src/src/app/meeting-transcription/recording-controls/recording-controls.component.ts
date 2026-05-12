@@ -3,6 +3,7 @@ import {
   ChangeDetectorRef,
   Component,
   OnInit,
+  computed,
   inject,
   output,
   signal,
@@ -88,6 +89,13 @@ function accelLabel(backends: Backend[]): string {
         </p>
       }
 
+      @if (mixedSourceSelected()) {
+        <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="mixed-source-note">
+          Recording the whole meeting captures system audio (the other participants) and your
+          microphone. Your OS may ask for microphone and audio-recording permission the first time.
+        </p>
+      }
+
       @if (modelsKnown() && !hasModel()) {
         <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]" data-testid="no-model-note">
           No speech-to-text model is downloaded yet. Download one in the Models panel (the smallest,
@@ -149,6 +157,10 @@ export class RecordingControlsComponent implements OnInit {
   readonly modelsKnown = signal(false);
   /** `true` if at least one Whisper model is downloaded (Start needs one). */
   readonly hasModel = signal(false);
+  /** `true` when the chosen source is the mixed (system + mic) one. */
+  readonly mixedSourceSelected = computed(
+    () => this.sources()[this.sourceIndex()]?.source.kind === 'mixed'
+  );
   /** The active session id (set on start, cleared on stop). */
   private activeSessionId: string | null = null;
 
@@ -163,9 +175,11 @@ export class RecordingControlsComponent implements OnInit {
       this.accel.set(accelLabel(caps.backends));
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
-      // Default to "System (everything)" if present.
+      // Default to "Whole meeting" (mixed) if offered, else "System
+      // (everything)", else the first entry.
+      const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
       const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
-      this.sourceIndex.set(sysIdx >= 0 ? sysIdx : 0);
+      this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);

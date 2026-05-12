@@ -82,6 +82,25 @@ describe('TranscriptionService', () => {
     expect(svc).toBeTruthy();
   });
 
+  describe('startRecording', () => {
+    it('forwards the source object (incl. a mixed source) to start_transcription', async () => {
+      const ack = {
+        session_id: 'sess-1',
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot(),
+      };
+      mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      const mixed = { kind: 'mixed' as const, system: { kind: 'system_wide' as const }, mic: null };
+      await svc.startRecording(mixed, 'pl');
+      expect(spy).toHaveBeenCalledWith('start_transcription', {
+        source: mixed,
+        language: 'pl',
+        liveModelOverride: null,
+      });
+    });
+  });
+
   describe('isEnabled / setEnabled', () => {
     it('reads the toggle via transcription_enabled', async () => {
       mockTauri.invokeHandler = async (cmd) => (cmd === 'transcription_enabled' ? true : undefined);

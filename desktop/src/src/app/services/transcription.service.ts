@@ -86,8 +86,8 @@ export class TranscriptionService {
   }
 
   /**
-   * Starts recording (the real capture lands in Phase 4).
-   * @param source - what to capture.
+   * Starts recording the given source, then subscribes to its live stream.
+   * @param source - what to capture (system / process / mic / mixed).
    * @param language - forced PL/EN; never auto-detected.
    */
   async startRecording(source: AudioSource, language: Language): Promise<StartAck> {

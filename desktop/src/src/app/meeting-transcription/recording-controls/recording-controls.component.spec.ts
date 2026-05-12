@@ -13,6 +13,21 @@ const SOURCES: AudioSourceInfo[] = [
   },
 ];
 
+/** Sources list led by a "Whole meeting" mixed entry (the real backends do this). */
+const SOURCES_WITH_MIXED: AudioSourceInfo[] = [
+  {
+    source: { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
+    label: 'Whole meeting (system audio + your microphone)',
+    app_id: null,
+  },
+  { source: { kind: 'system_wide' }, label: 'System (everything)', app_id: null },
+  {
+    source: { kind: 'microphone', device: null },
+    label: 'Microphone (default input)',
+    app_id: null,
+  },
+];
+
 describe('RecordingControlsComponent', () => {
   let component: RecordingControlsComponent;
   let fixture: ComponentFixture<RecordingControlsComponent>;
@@ -73,6 +88,36 @@ describe('RecordingControlsComponent', () => {
     expect(component.sources().length).toBe(2);
     expect(component.sourceIndex()).toBe(0); // system_wide
     expect(component.accel()).toBe('Acceleration: Metal');
+  });
+
+  it('defaults to the "Whole meeting" mixed source when the backend offers it', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
+    await component.ngOnInit();
+    expect(component.sourceIndex()).toBe(0); // the mixed entry
+    expect(component.sources()[component.sourceIndex()].source.kind).toBe('mixed');
+    expect(component.mixedSourceSelected()).toBe(true);
+  });
+
+  it('shows the mixed-source permission note only when the mixed source is selected', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="mixed-source-note"]')).not.toBeNull();
+    // Switch to the plain "System (everything)" entry (index 1) → note hidden.
+    component.onSource(1);
+    fixture.detectChanges();
+    expect(component.mixedSourceSelected()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="mixed-source-note"]')).toBeNull();
+  });
+
+  it('start() forwards the mixed source object to startRecording', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
+    await component.ngOnInit();
+    await component.start();
+    expect(svc.startRecording).toHaveBeenCalledWith(
+      { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
+      'pl'
+    );
   });
 
   it('shows the acceleration badge and language toggle', async () => {
