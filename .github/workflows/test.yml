@@ -118,6 +118,11 @@ jobs:
       - name: MCP tests + coverage
         run: make coverage-mcp
 
+      # vitest above mocks the office worker's subprocesses; this is the only
+      # gate that actually runs the Python scripts against the real libraries.
+      - name: Office Python script tests
+        run: make test-mcp-office-py
+
       - name: Install bats
         run: sudo apt-get update && sudo apt-get install -y bats
 

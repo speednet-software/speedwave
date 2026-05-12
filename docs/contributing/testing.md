@@ -4,22 +4,23 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 
 ## Running Tests
 
-| Command                               | What it runs                                                                                                                                                    |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `make test`                           | All tests (Rust + Angular + MCP + entrypoint + config + desktop-build + desktop)                                                                                |
-| `make test-rust`                      | Rust unit/integration tests (`speedwave-runtime` + `speedwave-cli`)                                                                                             |
-| `make test-cli`                       | CLI-specific tests                                                                                                                                              |
-| `make test-mcp`                       | All MCP workspace tests (shared, hub, slack, gitlab, etc.)                                                                                                      |
-| `make test-os`                        | OS MCP server tests only                                                                                                                                        |
-| `make test-angular`                   | Angular desktop UI tests (`vitest run`)                                                                                                                         |
-| `make test-e2e`                       | End-to-end CLI tests, incl. plugin-tamper bats against the debug CLI (requires `bats-core`)                                                                     |
-| `make test-e2e-plugin-tamper-release` | Plugin tamper / signature-bypass bats against the **release** CLI — verifies the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is compiled out (requires `bats-core`) |
-| `make test-entrypoint`                | Container entrypoint script tests (requires `bats-core`)                                                                                                        |
-| `make test-swift`                     | Swift tests for native macOS CLI packages (macOS only)                                                                                                          |
-| `make test-desktop`                   | Desktop integration tests (builds CLI, Angular, MCP, OS CLI first)                                                                                              |
-| `make test-desktop-build`             | Verifies desktop Tauri build succeeds                                                                                                                           |
-| `make test-desktop-config`            | Fast static checks: updater config fields + version consistency (local + CI)                                                                                    |
-| `make test-release-gate`              | Release asset verification using `gh` shim (CI-only, not in `make test`)                                                                                        |
+| Command                               | What it runs                                                                                                                                                                                                                                                                                          |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `make test`                           | All tests (Rust + Angular + MCP + entrypoint + config + desktop-build + desktop)                                                                                                                                                                                                                      |
+| `make test-rust`                      | Rust unit/integration tests (`speedwave-runtime` + `speedwave-cli`)                                                                                                                                                                                                                                   |
+| `make test-cli`                       | CLI-specific tests                                                                                                                                                                                                                                                                                    |
+| `make test-mcp`                       | All MCP workspace tests (shared, hub, slack, gitlab, etc.)                                                                                                                                                                                                                                            |
+| `make test-os`                        | OS MCP server tests only                                                                                                                                                                                                                                                                              |
+| `make test-mcp-office-py`             | Office worker's Python support-scripts against the real libraries (builds a throwaway venv); the vitest suite mocks these subprocesses, so this is the only gate that runs `docx_build`/`xlsx_build`/`pptx_build`/`pdf_ops`/`render_chart`/`weasyprint_render` for real. Runs in CI (the `test` job). |
+| `make test-angular`                   | Angular desktop UI tests (`vitest run`)                                                                                                                                                                                                                                                               |
+| `make test-e2e`                       | End-to-end CLI tests, incl. plugin-tamper bats against the debug CLI (requires `bats-core`)                                                                                                                                                                                                           |
+| `make test-e2e-plugin-tamper-release` | Plugin tamper / signature-bypass bats against the **release** CLI — verifies the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is compiled out (requires `bats-core`)                                                                                                                                       |
+| `make test-entrypoint`                | Container entrypoint script tests (requires `bats-core`)                                                                                                                                                                                                                                              |
+| `make test-swift`                     | Swift tests for native macOS CLI packages (macOS only)                                                                                                                                                                                                                                                |
+| `make test-desktop`                   | Desktop integration tests (builds CLI, Angular, MCP, OS CLI first)                                                                                                                                                                                                                                    |
+| `make test-desktop-build`             | Verifies desktop Tauri build succeeds                                                                                                                                                                                                                                                                 |
+| `make test-desktop-config`            | Fast static checks: updater config fields + version consistency (local + CI)                                                                                                                                                                                                                          |
+| `make test-release-gate`              | Release asset verification using `gh` shim (CI-only, not in `make test`)                                                                                                                                                                                                                              |
 
 ## Coverage
 
@@ -43,12 +44,14 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 
 Thresholds are enforced locally via vitest `coverage.thresholds` in each workspace's `vitest.config.ts` (SSOT for all threshold values — MCP and Angular alike) and in CI via `make coverage-mcp` / `make coverage-angular` / `vitest run --coverage`.
 
+> **Office worker:** the 100% above is vitest coverage of the TypeScript orchestration layer (path policy, DSL guards, argv construction, error handling) — the subprocesses (`pandoc`, `soffice`, `weasyprint`, the Python scripts) are mocked there. The document-producing code itself is exercised by `make test-mcp-office-py`, which builds a real venv and re-opens the output with the libraries; that runs in the CI `test` job, not under `make coverage-mcp`.
+
 ## CI Pipeline
 
 The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and every PR to `main`/`dev`. It has five jobs:
 
 1. **lint** — Rust clippy + format, Prettier, MCP type-check (tsc), MCP ESLint
-2. **test** — Rust tests, MCP tests with coverage enforcement, entrypoint tests (bats)
+2. **test** — Rust tests, MCP tests with coverage enforcement, Office Python script tests (`test-mcp-office-py`), entrypoint tests (bats)
 3. **desktop** — Desktop clippy, Angular ESLint, Angular tests with coverage enforcement, updater config + version-consistency bats (`test-desktop-config`), release-gate bats with `gh` shim (`test-release-gate`), desktop bats (`test-desktop-build`), Tauri build check
 4. **audit** — npm audit + cargo audit for all workspaces
 5. **swift** (PRs only) — Builds native macOS CLI binaries as universal binaries (`scripts/build-native-macos.sh`) and runs Swift tests on `macos-latest`. Catches xcbuild/`@main` attribute issues that `swift build` (llbuild) tolerates locally

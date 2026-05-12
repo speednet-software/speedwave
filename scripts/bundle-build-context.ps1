@@ -53,8 +53,11 @@ foreach ($svc in $services) {
         Copy-Item "mcp-servers\$svc\tsconfig.json" "$svcDest\"
     }
     # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
+    # Exclude test_*.py — pytest isn't in the runtime image and they're dead weight there.
     if (Test-Path "mcp-servers\$svc\scripts") {
-        Copy-Item -Recurse "mcp-servers\$svc\scripts" "$svcDest\scripts"
+        New-Item -ItemType Directory -Path "$svcDest\scripts" -Force | Out-Null
+        Get-ChildItem -Path "mcp-servers\$svc\scripts" -File | Where-Object { $_.Name -notlike 'test_*.py' } |
+            ForEach-Object { Copy-Item $_.FullName "$svcDest\scripts\" }
     }
     if (Test-Path "mcp-servers\$svc\requirements.txt") {
         Copy-Item "mcp-servers\$svc\requirements.txt" "$svcDest\"

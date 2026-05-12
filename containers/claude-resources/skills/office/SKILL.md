@@ -7,7 +7,7 @@ model: sonnet
 
 # Office Documents
 
-You have the `office` MCP service for every Office/PDF task. **NEVER** run `pip install python-docx`, `pip install openpyxl`, `pip install python-pptx`, `pip install pypdf`, `pip install weasyprint`, `pip install matplotlib`, `npm install xlsx`, `apt install libreoffice`, or any equivalent — those libraries are already wired behind the `office__*` tools, and the `claude` container can't install them anyway (read-only rootfs, no network egress, no sudo).
+You have the `office` MCP service for every Office/PDF task. **NEVER** run `pip install python-docx`, `pip install openpyxl`, `pip install python-pptx`, `pip install pypdf`, `pip install weasyprint`, `pip install matplotlib`, `npm install xlsx`, `apt install libreoffice`, or any equivalent — those libraries are already wired behind the `office__*` tools. Installing them in your own container is wasted work, and the parser would run there unsandboxed (no `cap_drop`, no `read_only`); the `office` worker runs it in a hardened, egress-less container instead. Use the tools.
 
 If a tool in the table below fits the task, use it. Otherwise call the hub's `search_tools` meta-tool once with the task keywords (e.g. `search_tools({ query: "office watermark", detail_level: "with_descriptions" })`) — `search_tools` has no service prefix. Do not improvise with `Bash`.
 
@@ -53,7 +53,7 @@ All `office__*` tools run through the hub's `execute_code` meta-tool, where the 
 
 5. **`readDocument` truncates by default** (`maxChars: 4000`). For a long doc, raise it explicitly when you need the full text — but prefer summarizing as you read.
 
-6. **No remote resources in HTML.** `htmlToPdf` and `markdownToPdf` only fetch `file://` URLs under `/workspace`. Any `<img src="https://...">` will be silently dropped.
+6. **No remote resources in HTML.** `htmlToPdf` and `markdownToPdf` only fetch `file://` URLs under `/workspace`. An `<img src="https://...">` (or any non-`file://` URL, or a `file://` outside `/workspace`) makes the conversion **fail with an error** — strip remote `<img>` tags, or pre-download the assets into `/workspace` and reference them by path.
 
 7. **PDF → editable .docx is not supported** (no reliable open-source converter). Use `readDocument` on the PDF to get Markdown, then `createDocx` from that Markdown.
 

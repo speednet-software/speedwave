@@ -127,7 +127,7 @@ This is part of the decision, not an implementation detail:
 3. **Limits (anti-DoS / anti-zip-bomb).** Per call: max input-file size (`50 MB` default, `OFFICE_MAX_INPUT_BYTES`); max PDF pages (`2000`); per-subprocess wall-time timeout (`60s` standard, `120s` for LibreOffice — `_meta.timeoutClass: 'long'`); container `mem_limit: 1g`; bounded subprocess stdout/stderr buffers (~10 MB — without this `pandoc`/LibreOffice can flood the worker's memory with log output). Exceeding any limit is a tool error with a clear message.
 4. **No service credentials, but an internal Bearer.** No `/tokens` mount; `auth_fields: &[]` in `TOGGLEABLE_MCP_SERVICES`. The worker must fail fast (`process.exit(1)`) without `MCP_OFFICE_AUTH_TOKEN` (the `mcp-servers/atlassian/src/index.ts` pattern); `createMCPServer({ auth: { token: AUTH_TOKEN } })`.
 5. **No macros / active content.** LibreOffice headless runs with no script provider; `python-docx`/`openpyxl`/`python-pptx` read XML and do not execute macros; OLE/macro payloads in a `.docx` are ignored by the structural parser. Documented.
-6. **Container hardening (as every worker):** `read_only: true`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, `user: ${CONTAINER_USER}`, `tmpfs: /tmp:noexec,nosuid,size=512m` (if LibreOffice headless requires `exec` on `/tmp`, a separate `tmpfs: /tmp/lo:size=512m` without `noexec` is mounted for the LibreOffice profile and `/tmp` stays `noexec`). No `EXPOSE`/`ports:` — `check_no_ports_on_workers` enforces this for built-in workers.
+6. **Container hardening (as every worker):** `read_only: true`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, `user: ${CONTAINER_USER}`, `tmpfs: /tmp:noexec,nosuid,size=512m` — `noexec` applies to all of `/tmp`, including the LibreOffice profile at `/tmp/lo`, with no exception (LibreOffice headless tolerates this; its executables live in `/usr`). No `EXPOSE`/`ports:` — `check_no_ports_on_workers` enforces this for built-in workers.
 
 ### Deliberate duplication with `presale`
 
@@ -161,6 +161,7 @@ This is part of the decision, not an implementation detail:
 - SheetJS is distributed from `cdn.sheetjs.com`, not the public npm registry;[^22] the Containerfile pins the tarball with a SHA-256 check, and it is a line item for `make audit`.
 - pip/apt versions are pinned and must be kept current via `make audit`.
 - The `soffice` mutex serializes LibreOffice conversions — parallel `officeToPdf` calls queue.
+- `/tmp` is `noexec` with no exception (the LibreOffice profile lives there too): if a future LibreOffice version needed `exec` in its profile, conversions would fail rather than the worker relaxing the mount — a deliberate hardening-over-completeness choice, only surfaced by the office-image build / the pytest gate.
 
 **Neutral.**
 

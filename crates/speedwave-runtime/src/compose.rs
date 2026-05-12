@@ -870,6 +870,7 @@ fn apply_integrations_filter(
     };
 
     let mut enabled_names: Vec<&str> = Vec::new();
+    // `office` is the only egress-less worker so far (ADR-055); a second one = add a flag to McpServiceDescriptor.
     let mut office_enabled = false;
 
     for svc in consts::TOGGLEABLE_MCP_SERVICES {
