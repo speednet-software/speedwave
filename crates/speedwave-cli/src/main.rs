@@ -1287,6 +1287,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let result = resolve_project_for_cwd(&canonical, &user_config).unwrap();
@@ -1311,6 +1312,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let result = resolve_project_for_cwd(&sub, &user_config).unwrap();
@@ -1346,6 +1348,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         // CWD inside nested project should match web-proj (longer prefix)
@@ -1366,6 +1369,7 @@ mod tests {
             active_project: Some("fallback-project".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         // Use a tempdir as CWD that doesn't match any project
@@ -1381,6 +1385,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1406,6 +1411,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         // canonicalize strips trailing slash, so exact match should work
