@@ -88,14 +88,28 @@ export function parseLogLine(raw: string): LogLine {
   const source = composeMatch ? stripContainerPrefix(composeMatch[1]) : 'log';
   const rest = composeMatch ? composeMatch[2] : trimmed;
 
-  const timeMatch = BRACKETED_TIME_RE.exec(rest) ?? ISO_TIME_RE.exec(rest);
-  const time = timeMatch ? timeMatch[1] : '';
-  const afterTime = timeMatch ? timeMatch[2] : rest;
-  // Strip the `STDOUT: `/`STDERR: ` drain marker — it is pure capture noise
-  // regardless of whether a timestamp was present (`SESSION:`/`TOOL:`/etc. are
-  // semantic claude-session prefixes and are deliberately kept).
+  // First timestamp at the start of `rest`: nerdctl `--timestamps` (RFC3339,
+  // unbracketed) or a Rust drain prefix, or a bare `[<ISO>]`.
+  let time = '';
+  let afterTime = rest;
+  const headMatch = BRACKETED_TIME_RE.exec(rest) ?? ISO_TIME_RE.exec(rest);
+  if (headMatch) {
+    time = headMatch[1];
+    afterTime = headMatch[2];
+  }
+  // `STDOUT: `/`STDERR: ` drain marker is pure capture noise (`SESSION:`/`TOOL:`/
+  // etc. are semantic claude-session prefixes and are deliberately kept).
   const drainMatch = DRAIN_PREFIX_RE.exec(afterTime);
-  const cleaned = drainMatch ? drainMatch[1] : afterTime;
+  let cleaned = drainMatch ? drainMatch[1] : afterTime;
+  // The worker's own `ts()` stamp (`[<ISO>]`) — drop it from the message. If we
+  // didn't already get a timestamp from the head, promote it; otherwise it just
+  // duplicates the column (a compose-container line carries nerdctl's stamp *and*
+  // the worker's `ts()`), so strip it.
+  const inlineMatch = BRACKETED_TIME_RE.exec(cleaned);
+  if (inlineMatch) {
+    if (!time) time = inlineMatch[1];
+    cleaned = inlineMatch[2];
+  }
 
   const levelMatch = LEVEL_RE.exec(cleaned);
   const level: LogLevel = levelMatch ? normalizeLevel(levelMatch[1]) : 'info';
@@ -124,6 +138,26 @@ function stripContainerPrefix(container: string): string {
   const match = CONTAINER_PREFIX_RE.exec(container);
   if (match) return match[1];
   return container.replace(TRAILING_INDEX_RE, '');
+}
+
+/**
+ * Interleave per-source log blocks into one chronological stream. The backend
+ * concatenates sources block-by-block; since every Speedwave log line now
+ * carries one ISO timestamp (ADR-057), we can merge them by parsed instant
+ * here. A line with no parseable timestamp (a stack-trace continuation, a
+ * banner) inherits the previous line's instant so it stays attached to it; the
+ * sort is stable, so equal-instant lines keep their original relative order.
+ * @param lines - Parsed log lines in backend (block) order.
+ */
+export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
+  let lastKey = 0;
+  const keyed = lines.map((line) => {
+    const t = line.time ? Date.parse(line.time) : NaN;
+    if (!Number.isNaN(t)) lastKey = t;
+    return { line, key: lastKey };
+  });
+  // `Array.prototype.sort` is stable (ES2019+) — equal keys keep input order.
+  return keyed.sort((a, b) => a.key - b.key).map((k) => k.line);
 }
 
 /**
@@ -760,10 +794,12 @@ export class LogsViewComponent implements OnInit, OnDestroy {
         project,
         tail: LOGS_TAIL_LINES,
       });
-      const parsed = raw
-        .split(/\r?\n/)
-        .filter((l) => l.length > 0)
-        .map(parseLogLine);
+      const parsed = sortLogLinesByTime(
+        raw
+          .split(/\r?\n/)
+          .filter((l) => l.length > 0)
+          .map(parseLogLine)
+      );
       this.lines.set(parsed);
       this.error.set('');
       this.scrollToBottom();

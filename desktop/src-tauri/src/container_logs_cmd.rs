@@ -270,13 +270,10 @@ pub(crate) struct LogSources {
 }
 
 /// Composes the per-source log buffers into a single newline-separated string,
-/// in a deterministic per-source order. We deliberately do NOT sort globally by
-/// timestamp — the sources use heterogeneous timestamp formats (compose
-/// `--timestamps` ISO, tauri-plugin-log local-with-offset, mcp-os/host-exec/claude
-/// raw text), and any sort would have to either parse all of them (expensive,
-/// fragile) or compare lexicographically (incorrect for offsets). The frontend
-/// source-filter dropdown gives users the per-source view they need, so
-/// per-source-block ordering is sufficient.
+/// block-by-block in a deterministic source order. Chronological interleaving
+/// is the frontend's job (`sortLogLinesByTime` in `logs-view.component.ts`) —
+/// every line now carries one ISO timestamp (ADR-057), so the renderer parses
+/// and merges them by instant; here we just concatenate.
 pub(crate) fn merge_log_sources(sources: LogSources) -> String {
     let compose = prefix_lines("compose", &sources.compose);
     let desktop = prefix_lines("desktop", &sources.desktop);
@@ -776,9 +773,8 @@ mod tests {
 
     #[test]
     fn merge_log_sources_preserves_compose_block_first() {
-        // Per-source-block ordering must put compose first so users
-        // diagnosing a workflow that started in a container (most common) see
-        // those lines without scrolling. Document by asserting offset.
+        // The concatenation order is deterministic: compose, then desktop, …
+        // (the frontend re-sorts by timestamp; this just pins the wire order).
         let merged = merge_log_sources(LogSources {
             compose: "claude_1 | START\n".to_string(),
             desktop: "desktop_only_line\n".to_string(),

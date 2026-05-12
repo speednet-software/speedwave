@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { LogsViewComponent, parseLogLine } from './logs-view.component';
+import { LogsViewComponent, parseLogLine, sortLogLinesByTime } from './logs-view.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
@@ -450,16 +450,17 @@ describe('parseLogLine', () => {
     expect(line.message).toBe('started');
   });
 
-  it('extracts the drain ISO timestamp and strips STDOUT: from an mcp-os line', () => {
-    // Drain prefix (Rust `log_file`, local offset) + the worker's own `ts()`
-    // (also local offset — same `TZ`); both are now `±HH:MM`, never `Z`.
+  it('uses the drain ISO timestamp; strips STDOUT: and the redundant inline ts() from an mcp-os line', () => {
+    // Line shape: `<drain-ISO> STDOUT: [<ts()-ISO>] msg` — the column gets the
+    // drain stamp, `STDOUT:` and the duplicate `[<ts()-ISO>]` are removed.
     const line = parseLogLine(
       'mcp-os | 2026-05-12T14:34:02.814+02:00 STDOUT: [2026-05-12T14:34:02.810+02:00] mcp-os started'
     );
     expect(line.source).toBe('mcp-os');
     expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
-    expect(line.message).toBe('[2026-05-12T14:34:02.810+02:00] mcp-os started');
+    expect(line.message).toBe('mcp-os started');
     expect(line.message).not.toContain('STDOUT:');
+    expect(line.message).not.toContain('[2026-');
   });
 
   it('strips STDERR: drain marker too', () => {
@@ -501,6 +502,19 @@ describe('parseLogLine', () => {
     expect(line.message).toBe('🚀 Starting');
   });
 
+  it('compose-container line: nerdctl stamp → column, the worker `ts()` stamp dropped from the message', () => {
+    // `<container> | <nerdctl-RFC3339-UTC> [<ts()-ISO-local>] msg` — the column
+    // gets nerdctl's stamp (localised at render); the inline `[<ts()>]` is the
+    // same instant, so it's removed from the visible message.
+    const line = parseLogLine(
+      'speedwave_doc_mcp-hub_1 | 2026-05-12T13:00:39.816Z [2026-05-12T15:00:39.816+02:00] 🔗 Initializing HTTP bridges'
+    );
+    expect(line.source).toBe('mcp-hub');
+    expect(line.time).toBe('2026-05-12T13:00:39.816Z');
+    expect(line.message).toBe('🔗 Initializing HTTP bridges');
+    expect(line.message).not.toContain('[2026-');
+  });
+
   it('rewrites the desktop ISO+bracketed-level line (colon offset) to a WARN chip', () => {
     // tauri-plugin-log → `prefix_lines("desktop", …)` → `desktop | <ISO> WARN [target] msg`.
     const line = parseLogLine(
@@ -510,6 +524,75 @@ describe('parseLogLine', () => {
     expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
     expect(line.level).toBe('warn');
     expect(line.message).toBe('[speedwave_desktop::x] auto-disabled mail');
+  });
+});
+
+describe('sortLogLinesByTime', () => {
+  // Build a parsed line from a backend wire line via the real parser.
+  const ln = (raw: string) => parseLogLine(raw);
+
+  it('interleaves per-source blocks into one chronological stream', () => {
+    // Backend order: a `claude` block then a `mcp-hub` block, each internally
+    // ordered but overlapping in time. After the sort they're interleaved.
+    const sorted = sortLogLinesByTime([
+      ln('claude | 2026-05-12T14:53:49.000+02:00 SESSION: started'),
+      ln('claude | 2026-05-12T14:53:57.000+02:00 SYSTEM: init'),
+      ln('claude | 2026-05-12T14:54:32.000+02:00 RESULT: turn complete'),
+      ln('speedwave_test_mcp-hub_1 | 2026-05-12T14:53:48.000+02:00 INFO  Tool registered'),
+      ln('speedwave_test_mcp-hub_1 | 2026-05-12T14:53:49.500+02:00 INFO  Session created'),
+      ln('speedwave_test_mcp-hub_1 | 2026-05-12T14:54:13.000+02:00 INFO  Executing tool'),
+    ]);
+    expect(sorted.map((l) => l.time)).toEqual([
+      '2026-05-12T14:53:48.000+02:00', // hub
+      '2026-05-12T14:53:49.000+02:00', // claude
+      '2026-05-12T14:53:49.500+02:00', // hub
+      '2026-05-12T14:53:57.000+02:00', // claude
+      '2026-05-12T14:54:13.000+02:00', // hub
+      '2026-05-12T14:54:32.000+02:00', // claude
+    ]);
+  });
+
+  it('orders correctly across mixed offsets (UTC `Z` vs `+02:00`) by instant', () => {
+    const sorted = sortLogLinesByTime([
+      ln('claude | 2026-05-12T14:00:05.000+02:00 SESSION: started'), // 12:00:05Z
+      ln('speedwave_x_mcp-hub_1 | 2026-05-12T12:00:03.000Z hub line'), // 12:00:03Z
+      ln('claude | 2026-05-12T14:00:01.000+02:00 SESSION: prep'), // 12:00:01Z
+    ]);
+    expect(sorted.map((l) => l.time)).toEqual([
+      '2026-05-12T14:00:01.000+02:00', // 12:00:01Z
+      '2026-05-12T12:00:03.000Z', // 12:00:03Z
+      '2026-05-12T14:00:05.000+02:00', // 12:00:05Z
+    ]);
+  });
+
+  it('keeps a timestamp-less line attached to the preceding line (continuation)', () => {
+    const banner = parseLogLine('speedwave_x_mcp-hub_1 | ════════════');
+    expect(banner.time).toBe(''); // no timestamp
+    const sorted = sortLogLinesByTime([
+      ln('claude | 2026-05-12T14:00:10.000+02:00 b: later'),
+      ln('speedwave_x_mcp-hub_1 | 2026-05-12T14:00:01.000+02:00 a: first'),
+      banner, // inherits a:first's instant → stays right after it
+      ln('speedwave_x_mcp-hub_1 | 2026-05-12T14:00:02.000+02:00 a: second'),
+    ]);
+    expect(sorted.map((l) => l.message)).toEqual([
+      'a: first',
+      '════════════',
+      'a: second',
+      'b: later',
+    ]);
+  });
+
+  it('is stable for equal instants — keeps input order', () => {
+    const sorted = sortLogLinesByTime([
+      ln('claude | 2026-05-12T14:00:00.000+02:00 first'),
+      ln('speedwave_x_mcp-hub_1 | 2026-05-12T14:00:00.000+02:00 second'),
+      ln('mcp-os | 2026-05-12T14:00:00.000+02:00 STDOUT: third'),
+    ]);
+    expect(sorted.map((l) => l.message)).toEqual(['first', 'second', 'third']);
+  });
+
+  it('returns an empty array unchanged', () => {
+    expect(sortLogLinesByTime([])).toEqual([]);
   });
 });
 
