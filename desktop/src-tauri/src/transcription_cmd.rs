@@ -122,16 +122,32 @@ pub struct StartAck {
     pub snapshot: TranscriptSession,
 }
 
+/// Frontend-supplied inputs for `start_transcription`. Grouped so the Tauri
+/// command stays under the 7-argument clippy limit.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartParams {
+    pub source: serde_json::Value,
+    pub language: String,
+    pub live_model_override: Option<String>,
+    /// Diarizer hint: `None` = auto-estimate.
+    pub expected_speakers: Option<u32>,
+}
+
 #[tauri::command]
 pub async fn start_transcription(
-    source: serde_json::Value,
-    language: String,
-    live_model_override: Option<String>,
+    params: StartParams,
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     drivers: tauri::State<'_, DriversHandle>,
     app: AppHandle,
 ) -> Result<StartAck, String> {
+    let StartParams {
+        source,
+        language,
+        live_model_override,
+        expected_speakers,
+    } = params;
     // Force-language is enum-validated at the Rust boundary.
     let lang = match language.as_str() {
         "pl" => Language::Pl,
@@ -183,9 +199,11 @@ pub async fn start_transcription(
     };
 
     // Optional diarizer: best-effort — if the diarization models are present,
-    // load them; otherwise run without speaker labels (the transcript is still
-    // useful, and the UI says labels are "provisional" anyway).
-    let diarize_opts = DiarizeOptions::default();
+    // load them; otherwise run without speaker labels.
+    let diarize_opts = DiarizeOptions {
+        num_speakers: expected_speakers.map(|n| n as usize),
+        ..DiarizeOptions::default()
+    };
     let diarizer: Option<Box<dyn Diarizer>> = {
         let m = models_arc.clone();
         let opts = diarize_opts; // Copy
@@ -230,6 +248,7 @@ pub async fn start_transcription(
         audio_wav.clone(),
     );
     session.models_used.live = Some(live_key.clone());
+    session.expected_speakers = expected_speakers;
     store
         .create(session)
         .map_err(|e| format!("store create: {e}"))?;
@@ -369,7 +388,14 @@ pub async fn stop_transcription(
             }
         };
         // Optional re-diarization over the whole recording (best-effort).
-        let diarize_opts = DiarizeOptions::default();
+        let diarize_opts = DiarizeOptions {
+            num_speakers: store_arc
+                .get(id)
+                .ok()
+                .and_then(|s| s.expected_speakers)
+                .map(|n| n as usize),
+            ..DiarizeOptions::default()
+        };
         let diarizer: Option<Box<dyn Diarizer>> = if models_arc.diarization_is_present() {
             match models_arc
                 .ensure_diarization_models(&mut |_| {})

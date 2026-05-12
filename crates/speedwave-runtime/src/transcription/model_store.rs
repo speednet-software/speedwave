@@ -176,7 +176,7 @@ impl ModelStore {
     fn diarization_artifact_path(&self, info: &DiarizationModelInfo) -> PathBuf {
         match info.kind {
             DiarizationModelKind::Embedding => {
-                // URL filename — e.g. `nemo_en_titanet_small.onnx`.
+                // URL filename — e.g. `3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx`.
                 let fname = info.url.rsplit('/').next().unwrap_or("embedding.onnx");
                 self.diarization_dir().join(fname)
             }

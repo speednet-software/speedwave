@@ -138,8 +138,25 @@ describe('RecordingControlsComponent', () => {
     await component.start();
     expect(svc.startRecording).toHaveBeenCalledWith(
       { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
-      'pl'
+      'pl',
+      null
     );
+  });
+
+  it('forwards the expectedSpeakers hint when the user sets it (0 stays null = auto)', async () => {
+    await component.ngOnInit();
+    // Default 0 → null (auto).
+    await component.start();
+    expect(svc.startRecording).toHaveBeenLastCalledWith(SOURCES[0].source, 'pl', null);
+    component.onSpeakers(4);
+    component.onSource(1);
+    await component.start();
+    expect(svc.startRecording).toHaveBeenLastCalledWith(SOURCES[1].source, 'pl', 4);
+    // Out-of-range clamps to 0-20.
+    component.onSpeakers(999);
+    expect(component.expectedSpeakers()).toBe(20);
+    component.onSpeakers(-5);
+    expect(component.expectedSpeakers()).toBe(0);
   });
 
   it('shows the acceleration badge and language toggle', async () => {
@@ -174,7 +191,7 @@ describe('RecordingControlsComponent', () => {
     const spy = vi.fn();
     component.started.subscribe(spy);
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith(SOURCES[1].source, 'en');
+    expect(svc.startRecording).toHaveBeenCalledWith(SOURCES[1].source, 'en', null);
     expect(component.recording()).toBe(true);
     expect(spy).toHaveBeenCalledWith('sess-1');
   });

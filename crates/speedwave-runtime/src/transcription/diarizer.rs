@@ -1,6 +1,7 @@
 //! Speaker diarization: the `Diarizer` trait and `SherpaDiarizer` (sherpa-onnx,
-//! pyannote segmentation + NeMo TitaNet embedding). Labels are provisional
-//! (ADR-056 §7) — not stable across runs.
+//! pyannote segmentation + the default embedding from the catalogue — 3D-Speaker
+//! CAM++ today, see `model_catalog.rs`). Labels are provisional (ADR-056 §7) —
+//! not stable across runs.
 
 use std::path::Path;
 use std::time::Duration;
@@ -108,8 +109,9 @@ pub fn assign_speakers_by_overlap(segments: &mut [Segment], turns: &[SpeakerTurn
     }
 }
 
-/// Speaker diarization via sherpa-onnx (pyannote segmentation + NeMo TitaNet
-/// embedding, FastClustering). Holds the loaded pipeline; create one per recording.
+/// Speaker diarization via sherpa-onnx (pyannote segmentation + the catalogue's
+/// default embedding model, FastClustering). Holds the loaded pipeline; create
+/// one per recording.
 pub struct SherpaDiarizer {
     inner: sherpa_onnx::OfflineSpeakerDiarization,
 }

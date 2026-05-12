@@ -73,6 +73,9 @@ pub struct TranscriptSession {
     pub speaker_names: HashMap<SpeakerId, String>,
     /// What models were used for each pass.
     pub models_used: ModelsUsed,
+    /// User hint for the diarizer (`None` = auto-estimate, default).
+    #[serde(default)]
+    pub expected_speakers: Option<u32>,
     /// Last event seq emitted for this session — for snapshot+stream resume.
     pub last_seq: u64,
 }
@@ -103,6 +106,7 @@ impl TranscriptSession {
             audio_path: Some(audio_path),
             speaker_names: HashMap::new(),
             models_used: ModelsUsed::default(),
+            expected_speakers: None,
             last_seq: 0,
         }
     }

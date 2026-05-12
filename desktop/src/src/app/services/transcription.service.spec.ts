@@ -94,9 +94,32 @@ describe('TranscriptionService', () => {
       const mixed = { kind: 'mixed' as const, system: { kind: 'system_wide' as const }, mic: null };
       await svc.startRecording(mixed, 'pl');
       expect(spy).toHaveBeenCalledWith('start_transcription', {
-        source: mixed,
-        language: 'pl',
-        liveModelOverride: null,
+        params: {
+          source: mixed,
+          language: 'pl',
+          liveModelOverride: null,
+          expectedSpeakers: null,
+        },
+      });
+    });
+
+    it('forwards a non-null expectedSpeakers hint to start_transcription', async () => {
+      const ack = {
+        session_id: 'sess-1',
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot(),
+      };
+      mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      const src = { kind: 'system_wide' as const };
+      await svc.startRecording(src, 'pl', 4);
+      expect(spy).toHaveBeenCalledWith('start_transcription', {
+        params: {
+          source: src,
+          language: 'pl',
+          liveModelOverride: null,
+          expectedSpeakers: 4,
+        },
       });
     });
   });

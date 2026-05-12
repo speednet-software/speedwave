@@ -43,6 +43,10 @@ import { ModelManagerComponent } from './model-manager/model-manager.component';
             Audio is transcribed locally on this machine. Model downloads and "Send to Claude" use
             the network.
           </p>
+          <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
+            Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;
+            spontaneous meeting speech is ~25-30% across all open models (industry-wide limit).
+          </p>
         </div>
       </header>
 

@@ -89,12 +89,15 @@ export class TranscriptionService {
    * Starts recording the given source, then subscribes to its live stream.
    * @param source - what to capture (system / process / mic / mixed).
    * @param language - forced PL/EN; never auto-detected.
+   * @param expectedSpeakers - hint for the diarizer (`null` = auto-estimate).
    */
-  async startRecording(source: AudioSource, language: Language): Promise<StartAck> {
+  async startRecording(
+    source: AudioSource,
+    language: Language,
+    expectedSpeakers: number | null = null
+  ): Promise<StartAck> {
     const ack = await this.tauri.invoke<StartAck>('start_transcription', {
-      source,
-      language,
-      liveModelOverride: null,
+      params: { source, language, liveModelOverride: null, expectedSpeakers },
     });
     this.activateSnapshot(ack.snapshot);
     await this.attachListener(ack.event_name);

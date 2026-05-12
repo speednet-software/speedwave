@@ -12,7 +12,8 @@
 //!   the HF API; `small`/`medium` SHA256 additionally confirmed by download.
 //! - Diarization models come from k2-fsa's `sherpa-onnx` GitHub releases;
 //!   SHA256 computed locally. The pyannote segmentation conversion is MIT;
-//!   the NeMo TitaNet embedding model is CC-BY-4.0 — both redistributable.
+//!   the default embedding model (3D-Speaker CAM++) is Apache-2.0 — both
+//!   redistributable. NeMo TitaNet-small (CC-BY-4.0) remains as a fallback.
 
 /// Hugging Face repo path the Whisper GGML models are downloaded from.
 pub const WHISPER_HF_REPO: &str = "ggerganov/whisper.cpp";
@@ -244,12 +245,15 @@ pub struct DiarizationModelInfo {
 }
 
 /// Diarization model catalogue. The default pair (`default == true`) is
-/// pyannote-segmentation-3.0 + NeMo TitaNet-small. There is no purely
-/// multilingual speaker-embedding model in sherpa-onnx's catalogue (all are
-/// EN- or ZH-trained); speaker embeddings are largely language-agnostic, so
-/// the NeMo English model is the default — alternates can be added here if a
-/// future Polish-quality measurement calls for it. Sizes/SHA256/licences from
-/// ADR-056 spike 0C.
+/// pyannote-segmentation-3.0 + 3D-Speaker CAM++ (English voxceleb). Speaker
+/// embeddings are largely language-agnostic, so the English model serves PL
+/// callers too. The CAM++ choice over NeMo TitaNet-small is research-backed
+/// (post-R6 review): Apache-2.0 (vs CC-BY-4.0), ~28 MB ONNX (vs ~40 MB), lower
+/// EER on VoxCeleb1-O, and OpenWhispr's open-source diarization picked CAM++
+/// over ECAPA-TDNN without TitaNet making the shortlist. TitaNet-small is kept
+/// as a non-default alternative so users with existing recordings can still
+/// load the old embedding if they want to. Sizes/SHA256/licences verified
+/// 2026-05-12.
 pub const DIARIZATION_MODELS: &[DiarizationModelInfo] = &[
     DiarizationModelInfo {
         key: "pyannote-segmentation-3-0",
@@ -262,6 +266,18 @@ pub const DIARIZATION_MODELS: &[DiarizationModelInfo] = &[
         default: true,
     },
     DiarizationModelInfo {
+        key: "campplus-en-voxceleb",
+        kind: DiarizationModelKind::Embedding,
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+        display_name: "3D-Speaker CAM++ speaker embedding (English, VoxCeleb)",
+        approx_bytes: 29_596_978,
+        sha256: "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
+        license: "Apache-2.0",
+        default: true,
+    },
+    // Non-default fallback: kept so an old recording's metadata that names the
+    // NeMo model still loads (the runtime will let a caller pick a non-default).
+    DiarizationModelInfo {
         key: "nemo-titanet-small",
         kind: DiarizationModelKind::Embedding,
         url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
@@ -269,7 +285,7 @@ pub const DIARIZATION_MODELS: &[DiarizationModelInfo] = &[
         approx_bytes: 40_257_283,
         sha256: "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
         license: "CC-BY-4.0",
-        default: true,
+        default: false,
     },
 ];
 
