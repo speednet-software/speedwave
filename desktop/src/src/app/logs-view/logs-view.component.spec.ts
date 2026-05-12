@@ -4,6 +4,7 @@ import { provideRouter } from '@angular/router';
 import { LogsViewComponent, parseLogLine, sortLogLinesByTime } from './logs-view.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { HEALTH_REFRESH_INTERVAL_MS } from '../services/system-health.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 const MOCK_LOGS = [
@@ -1027,6 +1028,60 @@ describe('LogsViewComponent — status bar layout', () => {
     const calledCommands = invokeSpy.mock.calls.map((c) => c[0]);
     expect(calledCommands).toContain('get_all_logs');
     expect(calledCommands).not.toContain('get_compose_logs');
+  });
+
+  it('live-tail: arms a poll on the health cadence and clears it on destroy', async () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    try {
+      await component.ngOnInit();
+      // A poll is armed at the health cadence (the same `setInterval(_, 5000)`
+      // line; the health service also arms one — assert ours is among them).
+      const armed = setIntervalSpy.mock.calls.filter(
+        (c) => c[1] === HEALTH_REFRESH_INTERVAL_MS
+      ).length;
+      expect(armed).toBeGreaterThanOrEqual(1);
+
+      // It fires `get_all_logs` again on each tick.
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await vi.advanceTimersByTimeAsync(HEALTH_REFRESH_INTERVAL_MS);
+      expect(invokeSpy.mock.calls.some((c) => c[0] === 'get_all_logs')).toBe(true);
+
+      // Destroy clears it.
+      component.ngOnDestroy();
+      expect(clearIntervalSpy).toHaveBeenCalled();
+      expect(component['logsTimer']).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a silent refresh does not toggle the loading spinner; a normal one does', async () => {
+    await component.ngOnInit();
+    expect(component.loading()).toBe(false); // settled after the initial fetch
+
+    // Hold the fetch so we can observe `loading` mid-flight.
+    let release!: () => void;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd !== 'get_all_logs') return undefined;
+      await new Promise<void>((r) => (release = r));
+      return '';
+    };
+
+    // Silent: `loading` stays false throughout.
+    const silent = component['refresh'](true);
+    expect(component.loading()).toBe(false);
+    release();
+    await silent;
+    expect(component.loading()).toBe(false);
+
+    // Non-silent (the explicit refresh button): `loading` flips to true then back.
+    const loud = component['refresh']();
+    expect(component.loading()).toBe(true);
+    release();
+    await loud;
+    expect(component.loading()).toBe(false);
   });
 
   it('exposes desktop, mcp-os, host-exec and claude as separate sources in the dropdown', async () => {

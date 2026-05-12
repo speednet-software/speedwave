@@ -14,7 +14,7 @@ import {
 import { RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
-import { SystemHealthService } from '../services/system-health.service';
+import { HEALTH_REFRESH_INTERVAL_MS, SystemHealthService } from '../services/system-health.service';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 import { TooltipDirective } from '../shared/tooltip.directive';
@@ -716,6 +716,8 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   private readonly tauri = inject(TauriService);
   private readonly injector = inject(Injector);
   private unsubProjectSettled: (() => void) | null = null;
+  /** Live-tail poll handle — re-fetches the log buffer on the health cadence. */
+  private logsTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
    * Kicks off the initial log fetch + health refresh + polling. Re-runs the
@@ -732,16 +734,23 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     // Await so the initial snapshot is committed before view tests assert
     // on it.
     await this.systemHealth.ensurePolling();
+    // Live-tail: re-fetch the log buffer on the same cadence (silent — no
+    // spinner, and only auto-scroll when the user is already at the bottom).
+    this.logsTimer = setInterval(() => void this.refresh(true), HEALTH_REFRESH_INTERVAL_MS);
     this.unsubProjectSettled = this.projectState.onProjectSettled(() => {
       void this.refresh();
     });
   }
 
-  /** Cancels the project-settled subscription (health polling lives in the service). */
+  /** Cancels the project-settled subscription and the live-tail poll. */
   ngOnDestroy(): void {
     if (this.unsubProjectSettled) {
       this.unsubProjectSettled();
       this.unsubProjectSettled = null;
+    }
+    if (this.logsTimer) {
+      clearInterval(this.logsTimer);
+      this.logsTimer = null;
     }
   }
 
@@ -765,8 +774,21 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     );
   }
 
-  /** Re-fetch the tail of compose logs and re-parse into typed lines. */
-  protected async refresh(): Promise<void> {
+  /** True when the log scroll region is at (or within ~50px of) the bottom. */
+  private isAtBottom(): boolean {
+    const el = this.logScroll?.nativeElement;
+    if (!el) return true; // no element yet → behave like a fresh tail
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+  }
+
+  /**
+   * Re-fetch the merged log buffer (`get_all_logs`) and re-parse. On a `silent`
+   * refresh (the live-tail poll) we don't toggle the spinner and only
+   * auto-scroll if the user was already at the bottom — so reading older lines
+   * isn't interrupted every cadence; a manual refresh always scrolls down.
+   * @param silent - True for the background poll; false (default) for explicit refresh.
+   */
+  protected async refresh(silent = false): Promise<void> {
     const project = this.projectState.activeProject;
     if (!project) {
       // While the shell still boots the project lifecycle the active project
@@ -774,15 +796,16 @@ export class LogsViewComponent implements OnInit, OnDestroy {
       // error banner, the onProjectSettled callback re-runs this fetch as
       // soon as the project is ready.
       if (this.projectState.status === 'loading') {
-        this.loading.set(true);
+        if (!silent) this.loading.set(true);
         this.error.set('');
-      } else {
+      } else if (!silent) {
         this.loading.set(false);
         this.error.set('No active project');
       }
       return;
     }
-    this.loading.set(true);
+    const stickToBottom = silent ? this.isAtBottom() : true;
+    if (!silent) this.loading.set(true);
     try {
       // `get_all_logs` merges every host-side log source (tauri-plugin-log
       // file, mcp-os.log, host-exec/<project>/log, claude-session.log) with
@@ -802,12 +825,12 @@ export class LogsViewComponent implements OnInit, OnDestroy {
       );
       this.lines.set(parsed);
       this.error.set('');
-      this.scrollToBottom();
+      if (stickToBottom) this.scrollToBottom();
       this.reconcileSourceFilter(parsed);
     } catch (e: unknown) {
       this.error.set(e instanceof Error ? e.message : String(e));
     } finally {
-      this.loading.set(false);
+      if (!silent) this.loading.set(false);
     }
   }
 
