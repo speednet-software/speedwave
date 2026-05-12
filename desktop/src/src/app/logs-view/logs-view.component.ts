@@ -52,16 +52,17 @@ export const LEVEL_CHIPS: readonly LogLevel[] = ['all', 'debug', 'info', 'warn',
 const FORCED_LOG_LEVEL = 'trace';
 
 const COMPOSE_RE = /^([\w.-]+)\s*\|\s*(.*)$/;
-const BRACKETED_TIME_RE = /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s*(.*)$/;
+// Bracketed timestamp: either bare `HH:MM:SS[.ms]` or an ISO 8601 timestamp.
+// Speedwave workers emit `[<ISO Z>]` via `@speedwave/mcp-shared`'s `ts()`; bare
+// HMS is the historical compose-line shape some external tools still use.
+const BRACKETED_TIME_RE =
+  /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\]\s*(.*)$/;
 // Matches ISO 8601 timestamps emitted by the various log sources we consume:
-//   - `2026-04-28T12:34:56Z`            (UTC, no fractional seconds)
-//   - `2026-04-28 12:34:56.123Z`        (legacy compose with millis)
-//   - `2026-05-06T19:58:38.724+0200`    (tauri-plugin-log local time + numeric offset)
-//   - `2026-05-06T19:58:38.724+02:00`   (some libraries emit colon-separated offset)
-// The offset variant matters for the unified `/logs` view: tauri-plugin-log's
-// format callback in `desktop/src-tauri/src/main.rs` uses `%.3f%z` which
-// produces `+0200` (no colon). Without `[+-]\d{2}:?\d{2}` here, those lines
-// fall through to default `info` level and lose their level chip.
+//   - `2026-04-28T12:34:56Z`            (UTC, no fractional seconds — older nerdctl)
+//   - `2026-04-28 12:34:56.123Z`        (compose with millis)
+//   - `2026-05-12T14:34:02.814+02:00`   (Speedwave Rust logs — `log_ts::log_timestamp()`)
+// The drain prefix (`<source> | <ISO> STDOUT: …`) puts this ISO at the start of
+// `rest`, so it lands in the `time` column for mcp-os / host-exec / claude.
 const ISO_TIME_RE =
   /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/;
 /** ISO date+time at the start of a stamped log line (e.g. `2026-04-28T12:34:56.123Z`). */
@@ -69,6 +70,8 @@ const FORMAT_TIME_ISO_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/;
 /** Bare `HH:MM:SS` prefix used by some compose log lines. Date is filled in from the host clock. */
 const FORMAT_TIME_HMS_RE = /^(\d{2}:\d{2}:\d{2})/;
 const LEVEL_RE = /^(DEBUG|INFO|WARN|WARNING|ERROR|TRACE)\s+(.*)$/i;
+/** Drain prefix the Rust `log_file` writer puts on captured stdout/stderr lines — pure noise in the message. */
+const DRAIN_PREFIX_RE = /^(?:STDOUT|STDERR): (.*)$/;
 const CONTAINER_PREFIX_RE = /^speedwave_[^_]+_([^_]+)(?:_\d+)?$/;
 const TRAILING_INDEX_RE = /_\d+$/;
 
@@ -88,10 +91,15 @@ export function parseLogLine(raw: string): LogLine {
   const timeMatch = BRACKETED_TIME_RE.exec(rest) ?? ISO_TIME_RE.exec(rest);
   const time = timeMatch ? timeMatch[1] : '';
   const afterTime = timeMatch ? timeMatch[2] : rest;
+  // Strip the `STDOUT: `/`STDERR: ` drain marker — it is pure capture noise
+  // regardless of whether a timestamp was present (`SESSION:`/`TOOL:`/etc. are
+  // semantic claude-session prefixes and are deliberately kept).
+  const drainMatch = DRAIN_PREFIX_RE.exec(afterTime);
+  const cleaned = drainMatch ? drainMatch[1] : afterTime;
 
-  const levelMatch = LEVEL_RE.exec(afterTime);
+  const levelMatch = LEVEL_RE.exec(cleaned);
   const level: LogLevel = levelMatch ? normalizeLevel(levelMatch[1]) : 'info';
-  const message = levelMatch ? levelMatch[2] : afterTime;
+  const message = levelMatch ? levelMatch[2] : cleaned;
 
   return { time, source, level, message };
 }

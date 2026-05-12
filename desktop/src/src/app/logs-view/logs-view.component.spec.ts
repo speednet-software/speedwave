@@ -425,6 +425,57 @@ describe('parseLogLine', () => {
     expect(line.level).toBe('info');
     expect(line.message).toBe('started');
   });
+
+  it('extracts the drain ISO timestamp and strips STDOUT: from an mcp-os line', () => {
+    const line = parseLogLine(
+      'mcp-os | 2026-05-12T14:34:02.814+02:00 STDOUT: [2026-05-12T12:34:02.814Z] mcp-os started'
+    );
+    expect(line.source).toBe('mcp-os');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe('[2026-05-12T12:34:02.814Z] mcp-os started');
+    expect(line.message).not.toContain('STDOUT:');
+  });
+
+  it('strips STDERR: drain marker too', () => {
+    const line = parseLogLine('host-exec | 2026-05-12T14:34:02.814+02:00 STDERR: something broke');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe('something broke');
+  });
+
+  it('extracts the drain timestamp from a host-exec audit JSON line, keeping the JSON as message', () => {
+    const line = parseLogLine(
+      'host-exec | 2026-05-12T14:34:02.814+02:00 {"ts":"2026-05-12T12:34:02.814Z","recipe":"docker_ps","status":"exited"}'
+    );
+    expect(line.source).toBe('host-exec');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe(
+      '{"ts":"2026-05-12T12:34:02.814Z","recipe":"docker_ps","status":"exited"}'
+    );
+  });
+
+  it('preserves the semantic SESSION: prefix on a claude-session line', () => {
+    const line = parseLogLine('claude | 2026-05-12T14:34:02.814+02:00 SESSION: started');
+    expect(line.source).toBe('claude');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe('SESSION: started');
+  });
+
+  it('parses a bare bracketed ISO timestamp via the extended BRACKETED_TIME_RE', () => {
+    const line = parseLogLine('hub_1 | [2026-05-12T12:34:02.814Z] 🚀 Starting');
+    expect(line.time).toBe('2026-05-12T12:34:02.814Z');
+    expect(line.message).toBe('🚀 Starting');
+  });
+
+  it('rewrites the desktop ISO+bracketed-level line (colon offset) to a WARN chip', () => {
+    // tauri-plugin-log → `prefix_lines("desktop", …)` → `desktop | <ISO> WARN [target] msg`.
+    const line = parseLogLine(
+      'desktop | 2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] auto-disabled mail'
+    );
+    expect(line.source).toBe('desktop');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.level).toBe('warn');
+    expect(line.message).toBe('[speedwave_desktop::x] auto-disabled mail');
+  });
 });
 
 describe('LogsViewComponent — status bar layout', () => {
@@ -870,11 +921,11 @@ describe('LogsViewComponent — status bar layout', () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return [
-        'speedwave_test_mcp-hub_1 | [11:00:00] INFO container line',
-        'desktop | 2026-05-06T19:58:38.724+0200 INFO[target] desktop line',
-        'mcp-os | 2026-05-06T20:00:00 INFO mcp-os line',
-        'host-exec | {"ts":"2026-05-06T20:00:00.500Z","recipe":"docker_ps","status":"exited"}',
-        'claude | 2026-05-06T20:00:01 INFO claude line',
+        'speedwave_test_mcp-hub_1 | 2026-05-12T12:00:00.123456Z [2026-05-12T12:00:00.123Z] INFO container line',
+        'desktop | 2026-05-12T14:34:02.814+02:00 INFO [target] desktop line',
+        'mcp-os | 2026-05-12T14:34:03.000+02:00 STDOUT: [2026-05-12T12:34:03.000Z] mcp-os line',
+        'host-exec | 2026-05-12T14:34:04.000+02:00 {"ts":"2026-05-12T12:34:04.000Z","recipe":"docker_ps","status":"exited"}',
+        'claude | 2026-05-12T14:34:05.000+02:00 SESSION: started',
       ].join('\n');
     };
     await component.ngOnInit();
@@ -897,11 +948,12 @@ describe('LogsViewComponent — status bar layout', () => {
     // The mock simulates what Rust `prefix_lines("desktop", …)` produces —
     // the bracketed `[WARN]` from tauri-plugin-log is rewritten to `WARN ` (with
     // trailing space, required by Angular `LEVEL_RE = /^LEVEL\s+/`) before
-    // the `desktop | ` prefix is added. If the Rust rewrite ever drops the
-    // trailing space, this test fails — which is the regression we want.
+    // the `desktop | ` prefix is added. The timestamp is now the colon-offset
+    // RFC-3339 form `log_ts::log_timestamp()` emits. If the Rust rewrite ever
+    // drops the trailing space, this test fails — which is the regression we want.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
-      return 'desktop | 2026-05-06T19:58:38.724+0200 WARN [x] auto-disabled mail';
+      return 'desktop | 2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] auto-disabled mail';
     };
     await component.ngOnInit();
 
@@ -909,5 +961,6 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(lines.length).toBe(1);
     expect(lines[0].level).toBe('warn');
     expect(lines[0].source).toBe('desktop');
+    expect(lines[0].time).toBe('2026-05-12T14:34:02.814+02:00');
   });
 });
