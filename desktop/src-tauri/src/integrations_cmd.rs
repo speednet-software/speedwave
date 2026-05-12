@@ -8,6 +8,7 @@ use crate::types::{
     IntegrationsResponse, OsIntegrationStatusEntry,
 };
 use speedwave_runtime::config;
+use speedwave_runtime::log_sanitizer;
 
 /// Returns the field keys that Redmine stores in config.json (derived from SSOT in consts).
 fn redmine_config_json_fields() -> Vec<&'static str> {
@@ -905,8 +906,98 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
     Ok(())
 }
 
+/// Builds missing worker images for `project`. Returns sanitized error on failure.
+pub fn ensure_project_images_built(
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    project: &str,
+) -> Result<(), String> {
+    let user_config = speedwave_runtime::config::load_user_config()
+        .map_err(|e| format!("failed to load user config: {e}"))?;
+    let dir = user_config
+        .require_project(project)
+        .map_err(|e| e.to_string())?
+        .dir
+        .clone();
+    let integrations = speedwave_runtime::config::resolve_integrations(
+        std::path::Path::new(&dir),
+        &user_config,
+        project,
+    );
+    let manifest = speedwave_runtime::bundle::load_current_bundle_manifest()
+        .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
+    let enabled = speedwave_runtime::build::enabled_images(&integrations);
+    speedwave_runtime::build::build_missing_images(rt, &enabled, &manifest.bundle_id)
+        .map(|_| ())
+        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))
+}
+
+/// Removes worker images that `project` no longer enables. Per-project scope
+/// (ADR-057): switching to a project that needs a pruned image triggers a
+/// lazy build. Warn-only — failure never blocks restart.
+fn prune_unused_worker_images(
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    project: &str,
+) {
+    let user_config = match speedwave_runtime::config::load_user_config() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("prune_unused_worker_images: load_user_config failed: {e}");
+            return;
+        }
+    };
+    let dir = match user_config.find_project(project) {
+        Some(p) => p.dir.clone(),
+        None => {
+            log::warn!("prune_unused_worker_images: project '{project}' not in config");
+            return;
+        }
+    };
+    let integrations = speedwave_runtime::config::resolve_integrations(
+        std::path::Path::new(&dir),
+        &user_config,
+        project,
+    );
+    let keep = speedwave_runtime::build::enabled_images(&integrations);
+    let manifest = match speedwave_runtime::bundle::load_current_bundle_manifest() {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("prune_unused_worker_images: load manifest failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) =
+        speedwave_runtime::build::prune_orphan_current_bundle_images(rt, &manifest.bundle_id, &keep)
+    {
+        log::warn!("prune_unused_worker_images failed: {e}");
+    }
+}
+
+/// Rolls a service back to `enabled: false`; called when on-demand build fails.
+fn rollback_integration_to_disabled(project: &str, service: &str) {
+    let result = config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let entry = user_config
+            .find_project_mut(project)
+            .ok_or_else(|| anyhow::anyhow!("project '{project}' not found"))?;
+        let integrations = entry.integrations.get_or_insert_with(Default::default);
+        let cfg = config::IntegrationConfig {
+            enabled: Some(false),
+        };
+        if !integrations.set_service(service, cfg) {
+            return Err(anyhow::anyhow!("unknown service: {service}"));
+        }
+        config::save_user_config(&user_config)
+    });
+    if let Err(e) = result {
+        log::warn!("rollback of '{service}' to disabled failed: {e}");
+    }
+}
+
 #[tauri::command]
-pub async fn restart_integration_containers(project: String) -> Result<(), String> {
+pub async fn restart_integration_containers(
+    project: String,
+    just_enabled: Option<String>,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         // Pre-flight: detect CloudStorage TCC denial before restarting containers.
@@ -917,21 +1008,25 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
                 )?;
             }
         }
-        log::info!("restart_integration_containers: project={project}");
+        log::info!(
+            "restart_integration_containers: project={project} just_enabled={just_enabled:?}"
+        );
         let rt = speedwave_runtime::runtime::detect_runtime();
+        rt.ensure_ready().map_err(|e| e.to_string())?;
 
         // Save snapshot of current compose.yml for rollback before any changes
         if let Err(e) = speedwave_runtime::update::save_snapshot(&project) {
             log::warn!("restart_integration_containers: save_snapshot failed, rollback will not work: {e}");
         }
 
-        // Rebuild images BEFORE stopping containers.
-        // If the build fails, containers keep running with the previous version.
-        // Docker/nerdctl layer caching makes no-op rebuilds fast (seconds).
-        if let Err(e) = speedwave_runtime::build::build_all_images(&*rt) {
-            log::error!("restart_integration_containers: image rebuild failed: {e}");
+        // Lazy build; rollback `just_enabled` on failure.
+        if let Err(sanitized) = ensure_project_images_built(&*rt, &project) {
+            log::error!("restart_integration_containers: image build failed: {sanitized}");
+            if let Some(svc) = just_enabled.as_deref() {
+                rollback_integration_to_disabled(&project, svc);
+            }
             return Err(format!(
-                "Image rebuild failed: {e}. Containers are still running with the previous version."
+                "Image build failed: {sanitized}. Containers are still running with the previous configuration."
             ));
         }
 
@@ -959,6 +1054,10 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
                 "Restart failed: {e}. Rolled back to previous configuration."
             ));
         }
+
+        // Drop worker images this project no longer enables (ADR-057 per-project
+        // scope; other projects rebuild lazily on switch). Warn-only.
+        prune_unused_worker_images(&*rt, &project);
 
         Ok(())
     })
@@ -990,7 +1089,15 @@ mod tests {
 
     #[test]
     fn set_service_all_known_keys() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab", "github", "atlassian", "playwright"] {
+        for key in &[
+            "slack",
+            "sharepoint",
+            "redmine",
+            "gitlab",
+            "github",
+            "atlassian",
+            "playwright",
+        ] {
             let mut cfg = config::IntegrationsConfig::default();
             let ic = config::IntegrationConfig {
                 enabled: Some(true),
@@ -1274,18 +1381,38 @@ mod tests {
             .expect("restart_integration_containers function must exist");
         let fn_body = &source[fn_start..];
 
-        let build_pos = fn_body
-            .find("build::build_all_images")
-            .expect("build_all_images call must exist in restart_integration_containers");
+        let build_pos = fn_body.find("ensure_project_images_built").expect(
+            "ensure_project_images_built call must exist in restart_integration_containers",
+        );
         let down_pos = fn_body
             .find("compose_down")
             .expect("compose_down call must exist in restart_integration_containers");
 
         assert!(
             build_pos < down_pos,
-            "build_all_images (offset {}) must appear before compose_down (offset {}) in restart_integration_containers",
+            "ensure_project_images_built (offset {}) must appear before compose_down (offset {}) in restart_integration_containers",
             build_pos,
             down_pos
+        );
+    }
+
+    #[test]
+    fn restart_rolls_back_just_enabled_on_build_failure() {
+        // Structural: the build-failure branch must call the rollback helper
+        // with the `just_enabled` arg so the toggled-on row reverts in the UI.
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers function must exist");
+        let fn_body = &source[fn_start..];
+        // The Err arm of ensure_project_images_built must call rollback_integration_to_disabled.
+        let build_pos = fn_body
+            .find("ensure_project_images_built")
+            .expect("ensure_project_images_built must exist");
+        let err_block = &fn_body[build_pos..build_pos.saturating_add(800)];
+        assert!(
+            err_block.contains("rollback_integration_to_disabled"),
+            "build failure must call rollback_integration_to_disabled, context: {err_block}"
         );
     }
 
@@ -1837,7 +1964,14 @@ mod tests {
 
     #[test]
     fn badge_none_for_credential_services() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab", "github", "atlassian"] {
+        for key in &[
+            "slack",
+            "sharepoint",
+            "redmine",
+            "gitlab",
+            "github",
+            "atlassian",
+        ] {
             let svc_desc = speedwave_runtime::consts::find_mcp_service(key)
                 .unwrap_or_else(|| panic!("service '{}' must exist", key));
             assert_eq!(

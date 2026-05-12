@@ -34,10 +34,7 @@ pub async fn set_beta_enabled(app: AppHandle, enabled: bool) -> Result<(), Strin
 /// Tray callers spawn this on the async runtime to avoid blocking the UI
 /// thread. No-op (no write, no event, no menu rebuild) when the value is
 /// already what's requested.
-pub(crate) async fn apply_beta_toggle_inner(
-    app: &AppHandle,
-    enabled: bool,
-) -> Result<(), String> {
+pub(crate) async fn apply_beta_toggle_inner(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let changed = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
         config::with_config_lock(|| {
             let mut cfg = config::load_user_config()?;
@@ -58,7 +55,8 @@ pub(crate) async fn apply_beta_toggle_inner(
     }
     app.state::<tray::TrayMenuState>().set_beta_enabled(enabled);
     tray::refresh_tray_menu(app);
-    app.emit("beta-changed", enabled).map_err(|e| e.to_string())?;
+    app.emit("beta-changed", enabled)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

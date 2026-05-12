@@ -735,7 +735,12 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      expect(spy).toHaveBeenCalledWith('restart_integration_containers', { project: 'test' });
+      // justEnabled is null when no integration was just toggled — backend
+      // accepts an Option<String> and rolls back only the named service.
+      expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
+        project: 'test',
+        justEnabled: null,
+      });
       expect(service.needsRestart).toBe(false);
       expect(service.restarting).toBe(false);
       expect(service.restartError).toBe('');
@@ -759,6 +764,11 @@ describe('ProjectStateService', () => {
       };
 
       const promise = service.restartContainers();
+      // restartContainers preloads worker-image estimates and registers an
+      // event listener before invoking the restart command; allow those
+      // microtasks to settle so resolveInvoke is bound.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
 
       expect(states).toHaveLength(1);
       expect(states[0]).toEqual({ restarting: true, needsRestart: true });
@@ -920,6 +930,39 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(false);
       expect(service.restartError).toBe('');
       expect(cb).toHaveBeenCalledTimes(1);
+    });
+
+    it('restartContainers forwards pendingJustEnabled and clears it after', async () => {
+      service.requestRestart();
+      service.pendingJustEnabled = 'playwright';
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.restartContainers();
+
+      expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
+        project: 'test',
+        justEnabled: 'playwright',
+      });
+      expect(service.pendingJustEnabled).toBeNull();
+    });
+
+    it('restart failure triggers integration status refresh + clears pendingJustEnabled', async () => {
+      service.requestRestart();
+      service.pendingJustEnabled = 'playwright';
+      const refresher = vi.fn();
+      service.registerIntegrationStatusRefresher(refresher);
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') {
+          throw new Error('Image build failed: disk full');
+        }
+        return undefined;
+      };
+
+      await service.restartContainers();
+
+      expect(refresher).toHaveBeenCalledTimes(1);
+      expect(service.pendingJustEnabled).toBeNull();
     });
 
     it('project switch clears restart state', () => {
