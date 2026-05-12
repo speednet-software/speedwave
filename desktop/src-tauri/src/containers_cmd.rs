@@ -280,7 +280,11 @@ pub async fn init_vm() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn create_project(name: String, dir: String) -> Result<(), String> {
+pub async fn create_project(
+    app: tauri::AppHandle,
+    name: String,
+    dir: String,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         log::info!("create_project: name={name}, dir={dir}");
         setup_wizard::create_project(&name, &dir).map_err(|e| {
@@ -289,7 +293,13 @@ pub async fn create_project(name: String, dir: String) -> Result<(), String> {
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    // `create_project` is the last setup step; `is_setup_complete()` now flips
+    // to `true`, so rebuild the tray menu to surface items gated on it (ADR-057
+    // beta toggle).
+    crate::tray::refresh_tray_menu(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -836,6 +846,7 @@ mod tests {
             active_project: Some("alpha".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -927,6 +938,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         // Use a non-local provider so the new local-provider+model guard
@@ -953,6 +965,7 @@ mod tests {
             active_project: Some("nonexistent".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         // Anthropic skips the local-provider+model guard so the project-not-
@@ -986,6 +999,7 @@ mod tests {
             active_project: Some("proj".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         apply_llm_config(&mut cfg, llm("ollama", Some("llama3.3"), None)).unwrap();
