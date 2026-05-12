@@ -105,27 +105,28 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
           </div>
         }
       }
-      @if (projectState.needsRestart && projectState.status === 'ready') {
-        @if (projectState.restarting && projectState.buildingWorkerImage) {
-          <div
-            class="fixed inset-0 z-[900] flex flex-col items-center justify-center bg-black/75 backdrop-blur-sm"
-            role="alertdialog"
-            aria-modal="true"
-            aria-label="Building worker images"
-            data-testid="worker-image-build-overlay"
-          >
-            <div class="w-full max-w-xl px-6">
-              <h2 class="mono mb-4 text-[14px] text-[var(--ink)]">Building container images</h2>
-              <app-progress-steps
-                [steps]="projectState.buildSteps"
-                [error]="projectState.buildError || null"
-                [showFooter]="false"
-                [showBackButton]="false"
-                (retry)="restartContainers()"
-              />
-            </div>
+      @if (projectState.buildingWorkerImage) {
+        <div
+          class="fixed inset-0 z-[10000] flex flex-col items-center justify-center bg-black/75 backdrop-blur-sm"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label="Building worker images"
+          data-testid="worker-image-build-overlay"
+        >
+          <div class="w-full max-w-xl px-6">
+            <h2 class="mono mb-4 text-[14px] text-[var(--ink)]">Building container images</h2>
+            <app-progress-steps
+              [steps]="projectState.buildSteps"
+              [error]="projectState.buildError || null"
+              [showFooter]="false"
+              [showBackButton]="false"
+              (retry)="restartContainers()"
+            />
           </div>
-        } @else if (projectState.restarting) {
+        </div>
+      }
+      @if (projectState.needsRestart && projectState.status === 'ready') {
+        @if (projectState.restarting) {
           <div
             class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"
             role="alertdialog"
