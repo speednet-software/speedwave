@@ -14,6 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
 anyhow = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
 fs2 = "0.4"
@@ -42,6 +43,10 @@ tempfile = "3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+# Serialises the `host_exec_process` spawn tests that mutate the process-global
+# environment (`std::env::set_var`) — without it they race each other and
+# concurrent runtime tests.
+serial_test = "3"
 
 [lints]
 workspace = true

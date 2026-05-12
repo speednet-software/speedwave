@@ -30,6 +30,46 @@ pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
+
+/// Subdirectory under the data dir holding per-project `host_exec` state.
+/// SSOT — do not hard-code `"host-exec"` at call sites.
+pub const HOST_EXEC_SUBDIR: &str = "host-exec";
+/// Per-project worker snapshot, written `0o600` (may hold env-value secrets).
+pub const HOST_EXEC_CONFIG_FILE: &str = "config.json";
+/// Per-project bearer token (`0o600`).
+pub const HOST_EXEC_AUTH_TOKEN_FILE: &str = "auth-token";
+/// Per-project worker listening port file.
+pub const HOST_EXEC_PORT_FILE: &str = "port";
+/// Per-project worker PID file — used for stale-process cleanup.
+pub const HOST_EXEC_PID_FILE: &str = "pid";
+/// Per-project audit log; env values redacted (ADR-054 §"Security model").
+pub const HOST_EXEC_LOG_FILE: &str = "log";
+
+/// Per-command timeout (7 min, fits under the hub's 600s long timeout).
+pub const HOST_EXEC_TIMEOUT_MS: u64 = 420_000;
+/// Per-stream stdout/stderr tail-cap.
+pub const HOST_EXEC_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Per-stream line cap, applied alongside the byte cap.
+pub const HOST_EXEC_MAX_OUTPUT_LINES: usize = 2000;
+/// Ceiling on a recipe parameter's value length and on the declared `maxLen`.
+pub const HOST_EXEC_PARAM_MAX_LEN: usize = 65536;
+/// Sanity ceiling on a parameter's regex `pattern` length (semantics live in the worker).
+pub const HOST_EXEC_PARAM_PATTERN_MAX_LEN: usize = 4096;
+
+/// Banned `exec` basenames (shell / eval launchers).
+/// SSOT; case-insensitive. See ADR-054 §"Hard ban on direct shell/eval launchers".
+pub const HOST_EXEC_SHELL_LAUNCHERS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "env", "xargs", "find", "ssh", "sshpass",
+    "busybox", "toybox",
+];
+
+/// Meta-tools banned only with a *bare* `{param}` argv element.
+/// SSOT; case-insensitive. See ADR-054 §"Config schema" (parameterised meta-invocation rule).
+pub const HOST_EXEC_META_TOOLS: &[&str] = &[
+    "node", "deno", "python", "python3", "perl", "ruby", "make", "npm", "npx", "pnpm", "yarn",
+    "awk", "gawk", "mawk", "nawk",
+];
+
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
@@ -629,6 +669,13 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
 
 /// Built-in service IDs (logical names, not compose names).
 /// Used by plugin install to prevent slug collisions.
+///
+/// `host_exec` is here even though it has no compose service — it is a
+/// host-side worker (like `os`/`mcp-os`) reached via `WORKER_HOST_EXEC_URL`
+/// on the hub (ADR-054). It is the first multi-word entry; the hub builds the
+/// worker env var as `WORKER_${id.toUpperCase()}_URL` and treats `_`
+/// literally, so `host_exec` → `WORKER_HOST_EXEC_URL` (a hyphen would give the
+/// broken `WORKER_HOST-EXEC_URL`).
 pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "slack",
     "sharepoint",
@@ -638,6 +685,7 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "atlassian",
     "playwright",
     "os",
+    "host_exec",
 ];
 
 /// Environment variable names that plugins are forbidden from setting via
@@ -669,6 +717,10 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
     "IFS",
     "BASH_ENV",
     "ENV",
+    // host_exec worker-internal env (must never reach a recipe child)
+    "HOST_EXEC_AUTH_TOKEN",
+    "HOST_EXEC_CONFIG_PATH",
+    "HOST_EXEC_LOG_FILE",
 ];
 
 /// Upper bound for plugin `mem_limit`, normalised to MiB. A plugin requesting
@@ -788,7 +840,7 @@ mod tests {
         // A change here is deliberate — bumping this count signals a new
         // hijack vector was added (and the matching test in plugin.rs
         // should grow too). Catches accidental deletions.
-        assert_eq!(RESERVED_ENV_KEYS.len(), 16);
+        assert_eq!(RESERVED_ENV_KEYS.len(), 19);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
                 k,

@@ -68,7 +68,7 @@ impl McpOsProcess {
         kill_stale_by_pid_file(&pid_path);
 
         // Truncate log file if it exceeds 2 MB to prevent unbounded growth
-        crate::log_file::truncate_if_oversized(&log_path, 2 * 1024 * 1024);
+        speedwave_runtime::log_file::truncate_if_oversized(&log_path, 2 * 1024 * 1024);
 
         // Write token file with restrictive permissions
         write_restricted_file(&token_path, &token)?;
@@ -432,13 +432,13 @@ fn drain_and_read_port(
     // Drain stderr — mcp-os writes warnings here via console.error/console.warn
     if let Some(stderr) = child.stderr.take() {
         let h = std::thread::spawn(move || {
-            let mut log_file = crate::log_file::open_log_file(&log_path_stderr);
+            let mut log_file = speedwave_runtime::log_file::open_log_file(&log_path_stderr);
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines() {
                 match line {
                     Ok(line) => {
                         log::warn!("mcp-os stderr: {line}");
-                        crate::log_file::write_log_line(&mut log_file, "STDERR", &line);
+                        speedwave_runtime::log_file::write_log_line(&mut log_file, "STDERR", &line);
                     }
                     Err(_) => break,
                 }
@@ -452,7 +452,7 @@ fn drain_and_read_port(
     let (tx, rx) = std::sync::mpsc::channel();
     let log_path_stdout = log_path.to_path_buf();
     let h = std::thread::spawn(move || {
-        let mut log_file = crate::log_file::open_log_file(&log_path_stdout);
+        let mut log_file = speedwave_runtime::log_file::open_log_file(&log_path_stdout);
         let reader = std::io::BufReader::new(stdout);
         let mut port_sent = false;
         for line in reader.lines() {
@@ -466,7 +466,7 @@ fn drain_and_read_port(
                                         anyhow::anyhow!("port {port} out of u16 range")
                                     }));
                                 port_sent = true;
-                                crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
+                                speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &line);
                                 continue;
                             }
                         }
@@ -474,7 +474,7 @@ fn drain_and_read_port(
                     // After port is found, keep draining stdout so the pipe
                     // never fills up and the child never gets SIGPIPE.
                     log::debug!("mcp-os: {line}");
-                    crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
+                    speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &line);
                 }
                 Err(_) => break,
             }
