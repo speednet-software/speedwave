@@ -101,6 +101,32 @@ pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String>
     .map_err(|e| e.to_string())?
 }
 
+/// Audit/stdout log of the per-project `host_exec` worker (`<data_dir>/host-exec/<project>/log`).
+#[tauri::command]
+pub(crate) async fn get_host_exec_logs(
+    project: String,
+    tail: Option<u32>,
+) -> Result<String, String> {
+    check_project(&project)?;
+    tokio::task::spawn_blocking(move || {
+        let log_path = host_exec_log_path(&project);
+        let tail = tail.unwrap_or(200).min(10_000) as usize;
+        read_tail_sanitized(&log_path, tail)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Path to a project's `host_exec` worker log (matches `host_exec_process` /
+/// `host_exec_cmd`'s state-dir layout).
+fn host_exec_log_path(project: &str) -> std::path::PathBuf {
+    speedwave_runtime::host_exec::host_exec_project_dir(
+        speedwave_runtime::consts::data_dir(),
+        project,
+    )
+    .join(speedwave_runtime::consts::HOST_EXEC_LOG_FILE)
+}
+
 #[tauri::command]
 pub(crate) async fn get_claude_session_logs(
     container: String,
@@ -239,40 +265,45 @@ pub(crate) struct LogSources {
     pub compose: String,
     pub desktop: String,
     pub mcp_os: String,
+    pub host_exec: String,
     pub claude: String,
 }
 
-/// Composes the four per-source log buffers into a single newline-separated
-/// string, in a deterministic per-source order. We deliberately do NOT sort
-/// globally by timestamp — the four sources use heterogeneous timestamp
-/// formats (compose `--timestamps` ISO, tauri-plugin-log local-with-offset,
-/// mcp-os/claude raw text), and any sort would have to either parse all four
-/// (expensive, fragile) or compare lexicographically (incorrect for offsets).
-/// The frontend source-filter dropdown gives users the per-source view they
-/// need, so per-source-block ordering is sufficient.
+/// Composes the per-source log buffers into a single newline-separated string,
+/// in a deterministic per-source order. We deliberately do NOT sort globally by
+/// timestamp — the sources use heterogeneous timestamp formats (compose
+/// `--timestamps` ISO, tauri-plugin-log local-with-offset, mcp-os/host-exec/claude
+/// raw text), and any sort would have to either parse all of them (expensive,
+/// fragile) or compare lexicographically (incorrect for offsets). The frontend
+/// source-filter dropdown gives users the per-source view they need, so
+/// per-source-block ordering is sufficient.
 pub(crate) fn merge_log_sources(sources: LogSources) -> String {
     let compose = prefix_lines("compose", &sources.compose);
     let desktop = prefix_lines("desktop", &sources.desktop);
     let mcp_os = prefix_lines("mcp-os", &sources.mcp_os);
+    let host_exec = prefix_lines("host-exec", &sources.host_exec);
     let claude = prefix_lines("claude", &sources.claude);
 
     // Apply the sanitizer once to the merged buffer (idempotent — sources are
     // already individually sanitized, this is a defence-in-depth pass).
-    speedwave_runtime::log_sanitizer::sanitize(&format!("{compose}{desktop}{mcp_os}{claude}"))
+    speedwave_runtime::log_sanitizer::sanitize(&format!(
+        "{compose}{desktop}{mcp_os}{host_exec}{claude}"
+    ))
 }
 
 /// Reads every host-side log file, fetches the compose stream, and returns a
 /// merged buffer that the frontend's existing `parseLogLine` understands.
 ///
 /// Sources merged (in this fixed order, per-source-block):
-///   1. compose  — `nerdctl compose logs --timestamps --tail <N>`
-///   2. desktop  — tauri-plugin-log file (Rust + Angular `LoggerService` +
-///                 Swift CLI stderr forwarded by `check_os_permission`)
-///   3. mcp-os   — `~/.speedwave/mcp-os.log`
-///   4. claude   — `~/.speedwave/logs/<project>/claude-session.log` (if exists)
+///   1. compose   — `nerdctl compose logs --timestamps --tail <N>`
+///   2. desktop   — tauri-plugin-log file (Rust + Angular `LoggerService` +
+///                  Swift CLI stderr forwarded by `check_os_permission`)
+///   3. mcp-os    — `~/.speedwave/mcp-os.log`
+///   4. host-exec — `~/.speedwave/host-exec/<project>/log` (if host_exec enabled)
+///   5. claude    — `~/.speedwave/logs/<project>/claude-session.log` (if exists)
 ///
 /// Each source uses the full `tail` budget independently (default 200, cap
-/// 10 000). With 4 sources × 10 000 the upper bound is 40 000 lines — trivial
+/// 10 000). With 5 sources × 10 000 the upper bound is 50 000 lines — trivial
 /// for the renderer, especially since the frontend further filters by source
 /// in the dropdown.
 ///
@@ -309,6 +340,9 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
             speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
         let mcp_os = read_tail_sanitized(&mcp_os_path, tail_us).unwrap_or_default();
 
+        // host-exec — per-project worker log (`get_host_exec_logs`'s path)
+        let host_exec = read_tail_sanitized(&host_exec_log_path(&project), tail_us).unwrap_or_default();
+
         // claude session log — same path resolution `get_claude_session_logs` uses
         let claude_path = speedwave_runtime::consts::claude_session_log_path(&project);
         let claude = read_tail_sanitized(&claude_path, tail_us).unwrap_or_default();
@@ -317,6 +351,7 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
             compose,
             desktop,
             mcp_os,
+            host_exec,
             claude,
         }))
     })
@@ -683,22 +718,29 @@ mod tests {
             compose: String::new(),
             desktop: String::new(),
             mcp_os: String::new(),
+            host_exec: String::new(),
             claude: String::new(),
         });
         assert_eq!(merged, "");
     }
 
     #[test]
-    fn merge_log_sources_includes_all_four_source_tokens_in_dropdown_friendly_form() {
+    fn merge_log_sources_includes_all_source_tokens_in_dropdown_friendly_form() {
         let merged = merge_log_sources(LogSources {
             compose: "claude_1 | first\n".to_string(),
             desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] d\n".to_string(),
             mcp_os: "ready\n".to_string(),
+            host_exec: r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#
+                .to_string(),
             claude: "session started\n".to_string(),
         });
         assert!(merged.contains("claude_1 | first"), "compose passthrough");
         assert!(merged.contains("desktop | 2026-01-01T00:00:00.000+0000 INFO [x] d"));
         assert!(merged.contains("mcp-os | ready"));
+        assert!(
+            merged.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#),
+            "host-exec line must be prefixed, got: {merged}"
+        );
         assert!(merged.contains("claude | session started"));
     }
 
@@ -711,6 +753,7 @@ mod tests {
             desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] auth Bearer sk-ant-api03-secret123\n"
                 .to_string(),
             mcp_os: String::new(),
+            host_exec: String::new(),
             claude: String::new(),
         });
         assert!(
@@ -728,10 +771,47 @@ mod tests {
             compose: "claude_1 | START\n".to_string(),
             desktop: "desktop_only_line\n".to_string(),
             mcp_os: String::new(),
+            host_exec: String::new(),
             claude: String::new(),
         });
         let compose_idx = merged.find("claude_1 | START").unwrap();
         let desktop_idx = merged.find("desktop | desktop_only_line").unwrap();
         assert!(compose_idx < desktop_idx, "compose block must come first");
+    }
+
+    #[test]
+    fn merge_log_sources_host_exec_block_between_mcp_os_and_claude() {
+        let merged = merge_log_sources(LogSources {
+            compose: String::new(),
+            desktop: String::new(),
+            mcp_os: "mcp_os_line\n".to_string(),
+            host_exec: "host_exec_line\n".to_string(),
+            claude: "claude_line\n".to_string(),
+        });
+        let mcp_idx = merged.find("mcp-os | mcp_os_line").unwrap();
+        let he_idx = merged.find("host-exec | host_exec_line").unwrap();
+        let claude_idx = merged.find("claude | claude_line").unwrap();
+        assert!(mcp_idx < he_idx && he_idx < claude_idx, "got: {merged}");
+    }
+
+    #[test]
+    fn prefix_lines_does_not_unwrap_brackets_for_host_exec() {
+        // host_exec audit lines are JSON; a `[INFO]`-looking substring (e.g. in
+        // an argv) must not be rewritten — the desktop-only rewrite must not fire.
+        let raw = r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#;
+        let out = prefix_lines("host-exec", raw);
+        assert!(
+            out.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#),
+            "host-exec content must pass through verbatim with only the prefix, got: {out}"
+        );
+    }
+
+    #[test]
+    fn host_exec_log_path_uses_per_project_state_dir() {
+        let p = host_exec_log_path("myproj");
+        let s = p.to_string_lossy();
+        assert!(s.contains("host-exec"), "path: {s}");
+        assert!(s.contains("myproj"), "path: {s}");
+        assert!(s.ends_with("log"), "path: {s}");
     }
 }

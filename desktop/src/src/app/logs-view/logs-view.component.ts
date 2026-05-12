@@ -743,10 +743,10 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     this.loading.set(true);
     try {
       // `get_all_logs` merges every host-side log source (tauri-plugin-log
-      // file, mcp-os.log, claude-session.log) with `compose logs` so that the
-      // dropdown shows every source the app produces — not just compose
-      // containers. Each line carries a `<source> | …` prefix that
-      // `parseLogLine` recognises (`COMPOSE_RE`), so the dropdown
+      // file, mcp-os.log, host-exec/<project>/log, claude-session.log) with
+      // `compose logs` so the dropdown shows every source the app produces —
+      // not just compose containers. Each line carries a `<source> | …` prefix
+      // that `parseLogLine` recognises (`COMPOSE_RE`), so the dropdown
       // automatically picks up the new sources without code changes here.
       const raw = await this.tauri.invoke<string>('get_all_logs', {
         project,

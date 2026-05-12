@@ -847,9 +847,9 @@ describe('LogsViewComponent — status bar layout', () => {
   //
   // The component now invokes `get_all_logs` instead of `get_compose_logs`
   // so that the dropdown surfaces every host-side log source (tauri-plugin-log,
-  // mcp-os.log, claude-session.log) in addition to compose containers. These
-  // tests pin the new behaviour so a future refactor cannot silently revert
-  // to compose-only output.
+  // mcp-os.log, host-exec/<project>/log, claude-session.log) in addition to
+  // compose containers. These tests pin the new behaviour so a future refactor
+  // cannot silently revert to compose-only output.
 
   it('invokes get_all_logs (not get_compose_logs) on refresh', async () => {
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -860,18 +860,20 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(calledCommands).not.toContain('get_compose_logs');
   });
 
-  it('exposes desktop, mcp-os and claude as separate sources in the dropdown', async () => {
+  it('exposes desktop, mcp-os, host-exec and claude as separate sources in the dropdown', async () => {
     // Backend `get_all_logs` returns lines pre-prefixed with `<source> | …`.
     // The existing `parseLogLine` extracts that source token and the
     // `sources()` signal exposes distinct values. This test pins the
-    // contract: a merged backend response with all four token types must
-    // produce four entries in the dropdown.
+    // contract: a merged backend response with all token types must produce
+    // matching entries in the dropdown — including `host-exec` (per-project
+    // worker audit/stdout log, ADR-054).
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return [
         'speedwave_test_mcp-hub_1 | [11:00:00] INFO container line',
         'desktop | 2026-05-06T19:58:38.724+0200 INFO[target] desktop line',
         'mcp-os | 2026-05-06T20:00:00 INFO mcp-os line',
+        'host-exec | {"ts":"2026-05-06T20:00:00.500Z","recipe":"docker_ps","status":"exited"}',
         'claude | 2026-05-06T20:00:01 INFO claude line',
       ].join('\n');
     };
@@ -881,6 +883,7 @@ describe('LogsViewComponent — status bar layout', () => {
     // Order is: 'all' first, then sorted distinct sources.
     expect(sources).toContain('desktop');
     expect(sources).toContain('mcp-os');
+    expect(sources).toContain('host-exec');
     expect(sources).toContain('claude');
     expect(sources).toContain('mcp-hub'); // compose container, prefix-stripped
     expect(sources[0]).toBe('all');

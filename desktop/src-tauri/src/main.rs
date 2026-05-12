@@ -1784,6 +1784,7 @@ fn main() {
             container_logs_cmd::get_container_logs,
             container_logs_cmd::get_compose_logs,
             container_logs_cmd::get_mcp_os_logs,
+            container_logs_cmd::get_host_exec_logs,
             container_logs_cmd::get_claude_session_logs,
             container_logs_cmd::get_all_logs,
             // IDE Bridge
