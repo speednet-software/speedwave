@@ -1046,8 +1046,7 @@ fn main() {
     let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
 
     // Shared state for IDE Bridge, mcp-os process, and auto-check handle.
-    // The tray menu's variable state (`update_version`, `beta_enabled`) is
-    // managed via `app.manage(TrayMenuState::default())` below — see ADR-057.
+    // (Tray menu state lives in a managed `TrayMenuState`, set up below.)
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
@@ -1072,10 +1071,7 @@ fn main() {
     let initial_beta_enabled = config::load_user_config()
         .map(|c| c.beta_enabled())
         .unwrap_or(false);
-    let tray_state = tray::TrayMenuState {
-        update_version: Mutex::new(None),
-        beta_enabled: Mutex::new(initial_beta_enabled),
-    };
+    let tray_state = tray::TrayMenuState::new(initial_beta_enabled);
 
     // Register SIGTERM/SIGINT handler so process signals trigger the same
     // cleanup as graceful window close. The CLEANUP_ONCE guard in
@@ -1293,24 +1289,14 @@ fn main() {
                 reconcile::reconcile_bundle_update(app.handle());
             }
 
-            // Build system tray. Initial state is read from the managed
-            // `TrayMenuState`; mutations (update_version, beta_enabled) flow
-            // through `refresh_tray_menu(app)` from anywhere.
+            // Build system tray from the managed `TrayMenuState`.
             use tauri::Manager;
-            let tray_menu = {
-                let state = app.state::<tray::TrayMenuState>();
-                let beta = state
-                    .beta_enabled
-                    .lock()
-                    .map(|g| *g)
-                    .unwrap_or(false);
-                tray::build_tray_menu(
-                    app.handle(),
-                    None,
-                    beta,
-                    setup_wizard::is_setup_complete(),
-                )?
-            };
+            let tray_menu = tray::build_tray_menu(
+                app.handle(),
+                None,
+                app.state::<tray::TrayMenuState>().beta_enabled(),
+                setup_wizard::is_setup_complete(),
+            )?;
             let tray_icon = tray::load_tray_icon()?;
 
             #[cfg_attr(target_os = "linux", allow(unused_mut))]
@@ -1357,12 +1343,8 @@ fn main() {
                         #[cfg(not(target_os = "linux"))]
                         let app_clone = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            let version = app_for_state
-                                .state::<tray::TrayMenuState>()
-                                .update_version
-                                .lock()
-                                .ok()
-                                .and_then(|g| g.clone());
+                            let version =
+                                app_for_state.state::<tray::TrayMenuState>().update_version();
                             if let Some(expected) = version {
                                 #[cfg(target_os = "linux")]
                                 let result = {
@@ -1396,14 +1378,8 @@ fn main() {
                     "toggle_beta" => {
                         let app_clone = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            let current = match app_clone
-                                .state::<tray::TrayMenuState>()
-                                .beta_enabled
-                                .lock()
-                            {
-                                Ok(g) => *g,
-                                Err(p) => *p.into_inner(),
-                            };
+                            let current =
+                                app_clone.state::<tray::TrayMenuState>().beta_enabled();
                             if let Err(e) =
                                 ui_prefs_cmd::apply_beta_toggle_inner(&app_clone, !current).await
                             {
@@ -1507,11 +1483,9 @@ fn main() {
                 "update_available",
                 move |event| match serde_json::from_str::<updater::UpdateInfo>(event.payload()) {
                     Ok(info) => {
-                        let state = app_handle_listener.state::<tray::TrayMenuState>();
-                        match state.update_version.lock() {
-                            Ok(mut guard) => *guard = Some(info.version.clone()),
-                            Err(e) => log::warn!("update version mutex poisoned: {e}"),
-                        }
+                        app_handle_listener
+                            .state::<tray::TrayMenuState>()
+                            .set_update_version(Some(info.version));
                         tray::refresh_tray_menu(&app_handle_listener);
                     }
                     Err(e) => {
@@ -1604,7 +1578,7 @@ fn main() {
             // Logging
             set_log_level,
             get_log_level,
-            // UI preferences (ADR-057)
+            // UI preferences (ADR-055)
             ui_prefs_cmd::get_beta_enabled,
             ui_prefs_cmd::set_beta_enabled,
             // Diagnostics

@@ -1,9 +1,5 @@
-//! System tray icon and context menu.
-//!
-//! `TrayMenuState` (managed via `app.manage`) is the single source of truth
-//! for the menu's variable bits — `update_version` (set by the updater) and
-//! `beta_enabled` (toggled by the user). Any callsite can mutate it then call
-//! `refresh_tray_menu(app)` for a consistent rebuild. See ADR-057.
+//! System tray icon and context menu. `TrayMenuState` owns the menu's variable
+//! bits; callers mutate via its accessors then call `refresh_tray_menu`. ADR-055.
 
 use std::sync::Mutex;
 
@@ -16,11 +12,51 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 #[cfg(not(target_os = "macos"))]
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon-white.png");
 
-/// Shared tray-menu inputs. Use via `app.manage(TrayMenuState::default())`.
+/// Variable inputs to the tray menu — `update_version` (set by the updater) and
+/// `beta_enabled` (toggled by the user). Managed via `app.manage`; the inner
+/// mutexes are private so all access goes through the accessors below, which
+/// recover from poisoning rather than panicking.
 #[derive(Default)]
 pub(crate) struct TrayMenuState {
-    pub update_version: Mutex<Option<String>>,
-    pub beta_enabled: Mutex<bool>,
+    update_version: Mutex<Option<String>>,
+    beta_enabled: Mutex<bool>,
+}
+
+impl TrayMenuState {
+    pub(crate) fn new(beta_enabled: bool) -> Self {
+        Self {
+            update_version: Mutex::new(None),
+            beta_enabled: Mutex::new(beta_enabled),
+        }
+    }
+
+    pub(crate) fn update_version(&self) -> Option<String> {
+        match self.update_version.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    pub(crate) fn set_update_version(&self, version: Option<String>) {
+        match self.update_version.lock() {
+            Ok(mut g) => *g = version,
+            Err(p) => *p.into_inner() = version,
+        }
+    }
+
+    pub(crate) fn beta_enabled(&self) -> bool {
+        match self.beta_enabled.lock() {
+            Ok(g) => *g,
+            Err(p) => *p.into_inner(),
+        }
+    }
+
+    pub(crate) fn set_beta_enabled(&self, enabled: bool) {
+        match self.beta_enabled.lock() {
+            Ok(mut g) => *g = enabled,
+            Err(p) => *p.into_inner() = enabled,
+        }
+    }
 }
 
 /// Describes the tray menu shape independently of the Tauri `Menu` builder so
@@ -123,16 +159,8 @@ pub(crate) fn build_tray_menu(
 /// status.
 pub(crate) fn refresh_tray_menu(app: &tauri::AppHandle) {
     let state = app.state::<TrayMenuState>();
-    let update_version = state
-        .update_version
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_else(|p| p.into_inner().clone());
-    let beta_enabled = state
-        .beta_enabled
-        .lock()
-        .map(|g| *g)
-        .unwrap_or_else(|p| *p.into_inner());
+    let update_version = state.update_version();
+    let beta_enabled = state.beta_enabled();
     let setup_complete = crate::setup_wizard::is_setup_complete();
 
     match build_tray_menu(app, update_version.as_deref(), beta_enabled, setup_complete) {
@@ -195,7 +223,7 @@ mod tests {
 
     #[test]
     fn spec_setup_complete_with_update_keeps_install_and_beta() {
-        // ADR-057 regression: toggling beta must not drop "Install Update".
+        // ADR-055 regression: toggling beta must not drop "Install Update".
         let spec = tray_menu_spec(Some("1.2.3"), true, true);
         assert_eq!(
             spec,
@@ -214,7 +242,7 @@ mod tests {
 
     #[test]
     fn spec_setup_incomplete_hides_beta_even_with_update() {
-        // ADR-057 regression: beta toggle must not appear before setup.
+        // ADR-055 regression: beta toggle must not appear before setup.
         let spec = tray_menu_spec(Some("9.9.9"), true, false);
         assert!(
             !spec.iter().any(|i| matches!(i, TrayItemSpec::Beta { .. })),

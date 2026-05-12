@@ -192,7 +192,7 @@ pub struct SelectedIde {
     pub port: u16,
 }
 
-/// UI preferences (ADR-057). Top-level user-only — a checked-in repo
+/// UI preferences (ADR-055). Top-level user-only — a checked-in repo
 /// `.speedwave.json` is not allowed to flip beta UI on or off.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct UiPrefsConfig {
@@ -206,7 +206,7 @@ pub struct SpeedwaveUserConfig {
     pub active_project: Option<String>,
     pub selected_ide: Option<SelectedIde>,
     pub log_level: Option<String>,
-    /// UI preferences (ADR-057). Top-level, user-only.
+    /// UI preferences (ADR-055). Top-level, user-only.
     pub ui: Option<UiPrefsConfig>,
 }
 
@@ -487,7 +487,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    // ---- UiPrefsConfig (ADR-057) -------------------------------------------
+    // ---- UiPrefsConfig (ADR-055) -------------------------------------------
 
     #[test]
     fn beta_disabled_by_default() {

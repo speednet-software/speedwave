@@ -295,9 +295,8 @@ pub async fn create_project(
     .await
     .map_err(|e| e.to_string())??;
 
-    // `create_project` is the last setup step; `is_setup_complete()` now flips
-    // to `true`, so rebuild the tray menu to surface items gated on it (ADR-057
-    // beta toggle).
+    // Last setup step → `is_setup_complete()` flips true; rebuild so setup-gated
+    // tray items (the ADR-055 beta toggle) appear.
     crate::tray::refresh_tray_menu(&app);
     Ok(())
 }

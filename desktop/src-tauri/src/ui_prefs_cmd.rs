@@ -1,4 +1,4 @@
-//! UI preferences commands — currently the beta-features toggle (ADR-057).
+//! UI preferences commands — currently the beta-features toggle (ADR-055).
 //!
 //! `apply_beta_toggle_inner` is the shared write path used by both the
 //! `set_beta_enabled` Tauri command and the tray menu's `toggle_beta` arm; it
@@ -32,31 +32,31 @@ pub async fn set_beta_enabled(app: AppHandle, enabled: bool) -> Result<(), Strin
 
 /// Internal write path shared by the Tauri command and the tray menu arm.
 /// Tray callers spawn this on the async runtime to avoid blocking the UI
-/// thread.
+/// thread. No-op (no write, no event, no menu rebuild) when the value is
+/// already what's requested.
 pub(crate) async fn apply_beta_toggle_inner(
     app: &AppHandle,
     enabled: bool,
 ) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+    let changed = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
         config::with_config_lock(|| {
             let mut cfg = config::load_user_config()?;
-            let mut ui = cfg.ui.unwrap_or_default();
-            ui.beta_enabled = Some(enabled);
-            cfg.ui = Some(ui);
-            config::save_user_config(&cfg)
+            if cfg.beta_enabled() == enabled {
+                return Ok(false);
+            }
+            cfg.ui.get_or_insert_with(Default::default).beta_enabled = Some(enabled);
+            config::save_user_config(&cfg)?;
+            Ok(true)
         })
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
 
-    {
-        let state = app.state::<tray::TrayMenuState>();
-        match state.beta_enabled.lock() {
-            Ok(mut g) => *g = enabled,
-            Err(p) => *p.into_inner() = enabled,
-        };
+    if !changed {
+        return Ok(());
     }
+    app.state::<tray::TrayMenuState>().set_beta_enabled(enabled);
     tray::refresh_tray_menu(app);
     app.emit("beta-changed", enabled).map_err(|e| e.to_string())?;
     Ok(())
