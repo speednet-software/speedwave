@@ -290,11 +290,10 @@ impl AudioStream for FilePlaybackStream {
     }
 }
 
-/// Reads a WAV file and returns 16 kHz mono `f32` samples in `[-1.0, 1.0]`.
-/// Channels are downmixed by averaging. Sample rates other than 16 kHz are
-/// resampled by simple linear interpolation (good enough for a file-backed
-/// dev path — the real backends resample with proper resamplers).
-fn read_wav_as_mono_16k(path: &Path) -> Result<Vec<f32>, CaptureError> {
+/// Parses a WAV file into mono `f32` samples (no resampling). Returns the
+/// downmixed samples and the file's sample rate so callers can choose to
+/// resample or trust the rate.
+pub fn parse_wav_to_mono_f32(path: &Path) -> Result<(Vec<f32>, u32), CaptureError> {
     let mut reader = hound::WavReader::open(path)
         .map_err(|e| CaptureError::Failed(format!("open WAV {}: {e}", path.display())))?;
     let spec = reader.spec();
@@ -315,7 +314,7 @@ fn read_wav_as_mono_16k(path: &Path) -> Result<Vec<f32>, CaptureError> {
         }
     };
     let channels = spec.channels.max(1) as usize;
-    let mono: Vec<f32> = if channels == 1 {
+    let mono = if channels == 1 {
         interleaved
     } else {
         interleaved
@@ -323,7 +322,44 @@ fn read_wav_as_mono_16k(path: &Path) -> Result<Vec<f32>, CaptureError> {
             .map(|frame| frame.iter().copied().sum::<f32>() / frame.len() as f32)
             .collect()
     };
-    Ok(resample_linear(&mono, spec.sample_rate, SAMPLE_RATE_HZ))
+    Ok((mono, spec.sample_rate))
+}
+
+/// File-backed dev path: parse + resample to 16 kHz.
+fn read_wav_as_mono_16k(path: &Path) -> Result<Vec<f32>, CaptureError> {
+    let (mono, rate) = parse_wav_to_mono_f32(path)?;
+    Ok(resample_linear(&mono, rate, SAMPLE_RATE_HZ))
+}
+
+/// Decodes raw little-endian f32 bytes into samples. Trailing bytes (`len % 4`)
+/// are silently truncated — the caller already aligns to 4-byte frames.
+pub fn bytes_to_f32_samples(raw: &[u8]) -> Vec<f32> {
+    raw.chunks_exact(4)
+        .map(|f| f32::from_le_bytes([f[0], f[1], f[2], f[3]]))
+        .collect()
+}
+
+/// Spawns a background thread draining a child's stderr into the log so the
+/// child can't deadlock on a full pipe. `target` distinguishes log lines per
+/// capture backend.
+pub fn drain_child_stderr(child: &mut std::process::Child, target: &'static str) {
+    use std::io::BufRead;
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                log::debug!(target: "transcription::capture", "{target}: {line}");
+            }
+        });
+    }
+}
+
+/// Best-effort graceful kill: skip if already exited, else SIGKILL + reap.
+pub fn kill_child_gracefully(child: &mut std::process::Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 /// Linear-interpolation resampler. `src` is mono. Returns `src` unchanged when

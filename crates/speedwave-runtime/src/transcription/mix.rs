@@ -35,9 +35,14 @@ const STALL_GIVE_UP: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Roughly one `CHUNK_DURATION` of samples — the target size of an emitted chunk.
-pub fn chunk_samples() -> usize {
-    (SAMPLE_RATE_HZ as u128 * CHUNK_DURATION.as_millis() / 1000).max(1) as usize
-}
+pub const CHUNK_SAMPLES: usize = {
+    let v = SAMPLE_RATE_HZ as u128 * CHUNK_DURATION.as_millis() / 1000;
+    if v < 1 {
+        1
+    } else {
+        v as usize
+    }
+};
 
 /// Which of the two streams a pushed buffer belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,7 +209,7 @@ impl MixBuffer {
 
 /// The shared `AudioStream::next_chunk` body for a mixed capture whose two
 /// sources feed `buf` from background threads (Windows cpal callbacks, Linux
-/// `pw-record`/`parec` reader threads). Polls for a full `chunk_samples()`-sized
+/// `pw-record`/`parec` reader threads). Polls for a full `CHUNK_SAMPLES`-sized
 /// chunk; once `STALL_GIVE_UP` elapses with nothing arriving — either both
 /// sources stopped without an EOF, or the buffer is poisoned — it drains
 /// whatever is left and then returns `Err(CaptureError::Failed)` so the driver
@@ -212,7 +217,7 @@ impl MixBuffer {
 /// EOF (a reader calling `buf.finish()` and the buffer fully drained) returns
 /// `Ok(None)`.
 pub fn poll_mixed_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, CaptureError> {
-    let want = chunk_samples();
+    let want = CHUNK_SAMPLES;
     let mut waited = Duration::ZERO;
     loop {
         match buf.lock() {
@@ -273,7 +278,7 @@ mod tests {
     #[test]
     fn chunk_samples_is_one_chunk_duration_at_16khz() {
         // 16 kHz × 200 ms = 3200 samples.
-        assert_eq!(chunk_samples(), 3_200);
+        assert_eq!(CHUNK_SAMPLES, 3_200);
     }
 
     #[test]
@@ -401,7 +406,7 @@ mod tests {
     #[test]
     fn poll_mixed_chunk_returns_a_chunk_once_both_sides_are_ready() {
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
-        let want = chunk_samples();
+        let want = CHUNK_SAMPLES;
         // A feeder thread pushes one full chunk on each side after a beat.
         let feeder = {
             let buf = Arc::clone(&buf);

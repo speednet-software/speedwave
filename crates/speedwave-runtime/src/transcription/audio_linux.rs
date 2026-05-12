@@ -19,7 +19,7 @@ use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError, ProcessSelector, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
-use super::mix::{chunk_samples, poll_mixed_chunk, MixBuffer, MixSource};
+use super::mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 
 /// 16 kHz as the rate string the capture tools want (`--rate <RATE_ARG>`). A
 /// `&'static str` can't be derived from `SAMPLE_RATE_HZ` at const time, so a
@@ -194,26 +194,12 @@ impl AudioCapture for LinuxAudioCapture {
             .stdout
             .take()
             .ok_or_else(|| CaptureError::Failed("capture tool stdout not piped".to_string()))?;
-        drain_stderr(&mut child);
+        super::audio::drain_child_stderr(&mut child, "linux-capture");
         Ok(Box::new(RawPcmStream {
             child,
             stdout,
             done: false,
         }))
-    }
-}
-
-/// Spawns a background thread that drains a child's stderr into the log so the
-/// child can't deadlock on a full pipe.
-fn drain_stderr(child: &mut Child) {
-    if let Some(stderr) = child.stderr.take() {
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                log::debug!(target: "transcription::capture", "linux-capture: {line}");
-            }
-        });
     }
 }
 
@@ -232,7 +218,7 @@ impl AudioStream for RawPcmStream {
         }
         // Read up to one chunk's worth of f32 samples (4 bytes each). A short
         // read at EOF is fine — we emit whatever we got, then stop next call.
-        let want = chunk_samples() * 4;
+        let want = CHUNK_SAMPLES * 4;
         let mut buf = vec![0u8; want];
         let mut filled = 0;
         while filled < want {
@@ -250,15 +236,9 @@ impl AudioStream for RawPcmStream {
             let _ = self.child.wait();
             return Ok(None);
         }
-        // Ignore a trailing partial sample (shouldn't happen, but be safe).
-        let usable = filled - (filled % 4);
-        let mut samples = Vec::with_capacity(usable / 4);
-        for f in buf[..usable].chunks_exact(4) {
-            samples.push(f32::from_le_bytes([f[0], f[1], f[2], f[3]]));
-        }
-        // We don't get precise per-chunk offsets from the tools; the driver
-        // tracks elapsed time itself. Report a zero offset (the engine treats
-        // chunks as contiguous when offsets are unavailable).
+        // Trailing partial sample (shouldn't happen) gets discarded by chunks_exact.
+        let samples = super::audio::bytes_to_f32_samples(&buf[..filled]);
+        // The tools don't emit per-chunk offsets; the driver tracks elapsed time.
         Ok(Some(AudioChunk {
             samples,
             offset: Duration::ZERO,
@@ -268,10 +248,7 @@ impl AudioStream for RawPcmStream {
 
 impl Drop for RawPcmStream {
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+        super::audio::kill_child_gracefully(&mut self.child);
     }
 }
 
@@ -302,8 +279,8 @@ impl MixedRawPcmStream {
             .stdout
             .take()
             .ok_or_else(|| CaptureError::Failed("mic capture stdout not piped".to_string()))?;
-        drain_stderr(&mut sys_child);
-        drain_stderr(&mut mic_child);
+        super::audio::drain_child_stderr(&mut sys_child, "linux-capture");
+        super::audio::drain_child_stderr(&mut mic_child, "linux-capture");
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
         let readers = vec![
             spawn_pcm_reader(sys_out, Arc::clone(&buf), MixSource::System),
@@ -344,7 +321,7 @@ fn spawn_pcm_reader(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut byte_pos: u64 = 0; // bytes read from this stream so far
-        let want = chunk_samples() * 4;
+        let want = CHUNK_SAMPLES * 4;
         loop {
             let mut chunk = vec![0u8; want];
             let mut filled = 0;
@@ -376,24 +353,16 @@ fn spawn_pcm_reader(
                 with_mix_buffer(&buf, "finish", |b| b.finish());
                 return;
             }
+            let samples = super::audio::bytes_to_f32_samples(&chunk[..usable]);
+            let offset_ns = byte_pos / 4 * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
             if io_err {
                 // Some bytes salvaged before the error — push them, then finish.
-                let mut samples = Vec::with_capacity(usable / 4);
-                for f in chunk[..usable].chunks_exact(4) {
-                    samples.push(f32::from_le_bytes([f[0], f[1], f[2], f[3]]));
-                }
-                let offset_ns = byte_pos / 4 * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
                 with_mix_buffer(&buf, "push (final)", |b| {
                     b.push(source, offset_ns, &samples);
                     b.finish();
                 });
                 return;
             }
-            let mut samples = Vec::with_capacity(usable / 4);
-            for f in chunk[..usable].chunks_exact(4) {
-                samples.push(f32::from_le_bytes([f[0], f[1], f[2], f[3]]));
-            }
-            let offset_ns = byte_pos / 4 * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
             with_mix_buffer(&buf, "push", |b| b.push(source, offset_ns, &samples));
             byte_pos += usable as u64;
         }
@@ -408,14 +377,9 @@ impl AudioStream for MixedRawPcmStream {
 
 impl Drop for MixedRawPcmStream {
     fn drop(&mut self) {
-        // Kill both children; the reader threads then see EOF and exit, which
-        // we join to avoid leaking threads.
-        for child in [&mut self.sys_child, &mut self.mic_child] {
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
+        // Children killed → reader threads see EOF and exit; join to avoid leaks.
+        super::audio::kill_child_gracefully(&mut self.sys_child);
+        super::audio::kill_child_gracefully(&mut self.mic_child);
         for h in self.readers.drain(..) {
             let _ = h.join();
         }

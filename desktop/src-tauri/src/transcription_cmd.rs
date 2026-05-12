@@ -5,7 +5,7 @@
 //! Tauri event channels (subscribe returns `{event_name, snapshot}` so a late
 //! subscriber doesn't miss what already happened — ADR-043 delivery shape).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -25,6 +25,9 @@ pub type TranscriptStoreHandle = Arc<TranscriptStore>;
 pub type ModelStoreHandle = Arc<ModelStore>;
 /// Tauri-managed map of in-flight recordings → their stop signal.
 pub type DriversHandle = Arc<Mutex<HashMap<Uuid, StopSignal>>>;
+/// Sessions that already have a live event forwarder — guards against
+/// double-spawning on repeated `subscribe_transcript` calls.
+pub type ForwardersHandle = Arc<Mutex<HashSet<Uuid>>>;
 
 /// Per-session event name. Mirror of `subscribe_cmd::patch_event_name`.
 pub fn transcript_event_name(id: Uuid) -> String {
@@ -140,6 +143,7 @@ pub async fn start_transcription(
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     drivers: tauri::State<'_, DriversHandle>,
+    forwarders: tauri::State<'_, ForwardersHandle>,
     app: AppHandle,
 ) -> Result<StartAck, String> {
     let StartParams {
@@ -162,14 +166,10 @@ pub async fn start_transcription(
     // Defend at the boundary (the UI should already hide unsupported choices).
     validate_source_against_caps(&audio_source, &caps)?;
 
-    // Pick the live model. An explicit override wins (and must be downloaded);
-    // otherwise we want the catalogue's recommendation for the compiled backends
-    // (`large-v3-turbo` on Metal, `small` on CPU), but if that's not downloaded
-    // we fall back to any downloaded Whisper model rather than failing — we
-    // never kick off a (potentially multi-GB) download implicitly. Only if
-    // *nothing* is downloaded do we error with a download hint.
-    let store_arc = store.inner_clone();
-    let models_arc = models.inner_clone();
+    // Pick live model: override wins, else recommendation, else any downloaded.
+    // Never download implicitly — error with a hint if nothing is present.
+    let store_arc = store.inner().clone();
+    let models_arc = models.inner().clone();
     let recommended = transcription::recommended_live_model(&transcription::compiled_backends())
         .key
         .to_string();
@@ -206,7 +206,6 @@ pub async fn start_transcription(
     };
     let diarizer: Option<Box<dyn Diarizer>> = {
         let m = models_arc.clone();
-        let opts = diarize_opts; // Copy
         match tokio::task::spawn_blocking(move || {
             if !m.diarization_is_present() {
                 return Ok::<Option<Box<dyn Diarizer>>, String>(None);
@@ -214,8 +213,12 @@ pub async fn start_transcription(
             let paths = m
                 .ensure_diarization_models(&mut |_| {})
                 .map_err(|e| e.to_string())?;
-            let d = SherpaDiarizer::load(&paths.segmentation_onnx, &paths.embedding_onnx, &opts)
-                .map_err(|e| e.to_string())?;
+            let d = SherpaDiarizer::load(
+                &paths.segmentation_onnx,
+                &paths.embedding_onnx,
+                &diarize_opts,
+            )
+            .map_err(|e| e.to_string())?;
             Ok(Some(Box::new(d) as Box<dyn Diarizer>))
         })
         .await
@@ -265,7 +268,12 @@ pub async fn start_transcription(
     })?;
 
     // Wire the event forwarder before the driver mutates anything.
-    spawn_event_forwarder(app, store_arc.clone(), session_id);
+    spawn_event_forwarder(
+        app,
+        store_arc.clone(),
+        forwarders.inner().clone(),
+        session_id,
+    );
 
     let stop = StopSignal::new();
     drivers
@@ -284,7 +292,7 @@ pub async fn start_transcription(
         stop,
     });
     // The driver loop blocks on `next_chunk` — run it on a blocking task.
-    let drivers_for_cleanup = drivers.inner_clone();
+    let drivers_for_cleanup = drivers.inner().clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = driver.run(&audio_wav) {
             log::warn!("transcript driver for {session_id} ended with error: {e}");
@@ -325,18 +333,13 @@ pub async fn stop_transcription(
         let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
     }
 
-    // Kick off the higher-quality offline pass on a blocking task. It loads the
-    // recorded WAV, re-transcribes with the offline model (preferring `large-v3`
-    // if it's downloaded; otherwise falls back to whatever live model is
-    // present — the result is still an improvement over the sliding-window live
-    // pass), and marks the session Done. If the WAV is missing/empty or the
-    // transcribe fails, `run_finalize` flips the session to Failed and the live
-    // transcript remains as a fallback.
-    let store_arc = store.inner_clone();
-    let models_arc = models.inner_clone();
+    // Offline pass: re-transcribe the WAV (prefer `large-v3`, fall back to the
+    // live model) and mark Done; on failure the live transcript stays.
+    let store_arc = store.inner().clone();
+    let models_arc = models.inner().clone();
     let session_dir = store.session_dir(id);
     let audio_wav = session_dir.join("audio.wav");
-    let drivers_arc = drivers.inner_clone();
+    let drivers_arc = drivers.inner().clone();
     tokio::task::spawn_blocking(move || {
         // Wait briefly for the driver to actually stop (it stops at the next
         // chunk boundary). Bounded so a wedged driver doesn't hang us forever.
@@ -410,10 +413,8 @@ pub async fn stop_transcription(
         } else {
             None
         };
-        // The live turns we'd remap against aren't tracked across the driver
-        // boundary in v1 — pass an empty list (the offline diarizer's own
-        // clusters win; user relabels survive only if the clustering happens to
-        // line up). Tracking live turns for a perfect remap is a follow-up.
+        // Live turns aren't tracked across the driver boundary in v1; offline
+        // diarizer's clusters win.
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
@@ -563,11 +564,12 @@ pub struct SubscribeAck {
 pub async fn subscribe_transcript(
     session_id: String,
     store: tauri::State<'_, TranscriptStoreHandle>,
+    forwarders: tauri::State<'_, ForwardersHandle>,
     app: AppHandle,
 ) -> Result<SubscribeAck, String> {
     let id = parse_transcript_id(&session_id)?;
     let snapshot = store.get(id).map_err(|e| e.to_string())?;
-    spawn_event_forwarder(app, store.inner_clone(), id);
+    spawn_event_forwarder(app, store.inner().clone(), forwarders.inner().clone(), id);
     Ok(SubscribeAck {
         event_name: transcript_event_name(id),
         snapshot,
@@ -575,17 +577,35 @@ pub async fn subscribe_transcript(
 }
 
 /// Drains a session's broadcast into Tauri events. Detached task.
-fn spawn_event_forwarder(app: AppHandle, store: Arc<TranscriptStore>, id: Uuid) {
+fn spawn_event_forwarder(
+    app: AppHandle,
+    store: Arc<TranscriptStore>,
+    forwarders: ForwardersHandle,
+    id: Uuid,
+) {
+    // Already-running forwarder: skip — emitting twice would duplicate every
+    // event to the frontend.
+    if let Ok(mut set) = forwarders.lock() {
+        if !set.insert(id) {
+            return;
+        }
+    }
     let sub = match store.subscribe(id) {
         Ok(s) => s,
         Err(e) => {
             log::warn!("subscribe_transcript: {e}");
+            if let Ok(mut set) = forwarders.lock() {
+                set.remove(&id);
+            }
             return;
         }
     };
     let event_name = transcript_event_name(id);
     tauri::async_runtime::spawn(async move {
         forward_events(app, event_name, sub.events).await;
+        if let Ok(mut set) = forwarders.lock() {
+            set.remove(&id);
+        }
     });
 }
 
@@ -705,10 +725,9 @@ pub async fn download_transcription_model(
     models: tauri::State<'_, ModelStoreHandle>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let key = model_id;
-    let models = models.inner_clone();
+    let models = models.inner().clone();
     // Diarization keys pull both sherpa models; Whisper keys go to ensure_model.
-    let is_diarization = speedwave_runtime::transcription::diarization_model(&key).is_some();
+    let is_diarization = speedwave_runtime::transcription::diarization_model(&model_id).is_some();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         if is_diarization {
             models
@@ -719,7 +738,7 @@ pub async fn download_transcription_model(
                 .map_err(|e| e.to_string())
         } else {
             models
-                .ensure_model(&key, &mut |p| {
+                .ensure_model(&model_id, &mut |p| {
                     let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
                 })
                 .map(|_| ())
@@ -737,18 +756,6 @@ pub async fn delete_transcription_model(
     models: tauri::State<'_, ModelStoreHandle>,
 ) -> Result<(), String> {
     models.delete_model(&model_id).map_err(|e| e.to_string())
-}
-
-// ---- tiny inherent helper so we don't expose `Arc` cloning everywhere -----
-
-/// Clones the inner `Arc<T>` out of a Tauri `State<'_, Arc<T>>`.
-trait ArcExt<T: Send + Sync + 'static> {
-    fn inner_clone(&self) -> Arc<T>;
-}
-impl<T: Send + Sync + 'static> ArcExt<T> for tauri::State<'_, Arc<T>> {
-    fn inner_clone(&self) -> Arc<T> {
-        Arc::clone(self.inner())
-    }
 }
 
 #[cfg(test)]

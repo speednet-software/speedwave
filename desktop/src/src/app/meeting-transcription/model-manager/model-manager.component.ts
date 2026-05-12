@@ -3,6 +3,7 @@ import {
   ChangeDetectorRef,
   Component,
   OnInit,
+  computed,
   inject,
   output,
   signal,
@@ -47,73 +48,42 @@ interface ProgressState {
         <p class="mb-2 text-[12px] text-red-300" data-testid="model-manager-error">{{ error() }}</p>
       }
 
-      <div class="mono mb-1 mt-2 text-[10px] uppercase text-[var(--ink-mute)]">speech-to-text</div>
-      <ul class="space-y-1">
-        @for (m of whisper(); track m.key) {
-          <li class="flex items-center gap-2 text-[12px]">
-            <span class="text-[var(--ink)]">{{ m.key }}</span>
-            <span class="text-[var(--ink-mute)]">{{ sizeLabel(m) }}</span>
-            <span class="text-[10px] text-[var(--ink-mute)]">{{ rowAction(m) }}</span>
-            <span class="ml-auto flex gap-1">
-              @if (!m.downloaded && !isDownloading(m.key)) {
-                <button
-                  type="button"
-                  class="mono rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] hover:bg-[var(--bg-2)]"
-                  [attr.data-testid]="'download-' + m.key"
-                  (click)="download(m.key)"
-                >
-                  download
-                </button>
-              }
-              @if (m.downloaded) {
-                <button
-                  type="button"
-                  class="mono rounded border border-red-500/40 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10"
-                  [attr.data-testid]="'delete-' + m.key"
-                  (click)="delete(m.key)"
-                >
-                  delete
-                </button>
-              }
-            </span>
-          </li>
-        }
-      </ul>
-
-      <div class="mono mb-1 mt-3 text-[10px] uppercase text-[var(--ink-mute)]">
-        speaker diarization
-      </div>
-      <ul class="space-y-1">
-        @for (m of diarization(); track m.key) {
-          <li class="flex items-center gap-2 text-[12px]">
-            <span class="text-[var(--ink)]">{{ m.key }}</span>
-            <span class="text-[var(--ink-mute)]">{{ sizeLabel(m) }}</span>
-            <span class="text-[10px] text-[var(--ink-mute)]">{{ rowAction(m) }}</span>
-            <span class="ml-auto flex gap-1">
-              @if (!m.downloaded && !isDownloading(m.key)) {
-                <button
-                  type="button"
-                  class="mono rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] hover:bg-[var(--bg-2)]"
-                  [attr.data-testid]="'download-' + m.key"
-                  (click)="download(m.key)"
-                >
-                  download
-                </button>
-              }
-              @if (m.downloaded) {
-                <button
-                  type="button"
-                  class="mono rounded border border-red-500/40 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10"
-                  [attr.data-testid]="'delete-' + m.key"
-                  (click)="delete(m.key)"
-                >
-                  delete
-                </button>
-              }
-            </span>
-          </li>
-        }
-      </ul>
+      @for (section of sections(); track section.title) {
+        <div class="mono mb-1 mt-3 text-[10px] uppercase text-[var(--ink-mute)]">
+          {{ section.title }}
+        </div>
+        <ul class="space-y-1">
+          @for (m of section.entries; track m.key) {
+            <li class="flex items-center gap-2 text-[12px]">
+              <span class="text-[var(--ink)]">{{ m.key }}</span>
+              <span class="text-[var(--ink-mute)]">{{ sizeLabel(m) }}</span>
+              <span class="text-[10px] text-[var(--ink-mute)]">{{ rowAction(m) }}</span>
+              <span class="ml-auto flex gap-1">
+                @if (!m.downloaded && !isDownloading(m.key)) {
+                  <button
+                    type="button"
+                    class="mono rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] hover:bg-[var(--bg-2)]"
+                    [attr.data-testid]="'download-' + m.key"
+                    (click)="download(m.key)"
+                  >
+                    download
+                  </button>
+                }
+                @if (m.downloaded) {
+                  <button
+                    type="button"
+                    class="mono rounded border border-red-500/40 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10"
+                    [attr.data-testid]="'delete-' + m.key"
+                    (click)="delete(m.key)"
+                  >
+                    delete
+                  </button>
+                }
+              </span>
+            </li>
+          }
+        </ul>
+      }
 
       <p class="mono mt-3 text-[10px] text-[var(--ink-mute)]">
         Models use {{ totalUsedLabel() }} on disk; downloads use the network.
@@ -134,6 +104,11 @@ export class ModelManagerComponent implements OnInit {
   readonly whisper = signal<ModelStatusEntry[]>([]);
   /** Diarization catalogue entries + on-disk status. */
   readonly diarization = signal<ModelStatusEntry[]>([]);
+  /** Sections rendered by the template (one row group per model kind). */
+  readonly sections = computed(() => [
+    { title: 'speech-to-text', entries: this.whisper() },
+    { title: 'speaker diarization', entries: this.diarization() },
+  ]);
   /** Total bytes the downloaded models occupy. */
   readonly totalUsed = signal(0);
   /** In-flight downloads, keyed by model key. */

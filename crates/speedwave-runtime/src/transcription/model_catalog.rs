@@ -244,15 +244,10 @@ pub struct DiarizationModelInfo {
     pub default: bool,
 }
 
-/// Diarization model catalogue. The default pair (`default == true`) is
-/// pyannote-segmentation-3.0 + 3D-Speaker CAM++ (English voxceleb). Speaker
-/// embeddings are largely language-agnostic, so the English model serves PL
-/// callers too. The CAM++ choice over NeMo TitaNet-small is research-backed
-/// (post-R6 review): Apache-2.0 (vs CC-BY-4.0), ~28 MB ONNX (vs ~40 MB), lower
-/// EER on VoxCeleb1-O, and OpenWhispr's open-source diarization picked CAM++
-/// over ECAPA-TDNN without TitaNet making the shortlist. TitaNet-small is kept
-/// as a non-default alternative so users with existing recordings can still
-/// load the old embedding if they want to. Sizes/SHA256/licences verified
+/// Diarization model catalogue. Default pair: pyannote-segmentation-3.0 +
+/// 3D-Speaker CAM++ (English voxceleb; embeddings are language-agnostic).
+/// CAM++ chosen over TitaNet-small for Apache-2.0 licence and lower EER —
+/// rationale and benchmarks in ADR-056. Sizes/SHA256/licences verified
 /// 2026-05-12.
 pub const DIARIZATION_MODELS: &[DiarizationModelInfo] = &[
     DiarizationModelInfo {

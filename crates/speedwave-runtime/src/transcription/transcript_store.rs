@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -315,6 +316,18 @@ impl TranscriptStore {
             TranscriptEvent::SegmentAppended { seq, segment }
         })?;
         Ok(seq_out)
+    }
+
+    /// Number of `live_segments` whose `start < threshold` — the splice point
+    /// for a fresh window decode. Avoids cloning the segment list.
+    pub fn live_splice_at(&self, id: Uuid, threshold: Duration) -> Result<usize, StoreError> {
+        let entry = self.sessions.get(&id).ok_or(StoreError::NotFound(id))?;
+        let session = entry.session.read();
+        Ok(session
+            .live_segments
+            .iter()
+            .position(|s| s.start >= threshold)
+            .unwrap_or(session.live_segments.len()))
     }
 
     /// Replaces the tail of `live_segments` starting at `from_index`.

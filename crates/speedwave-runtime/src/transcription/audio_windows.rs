@@ -26,7 +26,7 @@ use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
-use super::mix::{chunk_samples, poll_mixed_chunk, MixBuffer, MixSource};
+use super::mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 
 /// Channel depth for chunks in flight from the capture thread to the consumer.
 /// A few seconds of audio — enough to absorb a slow consumer without unbounded
@@ -365,7 +365,7 @@ impl ResamplerSink {
 }
 
 /// Down-mixes interleaved multi-channel f32 to mono and linear-resamples it to
-/// 16 kHz, emitting ~`chunk_samples()`-sized chunks to its `ResamplerSink`.
+/// 16 kHz, emitting ~`CHUNK_SAMPLES`-sized chunks to its `ResamplerSink`.
 struct Resampler {
     /// Source sample rate (e.g. 48000).
     src_rate: u32,
@@ -376,7 +376,7 @@ struct Resampler {
     /// Last mono sample carried over between callbacks (for interpolation
     /// across the buffer boundary).
     last: f32,
-    /// Accumulating output chunk; flushed at `chunk_samples()`.
+    /// Accumulating output chunk; flushed at `CHUNK_SAMPLES`.
     out: Vec<f32>,
     /// Total output samples emitted so far — used to stamp the chunk offset.
     emitted: u64,
@@ -390,7 +390,7 @@ impl Resampler {
             channels: channels.max(1),
             pos: 0.0,
             last: 0.0,
-            out: Vec::with_capacity(chunk_samples()),
+            out: Vec::with_capacity(CHUNK_SAMPLES),
             emitted: 0,
         }
     }
@@ -402,7 +402,7 @@ impl Resampler {
         }
         // Step in source-sample units per output sample.
         let step = self.src_rate as f64 / SAMPLE_RATE_HZ as f64;
-        let want = chunk_samples();
+        let want = CHUNK_SAMPLES;
         let channels = self.channels;
         let nmono = interleaved.len() / channels;
         if nmono == 0 {
@@ -467,7 +467,7 @@ impl Resampler {
         // from underflowing.
         let offset_ns = self.emitted.saturating_sub(n) * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
         sink.deliver(samples, offset_ns);
-        self.out = Vec::with_capacity(chunk_samples());
+        self.out = Vec::with_capacity(CHUNK_SAMPLES);
     }
 }
 
@@ -631,9 +631,9 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioChunk>(1);
         let sink = ResamplerSink::Channel(tx);
         let mut r = Resampler::new(16_000, 1);
-        r.out = vec![0.0; chunk_samples()];
+        r.out = vec![0.0; CHUNK_SAMPLES];
         r.flush(&sink); // fills the channel
-        r.out = vec![0.0; chunk_samples()];
+        r.out = vec![0.0; CHUNK_SAMPLES];
         r.flush(&sink); // would block on send() — try_send drops it instead
                         // If we got here without hanging, the non-blocking behaviour holds.
     }
@@ -652,14 +652,14 @@ mod tests {
             source: MixSource::Mic,
         };
         // Feed one chunk's worth of 1.0 on each side so flush fires.
-        let ones = vec![1.0f32; chunk_samples()];
+        let ones = vec![1.0f32; CHUNK_SAMPLES];
         let mut rs = Resampler::new(16_000, 1);
         rs.feed(&ones, &sys_sink);
         let mut rm = Resampler::new(16_000, 1);
         rm.feed(&ones, &mic_sink);
-        // Both streams delivered ~chunk_samples() at offset 0 → mix pops 0.5+0.5=1.
+        // Both streams delivered ~CHUNK_SAMPLES at offset 0 → mix pops 0.5+0.5=1.
         let mut b = buf.lock().unwrap();
-        let chunk = b.pop(1, chunk_samples()).expect("a mixed chunk is ready");
+        let chunk = b.pop(1, CHUNK_SAMPLES).expect("a mixed chunk is ready");
         assert!(!chunk.is_empty());
         assert!(
             chunk.iter().all(|&s| (s - 1.0).abs() < 1e-4),
@@ -674,7 +674,7 @@ mod tests {
         let buf = std::sync::Arc::new(std::sync::Mutex::new(MixBuffer::new()));
         {
             let mut b = buf.lock().unwrap();
-            let want = chunk_samples();
+            let want = CHUNK_SAMPLES;
             b.push(MixSource::System, 0, &vec![1.0; want]);
             b.push(MixSource::Mic, 0, &vec![1.0; want]);
         }
@@ -683,7 +683,7 @@ mod tests {
             buf: std::sync::Arc::clone(&buf),
         };
         let chunk = stream.next_chunk().unwrap().expect("a chunk is delivered");
-        assert_eq!(chunk.samples.len(), chunk_samples());
+        assert_eq!(chunk.samples.len(), CHUNK_SAMPLES);
         assert!(chunk.samples.iter().all(|&s| (s - 1.0).abs() < 1e-4));
         // After draining, finish() + empty → clean EOF.
         buf.lock().unwrap().finish();

@@ -1056,6 +1056,8 @@ fn main() {
         Arc::new(speedwave_runtime::transcription::ModelStore::new());
     let transcript_drivers: transcription_cmd::DriversHandle =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let transcript_forwarders: transcription_cmd::ForwardersHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
     // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
@@ -1185,6 +1187,7 @@ fn main() {
         .manage(transcript_store.clone())
         .manage(model_store.clone())
         .manage(transcript_drivers.clone())
+        .manage(transcript_forwarders.clone())
         .setup(move |app| {
             // Restore persisted log level (default: Info)
             let initial_level = config::load_user_config()

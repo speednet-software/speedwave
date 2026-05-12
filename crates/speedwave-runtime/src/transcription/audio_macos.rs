@@ -18,7 +18,7 @@ use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError, ProcessSelector,
 };
-use super::mix::{chunk_samples, MixBuffer, MixSource};
+use super::mix::{MixBuffer, MixSource, CHUNK_SAMPLES};
 
 /// Name of the bundled CLI (resolved via `binary::command`).
 const CLI_NAME: &str = "audio-capture-cli";
@@ -159,17 +159,7 @@ impl AudioCapture for MacOsAudioCapture {
             .stdout
             .take()
             .ok_or_else(|| CaptureError::Failed("capture CLI stdout not piped".to_string()))?;
-        // Drain stderr in the background so a noisy CLI can't deadlock on a
-        // full pipe. We log nothing here — diagnostics live in the CLI itself;
-        // a real failure shows up as the stream ending.
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    log::debug!(target: "transcription::capture", "{CLI_NAME}: {line}");
-                }
-            });
-        }
+        super::audio::drain_child_stderr(&mut child, CLI_NAME);
 
         let mut reader = BufReader::new(stdout);
         // First: the JSON header line.
@@ -288,23 +278,19 @@ impl CliRawReader {
                 "capture stream ended mid-chunk payload".to_string(),
             ));
         }
-        let mut samples = Vec::with_capacity(nframes);
-        for f in raw.chunks_exact(4) {
-            samples.push(f32::from_le_bytes([f[0], f[1], f[2], f[3]]));
-        }
-        Ok(Some((stream_index, offset_ns, samples)))
+        Ok(Some((
+            stream_index,
+            offset_ns,
+            super::audio::bytes_to_f32_samples(&raw),
+        )))
     }
 }
 
 impl Drop for CliRawReader {
     fn drop(&mut self) {
-        // Best-effort: SIGKILL the CLI if it's still running. The CLI's own
-        // SIGTERM handler does the graceful CoreAudio teardown; kill() sends
-        // SIGKILL, so we first try a polite kill via `try_wait`.
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+        // CLI's own SIGTERM handler does the graceful CoreAudio teardown;
+        // SIGKILL only if it didn't exit on its own.
+        super::audio::kill_child_gracefully(&mut self.child);
     }
 }
 
@@ -350,7 +336,7 @@ impl AudioStream for MixedCliStream {
         if self.raw.done {
             return Ok(None);
         }
-        let want = chunk_samples();
+        let want = CHUNK_SAMPLES;
         loop {
             let start_ns = self.mix.offset_ns();
             if let Some(samples) = self.mix.pop(1, want) {

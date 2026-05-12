@@ -164,8 +164,10 @@ export class RecordingControlsComponent implements OnInit {
   readonly expectedSpeakers = signal<number>(0);
   /** Host capture capabilities (drives the per-app note). */
   readonly capabilities = signal<CaptureCapabilities | null>(null);
-  /** Compiled-backends acceleration label. */
-  readonly accel = signal('Acceleration: CPU only');
+  /** Compiled whisper.cpp backends for this build. */
+  readonly backends = signal<Backend[]>([]);
+  /** Derived acceleration label. */
+  readonly accel = computed(() => accelLabel(this.backends()));
   /** `true` while a recording is in progress. */
   readonly recording = signal(false);
   /** Disables Start/Stop while a transition is in flight. */
@@ -191,7 +193,7 @@ export class RecordingControlsComponent implements OnInit {
     try {
       const caps = await this.transcription.getCapabilities();
       this.capabilities.set(caps.capabilities);
-      this.accel.set(accelLabel(caps.backends));
+      this.backends.set(caps.backends);
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
       // Default to "Whole meeting" (mixed) if offered, else "System

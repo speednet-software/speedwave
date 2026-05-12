@@ -227,19 +227,10 @@ impl TranscriptDriver {
             })
             .collect();
 
-        // Where do the current segments stop being "committed" (entirely before
-        // the window) and start being "tentative" (overlapping it)? That index
-        // is where the fresh decode splices in.
-        let snap = self
+        let splice_at = self
             .store
-            .get(self.id)
+            .live_splice_at(self.id, window_start)
             .map_err(|e| DriverError::Store(e.to_string()))?;
-        let splice_at = snap
-            .live_segments
-            .iter()
-            .position(|s| s.start >= window_start)
-            .unwrap_or(snap.live_segments.len());
-
         self.store
             .replace_segments(self.id, splice_at, absolute)
             .map_err(|e| DriverError::Store(e.to_string()))?;
@@ -440,41 +431,12 @@ fn transcribe_chunked(
     Ok(out)
 }
 
-/// Reads a 16 kHz WAV (the format `WavWriter` above produces) into mono `f32`
-/// samples in `[-1, 1]`. Tolerates int16 (our writer) and float32; down-mixes
-/// to mono if the file is multi-channel (it shouldn't be).
+/// Reads a 16 kHz WAV (the format `WavWriter` above produces) into mono `f32`.
+/// Delegates to the shared `audio::parse_wav_to_mono_f32`.
 fn read_wav_to_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
-    let mut reader = hound::WavReader::open(path).map_err(|e| e.to_string())?;
-    let spec = reader.spec();
-    let channels = spec.channels.max(1) as usize;
-    let raw: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Int => match spec.bits_per_sample {
-            16 => reader
-                .samples::<i16>()
-                .map(|s| s.map(|v| v as f32 / 32_768.0))
-                .collect::<Result<_, _>>()
-                .map_err(|e| e.to_string())?,
-            other => return Err(format!("unsupported int WAV bit depth {other}")),
-        },
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .collect::<Result<_, _>>()
-            .map_err(|e| e.to_string())?,
-    };
-    if channels == 1 {
-        return Ok(raw);
-    }
-    // Average channels into mono.
-    let frames = raw.len() / channels;
-    let mut mono = Vec::with_capacity(frames);
-    for i in 0..frames {
-        let mut acc = 0.0f32;
-        for c in 0..channels {
-            acc += raw[i * channels + c];
-        }
-        mono.push(acc / channels as f32);
-    }
-    Ok(mono)
+    super::audio::parse_wav_to_mono_f32(path)
+        .map(|(mono, _rate)| mono)
+        .map_err(|e| e.to_string())
 }
 
 /// One diarization pass over the live buffer; stamps speakers on the latest
