@@ -65,9 +65,9 @@ const BRACKETED_TIME_RE =
 // `rest`, so it lands in the `time` column for mcp-os / host-exec / claude.
 const ISO_TIME_RE =
   /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/;
-/** ISO date+time at the start of a stamped log line (e.g. `2026-04-28T12:34:56.123Z`). */
-const FORMAT_TIME_ISO_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/;
-/** Bare `HH:MM:SS` prefix used by some compose log lines. Date is filled in from the host clock. */
+/** A parseable ISO date+time prefix — `formatTime` parses it and re-renders in the host's local zone. */
+const FORMAT_TIME_ISO_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/;
+/** Bare `HH:MM:SS` (no day, no zone) from external tooling — dated with today's date as a hint. */
 const FORMAT_TIME_HMS_RE = /^(\d{2}:\d{2}:\d{2})/;
 const LEVEL_RE = /^(DEBUG|INFO|WARN|WARNING|ERROR|TRACE)\s+(.*)$/i;
 /** Drain prefix the Rust `log_file` writer puts on captured stdout/stderr lines — pure noise in the message. */
@@ -835,29 +835,26 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Format a parsed timestamp for display.
-   *
-   * - ISO stamps from `nerdctl compose logs --timestamps`
-   *   (e.g. `2026-04-28T11:32:56.123456Z`) are shortened to
-   *   `YYYY-MM-DD HH:MM:SS`.
-   * - Bracketed `HH:MM:SS[.ms]` stamps emitted by the application inside
-   *   the container are prefixed with today's date so the column always
-   *   carries a day — without this, two consecutive entries logged on
-   *   different days are indistinguishable. The fallback is a best-effort
-   *   approximation: we use the host's current date, which is correct for
-   *   the tail-N most recent entries we display, but the day prefix is
-   *   only a hint when the container clock or timezone diverges from the
-   *   host (for example, a containerised process logging in UTC while the
-   *   host shows local time).
-   *
-   * The original raw value is always exposed through `[title]` so the
-   * approximation is recoverable on hover.
+   * Render a parsed timestamp for the time column — always in the host's
+   * local timezone (`YYYY-MM-DD HH:MM:SS`), whatever offset the source wrote:
+   * an ISO stamp with `Z`/`±HH:MM` (nerdctl `--timestamps` is UTC; Speedwave
+   * loggers carry an offset) is parsed and re-rendered locally; a bare
+   * `HH:MM:SS[.ms]` (external tooling, no day/zone) is dated with today and
+   * kept as-is. The raw value stays in `[title]` on hover.
    * @param raw - the parsed `time` field from a log line
    */
   protected formatTime(raw: string): string {
     if (!raw) return '';
-    const isoMatch = FORMAT_TIME_ISO_RE.exec(raw);
-    if (isoMatch) return `${isoMatch[1]} ${isoMatch[2]}`;
+    if (FORMAT_TIME_ISO_RE.test(raw)) {
+      const d = new Date(raw);
+      if (!Number.isNaN(d.getTime())) {
+        const p2 = (n: number) => String(n).padStart(2, '0');
+        return (
+          `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+          `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+        );
+      }
+    }
     const hmsMatch = FORMAT_TIME_HMS_RE.exec(raw);
     if (hmsMatch) return `${this.todayIso()} ${hmsMatch[1]}`;
     return raw;

@@ -112,22 +112,46 @@ describe('LogsViewComponent', () => {
     expect(time.getAttribute('title')).toBe('11:32:56');
   });
 
-  it('renders ISO timestamps as `YYYY-MM-DD HH:MM:SS` and exposes the raw value via title', async () => {
-    // `nerdctl compose logs --timestamps` prefixes lines with RFC3339
-    // stamps. The view shrinks them to a fixed-width `YYYY-MM-DD HH:MM:SS`
-    // for the time column and keeps the full ISO value in `[title]` so
-    // hovering still reveals microseconds + timezone.
+  it('renders an ISO timestamp in the host local timezone, raw value in title', async () => {
+    // `nerdctl compose logs --timestamps` is UTC `Z`; Speedwave loggers carry
+    // an offset. Either way the column shows local time (`YYYY-MM-DD HH:MM:SS`)
+    // — so a UTC `Z` stamp and a `+02:00` stamp for the same instant render
+    // identically. `[title]` keeps the raw value (micros + offset).
+    const raw = '2026-04-28T11:32:56.123456Z';
     mockTauri.invokeHandler = async (cmd: string) =>
-      cmd === 'get_all_logs'
-        ? 'speedwave_test_mcp-hub_1 | 2026-04-28T11:32:56.123456Z INFO  hello'
-        : undefined;
+      cmd === 'get_all_logs' ? `speedwave_test_mcp-hub_1 | ${raw} INFO  hello` : undefined;
 
     await component.ngOnInit();
     fixture.detectChanges();
 
+    // Expected = the same instant, formatted with the test process's local
+    // getters — `formatTime` must agree with a plain `new Date(...)`.
+    const d = new Date(raw);
+    const p2 = (n: number) => String(n).padStart(2, '0');
+    const expected =
+      `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+      `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+
     const time = fixture.nativeElement.querySelector('[data-testid="logs-time"]') as HTMLElement;
-    expect(time.textContent?.trim()).toBe('2026-04-28 11:32:56');
-    expect(time.getAttribute('title')).toBe('2026-04-28T11:32:56.123456Z');
+    expect(time.textContent?.trim()).toBe(expected);
+    expect(time.getAttribute('title')).toBe(raw);
+  });
+
+  it('renders a `+02:00`-offset ISO stamp identically to the same instant in UTC', async () => {
+    // The whole point of `formatTime`: source offset is irrelevant to the column.
+    const utc = '2026-04-28T11:32:56.000Z';
+    const plus2 = '2026-04-28T13:32:56.000+02:00'; // same instant
+    const render = async (raw: string): Promise<string> => {
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'get_all_logs' ? `speedwave_test_mcp-hub_1 | ${raw} INFO x` : undefined;
+      await component.ngOnInit();
+      fixture.detectChanges();
+      return (
+        (fixture.nativeElement.querySelector('[data-testid="logs-time"]') as HTMLElement)
+          .textContent ?? ''
+      ).trim();
+    };
+    expect(await render(utc)).toBe(await render(plus2));
   });
 
   // -- ARIA --
