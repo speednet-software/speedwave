@@ -570,164 +570,28 @@ describe('HostExecConfigComponent', () => {
     });
   });
 
-  // ---- per-recipe confirmation --------------------------------------------
+  // ---- confirm prompt lives in the shell, not here -------------------------
 
-  describe('per-recipe confirmation prompt', () => {
-    it('shows a dialog on a host-exec://confirm-request event and replies "allow"', async () => {
-      await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
-      responses['host_exec_confirm_reply'] = undefined;
-      mockTauri.dispatchEvent('host-exec://confirm-request', {
-        project: 'proj-a',
-        recipe: 'gradle_test',
-        argv: ['./gradlew', 'test'],
-        cwd: '.',
-        id: 'req-1',
-      });
-      fixture.detectChanges();
-      expect(q('[data-testid="host-exec-confirm"]')).not.toBeNull();
-      expect(q('[data-testid="host-exec-confirm-argv"]')?.textContent).toContain('./gradlew test');
-      q('[data-testid="host-exec-confirm-allow"]')!.click();
-      await fixture.whenStable();
-      fixture.detectChanges();
-      expect(q('[data-testid="host-exec-confirm"]')).toBeNull();
-      expect(invokeCalls.find((c) => c.cmd === 'host_exec_confirm_reply')?.args).toEqual({
-        project: 'proj-a',
-        id: 'req-1',
-        decision: 'allow',
-      });
-    });
-
-    it('replies "deny" and "allow-session" via the respective buttons', async () => {
-      await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
-      mockTauri.dispatchEvent('host-exec://confirm-request', {
-        project: 'proj-a',
-        recipe: 'gradle_test',
-        argv: ['./gradlew', 'test'],
-        cwd: '.',
-        id: 'req-deny',
-      });
-      fixture.detectChanges();
-      q('[data-testid="host-exec-confirm-deny"]')!.click();
-      await fixture.whenStable();
-      expect(invokeCalls.find((c) => c.cmd === 'host_exec_confirm_reply')?.args?.['decision']).toBe(
-        'deny'
-      );
-      // Next request → session.
-      invokeCalls.length = 0;
-      mockTauri.dispatchEvent('host-exec://confirm-request', {
-        project: 'proj-a',
-        recipe: 'gradle_test',
-        argv: ['./gradlew', 'test'],
-        cwd: '.',
-        id: 'req-sess',
-      });
-      fixture.detectChanges();
-      q('[data-testid="host-exec-confirm-session"]')!.click();
-      await fixture.whenStable();
-      expect(invokeCalls.find((c) => c.cmd === 'host_exec_confirm_reply')?.args?.['decision']).toBe(
-        'allow-session'
-      );
-    });
-
-    it('queues multiple requests and shows them one at a time', async () => {
-      await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
-      mockTauri.dispatchEvent('host-exec://confirm-request', {
-        project: 'proj-a',
-        recipe: 'gradle_test',
-        argv: ['./gradlew', 'test'],
-        cwd: '.',
-        id: 'q1',
-      });
-      mockTauri.dispatchEvent('host-exec://confirm-request', {
-        project: 'proj-a',
-        recipe: 'gradle_test',
-        argv: ['./gradlew', 'lint'],
-        cwd: '.',
-        id: 'q2',
-      });
-      fixture.detectChanges();
-      expect(component.activeConfirm?.id).toBe('q1');
-      q('[data-testid="host-exec-confirm-allow"]')!.click();
-      await fixture.whenStable();
-      fixture.detectChanges();
-      expect(component.activeConfirm?.id).toBe('q2');
-    });
-
-    it('drops confirm requests for a different project', async () => {
-      await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
-      mockTauri.dispatchEvent('host-exec://confirm-request', {
-        project: 'some-other-project',
-        recipe: 'gradle_test',
-        argv: ['./gradlew', 'test'],
-        cwd: '.',
-        id: 'x',
-      });
-      fixture.detectChanges();
-      expect(component.activeConfirm).toBeNull();
-      expect(q('[data-testid="host-exec-confirm"]')).toBeNull();
-    });
-
-    it('a failing host_exec_confirm_reply is swallowed (worker fails closed) — dialog still closes', async () => {
-      await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
-      responses['host_exec_confirm_reply'] = new Error('no live worker');
-      mockTauri.dispatchEvent('host-exec://confirm-request', {
-        project: 'proj-a',
-        recipe: 'gradle_test',
-        argv: ['./gradlew', 'test'],
-        cwd: '.',
-        id: 'req-err',
-      });
-      fixture.detectChanges();
-      q('[data-testid="host-exec-confirm-allow"]')!.click();
-      await fixture.whenStable();
-      fixture.detectChanges();
-      expect(q('[data-testid="host-exec-confirm"]')).toBeNull();
-      // It did not throw out of the component.
-      expect(component.activeConfirm).toBeNull();
-    });
+  it('does NOT subscribe to host-exec://confirm-request (the prompt is shell-level)', async () => {
+    await init();
+    // The per-recipe confirm prompt is `app-host-exec-confirm-prompt` in the
+    // shell so it works from the chat too — this card must not listen for it.
+    expect(mockTauri.listenHandlers['host-exec://confirm-request']).toBeUndefined();
+    expect(q('[data-testid="host-exec-confirm"]')).toBeNull();
   });
 
   // ---- project switch ------------------------------------------------------
 
-  it('reloads status and clears pending confirms when the project changes', async () => {
+  it('reloads status when the project changes (load() reflects the new project)', async () => {
     await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
-    // Queue a confirm.
-    mockTauri.dispatchEvent('host-exec://confirm-request', {
-      project: 'proj-a',
-      recipe: 'gradle_test',
-      argv: ['./gradlew', 'test'],
-      cwd: '.',
-      id: 'pending',
-    });
-    fixture.detectChanges();
-    expect(component.activeConfirm).not.toBeNull();
-    // Switch project: new project has host_exec disabled.
+    expect(component.enabled).toBe(true);
+    // Simulate the onProjectSettled path: new project has host_exec disabled.
     projectState.activeProject = 'proj-b';
     responses['get_host_exec'] = makeStatus({ enabled: false });
-    // Fire the settled callback the component subscribed to.
-    await (projectState as unknown as { settledCallbacks?: (() => void | Promise<void>)[] });
-    // Trigger via the public API — the component registered with onProjectSettled.
-    // ProjectStateService exposes a way to notify; emulate by calling the same
-    // callback the component would receive. The simplest portable approach:
-    // re-run ngOnInit's listener by invoking the stored callback isn't exposed,
-    // so instead assert the component drops confirms when load() runs for a new
-    // project — call load() directly after switching, mirroring the settled path.
-    component['confirmQueue'] = [];
-    component.activeConfirm = null;
     component['project'] = 'proj-b';
     await component.load();
     fixture.detectChanges();
     expect(component.enabled).toBe(false);
-    expect(component.activeConfirm).toBeNull();
     expect(q('[data-testid="host-exec-recipes"]')).toBeNull();
-  });
-
-  // ---- cleanup -------------------------------------------------------------
-
-  it('unsubscribes from the confirm event on destroy', async () => {
-    await init();
-    expect(mockTauri.listenHandlers['host-exec://confirm-request']).toBeDefined();
-    fixture.destroy();
-    expect(mockTauri.listenHandlers['host-exec://confirm-request']).toBeUndefined();
   });
 });

@@ -19,6 +19,7 @@ import { UiStateService } from '../services/ui-state.service';
 import { CommandPaletteComponent } from './command-palette/command-palette.component';
 import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
 import { NavRailComponent, type NavRailEntry } from './nav-rail/nav-rail.component';
+import { HostExecConfirmPromptComponent } from './host-exec-confirm-prompt/host-exec-confirm-prompt.component';
 import { SpinIconComponent } from '../shared/spin-icon.component';
 import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudstorage-modal.component';
 
@@ -39,6 +40,7 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
     NavRailComponent,
     ModalOverlayComponent,
     CommandPaletteComponent,
+    HostExecConfirmPromptComponent,
     SpinIconComponent,
     CloudStorageModalComponent,
   ],
@@ -143,6 +145,7 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
         }
       }
       <app-update-notification />
+      <app-host-exec-confirm-prompt />
 
       <!-- CloudStorage TCC modal — shown when project dir is in OneDrive/Dropbox/etc. and TCC is denied -->
       <app-cloudstorage-modal

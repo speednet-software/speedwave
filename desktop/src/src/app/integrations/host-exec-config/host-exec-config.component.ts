@@ -9,11 +9,9 @@ import {
 import { CommonModule } from '@angular/common';
 import { open as openOsDialog } from '@tauri-apps/plugin-dialog';
 import { TauriService } from '../../services/tauri.service';
-import { LoggerService } from '../../services/logger.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { ModalOverlayComponent } from '../../shell/modal-overlay/modal-overlay.component';
 import {
-  HOST_EXEC_CONFIRM_EVENT,
   HOST_EXEC_META_TOOLS,
   HOST_EXEC_PARAM_NAME_RE,
   HOST_EXEC_RECIPE_NAME_RE,
@@ -21,8 +19,6 @@ import {
   HOST_EXEC_SHELL_LAUNCHERS,
   type HostExecCommand,
   type HostExecConfirm,
-  type HostExecConfirmDecision,
-  type HostExecConfirmRequest,
   type HostExecStatus,
   argParamRefs,
   execBasenameLower,
@@ -30,12 +26,6 @@ import {
   isStateChangingRecipe,
   renderRecipeCommand,
 } from '../../models/host-exec';
-
-/** A pending per-recipe confirmation prompt (one entry per worker request). */
-interface PendingConfirm extends HostExecConfirmRequest {
-  /** The rendered argv string for display. */
-  readonly argvText: string;
-}
 
 /** Editable form state for the add/edit-recipe dialog. */
 interface RecipeDraft {
@@ -627,68 +617,6 @@ interface RecipeDraft {
         </div>
       </div>
     }
-
-    <!-- Per-recipe confirmation prompt (one at a time). -->
-    @if (activeConfirm) {
-      <div
-        class="fixed inset-0 z-[1260] flex items-center justify-center bg-black/75 backdrop-blur-sm"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Confirm command"
-        data-testid="host-exec-confirm"
-        tabindex="-1"
-      >
-        <div
-          class="w-[min(30rem,calc(100vw-2rem))] rounded border border-amber-500/40 bg-[var(--bg-1)] p-5"
-          role="document"
-        >
-          <div class="mono text-[11px] uppercase tracking-widest text-amber-300">
-            claude wants to run a host command
-          </div>
-          <h3
-            class="view-title view-title-section mt-1 text-[var(--ink)]"
-            data-testid="host-exec-confirm-title"
-          >
-            Run <span class="mono">{{ activeConfirm.recipe }}</span
-            >?
-          </h3>
-          <p class="mt-2 text-[13px] text-[var(--ink-dim)]">
-            In <span class="mono">{{ activeConfirm.cwd }}</span> on this machine:
-          </p>
-          <pre
-            class="mono mt-2 overflow-x-auto rounded border border-[var(--line)] bg-[var(--bg)] p-2 text-[11.5px] text-[var(--ink)]"
-            data-testid="host-exec-confirm-argv"
-            >{{ activeConfirm.argvText }}</pre
-          >
-          <div class="mt-4 flex items-center justify-end gap-2">
-            <button
-              type="button"
-              class="mono rounded border border-red-500/40 bg-red-500/10 px-3 py-1 text-[12px] text-red-300 hover:bg-red-500/20"
-              data-testid="host-exec-confirm-deny"
-              (click)="replyConfirm('deny')"
-            >
-              deny
-            </button>
-            <button
-              type="button"
-              class="mono rounded border border-[var(--line)] px-3 py-1 text-[12px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
-              data-testid="host-exec-confirm-session"
-              (click)="replyConfirm('allow-session')"
-            >
-              allow for this session
-            </button>
-            <button
-              type="button"
-              class="mono rounded border border-[var(--accent-dim)] bg-[var(--accent-soft)] px-3 py-1 text-[12px] text-[var(--accent)] hover:opacity-90"
-              data-testid="host-exec-confirm-allow"
-              (click)="replyConfirm('allow')"
-            >
-              allow once
-            </button>
-          </div>
-        </div>
-      </div>
-    }
   `,
 })
 export class HostExecConfigComponent implements OnInit, OnDestroy {
@@ -755,27 +683,19 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
    */
   private pendingAlwaysFor: RecipeDraft | null = null;
 
-  // ---- per-recipe confirmation ------------------------------------------
-  /** Queue of pending confirm prompts (FIFO; one shown at a time). */
-  private confirmQueue: PendingConfirm[] = [];
-  /** The prompt currently shown, or `null` if none. */
-  activeConfirm: PendingConfirm | null = null;
-
   // ---- wiring ------------------------------------------------------------
   private tauri = inject(TauriService);
-  private logger = inject(LoggerService);
   private projectState = inject(ProjectStateService);
   private cdr = inject(ChangeDetectorRef);
-  private unlistenConfirm: (() => void) | null = null;
   private unsubProjectSettled: (() => void) | null = null;
-  /**
-   * The project this card last loaded for — confirm events for other
-   * projects are dropped (defence in depth; the worker is per-project but a
-   * stale event during a project switch shouldn't pop a dialog here).
-   */
+  /** The project this card last loaded for. */
   private project: string | null = null;
 
-  /** Loads status, subscribes to confirm requests, reloads on project change. */
+  /**
+   * Loads status, reloads on project change. (The per-recipe confirm prompt
+   * lives in the shell — `app-host-exec-confirm-prompt` — so it works from
+   * the chat too, not just here.)
+   */
   async ngOnInit(): Promise<void> {
     this.project = this.projectState.activeProject;
     this.tauri
@@ -790,25 +710,12 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
     await this.load();
     this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       this.project = this.projectState.activeProject;
-      // A project switch invalidates any in-flight confirm prompts.
-      this.confirmQueue = [];
-      this.activeConfirm = null;
       await this.load();
     });
-    try {
-      this.unlistenConfirm = await this.tauri.listen<HostExecConfirmRequest>(
-        HOST_EXEC_CONFIRM_EVENT,
-        (event) => this.onConfirmRequest((event as { payload: HostExecConfirmRequest }).payload)
-      );
-    } catch (e: unknown) {
-      this.logger.warn(`[host-exec] failed to subscribe to confirm events: ${this.errMsg(e)}`);
-    }
   }
 
   /** Tears down listeners. */
   ngOnDestroy(): void {
-    this.unlistenConfirm?.();
-    this.unlistenConfirm = null;
     this.unsubProjectSettled?.();
     this.unsubProjectSettled = null;
   }
@@ -1342,51 +1249,6 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
       if (typeof built === 'string') return `Command "${c.name}": ${built}`;
     }
     return '';
-  }
-
-  // ---- per-recipe confirmation ------------------------------------------
-
-  /**
-   * Handles a `host-exec://confirm-request` event — enqueue and show.
-   * @param req - The confirm-request payload from the worker.
-   */
-  private onConfirmRequest(req: HostExecConfirmRequest): void {
-    // Drop events for a different project (stale during a project switch).
-    if (this.project && req.project !== this.project) {
-      this.logger.debug(`[host-exec] ignoring confirm request for project ${req.project}`);
-      return;
-    }
-    const pending: PendingConfirm = { ...req, argvText: req.argv.join(' ') };
-    this.confirmQueue.push(pending);
-    if (!this.activeConfirm) this.dequeueConfirm();
-    this.cdr.markForCheck();
-  }
-
-  private dequeueConfirm(): void {
-    this.activeConfirm = this.confirmQueue.shift() ?? null;
-    this.cdr.markForCheck();
-  }
-
-  /**
-   * User answered the active confirm prompt — reply to the worker, show next.
-   * @param decision - The user's choice (`allow` / `allow-session` / `deny`).
-   */
-  async replyConfirm(decision: HostExecConfirmDecision): Promise<void> {
-    const c = this.activeConfirm;
-    if (!c) return;
-    this.activeConfirm = null;
-    this.cdr.markForCheck();
-    try {
-      await this.tauri.invoke('host_exec_confirm_reply', {
-        project: c.project,
-        id: c.id,
-        decision,
-      });
-    } catch (e: unknown) {
-      // If the reply fails the worker fails closed on its own; just log.
-      this.logger.warn(`[host-exec] confirm reply failed: ${this.errMsg(e)}`);
-    }
-    this.dequeueConfirm();
   }
 
   // ---- misc --------------------------------------------------------------

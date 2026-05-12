@@ -166,6 +166,16 @@ fn start_session_inner(
     host_exec_arc: SharedHostExec,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    // Spawn the `host_exec` worker BEFORE the container check below — the hub's
+    // compose only gets `WORKER_HOST_EXEC_URL` / the token mount if the worker's
+    // `port`/`auth-token` files already exist when `apply_host_exec_config`
+    // renders it. If we just started it (fresh spawn), recreate the project's
+    // containers so the hub re-renders with the URL. Best-effort.
+    let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, &app_handle, project);
+    if host_exec_just_started {
+        host_exec_cmd::recreate_project_containers_if_running(project);
+    }
+
     // Pre-flight: verify Claude is authenticated.  `check_claude_auth`
     // also calls `ensure_exec_healthy`, so containers are guaranteed
     // healthy after this returns.  The compose lock serialises this with
@@ -181,13 +191,6 @@ fn start_session_inner(
             return Err(MSG_NOT_AUTHENTICATED.to_string());
         }
     }
-
-    // Start this project's `host_exec` worker on demand if the project has it
-    // enabled (no-op otherwise, or if it's already running). Best-effort — a
-    // spawn failure must not block the chat from starting; `host_exec` tools
-    // simply won't be available until the watchdog retries (step 5 wires the
-    // hub re-discovery).
-    ensure_host_exec_running(&host_exec_arc, &app_handle, project);
 
     // Extract old session and stop it outside the lock.
     log::info!("start_session_inner: extracting old session");
@@ -996,21 +999,25 @@ fn ensure_mcp_os_running(
 /// (`<data_dir>/host-exec/<project>/config.json`, `chmod 600`) from the
 /// resolved config so the worker sees the up-to-date whitelist.
 /// (`host_exec_cmd::host_exec_save_settings` re-writes it on edits and respawns.)
+///
+/// Returns `true` if it spawned a fresh worker (so the caller should recreate
+/// the project's containers — the hub needs the new `WORKER_HOST_EXEC_URL`),
+/// `false` if a worker was already running, disabled, or the spawn failed.
 pub(crate) fn ensure_host_exec_running(
     host_exec: &SharedHostExec,
     app_handle: &tauri::AppHandle,
     project: &str,
-) {
+) -> bool {
     let mut map = match host_exec.lock() {
         Ok(g) => g,
         Err(e) => {
             log::error!("ensure_host_exec_running: map mutex poisoned: {e}");
-            return;
+            return false;
         }
     };
     if let Some(proc) = map.get(project) {
         if proc.is_alive() {
-            return; // already running and healthy
+            return false; // already running and healthy
         }
         // A dead-but-still-mapped worker — drop it; we'll respawn below.
         log::warn!("host_exec[{project}]: stale worker in the map — replacing");
@@ -1026,20 +1033,20 @@ pub(crate) fn ensure_host_exec_running(
         Ok(c) => c,
         Err(e) => {
             log::warn!("ensure_host_exec_running: cannot load user config: {e}");
-            return;
+            return false;
         }
     };
     let project_dir = match user_config.find_project(project) {
         Some(p) => std::path::PathBuf::from(&p.dir),
         None => {
             log::warn!("ensure_host_exec_running: unknown project '{project}'");
-            return;
+            return false;
         }
     };
     let resolved = config::resolve_integrations(&project_dir, &user_config, project);
     if !resolved.host_exec {
         log::debug!("ensure_host_exec_running: host_exec disabled for '{project}' — not spawning");
-        return;
+        return false;
     }
 
     // Write the config snapshot (`{ projectDir, commands }`), chmod 600 — it may
@@ -1050,13 +1057,13 @@ pub(crate) fn ensure_host_exec_running(
     );
     if let Err(e) = std::fs::create_dir_all(&state_dir) {
         log::warn!("ensure_host_exec_running: cannot create state dir for '{project}': {e}");
-        return;
+        return false;
     }
     let snapshot = config::host_exec_config_snapshot(&project_dir, &resolved.host_exec_commands);
     let config_path = state_dir.join(speedwave_runtime::consts::HOST_EXEC_CONFIG_FILE);
     if let Err(e) = write_host_exec_config_snapshot(&config_path, &snapshot) {
         log::warn!("ensure_host_exec_running: cannot write config snapshot for '{project}': {e}");
-        return;
+        return false;
     }
 
     let script = match speedwave_runtime::build::resolve_host_exec_script() {
@@ -1066,7 +1073,7 @@ pub(crate) fn ensure_host_exec_running(
                 "ensure_host_exec_running: host_exec worker script not found — \
                  host_exec will be unavailable for '{project}'"
             );
-            return;
+            return false;
         }
     };
     match host_exec_process::HostExecProcess::spawn_for(
@@ -1081,8 +1088,12 @@ pub(crate) fn ensure_host_exec_running(
             map.insert(project.to_string(), proc);
             drop(map); // release before touching the watchdog flag
             HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+            true
         }
-        Err(e) => log::error!("host_exec[{project}]: spawn failed: {e}"),
+        Err(e) => {
+            log::error!("host_exec[{project}]: spawn failed: {e}");
+            false
+        }
     }
 }
 

@@ -1062,8 +1062,11 @@ fn host_exec_gateway_url(port: u16) -> String {
 ///   - `WORKER_HOST_EXEC_URL` env var (the host-gateway URL with this project's
 ///     dynamic port — the hub builds `WORKER_${id.toUpperCase()}_URL`, so the
 ///     service id `host_exec` maps to exactly this name);
-///   - `/secrets/host-exec-auth-token:ro` bind-mount (the bearer token as a
-///     file, never an env var).
+///   - `/secrets/host_exec-auth-token:ro` bind-mount — the bearer token as a
+///     file (never an env var). The filename MUST match `/secrets/<service>-auth-token`
+///     where `<service>` is the id `host_exec` (underscore): the hub's
+///     `auth-tokens.ts` derives the path that way, so `host-exec` (hyphen)
+///     would never be read and every hub→worker call would 401.
 ///
 /// The `claude` container is NOT modified — it only sees the hub. `host_exec`
 /// is added to `ENABLED_SERVICES` separately, in `apply_integrations_filter`,
@@ -1108,7 +1111,7 @@ fn apply_host_exec_config_with_paths(
     add_hub_volume(
         &mut doc,
         &format!(
-            "{}:/secrets/host-exec-auth-token:ro",
+            "{}:/secrets/host_exec-auth-token:ro",
             to_engine_path(token_path)?
         ),
     );
@@ -5049,8 +5052,10 @@ services:
             "URL must not be the bind address: {url}"
         );
 
-        // The token is bind-mounted into the hub as a file (never an env var).
-        let expected_mount = format!("{}:/secrets/host-exec-auth-token:ro", token_path.display());
+        // The token is bind-mounted into the hub as a file (never an env var),
+        // at `/secrets/host_exec-auth-token` (underscore — matching the service
+        // id, which is how the hub's `auth-tokens.ts` derives the path).
+        let expected_mount = format!("{}:/secrets/host_exec-auth-token:ro", token_path.display());
         assert!(
             result.contains(&expected_mount),
             "token must be mounted into the hub.\nexpected: {expected_mount}\ngot:\n{result}"
