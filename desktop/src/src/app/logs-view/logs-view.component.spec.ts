@@ -1084,6 +1084,39 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(component.loading()).toBe(false);
   });
 
+  it('drops a silent poll while a fetch is in flight (refreshInFlight guard)', async () => {
+    await component.ngOnInit();
+    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+    const calls = () => invokeSpy.mock.calls.filter((c) => c[0] === 'get_all_logs').length;
+    let release!: () => void;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd !== 'get_all_logs') return undefined;
+      await new Promise<void>((r) => (release = r));
+      return '';
+    };
+
+    const first = component['refresh'](true);
+    const before = calls();
+    expect(before).toBe(1); // first silent refresh fired its invoke
+    // A second silent tick while `first` is still in flight must be dropped.
+    await component['refresh'](true);
+    expect(calls()).toBe(before); // no extra invoke
+    release();
+    await first;
+  });
+
+  it('skips re-render when the silent poll buffer is byte-identical (lastRaw guard)', async () => {
+    await component.ngOnInit();
+    mockTauri.invokeHandler = async (cmd: string) =>
+      cmd === 'get_all_logs' ? 'speedwave_test_mcp-hub_1 | hello' : undefined;
+    // First silent poll populates lastRaw + lines.
+    await component['refresh'](true);
+    const setSpy = vi.spyOn(component.lines, 'set');
+    // Second silent poll with identical raw response must skip `lines.set`.
+    await component['refresh'](true);
+    expect(setSpy).not.toHaveBeenCalled();
+  });
+
   it('exposes desktop, mcp-os, host-exec and claude as separate sources in the dropdown', async () => {
     // Backend `get_all_logs` returns lines pre-prefixed with `<source> | …`.
     // The existing `parseLogLine` extracts that source token and the

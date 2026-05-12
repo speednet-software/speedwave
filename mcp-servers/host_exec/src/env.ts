@@ -97,9 +97,8 @@ export function buildRecipeEnv(recipeEnv?: Record<string, string>): NodeJS.Proce
   }
   if (recipeEnv) {
     for (const [k, v] of Object.entries(recipeEnv)) {
-      // The Rust validator already rejects RESERVED_ENV_KEYS; this is a second
-      // line so a snapshot-tampering bug can't leak the worker's secrets via
-      // the recipe's own `env` map (HOST_EXEC_* is not on RESERVED_ENV_KEYS).
+      // Defence-in-depth: catch any future `HOST_EXEC_*` even if the Rust
+      // RESERVED_ENV_KEYS list misses it.
       if (k.toUpperCase().startsWith('HOST_EXEC_')) continue;
       env[k] = v;
     }
