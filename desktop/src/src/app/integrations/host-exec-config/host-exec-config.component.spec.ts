@@ -29,7 +29,7 @@ function makeStatus(over?: Partial<HostExecStatus>): HostExecStatus {
  * `it`s — a stray in-place edit would leak between tests).
  */
 function testRecipe(): HostExecCommand {
-  return { name: 'gradle_test', exec: './gradlew', args: ['test'], confirm: 'session' };
+  return { name: 'gradle_test', exec: './gradlew', args: ['test'] };
 }
 
 describe('HostExecConfigComponent', () => {
@@ -101,32 +101,19 @@ describe('HostExecConfigComponent', () => {
     ).toBe(true);
   });
 
-  it('does NOT show the Windows-unavailable banner on a non-Windows platform', async () => {
-    // The default invoke mock returns undefined for `get_platform` → not Windows.
+  it('shows no Windows-unavailable banner (host_exec works on every platform)', async () => {
     await init();
-    expect(component.isWindows).toBe(false);
     expect(q('[data-testid="host-exec-windows-unavailable"]')).toBeNull();
-  });
-
-  it('shows the Windows-unavailable banner when get_platform === "windows"', async () => {
-    responses['get_platform'] = 'windows';
-    await init();
-    expect(component.isWindows).toBe(true);
-    const banner = q('[data-testid="host-exec-windows-unavailable"]');
-    expect(banner).not.toBeNull();
-    expect(banner?.textContent).toContain('not yet available on Windows');
   });
 
   it('shows the recipe editor and the whitelist when enabled', async () => {
     await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
     expect(q('[data-testid="host-exec-badge"]')?.textContent).toContain('enabled');
     expect(q('[data-testid="host-exec-recipes"]')).not.toBeNull();
-    const row = q('[data-testid="host-exec-recipe-gradle_test"]');
-    expect(row).not.toBeNull();
+    expect(q('[data-testid="host-exec-recipe-gradle_test"]')).not.toBeNull();
     expect(q('[data-testid="host-exec-recipe-cmd"]')?.textContent).toContain('./gradlew test');
-    expect(q('[data-testid="host-exec-recipe-confirm-gradle_test"]')?.textContent?.trim()).toBe(
-      'session'
-    );
+    // No per-recipe confirm column anymore.
+    expect(q('[data-testid="host-exec-recipe-confirm-gradle_test"]')).toBeNull();
   });
 
   it('shows the empty state when enabled with no recipes', async () => {
@@ -136,14 +123,12 @@ describe('HostExecConfigComponent', () => {
 
   // ---- enable danger modal -------------------------------------------------
 
-  describe('enable toggle (danger modal)', () => {
+  describe('enable toggle (danger modal — the consent)', () => {
     it('clicking the toggle while disabled opens the danger modal — does NOT enable yet', async () => {
       await init();
       q('[data-testid="host-exec-toggle"]')!.click();
       fixture.detectChanges();
       expect(component.showEnableDanger).toBe(true);
-      // The modal renders via app-modal-overlay (CDK dialog) — check the flag &
-      // that set_host_exec_enabled was NOT called.
       expect(invokeCalls.some((c) => c.cmd === 'set_host_exec_enabled')).toBe(false);
     });
 
@@ -160,8 +145,6 @@ describe('HostExecConfigComponent', () => {
 
     it('confirming the danger modal calls set_host_exec_enabled(true) and enables', async () => {
       await init();
-      responses['set_host_exec_enabled'] = undefined;
-      // After enabling, the component re-loads status — return enabled now.
       let reloaded = false;
       mockTauri.invokeHandler = async (cmd, args) => {
         invokeCalls.push({ cmd, args });
@@ -225,7 +208,6 @@ describe('HostExecConfigComponent', () => {
       fixture.detectChanges();
       expect(component.commands).toHaveLength(0);
       expect(component.dirty).toBe(true);
-      // Save button enabled now.
       expect((q('[data-testid="host-exec-save"]') as HTMLButtonElement).disabled).toBe(false);
     });
 
@@ -239,21 +221,24 @@ describe('HostExecConfigComponent', () => {
       expect(component.dirty).toBe(false);
     });
 
-    it('save calls host_exec_save_settings with the working copy', async () => {
+    it('save calls host_exec_save_settings with the working copy (camelCase fields)', async () => {
       await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
       const extra: HostExecCommand = {
         name: 'lint',
         exec: './gradlew',
         args: ['lint'],
-        confirm: 'ask',
+        cwdSub: 'frontend',
+        params: [{ name: 'mod', pattern: '^[a-z]+$', maxLen: 30 }],
       };
       component.commands = [testRecipe(), extra];
       fixture.detectChanges();
-      responses['host_exec_save_settings'] = undefined;
       const restartSpy = vi.spyOn(projectState, 'requestRestart');
       await component.save();
       const call = invokeCalls.find((c) => c.cmd === 'host_exec_save_settings');
       expect(call?.args).toEqual({ project: 'proj-a', commands: [testRecipe(), extra] });
+      // The on-the-wire JSON uses the camelCase keys the worker/Rust expect.
+      expect(JSON.stringify(call?.args)).toContain('"cwdSub"');
+      expect(JSON.stringify(call?.args)).toContain('"maxLen"');
       expect(restartSpy).toHaveBeenCalled();
       expect(component.dirty).toBe(false);
     });
@@ -261,9 +246,7 @@ describe('HostExecConfigComponent', () => {
     it('save aborts (no backend call) when the working copy fails client-side validation', async () => {
       await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
       // A bad recipe: shell-launcher exec.
-      component.commands = [
-        { name: 'evil', exec: 'bash', args: ['-c', 'rm -rf /'], confirm: 'ask' },
-      ];
+      component.commands = [{ name: 'evil', exec: 'bash', args: ['-c', 'rm -rf /'] }];
       fixture.detectChanges();
       await component.save();
       expect(invokeCalls.some((c) => c.cmd === 'host_exec_save_settings')).toBe(false);
@@ -272,16 +255,11 @@ describe('HostExecConfigComponent', () => {
 
     it('surfaces a host_exec_save_settings failure and does not persist', async () => {
       await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
-      component.commands = [
-        testRecipe(),
-        { name: 'lint', exec: './gradlew', args: ['lint'], confirm: 'ask' },
-      ];
+      component.commands = [testRecipe(), { name: 'lint', exec: './gradlew', args: ['lint'] }];
       responses['host_exec_save_settings'] = new Error('backend rejected: duplicate');
       const restartSpy = vi.spyOn(projectState, 'requestRestart');
       await component.save();
       expect(component.error).toContain('backend rejected: duplicate');
-      // The save did not take: the persisted whitelist is unchanged (still one
-      // recipe), and no restart was requested.
       expect(component['persisted']).toHaveLength(1);
       expect(restartSpy).not.toHaveBeenCalled();
     });
@@ -290,27 +268,23 @@ describe('HostExecConfigComponent', () => {
   // ---- add / edit dialog ---------------------------------------------------
 
   describe('add / edit dialog', () => {
-    it('opening "add" shows the dialog with a blank draft and no "always" option', async () => {
+    it('opening "add" shows the dialog with a blank draft', async () => {
       await init(makeStatus({ enabled: true }));
       q('[data-testid="host-exec-add"]')!.click();
       fixture.detectChanges();
       expect(q('[data-testid="host-exec-dialog"]')).not.toBeNull();
       expect(component.draft?.editing).toBe(false);
-      // The confirm <select> in add-mode must NOT contain an "always" option.
-      const sel = q('[data-testid="host-exec-d-confirm"]') as HTMLSelectElement;
-      const values = Array.from(sel.options).map((o) => o.value);
-      expect(values).toEqual(['ask', 'session']);
+      // No confirm <select> anymore (no per-call confirmation).
+      expect(q('[data-testid="host-exec-d-confirm"]')).toBeNull();
     });
 
-    it('opening "edit" pre-fills the draft and DOES offer "always"', async () => {
+    it('opening "edit" pre-fills the draft', async () => {
       await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
       q('[data-testid="host-exec-edit-gradle_test"]')!.click();
       fixture.detectChanges();
       expect(component.draft?.editing).toBe(true);
       expect(component.draft?.name).toBe('gradle_test');
       expect((q('[data-testid="host-exec-d-exec"]') as HTMLInputElement).value).toBe('./gradlew');
-      const sel = q('[data-testid="host-exec-d-confirm"]') as HTMLSelectElement;
-      expect(Array.from(sel.options).map((o) => o.value)).toContain('always');
     });
 
     it('committing a valid new recipe adds it to the working copy', async () => {
@@ -323,7 +297,7 @@ describe('HostExecConfigComponent', () => {
       fixture.detectChanges();
       expect(component.draft).toBeNull();
       expect(component.commands).toEqual([
-        { name: 'build_app', exec: './gradlew', args: ['assemble'], confirm: 'ask' },
+        { name: 'build_app', exec: './gradlew', args: ['assemble'] },
       ]);
     });
 
@@ -441,8 +415,8 @@ describe('HostExecConfigComponent', () => {
     });
 
     it('editing a recipe in place keeps its position and updates it', async () => {
-      const a: HostExecCommand = { name: 'a', exec: './a', args: [], confirm: 'ask' };
-      const b: HostExecCommand = { name: 'b', exec: './b', args: [], confirm: 'ask' };
+      const a: HostExecCommand = { name: 'a', exec: './a', args: [] };
+      const b: HostExecCommand = { name: 'b', exec: './b', args: [] };
       await init(makeStatus({ enabled: true, commands: [a, b] }));
       component.openEdit(a);
       component.draft!.exec = './a-renamed';
@@ -451,67 +425,76 @@ describe('HostExecConfigComponent', () => {
       expect(component.commands[0].exec).toBe('./a-renamed');
     });
 
-    describe('confirm: always', () => {
-      it('the "always" option is disabled for a state-changing recipe in edit mode', async () => {
-        const dbRecipe: HostExecCommand = {
-          name: 'db_shell',
-          exec: 'psql',
-          args: ['-c', 'SELECT 1'],
-          confirm: 'ask',
-        };
-        await init(makeStatus({ enabled: true, commands: [dbRecipe] }));
-        q('[data-testid="host-exec-edit-db_shell"]')!.click();
-        fixture.detectChanges();
-        expect(component.draftIsStateChanging()).toBe(true);
-        const sel = q('[data-testid="host-exec-d-confirm"]') as HTMLSelectElement;
-        const alwaysOpt = Array.from(sel.options).find((o) => o.value === 'always')!;
-        expect(alwaysOpt.disabled).toBe(true);
-        expect(q('[data-testid="host-exec-d-statechanging-hint"]')).not.toBeNull();
+    it('round-trips a snake_case→camelCase recipe (cwdSub / params / env) through the add dialog + save', async () => {
+      // Build a recipe with cwdSub + params + env in the dialog, save it, and
+      // confirm the on-the-wire JSON uses the camelCase keys the worker/Rust expect.
+      await init(makeStatus({ enabled: true }));
+      component.openAdd();
+      component.draft!.name = 'fe_test';
+      component.draft!.exec = 'npm';
+      component.draft!.args = ['test', '--', '--watchAll=false', '--testPathPattern={pat}'];
+      component.draft!.cwdSub = 'frontend';
+      component.draft!.params = [{ name: 'pat', pattern: '^[A-Za-z0-9_./-]+$', maxLen: '120' }];
+      component.draft!.env = [{ key: 'CI', value: 'true' }];
+      component.commitDraft();
+      expect(component.draftError).toBe('');
+      await component.save();
+      const call = invokeCalls.find((c) => c.cmd === 'host_exec_save_settings');
+      const sent = (call?.args?.['commands'] as HostExecCommand[])[0];
+      expect(sent).toEqual({
+        name: 'fe_test',
+        exec: 'npm',
+        args: ['test', '--', '--watchAll=false', '--testPathPattern={pat}'],
+        cwdSub: 'frontend',
+        params: [{ name: 'pat', pattern: '^[A-Za-z0-9_./-]+$', maxLen: 120 }],
+        env: { CI: 'true' },
       });
+      expect(JSON.stringify(call?.args)).toContain('"cwdSub"');
+      expect(JSON.stringify(call?.args)).toContain('"maxLen"');
+    });
 
-      it('choosing "always" opens the second warning; confirming applies it', async () => {
-        await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
-        component.openEdit(testRecipe());
-        fixture.detectChanges();
-        // Simulate the <select> change to "always".
-        const sel = q('[data-testid="host-exec-d-confirm"]') as HTMLSelectElement;
-        sel.value = 'always';
-        sel.dispatchEvent(new Event('change'));
-        fixture.detectChanges();
-        expect(component.showAlwaysWarn).toBe(true);
-        // The draft is NOT yet "always" until confirmed.
-        expect(component.draft?.confirm).not.toBe('always');
-        component.confirmAlways();
-        fixture.detectChanges();
-        expect(component.draft?.confirm).toBe('always');
-        expect(component.showAlwaysWarn).toBe(false);
-      });
+    // ---- container-lifecycle / state-changing warning ---------------------
 
-      it('declining the second warning leaves confirm unchanged', async () => {
-        await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
-        component.openEdit(testRecipe());
-        fixture.detectChanges();
-        const sel = q('[data-testid="host-exec-d-confirm"]') as HTMLSelectElement;
-        sel.value = 'always';
-        sel.dispatchEvent(new Event('change'));
-        fixture.detectChanges();
-        component.cancelAlways();
-        fixture.detectChanges();
-        expect(component.draft?.confirm).toBe('session'); // original
-        expect(component.showAlwaysWarn).toBe(false);
-      });
+    it('shows the docker-lifecycle warning when adding a `docker compose up` recipe', async () => {
+      await init(makeStatus({ enabled: true }));
+      component.openAdd();
+      component.draft!.name = 'compose_up';
+      component.draft!.exec = 'docker';
+      component.draft!.args = ['compose', 'up', '-d'];
+      fixture.detectChanges();
+      expect(component.draftIsContainerLifecycle()).toBe(true);
+      expect(q('[data-testid="host-exec-d-lifecycle-warn"]')).not.toBeNull();
+      // It still validates (no per-call confirmation; enabling host_exec is the consent).
+      component.commitDraft();
+      expect(component.draftError).toBe('');
+      expect(component.commands.some((c) => c.name === 'compose_up')).toBe(true);
+    });
 
-      it('committing a recipe with confirm: always is rejected if it is state-changing', async () => {
-        await init(makeStatus({ enabled: true }));
-        component.openAdd();
-        component.draft!.editing = true; // pretend edit so the path is reachable
-        component.draft!.name = 'migrate';
-        component.draft!.exec = './gradlew';
-        component.draft!.args = ['flywayMigrate'];
-        component.draft!.confirm = 'always';
-        component.commitDraft();
-        expect(component.draftError).toContain('never ask');
-      });
+    it('shows the generic state-changing warning for a DB-client recipe (not the lifecycle one)', async () => {
+      await init(makeStatus({ enabled: true }));
+      component.openAdd();
+      component.draft!.name = 'db_shell';
+      component.draft!.exec = 'psql';
+      component.draft!.args = ['-c', '{q}'];
+      component.draft!.params = [{ name: 'q', pattern: '^SELECT.*$', maxLen: '' }];
+      fixture.detectChanges();
+      expect(component.draftIsContainerLifecycle()).toBe(false);
+      expect(component.draftIsStateChanging()).toBe(true);
+      expect(q('[data-testid="host-exec-d-lifecycle-warn"]')).toBeNull();
+      expect(q('[data-testid="host-exec-d-statechanging-warn"]')).not.toBeNull();
+    });
+
+    it('shows no warning for a plain `./gradlew test` recipe', async () => {
+      await init(makeStatus({ enabled: true }));
+      component.openAdd();
+      component.draft!.name = 'gradle_test';
+      component.draft!.exec = './gradlew';
+      component.draft!.args = ['test'];
+      fixture.detectChanges();
+      expect(component.draftIsContainerLifecycle()).toBe(false);
+      expect(component.draftIsStateChanging()).toBe(false);
+      expect(q('[data-testid="host-exec-d-lifecycle-warn"]')).toBeNull();
+      expect(q('[data-testid="host-exec-d-statechanging-warn"]')).toBeNull();
     });
 
     describe('exec picker', () => {
@@ -570,12 +553,10 @@ describe('HostExecConfigComponent', () => {
     });
   });
 
-  // ---- confirm prompt lives in the shell, not here -------------------------
+  // ---- no per-call confirmation -------------------------------------------
 
-  it('does NOT subscribe to host-exec://confirm-request (the prompt is shell-level)', async () => {
+  it('does NOT subscribe to host-exec://confirm-request (there is no per-call confirmation)', async () => {
     await init();
-    // The per-recipe confirm prompt is `app-host-exec-confirm-prompt` in the
-    // shell so it works from the chat too — this card must not listen for it.
     expect(mockTauri.listenHandlers['host-exec://confirm-request']).toBeUndefined();
     expect(q('[data-testid="host-exec-confirm"]')).toBeNull();
   });
@@ -585,7 +566,6 @@ describe('HostExecConfigComponent', () => {
   it('reloads status when the project changes (load() reflects the new project)', async () => {
     await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
     expect(component.enabled).toBe(true);
-    // Simulate the onProjectSettled path: new project has host_exec disabled.
     projectState.activeProject = 'proj-b';
     responses['get_host_exec'] = makeStatus({ enabled: false });
     component['project'] = 'proj-b';

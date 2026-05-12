@@ -16,19 +16,18 @@
  *     NOT enable host_exec → covered as a UI-flow assertion.
  *
  * The other plan scenarios — **(a)** Claude calls a recipe and gets a
- * structured result, **(c)** `confirm:ask` without a frontend reply fails
- * closed, **(d)** exit≠0 is a successful ToolResult, **(f)** two projects'
- * workers do not cross-talk — require a live Anthropic API turn through the
- * MCP hub and the real per-project `host_exec` worker process. Those live
- * outside this E2E suite (no Anthropic key in CI) and ship as a
+ * structured result, **(d)** exit≠0 is a successful ToolResult, **(f)** two
+ * projects' workers do not cross-talk — require a live Anthropic API turn
+ * through the MCP hub and the real per-project `host_exec` worker process.
+ * Those live outside this E2E suite (no Anthropic key in CI) and ship as a
  * runnable manual-smoke recipe in `docs/contributing/testing.md`. The
  * non-Claude invariants they assert (worker spawn, process-tree kill, child
- * env allowlist, fd-3 confirm round-trip, two-projects two-ports) ARE
- * covered exhaustively by the unit/integration tests in
- * `desktop/src-tauri/src/host_exec_process.rs::tests` (43 tests),
- * `crates/speedwave-runtime/src/host_exec.rs::tests` (43+ tests),
+ * env allowlist, two-projects two-ports) ARE covered by the unit/integration
+ * tests in `crates/speedwave-runtime/src/host_exec_process.rs::tests`,
+ * `crates/speedwave-runtime/src/host_exec.rs::tests`,
  * `crates/speedwave-runtime/src/compose.rs` (the per-project compose
- * scenarios) and the `mcp-servers/host_exec/` worker suite (110 tests).
+ * scenarios) and the `mcp-servers/host_exec/` worker suite. There is **no
+ * per-call confirmation** (enabling host_exec is the consent — ADR-054).
  *
  * Runs after the project-management spec — the active project is
  * `e2e-test`, the shell is mounted.
@@ -44,7 +43,6 @@ interface HostExecRecipe {
   cwdSub?: string;
   params?: { name: string; pattern: string; maxLen?: number }[];
   env?: Record<string, string>;
-  confirm: 'ask' | 'session' | 'always';
 }
 
 interface HostExecStatus {
@@ -282,7 +280,7 @@ describe('Host Exec', function () {
     it('rejects a recipe whose exec is a shell launcher (`bash`)', async function () {
       this.timeout(15_000);
       const err = await saveHostExecSettings(PROJECT, [
-        { name: 'shell_evil', exec: 'bash', args: ['-c', 'id'], confirm: 'ask' },
+        { name: 'shell_evil', exec: 'bash', args: ['-c', 'id'] },
       ]);
       expect(err).not.toBeNull();
       // Validator must mention the offending tool by basename.
@@ -294,7 +292,7 @@ describe('Host Exec', function () {
     it('rejects a recipe with a non-snake_case name', async function () {
       this.timeout(15_000);
       const err = await saveHostExecSettings(PROJECT, [
-        { name: 'BadName-1', exec: './gradlew', args: ['test'], confirm: 'ask' },
+        { name: 'BadName-1', exec: './gradlew', args: ['test'] },
       ]);
       expect(err).not.toBeNull();
     });
@@ -302,13 +300,7 @@ describe('Host Exec', function () {
     it("rejects a recipe with a `cwdSub` that escapes the project (`..`)", async function () {
       this.timeout(15_000);
       const err = await saveHostExecSettings(PROJECT, [
-        {
-          name: 'escape_cwd',
-          exec: './gradlew',
-          args: ['test'],
-          cwdSub: '../sibling',
-          confirm: 'ask',
-        },
+        { name: 'escape_cwd', exec: './gradlew', args: ['test'], cwdSub: '../sibling' },
       ]);
       expect(err).not.toBeNull();
     });
@@ -316,16 +308,8 @@ describe('Host Exec', function () {
     it('rejects a duplicate recipe name in the same save', async function () {
       this.timeout(15_000);
       const err = await saveHostExecSettings(PROJECT, [
-        { name: 'dup', exec: './a', args: [], confirm: 'ask' },
-        { name: 'dup', exec: './b', args: [], confirm: 'ask' },
-      ]);
-      expect(err).not.toBeNull();
-    });
-
-    it('rejects `confirm: always` on a state-changing recipe (`docker compose up`)', async function () {
-      this.timeout(15_000);
-      const err = await saveHostExecSettings(PROJECT, [
-        { name: 'up_no_ask', exec: 'docker', args: ['compose', 'up', '-d'], confirm: 'always' },
+        { name: 'dup', exec: './a', args: [] },
+        { name: 'dup', exec: './b', args: [] },
       ]);
       expect(err).not.toBeNull();
     });
@@ -338,7 +322,6 @@ describe('Host Exec', function () {
           exec: 'npm',
           args: ['run', '{script}'],
           params: [{ name: 'script', pattern: '^[a-z:-]+$' }],
-          confirm: 'ask',
         },
       ]);
       expect(err).not.toBeNull();
@@ -352,7 +335,6 @@ describe('Host Exec', function () {
           exec: './gradlew',
           args: ['test'],
           env: { PATH: '/tmp/evil:/usr/bin' },
-          confirm: 'ask',
         },
       ]);
       expect(err).not.toBeNull();
@@ -367,7 +349,6 @@ describe('Host Exec', function () {
         cwdSub: 'frontend',
         params: [{ name: 'class', pattern: '^[A-Za-z0-9_.]+$', maxLen: 200 }],
         env: { CI: 'true' },
-        confirm: 'session',
       };
       const err = await saveHostExecSettings(PROJECT, [recipe]);
       expect(err).toBeNull();
@@ -382,7 +363,6 @@ describe('Host Exec', function () {
       expect(persisted[0].params?.[0].name).toBe('class');
       expect(persisted[0].params?.[0].maxLen).toBe(200);
       expect(persisted[0].env).toEqual({ CI: 'true' });
-      expect(persisted[0].confirm).toBe('session');
 
       // The card now lists it. Re-render the table and check the row appears.
       const row = await $(`[data-testid="host-exec-recipe-${recipe.name}"]`);

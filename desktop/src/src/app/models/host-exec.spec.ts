@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import {
-  HOST_EXEC_CONFIRM_EVENT,
   HOST_EXEC_META_TOOLS,
   HOST_EXEC_PARAM_NAME_RE,
   HOST_EXEC_RECIPE_NAME_RE,
@@ -9,15 +8,13 @@ import {
   argParamRefs,
   execBasenameLower,
   isBareParamArg,
+  isContainerLifecycleRecipe,
   isStateChangingRecipe,
   renderRecipeCommand,
 } from './host-exec';
 
 describe('host-exec model helpers', () => {
   describe('constants', () => {
-    it('exposes the worker confirm-event name', () => {
-      expect(HOST_EXEC_CONFIRM_EVENT).toBe('host-exec://confirm-request');
-    });
     it('lists the shell/eval launchers (matches the Rust SSOT)', () => {
       expect(HOST_EXEC_SHELL_LAUNCHERS).toContain('bash');
       expect(HOST_EXEC_SHELL_LAUNCHERS).toContain('eval');
@@ -96,6 +93,24 @@ describe('host-exec model helpers', () => {
     });
   });
 
+  describe('isContainerLifecycleRecipe', () => {
+    it.each([
+      [{ exec: 'docker', args: ['compose', 'up', '-d'] }, true],
+      [{ exec: 'docker', args: ['compose', 'down'] }, true],
+      [{ exec: 'docker-compose', args: ['exec', 'db', 'sh'] }, true],
+      [{ exec: 'podman', args: ['compose', 'up'] }, true],
+      [{ exec: '/usr/bin/docker', args: ['compose', 'rm', '-f'] }, true],
+      [{ exec: 'docker', args: ['system', 'prune'] }, true],
+      [{ exec: 'docker', args: ['compose', 'ps'] }, false],
+      [{ exec: 'docker', args: ['build', '-t', 'x', '.'] }, false],
+      [{ exec: 'docker', args: ['compose', 'logs'] }, false],
+      [{ exec: './gradlew', args: ['up'] }, false], // not a container engine
+      [{ exec: 'npm', args: ['run', 'build'] }, false],
+    ])('%j → %s', (cmd, flagged) => {
+      expect(isContainerLifecycleRecipe(cmd)).toBe(flagged);
+    });
+  });
+
   describe('isStateChangingRecipe', () => {
     it('flags database clients', () => {
       for (const exec of [
@@ -110,13 +125,12 @@ describe('host-exec model helpers', () => {
         expect(isStateChangingRecipe({ exec, args: ['-c', 'SELECT 1'] })).toBe(true);
       }
     });
-    it('flags docker compose up / down / exec / rm / prune', () => {
+    it('flags container-lifecycle recipes (via isContainerLifecycleRecipe)', () => {
       expect(isStateChangingRecipe({ exec: 'docker', args: ['compose', 'up', '-d'] })).toBe(true);
-      expect(isStateChangingRecipe({ exec: 'docker', args: ['compose', 'down'] })).toBe(true);
+      expect(isStateChangingRecipe({ exec: 'podman', args: ['compose', 'down'] })).toBe(true);
       expect(isStateChangingRecipe({ exec: 'docker-compose', args: ['exec', 'db', 'sh'] })).toBe(
         true
       );
-      expect(isStateChangingRecipe({ exec: 'docker', args: ['system', 'prune'] })).toBe(true);
     });
     it('flags migration tooling in args', () => {
       expect(isStateChangingRecipe({ exec: './gradlew', args: ['flywayMigrate'] })).toBe(true);

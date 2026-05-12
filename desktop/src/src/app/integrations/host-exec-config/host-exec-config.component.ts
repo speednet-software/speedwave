@@ -18,21 +18,18 @@ import {
   HOST_EXEC_RESERVED_ENV_KEYS,
   HOST_EXEC_SHELL_LAUNCHERS,
   type HostExecCommand,
-  type HostExecConfirm,
   type HostExecStatus,
   argParamRefs,
   execBasenameLower,
   isBareParamArg,
+  isContainerLifecycleRecipe,
   isStateChangingRecipe,
   renderRecipeCommand,
 } from '../../models/host-exec';
 
 /** Editable form state for the add/edit-recipe dialog. */
 interface RecipeDraft {
-  /**
-   * `true` when editing an existing recipe (then `originalName` is set and
-   * `confirm: 'always'` may be chosen); `false` when adding.
-   */
+  /** `true` when editing an existing recipe (then `originalName` is set); `false` when adding. */
   editing: boolean;
   /** The name the recipe had before editing — used to find/replace it. */
   originalName: string;
@@ -43,7 +40,6 @@ interface RecipeDraft {
   cwdSub: string;
   params: { name: string; pattern: string; maxLen: string }[];
   env: { key: string; value: string }[];
-  confirm: HostExecConfirm;
 }
 
 /**
@@ -55,15 +51,13 @@ interface RecipeDraft {
  * Unlike the credential-based integrations it is **not** in the generic
  * services table: its toggle is *gated* behind a blocking danger modal that
  * explains the consequences (the worker runs repo-controlled code on the host;
- * a prompt-injected Claude can write a malicious build script and then run it),
- * and it has its own recipe editor.
+ * a prompt-injected Claude can write a malicious build script and then run it).
+ * Enabling it **is** the consent — once on, Claude runs any whitelisted recipe
+ * without further prompting; the audit log is the after-the-fact record.
  *
  * Backed by the Tauri commands `get_host_exec`, `set_host_exec_enabled`,
  * `host_exec_save_settings`, `host_exec_load_settings`,
- * `host_exec_resolve_executable`, `host_exec_confirm_reply`
- * (`desktop/src-tauri/src/host_exec_cmd.rs` + `host_exec_process.rs`), and the
- * `host-exec://confirm-request` event the worker emits before each
- * non-auto-allowed recipe run.
+ * `host_exec_resolve_executable` (`desktop/src-tauri/src/host_exec_cmd.rs`).
  */
 @Component({
   selector: 'app-host-exec-config',
@@ -113,21 +107,10 @@ interface RecipeDraft {
           <span class="mono">docker compose</span>, …) on this computer, in this project's folder —
           closing the gap where Claude, running in a container, can't drive your toolchain. It is a
           deliberate, scoped weakening of Speedwave's isolation: opt-in per project, the whitelist
-          starts empty, the config lives only in your user config (never the repo), and every recipe
-          asks before it runs.
+          starts empty, the config lives only in your user config (never the repo). Enabling it is
+          the consent — Claude then runs whitelisted recipes without further prompting (the audit
+          log records every run), so only whitelist commands you're OK with Claude running anytime.
         </p>
-
-        @if (isWindows) {
-          <div
-            class="mono mx-4 mb-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[11.5px] text-amber-300"
-            data-testid="host-exec-windows-unavailable"
-            role="status"
-          >
-            Host Exec is not yet available on Windows — the per-recipe confirmation channel isn't
-            wired here, so recipes fail closed ("confirmation unavailable"). You can configure
-            recipes, but they won't run until this lands.
-          </div>
-        }
 
         @if (error) {
           <div
@@ -173,7 +156,6 @@ interface RecipeDraft {
                       <th class="px-3 py-1.5 text-left font-medium">name</th>
                       <th class="px-3 py-1.5 text-left font-medium">command</th>
                       <th class="px-3 py-1.5 text-left font-medium">dir</th>
-                      <th class="px-3 py-1.5 text-left font-medium">confirm</th>
                       <th class="px-3 py-1.5 text-right font-medium">actions</th>
                     </tr>
                   </thead>
@@ -194,17 +176,6 @@ interface RecipeDraft {
                         </td>
                         <td class="px-3 py-1.5 text-[var(--ink-mute)]">
                           {{ cmd.cwdSub || '.' }}
-                        </td>
-                        <td class="px-3 py-1.5">
-                          <span
-                            class="rounded px-1.5 py-0.5 text-[10px]"
-                            [attr.data-testid]="'host-exec-recipe-confirm-' + cmd.name"
-                            [class.bg-amber-500/15]="cmd.confirm !== 'always'"
-                            [class.text-amber-300]="cmd.confirm !== 'always'"
-                            [class.bg-red-500/15]="cmd.confirm === 'always'"
-                            [class.text-red-300]="cmd.confirm === 'always'"
-                            >{{ cmd.confirm }}</span
-                          >
                         </td>
                         <td class="px-3 py-1.5 text-right">
                           <button
@@ -280,22 +251,6 @@ interface RecipeDraft {
       (closed)="cancelEnable()"
     />
 
-    <!-- Second warning when switching a recipe to confirm: always. -->
-    <app-modal-overlay
-      [open]="showAlwaysWarn"
-      kicker="⚠ no confirmation"
-      kickerColor="red"
-      borderColor="red"
-      modalTitle="Run this command without ever asking?"
-      [body]="alwaysWarnBody"
-      primaryLabel="Yes — never ask for this command"
-      secondaryLabel="keep asking"
-      testId="host-exec-always-warn"
-      (primary)="confirmAlways()"
-      (secondary)="cancelAlways()"
-      (closed)="cancelAlways()"
-    />
-
     <!-- Add / edit recipe dialog. -->
     @if (draft) {
       <div
@@ -355,7 +310,7 @@ interface RecipeDraft {
               id="host-exec-d-exec"
               type="text"
               [value]="draft.exec"
-              (input)="draft.exec = inputVal($event)"
+              (input)="draft.exec = inputVal($event); recomputeExecHint()"
               placeholder="./gradlew  (or  docker  /  /opt/homebrew/bin/gradle)"
               data-testid="host-exec-d-exec"
               class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
@@ -552,37 +507,25 @@ interface RecipeDraft {
             + env var
           </button>
 
-          <!-- confirm -->
-          <label
-            class="mono mt-3 mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-            for="host-exec-d-confirm"
-            >confirmation</label
-          >
-          <select
-            id="host-exec-d-confirm"
-            [value]="draft.confirm"
-            (change)="onConfirmSelect($event)"
-            data-testid="host-exec-d-confirm"
-            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
-          >
-            <option value="ask">ask every time (recommended)</option>
-            <option value="session">ask once per app session</option>
-            @if (draft.editing) {
-              <option value="always" [disabled]="draftIsStateChanging()">
-                never ask{{
-                  draftIsStateChanging() ? ' — not allowed for state-changing commands' : ''
-                }}
-              </option>
-            }
-          </select>
-          @if (draftIsStateChanging()) {
+          <!-- container-lifecycle / state-changing warning -->
+          @if (draftIsContainerLifecycle()) {
             <p
-              class="mono mt-0.5 text-[10px] text-amber-400"
-              data-testid="host-exec-d-statechanging-hint"
+              class="mono mt-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[10.5px] text-amber-300"
+              data-testid="host-exec-d-lifecycle-warn"
+              role="status"
             >
-              This command looks like it changes state (a database client,
-              <span class="text-[var(--ink-dim)]">docker compose up/down</span>, a migration). It
-              must keep a confirmation prompt — “never ask” is disabled.
+              ⚠ this can mount arbitrary host paths into a privileged container — effectively host
+              root, from a <span class="text-amber-200">docker-compose.yml</span> Claude can edit.
+              Only add it if you trust this repo. There is no per-run prompt.
+            </p>
+          } @else if (draftIsStateChanging()) {
+            <p
+              class="mono mt-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[10.5px] text-amber-300"
+              data-testid="host-exec-d-statechanging-warn"
+              role="status"
+            >
+              ⚠ this command looks like it changes state (a database client, a migration). Claude
+              can run it without a prompt once host_exec is enabled — only add it if that's OK.
             </p>
           }
 
@@ -623,11 +566,6 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
   // ---- state -------------------------------------------------------------
   /** Whether host_exec is enabled for the active project. */
   enabled = false;
-  /**
-   * True on Windows, where the fd-3 confirm channel isn't wired — recipes
-   * fail closed there, so the UI shows a banner saying so.
-   */
-  isWindows = false;
   /** The persisted whitelist (last loaded/saved). */
   private persisted: HostExecCommand[] = [];
   /** The working copy edited in the UI; saved via `host_exec_save_settings`. */
@@ -642,29 +580,24 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
     return JSON.stringify(this.commands) !== JSON.stringify(this.persisted);
   }
 
-  // ---- danger modals -----------------------------------------------------
+  // ---- danger modal ------------------------------------------------------
   /** True while the enable-danger modal is open. */
   showEnableDanger = false;
-  /** True while the "switch to confirm: always" second-warning modal is open. */
-  showAlwaysWarn = false;
 
   readonly enableDangerBody =
     "Host Exec lets Claude run the commands you list, on this computer, in this project's folder. " +
     'Those commands execute code from this repository — and because Claude can also edit this repo, ' +
     'a prompt-injected Claude could write a malicious build script and then run it. This is a ' +
-    "deliberate weakening of Speedwave's container isolation. Only enable it for repositories you " +
-    'trust; keep per-command confirmation on for anything that changes state; never put secrets in a ' +
-    "command's env.";
+    "deliberate weakening of Speedwave's container isolation. Enabling it is the consent: there is " +
+    'no per-command prompt — once on, Claude runs any whitelisted command anytime (the audit log ' +
+    "records every run). Only enable it for repositories you trust, only whitelist commands you're " +
+    "OK with Claude running unattended, and never put secrets in a command's env.";
   readonly enableDangerExamples =
     './gradlew test          → runs build.gradle\n' +
     'npm run test            → runs code in node_modules\n' +
     'docker compose up       → runs the images in docker-compose.yml';
   readonly enableDangerNote =
     'Disable it any time. The whitelist starts empty — Claude can run nothing until you add a command.';
-  readonly alwaysWarnBody =
-    'Setting a command to “never ask” means Claude can run it on this machine, in this project, with ' +
-    'no prompt — for the rest of every session. Only do this for a command you fully trust to be ' +
-    'read-only and harmless. State-changing commands are not allowed to use this.';
 
   // ---- add/edit dialog ---------------------------------------------------
   /** The recipe-draft form state, or `null` when the dialog is closed. */
@@ -677,11 +610,6 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
   execHintWarn = false;
   /** True while `host_exec_resolve_executable` is in flight. */
   execResolving = false;
-  /**
-   * The `confirm` value the user picked that triggered the always-warning,
-   * pending their confirmation.
-   */
-  private pendingAlwaysFor: RecipeDraft | null = null;
 
   // ---- wiring ------------------------------------------------------------
   private tauri = inject(TauriService);
@@ -691,22 +619,9 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
   /** The project this card last loaded for. */
   private project: string | null = null;
 
-  /**
-   * Loads status, reloads on project change. (The per-recipe confirm prompt
-   * lives in the shell — `app-host-exec-confirm-prompt` — so it works from
-   * the chat too, not just here.)
-   */
+  /** Loads status, reloads on project change. */
   async ngOnInit(): Promise<void> {
     this.project = this.projectState.activeProject;
-    this.tauri
-      .invoke<string>('get_platform')
-      .then((p) => {
-        this.isWindows = p === 'windows';
-        this.cdr.markForCheck();
-      })
-      .catch(() => {
-        /* non-fatal — the Windows banner just won't show */
-      });
     await this.load();
     this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       this.project = this.projectState.activeProject;
@@ -851,7 +766,6 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
       cwdSub: '',
       params: [],
       env: [],
-      confirm: 'ask',
     };
     this.draftError = '';
     this.recomputeExecHint();
@@ -876,7 +790,6 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
         maxLen: p.maxLen != null ? String(p.maxLen) : '',
       })),
       env: Object.entries(cmd.env ?? {}).map(([key, value]) => ({ key, value })),
-      confirm: cmd.confirm,
     };
     this.draftError = '';
     this.recomputeExecHint();
@@ -887,8 +800,6 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
   closeDialog(): void {
     this.draft = null;
     this.draftError = '';
-    this.pendingAlwaysFor = null;
-    this.showAlwaysWarn = false;
     this.cdr.markForCheck();
   }
 
@@ -967,55 +878,13 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
     }
   }
 
-  /**
-   * `<select>` change for `confirm`; choosing `always` opens the 2nd warning.
-   * @param event - The `change` event from the confirm `<select>`.
-   */
-  onConfirmSelect(event: Event): void {
-    if (!this.draft) return;
-    const v = this.inputVal(event) as HostExecConfirm;
-    if (v === 'always') {
-      // Guard: not allowed for state-changing recipes (the <option> is also
-      // disabled, but a keyboard/programmatic pick should still be rejected).
-      if (this.draftIsStateChanging()) {
-        this.draftError = 'State-changing commands cannot be set to “never ask”.';
-        // revert the select visually
-        (event.target as HTMLSelectElement).value = this.draft.confirm;
-        this.cdr.markForCheck();
-        return;
-      }
-      this.pendingAlwaysFor = this.draft;
-      this.showAlwaysWarn = true;
-      // Keep the select on its previous value until confirmed.
-      (event.target as HTMLSelectElement).value = this.draft.confirm;
-      this.cdr.markForCheck();
-      return;
-    }
-    this.draft.confirm = v;
-    this.cdr.markForCheck();
+  /** True if the *draft* is a container-lifecycle recipe (amber dialog warning). */
+  draftIsContainerLifecycle(): boolean {
+    if (!this.draft) return false;
+    return isContainerLifecycleRecipe({ exec: this.draft.exec, args: this.draft.args });
   }
 
-  /** User confirmed the always-warning — apply `confirm: 'always'`. */
-  confirmAlways(): void {
-    if (this.pendingAlwaysFor && this.pendingAlwaysFor === this.draft) {
-      this.draft.confirm = 'always';
-    }
-    this.pendingAlwaysFor = null;
-    this.showAlwaysWarn = false;
-    this.cdr.markForCheck();
-  }
-
-  /** User declined the always-warning — leave `confirm` as it was. */
-  cancelAlways(): void {
-    this.pendingAlwaysFor = null;
-    this.showAlwaysWarn = false;
-    this.cdr.markForCheck();
-  }
-
-  /**
-   * True if the *draft* matches the state-changing heuristic (the `always`
-   * option is disabled for it; the backend re-enforces).
-   */
+  /** True if the *draft* matches the broader state-changing heuristic (amber dialog warning). */
   draftIsStateChanging(): boolean {
     if (!this.draft) return false;
     return isStateChangingRecipe({ exec: this.draft.exec, args: this.draft.args });
@@ -1175,12 +1044,6 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
         return `"${execBase}" with a bare parameter ("${a}") would let Claude run anything through ${execBase}. Use a literal sub-command (e.g. ${execBase} test) or a more specific executable.`;
       }
     }
-    // Every declared param must be referenced somewhere (otherwise it's dead /
-    // confusing — the worker doesn't require it but flag it as a warning-ish
-    // error to keep recipes clean; the Rust validator allows unused params, so
-    // this is a UI-only nicety — actually allow it to avoid diverging; skip).
-    // (Intentionally NOT enforced — matches the backend.)
-
     // cwdSub.
     const cwdSub = d.cwdSub.trim();
     if (cwdSub) {
@@ -1207,12 +1070,8 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
       }
       env[k] = e.value;
     }
-    // confirm vs state-changing.
-    if (d.confirm === 'always' && isStateChangingRecipe({ exec, args })) {
-      return 'State-changing commands cannot be set to “never ask”.';
-    }
 
-    const cmd: HostExecCommand = { name, exec, args, confirm: d.confirm };
+    const cmd: HostExecCommand = { name, exec, args };
     if (cwdSub) cmd.cwdSub = cwdSub;
     if (params.length > 0) cmd.params = params;
     if (Object.keys(env).length > 0) cmd.env = env;
@@ -1243,7 +1102,6 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
           maxLen: p.maxLen != null ? String(p.maxLen) : '',
         })),
         env: Object.entries(c.env ?? {}).map(([key, value]) => ({ key, value })),
-        confirm: c.confirm,
       };
       const built = this.buildFromDraft(draft);
       if (typeof built === 'string') return `Command "${c.name}": ${built}`;
