@@ -1104,7 +1104,15 @@ pub fn is_setup_complete() -> bool {
 pub fn build_images() -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
     rt.ensure_ready()?;
-    match build::build_all_images(rt.as_ref()) {
+    // Build the union of enabled integrations across all registered projects
+    // (+ claude/mcp-hub always). On a fresh setup there are no projects yet, so
+    // this builds just claude + mcp-hub — workers are built on demand when an
+    // integration is first enabled (ADR on lazy worker-image builds).
+    let union = {
+        let user_config = config::load_user_config().unwrap_or_default();
+        crate::integrations_union::union_integrations(&user_config)
+    };
+    match build::build_enabled_images(rt.as_ref(), &union) {
         Ok(_) => {}
         Err(e)
             if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
@@ -1112,7 +1120,7 @@ pub fn build_images() -> anyhow::Result<()> {
         {
             log::warn!("snapshotter recovery failed after prune, restarting engine");
             rt.restart_container_engine()?;
-            build::build_all_images(rt.as_ref())?;
+            build::build_enabled_images(rt.as_ref(), &union)?;
         }
         Err(e) => return Err(e),
     }
@@ -4153,8 +4161,8 @@ networks:
             "build_images() must call restart_container_engine() in the recovery path"
         );
         assert!(
-            body.contains("build::build_all_images(rt.as_ref())?"),
-            "build_images() must retry build_all_images after engine restart"
+            body.contains("build::build_enabled_images(rt.as_ref(), &union)?"),
+            "build_images() must retry build_enabled_images after engine restart"
         );
     }
 
