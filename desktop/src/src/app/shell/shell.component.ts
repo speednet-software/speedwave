@@ -13,6 +13,7 @@ import type { Subscription } from 'rxjs';
 import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
+import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
@@ -168,6 +169,15 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
 
       <!-- Command palette modal — ⌘K opens, ESC (handled in shell) closes. -->
       <app-command-palette />
+
+      @if (beta.enabled()) {
+        <span
+          class="mono pointer-events-none fixed bottom-1.5 right-2 z-[1000] select-none rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-[var(--ink-mute)]"
+          data-testid="beta-badge"
+          aria-label="Beta features enabled"
+          >Beta</span
+        >
+      }
     </div>
   `,
 })
@@ -175,6 +185,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
   readonly theme = inject(ThemeService);
+  readonly beta = inject(BetaService);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private unsubscribe: (() => void) | null = null;

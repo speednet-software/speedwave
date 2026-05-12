@@ -196,12 +196,22 @@ pub struct SelectedIde {
     pub port: u16,
 }
 
+/// UI preferences (ADR-055). Top-level user-only — a checked-in repo
+/// `.speedwave.json` is not allowed to flip beta UI on or off.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct UiPrefsConfig {
+    /// Reveal hidden / work-in-progress UI surfaces. Default = off.
+    pub beta_enabled: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct SpeedwaveUserConfig {
     pub projects: Vec<ProjectUserEntry>,
     pub active_project: Option<String>,
     pub selected_ide: Option<SelectedIde>,
     pub log_level: Option<String>,
+    /// UI preferences (ADR-055). Top-level, user-only.
+    pub ui: Option<UiPrefsConfig>,
 }
 
 impl SpeedwaveUserConfig {
@@ -227,6 +237,14 @@ impl SpeedwaveUserConfig {
         self.active_project
             .as_deref()
             .and_then(|n| self.find_project(n))
+    }
+
+    /// `true` if beta-features UI surface is enabled (top-level only).
+    pub fn beta_enabled(&self) -> bool {
+        self.ui
+            .as_ref()
+            .and_then(|u| u.beta_enabled)
+            .unwrap_or(false)
     }
 }
 
@@ -474,6 +492,66 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    // ---- UiPrefsConfig (ADR-055) -------------------------------------------
+
+    #[test]
+    fn beta_disabled_by_default() {
+        let cfg = SpeedwaveUserConfig::default();
+        assert!(!cfg.beta_enabled());
+        assert!(cfg.ui.is_none());
+    }
+
+    #[test]
+    fn beta_enabled_only_when_user_set_it() {
+        let cfg_on = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        assert!(cfg_on.beta_enabled());
+
+        let cfg_off = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(false),
+            }),
+            ..Default::default()
+        };
+        assert!(!cfg_off.beta_enabled());
+
+        let cfg_unset = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig::default()),
+            ..Default::default()
+        };
+        assert!(!cfg_unset.beta_enabled());
+    }
+
+    #[test]
+    fn ui_prefs_round_trip_through_serde() {
+        let cfg = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.ui, cfg.ui);
+    }
+
+    #[test]
+    fn user_config_without_ui_field_still_parses() {
+        let pre_adr_json = r#"{
+            "projects": [],
+            "active_project": null,
+            "selected_ide": null,
+            "log_level": null
+        }"#;
+        let parsed: SpeedwaveUserConfig = serde_json::from_str(pre_adr_json).expect("parse");
+        assert!(parsed.ui.is_none());
+        assert!(!parsed.beta_enabled());
+    }
+
     #[test]
     fn test_default_config_has_expected_env() {
         let defaults = defaults::base_env();
@@ -585,6 +663,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -633,6 +712,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -727,6 +807,7 @@ mod tests {
             active_project: Some("acme".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SpeedwaveUserConfig = serde_json::from_str(&json).unwrap();
@@ -751,6 +832,7 @@ mod tests {
             active_project: Some("test".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         save_user_config_to(&config, &config_path).unwrap();
@@ -772,6 +854,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         save_user_config_to(&config, &config_path).unwrap();
@@ -794,6 +877,7 @@ mod tests {
             active_project: Some("test".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         save_user_config_to(&config, &config_path).unwrap();
@@ -827,6 +911,7 @@ mod tests {
             active_project: Some("v1".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
         save_user_config_to(&config_v1, &config_path).unwrap();
 
@@ -842,6 +927,7 @@ mod tests {
             active_project: Some("v2".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
         save_user_config_to(&config_v2, &config_path).unwrap();
 
@@ -862,6 +948,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: Some("debug".to_string()),
+            ui: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SpeedwaveUserConfig = serde_json::from_str(&json).unwrap();
@@ -901,6 +988,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -949,6 +1037,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
         let flags = &resolved.flags;
@@ -1183,6 +1272,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
@@ -1224,6 +1314,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1260,6 +1351,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1554,6 +1646,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
@@ -1585,6 +1678,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -1659,6 +1753,7 @@ mod tests {
             active_project: Some("beta".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
         let entry = config.active_project_entry();
         assert!(entry.is_some());
@@ -1684,6 +1779,7 @@ mod tests {
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
         assert!(
             config.active_project_entry().is_none(),
