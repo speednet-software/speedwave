@@ -269,7 +269,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         bundle_changed,
     );
 
-    // Scope: active project only; project switch builds the rest on demand (ADR-055).
+    // Scope: active project only; project switch builds the rest on demand (ADR-056).
     let user_config_for_active = config::load_user_config().unwrap_or_default();
     let active_integrations = match user_config_for_active.active_project.as_deref() {
         Some(name) => match user_config_for_active.find_project(name) {

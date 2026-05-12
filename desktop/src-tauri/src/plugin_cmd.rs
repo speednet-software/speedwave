@@ -925,6 +925,7 @@ mod tests {
             active_project: Some("test-project".into()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
         let json = serde_json::to_string_pretty(&initial_config).unwrap();
         std::fs::write(&config_path, &json).unwrap();
@@ -971,6 +972,7 @@ mod tests {
             active_project: Some("test-project".into()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         // Load for unknown plugin — should return empty object
@@ -997,6 +999,7 @@ mod tests {
             active_project: Some("test-project".into()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let loaded2 = cfg2
@@ -1051,6 +1054,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         // Simulate the cleanup logic from remove_plugin
@@ -1117,6 +1121,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         let service_id = "presale";
@@ -1418,6 +1423,7 @@ mod tests {
             active_project: Some("my-project".into()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
         // Simulate the auto-enable block from install_plugin
         let plugin_key = "my-skills";

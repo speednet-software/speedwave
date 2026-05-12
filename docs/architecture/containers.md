@@ -84,7 +84,7 @@ Existing projects receive the new Claude container memory limit on next containe
 - The `IMAGES` constant in `crates/speedwave-runtime/src/build.rs` must stay aligned with `scripts/bundle-build-context.sh`
 - All binary downloads in Containerfiles are **SHA256-verified** for supply chain security
 
-### Lazy build of enabled images (ADR-055)
+### Lazy build of enabled images (ADR-056)
 
 Builds are scoped to what the user actually runs:
 
@@ -171,7 +171,7 @@ The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/
 
 ### Missing images (reconcile-time detection)
 
-At startup, `reconcile_bundle_update` verifies that the expected container images exist for the active project even when the bundle ID has not changed. If any of those images are missing (e.g. containerd was reinstalled), the reconcile forces a rebuild of the active project's enabled set before setting `IMAGES_READY = Ready`. Disabled-integration images are intentionally absent under lazy builds (ADR-055) and don't trigger a rebuild.
+At startup, `reconcile_bundle_update` verifies that the expected container images exist for the active project even when the bundle ID has not changed. If any of those images are missing (e.g. containerd was reinstalled), the reconcile forces a rebuild of the active project's enabled set before setting `IMAGES_READY = Ready`. Disabled-integration images are intentionally absent under lazy builds (ADR-056) and don't trigger a rebuild.
 
 ## VM Lifecycle on Exit
 

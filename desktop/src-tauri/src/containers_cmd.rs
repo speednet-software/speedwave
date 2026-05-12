@@ -280,7 +280,11 @@ pub async fn init_vm() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn create_project(name: String, dir: String) -> Result<(), String> {
+pub async fn create_project(
+    app: tauri::AppHandle,
+    name: String,
+    dir: String,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         log::info!("create_project: name={name}, dir={dir}");
         setup_wizard::create_project(&name, &dir).map_err(|e| {
@@ -289,7 +293,12 @@ pub async fn create_project(name: String, dir: String) -> Result<(), String> {
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    // Last setup step → `is_setup_complete()` flips true; rebuild so setup-gated
+    // tray items (the ADR-055 beta toggle) appear.
+    crate::tray::refresh_tray_menu(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -531,7 +540,7 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
-        // Lazy build for the destination project (ADR-055).
+        // Lazy build for the destination project (ADR-056).
         if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&*rt, &project)
         {
             log::error!("recreate_project_containers: image build failed: {sanitized}");
@@ -844,6 +853,7 @@ mod tests {
             active_project: Some("alpha".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -935,6 +945,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         // Use a non-local provider so the new local-provider+model guard
@@ -961,6 +972,7 @@ mod tests {
             active_project: Some("nonexistent".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         // Anthropic skips the local-provider+model guard so the project-not-
@@ -994,6 +1006,7 @@ mod tests {
             active_project: Some("proj".to_string()),
             selected_ide: None,
             log_level: None,
+            ui: None,
         };
 
         apply_llm_config(&mut cfg, llm("ollama", Some("llama3.3"), None)).unwrap();
