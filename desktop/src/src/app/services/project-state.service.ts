@@ -432,6 +432,9 @@ export class ProjectStateService {
       }
       case 'all_done': {
         this.buildSteps.update((steps) => steps.map((s) => ({ ...s, status: 'done' as const })));
+        // Build finished; close overlay so the regular "Restarting…" spinner
+        // can take over for compose_down/up. Don't wait for invoke to return.
+        this.buildingWorkerImage.set(false);
         break;
       }
       case 'failed': {
