@@ -464,7 +464,25 @@ export class ProjectStateService {
    * @param name - The project name to switch to.
    */
   async switchProject(name: string): Promise<void> {
-    await this.tauri.invoke('switch_project', { name });
+    // Switching to a project whose enabled integrations don't yet have worker
+    // images for the current bundle triggers a lazy build (ADR-055), so we
+    // listen for worker_image_build_status while switch_project runs.
+    await this.estimates.list();
+    this.buildError = '';
+    this.buildingWorkerImage = false;
+    this.buildSteps = [];
+    this.notifyChange();
+    const unlisten = await this.tauri.listen<WorkerImageBuildProgress>(
+      'worker_image_build_status',
+      (e) => this.onWorkerImageBuildProgress(e.payload)
+    );
+    try {
+      await this.tauri.invoke('switch_project', { name });
+    } finally {
+      unlisten();
+      this.buildingWorkerImage = false;
+      this.notifyChange();
+    }
   }
 
   /**

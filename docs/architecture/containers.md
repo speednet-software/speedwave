@@ -90,9 +90,11 @@ Builds are scoped to what the user actually runs:
 
 - `build::enabled_images(integrations)` returns `claude` + `mcp-hub` always, plus the worker image for each enabled built-in MCP integration. Plugin images go through `plugin::ensure_plugin_images(rt, enabled_plugin_service_ids)`.
 - The same per-project predicate (`is_service_enabled`) drives the hub's `ENABLED_SERVICES` env var — `compose::enabled_hub_service_ids` and `build::enabled_images` are the SSOT for "enabled". Build- and compose-filtering can't drift.
-- **Reconcile / setup build the union across all registered projects** so any project can be auto-restored or switched to. The helper `integrations_union::union_integrations(user_config)` ORs the resolved configs; a missing/unreadable project dir is skipped with a warn (a stale config entry must not break reconcile).
-- **Enabling an integration in a running project triggers a single-image build on demand** (`build::build_missing_images`), emitting `worker_image_build_status` events that drive a blocking modal in the Desktop UI (mirroring the plugin install overlay — ADR-047). A build failure rolls the just-enabled integration back to `enabled: false`; the prior containers keep running with their prior configuration.
+- **Reconcile and setup build only the active project's enabled set.** On a fresh setup with no active project, only claude + mcp-hub are built.
+- **Enabling an integration in a running project triggers a single-image build on demand** (`integrations_cmd::ensure_project_images_built` → `build::build_missing_images`), emitting `worker_image_build_status` events that drive a blocking modal in the Desktop UI (mirroring the plugin install overlay — ADR-047). A build failure rolls the just-enabled integration back to `enabled: false`; the prior containers keep running with their prior configuration.
+- **Project switch runs the same lazy build for the destination project** before `compose_up`, so switching to a project whose integrations weren't yet built shows the same overlay and never fails with `no such image`.
 - `images_exist(rt, integrations)` checks only images that should exist for the given set, so disabled integrations don't force a phantom rebuild at reconcile time.
+- After each reconcile, `prune_orphan_current_bundle_images` force-removes worker tags of the current bundle that are no longer in `enabled_images(active)` — cleans up after the user disables an integration without bumping the bundle.
 - Pruning is unchanged: `prune_old_bundle_images` still `rmi`s every catalogue tag for the old bundle id; `rmi` of an absent tag is a no-op.
 
 ### Image pruning on update
@@ -106,7 +108,7 @@ This two-step cleanup ensures the Lima VM diffdisk (50 GiB cap) has sufficient s
 
 Both update paths perform this pruning:
 
-- **Desktop** (`reconcile_bundle_update_inner` in `desktop/src-tauri/src/reconcile.rs`) — prunes before calling `build_enabled_images` for the per-project union
+- **Desktop** (`reconcile_bundle_update_inner` in `desktop/src-tauri/src/reconcile.rs`) — prunes before calling `build_enabled_images` for the active project's enabled set
 - **CLI** (`update_containers` in `crates/speedwave-runtime/src/update.rs`) — prunes before calling `build_images_for_bundle` for the current project's enabled set
 
 The guard condition is: `applied_bundle_id` exists **and** differs from the new bundle ID. Fresh installs (no `applied_bundle_id`) and rebuilds without a version change produce no prune call.
@@ -169,7 +171,7 @@ The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/
 
 ### Missing images (reconcile-time detection)
 
-At startup, `reconcile_bundle_update` verifies that the expected container images exist for the per-project union even when the bundle ID has not changed. If any of those images are missing (e.g. containerd was reinstalled), the reconcile forces a rebuild of the enabled set before setting `IMAGES_READY = Ready`. Disabled-integration images are intentionally absent under lazy builds (ADR-055) and don't trigger a rebuild.
+At startup, `reconcile_bundle_update` verifies that the expected container images exist for the active project even when the bundle ID has not changed. If any of those images are missing (e.g. containerd was reinstalled), the reconcile forces a rebuild of the active project's enabled set before setting `IMAGES_READY = Ready`. Disabled-integration images are intentionally absent under lazy builds (ADR-055) and don't trigger a rebuild.
 
 ## VM Lifecycle on Exit
 

@@ -101,19 +101,8 @@ pub trait ContainerRuntime: Send + Sync {
         Ok(())
     }
 
-    /// Remove container images by their full tags.
-    ///
-    /// `force = false` is the safe default: nerdctl `rmi` refuses to remove
-    /// an image that is still referenced by a running container, the error
-    /// is logged at warn level, and cleanup is left to the next prune cycle
-    /// once the container is gone. Used by the bundle-update flow.
-    ///
-    /// `force = true` (`nerdctl rmi --force`) removes the image even when a
-    /// running container still references it. Used by the explicit-uninstall
-    /// path (`speedwave plugin remove …` / Desktop "$ uninstall plugin")
-    /// because the user has already declared their intent to drop the plugin
-    /// and waiting for a future prune leaves stale layer cache that defeats
-    /// the next reinstall.
+    /// Remove image tags. `force=true` = `rmi --force` (used by
+    /// `prune_old_bundle_images` and plugin-uninstall).
     fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
         let _ = (tags, force);
         log::debug!("remove_images: not implemented for this runtime, skipping");

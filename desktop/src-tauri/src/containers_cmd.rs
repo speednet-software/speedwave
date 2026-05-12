@@ -515,7 +515,10 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
 /// because it skips image rebuilds and snapshot/rollback (images don't change
 /// between projects, and there's no previous "good" compose to roll back to).
 #[tauri::command]
-pub async fn recreate_project_containers(project: String) -> Result<(), String> {
+pub async fn recreate_project_containers(
+    app: tauri::AppHandle,
+    project: String,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
@@ -529,6 +532,15 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         }
         log::info!("recreate_project_containers: project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
+        rt.ensure_ready().map_err(|e| e.to_string())?;
+
+        // Lazy build for the destination project (ADR-055).
+        if let Err(sanitized) =
+            crate::integrations_cmd::ensure_project_images_built(&app, &*rt, &project)
+        {
+            log::error!("recreate_project_containers: image build failed: {sanitized}");
+            return Err(format!("Image build failed: {sanitized}"));
+        }
 
         // Stop old containers (ignore errors — they may not be running)
         let _ = rt.compose_down(&project);

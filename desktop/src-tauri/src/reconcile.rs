@@ -269,10 +269,22 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         bundle_changed,
     );
 
-    // Build/check the union across all registered projects — any of them could
-    // be auto-restored or switched to (see ADR on lazy worker-image builds).
-    let user_config_for_union = config::load_user_config().unwrap_or_default();
-    let union = crate::integrations_union::union_integrations(&user_config_for_union);
+    // Scope: active project only; project switch builds the rest on demand (ADR-055).
+    let user_config_for_active = config::load_user_config().unwrap_or_default();
+    let active_integrations = match user_config_for_active.active_project.as_deref() {
+        Some(name) => match user_config_for_active.find_project(name) {
+            Some(p) => config::resolve_integrations(
+                std::path::Path::new(&p.dir),
+                &user_config_for_active,
+                name,
+            ),
+            None => {
+                log::warn!("reconcile: active_project '{name}' not in config — building core only");
+                config::ResolvedIntegrationsConfig::default()
+            }
+        },
+        None => config::ResolvedIntegrationsConfig::default(),
+    };
 
     let rt = speedwave_runtime::runtime::detect_runtime();
 
@@ -286,7 +298,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
 
     // Even when bundle_id matches, verify images actually exist.
     // They may have been lost after containerd reinstall or VM recreation.
-    if !bundle_changed && runtime_ready && !build::images_exist(&*rt, &union) {
+    if !bundle_changed && runtime_ready && !build::images_exist(&*rt, &active_integrations) {
         log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
         bundle_changed = true;
     }
@@ -379,7 +391,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // Here we escalate: restart engine → retry build. Safe because we are in the
         // pre-restore phase — no containers are running yet (see ContainerRuntime
         // trait docs for restart_container_engine).
-        let enabled = build::enabled_images(&union);
+        let enabled = build::enabled_images(&active_integrations);
         match build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id, None) {
             Ok(_) => {}
             Err(e)
@@ -405,11 +417,16 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 return Err(set_bundle_error(&mut state, msg));
             }
         }
-        // Rebuild only plugin images enabled in any project (warn-only). Per-project
-        // enforcement in render_compose() still catches anything missed here.
-        let enabled_plugins: Vec<&str> = union.enabled_plugin_service_ids();
+        // Plugin images enabled in the active project (warn-only).
+        let enabled_plugins: Vec<&str> = active_integrations.enabled_plugin_service_ids();
         if let Err(e) = plugin::ensure_plugin_images(rt.as_ref(), &enabled_plugins) {
             log::warn!("reconcile_bundle: failed to rebuild some plugin images: {e}");
+        }
+        // Drop tags from this bundle that no longer belong to enabled set (warn-only).
+        if let Err(e) =
+            build::prune_orphan_current_bundle_images(rt.as_ref(), &manifest.bundle_id, &enabled)
+        {
+            log::warn!("reconcile_bundle: orphan-tag prune failed: {e}");
         }
 
         state.phase = bundle::BundleReconcilePhase::ImagesBuilt;

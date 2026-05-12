@@ -22,7 +22,6 @@ mod history;
 mod http_util;
 mod ide_bridge;
 mod integrations_cmd;
-mod integrations_union;
 mod llm_cmd;
 mod log_file;
 mod logging_cmd;
@@ -411,6 +410,7 @@ async fn switch_project(
     // Container transaction: wait for images → stop previous → recreate new
     let prev_clone = previous.clone();
     let new_clone = name.clone();
+    let app_for_switch = app.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = containers_cmd::ensure_images_ready() {
             return SwitchResult::Failed {
@@ -419,10 +419,16 @@ async fn switch_project(
             };
         }
         let rt = speedwave_runtime::runtime::detect_runtime();
+        let app_for_build = app_for_switch.clone();
         switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, rt| {
             check_project(proj)?;
+            // Lazy build for the destination project (ADR-055).
+            if let Err(sanitized) =
+                integrations_cmd::ensure_project_images_built(&app_for_build, rt, proj)
+            {
+                return Err(format!("Image build failed: {sanitized}"));
+            }
             // compose_down(prev) already handled by switch_project_core step 2.
-            // Here we only render the new compose and start containers.
             containers_cmd::render_and_save_compose(proj, rt)?;
             rt.compose_up_recreate(proj).map_err(|e| e.to_string())
         })

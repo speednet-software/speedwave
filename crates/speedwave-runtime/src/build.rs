@@ -445,17 +445,13 @@ fn platform_restart_hint() -> &'static str {
     }
 }
 
-/// Per-image build progress, surfaced to the on-demand build UI. No Tauri coupling.
+/// Per-image build progress for the on-demand build UI.
 #[derive(Clone, Debug)]
 pub struct BuildProgress {
-    /// Image repo name being built, e.g. `"speedwave-mcp-playwright"`.
     pub image_name: &'static str,
-    /// 1-based index within this build run.
     pub current: u32,
-    /// Total images in this build run.
     pub total: u32,
     pub phase: BuildPhase,
-    /// Set only when `phase` is `Failed`.
     pub error: Option<String>,
 }
 
@@ -467,8 +463,7 @@ pub enum BuildPhase {
     Failed,
 }
 
-/// Resolves the current bundle and builds [`enabled_images`] for `integrations`.
-/// Used by setup and reconcile (pass the union across projects there).
+/// Builds `enabled_images(integrations)` for the current bundle.
 pub fn build_enabled_images(
     runtime: &dyn ContainerRuntime,
     integrations: &ResolvedIntegrationsConfig,
@@ -482,9 +477,8 @@ pub fn build_enabled_images(
     )
 }
 
-/// Builds the subset of `images` not yet present for `bundle_id`, emitting
-/// per-image progress. Reuses [`build_images_for_bundle`], so snapshotter/transient
-/// retry still applies. Returns the number of images actually built (0 = all present).
+/// Builds the subset of `images` not yet present for `bundle_id`, with progress.
+/// Returns the count of images actually built (0 = all present).
 pub fn build_missing_images(
     runtime: &dyn ContainerRuntime,
     images: &[&ImageDef],
@@ -507,12 +501,7 @@ pub fn build_missing_images(
     Ok(missing.len() as u32)
 }
 
-/// Decide whether pruning a previous bundle's images is warranted.
-///
-/// Returns `Some(old_id)` only when the previously applied bundle exists and
-/// differs from the new one. Fresh installs (`applied` is `None`) and
-/// same-version rebuilds (`applied == new`) return `None`, so the caller
-/// skips `prune_old_bundle_images` entirely in those cases.
+/// `Some(old_id)` only when the applied bundle exists and differs from `new_bundle_id`.
 pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) -> Option<&'a str> {
     match applied {
         Some(old) if old != new_bundle_id => Some(old),
@@ -520,7 +509,30 @@ pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) ->
     }
 }
 
-/// Remove images from a previous bundle to reclaim disk space.
+/// Force-removes worker tags `<current_bundle_id>` that are no longer in `keep`.
+/// Cleans zombie images left when the user disables an integration without
+/// bumping the bundle.
+pub fn prune_orphan_current_bundle_images(
+    runtime: &dyn ContainerRuntime,
+    current_bundle_id: &str,
+    keep: &[&ImageDef],
+) -> anyhow::Result<()> {
+    let keep_names: std::collections::HashSet<&str> = keep.iter().map(|i| i.name).collect();
+    let stale: Vec<String> = IMAGES
+        .iter()
+        .filter(|img| !keep_names.contains(img.name))
+        .map(|img| image_ref(img.name, current_bundle_id))
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    log::info!("Pruning {} orphan tag(s) for current bundle", stale.len());
+    runtime.remove_images(&stale, true)?;
+    Ok(())
+}
+
+/// Force-removes the previous bundle's image tags. `--force` is required
+/// because stopped containers from the previous session block plain `rmi`.
 pub fn prune_old_bundle_images(
     runtime: &dyn ContainerRuntime,
     old_bundle_id: &str,
@@ -536,7 +548,7 @@ pub fn prune_old_bundle_images(
         "Pruning {} images from old bundle {old_bundle_id}",
         tags.len()
     );
-    runtime.remove_images(&tags, false)?;
+    runtime.remove_images(&tags, true)?;
 
     log::info!("Pruning BuildKit cache");
     if let Err(e) = runtime.prune_buildkit_cache() {
@@ -545,18 +557,8 @@ pub fn prune_old_bundle_images(
     Ok(())
 }
 
-/// Builds `images` for `bundle_id` from their Containerfiles. `claude` + `mcp-hub`
-/// must always be in the slice — see [`enabled_images`].
-///
-/// Calls `runtime.prepare_build_context()` to translate the host build-root into
-/// a path accessible by the container engine. On a containerd snapshotter error
-/// ("failed to rename: file exists"), prunes and retries once, returning
-/// `SnapshotterRecoveryFailed` if that also fails (containerd#11719, nerdctl#3420).
-/// Transient errors get backed-off retries. `progress`, when set, is invoked
-/// per image; the slice is rebuilt on each retry, so callers see repeated
-/// `ImageStarted` events.
-///
-/// Returns the number of images successfully built.
+/// Builds `images` for `bundle_id`. Snapshotter/transient errors retry
+/// internally (see `is_snapshotter_error` / `is_transient_build_error`).
 pub fn build_images_for_bundle(
     runtime: &dyn ContainerRuntime,
     images: &[&ImageDef],
@@ -2748,6 +2750,34 @@ mod tests {
         let rt = PruneMockRuntime::new();
         prune_old_bundle_images(&rt, "same123").unwrap();
         assert_eq!(rt.removed_tags.lock().unwrap().len(), IMAGES.len());
+    }
+
+    #[test]
+    fn test_prune_orphan_current_bundle_keeps_enabled_only() {
+        let cfg = ResolvedIntegrationsConfig {
+            slack: true,
+            ..ResolvedIntegrationsConfig::default()
+        };
+        let keep = enabled_images(&cfg);
+        let rt = PruneMockRuntime::new();
+        prune_orphan_current_bundle_images(&rt, "cur123", &keep).unwrap();
+        let removed = rt.removed_tags.lock().unwrap().clone();
+        // Removed = IMAGES \ {claude, mcp-hub, mcp-slack} = 6 tags.
+        assert_eq!(removed.len(), IMAGES.len() - keep.len());
+        for tag in &removed {
+            assert!(tag.ends_with(":cur123"));
+            assert!(!tag.contains("claude"));
+            assert!(!tag.contains("mcp-hub"));
+            assert!(!tag.contains("mcp-slack"));
+        }
+    }
+
+    #[test]
+    fn test_prune_orphan_current_bundle_noop_when_all_kept() {
+        let keep: Vec<&ImageDef> = IMAGES.iter().collect();
+        let rt = PruneMockRuntime::new();
+        prune_orphan_current_bundle_images(&rt, "cur123", &keep).unwrap();
+        assert!(rt.removed_tags.lock().unwrap().is_empty());
     }
 
     #[test]
