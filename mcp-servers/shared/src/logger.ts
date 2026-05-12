@@ -4,16 +4,12 @@
  */
 
 /**
- * Returns current timestamp in [HH:MM:SS] format for logs.
- * Uses local time for readability in Lumadock.
+ * Returns `[<ISO 8601, UTC>]` for log-line prefixes. TS SSOT; the Rust
+ * counterpart is `speedwave-runtime`'s `log_ts::log_timestamp()`.
  * @example
  * console.log(`${ts()} 🔧 Tool registered: ${tool.name}`);
- * // Output: [10:30:45] 🔧 Tool registered: get_tree
+ * // Output: [2026-05-12T14:34:02.814Z] 🔧 Tool registered: get_tree
  */
 export function ts(): string {
-  const now = new Date();
-  const hh = String(now.getHours()).padStart(2, '0');
-  const mm = String(now.getMinutes()).padStart(2, '0');
-  const ss = String(now.getSeconds()).padStart(2, '0');
-  return `[${hh}:${mm}:${ss}]`;
+  return `[${new Date().toISOString()}]`;
 }
