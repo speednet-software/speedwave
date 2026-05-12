@@ -101,6 +101,13 @@ describe('readDocumentToMarkdown — spreadsheets (SheetJS)', () => {
     // `\|` in the cell → `\\` (escaped backslash) then `\|` (escaped pipe) → `\\\|`.
     expect(r.content).toContain('| a\\\\\\|b |');
   });
+
+  it('collapses newlines inside a cell so the table row stays intact', async () => {
+    fileBytes['/workspace/nl.csv'] = Buffer.from('"line1\nline2",b\n');
+    const r = await readDocumentToMarkdown('nl.csv');
+    expect(r.content).toContain('| line1 line2 | b |');
+    expect(r.content).not.toContain('line1\nline2');
+  });
 });
 
 describe('readDocumentToMarkdown — markitdown chain', () => {
