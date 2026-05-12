@@ -146,3 +146,15 @@ export interface DownloadProgress {
   downloaded_bytes: number;
   total_bytes: number | null;
 }
+
+/**
+ * Meeting-transcription preferences (top-level user config, ADR-056 §13 —
+ * repo `.speedwave.json` cannot set these). All fields optional; `null`/absent
+ * means "use the default".
+ */
+export interface TranscriptionConfig {
+  enabled: boolean | null;
+  default_live_model: string | null;
+  default_language: Language | null;
+  keep_audio_after_finalize: boolean | null;
+}

@@ -1537,6 +1537,8 @@ fn main() {
             // Meeting transcription (ADR-056)
             transcription_cmd::transcription_enabled,
             transcription_cmd::set_transcription_enabled,
+            transcription_cmd::get_transcription_config,
+            transcription_cmd::set_transcription_config,
             transcription_cmd::transcription_capabilities,
             transcription_cmd::list_audio_sources,
             transcription_cmd::start_transcription,

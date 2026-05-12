@@ -13,6 +13,7 @@ import type {
   StartAck,
   SubscribeAck,
   TranscriptEvent,
+  TranscriptionConfig,
   TranscriptSession,
 } from '../models/transcript';
 import { ChatStateService } from './chat-state.service';
@@ -59,6 +60,19 @@ export class TranscriptionService {
    */
   setEnabled(enabled: boolean): Promise<void> {
     return this.tauri.invoke<void>('set_transcription_enabled', { enabled });
+  }
+
+  /** Reads the full meeting-transcription preferences block. */
+  getConfig(): Promise<TranscriptionConfig> {
+    return this.tauri.invoke<TranscriptionConfig>('get_transcription_config');
+  }
+
+  /**
+   * Persists the full meeting-transcription preferences block (whole replace).
+   * @param config - the new preferences.
+   */
+  setConfig(config: TranscriptionConfig): Promise<void> {
+    return this.tauri.invoke<void>('set_transcription_config', { config });
   }
 
   /** Capture capabilities + compiled whisper.cpp backends for this build. */
@@ -208,6 +222,16 @@ export class TranscriptionService {
    */
   deleteModel(modelId: string): Promise<void> {
     return this.tauri.invoke<void>('delete_transcription_model', { modelId });
+  }
+
+  /** Opens the macOS System Settings → Privacy → Microphone pane (no-op elsewhere). */
+  openMicrophonePrivacyPane(): Promise<void> {
+    return this.tauri.invoke<void>('open_microphone_pane');
+  }
+
+  /** Opens the macOS System Settings → Privacy → Audio Recording pane (no-op elsewhere). */
+  openAudioCapturePrivacyPane(): Promise<void> {
+    return this.tauri.invoke<void>('open_audio_capture_pane');
   }
 
   /**

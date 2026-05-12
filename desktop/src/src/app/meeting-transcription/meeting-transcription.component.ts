@@ -1,19 +1,38 @@
-import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  OnDestroy,
+  OnInit,
+  ViewChild,
+  computed,
+  inject,
+  signal,
+} from '@angular/core';
 import { Router } from '@angular/router';
 
 import { TranscriptionService } from '../services/transcription.service';
 import type { TranscriptSession } from '../models/transcript';
+import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
+import { LiveTranscriptComponent } from './live-transcript/live-transcript.component';
+import { SessionListComponent } from './session-list/session-list.component';
+import { ModelManagerComponent } from './model-manager/model-manager.component';
 
 /**
  * Meeting transcription tab — opt-in (the empty-state links to Settings until
- * the user toggles it on). Phase 2 MVP: shell + empty-state + the session list.
- * Recording controls, the live transcript view, and the model manager land as
- * child components in later iterations.
+ * the user toggles it on). When enabled: left pane = recordings + model
+ * manager; right pane = recording controls + the live transcript. Audio is
+ * transcribed locally; model downloads and "Send to Claude" use the network —
+ * the banner says so.
  */
 @Component({
   selector: 'app-meeting-transcription',
   standalone: true,
-  imports: [],
+  imports: [
+    RecordingControlsComponent,
+    LiveTranscriptComponent,
+    SessionListComponent,
+    ModelManagerComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="flex h-full flex-1 flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
@@ -21,7 +40,8 @@ import type { TranscriptSession } from '../models/transcript';
         <div>
           <h1 class="text-lg font-semibold">Meeting transcription</h1>
           <p class="text-sm text-[var(--ink-mute)]">
-            Audio is transcribed locally. Model downloads and "Send to Claude" use the network.
+            Audio is transcribed locally on this machine. Model downloads and "Send to Claude" use
+            the network.
           </p>
         </div>
       </header>
@@ -35,38 +55,48 @@ import type { TranscriptSession } from '../models/transcript';
           <button
             type="button"
             class="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--bg)] hover:opacity-90"
+            data-testid="enable-in-settings"
             (click)="goToSettings()"
           >
             Enable in Settings →
           </button>
         </div>
-      } @else {
-        <div class="flex flex-1 gap-4 overflow-hidden p-6">
-          <aside class="w-72 shrink-0 overflow-y-auto border-r border-[var(--line)] pr-4">
-            <h2 class="mb-3 text-sm font-semibold uppercase text-[var(--ink-mute)]">
-              Sessions ({{ sessions().length }})
-            </h2>
-            @if (sessions().length === 0) {
-              <p class="text-sm text-[var(--ink-mute)]">No recordings yet.</p>
+      } @else if (enabled() === true) {
+        @if (error()) {
+          <div
+            class="mx-6 mt-3 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300"
+            role="alert"
+            data-testid="meeting-transcription-error"
+          >
+            {{ error() }}
+            @if (showOpenSettingsLink()) {
+              <button
+                type="button"
+                class="mono ml-2 underline"
+                data-testid="open-mic-settings"
+                (click)="openMicrophoneSettings()"
+              >
+                Open Privacy settings →
+              </button>
             }
-            <ul class="space-y-2">
-              @for (s of sessions(); track s.id) {
-                <li class="rounded-md border border-[var(--line)] p-3 text-sm">
-                  <div class="font-medium">{{ s.created_at }}</div>
-                  <div class="text-xs text-[var(--ink-mute)]">
-                    {{ s.language }} · {{ statusLabel(s) }} · {{ s.live_segments.length }} segments
-                  </div>
-                </li>
-              }
-            </ul>
+          </div>
+        }
+        <div class="flex flex-1 gap-4 overflow-hidden p-6">
+          <aside class="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
+            <app-session-list (opened)="onOpenSession($event)" (errorOccurred)="onError($event)" />
+            <app-model-manager (errorOccurred)="onError($event)" />
           </aside>
-          <main class="flex flex-1 flex-col items-center justify-center gap-2 text-center">
-            <p class="text-sm text-[var(--ink-mute)]">
-              Recording controls and the live transcript view land in the next iteration.
-            </p>
-            <p class="text-xs text-[var(--ink-mute)]">
-              Phase 2 backend (16 Tauri commands) is wired and reachable from this tab's service.
-            </p>
+          <main class="flex flex-1 flex-col gap-4 overflow-hidden">
+            <app-recording-controls
+              (started)="onStarted($event)"
+              (stopped)="onStopped($event)"
+              (errorOccurred)="onError($event)"
+            />
+            <div
+              class="flex-1 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--bg-1)] p-3"
+            >
+              <app-live-transcript [session]="active()" (errorOccurred)="onError($event)" />
+            </div>
           </main>
         </div>
       }
@@ -74,40 +104,92 @@ import type { TranscriptSession } from '../models/transcript';
   `,
   host: { class: 'flex h-full flex-1' },
 })
-export class MeetingTranscriptionComponent implements OnInit {
-  private readonly transcription = inject(TranscriptionService);
-  private readonly router = inject(Router);
+export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
+  /** Left pane's recordings list (refreshed after start/stop/delete). */
+  @ViewChild(SessionListComponent) private sessionList?: SessionListComponent;
 
   /** `null` while loading, `true`/`false` once the toggle is known. */
   readonly enabled = signal<boolean | null>(null);
-  /** Recorded sessions on disk (populated once the toggle is on). */
-  readonly sessions = signal<TranscriptSession[]>([]);
+  /** Latest error string (rendered in a banner). */
+  readonly error = signal('');
 
-  /** Loads the toggle + (if on) the session list. */
+  private readonly transcription = inject(TranscriptionService);
+  private readonly router = inject(Router);
+
+  /** The active session (live snapshot from the service). */
+  readonly active = computed<TranscriptSession | null>(() => this.transcription.active());
+  /** Whether the current error looks like a macOS permission denial. */
+  readonly showOpenSettingsLink = computed(() => {
+    const e = this.error().toLowerCase();
+    return e.includes('permission') || e.includes('privacy') || e.includes('microphone');
+  });
+
+  /** Loads the opt-in toggle on first paint. */
   async ngOnInit(): Promise<void> {
     try {
-      const on = await this.transcription.isEnabled();
-      this.enabled.set(on);
-      if (on) {
-        this.sessions.set(await this.transcription.list());
-      }
+      this.enabled.set(await this.transcription.isEnabled());
     } catch (err) {
       console.warn('meeting-transcription init failed:', err);
-      // Fall back to the empty state if we can't reach the backend.
       this.enabled.set(false);
     }
   }
 
-  /** Sends the user to Settings (where Phase 3 puts the toggle). */
+  /** Detaches the live-stream listener when the tab is destroyed. */
+  async ngOnDestroy(): Promise<void> {
+    await this.transcription.detach();
+  }
+
+  /** Navigates to Settings (where the opt-in toggle lives). */
   goToSettings(): void {
     void this.router.navigateByUrl('/settings');
   }
 
   /**
-   * Short status label for the session list.
-   * @param s - the session to summarise.
+   * Records an error in the banner.
+   * @param msg - the error message.
    */
-  statusLabel(s: TranscriptSession): string {
-    return s.status.state;
+  onError(msg: string): void {
+    this.error.set(msg);
+  }
+
+  /**
+   * Opens a session in the right pane (subscribes to its live stream).
+   * @param s - the session.
+   */
+  async onOpenSession(s: TranscriptSession): Promise<void> {
+    this.error.set('');
+    try {
+      await this.transcription.subscribeToTranscript(s.id);
+    } catch (err: unknown) {
+      this.error.set(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /**
+   * After recording starts: the controls already subscribed via `startRecording`,
+   * so we just clear the banner and refresh the recordings list.
+   * @param _sessionId - the new session id (unused — the controls own the stream).
+   */
+  onStarted(_sessionId: string): void {
+    this.error.set('');
+    void this.sessionList?.refresh();
+  }
+
+  /**
+   * After recording stops: refresh the list (status moved to Finalizing/Done).
+   * @param _sessionId - the stopped session id (unused — the offline pass is server-side).
+   */
+  onStopped(_sessionId: string): void {
+    void this.sessionList?.refresh();
+  }
+
+  /** Deep-links to the macOS Microphone / Audio Recording privacy panes. */
+  async openMicrophoneSettings(): Promise<void> {
+    try {
+      await this.transcription.openMicrophonePrivacyPane();
+      await this.transcription.openAudioCapturePrivacyPane();
+    } catch (err) {
+      console.warn('open privacy pane failed:', err);
+    }
   }
 }

@@ -65,6 +65,24 @@ pub async fn set_transcription_enabled(enabled: bool) -> Result<(), String> {
     speedwave_runtime::config::save_user_config(&cfg).map_err(|e| e.to_string())
 }
 
+/// Returns the full meeting-transcription preferences block (defaults if unset).
+#[tauri::command]
+pub async fn get_transcription_config(
+) -> Result<speedwave_runtime::config::TranscriptionConfig, String> {
+    let cfg = speedwave_runtime::config::load_user_config().map_err(|e| e.to_string())?;
+    Ok(cfg.transcription.unwrap_or_default())
+}
+
+/// Persists the meeting-transcription preferences block (whole replace).
+#[tauri::command]
+pub async fn set_transcription_config(
+    config: speedwave_runtime::config::TranscriptionConfig,
+) -> Result<(), String> {
+    let mut cfg = speedwave_runtime::config::load_user_config().map_err(|e| e.to_string())?;
+    cfg.transcription = Some(config);
+    speedwave_runtime::config::save_user_config(&cfg).map_err(|e| e.to_string())
+}
+
 // ---- 2) capability + source listing ---------------------------------------
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
