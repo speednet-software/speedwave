@@ -3,8 +3,8 @@
 //!
 //! Bumping a model = editing one const here. Nothing else hard-codes a model
 //! filename, URL, or hash. Mirrors the `defaults::ANTHROPIC_MODELS` pattern:
-//! the frontend reads this via a Tauri command (Phase 2's
-//! `list_transcription_models`) rather than hard-coding model names.
+//! the frontend reads this via the `list_transcription_models` Tauri command
+//! rather than hard-coding model names.
 //!
 //! URLs, sizes, and SHA256 values were established in ADR-056 spike 0C:
 //! - Whisper GGML models come from `ggerganov/whisper.cpp` on Hugging Face

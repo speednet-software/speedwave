@@ -1,13 +1,12 @@
 //! The `AudioCapture` trait and its `FileAudioCapture` test/dev implementation.
 //!
-//! `AudioCapture` is the seam between the three OS-specific capture backends
-//! (Windows WASAPI loopback, macOS CoreAudio process taps, Linux `pw-record`/
-//! `parec` — added in Phase 4) and the rest of the engine — the same shape as
-//! `ContainerRuntime` → `LimaRuntime`/`NerdctlRuntime`/`WslRuntime`. Phase 1a
-//! ships only `FileAudioCapture`, which "plays back" a 16 kHz mono WAV in fixed
-//! chunks so the orchestration (the transcriber, the diarizer, the driver) can
-//! be exercised without any real device — and which doubles as the dev
-//! affordance ("transcribe a WAV file") before live capture exists.
+//! `AudioCapture` is the seam between the OS-specific capture backends (Windows
+//! WASAPI loopback, macOS CoreAudio process taps, Linux `pw-record`/`parec`) and
+//! the rest of the engine — the same shape as `ContainerRuntime` →
+//! `LimaRuntime`/`NerdctlRuntime`/`WslRuntime`. `FileAudioCapture` "plays back" a
+//! 16 kHz mono WAV in fixed chunks so the orchestration (the transcriber, the
+//! diarizer, the driver) can be exercised without a real device — and doubles as
+//! the dev affordance ("transcribe a WAV file").
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -164,7 +163,7 @@ pub trait AudioStream: Send {
 }
 
 /// A host audio-capture backend. Resolved per-OS at runtime (the same pattern
-/// as `ContainerRuntime`); Phase 1a's only implementor is `FileAudioCapture`.
+/// as `ContainerRuntime`); `FileAudioCapture` is the dev/test implementor.
 pub trait AudioCapture: Send + Sync {
     /// What this backend can do on this host.
     fn capabilities(&self) -> CaptureCapabilities;

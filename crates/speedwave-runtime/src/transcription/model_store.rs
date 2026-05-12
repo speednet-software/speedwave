@@ -1,5 +1,5 @@
 //! On-demand download + verification + caching of the Whisper and diarization
-//! models (ADR-056, Phase 1b).
+//! models (ADR-056).
 //!
 //! Models live under `<data_dir>/models/whisper/` and `<data_dir>/models/diarization/`
 //! (perms `0o700`, files `0o600` — they aren't secrets, but neither are they

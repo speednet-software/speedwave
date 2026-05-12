@@ -121,7 +121,7 @@ impl TranscriptSession {
         if trimmed.is_empty() {
             self.speaker_names.remove(&speaker);
         } else {
-            // Cap label length defensively — matches the Tauri command's cap (Phase 2).
+            // Cap label length defensively — matches the Tauri command's cap.
             let capped: String = trimmed.chars().take(64).collect();
             self.speaker_names.insert(speaker, capped);
         }

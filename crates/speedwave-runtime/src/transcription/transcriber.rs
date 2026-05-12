@@ -126,7 +126,7 @@ pub trait Transcriber: Send {
 
     /// Decode the current live window. Default = `transcribe(window)`;
     /// `WhisperCppTranscriber` uses the same (the window policy lives in the
-    /// driver, Phase 1d).
+    /// driver).
     fn feed(
         &mut self,
         pcm_window: &[f32],

@@ -1,4 +1,4 @@
-//! Tauri commands for the meeting-transcription feature (ADR-056 Phase 2).
+//! Tauri commands for the meeting-transcription feature (ADR-056).
 //!
 //! Thin layer over `speedwave_runtime::transcription`: stores live in Tauri
 //! managed state; events forwarded via per-session `transcript_event::<id>`
@@ -598,7 +598,7 @@ pub async fn discard_transcript_audio(
     store: tauri::State<'_, TranscriptStoreHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    // Pull, mutate locally, save. (Driver isn't running here in Phase 2.)
+    // Pull, mutate locally, save (no driver runs while discarding a finished session's audio).
     let mut s = store.get(id).map_err(|e| e.to_string())?;
     s.discard_audio().map_err(|e| e.to_string())?;
     let dir = store.session_dir(id);

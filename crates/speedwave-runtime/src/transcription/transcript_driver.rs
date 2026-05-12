@@ -248,7 +248,7 @@ impl TranscriptDriver {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5: higher-quality offline pass
+// Higher-quality offline pass (runs after stop, on the recorded WAV)
 // ---------------------------------------------------------------------------
 
 /// Inputs for the offline finalize pass — built by the caller (Tauri layer)
@@ -646,7 +646,7 @@ mod tests {
             "expected ~20 s of frames, got {frames}"
         );
 
-        // The session is now in Finalizing (hand-off to Phase 5).
+        // The session is now in Finalizing (hand-off to the offline pass).
         let snap = store.get(id).unwrap();
         assert!(matches!(snap.status, TranscriptStatus::Finalizing { .. }));
         // And we got some live segments.
@@ -819,7 +819,7 @@ mod tests {
         assert!(s.is_stopped(), "stop() should be visible across clones");
     }
 
-    // --- Phase 5: offline finalize pass ------------------------------------
+    // --- offline finalize pass ---------------------------------------------
 
     use crate::transcription::diarizer::SpeakerTurn;
     use crate::transcription::transcriber::SpeakerId;

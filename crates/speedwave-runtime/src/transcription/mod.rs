@@ -109,7 +109,8 @@ impl TranscriptionEngine {
         self.capture.enumerate_sources()
     }
 
-    /// Starts capturing `source`. (Phase 1d wires this into a `TranscriptDriver`.)
+    /// Starts capturing `source`; the returned stream is what `TranscriptDriver`
+    /// pumps.
     pub fn start_capture(&self, source: AudioSource) -> Result<Box<dyn AudioStream>, CaptureError> {
         self.capture.start(source)
     }
