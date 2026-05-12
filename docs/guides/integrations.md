@@ -93,6 +93,12 @@ Each MCP integration requires specific credentials to function. Fields marked as
 | Office      | _(none — no credentials required)_                              | —                                                                      |
 | Playwright  | _(none — no credentials required)_                              | —                                                                      |
 
+### Enabling an integration — first build on demand
+
+When you toggle an integration on for the first time in a project, Speedwave builds its worker container image on demand (ADR-057). The build is part of the "Restarting containers…" wait. First builds of heavy images (e.g. `playwright`, which pulls Chromium; `office`, which pulls LibreOffice + a Python venv) noticeably extend that wait; subsequent toggles are near-instant because the build is cached.
+
+If the build fails (network, disk), the integration row reverts to disabled — your running containers keep their prior configuration. Disabling an integration drops its worker image; re-enabling rebuilds.
+
 ### GitHub — Code Hosting
 
 The GitHub integration is a built-in MCP worker that talks to **GitHub.com** through the official Octokit REST client. It is the GitHub-side counterpart to the GitLab worker — repositories, pull requests, branches, commits, GitHub Actions, issues, labels, tags, and releases.

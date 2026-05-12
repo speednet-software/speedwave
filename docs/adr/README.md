@@ -61,6 +61,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-052](ADR-052-anthropic-oauth-login-flow.md)                       | Claude Code Login Surface + Clipboard Bridge                                             | Accepted              |
 | [ADR-053](ADR-053-worker-implementation-own-vs-wrap-official-mcp.md)   | Worker Implementation — Own Thin Worker vs Wrapping an Official MCP Server               | Accepted              |
 | [ADR-055](ADR-055-built-in-office-document-worker.md)                  | Built-in `office` MCP Worker — Word/Excel/PowerPoint/PDF Read · Write · Convert · Charts | Accepted              |
+| [ADR-057](ADR-057-lazy-build-of-enabled-worker-images.md)              | Lazy Build of Enabled Worker Container Images                                            | Accepted              |
 | [ADR-058](ADR-058-beta-features-toggle.md)                             | Beta Features Toggle in the Tray Menu                                                    | Accepted              |
 
 ## Creating a New ADR
