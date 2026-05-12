@@ -68,86 +68,43 @@ impl OsIntegrationsConfig {
     }
 }
 
-/// One named parameter a `host_exec` recipe may accept from Claude, substituted
-/// into a fixed position in the recipe's `args`. The `pattern`'s *semantics*
-/// (compilation, full-match against the supplied value) are checked in the
-/// `host_exec` worker in JavaScript `RegExp` — Rust only sanity-checks the
-/// `pattern` string length and the `max_len` ceiling (ADR-054).
-///
-/// Serialised `camelCase` (`maxLen`) so the on-disk JSON — both the user
-/// config (`~/.speedwave/config.json`, which is camelCase throughout) and the
-/// per-project worker snapshot (`<data_dir>/host-exec/<project>/config.json`,
-/// read by the TypeScript worker which expects `maxLen`) — uses one casing.
+/// One named parameter a recipe accepts from Claude. Regex semantics live in
+/// the JS worker; Rust only sanity-checks shape (ADR-054).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct HostExecParam {
-    /// Parameter name — `snake_case`, unique within the recipe; the `{name}`
-    /// token in `args` that this entry defines.
+    /// Parameter name — `snake_case`, unique within the recipe.
     pub name: String,
-    /// Regex the supplied value must fully match (the worker anchors it as
-    /// `^(?:…)$`). Must be a non-empty string ≤ `HOST_EXEC_PARAM_PATTERN_MAX_LEN`
-    /// chars with no NUL/newline; the worker rejects a value that fails to
-    /// match (MCP tool error).
+    /// Regex the worker anchors as `^(?:…)$`; non-empty, length-bounded.
     pub pattern: String,
-    /// Optional upper bound on the supplied value's length (≤
-    /// `HOST_EXEC_PARAM_MAX_LEN`). If omitted, `HOST_EXEC_PARAM_MAX_LEN`
-    /// applies. Serialised as `maxLen`.
+    /// Optional upper bound on value length (≤ `HOST_EXEC_PARAM_MAX_LEN`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_len: Option<usize>,
 }
 
-/// One whitelisted command a `host_exec` worker may run on the host, in the
-/// project directory. Exposed to Claude as the MCP tool `host_exec.<name>()`.
-/// See ADR-054 for the full validation rules.
-///
-/// Serialised `camelCase` (`cwdSub`) — see [`HostExecParam`] for why (the user
-/// config and the TypeScript worker snapshot both use camelCase).
+/// One whitelisted command. Exposed to Claude as `host_exec.<name>()` (ADR-054).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct HostExecRecipe {
-    /// Recipe name — `^[a-z][a-z0-9_]{0,63}$` (snake_case, so the hub's
-    /// `toCamelCase` bridge exposes it as a valid JS identifier
-    /// `host_exec.<camelCase(name)>()`); unique across the whitelist.
+    /// Recipe name — `^[a-z][a-z0-9_]{0,63}$`, unique across the whitelist.
     pub name: String,
-    /// The executable to run — checked on its basename against
-    /// `HOST_EXEC_SHELL_LAUNCHERS` (rejected if it matches) and against
-    /// `HOST_EXEC_META_TOOLS` (in combination with a bare-parameter `arg`).
-    /// A relative path (`./gradlew`, `npm`, `docker`) resolves against the
-    /// project directory or `PATH`; an absolute path is allowed but flagged in
-    /// the UI. No `..`, NUL, `=`, or newlines.
+    /// Executable. Basename checked against ban lists; relative resolves on `PATH`.
     pub exec: String,
-    /// Fixed argument list — literals plus `{name}` parameter tokens
-    /// substituted into fixed positions (each substitution becomes one argv
-    /// element, never re-split). No "pass the rest through", no splatting.
-    /// Every `{name}` must have a matching `params` entry.
+    /// Fixed argv — literals plus `{name}` tokens (one element per substitution).
     #[serde(default)]
     pub args: Vec<String>,
-    /// Optional subdirectory inside the project directory to run in (monorepo
-    /// support). Relative, no `..`, no absolute path, no NUL; the worker
-    /// canonicalises `projectDir/cwdSub` and asserts it stays under the
-    /// project root with no symlink escape. Serialised as `cwdSub`.
+    /// Optional subdirectory inside the project dir; worker canonicalises and pins to root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd_sub: Option<String>,
-    /// Named parameters this recipe accepts from Claude. A `{name}` in `args`
-    /// without a matching entry here is rejected.
+    /// Named parameters Claude supplies; every `{name}` token needs a match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Vec<HostExecParam>>,
-    /// Literal environment variables for the recipe (no Claude-supplied
-    /// values). Keys must not be in `consts::RESERVED_ENV_KEYS`
-    /// (case-insensitive). May contain secrets — hence the per-project config
-    /// snapshot is written `0o600` and the host log redacts these values
-    /// (ADR-054).
+    /// Literal env vars (no Claude values); reserved keys rejected. May hold secrets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
 }
 
-/// Per-project `host_exec` configuration. **User-config only** — the repo
-/// `.speedwave.json` layer ignores this (an executable command whitelist is a
-/// security-class field, like `provider`/`base_url`; see
-/// `apply_integrations_layer` and ADR-054). The whitelist starts empty;
-/// `host_exec` with no `commands` means Claude can run nothing. `commands` is
-/// a list (not a map) so a duplicate `name` is detectable at validation —
-/// a JSON object would silently overwrite the dup.
+/// Per-project `host_exec` config. User-config only (ADR-054).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct HostExecConfig {
     pub enabled: Option<bool>,
@@ -165,8 +122,7 @@ pub struct IntegrationsConfig {
     pub atlassian: Option<IntegrationConfig>,
     pub playwright: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
-    /// Per-project `host_exec` whitelist (ADR-054). **User-config only** — the
-    /// repo `.speedwave.json` layer ignores it (see `apply_integrations_layer`).
+    /// Per-project `host_exec` whitelist (ADR-054). User-config only.
     #[serde(default, rename = "hostExec", skip_serializing_if = "Option::is_none")]
     pub host_exec: Option<HostExecConfig>,
     #[serde(default)]
@@ -203,20 +159,13 @@ impl IntegrationsConfig {
         );
     }
 
-    /// Set the `host_exec.enabled` flag for this project, preserving any
-    /// existing `commands`. Used by the Desktop `set_host_exec_enabled`
-    /// command (the danger-modal gate is enforced frontend-side; this just
-    /// persists). Caller is responsible for spawning/tearing down the worker
-    /// and re-rendering compose.
+    /// Set the `host_exec.enabled` flag. Caller handles worker + compose.
     pub fn set_host_exec_enabled(&mut self, enabled: bool) {
         let cfg = self.host_exec.get_or_insert_with(HostExecConfig::default);
         cfg.enabled = Some(enabled);
     }
 
-    /// Replace the `host_exec.commands` whitelist for this project, preserving
-    /// the `enabled` flag. The caller MUST have validated `commands` via
-    /// `host_exec::validate_host_exec_config` first (the Desktop
-    /// `host_exec_save_settings` command does).
+    /// Replace the whitelist. Caller must have validated via `validate_host_exec_config`.
     pub fn set_host_exec_commands(&mut self, commands: Vec<HostExecRecipe>) {
         let cfg = self.host_exec.get_or_insert_with(HostExecConfig::default);
         cfg.commands = commands;
@@ -236,15 +185,9 @@ pub struct ResolvedIntegrationsConfig {
     pub os_calendar: bool,
     pub os_mail: bool,
     pub os_notes: bool,
-    /// Whether the per-project `host_exec` worker is enabled for this project.
-    /// Resolved from the **user config only** — the repo `.speedwave.json`
-    /// layer never sets it (ADR-054).
+    /// `host_exec` enabled flag — user-config only (ADR-054).
     pub host_exec: bool,
-    /// The resolved `host_exec` whitelist for this project (from the user
-    /// config only). Empty unless the user has added recipes. The
-    /// authoritative copy the worker reads is the on-disk snapshot
-    /// (`<data_dir>/host-exec/<project>/config.json`); this is the in-memory
-    /// view for the Desktop UI / compose rendering.
+    /// Resolved whitelist (user-config only). On-disk snapshot is the authoritative copy.
     pub host_exec_commands: Vec<HostExecRecipe>,
     pub plugins: HashMap<String, bool>,
 }
@@ -447,12 +390,7 @@ pub fn resolve_integrations(
     resolve_project_config(project_dir, user_config, project_name).1
 }
 
-/// Builds the JSON snapshot the per-project `host_exec` worker reads from
-/// `<data_dir>/host-exec/<project>/config.json` — `{ projectDir, commands }`.
-/// `commands` MUST already be validated (`host_exec::validate_host_exec_config`);
-/// the worker trusts the snapshot. The Tauri side writes this file with
-/// `0o600` (it may contain recipe `env` values, possibly secrets — ADR-054)
-/// whenever the whitelist changes, then respawns the worker.
+/// Builds `{ projectDir, commands }` for the worker snapshot. Caller must validate.
 pub fn host_exec_config_snapshot(
     project_dir: &Path,
     commands: &[HostExecRecipe],
@@ -471,11 +409,8 @@ fn apply_toggle(target: &mut bool, source: &Option<IntegrationConfig>) {
     }
 }
 
-/// Applies one integrations layer onto `result`. `from_repo` is `true` for the
-/// `.speedwave.json` layer and `false` for the user-config layer; it gates the
-/// security-class fields the repo must never set — currently `host_exec` (an
-/// executable command whitelist; the same precedent as `merge_llm_repo`
-/// ignoring `provider`/`base_url` from the repo — ADR-040, ADR-054).
+/// Applies one integrations layer. `from_repo=true` skips security-class fields
+/// (currently `host_exec`; mirrors `merge_llm_repo`'s `provider`/`base_url` rule).
 fn apply_integrations_layer(
     result: &mut ResolvedIntegrationsConfig,
     layer: &IntegrationsConfig,
@@ -494,18 +429,13 @@ fn apply_integrations_layer(
         apply_toggle(&mut result.os_mail, &os.mail);
         apply_toggle(&mut result.os_notes, &os.notes);
     }
-    // `host_exec` is user-config only — a repo-supplied whitelist is ignored
-    // entirely (an executable command whitelist run on the host is a
-    // security-class field; ADR-054). The Desktop UI is the only way it gets
-    // set.
+    // `host_exec` is user-config only — repo layer ignored (ADR-054).
     if !from_repo {
         if let Some(ref he) = layer.host_exec {
             if let Some(enabled) = he.enabled {
                 result.host_exec = enabled;
             }
-            // The user layer is the highest-priority source; replace wholesale
-            // (there is no meaningful "merge two whitelists" — the later layer
-            // wins, and only the user layer ever provides one).
+            // User layer wins wholesale — no whitelist merging.
             result.host_exec_commands = he.commands.clone();
         }
     }

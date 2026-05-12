@@ -1,49 +1,16 @@
 /**
- * Models for the `host_exec` integration — the per-project host-side worker
- * that runs a user-whitelisted set of project-toolchain commands (build / test
- * / lint, `docker compose`, …) on the host machine, in the project directory,
- * behind the per-project MCP hub (ADR-054, SPW-83).
- *
- * `host_exec` is a deliberate, scoped weakening of Speedwave's container
- * isolation: it is opt-in per project, the whitelist starts empty, the config
- * lives only in `~/.speedwave/config.json` (never the repo `.speedwave.json`),
- * and enabling it pops a blocking danger modal explaining the consequences —
- * which **is the consent**: once enabled, Claude runs any whitelisted recipe
- * without further prompting (there is no per-call confirmation); the audit log
- * is the after-the-fact record. See `docs/architecture/security.md`.
- *
- * The shapes here mirror the Rust SSOT in `crates/speedwave-runtime/src/config.rs`
- * (`HostExecRecipe` / `HostExecParam`, both `#[serde(rename_all = "camelCase")]`)
- * and the TypeScript worker's `HostExecRecipe` (`mcp-servers/host_exec/src/types.ts`)
- * — keep them in sync with both. The Tauri commands they back are
- * `get_host_exec`, `set_host_exec_enabled`, `host_exec_save_settings`,
- * `host_exec_load_settings`, and `host_exec_resolve_executable`
- * (`desktop/src-tauri/src/host_exec_cmd.rs`).
+ * Models for the `host_exec` integration (ADR-054). Mirror Rust SSOT in
+ * `crates/speedwave-runtime/src/config.rs` and the worker's `types.ts`.
  * @module models/host-exec
  */
 
-/**
- * One named parameter a recipe accepts from Claude, substituted into a fixed
- * position in the recipe's `args` (each substitution is one argv element, never
- * re-split). The `pattern`'s semantics (compilation + a full match against the
- * value Claude supplies) are enforced in the worker; the UI and the Rust
- * validator only sanity-check the `pattern` string and the `maxLen` ceiling.
- */
+/** One named parameter a recipe accepts from Claude (ADR-054 §"Config schema"). */
 export interface HostExecParam {
-  /**
-   * Parameter name — `snake_case`, unique within the recipe; the `{name}`
-   * token in `args` this entry defines.
-   */
+  /** Parameter name — `snake_case`, unique within the recipe. */
   name: string;
-  /**
-   * Regex the supplied value must fully match (the worker anchors it as
-   * `^(?:…)$`). Non-empty, no NUL/newline.
-   */
+  /** Regex the supplied value must fully match (worker anchors as `^(?:…)$`). */
   pattern: string;
-  /**
-   * Optional upper bound on the supplied value's length. If omitted the
-   * worker's default ceiling applies. Serialised as `maxLen`.
-   */
+  /** Optional upper bound on the supplied value's length. */
   maxLen?: number;
 }
 
@@ -52,45 +19,21 @@ export interface HostExecParam {
  * Exposed to Claude as the MCP tool `host_exec.<camelCase(name)>()`.
  */
 export interface HostExecCommand {
-  /**
-   * Recipe name — `^[a-z][a-z0-9_]{0,63}$` (snake_case, so the hub's
-   * `toCamelCase` bridge exposes it as a valid JS identifier); unique across
-   * the whitelist.
-   */
+  /** Recipe name — `^[a-z][a-z0-9_]{0,63}$`, unique across the whitelist. */
   name: string;
-  /**
-   * The executable to run. A relative path (`./gradlew`, `npm`, `docker`)
-   * resolves against the project directory or the recovered host `PATH`; an
-   * absolute path is allowed but flagged in the UI. Must not be a shell/eval
-   * launcher (`bash`, `sh`, `eval`, `xargs`, …). No `..`, NUL, `=`, newlines.
-   */
+  /** Executable. Relative resolves against project dir or PATH (ADR-054 §"PATH"). */
   exec: string;
-  /**
-   * Fixed argument list — literals plus `{name}` parameter tokens. Every
-   * `{name}` must have a matching {@link HostExecParam} in `params`.
-   */
+  /** Fixed argument list — literals plus `{name}` parameter tokens. */
   args: string[];
-  /**
-   * Optional subdirectory inside the project directory to run in (monorepo
-   * support). Relative, no `..`, no absolute path. Serialised as `cwdSub`.
-   */
+  /** Optional subdirectory inside the project directory to run in. */
   cwdSub?: string;
   /** Named parameters this recipe accepts from Claude. */
   params?: HostExecParam[];
-  /**
-   * Literal environment variables for the recipe (no Claude-supplied values).
-   * Keys must not be reserved (`PATH`, `LD_*`, `NODE_OPTIONS`, …). May hold
-   * secrets — the on-disk snapshot is `0600` and the host log redacts these
-   * values — but the UI warns against it (prefer a repo `.env`).
-   */
+  /** Literal env vars; reserved keys rejected (see `HOST_EXEC_RESERVED_ENV_KEYS`). */
   env?: Record<string, string>;
 }
 
-/**
- * What `get_host_exec` returns for a project: whether `host_exec` is enabled
- * and the current recipe whitelist (so the editor can render it). Mirrors the
- * Rust `HostExecStatus` (`desktop/src-tauri/src/host_exec_cmd.rs`).
- */
+/** What `get_host_exec` returns for a project — mirrors Rust `HostExecStatus`. */
 export interface HostExecStatus {
   /** Whether `host_exec` is enabled for this project (user config only). */
   enabled: boolean;
@@ -98,25 +41,13 @@ export interface HostExecStatus {
   commands: HostExecCommand[];
 }
 
-/**
- * Recipe-name pattern enforced by the backend (`RECIPE_NAME_PATTERN` in
- * `crates/speedwave-runtime/src/host_exec.rs`). The UI mirrors it for inline
- * validation; the backend re-validates.
- */
+/** Recipe-name pattern; mirrors `RECIPE_NAME_PATTERN` in `host_exec.rs`. */
 export const HOST_EXEC_RECIPE_NAME_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
-/**
- * Parameter-name pattern (same `snake_case` rule, mirrored for inline
- * validation).
- */
+/** Parameter-name pattern (same `snake_case` rule). */
 export const HOST_EXEC_PARAM_NAME_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
-/**
- * Shell / eval launchers a recipe's `exec` may not be (checked on the
- * basename, case-insensitive). Mirrors `HOST_EXEC_SHELL_LAUNCHERS` in
- * `crates/speedwave-runtime/src/consts.rs` — the backend is authoritative;
- * this list only drives the inline UI hint.
- */
+/** Banned `exec` basenames; mirrors `HOST_EXEC_SHELL_LAUNCHERS` (backend is authoritative). */
 export const HOST_EXEC_SHELL_LAUNCHERS: readonly string[] = [
   'bash',
   'sh',
@@ -134,13 +65,7 @@ export const HOST_EXEC_SHELL_LAUNCHERS: readonly string[] = [
   'toybox',
 ];
 
-/**
- * "Meta" interpreters/runners that may not take a *bare* `{param}` argument
- * (the whole argv element being the parameter = "run whatever Claude types").
- * A literal sub-command is fine (`make test`, `npm run build`). Mirrors
- * `HOST_EXEC_META_TOOLS` in `crates/speedwave-runtime/src/consts.rs` — the
- * backend is authoritative; this drives the inline UI hint.
- */
+/** Meta runners banned from a bare `{param}` argv; mirrors `HOST_EXEC_META_TOOLS`. */
 export const HOST_EXEC_META_TOOLS: readonly string[] = [
   'node',
   'deno',
@@ -159,12 +84,7 @@ export const HOST_EXEC_META_TOOLS: readonly string[] = [
   'nawk',
 ];
 
-/**
- * Reserved env-var names a recipe's `env` may not set (case-insensitive).
- * Mirrors `RESERVED_ENV_KEYS` in `crates/speedwave-runtime/src/consts.rs`
- * (the SSOT — keep in sync); the backend is authoritative, this only drives
- * the inline UI hint.
- */
+/** Reserved env-var names a recipe's `env` may not set; mirrors `RESERVED_ENV_KEYS` SSOT. */
 export const HOST_EXEC_RESERVED_ENV_KEYS: readonly string[] = [
   // Reserved by Speedwave — auto-injected
   'PORT',
@@ -190,11 +110,8 @@ export const HOST_EXEC_RESERVED_ENV_KEYS: readonly string[] = [
 ];
 
 /**
- * Returns the basename of a path-ish `exec` string, lowercased and with any
- * Windows `.exe`/`.bat`/`.cmd`/`.com` extension stripped — used for the
- * shell-launcher / meta-tool inline checks (the backend does the same on its
- * side).
- * @param exec - The recipe `exec` string (a path or bare command name).
+ * Lowercased basename of `exec`, Windows extension stripped — for launcher / meta-tool checks.
+ * @param exec - The recipe `exec` string.
  */
 export function execBasenameLower(exec: string): string {
   const base = exec.split(/[/\\]/).pop() ?? exec;
@@ -202,10 +119,8 @@ export function execBasenameLower(exec: string): string {
 }
 
 /**
- * Extracts the `{name}` parameter references from one `args` element (returns
- * the names without braces). `'{tgt}'` → `['tgt']`; `'--out={dir}/build'` →
- * `['dir']`; a literal → `[]`.
- * @param arg - One `args` element to scan for `{name}` tokens.
+ * Names referenced by `{name}` tokens in one `args` element (no braces).
+ * @param arg - One `args` element to scan.
  */
 export function argParamRefs(arg: string): string[] {
   const refs: string[] = [];
@@ -216,9 +131,7 @@ export function argParamRefs(arg: string): string[] {
 }
 
 /**
- * True if an `args` element is *exactly* a single `{param}` token (the whole
- * element, no surrounding literal text) — the "pass whatever Claude types"
- * shape that's banned for {@link HOST_EXEC_META_TOOLS} execs.
+ * True if an `args` element is exactly a single `{param}` token — banned for meta-tool execs.
  * @param arg - One `args` element.
  */
 export function isBareParamArg(arg: string): boolean {
@@ -226,12 +139,8 @@ export function isBareParamArg(arg: string): boolean {
 }
 
 /**
- * Heuristic — a recipe whose `exec` is a DB client or whose `args` look like a
- * migration tool (`migrat*`, `flyway`, `liquibase`), or a container-lifecycle
- * recipe (see {@link isContainerLifecycleRecipe}). Drives an amber inline
- * warning when adding/editing such a recipe ("changes state — only whitelist it
- * if you trust this repo"); not blocking — enabling host_exec is the consent.
- * @param cmd - The recipe (only `exec` / `args` are inspected).
+ * Heuristic: DB client, migration tool, or container-lifecycle recipe — drives amber UI warning.
+ * @param cmd - The recipe.
  */
 export function isStateChangingRecipe(cmd: Pick<HostExecCommand, 'exec' | 'args'>): boolean {
   const base = execBasenameLower(cmd.exec);
@@ -244,13 +153,8 @@ export function isStateChangingRecipe(cmd: Pick<HostExecCommand, 'exec' | 'args'
 }
 
 /**
- * Mirror of `host_exec::is_container_lifecycle_recipe` (Rust). True if `exec`
- * is `docker` / `docker-compose` / `podman` and `args` contains a lifecycle
- * verb (`up` / `down` / `exec` / `rm` / `prune`). Such a recipe is effectively
- * `docker run` with arbitrary mounts/privileges from a compose file Claude can
- * edit (`/workspace:rw`) — i.e. host root. The add/edit dialog shows an amber
- * warning when it matches (not blocking — enabling host_exec is the consent).
- * @param cmd - The recipe (only `exec` / `args` are inspected).
+ * True if `exec` is docker/podman with a lifecycle verb — mirrors Rust `is_container_lifecycle_recipe`.
+ * @param cmd - The recipe.
  */
 export function isContainerLifecycleRecipe(cmd: Pick<HostExecCommand, 'exec' | 'args'>): boolean {
   const base = execBasenameLower(cmd.exec);
@@ -260,9 +164,8 @@ export function isContainerLifecycleRecipe(cmd: Pick<HostExecCommand, 'exec' | '
 }
 
 /**
- * Renders a recipe's `exec` + `args` the way it'll be run — for the recipe
- * list and the warning copy. Tokens stay as-is (`{name}`).
- * @param cmd - The recipe (only `exec` / `args` are rendered).
+ * Renders `exec` + `args` for display. Tokens stay as-is (`{name}`).
+ * @param cmd - The recipe.
  */
 export function renderRecipeCommand(cmd: Pick<HostExecCommand, 'exec' | 'args'>): string {
   return [cmd.exec, ...cmd.args].join(' ');
@@ -272,22 +175,16 @@ export function renderRecipeCommand(cmd: Pick<HostExecCommand, 'exec' | 'args'>)
 export type ParsedArgLine = { args: string[] } | { error: string };
 
 /**
- * Split a command-line-style argument string into an `args[]` list — splits on
- * runs of whitespace, with `"double"` and `'single'` quotes grouping a token
- * that contains spaces. **This is not a shell**: `$VAR`, `&&`, `|`, `;` and
- * globs are kept verbatim (they become literal characters inside an argv
- * element — `spawn` with `shell:false` never re-parses them). Used so the UI
- * can offer a single "type it as on a command line" field instead of one input
- * per argument; the resulting `args[]` is exactly what the worker receives.
- * @param line - The raw argument line (no `exec` — just the args after it).
- * @returns `{ args }` on success, `{ error }` on an unbalanced quote.
+ * Splits an argument line into `args[]`. Honors `"…"`/`'…'`; otherwise verbatim (no shell).
+ * @param line - The raw argument line.
+ * @returns `{ args }` on success, `{ error }` on unbalanced quote.
  */
 export function parseArgLine(line: string): ParsedArgLine {
   const out: string[] = [];
   let cur = '';
   let inSingle = false;
   let inDouble = false;
-  let started = false; // whether the current token has any content (even empty `""`)
+  let started = false; // current token has any content (including empty `""`)
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
     if (inSingle) {
@@ -329,12 +226,7 @@ export function parseArgLine(line: string): ParsedArgLine {
 }
 
 /**
- * Inverse of {@link parseArgLine} — render an `args[]` back into a single line
- * (so the UI can load an existing recipe into the command-line field). Any
- * token containing whitespace is wrapped in double quotes; an empty token
- * becomes `""`. Round-trips with `parseArgLine` for the cases the field
- * produces (it does not attempt to escape quotes-within-tokens — those don't
- * occur in practice and `parseArgLine` wouldn't survive them either).
+ * Renders `args[]` back to a line — inverse of {@link parseArgLine}. Whitespace tokens quoted.
  * @param args - The argument list.
  * @returns A command-line string.
  */
@@ -360,12 +252,7 @@ export interface HostExecPreset {
   execHint: string;
 }
 
-/**
- * Built-in recipe templates surfaced in the add/edit dialog. They mirror the
- * stacks the team reported (Gradle, npm/yarn, Maven, Docker, repo shell
- * scripts — see the SPW-83 discovery thread). Each one only *prefills* the
- * fields — the user edits everything; nothing is whitelisted automatically.
- */
+/** Built-in recipe templates for the add/edit dialog — prefill only, never auto-whitelisted. */
 export const HOST_EXEC_PRESETS: readonly HostExecPreset[] = [
   {
     key: 'gradle-test',

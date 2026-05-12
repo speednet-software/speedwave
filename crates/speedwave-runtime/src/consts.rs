@@ -31,90 +31,40 @@ pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
 
-/// Subdirectory under the data dir holding per-project `host_exec` worker state
-/// (`<data_dir>/host-exec/<project>/{config.json,auth-token,port,pid,log}`).
-/// Unlike `mcp-os` (one global process, one set of state files), `host_exec`
-/// is per-project — see ADR-054. This is the SSOT; do not hard-code the
-/// `"host-exec"` literal at call sites.
+/// Subdirectory under the data dir holding per-project `host_exec` state.
+/// SSOT — do not hard-code `"host-exec"` at call sites.
 pub const HOST_EXEC_SUBDIR: &str = "host-exec";
-/// File name (within `<data_dir>/host-exec/<project>/`) of the validated
-/// per-project whitelist snapshot the `host_exec` worker reads. Written by the
-/// Tauri side with `0o600` (it may contain recipe `env` values, possibly
-/// secrets — ADR-054).
+/// Per-project worker snapshot, written `0o600` (may hold env-value secrets).
 pub const HOST_EXEC_CONFIG_FILE: &str = "config.json";
-/// File name of the per-project `host_exec` worker's bearer token (`0o600`).
+/// Per-project bearer token (`0o600`).
 pub const HOST_EXEC_AUTH_TOKEN_FILE: &str = "auth-token";
-/// File name of the per-project `host_exec` worker's listening port.
+/// Per-project worker listening port file.
 pub const HOST_EXEC_PORT_FILE: &str = "port";
-/// File name of the per-project `host_exec` worker's PID (for stale-process
-/// cleanup on the next session).
+/// Per-project worker PID file — used for stale-process cleanup.
 pub const HOST_EXEC_PID_FILE: &str = "pid";
-/// File name of the per-project `host_exec` worker's log. Records every call —
-/// recipe name, full argv, cwd, exit code, status, duration, the confirmation
-/// decision — with recipe `env` values redacted. Surfaced in the diagnostics /
-/// system-health views.
+/// Per-project audit log; env values redacted (ADR-054 §"Security model").
 pub const HOST_EXEC_LOG_FILE: &str = "log";
 
-/// Per-command timeout (ms) for a `host_exec` recipe. On expiry the worker
-/// kills the recipe's whole process group with `SIGKILL`. 7 minutes leaves
-/// headroom for a long Gradle/Maven build while keeping the command + margin
-/// under the hub's 600 s long-operation timeout (ADR-054 §"Reading a command's
-/// result").
+/// Per-command timeout (7 min, fits under the hub's 600s long timeout).
 pub const HOST_EXEC_TIMEOUT_MS: u64 = 420_000;
-/// Per-stream output cap (bytes) for a `host_exec` recipe. Each of
-/// stdout/stderr is truncated to the last `HOST_EXEC_MAX_OUTPUT_BYTES` (the
-/// tail — for compile/test failures the end is what matters) and the result's
-/// `truncated` flag is set. 64 KiB is generous for a build/test log tail while
-/// bounding what gets dumped into Claude's context.
+/// Per-stream stdout/stderr tail-cap.
 pub const HOST_EXEC_MAX_OUTPUT_BYTES: usize = 64 * 1024;
-/// Per-stream output cap (lines) for a `host_exec` recipe, applied alongside
-/// `HOST_EXEC_MAX_OUTPUT_BYTES` (whichever limit is hit first). Guards against
-/// a flood of short lines that stays under the byte cap.
+/// Per-stream line cap, applied alongside the byte cap.
 pub const HOST_EXEC_MAX_OUTPUT_LINES: usize = 2000;
-/// Upper bound (bytes) on a recipe parameter's value, and a hard ceiling on
-/// the `maxLen` a recipe may declare for one of its parameters. Bounds what an
-/// attacker can wedge through a regex-validated parameter.
+/// Ceiling on a recipe parameter's value length and on the declared `maxLen`.
 pub const HOST_EXEC_PARAM_MAX_LEN: usize = 65536;
-/// Upper bound (chars) on a recipe parameter's regex `pattern` string. The
-/// pattern's *semantics* (does it compile, does the supplied value match) are
-/// validated in the `host_exec` worker, in JavaScript `RegExp`, since the
-/// worker is what executes it — doing it in Rust's `regex` crate too would
-/// invite engine drift (ADR-054). Rust only sanity-checks the string here.
+/// Sanity ceiling on a parameter's regex `pattern` length (semantics live in the worker).
 pub const HOST_EXEC_PARAM_PATTERN_MAX_LEN: usize = 4096;
 
-/// `exec` basenames a `host_exec` recipe may NOT use: direct shell / eval
-/// launchers whose whole job is "run an arbitrary string". Banning these
-/// closes the obvious `{"exec":"bash","args":["-c","{cmd}"]}` vector — it is
-/// **defense in depth, not a guarantee** that whitelisted recipes can't run
-/// arbitrary code (`npm run` / `make` / `gradle` / `docker compose` all run
-/// repo-controlled code, often via `/bin/sh` themselves), and it is a
-/// **basename** check — `./node_modules/.bin/node` bypasses the `node` ban by
-/// being a path, not the name `node` (a documented residual; the recipe author
-/// chose it). See ADR-054 §"Hard ban on direct shell/eval launchers".
-///
-/// `node` / `python` / `make` / `npm` / `npx` / `pnpm` / `yarn` are *not* on
-/// this list — a literal sub-command (`make test`, `npm run build`) is fine;
-/// they are rejected only when an `args` element is a *bare parameter token*
-/// (the "parameterised meta-invocation" rule in `host_exec::validate_*`).
-///
-/// Compared case-insensitively, on the `exec` path's basename. SSOT —
-/// referenced from `host_exec::validate_host_exec_config()`. NOT exhaustive: it
-/// bans these *names*; a renamed interpreter, or another shell-equivalent tool
-/// not listed, is the recipe author's risk (see ADR-054 §Negative).
-/// `busybox`/`toybox` are here because `busybox sh -c {x}` is a shell.
+/// Banned `exec` basenames (shell / eval launchers).
+/// SSOT; case-insensitive. See ADR-054 §"Hard ban on direct shell/eval launchers".
 pub const HOST_EXEC_SHELL_LAUNCHERS: &[&str] = &[
     "bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "env", "xargs", "find", "ssh", "sshpass",
     "busybox", "toybox",
 ];
 
-/// `exec` basenames that are meta-tools (interpreters / package-script
-/// runners): a *literal* sub-command argument is allowed, but a recipe whose
-/// `args` contains a *bare parameter token* (the whole element is `{param}`)
-/// is rejected — that is "run whatever Claude types" through a meta-tool.
-/// Compared case-insensitively, on the `exec` path's basename. SSOT —
-/// referenced from `host_exec::validate_host_exec_config()`. Like the launcher
-/// list, NOT exhaustive (`awk '{prog}'` is caught; `sed -e '{prog}'` /
-/// `git -c core.pager={x}` are not bare-param shapes — see ADR-054 §Negative).
+/// Meta-tools banned only with a *bare* `{param}` argv element.
+/// SSOT; case-insensitive. See ADR-054 §"Config schema" (parameterised meta-invocation rule).
 pub const HOST_EXEC_META_TOOLS: &[&str] = &[
     "node", "deno", "python", "python3", "perl", "ruby", "make", "npm", "npx", "pnpm", "yarn",
     "awk", "gawk", "mawk", "nawk",

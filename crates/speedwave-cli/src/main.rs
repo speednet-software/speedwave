@@ -734,14 +734,7 @@ fn main() -> anyhow::Result<()> {
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
 
-    // If `host_exec` is enabled, spawn its per-project worker BEFORE
-    // `render_compose` — `apply_host_exec_config` only injects
-    // `WORKER_HOST_EXEC_URL` / the token mount into the hub if the worker's
-    // `port`/`auth-token` files already exist (ADR-054). The CLI is one-shot:
-    // hold the handle for the run; it `exec`s nothing (it spawns+waits on
-    // `container_exec`), but `process::exit` below skips `Drop`, so the worker
-    // is killed by `kill_stale_by_pid_file` on the next run. No watchdog
-    // (one-shot) and no compose recreate (fresh render each run).
+    // Spawn host_exec BEFORE render_compose — hub needs port/auth-token files (ADR-054).
     let _host_exec_worker =
         maybe_spawn_host_exec_worker(&project_name, &project_dir, &integrations);
 
@@ -885,14 +878,8 @@ fn main() -> anyhow::Result<()> {
     std::process::exit(code);
 }
 
-/// Spawn the per-project `host_exec` worker if the project has it enabled,
-/// returning the handle so it stays alive for the CLI run. Writes the chmod-600
-/// config snapshot from the resolved whitelist first (so the worker sees the
-/// current recipes), then `HostExecProcess::spawn_in`. Best-effort: a failure
-/// is logged and `None` returned — `host_exec` tools are then unavailable but
-/// the rest of the session still works. The CLI's inherited `PATH` is the
-/// login-shell `PATH` (it runs from a terminal), so the worker (and recipes)
-/// get the right `PATH` directly.
+/// Spawn per-project `host_exec` worker if enabled; the handle keeps it alive.
+/// Best-effort: failures are logged and `None` returned.
 fn maybe_spawn_host_exec_worker(
     project_name: &str,
     project_dir: &Path,

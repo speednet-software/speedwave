@@ -52,17 +52,10 @@ export const LEVEL_CHIPS: readonly LogLevel[] = ['all', 'debug', 'info', 'warn',
 const FORCED_LOG_LEVEL = 'trace';
 
 const COMPOSE_RE = /^([\w.-]+)\s*\|\s*(.*)$/;
-// Bracketed timestamp: either bare `HH:MM:SS[.ms]` or an ISO 8601 timestamp.
-// Speedwave workers emit `[<ISO Z>]` via `@speedwave/mcp-shared`'s `ts()`; bare
-// HMS is the historical compose-line shape some external tools still use.
+// `[HH:MM:SS]` or `[<ISO>]`; ISO is `mcp-shared`'s `ts()` (ADR-057).
 const BRACKETED_TIME_RE =
   /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\]\s*(.*)$/;
-// Matches ISO 8601 timestamps emitted by the various log sources we consume:
-//   - `2026-04-28T12:34:56Z`            (UTC, no fractional seconds — older nerdctl)
-//   - `2026-04-28 12:34:56.123Z`        (compose with millis)
-//   - `2026-05-12T14:34:02.814+02:00`   (Speedwave Rust logs — `log_ts::log_timestamp()`)
-// The drain prefix (`<source> | <ISO> STDOUT: …`) puts this ISO at the start of
-// `rest`, so it lands in the `time` column for mcp-os / host-exec / claude.
+// ISO 8601 prefix (UTC, millis, or local-offset) — see ADR-057 for the SSOT format.
 const ISO_TIME_RE =
   /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/;
 /** A parseable ISO date+time prefix — `formatTime` parses it and re-renders in the host's local zone. */
@@ -88,8 +81,7 @@ export function parseLogLine(raw: string): LogLine {
   const source = composeMatch ? stripContainerPrefix(composeMatch[1]) : 'log';
   const rest = composeMatch ? composeMatch[2] : trimmed;
 
-  // First timestamp at the start of `rest`: nerdctl `--timestamps` (RFC3339,
-  // unbracketed) or a Rust drain prefix, or a bare `[<ISO>]`.
+  // Head: nerdctl `--timestamps`, Rust drain, or `[<ISO>]`.
   let time = '';
   let afterTime = rest;
   const headMatch = BRACKETED_TIME_RE.exec(rest) ?? ISO_TIME_RE.exec(rest);
@@ -97,14 +89,10 @@ export function parseLogLine(raw: string): LogLine {
     time = headMatch[1];
     afterTime = headMatch[2];
   }
-  // `STDOUT: `/`STDERR: ` drain marker is pure capture noise (`SESSION:`/`TOOL:`/
-  // etc. are semantic claude-session prefixes and are deliberately kept).
+  // Drop the `STDOUT: `/`STDERR: ` drain marker (capture noise only).
   const drainMatch = DRAIN_PREFIX_RE.exec(afterTime);
   let cleaned = drainMatch ? drainMatch[1] : afterTime;
-  // The worker's own `ts()` stamp (`[<ISO>]`) — drop it from the message. If we
-  // didn't already get a timestamp from the head, promote it; otherwise it just
-  // duplicates the column (a compose-container line carries nerdctl's stamp *and*
-  // the worker's `ts()`), so strip it.
+  // Inline `[<ISO>]` from the worker's `ts()` — promote to time if absent, else strip.
   const inlineMatch = BRACKETED_TIME_RE.exec(cleaned);
   if (inlineMatch) {
     if (!time) time = inlineMatch[1];
@@ -141,12 +129,8 @@ function stripContainerPrefix(container: string): string {
 }
 
 /**
- * Interleave per-source log blocks into one chronological stream. The backend
- * concatenates sources block-by-block; since every Speedwave log line now
- * carries one ISO timestamp (ADR-057), we can merge them by parsed instant
- * here. A line with no parseable timestamp (a stack-trace continuation, a
- * banner) inherits the previous line's instant so it stays attached to it; the
- * sort is stable, so equal-instant lines keep their original relative order.
+ * Interleave per-source blocks into one chronological stream (ADR-057).
+ * Lines without a parseable time inherit the previous line's instant.
  * @param lines - Parsed log lines in backend (block) order.
  */
 export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
@@ -734,8 +718,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     // Await so the initial snapshot is committed before view tests assert
     // on it.
     await this.systemHealth.ensurePolling();
-    // Live-tail: re-fetch the log buffer on the same cadence (silent — no
-    // spinner, and only auto-scroll when the user is already at the bottom).
+    // Live-tail: silent refresh on the health cadence; sticky-scroll if at bottom.
     this.logsTimer = setInterval(() => void this.refresh(true), HEALTH_REFRESH_INTERVAL_MS);
     this.unsubProjectSettled = this.projectState.onProjectSettled(() => {
       void this.refresh();
@@ -754,14 +737,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     }
   }
 
-  /**
-   * Pin the log surface to the bottom after Angular commits the freshly
-   * rendered rows to the DOM. `afterNextRender({ write })` is the official
-   * post-render hook (Angular 16+) and runs in the browser only, after the
-   * commit — so `scrollHeight` reflects the final layout, unlike
-   * `ngAfterViewChecked` + `requestAnimationFrame` which fired before the
-   * `@for` block had finished extending the document.
-   */
+  /** Pin the log surface to the bottom after Angular commits new rows. */
   private scrollToBottom(): void {
     afterNextRender(
       {
@@ -782,19 +758,13 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Re-fetch the merged log buffer (`get_all_logs`) and re-parse. On a `silent`
-   * refresh (the live-tail poll) we don't toggle the spinner and only
-   * auto-scroll if the user was already at the bottom — so reading older lines
-   * isn't interrupted every cadence; a manual refresh always scrolls down.
-   * @param silent - True for the background poll; false (default) for explicit refresh.
+   * Re-fetch + re-parse the merged buffer. `silent`: no spinner; sticky scroll only.
+   * @param silent - True for the background poll.
    */
   protected async refresh(silent = false): Promise<void> {
     const project = this.projectState.activeProject;
     if (!project) {
-      // While the shell still boots the project lifecycle the active project
-      // is transiently null — surface a quiet loading state instead of an
-      // error banner, the onProjectSettled callback re-runs this fetch as
-      // soon as the project is ready.
+      // Project transiently null during shell boot — quiet loading, no banner.
       if (this.projectState.status === 'loading') {
         if (!silent) this.loading.set(true);
         this.error.set('');
@@ -807,12 +777,8 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     const stickToBottom = silent ? this.isAtBottom() : true;
     if (!silent) this.loading.set(true);
     try {
-      // `get_all_logs` merges every host-side log source (tauri-plugin-log
-      // file, mcp-os.log, host-exec/<project>/log, claude-session.log) with
-      // `compose logs` so the dropdown shows every source the app produces —
-      // not just compose containers. Each line carries a `<source> | …` prefix
-      // that `parseLogLine` recognises (`COMPOSE_RE`), so the dropdown
-      // automatically picks up the new sources without code changes here.
+      // `get_all_logs` merges host-side logs + `compose logs`. `<source> | …` prefix
+      // is recognised by `parseLogLine` (COMPOSE_RE) — new sources auto-appear.
       const raw = await this.tauri.invoke<string>('get_all_logs', {
         project,
         tail: LOGS_TAIL_LINES,

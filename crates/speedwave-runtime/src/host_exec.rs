@@ -1,51 +1,18 @@
-//! Validation for the per-project `host_exec` whitelist (ADR-054).
-//!
-//! `host_exec` is a host-side MCP worker that runs **only** the commands a user
-//! has explicitly added to a per-project whitelist, in the project directory,
-//! with no shell. This module validates that whitelist before it is persisted
-//! / snapshotted for the worker. It deliberately mirrors the patterns in
-//! [`crate::plugin`]'s `validate_manifest` (an `OnceLock`-cached regex, the
-//! `consts::RESERVED_ENV_KEYS` case-insensitive check, the `..`/NUL/`=`/newline
-//! key sanitisation) — see CLAUDE.md ("if the same logic appears in two places
-//! — extract it"; here the *shape* is shared but the rules differ enough that a
-//! separate function is clearer than a parameterised one).
-//!
-//! What this module does **not** do: validate the *semantics* of a parameter
-//! `pattern` (whether it compiles, whether a supplied value matches). That
-//! happens in the `host_exec` worker, in JavaScript `RegExp`, because the
-//! worker is what executes it — checking it in Rust's `regex` crate too would
-//! invite engine drift. Rust only sanity-checks the `pattern` string here.
-//!
-//! It also does not — *cannot* — guarantee that a whitelisted recipe won't run
-//! arbitrary code: `npm run X` runs `package.json` scripts, `make test` runs
-//! the `Makefile`, `./gradlew test` runs `build.gradle` (all repo-controlled),
-//! and the launcher ban is by basename so `./node_modules/.bin/node` slips
-//! past the `node` ban. The whitelist guarantees the *recipe name and argv
-//! shape* are the user's; it does not guarantee the *code that runs* is. The
-//! mitigations for that are opt-in + the enable-time danger modal (which is the
-//! consent for the whole project — there is no per-call confirmation) + the
-//! host-side audit log (ADR-054 §Negative), not this validator.
+//! Validates the per-project `host_exec` whitelist before snapshotting (ADR-054).
+//! Regex semantics live in the JS worker; this module only sanity-checks shape.
 
 use crate::config::{HostExecConfig, HostExecParam, HostExecRecipe};
 use crate::consts;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Returns the per-project `host_exec` state directory:
-/// `<data_dir>/host-exec/<project>/` (holds `config.json`, `auth-token`,
-/// `port`, `pid`, `log`). Mirrors [`crate::claude_home::claude_home_dir`] —
-/// the caller is responsible for validating `project` as a safe single
-/// directory component beforehand. This is the SSOT for the layout; do not
-/// hard-code the `host-exec/<project>` join at call sites.
+/// Per-project `host_exec` state dir: `<data_dir>/host-exec/<project>/`.
+/// SSOT for the layout — do not hard-code the join elsewhere.
 pub fn host_exec_project_dir(data_dir: &Path, project: &str) -> PathBuf {
     data_dir.join(consts::HOST_EXEC_SUBDIR).join(project)
 }
 
-/// Recipe name pattern: lowercase letters, digits, underscores; starts with a
-/// letter; max 64 chars. **Not** [`crate::plugin`]'s slug pattern — that one
-/// allows hyphens, and a hyphenated recipe name would not survive the hub's
-/// `toCamelCase` bridge as a valid JS identifier (`host_exec.gradle-help()`
-/// doesn't parse). See ADR-054.
+/// `snake_case`, 1-64 chars. No hyphens (would break the hub's camelCase bridge).
 const RECIPE_NAME_PATTERN: &str = r"^[a-z][a-z0-9_]{0,63}$";
 
 fn recipe_name_re() -> Result<&'static regex::Regex, anyhow::Error> {
@@ -55,10 +22,7 @@ fn recipe_name_re() -> Result<&'static regex::Regex, anyhow::Error> {
         .map_err(|e| anyhow::anyhow!("invalid RECIPE_NAME_PATTERN regex: {e}"))
 }
 
-/// Returns the basename of an `exec` path, lowercased, for comparison against
-/// the ban / meta-tool lists. `./gradlew` -> `gradlew`; `/usr/bin/python3` ->
-/// `python3`; `docker-compose` -> `docker-compose`. Strips a Windows `.exe`
-/// suffix too so `bash.exe` is caught.
+/// Lowercased basename of an `exec` path, Windows `.exe` stripped — for ban-list checks.
 fn exec_basename_lower(exec: &str) -> String {
     let name = exec
         .rsplit(['/', '\\'])
@@ -70,26 +34,12 @@ fn exec_basename_lower(exec: &str) -> String {
         .unwrap_or(name)
 }
 
-/// True if `value` contains characters that must never appear in a config
-/// string destined for argv / env / a JSON snapshot, or in a command name a
-/// Tauri command resolves: NUL or a line break (`\n` / `\r`). Public so the
-/// Desktop crate's `host_exec_resolve_executable` can reuse it.
+/// True if `value` contains NUL or a newline — banned in argv/env/JSON snapshot strings.
 pub fn has_control_chars(value: &str) -> bool {
     value.contains('\0') || value.contains('\n') || value.contains('\r')
 }
 
-/// Extracts the parameter names referenced by `{name}` tokens in an `args`
-/// element, and reports whether the element is a *bare* parameter token (the
-/// entire element is exactly `{name}` — the "run whatever Claude types"
-/// shape when combined with a meta-tool `exec`).
-///
-/// `{name}` tokens are `{` + a `snake_case`-ish run + `}`; anything else
-/// (`{}`, `{ }`, `{1abc}`, an unclosed `{`) is treated as a literal and is not
-/// a parameter reference (it just won't match any declared parameter — if the
-/// recipe author meant it as a parameter and got the name wrong, the
-/// "`{name}` without a `params` entry" rule below will not fire because we
-/// don't recognise it as a token; that is acceptable — the worst case is a
-/// literal `{typo}` reaching the process, which is harmless).
+/// Names referenced by `{name}` tokens in `arg`, plus whether `arg` is exactly one bare `{name}`.
 fn arg_param_refs(arg: &str) -> (Vec<String>, bool) {
     let mut refs = Vec::new();
     let bytes = arg.as_bytes();
@@ -115,10 +65,7 @@ fn arg_param_refs(arg: &str) -> (Vec<String>, bool) {
     (refs, is_bare)
 }
 
-/// A `{...}` token name is valid (and thus a parameter reference) iff it looks
-/// like a recipe parameter name: starts with a letter, then letters/digits/
-/// underscores. (Same shape as `RECIPE_NAME_PATTERN` minus the length cap —
-/// parameter names are validated against `snake_case` separately below.)
+/// `snake_case`-ish token name: letter, then letters/digits/underscores.
 fn is_token_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -128,15 +75,8 @@ fn is_token_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// True if `recipe` is a container-engine *lifecycle* command — `docker` /
-/// `docker-compose` / `podman` (`podman compose`) with `up` / `down` / `exec`
-/// / `rm` / `prune` in `args`. Such a recipe is effectively `docker run` with
-/// arbitrary mounts/privileges from a compose file Claude can edit
-/// (`/workspace:rw`), i.e. host root. This is **a UI warning hint, not an
-/// enforced restriction** — the Desktop add/edit dialog shows an amber notice
-/// when a recipe matches; validation does not reject it (enabling host_exec is
-/// the consent — ADR-054 §Negative). Mirrored client-side as
-/// `isContainerLifecycleRecipe` in `models/host-exec.ts`.
+/// True if `recipe` is a docker/podman lifecycle command — UI warning hint only.
+/// Mirrored as `isContainerLifecycleRecipe` in `models/host-exec.ts`.
 pub fn is_container_lifecycle_recipe(recipe: &HostExecRecipe) -> bool {
     const LIFECYCLE: &[&str] = &["up", "down", "exec", "rm", "prune"];
     let base = exec_basename_lower(&recipe.exec);
@@ -149,10 +89,7 @@ pub fn is_container_lifecycle_recipe(recipe: &HostExecRecipe) -> bool {
         .any(|a| LIFECYCLE.contains(&a.to_ascii_lowercase().as_str()))
 }
 
-/// Validates a per-project `host_exec` config (the `commands` whitelist plus
-/// the `enabled` flag). An empty whitelist is valid (`host_exec` enabled with
-/// no recipes simply means Claude can run nothing). Returns the first error
-/// found, with a message suitable for surfacing in the Desktop UI.
+/// Validates the `commands` whitelist (an empty list is valid). Returns the first error.
 pub fn validate_host_exec_config(cfg: &HostExecConfig) -> anyhow::Result<()> {
     let name_re = recipe_name_re()?;
     let mut seen_names: HashSet<&str> = HashSet::new();
@@ -305,9 +242,7 @@ fn validate_recipe(recipe: &HostExecRecipe, name_re: &regex::Regex) -> anyhow::R
 }
 
 fn validate_param(recipe_name: &str, param: &HostExecParam) -> anyhow::Result<()> {
-    // name: snake_case, same shape as a recipe name (length cap reused — a
-    // parameter name longer than 64 chars is absurd and almost certainly a
-    // mistake).
+    // name: snake_case, 1-64 chars.
     if !is_token_name(&param.name) || param.name.len() > 64 {
         anyhow::bail!(
             "host_exec recipe '{recipe_name}': parameter name '{}' must be lowercase snake_case, \
@@ -381,12 +316,7 @@ fn validate_cwd_sub(recipe_name: &str, sub: &str) -> anyhow::Result<()> {
              project directory, not an absolute path"
         );
     }
-    // Reject `..` anywhere — the worker also canonicalises and re-checks at
-    // exec time (the project dir isn't known here), but rejecting the obvious
-    // case at config-save time gives a clearer error and a defence-in-depth
-    // layer. Use the parsed components so `a/../b` and `a/..` are both caught,
-    // and a bare `..` segment isn't missed by a naive `contains("..")` (which
-    // would also flag a legitimate `..foo` filename — components don't).
+    // Reject `..` via parsed components — worker re-canonicalises at exec time.
     for comp in path.components() {
         match comp {
             std::path::Component::ParentDir => anyhow::bail!(

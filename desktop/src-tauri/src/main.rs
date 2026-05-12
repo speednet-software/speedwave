@@ -136,9 +136,7 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// to prevent the watchdog from respawning mcp-os during shutdown.
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Stop flag for the per-project `host_exec` watchdog thread. Set during exit
-/// cleanup (in `run_exit_cleanup`, alongside `WATCHDOG_STOP`) so the watchdog
-/// does not respawn a worker mid-shutdown.
+/// Stop flag for the `host_exec` watchdog (set during exit cleanup).
 static HOST_EXEC_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -165,11 +163,7 @@ fn start_session_inner(
     host_exec_arc: SharedHostExec,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Spawn the `host_exec` worker BEFORE the container check below — the hub's
-    // compose only gets `WORKER_HOST_EXEC_URL` / the token mount if the worker's
-    // `port`/`auth-token` files already exist when `apply_host_exec_config`
-    // renders it. If we just started it (fresh spawn), recreate the project's
-    // containers so the hub re-renders with the URL. Best-effort.
+    // Spawn host_exec before the container check — the hub needs port/auth-token files (ADR-054).
     let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, project);
     if host_exec_just_started {
         host_exec_cmd::recreate_project_containers_if_running(project);
@@ -437,9 +431,7 @@ async fn switch_project(
     })
     .map_err(|e| e.to_string())?;
 
-    // Tear down the previous project's `host_exec` worker (its containers go
-    // down below; the new project's worker is spawned on demand by the next
-    // chat/container start — see `ensure_host_exec_running`). Best-effort.
+    // Tear down the previous project's `host_exec` worker (best-effort).
     if let Some(ref prev) = previous {
         if prev != &name {
             reconcile::teardown_host_exec_for_project(host_exec.inner(), prev);
@@ -988,20 +980,8 @@ fn ensure_mcp_os_running(
     }
 }
 
-/// Start the per-project `host_exec` worker for `project` if the project has
-/// `host_exec` enabled and no worker is running yet. No-op when the integration
-/// is disabled (or the project is unknown / its dir can't be resolved). Holds
-/// the shared-map mutex for the spawn so two callers don't double-spawn the
-/// same project's worker; the spawn can block up to ~10 s (the port handshake).
-///
-/// Before spawning, this writes the *current* config snapshot
-/// (`<data_dir>/host-exec/<project>/config.json`, `chmod 600`) from the
-/// resolved config so the worker sees the up-to-date whitelist.
-/// (`host_exec_cmd::host_exec_save_settings` re-writes it on edits and respawns.)
-///
-/// Returns `true` if it spawned a fresh worker (so the caller should recreate
-/// the project's containers — the hub needs the new `WORKER_HOST_EXEC_URL`),
-/// `false` if a worker was already running, disabled, or the spawn failed.
+/// Spawn the project's `host_exec` worker if enabled and not running.
+/// Writes the chmod-600 config snapshot first. Returns `true` on fresh spawn.
 pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str) -> bool {
     let mut map = match host_exec.lock() {
         Ok(g) => g,
@@ -1022,8 +1002,7 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
         }
     }
 
-    // Resolve the project dir + the resolved config (which knows whether
-    // `host_exec` is enabled and what the whitelist is — user-config only).
+    // Resolve project dir + config (user-config only).
     let user_config = match config::load_user_config() {
         Ok(c) => c,
         Err(e) => {
@@ -1044,8 +1023,7 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
         return false;
     }
 
-    // Write the config snapshot (`{ projectDir, commands }`), chmod 600 — it may
-    // hold recipe `env` values (possibly secrets), ADR-054.
+    // Write chmod-600 config snapshot (may hold env-value secrets, ADR-054).
     let state_dir = speedwave_runtime::host_exec::host_exec_project_dir(
         speedwave_runtime::consts::data_dir(),
         project,
@@ -1092,16 +1070,7 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
     }
 }
 
-/// Per-project `host_exec` watchdog: one thread iterating the shared map,
-/// respawning any worker whose process has died (or stopped listening). On a
-/// respawn, the hub must re-discover the project's `host_exec` tools — step 5
-/// wires that (the simplest path is recreating the project's hub container via
-/// the existing `reconcile` logic, the same way the `mcp-os` watchdog does for
-/// a port change); for step 4 the respawn is logged and left at that.
-///
-/// Mirrors `start_mcp_os_watchdog`'s shape: 30 s checks, a cooldown after a run
-/// of unhealthy checks, and exit when `HOST_EXEC_WATCHDOG_STOP` is set or the
-/// map is gone.
+/// Per-project `host_exec` watchdog — 30s checks, mirrors `start_mcp_os_watchdog`.
 fn start_host_exec_watchdog(host_exec: SharedHostExec) {
     std::thread::spawn(move || {
         use std::time::Duration;
@@ -1111,10 +1080,7 @@ fn start_host_exec_watchdog(host_exec: SharedHostExec) {
             if HOST_EXEC_WATCHDOG_STOP.load(Ordering::Relaxed) {
                 break;
             }
-            // Respawn dead workers under the lock; collect the names that
-            // were successfully respawned so we can fire `recreate_project_containers_if_running`
-            // AFTER releasing the lock (recreate shells out and may take a
-            // few seconds — we don't want to block other handlers on the map).
+            // Respawn under the lock; defer container recreate until after we release it.
             let respawned: Vec<String> = {
                 let mut map = match host_exec.lock() {
                     Ok(g) => g,
@@ -1124,10 +1090,7 @@ fn start_host_exec_watchdog(host_exec: SharedHostExec) {
                     }
                 };
                 if map.is_empty() {
-                    // Nothing to watch right now — keep looping; a project may
-                    // enable host_exec later (ensure_host_exec_running resets
-                    // the stop flag).
-                    continue;
+                    continue; // a project may enable host_exec later
                 }
                 // Collect names first so we don't hold an iterator while mutating.
                 let names: Vec<String> = map.keys().cloned().collect();
@@ -1158,11 +1121,7 @@ fn start_host_exec_watchdog(host_exec: SharedHostExec) {
                 }
                 respawned
             };
-            // Now that the lock is released, recreate the project's hub
-            // container so it picks up the new `WORKER_HOST_EXEC_URL` port —
-            // otherwise the hub keeps routing to the dead port and host_exec
-            // tools are silently unreachable until the next chat restart.
-            // Best-effort; failures are logged inside the helper.
+            // Lock released — recreate hub containers so they see the new port.
             for name in respawned {
                 host_exec_cmd::recreate_project_containers_if_running(&name);
             }
@@ -1288,8 +1247,7 @@ fn main() {
     let tray_available_setup = tray_available.clone();
     let tray_available_close = tray_available.clone();
 
-    // Bundle the shared-state Arcs into a single context struct so each exit
-    // path only needs one clone instead of several parallel Arc clones.
+    // One context struct → one clone per exit path instead of N parallel Arc clones.
     let cleanup_ctx = ExitCleanupContext {
         ide_bridge: ide_bridge.clone(),
         mcp_os: mcp_os.clone(),
@@ -1350,9 +1308,7 @@ fn main() {
     builder
         .plugin({
             use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
-            // Note: no timezone_strategy() here — the custom `.format(...)`
-            // below takes over and uses the shared `log_ts` SSOT directly, so
-            // the plugin's TimezoneStrategy would be dead config.
+            // No timezone_strategy — custom `.format(...)` below uses `log_ts` SSOT.
             tauri_plugin_log::Builder::new()
                 .targets([
                     Target::new(TargetKind::Stdout),
@@ -1370,8 +1326,7 @@ fn main() {
                 .format(move |callback, message, record| {
                     let sanitized =
                         speedwave_runtime::log_sanitizer::sanitize(&format!("{message}"));
-                    // One timestamp format for every Speedwave log line — see
-                    // `speedwave_runtime::log_ts` (the Rust SSOT).
+                    // SSOT log timestamp (see `speedwave_runtime::log_ts`).
                     let ts = speedwave_runtime::log_ts::log_timestamp();
                     callback.finish(format_args!(
                         "{ts} [{level}][{target}] {sanitized}",

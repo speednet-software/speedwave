@@ -1,30 +1,12 @@
-//! Tauri commands for the `host_exec` integration (ADR-054): reading the
-//! per-project status, toggling it on/off, editing the recipe whitelist, and
-//! resolving an executable on the recovered host `PATH` (for the UI's
-//! "browse…" picker).
-//!
-//! The whitelist is **user-config only** — these commands write it to
-//! `~/.speedwave/config.json` (never to the repo's `.speedwave.json`; the
-//! repo-config layer ignores `integrations.hostExec`, see `config::apply_integrations_layer`).
-//! After a change they (re)write the chmod-600 worker snapshot
-//! (`<data_dir>/host-exec/<project>/config.json`), (re)spawn or tear down the
-//! per-project worker, and — if the project's containers are running — recreate
-//! them so the hub re-discovers (or drops) the `host_exec` tools with the
-//! worker's current port. There is no per-call confirmation — enabling
-//! host_exec (via the danger modal) is the consent (ADR-054).
-//!
-//! All `#[tauri::command]` functions here are registered in `main.rs`'s
-//! `invoke_handler!`.
+//! Tauri commands for the `host_exec` integration (ADR-054).
+//! User-config only; respawn worker + recreate containers on change.
 
 use crate::types::check_project;
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::config::{self, HostExecRecipe};
 use speedwave_runtime::host_exec_process::write_host_exec_config_snapshot;
 
-/// What the Desktop UI shows for `host_exec` in a project: whether it's
-/// enabled, and the current whitelist (so the recipe editor can render it).
-/// Mirrors the resolved config (`ResolvedIntegrationsConfig.host_exec` /
-/// `.host_exec_commands`).
+/// `host_exec` UI status: enabled flag + recipe whitelist.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct HostExecStatus {
     /// Whether `host_exec` is enabled for this project (user config only).
@@ -49,12 +31,7 @@ pub fn get_host_exec(project: String) -> Result<HostExecStatus, String> {
     })
 }
 
-/// Toggle `host_exec` on/off for a project.
-///
-/// **The danger modal that explains the consequences is the frontend's gate** —
-/// the UI must confirm it before calling this; this command only persists the
-/// flag, (re)spawns or tears down the worker, and recreates the project's
-/// containers (if running) so the hub picks up / drops `host_exec`.
+/// Toggle `host_exec` for a project. Frontend danger modal is the consent gate.
 #[tauri::command]
 pub async fn set_host_exec_enabled(
     project: String,
@@ -84,10 +61,7 @@ pub async fn set_host_exec_enabled(
             crate::reconcile::teardown_host_exec_for_project(&host_exec_arc, &project);
         }
 
-        // 3. If the project's containers are running, recreate them so the hub
-        //    re-discovers host_exec (or drops it) with the worker's current
-        //    port. Best-effort — a render/recreate failure doesn't undo the
-        //    config change; the next chat/container start picks it up.
+        // 3. Recreate running containers so the hub re-discovers — best-effort.
         recreate_project_containers_if_running(&project);
         Ok::<(), String>(())
     })
@@ -95,14 +69,7 @@ pub async fn set_host_exec_enabled(
     .map_err(|e| e.to_string())?
 }
 
-/// Replace the `host_exec` recipe whitelist for a project.
-///
-/// Validates the recipes (`host_exec::validate_host_exec_config` — the same
-/// rules the worker relies on) and only persists if valid (a readable error is
-/// returned otherwise, not a 500). Then: writes the chmod-600 worker snapshot,
-/// respawns the worker if it's running (so it re-reads the whitelist), and
-/// recreates the project's containers (if running) so the hub re-discovers the
-/// updated tool set.
+/// Replace the recipe whitelist: validate, persist, respawn worker, recreate containers.
 #[tauri::command]
 pub async fn host_exec_save_settings(
     project: String,
@@ -135,8 +102,7 @@ pub async fn host_exec_save_settings(
         })
         .map_err(|e| e.to_string())?;
 
-        // 3. Write the chmod-600 worker snapshot (it may hold recipe `env`
-        //    values, possibly secrets — ADR-054).
+        // 3. Write chmod-600 worker snapshot — may hold recipe env-value secrets (ADR-054).
         let user_config = config::load_user_config().map_err(|e| e.to_string())?;
         let project_dir = user_config
             .find_project(&project)
@@ -153,12 +119,7 @@ pub async fn host_exec_save_settings(
         let config_path = state_dir.join(speedwave_runtime::consts::HOST_EXEC_CONFIG_FILE);
         write_host_exec_config_snapshot(&config_path, &snapshot).map_err(|e| e.to_string())?;
 
-        // 4. If host_exec is enabled for this project, make the worker reflect
-        //    the new whitelist: respawn it if it's running (refreshes tools/list),
-        //    or spawn it via `ensure_host_exec_running` if it's enabled but not
-        //    currently up (e.g. it died, or this is the first edit before a chat
-        //    starts). Disabled → nothing to do; the worker also re-reads its
-        //    snapshot per call regardless.
+        // 4. Make the worker reflect the new whitelist (respawn or spawn).
         if resolved.host_exec {
             let was_running = respawn_host_exec_worker(&host_exec_arc, &project);
             if !was_running {
@@ -166,8 +127,7 @@ pub async fn host_exec_save_settings(
             }
         }
 
-        // 5. Recreate the project's containers (if running) so the hub
-        //    re-discovers the updated tools. Best-effort.
+        // 5. Recreate running containers so the hub re-discovers — best-effort.
         recreate_project_containers_if_running(&project);
         Ok::<(), String>(())
     })
@@ -188,12 +148,7 @@ pub fn host_exec_load_settings(project: String) -> Result<Vec<HostExecRecipe>, S
         .unwrap_or_default())
 }
 
-/// Resolve an executable name on the recovered host `PATH` — a `which`-style
-/// lookup for the UI's "browse…" picker when `PATH` discovery can't find a
-/// recipe's `exec` (e.g. `docker` / `gradle`). Returns the first absolute path
-/// found, or `None`. Rejects names containing path separators, `..`, NUL, or a
-/// line break (callers should pass a bare command name; an explicit path
-/// doesn't need resolving).
+/// `which`-style lookup on the recovered host `PATH`. Rejects path-bearing names.
 #[tauri::command]
 pub fn host_exec_resolve_executable(name: String) -> Result<Option<String>, String> {
     if name.is_empty()
@@ -228,7 +183,7 @@ pub fn host_exec_resolve_executable(name: String) -> Result<Option<String>, Stri
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        // Must be executable by someone (owner/group/other x bit).
+                        // Must be executable (any x bit set).
                         if meta.permissions().mode() & 0o111 == 0 {
                             continue;
                         }
@@ -241,16 +196,9 @@ pub fn host_exec_resolve_executable(name: String) -> Result<Option<String>, Stri
     Ok(None)
 }
 
-// ---------------------------------------------------------------------------
 // helpers
-// ---------------------------------------------------------------------------
 
-/// Respawn the project's `host_exec` worker if one is in the shared map (so it
-/// re-reads the whitelist and the hub gets a fresh `tools/list`). Returns `true`
-/// if a worker was mapped (and a respawn was attempted), `false` if none was —
-/// so the caller can `ensure_host_exec_running` instead. On a respawn failure
-/// the dead worker is dropped (the watchdog / next chat start retries) and
-/// `true` is still returned (a worker *was* there).
+/// Respawn the project's worker if mapped. Returns `true` if one was present.
 fn respawn_host_exec_worker(host_exec: &crate::reconcile::SharedHostExec, project: &str) -> bool {
     match host_exec.lock() {
         Ok(mut map) => {
@@ -283,17 +231,8 @@ fn respawn_host_exec_worker(host_exec: &crate::reconcile::SharedHostExec, projec
     }
 }
 
-/// If the project's containers are running, re-render its compose (now picking
-/// up — or dropping — `WORKER_HOST_EXEC_URL` / the `host_exec` entry in
-/// `ENABLED_SERVICES` via `compose::apply_host_exec_config` + the integrations
-/// filter) and `compose_up_recreate` so the hub re-discovers. If nothing is
-/// running, do nothing — the next chat/container start renders fresh. Mirrors
-/// the recreate path in `containers_cmd`/`reconcile`; failures are logged, not
-/// fatal (the config change stands regardless).
-///
-/// Visible crate-wide because the watchdog (`main::start_host_exec_watchdog`)
-/// also needs to call it after a successful `proc.respawn()` so the hub
-/// picks up the worker's new dynamic port.
+/// Re-render compose and recreate running containers so the hub re-discovers.
+/// Best-effort — failures are logged, not fatal. Also used by the watchdog.
 pub(crate) fn recreate_project_containers_if_running(project: &str) {
     let rt = speedwave_runtime::runtime::detect_runtime();
     if !rt.is_available() {

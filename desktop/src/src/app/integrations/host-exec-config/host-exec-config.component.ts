@@ -48,21 +48,8 @@ interface RecipeDraft {
 }
 
 /**
- * The **Host Exec** integration card (Service integrations view).
- *
- * Lets the user opt this project into `host_exec` — the per-project host-side
- * MCP worker that runs the whitelisted project-toolchain commands on the host,
- * in the project folder, behind the per-project MCP hub (ADR-054, SPW-83).
- * Unlike the credential-based integrations it is **not** in the generic
- * services table: its toggle is *gated* behind a blocking danger modal that
- * explains the consequences (the worker runs repo-controlled code on the host;
- * a prompt-injected Claude can write a malicious build script and then run it).
- * Enabling it **is** the consent — once on, Claude runs any whitelisted recipe
- * without further prompting; the audit log is the after-the-fact record.
- *
- * Backed by the Tauri commands `get_host_exec`, `set_host_exec_enabled`,
- * `host_exec_save_settings`, `host_exec_load_settings`,
- * `host_exec_resolve_executable` (`desktop/src-tauri/src/host_exec_cmd.rs`).
+ * Host Exec integration card — gated toggle + danger modal + recipe editor (ADR-054).
+ * Enabling is the consent: whitelisted recipes run without per-call prompts.
  */
 @Component({
   selector: 'app-host-exec-config',

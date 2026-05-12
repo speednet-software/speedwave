@@ -1,15 +1,4 @@
-//! Recovers the user's *login-shell* `PATH` once at app startup, for the
-//! `host_exec` worker (and, via the worker's child-env allowlist, for recipes).
-//!
-//! A GUI-launched Desktop app does not inherit the login shell's `PATH` — on
-//! macOS launched from Finder, `std::env::var("PATH")` is just
-//! `/usr/bin:/bin:/usr/sbin:/sbin` (no `/opt/homebrew/bin`, no `nvm`/`asdf`
-//! shims). `./gradlew` (a repo script) is fine, but `npm`/`docker`/`gradle`
-//! *globals* are not. So we run `$SHELL -ilc 'printf %s "$PATH"'` once, with a
-//! short timeout, and cache the result; if that fails (no `$SHELL`, the shell
-//! exits non-zero, the call times out, or this is Windows where there is no
-//! login-shell concept), we fall back to the inherited `PATH` plus the two
-//! common Homebrew bin dirs. See ADR-054 §PATH.
+//! Recovers the user's login-shell `PATH` once at startup for `host_exec` (ADR-054 §PATH).
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -21,10 +10,7 @@ const SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(5);
 /// startup; read by [`recovered_host_path`].
 static RECOVERED_HOST_PATH: OnceLock<String> = OnceLock::new();
 
-/// Resolve the recovered login-shell `PATH`, computing it once. Subsequent
-/// calls return the cached value. Safe to call before [`init_recovered_host_path`]
-/// (it will do the work then) — but `setup()` calls `init_*` early so the
-/// (potentially slow) shell invocation doesn't happen on a hot path.
+/// Resolve the recovered `PATH`, computing it once. Subsequent calls return the cache.
 pub(crate) fn recovered_host_path() -> &'static str {
     RECOVERED_HOST_PATH.get_or_init(compute_recovered_path)
 }
@@ -35,12 +21,7 @@ pub(crate) fn init_recovered_host_path() {
     let _ = recovered_host_path();
 }
 
-/// The fallback `PATH` when the login-shell probe is unavailable/fails:
-/// the inherited `PATH` plus the two common Homebrew bin dirs (so `docker` /
-/// `gradle` installed via Homebrew still resolve). On Windows there is no
-/// login-shell concept — the inherited `PATH` is the right (and only) answer,
-/// so the Homebrew dirs (harmless on Windows; just non-existent) are appended
-/// the same way for code-path simplicity.
+/// Inherited `PATH` plus Homebrew bin dirs (harmless on Windows).
 fn fallback_path() -> String {
     let inherited = std::env::var("PATH").unwrap_or_default();
     let extra = ["/usr/local/bin", "/opt/homebrew/bin"];
@@ -67,10 +48,7 @@ fn path_sep() -> &'static str {
     ":"
 }
 
-/// Computes the recovered `PATH`. On Unix: `$SHELL -ilc 'printf %s "$PATH"'`
-/// with a timeout; falls back to [`fallback_path`] if `$SHELL` is unset, the
-/// command fails / exits non-zero / times out, or the output is empty. On
-/// Windows: just [`fallback_path`] (no login shell).
+/// Recovered `PATH` via `$SHELL -ilc 'printf %s "$PATH"'`; falls back on any failure.
 fn compute_recovered_path() -> String {
     #[cfg(not(windows))]
     {
@@ -94,21 +72,16 @@ fn compute_recovered_path() -> String {
     }
     #[cfg(windows)]
     {
-        // No login-shell concept on Windows; the process PATH is authoritative.
+        // Windows: process PATH is authoritative (no login shell).
         fallback_path()
     }
 }
 
-/// Run `$SHELL -ilc 'printf %s "$PATH"'` with a timeout, returning its stdout
-/// (trimmed) on a clean exit. `None` on any failure (unset `$SHELL`, spawn
-/// error, non-zero exit, or timeout). Pulled out so it's testable with an
-/// explicit timeout.
+/// `$SHELL -ilc 'printf %s "$PATH"'` with a timeout; `None` on any failure.
 #[cfg(not(windows))]
 fn probe_login_shell_path(timeout: Duration) -> Option<String> {
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
-    // -i: interactive (sources the user's rc), -l: login (sources the profile),
-    // -c: run the command. `printf %s "$PATH"` writes the PATH with no newline
-    // or quoting, which `bash`/`zsh`/`sh` all support.
+    // -ilc: interactive + login + run the command; `printf %s` is portable.
     let mut child = std::process::Command::new(&shell)
         .args(["-ilc", "printf %s \"$PATH\""])
         .stdin(std::process::Stdio::null())
@@ -117,9 +90,7 @@ fn probe_login_shell_path(timeout: Duration) -> Option<String> {
         .spawn()
         .ok()?;
 
-    // Wait with a timeout: a thread reads stdout to completion (so a chatty rc
-    // file printing to stdout can't deadlock the pipe), the main path waits on
-    // a channel; on timeout we kill the child.
+    // Reader thread drains stdout (chatty rc files can't deadlock the pipe).
     let mut stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
@@ -133,7 +104,7 @@ fn probe_login_shell_path(timeout: Duration) -> Option<String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                // Process exited — collect whatever the reader thread got.
+                // Exited — collect whatever the reader thread captured.
                 let out = rx
                     .recv_timeout(Duration::from_millis(200))
                     .unwrap_or_default();

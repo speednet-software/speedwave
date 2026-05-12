@@ -17,35 +17,23 @@ pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
 /// Shared handle for the mcp-os process.
 pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
 
-/// Shared map of per-project `host_exec` workers (ADR-054). Unlike `mcp-os`
-/// (one global instance), `host_exec` is per-project — one worker process per
-/// project, keyed by project name. Empty until a project enables `host_exec`.
+/// Per-project `host_exec` workers, keyed by project name (ADR-054).
 pub(crate) type SharedHostExec = Arc<Mutex<HashMap<String, HostExecProcess>>>;
 
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
 
-/// The shared-state Arcs required by every `run_exit_cleanup` call site.
-///
-/// Wrapping them in a struct eliminates the parallel Arc clones that would
-/// otherwise appear at each of the three call sites (signal handler,
-/// `WindowEvent::Destroyed`, `RunEvent::ExitRequested`). Clone the struct once
-/// per exit path instead of cloning each Arc individually.
+/// Shared Arcs needed by `run_exit_cleanup` — clone once per exit path.
 #[derive(Clone)]
 pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
     pub(crate) mcp_os: SharedMcpOs,
-    /// Per-project `host_exec` workers — all stopped + their files cleaned on exit.
+    /// Per-project `host_exec` workers — stopped + files cleaned on exit.
     pub(crate) host_exec: SharedHostExec,
     pub(crate) auto_check_handle: SharedAutoCheckHandle,
 }
 
-/// Stop and remove a project's `host_exec` worker (if any) from the shared
-/// map, cleaning up its token/port/pid/config files. Called when a project is
-/// switched away from (the new project's worker is spawned on demand by the
-/// next chat/container start) and — once step 6 lands — when `host_exec` is
-/// disabled for the project. The audit log is kept (see
-/// `HostExecProcess::cleanup_files`).
+/// Stop + remove a project's worker; cleans token/port/pid/config (keeps audit log).
 pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project: &str) {
     let proc = match host_exec.lock() {
         Ok(mut map) => map.remove(project),

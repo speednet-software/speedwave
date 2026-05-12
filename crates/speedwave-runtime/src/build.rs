@@ -270,19 +270,8 @@ fn resolve_mcp_os_script_inner(
     None
 }
 
-/// Resolves the path to the `host_exec` worker `index.js` entry point.
-///
-/// Mirrors [`resolve_mcp_os_script`] exactly — `host_exec` is a host process
-/// (per-project, ADR-054), bundled the same way as `mcp-os` (`node` + JS, no
-/// container, no `IMAGES` entry, no `sign-bundled-binaries.sh` entry). The
-/// bundle / dev / marker subpaths are `host_exec/host_exec/dist/index.js`:
-///
-/// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/host_exec/host_exec/dist/index.js`
-/// 2. `CARGO_MANIFEST_DIR` source tree → `<repo>/mcp-servers/host_exec/dist/index.js`
-/// 3. `~/.speedwave/resources-dir` marker → `<dir>/host_exec/host_exec/dist/index.js`
-///
-/// Step 2 before 3 ensures `make dev` uses local sources (with hoisted
-/// `node_modules`) instead of a stale bundle path written by the installed app.
+/// Resolves the `host_exec` worker `index.js` (bundle → CARGO source → marker).
+/// Mirrors [`resolve_mcp_os_script`]; ADR-054.
 pub fn resolve_host_exec_script() -> Option<std::path::PathBuf> {
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

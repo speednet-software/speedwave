@@ -1,9 +1,5 @@
 /**
- * Shared types for the `host_exec` worker — the on-disk config snapshot the
- * spawner writes (mirrors Rust `HostExecConfig`/`HostExecRecipe` in
- * `crates/speedwave-runtime/src/config.rs`) and the result contract returned to
- * Claude (ADR-054). The worker re-validates only the runtime-only parts (param
- * regexes, the `cwdSub` canonical-path check); the structural validation is Rust's.
+ * Shared types for the `host_exec` worker: config snapshot + result contract (ADR-054).
  * @module host_exec/types
  */
 
@@ -51,11 +47,8 @@ export type HostExecStatus =
   | 'spawn_error';
 
 /**
- * The structured result returned to Claude as a (successful) ToolResult.
- * `exitCode !== 0` is **not** an MCP tool error — it is a successful result
- * carrying the command's exit code (ADR-054). MCP tool *errors* are reserved
- * for: unknown recipe, a parameter that fails its regex, a `cwdSub` escape, and
- * a `spawn_error`.
+ * Structured result returned to Claude. `exitCode !== 0` is a successful result,
+ * not an MCP error — see ADR-054 §"Reading a command's result".
  */
 export interface HostExecResult {
   /** How the execution ended. */

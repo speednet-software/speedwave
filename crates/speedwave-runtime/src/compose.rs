@@ -168,9 +168,7 @@ pub fn render_compose(
     // Inject mcp-os config into hub if auth token exists
     yaml = apply_mcp_os_config(&yaml)?;
 
-    // Inject this project's host_exec worker URL + token into the hub if the
-    // worker is running (ADR-054). No-op when it isn't yet (the Desktop side
-    // spawns it on demand and recreates the hub container afterward).
+    // Inject host_exec WORKER URL + token if the worker is running (ADR-054). No-op otherwise.
     yaml = apply_host_exec_config(&yaml, project_name)?;
 
     // Inject per-worker Bearer auth tokens (SEC-035)
@@ -893,11 +891,7 @@ fn apply_integrations_filter(
         enabled_names.push("os");
     }
 
-    // host_exec (ADR-054) — host-side, no compose service; the hub discovers it
-    // via WORKER_HOST_EXEC_URL (injected by `apply_host_exec_config` when the
-    // worker is running). Listed here, gated on the per-project toggle, so the
-    // hub knows to expect it even if `apply_host_exec_config` was a no-op
-    // because the worker hadn't started yet.
+    // host_exec is host-side (no compose service); list it for the hub (ADR-054).
     if integrations.host_exec {
         enabled_names.push("host_exec");
     }
@@ -1042,36 +1036,14 @@ fn mcp_os_gateway_url(port: u16) -> String {
     }
 }
 
-/// Returns the URL where the per-project `host_exec` worker listens, as seen
-/// from inside that project's containers. Same gateway hostnames as
-/// `mcp_os_gateway_url` — the worker (like `mcp-os`) runs on the host, not in
-/// the compose network, so the hub reaches it via the platform's host gateway
-/// alias (Lima `host.lima.internal` / rootless-nerdctl `host.docker.internal`
-/// / `host.containers.internal` elsewhere). ADR-054.
+/// Per-project `host_exec` URL as seen from inside the project's containers (ADR-054).
 fn host_exec_gateway_url(port: u16) -> String {
-    // The gateway alias is the same regardless of which host-side worker it
-    // points at; only the port differs (per project, dynamically assigned).
+    // Same gateway alias as host-side `mcp-os`; only the dynamic port differs.
     mcp_os_gateway_url(port)
 }
 
-/// Injects per-project `host_exec` configuration into the `mcp-hub` container,
-/// if this project's worker is running (its `port` + `auth-token` files exist
-/// under `<data_dir>/host-exec/<project>/`).
-///
-/// Injections into `mcp-hub`:
-///   - `WORKER_HOST_EXEC_URL` env var (the host-gateway URL with this project's
-///     dynamic port — the hub builds `WORKER_${id.toUpperCase()}_URL`, so the
-///     service id `host_exec` maps to exactly this name);
-///   - `/secrets/host_exec-auth-token:ro` bind-mount — the bearer token as a
-///     file (never an env var). The filename MUST match `/secrets/<service>-auth-token`
-///     where `<service>` is the id `host_exec` (underscore): the hub's
-///     `auth-tokens.ts` derives the path that way, so `host-exec` (hyphen)
-///     would never be read and every hub→worker call would 401.
-///
-/// The `claude` container is NOT modified — it only sees the hub. `host_exec`
-/// is added to `ENABLED_SERVICES` separately, in `apply_integrations_filter`,
-/// gated on `integrations.host_exec` — so even if the worker isn't running yet
-/// (its files absent → this is a no-op), the hub knows to expect it once it is.
+/// Injects `WORKER_HOST_EXEC_URL` + bearer-token mount into the hub if the worker is up.
+/// No-op when files are absent. Filename MUST be `host_exec-auth-token` (underscore).
 fn apply_host_exec_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     let state_dir = crate::host_exec::host_exec_project_dir(consts::data_dir(), project);
     let token_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
@@ -1085,10 +1057,7 @@ fn apply_host_exec_config_with_paths(
     token_path: &std::path::Path,
     port_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    // Single read attempt — same TOCTOU reasoning as `apply_mcp_os_config_with_path`:
-    // the Desktop side spawns/respawns the worker and rewrites these files at
-    // runtime; treat any read failure as "not running yet" (no-op), logging
-    // non-NotFound errors so permission/disk problems stay visible.
+    // Same TOCTOU handling as `apply_mcp_os_config_with_path` — read failure ⇒ not running.
     let token = match std::fs::read_to_string(token_path) {
         Ok(s) => s.trim().to_string(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(yaml.to_string()),

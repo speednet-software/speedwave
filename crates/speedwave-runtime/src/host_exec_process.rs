@@ -1,21 +1,5 @@
 //! Per-project process manager for the `host_exec` MCP worker (ADR-054).
-//!
-//! `host_exec` is a host-side worker that runs **only** the commands a user has
-//! explicitly whitelisted, in the project directory, with no shell. Unlike
-//! `mcp-os` (one global, project-agnostic process), `host_exec` is
-//! **per-project**: one worker process per project, each on its own dynamic
-//! `127.0.0.1` port, each with its own whitelist, bearer token, and log under
-//! `<data_dir>/host-exec/<project>/`. There is **no per-call confirmation** —
-//! enabling `host_exec` is the user's consent for the whole project; the audit
-//! log is the after-the-fact record.
-//!
-//! Shared by Speedwave Desktop (which keeps a `HashMap<String, HostExecProcess>`
-//! in app state and a watchdog) and the CLI (which spawns one before
-//! `compose_up`). Mechanics mirror `mcp_os_process.rs`: `env_clear` + a minimal
-//! re-added env, the `{"port":N}` stdout handshake with a read timeout,
-//! background drain threads, a PID-file stale-kill (`is_node_process` guard),
-//! `write_restricted_file` (`chmod 600` / `icacls`), log truncation, `Drop`
-//! cleanup.
+//! Mirrors `mcp_os_process.rs` mechanics; shared by Desktop and CLI.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -23,19 +7,16 @@ use std::thread::JoinHandle;
 
 use crate::consts;
 
-/// Timeout for reading the port announcement from the `host_exec` worker's
-/// stdout (`{"port":N}` as the first line). Same value as `mcp-os`'s.
+/// Worker port-announcement read timeout (same value as `mcp-os`).
 const PORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Cap the per-project audit log at 2 MiB on spawn (the worker appends to it
-/// for the lifetime of the process; we just keep it bounded).
+/// Cap on the per-project audit log size at spawn time.
 const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Timeout for a TCP liveness probe against the worker's loopback port.
+/// TCP liveness probe timeout for the worker's loopback port.
 const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Windows system environment variables required for Node.js OpenSSL CSPRNG
-/// (BCryptGenRandom) initialization. Same list `mcp_os_process` uses (ADR-013).
+/// Windows env vars required for Node.js BCryptGenRandom (ADR-013).
 #[cfg(target_os = "windows")]
 const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[
     "SystemRoot",
@@ -63,8 +44,7 @@ pub struct HostExecProcess {
     drain_handles: Vec<JoinHandle<()>>,
     /// The data dir (so `respawn` re-spawns into the same per-project layout).
     data_dir: PathBuf,
-    /// `<data_dir>/host-exec/<project>/config.json` — the validated whitelist
-    /// snapshot the worker reads.
+    /// `<data_dir>/host-exec/<project>/config.json` — validated whitelist snapshot.
     config_path: PathBuf,
     /// `<data_dir>/host-exec/<project>/auth-token` (`chmod 600`).
     token_path: PathBuf,
@@ -76,18 +56,13 @@ pub struct HostExecProcess {
     port: u16,
     /// Absolute path to `mcp-servers/host_exec/dist/index.js`.
     script_path: String,
-    /// The recovered login-shell `PATH` to give the worker (and, via the
-    /// worker's child-env allowlist, to recipes).
+    /// Recovered login-shell `PATH` for the worker and its recipes.
     host_path: String,
 }
 
 impl HostExecProcess {
-    /// Spawn a `host_exec` worker for `project`, blocking up to ~10 s for the
-    /// `{"port":N}` announcement. State files go under
-    /// `<data_dir>/host-exec/<project>/`. `host_path` is the recovered
-    /// login-shell `PATH` (the GUI app's stunted `PATH` won't find
-    /// `npm`/`docker`/`gradle` globals; the CLI's inherited `PATH` is already
-    /// the login-shell one).
+    /// Spawn a `host_exec` worker; blocks ~10s for the `{"port":N}` handshake.
+    /// `host_path` is the recovered login-shell `PATH` (see ADR-054).
     pub fn spawn_in(
         project: &str,
         project_dir: &Path,
@@ -108,21 +83,14 @@ impl HostExecProcess {
         // Kill any stale worker from a previous session (this project's PID file).
         kill_stale_by_pid_file(&pid_path);
 
-        // Keep the audit log bounded; pre-create it chmod 600 so the worker's
-        // `appendFile` (audit.ts) opens an already-restricted file.
+        // Pre-create log chmod 600 so the worker opens an already-restricted file.
         crate::log_file::truncate_if_oversized(&log_path, LOG_MAX_BYTES);
         let _ = crate::log_file::open_log_file(&log_path);
 
         // Bearer token — chmod 600.
         write_restricted_file(&token_path, &token)?;
 
-        // Build the child env: env_clear() (so a parent secret can't leak into
-        // the worker — or, via the worker's child-env allowlist, into recipes)
-        // + a minimal re-added set (the recovered PATH, HOME / Windows CSPRNG
-        // vars, the bundle env in prod, and the HOST_EXEC_* contract vars).
-        // The bundled `node` is resolved to an absolute path by
-        // `binary::command("node")`, so it runs even though PATH lost the
-        // bundle's bin dir.
+        // env_clear + minimal re-added env (see ADR-054 §"Child environment of recipes").
         let mut cmd = crate::binary::command("node");
         cmd.arg(script_path);
         apply_child_env(&mut cmd, host_path, &CurrentProcessEnv);
@@ -130,19 +98,17 @@ impl HostExecProcess {
             .env("HOST_EXEC_AUTH_TOKEN", &token)
             .env("HOST_EXEC_CONFIG_PATH", &config_path)
             .env("HOST_EXEC_LOG_FILE", &log_path)
-            // No stdin (a recipe cannot prompt): the worker gets nothing.
+            // No stdin — recipes cannot prompt.
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
         let mut child = cmd.spawn()?;
 
-        // PID file immediately so the next session can kill a stale worker.
+        // PID file so the next session can kill a stale worker.
         write_restricted_file(&pid_path, &child.id().to_string())?;
 
-        // Drain stdout/stderr + read the port (10 s timeout). On failure, kill
-        // the child and remove the token + PID (the port file isn't written
-        // yet).
+        // Drain stdio + read port (10s). On failure, clean up child + token + PID.
         let (port, drain_handles) = match drain_and_read_port(&mut child, &log_path) {
             Ok(p) => p,
             Err(e) => {
@@ -184,9 +150,7 @@ impl HostExecProcess {
         self.port
     }
 
-    /// Kill the worker and join the stdout/stderr drain threads. After
-    /// `child.wait()` the pipes are closed, so the drain loops hit EOF and the
-    /// joins are deterministic. Idempotent.
+    /// Kill the worker and join the stdio drain threads. Idempotent.
     pub fn stop(&mut self) -> anyhow::Result<()> {
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
@@ -198,8 +162,7 @@ impl HostExecProcess {
         Ok(())
     }
 
-    /// Remove the per-project token, port, PID, and config-snapshot files. The
-    /// audit **log is intentionally kept** — it persists for diagnostics.
+    /// Remove token, port, PID, and config snapshot. Audit log is kept.
     pub fn cleanup_files(&self) {
         let _ = std::fs::remove_file(&self.token_path);
         let _ = std::fs::remove_file(&self.port_path);
@@ -207,11 +170,8 @@ impl HostExecProcess {
         let _ = std::fs::remove_file(&self.config_path);
     }
 
-    /// Stop the worker and spawn a fresh one for the same project. The new
-    /// worker reads the *current* `config.json`; the caller must have written
-    /// the new snapshot first and is responsible for triggering the hub
-    /// re-discovery afterwards. Clears the about-to-be-replaced `self`'s file
-    /// paths so `Drop`/`cleanup_files` deletes nothing the new spawn wrote.
+    /// Stop and respawn for the same project. Caller must write the new
+    /// config snapshot and trigger hub re-discovery afterwards.
     pub fn respawn(&mut self) -> anyhow::Result<u16> {
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
@@ -243,12 +203,11 @@ impl HostExecProcess {
             }
         };
         let new_port = new.port;
-        *self = new; // old self dropped — Drop is harmless now (empty paths, no child/handles)
+        *self = new; // empty paths + no child/handles → Drop is harmless
         Ok(new_port)
     }
 
-    /// Whether the worker is alive *and* listening on its port. More thorough
-    /// than `child.is_some()` — detects "alive but not listening".
+    /// True if the worker process is alive *and* listening on its port.
     pub fn is_alive(&self) -> bool {
         if self.child.is_none() {
             return false;
@@ -264,8 +223,7 @@ impl Drop for HostExecProcess {
     }
 }
 
-/// Whether a `host_exec` worker is listening on `127.0.0.1:<port>`. A quick TCP
-/// probe — the caller already knows the worker is process-alive.
+/// Quick TCP liveness probe against `127.0.0.1:<port>`.
 pub fn is_host_exec_alive(port: u16) -> bool {
     if port == 0 {
         return false;
@@ -274,10 +232,7 @@ pub fn is_host_exec_alive(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(&addr, PORT_PROBE_TIMEOUT).is_ok()
 }
 
-/// Write the validated `host_exec` config snapshot JSON (`{ projectDir,
-/// commands }` — see [`crate::config::host_exec_config_snapshot`]) to `path`
-/// `chmod 600` (current-user-only ACL on Windows). It may hold recipe `env`
-/// values (possibly secrets), so it must not be world-readable (ADR-054).
+/// Write the config snapshot JSON `chmod 600` — may hold env-value secrets.
 pub fn write_host_exec_config_snapshot(
     path: &Path,
     snapshot: &serde_json::Value,
@@ -285,11 +240,7 @@ pub fn write_host_exec_config_snapshot(
     write_restricted_file(path, &serde_json::to_string_pretty(snapshot)?)
 }
 
-// ---------------------------------------------------------------------------
-// Child-process environment policy (mirrors mcp_os_process::apply_child_env,
-// but the re-added PATH is the recovered login-shell PATH and the HOST_EXEC_*
-// vars are added by the caller — never here, and never inherited).
-// ---------------------------------------------------------------------------
+// Child-env policy — mirrors `mcp_os_process::apply_child_env`.
 
 /// Reads environment variables from a source (process env, or a fake in tests).
 trait EnvSource {
@@ -305,11 +256,7 @@ impl EnvSource for CurrentProcessEnv {
     }
 }
 
-/// Apply the `host_exec` worker's child-process environment policy to `cmd`:
-/// `env_clear()` then re-add only `PATH` (the recovered login-shell PATH),
-/// `HOME` / Windows CSPRNG vars (Node needs them), and the bundle env
-/// (`SPEEDWAVE_RESOURCES_DIR`, `SPEEDWAVE_PROD`) in a bundled `.app`. It never
-/// adds the `HOST_EXEC_*` contract vars (the caller does) and re-adds nothing else.
+/// `env_clear()` + re-add only PATH/HOME/Windows-CSPRNG/bundle vars (ADR-054).
 fn apply_child_env(cmd: &mut Command, host_path: &str, env: &dyn EnvSource) {
     cmd.env_clear();
 
@@ -322,11 +269,10 @@ fn apply_child_env(cmd: &mut Command, host_path: &str, env: &dyn EnvSource) {
         }
     }
 
-    // The recovered login-shell PATH — given to the worker and (via the
-    // worker's allowlist) to recipes.
+    // Recovered login-shell PATH — propagates to the worker and its recipes.
     cmd.env("PATH", host_path);
 
-    // HOME on Unix; on Windows USERPROFILE (forwarded above) is the equivalent.
+    // HOME on Unix; on Windows USERPROFILE is the equivalent (forwarded above).
     #[cfg(not(target_os = "windows"))]
     cmd.env("HOME", env.var("HOME").unwrap_or_default());
 
@@ -338,13 +284,9 @@ fn apply_child_env(cmd: &mut Command, host_path: &str, env: &dyn EnvSource) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Stale-process cleanup (per-project PID file) — same mechanics as mcp_os_process.
-// ---------------------------------------------------------------------------
+// Stale-PID cleanup — mirrors `mcp_os_process`.
 
-/// Kill a stale `host_exec` worker identified by its (per-project) PID file.
-/// Only kills the PID if `ps`/`tasklist` says it is a `node` process, so a
-/// recycled PID is not killed by mistake. The PID file is removed regardless.
+/// Kill a stale worker from `pid_path` (only if it's still a node process).
 fn kill_stale_by_pid_file(pid_path: &Path) {
     let pid_str = match std::fs::read_to_string(pid_path) {
         Ok(s) => s.trim().to_string(),
@@ -411,14 +353,9 @@ fn kill_process(pid: u32) {
         .status();
 }
 
-// ---------------------------------------------------------------------------
-// Port handshake + stdout/stderr drain (mirrors mcp_os_process).
-// ---------------------------------------------------------------------------
+// Port handshake + stdio drain — mirrors `mcp_os_process`.
 
-/// Spawn background threads draining the worker's stdout and stderr into the
-/// log, and wait for the `{"port":N}` JSON line on stdout (10 s timeout).
-/// Returns the port and the drain join handles (so the caller can join them on
-/// stop, releasing the log-file handles).
+/// Drain stdio in background threads and wait for the `{"port":N}` line (10s).
 fn drain_and_read_port(
     child: &mut Child,
     log_path: &Path,
@@ -492,17 +429,9 @@ fn drain_and_read_port(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Restricted file write (chmod 600 / icacls) — same shape as mcp_os_process.
-// Extracting this trio (here, mcp_os_process, the worker snapshot) into a
-// shared helper that also closes the Windows write-then-icacls TOCTOU window
-// is a tracked follow-up (ADR-054).
-// ---------------------------------------------------------------------------
+// Restricted file write — mirrors `mcp_os_process`; ADR-054 tracks the share-helper follow-up.
 
-/// Write `content` to `path` `chmod 600` (current-user-only ACL via `icacls` on
-/// Windows). Windows known limitation: writes the file then tightens the ACL,
-/// so the content is briefly readable by other users on a multi-user box; the
-/// Unix path opens with `mode(0o600)` at creation.
+/// Write `content` to `path` chmod 600 (icacls on Windows; TOCTOU window — ADR-054).
 fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
     if path.is_dir() {
         log::warn!(
@@ -561,10 +490,7 @@ fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Test-only accessors — gated behind cfg(test) so clippy reports dead code in
-// production builds instead of needing #[allow(dead_code)].
-// ---------------------------------------------------------------------------
+// Test-only accessors — gated behind `cfg(test)` to keep clippy honest.
 
 #[cfg(test)]
 impl HostExecProcess {
