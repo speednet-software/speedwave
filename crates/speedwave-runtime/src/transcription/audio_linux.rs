@@ -6,20 +6,26 @@
 //! Both tools can output the target rate/format directly:
 //!   PipeWire: `pw-record --target <node> --rate 16000 --channels 1 --format f32 -`
 //!   PulseAudio: `parec --device <source> --rate 16000 --channels 1 --format float32le`
-//! so the Rust side just frames the raw byte stream into `AudioChunk`s.
+//! so the Rust side just frames the raw byte stream into `AudioChunk`s. A
+//! `Mixed` (system + mic) capture runs two such processes and sums their PCM in
+//! one shared `MixBuffer` via per-process reader threads (ADR-056 decision 15).
 
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, ProcessSelector,
+    CaptureError, ProcessSelector, CHUNK_DURATION,
 };
+use super::mix::{MixBuffer, MixSource};
 
 /// Approximate chunk size in frames (~200 ms at 16 kHz) — the granularity at
 /// which we hand audio to the engine.
 const CHUNK_FRAMES: usize = 3200;
+/// 16 kHz — the (only) output rate.
+const TARGET_RATE: u32 = 16_000;
 
 /// Which sound server we found on this host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,11 +149,23 @@ impl AudioCapture for LinuxAudioCapture {
 
     fn enumerate_sources(&self) -> Result<Vec<AudioSourceInfo>, CaptureError> {
         let server = self.server()?;
-        let mut sources = vec![AudioSourceInfo {
-            source: AudioSource::SystemWide,
-            label: "System (everything)".to_string(),
-            app_id: None,
-        }];
+        let mut sources = vec![
+            // "Whole meeting" (system monitor + default mic) first — the product
+            // default for meeting transcription; works on both servers.
+            AudioSourceInfo {
+                source: AudioSource::Mixed {
+                    system: Box::new(AudioSource::SystemWide),
+                    mic: None,
+                },
+                label: "Whole meeting (system audio + your microphone)".to_string(),
+                app_id: None,
+            },
+            AudioSourceInfo {
+                source: AudioSource::SystemWide,
+                label: "System (everything)".to_string(),
+                app_id: None,
+            },
+        ];
         match server {
             SoundServer::PipeWire => enumerate_pipewire(&mut sources)?,
             SoundServer::PulseAudio => enumerate_pulse(&mut sources)?,
@@ -157,6 +175,14 @@ impl AudioCapture for LinuxAudioCapture {
 
     fn start(&self, source: AudioSource) -> Result<Box<dyn AudioStream>, CaptureError> {
         let server = self.server()?;
+        // Mixed = two children (system monitor + mic) summed into one MixBuffer.
+        if let AudioSource::Mixed { system, mic } = &source {
+            let (sys_child, mic_child) = match server {
+                SoundServer::PipeWire => spawn_mixed_pw_record(system, mic)?,
+                SoundServer::PulseAudio => spawn_mixed_parec(system, mic)?,
+            };
+            return Ok(Box::new(MixedRawPcmStream::new(sys_child, mic_child)?));
+        }
         let mut child = match server {
             SoundServer::PipeWire => spawn_pw_record(&source)?,
             SoundServer::PulseAudio => spawn_parec(&source)?,
@@ -165,21 +191,26 @@ impl AudioCapture for LinuxAudioCapture {
             .stdout
             .take()
             .ok_or_else(|| CaptureError::Failed("capture tool stdout not piped".to_string()))?;
-        // Drain stderr so the tool can't deadlock on a full pipe.
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || {
-                use std::io::BufRead;
-                let reader = std::io::BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    log::debug!(target: "transcription::capture", "linux-capture: {line}");
-                }
-            });
-        }
+        drain_stderr(&mut child);
         Ok(Box::new(RawPcmStream {
             child,
             stdout,
             done: false,
         }))
+    }
+}
+
+/// Spawns a background thread that drains a child's stderr into the log so the
+/// child can't deadlock on a full pipe.
+fn drain_stderr(child: &mut Child) {
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                log::debug!(target: "transcription::capture", "linux-capture: {line}");
+            }
+        });
     }
 }
 
@@ -241,6 +272,143 @@ impl Drop for RawPcmStream {
     }
 }
 
+/// `AudioStream` for a mixed Linux capture: two child tools (system monitor +
+/// mic, both already 16 kHz mono f32-LE) drained by background threads into one
+/// shared `MixBuffer` that sums them. Dropping it kills both children, which
+/// makes the reader threads see EOF and exit.
+struct MixedRawPcmStream {
+    /// System-side capture child (e.g. `pw-record --target @DEFAULT_MONITOR@`).
+    sys_child: Child,
+    /// Mic-side capture child.
+    mic_child: Child,
+    /// Buffer both reader threads push into; `next_chunk` pops from it.
+    buf: Arc<Mutex<MixBuffer>>,
+    /// Reader-thread handles — joined on drop after the children are killed.
+    readers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl MixedRawPcmStream {
+    /// Wires up both children: takes their stdouts, drains their stderrs, and
+    /// spawns one reader thread per side that feeds the shared `MixBuffer`.
+    fn new(mut sys_child: Child, mut mic_child: Child) -> Result<Self, CaptureError> {
+        let sys_out = sys_child
+            .stdout
+            .take()
+            .ok_or_else(|| CaptureError::Failed("system capture stdout not piped".to_string()))?;
+        let mic_out = mic_child
+            .stdout
+            .take()
+            .ok_or_else(|| CaptureError::Failed("mic capture stdout not piped".to_string()))?;
+        drain_stderr(&mut sys_child);
+        drain_stderr(&mut mic_child);
+        let buf = Arc::new(Mutex::new(MixBuffer::new(true)));
+        let readers = vec![
+            spawn_pcm_reader(sys_out, Arc::clone(&buf), MixSource::System),
+            spawn_pcm_reader(mic_out, Arc::clone(&buf), MixSource::Mic),
+        ];
+        Ok(Self {
+            sys_child,
+            mic_child,
+            buf,
+            readers,
+        })
+    }
+}
+
+/// Reads raw f32-LE mono PCM from `stdout` and pushes ~`CHUNK_FRAMES`-sample
+/// runs into the shared `MixBuffer`, tagged with `source`, tracking a running
+/// offset (the tools give us no timestamps). Exits on EOF.
+fn spawn_pcm_reader(
+    mut stdout: std::process::ChildStdout,
+    buf: Arc<Mutex<MixBuffer>>,
+    source: MixSource,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut byte_pos: u64 = 0; // bytes read from this stream so far
+        let want = CHUNK_FRAMES * 4;
+        loop {
+            let mut chunk = vec![0u8; want];
+            let mut filled = 0;
+            while filled < want {
+                match stdout.read(&mut chunk[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(_) => break,
+                }
+            }
+            if filled == 0 {
+                // EOF — mark the buffer finished from this side and exit. (If
+                // the *other* side is still going, MixBuffer keeps padding this
+                // side with silence; finish() makes it drain on the last pop.)
+                if let Ok(mut b) = buf.lock() {
+                    b.finish();
+                }
+                return;
+            }
+            let usable = filled - (filled % 4);
+            let mut samples = Vec::with_capacity(usable / 4);
+            for f in chunk[..usable].chunks_exact(4) {
+                samples.push(f32::from_le_bytes([f[0], f[1], f[2], f[3]]));
+            }
+            let offset_ns = byte_pos / 4 * 1_000_000_000 / TARGET_RATE as u64;
+            if let Ok(mut b) = buf.lock() {
+                b.push(source, offset_ns, &samples);
+            }
+            byte_pos += usable as u64;
+        }
+    })
+}
+
+impl AudioStream for MixedRawPcmStream {
+    fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
+        let want = ((TARGET_RATE as u128 * CHUNK_DURATION.as_millis() / 1000) as usize).max(1);
+        // Poll the mix buffer; ~200 ms chunk cadence, 20 ms poll. A ~2 s stall
+        // (both children stopped without an EOF, e.g. a device vanished) →
+        // Ok(None) so the driver finalizes rather than spins forever.
+        const STALL_GIVE_UP: Duration = Duration::from_secs(2);
+        let mut waited = Duration::ZERO;
+        loop {
+            {
+                let mut b = self
+                    .buf
+                    .lock()
+                    .map_err(|_| CaptureError::Failed("mix buffer poisoned".to_string()))?;
+                let start_ns = b.offset_ns();
+                let chunk = b
+                    .pop(want, want)
+                    .or_else(|| (waited >= STALL_GIVE_UP).then(|| b.pop(1, want)).flatten());
+                if let Some(samples) = chunk {
+                    return Ok(Some(AudioChunk {
+                        samples,
+                        offset: Duration::from_nanos(start_ns),
+                    }));
+                }
+            }
+            if waited >= STALL_GIVE_UP {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            waited += Duration::from_millis(20);
+        }
+    }
+}
+
+impl Drop for MixedRawPcmStream {
+    fn drop(&mut self) {
+        // Kill both children; the reader threads then see EOF and exit, which
+        // we join to avoid leaking threads.
+        for child in [&mut self.sys_child, &mut self.mic_child] {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        for h in self.readers.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
 // --- PipeWire ---------------------------------------------------------------
 
 /// Spawns `pw-record` for the requested source.
@@ -265,15 +433,58 @@ fn spawn_pw_record(source: &AudioSource) -> Result<Child, CaptureError> {
                 .unwrap_or_else(|| "@DEFAULT_SOURCE@".to_string());
             cmd.args(["--target", &target]);
         }
-        AudioSource::Mixed { system, .. } => {
-            // pw-record captures one target; for Mixed we capture the system
-            // side here and let the engine pull the mic via a second stream
-            // if it needs it. v1: just record the system side.
-            return spawn_pw_record(system);
+        AudioSource::Mixed { .. } => {
+            // Mixed is handled by spawn_mixed_pw_record (two processes).
+            return Err(CaptureError::Failed(
+                "mixed capture must go through spawn_mixed_pw_record".to_string(),
+            ));
         }
     }
     cmd.arg("-");
     cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| CaptureError::Failed(format!("spawn pw-record: {e}")))
+}
+
+/// Spawns two `pw-record` processes for a `Mixed` source: the system side
+/// (recursing on `system`, which must be `SystemWide` or a PipeWire `Process`
+/// node — not a nested `Mixed`/`Microphone`) and the mic side (`mic` device, or
+/// `@DEFAULT_SOURCE@`). Returns `(system_child, mic_child)`.
+fn spawn_mixed_pw_record(
+    system: &AudioSource,
+    mic: &Option<String>,
+) -> Result<(Child, Child), CaptureError> {
+    let sys_child = match system {
+        AudioSource::SystemWide | AudioSource::Process { .. } => spawn_pw_record(system)?,
+        other => {
+            return Err(CaptureError::Unsupported(format!(
+                "mixed capture's system source must be System or a PipeWire node, got {other:?}"
+            )))
+        }
+    };
+    let mic_target = mic
+        .clone()
+        .unwrap_or_else(|| "@DEFAULT_SOURCE@".to_string());
+    let mic_child = pw_record_target(&mic_target)?;
+    Ok((sys_child, mic_child))
+}
+
+/// Spawns a `pw-record` capturing exactly `target` at 16 kHz mono f32 to stdout.
+fn pw_record_target(target: &str) -> Result<Child, CaptureError> {
+    Command::new("pw-record")
+        .args([
+            "--rate",
+            "16000",
+            "--channels",
+            "1",
+            "--format",
+            "f32",
+            "--target",
+            target,
+            "-",
+        ])
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| CaptureError::Failed(format!("spawn pw-record: {e}")))
@@ -407,11 +618,61 @@ fn spawn_parec(source: &AudioSource) -> Result<Child, CaptureError> {
                 "per-app capture is not available on PulseAudio — use System audio".to_string(),
             ));
         }
-        AudioSource::Mixed { system, .. } => {
-            return spawn_parec(system);
+        AudioSource::Mixed { .. } => {
+            // Mixed is handled by spawn_mixed_parec (two processes).
+            return Err(CaptureError::Failed(
+                "mixed capture must go through spawn_mixed_parec".to_string(),
+            ));
         }
     }
     cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| CaptureError::Failed(format!("spawn parec: {e}")))
+}
+
+/// Spawns two `parec` processes for a `Mixed` source: the default sink's monitor
+/// (the system side; the inner `system` must be `SystemWide` — PulseAudio has no
+/// per-app capture in v1) and the mic source (`mic` device or `@DEFAULT_SOURCE@`).
+fn spawn_mixed_parec(
+    system: &AudioSource,
+    mic: &Option<String>,
+) -> Result<(Child, Child), CaptureError> {
+    match system {
+        AudioSource::SystemWide => {}
+        AudioSource::Process { .. } => {
+            return Err(CaptureError::Unsupported(
+                "per-app capture is not available on PulseAudio — use System audio".to_string(),
+            ))
+        }
+        other => {
+            return Err(CaptureError::Unsupported(format!(
+                "mixed capture's system source must be System on PulseAudio, got {other:?}"
+            )))
+        }
+    }
+    let sys_child = parec_device("@DEFAULT_MONITOR@")?;
+    let mic_device = mic
+        .clone()
+        .unwrap_or_else(|| "@DEFAULT_SOURCE@".to_string());
+    let mic_child = parec_device(&mic_device)?;
+    Ok((sys_child, mic_child))
+}
+
+/// Spawns a `parec` capturing exactly `device` at 16 kHz mono float32le to stdout.
+fn parec_device(device: &str) -> Result<Child, CaptureError> {
+    Command::new("parec")
+        .args([
+            "--rate",
+            "16000",
+            "--channels",
+            "1",
+            "--format",
+            "float32le",
+            "--device",
+            device,
+        ])
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| CaptureError::Failed(format!("spawn parec: {e}")))
@@ -537,6 +798,68 @@ mod tests {
         };
         let err = spawn_parec(&src).unwrap_err();
         assert!(matches!(err, CaptureError::Unsupported(_)));
+    }
+
+    #[test]
+    fn mixed_pw_record_rejects_a_nonsensical_system_source() {
+        // A microphone or a nested Mixed can't be the "system" side of a mix.
+        let err =
+            spawn_mixed_pw_record(&AudioSource::Microphone { device: None }, &None).unwrap_err();
+        assert!(matches!(err, CaptureError::Unsupported(_)));
+        let nested = AudioSource::Mixed {
+            system: Box::new(AudioSource::SystemWide),
+            mic: None,
+        };
+        assert!(matches!(
+            spawn_mixed_pw_record(&nested, &None).unwrap_err(),
+            CaptureError::Unsupported(_)
+        ));
+        // A PipeWire Process node carrying a raw PID (not a node id) → rejected
+        // by node_id_of inside spawn_pw_record, before any process is spawned.
+        let bad_pid = AudioSource::Process {
+            selector: ProcessSelector::Pid { pid: 9 },
+        };
+        assert!(matches!(
+            spawn_mixed_pw_record(&bad_pid, &None).unwrap_err(),
+            CaptureError::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn mixed_parec_rejects_per_app_and_other_system_sources() {
+        // PulseAudio has no per-app capture — a Process system source is out.
+        let proc = AudioSource::Process {
+            selector: ProcessSelector::NodeId {
+                id: "1".to_string(),
+            },
+        };
+        assert!(matches!(
+            spawn_mixed_parec(&proc, &None).unwrap_err(),
+            CaptureError::Unsupported(_)
+        ));
+        // And so is anything that isn't SystemWide (e.g. a Microphone-as-system).
+        assert!(matches!(
+            spawn_mixed_parec(&AudioSource::Microphone { device: None }, &None).unwrap_err(),
+            CaptureError::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn spawn_pw_record_routes_mixed_through_the_dedicated_path() {
+        // Calling spawn_pw_record directly with a Mixed source is a programmer
+        // error — it must go through spawn_mixed_pw_record. (Same for parec.)
+        let m = AudioSource::Mixed {
+            system: Box::new(AudioSource::SystemWide),
+            mic: None,
+        };
+        assert!(matches!(
+            spawn_pw_record(&m).unwrap_err(),
+            CaptureError::Failed(_)
+        ));
+        assert!(matches!(
+            spawn_parec(&m).unwrap_err(),
+            CaptureError::Failed(_)
+        ));
     }
 
     #[test]
