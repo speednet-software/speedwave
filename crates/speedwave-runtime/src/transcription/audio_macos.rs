@@ -67,12 +67,16 @@ impl AudioCapture for MacOsAudioCapture {
     fn capabilities(&self) -> CaptureCapabilities {
         // The CLI itself enforces macOS 14.4; if we're running at all on macOS
         // the safe assumption is "process taps available" — the CLI returns a
-        // clean error on older systems and `start()` surfaces it.
+        // clean error on older systems and `start()` surfaces it. Microphone
+        // capture is a v1 follow-up on macOS (the CLI always taps system audio
+        // and the driver consumes one stream), so it's advertised as off.
         CaptureCapabilities {
             supports_per_process: true,
             supports_system_audio: true,
-            supports_microphone: true,
-            note: Some("Requires macOS 14.4+ (CoreAudio process taps)".to_string()),
+            supports_microphone: false,
+            note: Some(
+                "Requires macOS 14.4+ (CoreAudio process taps; system audio only)".to_string(),
+            ),
         }
     }
 
@@ -100,16 +104,12 @@ impl AudioCapture for MacOsAudioCapture {
         let entries: Vec<ProcessListEntry> = serde_json::from_slice(&output.stdout)
             .map_err(|e| CaptureError::Failed(format!("parse --list JSON: {e}")))?;
 
-        let mut sources = Vec::with_capacity(entries.len() + 2);
-        // The two always-present "synthetic" sources first.
+        let mut sources = Vec::with_capacity(entries.len() + 1);
+        // "System (everything)" first; no microphone source on macOS v1 (see
+        // `capabilities`).
         sources.push(AudioSourceInfo {
             source: AudioSource::SystemWide,
             label: "System (everything)".to_string(),
-            app_id: None,
-        });
-        sources.push(AudioSourceInfo {
-            source: AudioSource::Microphone { device: None },
-            label: "Microphone (default input)".to_string(),
             app_id: None,
         });
         for e in entries {
@@ -228,45 +228,54 @@ impl AudioStream for CliAudioStream {
         if self.done {
             return Ok(None);
         }
-        // Frame header: u32 stream, u32 nframes, u64 offset_ns (16 bytes LE).
-        let mut hdr = [0u8; 16];
-        if !self.read_exact_or_eof(&mut hdr)? {
-            self.done = true;
-            let _ = self.child.wait();
-            return Ok(None);
-        }
-        let _stream_index = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
-        let nframes = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
-        let offset_ns = u64::from_le_bytes([
-            hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
-        ]);
+        // The driver consumes a single mono stream; we only forward stream 0
+        // (system/app). Stream-1 (mic) chunks are skipped here — a future
+        // "mic = [You]" diarization angle would need the driver to take two
+        // streams, which it doesn't yet. We never request `--mic` on macOS in
+        // v1 anyway (see `source_to_cli_args`), so this is a defensive filter.
+        loop {
+            // Frame header: u32 stream, u32 nframes, u64 offset_ns (16 bytes LE).
+            let mut hdr = [0u8; 16];
+            if !self.read_exact_or_eof(&mut hdr)? {
+                self.done = true;
+                let _ = self.child.wait();
+                return Ok(None);
+            }
+            let stream_index = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+            let nframes = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
+            let offset_ns = u64::from_le_bytes([
+                hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
+            ]);
 
-        // Sanity: an absurd nframes means a desynced stream — bail rather than
-        // try to allocate gigabytes.
-        if nframes > 16_000 * 5 {
-            self.done = true;
-            let _ = self.child.kill();
-            return Err(CaptureError::Failed(format!(
-                "implausible chunk size {nframes} frames — capture stream desynced"
-            )));
-        }
+            // Sanity: an absurd nframes means a desynced stream — bail rather
+            // than try to allocate gigabytes.
+            if nframes > 16_000 * 5 {
+                self.done = true;
+                let _ = self.child.kill();
+                return Err(CaptureError::Failed(format!(
+                    "implausible chunk size {nframes} frames — capture stream desynced"
+                )));
+            }
 
-        let mut raw = vec![0u8; nframes * 4];
-        if !self.read_exact_or_eof(&mut raw)? {
-            self.done = true;
-            return Err(CaptureError::Failed(
-                "capture stream ended mid-chunk payload".to_string(),
-            ));
+            let mut raw = vec![0u8; nframes * 4];
+            if !self.read_exact_or_eof(&mut raw)? {
+                self.done = true;
+                return Err(CaptureError::Failed(
+                    "capture stream ended mid-chunk payload".to_string(),
+                ));
+            }
+            if stream_index != 0 {
+                continue; // skip mic / unknown streams
+            }
+            let mut samples = Vec::with_capacity(nframes);
+            for f in raw.chunks_exact(4) {
+                samples.push(f32::from_le_bytes([f[0], f[1], f[2], f[3]]));
+            }
+            return Ok(Some(AudioChunk {
+                samples,
+                offset: Duration::from_nanos(offset_ns),
+            }));
         }
-        let mut samples = Vec::with_capacity(nframes);
-        for f in raw.chunks_exact(4) {
-            samples.push(f32::from_le_bytes([f[0], f[1], f[2], f[3]]));
-        }
-
-        Ok(Some(AudioChunk {
-            samples,
-            offset: Duration::from_nanos(offset_ns),
-        }))
     }
 }
 
@@ -283,7 +292,11 @@ impl Drop for CliAudioStream {
 }
 
 /// Maps an `AudioSource` to the CLI's `--source` / `--mic` argument strings.
-/// Rejects sources the macOS CLI can't express.
+/// macOS v1 captures system audio only: `Microphone` and `Mixed` are rejected
+/// because the CLI always taps the system stream (there's no "mic only" mode
+/// yet) and the driver consumes a single stream — wiring the mic in as a second
+/// "[You]" stream is a follow-up. `SystemWide` and `Process` always pass
+/// `--mic none`.
 fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureError> {
     match source {
         AudioSource::SystemWide => Ok(("all".to_string(), "none".to_string())),
@@ -291,22 +304,12 @@ fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureE
             let pid = pid_of(selector)?;
             Ok((format!("pid:{pid}"), "none".to_string()))
         }
-        AudioSource::Microphone { device } => {
-            let mic = device.clone().unwrap_or_else(|| "default".to_string());
-            // Mic-only: capture nothing system-side. The CLI always taps the
-            // system stream too, so we approximate "mic only" by tapping
-            // nothing-but-everything-excluded — but that still yields system
-            // audio. Cleaner: tell the user mic-only isn't a meeting mode.
-            // For now, route mic-only as `--source all-except:<self>` is wrong;
-            // use `all` and let the engine ignore stream 0 if it wants. Keep
-            // it simple: mic-only just records the mic with system audio too.
-            Ok(("all".to_string(), mic))
-        }
-        AudioSource::Mixed { system, mic } => {
-            let (sarg, _) = source_to_cli_args(system)?;
-            let marg = mic.clone().unwrap_or_else(|| "default".to_string());
-            Ok((sarg, marg))
-        }
+        AudioSource::Microphone { .. } => Err(CaptureError::Unsupported(
+            "microphone capture isn't available on macOS yet — use System audio".to_string(),
+        )),
+        AudioSource::Mixed { .. } => Err(CaptureError::Unsupported(
+            "mixed system+mic capture isn't available on macOS yet — use System audio".to_string(),
+        )),
     }
 }
 
@@ -338,11 +341,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capabilities_advertise_per_process_on_macos() {
+    fn capabilities_advertise_per_process_but_not_microphone_on_macos() {
         let caps = MacOsAudioCapture::new().capabilities();
         assert!(caps.supports_per_process);
         assert!(caps.supports_system_audio);
-        assert!(caps.supports_microphone);
+        assert!(
+            !caps.supports_microphone,
+            "mic capture is a v1 follow-up on macOS"
+        );
         assert!(caps.note.as_deref().unwrap().contains("14.4"));
     }
 
@@ -364,21 +370,30 @@ mod tests {
     }
 
     #[test]
-    fn mixed_maps_system_and_mic() {
+    fn mixed_source_is_rejected_on_macos() {
         let src = AudioSource::Mixed {
             system: Box::new(AudioSource::SystemWide),
             mic: Some("BuiltInMic".to_string()),
         };
-        let (s, m) = source_to_cli_args(&src).unwrap();
-        assert_eq!(s, "all");
-        assert_eq!(m, "BuiltInMic");
+        assert!(matches!(
+            source_to_cli_args(&src).unwrap_err(),
+            CaptureError::Unsupported(_)
+        ));
     }
 
     #[test]
-    fn microphone_default_routes_to_default_mic() {
-        let (s, m) = source_to_cli_args(&AudioSource::Microphone { device: None }).unwrap();
-        assert_eq!(s, "all");
-        assert_eq!(m, "default");
+    fn microphone_source_is_rejected_on_macos() {
+        assert!(matches!(
+            source_to_cli_args(&AudioSource::Microphone { device: None }).unwrap_err(),
+            CaptureError::Unsupported(_)
+        ));
+        assert!(matches!(
+            source_to_cli_args(&AudioSource::Microphone {
+                device: Some("BuiltInMic".to_string())
+            })
+            .unwrap_err(),
+            CaptureError::Unsupported(_)
+        ));
     }
 
     #[test]

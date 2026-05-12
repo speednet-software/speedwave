@@ -21,44 +21,113 @@ import SharedCLI
 
 /// 16 kHz mono float32 — the only output format. Whisper expects this rate.
 let kSampleRate: Double = 16_000.0
-/// Approximate chunk size (~200 ms) — kept small so the parent's reader
-/// surfaces audio promptly while staying well above pipe buffer overhead.
-let kChunkFrames: Int = 3200
 
-/// Writes a single binary chunk to stdout in the framed protocol.
-func writeChunk(streamIndex: UInt32, samples: [Float], offsetNs: UInt64) {
-    var idx = streamIndex.littleEndian
-    var n = UInt32(samples.count).littleEndian
-    var off = offsetNs.littleEndian
+/// Owns all stdout writes (header + binary chunks). CoreAudio IOProc threads
+/// and the mic-engine tap only hand it already-copied raw frames and let the
+/// resample + write happen here — never on a real-time audio thread (a full
+/// stdout pipe blocking the audio path would glitch the whole system).
+final class WriterQueue {
+    static let shared = WriterQueue()
+    private let queue = DispatchQueue(label: "pl.speedwave.audio-capture.writer")
+    /// One AVAudioConverter per stream (0 = app, 1 = mic), created lazily from
+    /// the first frame's actual format. Lives on the writer queue — single-threaded.
+    private var converters: [Int: AVAudioConverter] = [:]
+    /// 16 kHz mono float32 — the target for every stream.
+    private let outFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32, sampleRate: kSampleRate, channels: 1, interleaved: false)!
 
-    let stdout = FileHandle.standardOutput
-    stdout.write(Data(bytes: &idx, count: 4))
-    stdout.write(Data(bytes: &n, count: 4))
-    stdout.write(Data(bytes: &off, count: 8))
-    samples.withUnsafeBufferPointer { buf in
-        stdout.write(Data(buffer: buf))
+    /// Writes the JSON header line synchronously (called once, before any chunk).
+    func writeHeader(streams: [String]) {
+        // `started_at_ns` uses wall-clock; per-chunk `offset_ns` is a monotonic
+        // mach-time delta. They are in different clock domains — the Rust reader
+        // ignores `started_at_ns`, so this is informational only.
+        let startedAtNs = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
+        let header: [String: Any] = [
+            "sample_rate": Int(kSampleRate), "channels": 1, "format": "f32le",
+            "streams": streams, "started_at_ns": startedAtNs,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: header),
+              var line = String(data: data, encoding: .utf8)
+        else { exitWithError("Failed to serialize header") }
+        line.append("\n")
+        if let payload = line.data(using: .utf8) {
+            FileHandle.standardOutput.write(payload)
+        }
     }
-}
 
-/// Writes the JSON header line. Called once at session start.
-func writeHeader(streams: [String]) {
-    let startedAtNs = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
-    let header: [String: Any] = [
-        "sample_rate": Int(kSampleRate),
-        "channels": 1,
-        "format": "f32le",
-        "streams": streams,
-        "started_at_ns": startedAtNs,
-    ]
-    guard let data = try? JSONSerialization.data(withJSONObject: header),
-          var line = String(data: data, encoding: .utf8)
-    else {
-        exitWithError("Failed to serialize header")
+    /// Hands a raw interleaved-float buffer (in `format`) for `streamIndex` to
+    /// the writer queue: down-mix + resample to 16 kHz mono, frame, write.
+    /// Non-blocking from the caller's side.
+    func enqueue(
+        streamIndex: UInt32, interleaved: [Float], format: AVAudioFormat, offsetNs: UInt64
+    ) {
+        queue.async { [self] in
+            let idx = Int(streamIndex)
+            guard let converter = converters[idx]
+                ?? AVAudioConverter(from: format, to: outFormat)
+            else { return }
+            converters[idx] = converter
+
+            let inFrames = AVAudioFrameCount(interleaved.count) / max(1, format.channelCount)
+            guard inFrames > 0,
+                  let inBuf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: inFrames)
+            else { return }
+            inBuf.frameLength = inFrames
+            // Copy the raw interleaved samples into the input buffer. The input
+            // format we hand the converter is always non-interleaved float (we
+            // build it that way in the callers), so write one channel at a time.
+            if format.isInterleaved {
+                if let dst = inBuf.floatChannelData?[0] {
+                    interleaved.withUnsafeBufferPointer { src in
+                        guard let base = src.baseAddress else { return }
+                        dst.update(from: base, count: interleaved.count)
+                    }
+                }
+            } else if let dst = inBuf.floatChannelData {
+                // De-interleave into per-channel planes.
+                let ch = Int(format.channelCount)
+                for f in 0..<Int(inFrames) {
+                    for c in 0..<ch { dst[c][f] = interleaved[f * ch + c] }
+                }
+            }
+
+            let ratio = kSampleRate / format.sampleRate
+            let outCap = AVAudioFrameCount(Double(inFrames) * ratio + 16)
+            guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: outCap)
+            else { return }
+            var consumed = false
+            var convErr: NSError?
+            converter.convert(to: outBuf, error: &convErr) { _, status in
+                if consumed {
+                    status.pointee = .noDataNow
+                    return nil
+                }
+                consumed = true
+                status.pointee = .haveData
+                return inBuf
+            }
+            if convErr != nil { return }
+            let n = Int(outBuf.frameLength)
+            guard n > 0, let raw = outBuf.floatChannelData else { return }
+            let mono = Array(UnsafeBufferPointer(start: raw[0], count: n))
+            writeChunk(streamIndex: streamIndex, samples: mono, offsetNs: offsetNs)
+        }
     }
-    line.append("\n")
-    if let payload = line.data(using: .utf8) {
-        FileHandle.standardOutput.write(payload)
+
+    /// Frames + writes one chunk to stdout. Only ever called on `queue`.
+    private func writeChunk(streamIndex: UInt32, samples: [Float], offsetNs: UInt64) {
+        var idx = streamIndex.littleEndian
+        var n = UInt32(samples.count).littleEndian
+        var off = offsetNs.littleEndian
+        let stdout = FileHandle.standardOutput
+        stdout.write(Data(bytes: &idx, count: 4))
+        stdout.write(Data(bytes: &n, count: 4))
+        stdout.write(Data(bytes: &off, count: 8))
+        samples.withUnsafeBufferPointer { buf in stdout.write(Data(buffer: buf)) }
     }
+
+    /// Drains any queued writes (best-effort, used on shutdown).
+    func flush() { queue.sync {} }
 }
 
 /// Writes a diagnostic line to stderr — never stdout.
@@ -321,7 +390,9 @@ let cleanupHandler: @convention(c) (Int32) -> Void = { _ in
     if #available(macOS 14.4, *) {
         activeSession?.teardown()
     }
-    // Flush stdout so the parent doesn't see a truncated chunk.
+    // Drain any frames still queued on the writer thread, then flush the C
+    // stdio buffer so the parent doesn't see a truncated chunk.
+    WriterQueue.shared.flush()
     fflush(stdout)
     _exit(0)
 }
@@ -339,7 +410,7 @@ func runRecord(_ opts: RecordOptions) {
     case .none: streams = ["app"]
     default: streams = ["app", "mic"]
     }
-    writeHeader(streams: streams)
+    WriterQueue.shared.writeHeader(streams: streams)
 
     do {
         try startSystemTap(session: session, source: opts.source)
@@ -443,14 +514,43 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
     }
     session.aggregateId = aggId
 
-    // IOProc receives interleaved float samples in the device's native rate;
-    // we resample to 16 kHz mono on the fly with AVAudioConverter (set up
-    // lazily on the first callback once we know the input format).
+    // The aggregate device's input stream format tells us the *real* sample
+    // rate + channel count CoreAudio will deliver — never assume 48 kHz. A tap
+    // mixdown arrives as one interleaved float buffer, so we hand the writer
+    // queue an interleaved float format matching it.
+    let inputFormat = inputStreamFormat(of: aggId)
+    let inChannels = max(1, inputFormat.mChannelsPerFrame)
+    guard let avInFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32, sampleRate: inputFormat.mSampleRate,
+        channels: AVAudioChannelCount(inChannels), interleaved: true)
+    else {
+        throw NSError(
+            domain: "AudioCapture", code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "could not build input AVAudioFormat (rate \(inputFormat.mSampleRate))"])
+    }
+
+    // IOProc runs on a real-time CoreAudio thread: it only copies the buffer's
+    // float samples into a Swift array and hands them to the writer queue. No
+    // resampling, no stdout, no locking on the audio path.
     var procId: AudioDeviceIOProcID?
     let procStatus = AudioDeviceCreateIOProcIDWithBlock(
         &procId, aggId, nil
     ) { _, inputData, _, _, _ in
-        ioProcCallback(streamIndex: 0, inputData: inputData)
+        let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+        guard let first = abl.first, let mData = first.mData else { return }
+        let count = Int(first.mDataByteSize) / MemoryLayout<Float32>.size
+        guard count > 0 else { return }
+        let interleaved = [Float](
+            unsafeUninitializedCapacity: count
+        ) { buf, initialized in
+            mData.withMemoryRebound(to: Float32.self, capacity: count) { src in
+                buf.baseAddress?.update(from: src, count: count)
+            }
+            initialized = count
+        }
+        let offset = activeSession?.offsetNs() ?? 0
+        WriterQueue.shared.enqueue(
+            streamIndex: 0, interleaved: interleaved, format: avInFormat, offsetNs: offset)
     }
     guard procStatus == noErr, let proc = procId else {
         throw NSError(
@@ -467,85 +567,31 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
     }
 }
 
-/// Per-stream resampler state. We keep one converter per stream so the input
-/// format probe happens once. Indexed by stream id (0 = app, 1 = mic).
-final class StreamResampler {
-    var converter: AVAudioConverter?
-    var outputFormat: AVAudioFormat
-    init() {
-        outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: kSampleRate,
-            channels: 1,
-            interleaved: false)!
-    }
-}
-/// One resampler per stream. The IOProc callback resolves which slot to use
-/// from the `streamIndex` argument.
-var resamplers: [Int: StreamResampler] = [0: StreamResampler(), 1: StreamResampler()]
-
-/// Shared IOProc callback for both the tap-aggregate and the mic engine.
-/// Pulls samples out of the AudioBufferList, runs them through the per-stream
-/// AVAudioConverter (resample → 16 kHz mono), and writes one binary chunk.
+/// Reads the input-scope stream format (`AudioStreamBasicDescription`) of a
+/// device. Falls back to a 48 kHz stereo float layout only if the query fails
+/// (it shouldn't for an aggregate device we just created).
 @available(macOS 14.4, *)
-func ioProcCallback(streamIndex: UInt32, inputData: UnsafePointer<AudioBufferList>) {
-    guard let resampler = resamplers[Int(streamIndex)] else { return }
-    let ablPointer = UnsafeMutableAudioBufferListPointer(
-        UnsafeMutablePointer(mutating: inputData))
-    guard let first = ablPointer.first,
-          let mData = first.mData
-    else { return }
-
-    // Treat the input as float interleaved at whatever rate CoreAudio gives
-    // us; the converter handles the deinterleave + resample.
-    let inputBytes = Int(first.mDataByteSize)
-    let inputFrames = inputBytes / (MemoryLayout<Float32>.size * Int(first.mNumberChannels))
-    guard inputFrames > 0 else { return }
-
-    // Lazy-init the converter on the first callback (we don't know the device
-    // native format up front for the aggregate device).
-    if resampler.converter == nil {
-        guard let inputFormat = AVAudioFormat(
-            standardFormatWithSampleRate: 48_000.0,
-            channels: AVAudioChannelCount(first.mNumberChannels)),
-              let conv = AVAudioConverter(from: inputFormat, to: resampler.outputFormat)
-        else {
-            return
-        }
-        resampler.converter = conv
+func inputStreamFormat(of device: AudioObjectID) -> AudioStreamBasicDescription {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreamFormat,
+        mScope: kAudioDevicePropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain)
+    var asbd = AudioStreamBasicDescription()
+    var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+    let status = AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &asbd)
+    if status == noErr, asbd.mSampleRate > 0 {
+        return asbd
     }
-    guard let converter = resampler.converter,
-          let inputBuf = AVAudioPCMBuffer(
-            pcmFormat: converter.inputFormat,
-            frameCapacity: AVAudioFrameCount(inputFrames))
-    else { return }
-    inputBuf.frameLength = AVAudioFrameCount(inputFrames)
-    if let raw = inputBuf.floatChannelData {
-        memcpy(raw[0], mData, inputBytes)
-    }
-
-    let outFrames = AVAudioFrameCount(
-        Double(inputFrames) * kSampleRate / converter.inputFormat.sampleRate + 1)
-    guard let outputBuf = AVAudioPCMBuffer(
-        pcmFormat: resampler.outputFormat, frameCapacity: outFrames)
-    else { return }
-    var err: NSError?
-    converter.convert(to: outputBuf, error: &err) { _, status in
-        status.pointee = .haveData
-        return inputBuf
-    }
-    if err != nil { return }
-
-    let n = Int(outputBuf.frameLength)
-    guard n > 0, let raw = outputBuf.floatChannelData else { return }
-    let samples = Array(UnsafeBufferPointer(start: raw[0], count: n))
-
-    let offset = activeSession?.offsetNs() ?? 0
-    writeChunk(streamIndex: streamIndex, samples: samples, offsetNs: offset)
+    var fallback = AudioStreamBasicDescription()
+    fallback.mSampleRate = 48_000
+    fallback.mChannelsPerFrame = 2
+    fallback.mFormatID = kAudioFormatLinearPCM
+    return fallback
 }
 
-/// Spins up an AVAudioEngine on the default (or named) microphone and tees
-/// resampled mono float frames into the framed protocol as stream 1.
+/// Spins up an AVAudioEngine on the default (or named) microphone and tees its
+/// frames into the framed protocol as stream 1 — via the writer queue, not
+/// directly on the engine's tap thread.
 @available(macOS 14.4, *)
 func startMicEngine(session: RecordSession, selector: MicSelector) throws {
     let engine = AVAudioEngine()
@@ -553,35 +599,24 @@ func startMicEngine(session: RecordSession, selector: MicSelector) throws {
     let format = inputNode.outputFormat(forBus: 0)
 
     inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buf, _ in
-        guard let resampler = resamplers[1],
-              let inputBuf = AVAudioPCMBuffer(
-                pcmFormat: buf.format, frameCapacity: buf.frameLength)
+        let frames = Int(buf.frameLength)
+        let channels = Int(buf.format.channelCount)
+        guard frames > 0, let chan = buf.floatChannelData else { return }
+        // Interleave the engine's non-interleaved channels into one array, then
+        // hand a matching interleaved format to the writer queue (which will
+        // deinterleave + down-mix + resample). Keeping it simple: the engine's
+        // float format is what we pass through unchanged otherwise.
+        var interleaved = [Float](repeating: 0, count: frames * channels)
+        for f in 0..<frames {
+            for c in 0..<channels { interleaved[f * channels + c] = chan[c][f] }
+        }
+        guard let interleavedFmt = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: buf.format.sampleRate,
+            channels: AVAudioChannelCount(channels), interleaved: true)
         else { return }
-        if let src = buf.floatChannelData, let dst = inputBuf.floatChannelData {
-            memcpy(dst[0], src[0], Int(buf.frameLength) * MemoryLayout<Float32>.size)
-            inputBuf.frameLength = buf.frameLength
-        }
-        if resampler.converter == nil,
-           let conv = AVAudioConverter(from: buf.format, to: resampler.outputFormat) {
-            resampler.converter = conv
-        }
-        guard let converter = resampler.converter else { return }
-        let outFrames = AVAudioFrameCount(
-            Double(buf.frameLength) * kSampleRate / buf.format.sampleRate + 1)
-        guard let outBuf = AVAudioPCMBuffer(
-            pcmFormat: resampler.outputFormat, frameCapacity: outFrames)
-        else { return }
-        var err: NSError?
-        converter.convert(to: outBuf, error: &err) { _, status in
-            status.pointee = .haveData
-            return inputBuf
-        }
-        if err != nil { return }
-        let n = Int(outBuf.frameLength)
-        guard n > 0, let raw = outBuf.floatChannelData else { return }
-        let samples = Array(UnsafeBufferPointer(start: raw[0], count: n))
         let offset = activeSession?.offsetNs() ?? 0
-        writeChunk(streamIndex: 1, samples: samples, offsetNs: offset)
+        WriterQueue.shared.enqueue(
+            streamIndex: 1, interleaved: interleaved, format: interleavedFmt, offsetNs: offset)
     }
 
     // The `selector` is plumbed so a future iteration can route to a named

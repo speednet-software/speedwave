@@ -185,16 +185,21 @@ describe('TranscriptionService', () => {
       expect(svc.active()?.status).toEqual({ state: 'done' });
     });
 
-    it('updates speaker_names on speaker_relabeled', () => {
+    it('converts the wire pair-array into a record on speaker_relabeled', () => {
+      // The Rust event sends [[id, name], …]; the reducer must normalise it
+      // to the { id: name } shape the snapshot uses.
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'speaker_relabeled',
         seq: 1,
-        speaker_names: { 0: 'Ola' },
+        speaker_names: [
+          [0, 'Ola'],
+          [1, 'Bartek'],
+        ],
       });
-      expect(svc.active()?.speaker_names).toEqual({ 0: 'Ola' });
+      expect(svc.active()?.speaker_names).toEqual({ 0: 'Ola', 1: 'Bartek' });
     });
 
-    it('swaps in final_segments on final_segments_ready', () => {
+    it('swaps in final_segments on final_segments_ready (pair-array → record)', () => {
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'segment_appended',
         seq: 1,
@@ -204,7 +209,7 @@ describe('TranscriptionService', () => {
         kind: 'final_segments_ready',
         seq: 2,
         segments: [seg(0, 5, 'higher-quality', 0)],
-        speaker_names: { 0: 'Ola' },
+        speaker_names: [[0, 'Ola']],
       });
       const s = svc.active()!;
       expect(s.final_segments).toEqual([seg(0, 5, 'higher-quality', 0)]);

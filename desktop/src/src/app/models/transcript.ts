@@ -81,19 +81,28 @@ export interface TranscriptSession {
   last_seq: number;
 }
 
+/**
+ * `speaker_names` on the wire inside a `TranscriptEvent` — a list of
+ * `[speaker_id, name]` pairs. (The Rust side serializes the map this way for
+ * events because serde_json's "numeric map key from string" shortcut doesn't
+ * fire through the internally-tagged enum's `Content` buffer. The reducer
+ * converts it to the `Record<number, string>` shape used on `TranscriptSession`.)
+ */
+export type SpeakerNamePairs = readonly (readonly [number, string])[];
+
 /** Live event on a `transcript_event::<id>` channel. `seq` is monotonic per session. */
 export type TranscriptEvent =
   | { kind: 'segment_appended'; seq: number; segment: Segment }
   | { kind: 'segments_replaced'; seq: number; from_index: number; segments: Segment[] }
   | { kind: 'speaker_assigned'; seq: number; segment_index: number; speaker: number }
   | { kind: 'status_changed'; seq: number; status: TranscriptStatus }
-  | { kind: 'speaker_relabeled'; seq: number; speaker_names: Record<number, string> }
+  | { kind: 'speaker_relabeled'; seq: number; speaker_names: SpeakerNamePairs }
   | { kind: 'finalize_progress'; seq: number; progress: number }
   | {
       kind: 'final_segments_ready';
       seq: number;
       segments: Segment[];
-      speaker_names: Record<number, string>;
+      speaker_names: SpeakerNamePairs;
     }
   | { kind: 'finished'; seq: number };
 

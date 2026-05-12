@@ -18,11 +18,6 @@ use crate::transcription::transcript_store::TranscriptStore;
 /// words but more recompute per chunk.
 const LIVE_WINDOW_SECS: f32 = 12.0;
 
-/// Replace the trailing N segments from the previous decode each time the
-/// window re-decodes. (Whisper's last few segments are the least stable; the
-/// driver presents them as "tentative" until they fall out of the window.)
-const TENTATIVE_TAIL: usize = 2;
-
 /// How often (in seconds of audio accumulated) the live transcriber re-decodes.
 const LIVE_DECODE_EVERY_SECS: f32 = 5.0;
 
@@ -109,8 +104,6 @@ pub struct TranscriptDriver {
     pcm: Vec<f32>,
     last_decode_at: f32,
     last_diarize_at: f32,
-    /// Index in `live_segments` where the "tentative tail" starts.
-    tail_start: usize,
 }
 
 impl TranscriptDriver {
@@ -128,33 +121,57 @@ impl TranscriptDriver {
             pcm: Vec::new(),
             last_decode_at: 0.0,
             last_diarize_at: 0.0,
-            tail_start: 0,
         }
     }
 
     /// Runs the driver to completion (until the audio stream ends or `stop`
-    /// is tripped). Writes a WAV at `audio_wav_path` along the way.
+    /// is tripped). Writes a WAV at `audio_wav_path` along the way. On any error
+    /// the session is flipped to `Failed{reason}` and the (partial) WAV is
+    /// closed before the error propagates.
     pub fn run(mut self, audio_wav_path: &Path) -> Result<(), DriverError> {
         let mut wav = WavWriter::create(audio_wav_path)?;
         // Mark the session as Recording (a no-op transition from new()).
         let _ = self.store.set_status(self.id, TranscriptStatus::Recording);
 
+        let result = self.pump_loop(&mut wav);
+        // Always close the WAV — even on error, a partial recording is better
+        // than a truncated/locked file.
+        let _ = wav.finalize();
+
+        match result {
+            Ok(()) => {
+                // Final live decode over what's left (so the user sees the last
+                // chunk), then hand off to the finalize pass.
+                let _ = self.decode_window();
+                let _ = self
+                    .store
+                    .set_status(self.id, TranscriptStatus::Finalizing { progress: 0.0 });
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.store.set_status(
+                    self.id,
+                    TranscriptStatus::Failed {
+                        reason: e.to_string(),
+                    },
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// The capture→transcribe→diarize loop. Returns `Ok` when the stream ends
+    /// or `stop` is tripped; `Err` on a capture, transcribe, WAV, or store
+    /// failure (the caller flips the session to `Failed`).
+    fn pump_loop(&mut self, wav: &mut WavWriter) -> Result<(), DriverError> {
         loop {
             if self.stop.is_stopped() {
-                break;
+                return Ok(());
             }
             let chunk = match self.audio.next_chunk() {
                 Ok(Some(c)) => c,
-                Ok(None) => break, // stream ended
-                Err(e) => {
-                    let _ = self.store.set_status(
-                        self.id,
-                        TranscriptStatus::Failed {
-                            reason: format!("capture: {e}"),
-                        },
-                    );
-                    return Err(DriverError::Capture(e.to_string()));
-                }
+                Ok(None) => return Ok(()), // stream ended
+                Err(e) => return Err(DriverError::Capture(e.to_string())),
             };
             wav.write(&chunk.samples)?;
             self.pcm.extend_from_slice(&chunk.samples);
@@ -177,19 +194,14 @@ impl TranscriptDriver {
                 }
             }
         }
-
-        wav.finalize()?;
-        // Final live decode over what's left (so the user sees the last chunk).
-        let _ = self.decode_window();
-        // Hand-off: flip to Finalizing; the finalize task (Phase 5) takes over.
-        let _ = self
-            .store
-            .set_status(self.id, TranscriptStatus::Finalizing { progress: 0.0 });
-        Ok(())
     }
 
-    /// Decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and splices the result
-    /// into `live_segments` from `tail_start` onwards (the tentative tail).
+    /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and replaces exactly
+    /// the segments that fall inside that window. `feed()` returns segments for
+    /// the *whole* window each time, so the splice index must be "the first
+    /// `live_segments` entry whose start is ≥ the window's start" — not a
+    /// running count, which would duplicate the earlier segments once the
+    /// window starts at offset 0 and re-covers them.
     fn decode_window(&mut self) -> Result<(), DriverError> {
         if self.pcm.is_empty() {
             return Ok(());
@@ -214,13 +226,23 @@ impl TranscriptDriver {
                 speaker: s.speaker,
             })
             .collect();
-        // Splice: drop the tentative tail from last time, append the new decode.
-        self.store
-            .replace_segments(self.id, self.tail_start, absolute.clone())
+
+        // Where do the current segments stop being "committed" (entirely before
+        // the window) and start being "tentative" (overlapping it)? That index
+        // is where the fresh decode splices in.
+        let snap = self
+            .store
+            .get(self.id)
             .map_err(|e| DriverError::Store(e.to_string()))?;
-        // Next time, the tentative tail is the trailing N segments of *this* decode.
-        let now_len = self.tail_start + absolute.len();
-        self.tail_start = now_len.saturating_sub(TENTATIVE_TAIL);
+        let splice_at = snap
+            .live_segments
+            .iter()
+            .position(|s| s.start >= window_start)
+            .unwrap_or(snap.live_segments.len());
+
+        self.store
+            .replace_segments(self.id, splice_at, absolute)
+            .map_err(|e| DriverError::Store(e.to_string()))?;
         Ok(())
     }
 }
@@ -254,10 +276,15 @@ pub struct FinalizeConfig {
     pub live_turns: Vec<crate::transcription::diarizer::SpeakerTurn>,
 }
 
-/// Granularity (seconds) for the `FinalizeProgress` ticks — we transcribe the
-/// whole recording in one shot (Whisper handles long audio internally), so the
-/// progress signal is just "we're working" at this cadence.
-const FINALIZE_PROGRESS_TICK_SECS: f32 = 30.0;
+/// Offline-pass decode window (seconds). The recording is transcribed in
+/// windows of this length so the progress bar can move per-window; a short
+/// overlap (below) keeps utterances that straddle a boundary intact.
+const FINALIZE_WINDOW_SECS: f32 = 30.0;
+
+/// Overlap (seconds) between consecutive offline-pass windows. Segments that
+/// start inside the overlap of the *next* window are dropped from the previous
+/// window's output to avoid duplicates.
+const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
 
 /// Runs the offline pass: load the recorded WAV, transcribe it with the
 /// higher-quality model, (optionally) re-diarize the whole recording, merge the
@@ -299,28 +326,20 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         Ok(_) => return Err(fail(&store, "recorded audio is empty".to_string())),
         Err(e) => return Err(fail(&store, format!("read audio: {e}"))),
     };
-    let total_secs = pcm.len() as f32 / SAMPLE_RATE_HZ as f32;
 
-    // 2) Progress: tick to ~50% before the (single) transcribe call, then to
-    //    ~90% after — the heavy lifting is opaque inside Whisper. (We avoid
-    //    chunked decoding here on purpose: a whole-recording pass yields better
-    //    cross-utterance context than the live sliding window.)
+    // 2) + 3) Transcribe in ~30 s windows with a short overlap, stitching the
+    //    results and emitting real per-window progress. Chunking (vs one
+    //    whole-recording call) loses a little cross-utterance context but lets
+    //    the progress bar actually move; the overlap + de-dup keeps boundaries
+    //    clean. Progress here fills the 5%..60% band.
     let _ = store.finalize_progress(id, 0.05);
-    // Cap the visible ticks at 9 so the bar moves a bounded number of times.
-    let ticks = (total_secs / FINALIZE_PROGRESS_TICK_SECS).ceil().max(1.0) as u32;
-    let visible_ticks = ticks.clamp(1, 9);
-    for t in 1..=visible_ticks {
-        // Pre-transcribe progress fills the 5%..45% band so the bar moves even
-        // for long recordings before the (single) decode returns.
-        let p = 0.05 + 0.40 * (t as f32 / visible_ticks as f32);
-        let _ = store.finalize_progress(id, p);
-    }
-
-    // 3) The higher-quality transcription (whole buffer, no sliding window).
-    let final_segs = match transcriber.transcribe(&pcm, &transcribe_opts) {
-        Ok(s) => s,
-        Err(e) => return Err(fail(&store, format!("offline transcribe: {e}"))),
-    };
+    let final_segs =
+        match transcribe_chunked(transcriber.as_mut(), &pcm, &transcribe_opts, |frac| {
+            let _ = store.finalize_progress(id, 0.05 + 0.55 * frac);
+        }) {
+            Ok(s) => s,
+            Err(e) => return Err(fail(&store, format!("offline transcribe: {e}"))),
+        };
     let _ = store.finalize_progress(id, 0.65);
 
     // 4) Optional re-diarization over the whole recording. Best-effort: a
@@ -353,6 +372,72 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         .finish(id)
         .map_err(|e| DriverError::Store(e.to_string()))?;
     Ok(())
+}
+
+/// Transcribes `pcm` (16 kHz mono) in `FINALIZE_WINDOW_SECS` windows with a
+/// `FINALIZE_WINDOW_OVERLAP_SECS` overlap, stitching the per-window segments
+/// into one absolute-timestamped list. Calls `progress` with a 0.0→1.0 fraction
+/// after each window so a UI bar can move. Segments whose start falls inside the
+/// *next* window's overlap are dropped to de-dup the boundary.
+fn transcribe_chunked(
+    transcriber: &mut dyn Transcriber,
+    pcm: &[f32],
+    opts: &TranscribeOptions,
+    mut progress: impl FnMut(f32),
+) -> Result<Vec<Segment>, DriverError> {
+    let rate = SAMPLE_RATE_HZ as usize;
+    let win = (FINALIZE_WINDOW_SECS * SAMPLE_RATE_HZ as f32) as usize;
+    let overlap = (FINALIZE_WINDOW_OVERLAP_SECS * SAMPLE_RATE_HZ as f32) as usize;
+    let step = win.saturating_sub(overlap).max(1);
+    let total = pcm.len();
+
+    // Short recording: one window, no stitching.
+    if total <= win {
+        let segs = transcriber
+            .transcribe(pcm, opts)
+            .map_err(|e| DriverError::Transcribe(e.to_string()))?;
+        progress(1.0);
+        return Ok(segs);
+    }
+
+    let mut out: Vec<Segment> = Vec::new();
+    let mut start = 0usize;
+    while start < total {
+        let end = (start + win).min(total);
+        let is_last = end >= total;
+        let window = &pcm[start..end];
+        let window_start = Duration::from_secs_f64(start as f64 / rate as f64);
+        // Window-relative-end below which we *keep* segments: everything for the
+        // last window; up to where the next window starts (its overlap zone) for
+        // earlier windows, so straddling segments come from exactly one window.
+        let keep_until = if is_last {
+            Duration::from_secs_f64(window.len() as f64 / rate as f64)
+        } else {
+            Duration::from_secs_f64(step as f64 / rate as f64)
+        };
+
+        let segs = transcriber
+            .transcribe(window, opts)
+            .map_err(|e| DriverError::Transcribe(e.to_string()))?;
+        for s in segs {
+            if s.start >= keep_until {
+                continue;
+            }
+            out.push(Segment {
+                start: window_start + s.start,
+                end: window_start + s.end,
+                text: s.text,
+                words: s.words,
+                speaker: s.speaker,
+            });
+        }
+        progress((end as f32 / total as f32).min(1.0));
+        if is_last {
+            break;
+        }
+        start += step;
+    }
+    Ok(out)
 }
 
 /// Reads a 16 kHz WAV (the format `WavWriter` above produces) into mono `f32`
@@ -571,6 +656,56 @@ mod tests {
         );
         // Seq monotonic and > 0.
         assert!(snap.last_seq > 0);
+    }
+
+    #[test]
+    fn live_segments_stay_monotonic_and_unique_across_re_decodes() {
+        // 30 s of audio at 16 kHz: with LIVE_DECODE_EVERY_SECS=5, the sliding
+        // window re-decodes ~6 times and (since the recording exceeds
+        // LIVE_WINDOW_SECS) the window slides forward. The splice index must be
+        // "first segment at/after the window start", not a running count — if it
+        // were a count, the earlier segments would be duplicated and timestamps
+        // would go backwards. MockTranscriber emits one segment per 2 s.
+        let (_fixture_guard, fixture) = make_fixture_wav(30.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: Box::new(MockTranscriber {
+                seg_secs: 2.0,
+                text_template: "s{n}".to_string(),
+            }),
+            diarizer: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            diarize_opts: DiarizeOptions::default(),
+            stop: StopSignal::new(),
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        driver.run(&out_wav).unwrap();
+
+        let snap = store.get(id).unwrap();
+        let segs = &snap.live_segments;
+        assert!(!segs.is_empty());
+        // Timestamps non-decreasing.
+        for w in segs.windows(2) {
+            assert!(
+                w[1].start >= w[0].start,
+                "segment starts went backwards: {:?} then {:?}",
+                w[0].start,
+                w[1].start
+            );
+        }
+        // ~30 s / 2 s ≈ 15 segments, give or take one window's worth — and
+        // definitely not the ~25+ a duplicating splice would produce.
+        assert!(
+            segs.len() <= 18,
+            "too many segments ({}) — the splice is duplicating",
+            segs.len()
+        );
     }
 
     #[test]
@@ -956,5 +1091,84 @@ mod tests {
         assert_eq!(sf.len(), 2);
         assert!((sf[0] - 0.5).abs() < 1e-4);
         assert!((sf[1] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn transcribe_chunked_short_recording_is_one_window() {
+        // 10 s < FINALIZE_WINDOW_SECS (30 s): one transcribe call, progress→1.0.
+        let pcm = vec![0.01f32; 10 * 16_000];
+        let mut tr = MockTranscriber {
+            seg_secs: 2.0,
+            text_template: "s{n}".to_string(),
+        };
+        let mut last_progress = 0.0;
+        let opts = TranscribeOptions::for_language(Language::Pl);
+        let segs = transcribe_chunked(&mut tr, &pcm, &opts, |p| last_progress = p).unwrap();
+        assert_eq!(segs.len(), 5); // 10 s / 2 s
+        assert!((last_progress - 1.0).abs() < 1e-6);
+        // Timestamps are window-absolute (= recording-absolute for one window).
+        assert_eq!(segs[0].start, Duration::ZERO);
+        assert_eq!(segs[4].start, Duration::from_secs_f32(8.0));
+    }
+
+    #[test]
+    fn transcribe_chunked_stitches_overlapping_windows_without_duplicates() {
+        // 70 s of audio, 30 s windows, 3 s overlap, 27 s step → 3 windows
+        // (0..30, 27..57, 54..70). MockTranscriber emits one 5 s segment per
+        // window-slice. Segments must be monotonic, recording-absolute, and the
+        // overlap zones must not be double-counted.
+        let pcm = vec![0.01f32; 70 * 16_000];
+        let mut tr = MockTranscriber {
+            seg_secs: 5.0,
+            text_template: "s{n}".to_string(),
+        };
+        let mut ticks: Vec<f32> = Vec::new();
+        let opts = TranscribeOptions::for_language(Language::En);
+        let segs = transcribe_chunked(&mut tr, &pcm, &opts, |p| ticks.push(p)).unwrap();
+        assert!(!segs.is_empty());
+        // Monotonic, non-overlapping starts.
+        for w in segs.windows(2) {
+            assert!(w[1].start >= w[0].start, "starts went backwards");
+        }
+        // Last segment ends at ~70 s (the recording length), not 30 s or beyond.
+        let last_end = segs.last().unwrap().end.as_secs_f32();
+        assert!(
+            (60.0..=71.0).contains(&last_end),
+            "last segment ends at {last_end}, expected ≈70"
+        );
+        // Progress was reported per window and reached 1.0 on the last.
+        assert!(
+            ticks.len() >= 3,
+            "expected ≥3 progress ticks, got {}",
+            ticks.len()
+        );
+        assert!((ticks.last().copied().unwrap() - 1.0).abs() < 1e-6);
+        // Ticks are non-decreasing.
+        for w in ticks.windows(2) {
+            assert!(w[1] >= w[0]);
+        }
+    }
+
+    #[test]
+    fn transcribe_chunked_propagates_transcriber_errors() {
+        struct Boom;
+        impl Transcriber for Boom {
+            fn transcribe(
+                &mut self,
+                _pcm: &[f32],
+                _opts: &TranscribeOptions,
+            ) -> Result<Vec<Segment>, crate::transcription::transcriber::TranscribeError>
+            {
+                Err(
+                    crate::transcription::transcriber::TranscribeError::Inference(
+                        "kaboom".to_string(),
+                    ),
+                )
+            }
+        }
+        let pcm = vec![0.0f32; 5 * 16_000];
+        let opts = TranscribeOptions::for_language(Language::Pl);
+        let err = transcribe_chunked(&mut Boom, &pcm, &opts, |_| {}).unwrap_err();
+        assert!(matches!(err, DriverError::Transcribe(_)));
     }
 }

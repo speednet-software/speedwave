@@ -9,6 +9,7 @@ import type {
   Language,
   ModelsAck,
   Segment,
+  SpeakerNamePairs,
   StartAck,
   SubscribeAck,
   TranscriptEvent,
@@ -19,6 +20,16 @@ import { TauriService } from './tauri.service';
 
 /** Event name the Rust backend emits per model-download progress update. */
 const MODEL_PROGRESS_EVENT = 'transcription_model_status';
+
+/**
+ * Converts the wire `[[id, name], …]` pairs into a `{ id: name }` record.
+ * @param pairs - speaker-name pairs as carried inside a `TranscriptEvent`.
+ */
+function pairsToRecord(pairs: SpeakerNamePairs): Record<number, string> {
+  const out: Record<number, string> = {};
+  for (const [id, name] of pairs) out[id] = name;
+  return out;
+}
 
 /**
  * Meeting-transcription state + Tauri-command facade. Mirrors the ADR-056
@@ -246,7 +257,7 @@ export class TranscriptionService {
         next.status = ev.status;
         break;
       case 'speaker_relabeled':
-        next.speaker_names = ev.speaker_names;
+        next.speaker_names = pairsToRecord(ev.speaker_names);
         break;
       case 'finalize_progress':
         next.status = { state: 'finalizing', progress: ev.progress };
@@ -255,7 +266,7 @@ export class TranscriptionService {
         // The offline pass produced a higher-quality transcript; swap it in.
         // Speaker IDs were already remapped server-side to keep user relabels.
         next.final_segments = ev.segments;
-        next.speaker_names = ev.speaker_names;
+        next.speaker_names = pairsToRecord(ev.speaker_names);
         break;
       case 'finished':
         next.status = { state: 'done' };
