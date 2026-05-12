@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
 import type {
   BundleReconcileStatus,
@@ -6,9 +6,6 @@ import type {
   ProjectList,
   ProjectSwitchFailedPayload,
 } from '../models/update';
-import type { WorkerImageBuildProgress } from '../models/integration';
-import type { SetupStep } from '../shared/progress-steps/progress-steps.component';
-import { WorkerImageEstimatesService } from './worker-image-estimates.service';
 import { CLOUDSTORAGE_TCC_PREFIX, cloudstorageProviderDisplayName } from './cloudstorage-prefix';
 
 /** Lifecycle status of the project + container lifecycle. */
@@ -54,12 +51,6 @@ export class ProjectStateService {
 
   /** Service just toggled on; forwarded to backend for rollback on build fail. */
   pendingJustEnabled: string | null = null;
-  /** True while worker images are being built; gates the shell overlay. */
-  readonly buildingWorkerImage = signal(false);
-  /** Per-image steps for the build overlay. */
-  readonly buildSteps = signal<SetupStep[]>([]);
-  /** Last build error (sanitized); empty when no error. */
-  readonly buildError = signal('');
 
   /**
    * Structured error kind set when a CloudStorage TCC failure is detected.
@@ -74,7 +65,6 @@ export class ProjectStateService {
 
   private initialized = false;
   private tauri = inject(TauriService);
-  private estimates = inject(WorkerImageEstimatesService);
   /**
    * Set of integration status re-fetchers registered by the integrations component;
    * called after a failed restart so the toggled-on row reverts to reality.
@@ -350,35 +340,18 @@ export class ProjectStateService {
     };
   }
 
-  /**
-   * Restarts integration containers, building any missing worker images on
-   * demand and showing per-image progress on a blocking overlay.
-   */
+  /** Restarts integration containers; backend rebuilds missing worker images. */
   async restartContainers(): Promise<void> {
     if (!this.activeProject || this.restarting) return;
     const project = this.activeProject;
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
-    this.buildError.set('');
-    this.buildingWorkerImage.set(false);
-    this.buildSteps.set([]);
     this.notifyChange();
-
-    // Preload estimates so step titles can show "~Ns" on the first event.
-    await this.estimates.list();
-
-    const unlisten = await this.tauri.listen<WorkerImageBuildProgress>(
-      'worker_image_build_status',
-      (e) => this.onWorkerImageBuildProgress(e.payload)
-    );
 
     let restartedOk = false;
     try {
-      await this.tauri.invoke('restart_integration_containers', {
-        project,
-        justEnabled,
-      });
+      await this.tauri.invoke('restart_integration_containers', { project, justEnabled });
       this.needsRestart = false;
       restartedOk = true;
       // Slash discovery is cached host-side for 10 min; compose recreate
@@ -390,63 +363,16 @@ export class ProjectStateService {
       }
     } catch (e: unknown) {
       this.restartError = e instanceof Error ? e.message : String(e);
-      // The backend rolled back `justEnabled` to disabled — refresh the rows.
+      // Backend rolled `justEnabled` back to disabled — refresh the rows.
       for (const cb of this.statusRefreshers) cb();
-    } finally {
-      unlisten();
     }
 
     this.restarting = false;
-    this.buildingWorkerImage.set(false);
     this.pendingJustEnabled = null;
     this.notifyChange();
     if (restartedOk) {
       this.notifyReady();
       this.notifySettled();
-    }
-  }
-
-  private onWorkerImageBuildProgress(p: WorkerImageBuildProgress): void {
-    const estimate = this.estimates.secondsFor(p.image_name);
-    const detail = estimate > 0 ? `~${Math.round(estimate / 60)} min` : '';
-    switch (p.phase) {
-      case 'image_started': {
-        this.buildingWorkerImage.set(true);
-        this.buildSteps.update((steps) => [
-          ...steps.filter((s) => s.id !== p.image_name),
-          {
-            id: p.image_name,
-            title: p.image_name,
-            description: p.message,
-            detail,
-            status: 'active',
-          },
-        ]);
-        break;
-      }
-      case 'image_done': {
-        this.buildSteps.update((steps) =>
-          steps.map((s) => (s.id === p.image_name ? { ...s, status: 'done' as const } : s))
-        );
-        break;
-      }
-      case 'all_done': {
-        this.buildSteps.update((steps) => steps.map((s) => ({ ...s, status: 'done' as const })));
-        // Build finished; close overlay so the regular "Restarting…" spinner
-        // can take over for compose_down/up. Don't wait for invoke to return.
-        this.buildingWorkerImage.set(false);
-        break;
-      }
-      case 'failed': {
-        const err = p.error ?? p.message;
-        this.buildError.set(err);
-        this.buildSteps.update((steps) =>
-          steps.map((s) =>
-            s.status === 'active' ? { ...s, status: 'error' as const, detail: err } : s
-          )
-        );
-        break;
-      }
     }
   }
 
@@ -462,21 +388,7 @@ export class ProjectStateService {
    * @param name - The project name to switch to.
    */
   async switchProject(name: string): Promise<void> {
-    // Lazy build may fire during switch_project (ADR-055).
-    await this.estimates.list();
-    this.buildError.set('');
-    this.buildingWorkerImage.set(false);
-    this.buildSteps.set([]);
-    const unlisten = await this.tauri.listen<WorkerImageBuildProgress>(
-      'worker_image_build_status',
-      (e) => this.onWorkerImageBuildProgress(e.payload)
-    );
-    try {
-      await this.tauri.invoke('switch_project', { name });
-    } finally {
-      unlisten();
-      this.buildingWorkerImage.set(false);
-    }
+    await this.tauri.invoke('switch_project', { name });
   }
 
   /**

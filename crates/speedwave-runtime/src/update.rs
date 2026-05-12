@@ -253,7 +253,6 @@ pub fn update_containers(
         runtime,
         &build::enabled_images(&integrations),
         &new_manifest.bundle_id,
-        None,
     )
     .map_err(|e| {
         anyhow::anyhow!(

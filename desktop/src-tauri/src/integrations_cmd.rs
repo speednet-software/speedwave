@@ -7,38 +7,8 @@ use crate::types::{
     check_project, get_allowed_fields, get_auth_fields, is_secret_field, IntegrationStatusEntry,
     IntegrationsResponse, OsIntegrationStatusEntry,
 };
-use serde::Serialize;
 use speedwave_runtime::config;
 use speedwave_runtime::log_sanitizer;
-use tauri::Emitter;
-
-/// `worker_image_build_status` phases — SSOT mirrored by `models/integration.ts`.
-pub const ALL_WORKER_IMAGE_BUILD_PHASES: [&str; 4] =
-    ["image_started", "image_done", "all_done", "failed"];
-
-fn build_phase_str(phase: speedwave_runtime::build::BuildPhase) -> &'static str {
-    use speedwave_runtime::build::BuildPhase;
-    let idx = match phase {
-        BuildPhase::ImageStarted => 0,
-        BuildPhase::ImageDone => 1,
-        BuildPhase::AllDone => 2,
-        BuildPhase::Failed => 3,
-    };
-    ALL_WORKER_IMAGE_BUILD_PHASES[idx]
-}
-
-/// Payload of `worker_image_build_status`.
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "snake_case")]
-pub struct WorkerImageBuildProgress {
-    pub phase: String,
-    pub image_name: String,
-    pub estimated_seconds: u32,
-    pub current: u32,
-    pub total: u32,
-    pub message: String,
-    pub error: Option<String>,
-}
 
 /// Returns the field keys that Redmine stores in config.json (derived from SSOT in consts).
 fn redmine_config_json_fields() -> Vec<&'static str> {
@@ -936,10 +906,8 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
     Ok(())
 }
 
-/// Builds missing worker images for `project`, emitting `worker_image_build_status`.
-/// Returns sanitized error on failure.
+/// Builds missing worker images for `project`. Returns sanitized error on failure.
 pub fn ensure_project_images_built(
-    app: &tauri::AppHandle,
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     project: &str,
 ) -> Result<(), String> {
@@ -958,22 +926,7 @@ pub fn ensure_project_images_built(
     let manifest = speedwave_runtime::bundle::load_current_bundle_manifest()
         .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
     let enabled = speedwave_runtime::build::enabled_images(&integrations);
-
-    let app_for_cb = app.clone();
-    let cb = move |p: speedwave_runtime::build::BuildProgress| {
-        let payload = WorkerImageBuildProgress {
-            phase: build_phase_str(p.phase).to_string(),
-            image_name: p.image_name.to_string(),
-            estimated_seconds: speedwave_runtime::build::estimated_build_seconds(p.image_name),
-            current: p.current,
-            total: p.total,
-            message: format!("{} of {}: {}", p.current, p.total, p.image_name),
-            error: p.error.as_deref().map(log_sanitizer::sanitize),
-        };
-        let _ = app_for_cb.emit("worker_image_build_status", payload);
-    };
-
-    speedwave_runtime::build::build_missing_images(rt, &enabled, &manifest.bundle_id, &cb)
+    speedwave_runtime::build::build_missing_images(rt, &enabled, &manifest.bundle_id)
         .map(|_| ())
         .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))
 }
@@ -1042,7 +995,6 @@ fn rollback_integration_to_disabled(project: &str, service: &str) {
 
 #[tauri::command]
 pub async fn restart_integration_containers(
-    app: tauri::AppHandle,
     project: String,
     just_enabled: Option<String>,
 ) -> Result<(), String> {
@@ -1068,7 +1020,7 @@ pub async fn restart_integration_containers(
         }
 
         // Lazy build; rollback `just_enabled` on failure.
-        if let Err(sanitized) = ensure_project_images_built(&app, &*rt, &project) {
+        if let Err(sanitized) = ensure_project_images_built(&*rt, &project) {
             log::error!("restart_integration_containers: image build failed: {sanitized}");
             if let Some(svc) = just_enabled.as_deref() {
                 rollback_integration_to_disabled(&project, svc);
@@ -1461,20 +1413,6 @@ mod tests {
             err_block.contains("rollback_integration_to_disabled"),
             "build failure must call rollback_integration_to_disabled, context: {err_block}"
         );
-    }
-
-    #[test]
-    fn worker_image_build_phases_match_consumer() {
-        // SSOT mirror — adding/removing a phase here forces the same change on
-        // the frontend, where the phase string drives step transitions.
-        assert_eq!(
-            ALL_WORKER_IMAGE_BUILD_PHASES,
-            ["image_started", "image_done", "all_done", "failed"]
-        );
-        // Spot-check the mapping from typed phase to wire string.
-        use speedwave_runtime::build::BuildPhase;
-        assert_eq!(build_phase_str(BuildPhase::ImageStarted), "image_started");
-        assert_eq!(build_phase_str(BuildPhase::AllDone), "all_done");
     }
 
     #[test]

@@ -515,10 +515,7 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
 /// because it skips image rebuilds and snapshot/rollback (images don't change
 /// between projects, and there's no previous "good" compose to roll back to).
 #[tauri::command]
-pub async fn recreate_project_containers(
-    app: tauri::AppHandle,
-    project: String,
-) -> Result<(), String> {
+pub async fn recreate_project_containers(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
@@ -535,8 +532,7 @@ pub async fn recreate_project_containers(
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
         // Lazy build for the destination project (ADR-055).
-        if let Err(sanitized) =
-            crate::integrations_cmd::ensure_project_images_built(&app, &*rt, &project)
+        if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&*rt, &project)
         {
             log::error!("recreate_project_containers: image build failed: {sanitized}");
             return Err(format!("Image build failed: {sanitized}"));
@@ -664,26 +660,6 @@ pub fn get_default_base_url(provider: String) -> Result<Option<String>, String> 
 #[tauri::command]
 pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::AnthropicModelInfo] {
     speedwave_runtime::defaults::ANTHROPIC_MODELS
-}
-
-/// One entry per built-in image, for the build-progress modal's display labels
-/// and the "~Ns" estimate. Same `image_name` value as the
-/// `worker_image_build_status` event so the frontend can join estimates ↔ events.
-#[derive(serde::Serialize)]
-pub struct WorkerImageBuildEstimate {
-    pub image_name: &'static str,
-    pub estimated_seconds: u32,
-}
-
-#[tauri::command]
-pub fn list_worker_image_build_estimates() -> Vec<WorkerImageBuildEstimate> {
-    speedwave_runtime::build::IMAGES
-        .iter()
-        .map(|img| WorkerImageBuildEstimate {
-            image_name: img.name,
-            estimated_seconds: img.estimated_build_seconds,
-        })
-        .collect()
 }
 
 /// Returns the display label of the Opus model that the dropdown's

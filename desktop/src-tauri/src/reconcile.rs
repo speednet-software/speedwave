@@ -392,7 +392,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // pre-restore phase — no containers are running yet (see ContainerRuntime
         // trait docs for restart_container_engine).
         let enabled = build::enabled_images(&active_integrations);
-        match build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id, None) {
+        match build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id) {
             Ok(_) => {}
             Err(e)
                 if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
@@ -404,7 +404,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                     log::error!("reconcile_bundle: {msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
-                build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id, None)
+                build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id)
                     .map_err(|e| {
                         let msg = format!("Image rebuild failed after engine restart: {e}");
                         log::error!("reconcile_bundle: {msg}");

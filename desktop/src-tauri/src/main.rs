@@ -410,7 +410,6 @@ async fn switch_project(
     // Container transaction: wait for images → stop previous → recreate new
     let prev_clone = previous.clone();
     let new_clone = name.clone();
-    let app_for_switch = app.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = containers_cmd::ensure_images_ready() {
             return SwitchResult::Failed {
@@ -419,13 +418,10 @@ async fn switch_project(
             };
         }
         let rt = speedwave_runtime::runtime::detect_runtime();
-        let app_for_build = app_for_switch.clone();
         switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, rt| {
             check_project(proj)?;
             // Lazy build for the destination project (ADR-055).
-            if let Err(sanitized) =
-                integrations_cmd::ensure_project_images_built(&app_for_build, rt, proj)
-            {
+            if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
             // compose_down(prev) already handled by switch_project_core step 2.
@@ -1503,7 +1499,6 @@ fn main() {
             containers_cmd::get_llm_config,
             containers_cmd::get_default_base_url,
             containers_cmd::list_anthropic_models,
-            containers_cmd::list_worker_image_build_estimates,
             containers_cmd::get_default_anthropic_model_label,
             containers_cmd::update_llm_config,
             llm_cmd::discover_llm_models,

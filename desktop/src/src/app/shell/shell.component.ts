@@ -20,7 +20,6 @@ import { CommandPaletteComponent } from './command-palette/command-palette.compo
 import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
 import { NavRailComponent, type NavRailEntry } from './nav-rail/nav-rail.component';
 import { SpinIconComponent } from '../shared/spin-icon.component';
-import { ProgressStepsComponent } from '../shared/progress-steps/progress-steps.component';
 import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudstorage-modal.component';
 
 /**
@@ -41,7 +40,6 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
     ModalOverlayComponent,
     CommandPaletteComponent,
     SpinIconComponent,
-    ProgressStepsComponent,
     CloudStorageModalComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -104,26 +102,6 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
             <p class="mono mt-4 text-sm text-[var(--ink)]">{{ statusMessage }}</p>
           </div>
         }
-      }
-      @if (projectState.buildingWorkerImage()) {
-        <div
-          class="fixed inset-0 z-[10000] flex flex-col items-center justify-center bg-black/75 backdrop-blur-sm"
-          role="alertdialog"
-          aria-modal="true"
-          aria-label="Building worker images"
-          data-testid="worker-image-build-overlay"
-        >
-          <div class="w-full max-w-xl px-6">
-            <h2 class="mono mb-4 text-[14px] text-[var(--ink)]">Building container images</h2>
-            <app-progress-steps
-              [steps]="projectState.buildSteps()"
-              [error]="projectState.buildError() || null"
-              [showFooter]="false"
-              [showBackButton]="false"
-              (retry)="restartContainers()"
-            />
-          </div>
-        </div>
       }
       @if (projectState.needsRestart && projectState.status === 'ready') {
         @if (projectState.restarting) {

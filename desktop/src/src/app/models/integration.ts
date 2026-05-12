@@ -51,32 +51,6 @@ export interface OAuthProgressEvent {
 }
 
 /**
- * Phase of a `worker_image_build_status` event. Mirrors
- * `ALL_WORKER_IMAGE_BUILD_PHASES` in `integrations_cmd.rs`.
- */
-export type WorkerImageBuildPhase = 'image_started' | 'image_done' | 'all_done' | 'failed';
-
-/**
- * Payload of the `worker_image_build_status` event emitted while building
- * worker images on demand during an integration enable.
- */
-export interface WorkerImageBuildProgress {
-  phase: WorkerImageBuildPhase;
-  image_name: string;
-  estimated_seconds: number;
-  current: number;
-  total: number;
-  message: string;
-  error?: string;
-}
-
-/** Entry from `list_worker_image_build_estimates` — image name + estimate. */
-export interface WorkerImageBuildEstimate {
-  image_name: string;
-  estimated_seconds: number;
-}
-
-/**
  * Result of validating one OS integration against macOS TCC at startup.
  * Returned by `validate_os_integrations_on_startup` for each integration that
  * was previously `enabled=true` in config but whose live TCC state denies the

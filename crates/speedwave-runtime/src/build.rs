@@ -12,8 +12,6 @@ pub struct ImageDef {
     pub containerfile: &'static str,
     /// Build arguments passed as `--build-arg KEY=VAL` to the container engine.
     pub build_args: &'static [(&'static str, &'static str)],
-    /// Rough first-build estimate (seconds) for the progress UI; `0` = unknown.
-    pub estimated_build_seconds: u32,
 }
 
 /// Prefix on every toggleable MCP worker image; the suffix is the integration
@@ -42,64 +40,54 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "containers",
         containerfile: "containers/Containerfile.claude",
         build_args: CLAUDE_BUILD_ARGS,
-        estimated_build_seconds: 120,
     },
     ImageDef {
         name: IMAGE_MCP_HUB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
         build_args: &[],
-        estimated_build_seconds: 60,
     },
     ImageDef {
         name: IMAGE_MCP_SLACK,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/slack/Dockerfile",
         build_args: &[],
-        estimated_build_seconds: 60,
     },
     ImageDef {
         name: IMAGE_MCP_SHAREPOINT,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/sharepoint/Dockerfile",
         build_args: &[],
-        estimated_build_seconds: 60,
     },
     ImageDef {
         name: IMAGE_MCP_REDMINE,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/redmine/Dockerfile",
         build_args: &[],
-        estimated_build_seconds: 60,
     },
     ImageDef {
         name: IMAGE_MCP_GITLAB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/gitlab/Dockerfile",
         build_args: &[],
-        estimated_build_seconds: 60,
     },
     ImageDef {
         name: IMAGE_MCP_GITHUB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/github/Dockerfile",
         build_args: &[],
-        estimated_build_seconds: 60,
     },
     ImageDef {
         name: IMAGE_MCP_ATLASSIAN,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/atlassian/Dockerfile",
         build_args: &[],
-        estimated_build_seconds: 60,
     },
     ImageDef {
         name: IMAGE_MCP_PLAYWRIGHT,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/playwright/Containerfile",
         build_args: &[],
-        // Pulls a full Chromium (~2.5 GB) — the slowest worker image by far.
-        estimated_build_seconds: 480,
     },
 ];
 
@@ -125,15 +113,6 @@ pub fn image_for_service_key(config_key: &str) -> Option<&'static ImageDef> {
     }
     let target = format!("{MCP_IMAGE_PREFIX}{config_key}");
     IMAGES.iter().find(|img| img.name == target)
-}
-
-/// Rough first-build estimate (seconds) for an image repo name; `0` if unknown.
-pub fn estimated_build_seconds(image_name: &str) -> u32 {
-    IMAGES
-        .iter()
-        .find(|img| img.name == image_name)
-        .map(|img| img.estimated_build_seconds)
-        .unwrap_or(0)
 }
 
 /// Used when `std::thread::available_parallelism()` cannot determine CPU count.
@@ -445,45 +424,20 @@ fn platform_restart_hint() -> &'static str {
     }
 }
 
-/// Per-image build progress for the on-demand build UI.
-#[derive(Clone, Debug)]
-pub struct BuildProgress {
-    pub image_name: &'static str,
-    pub current: u32,
-    pub total: u32,
-    pub phase: BuildPhase,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuildPhase {
-    ImageStarted,
-    ImageDone,
-    AllDone,
-    Failed,
-}
-
 /// Builds `enabled_images(integrations)` for the current bundle.
 pub fn build_enabled_images(
     runtime: &dyn ContainerRuntime,
     integrations: &ResolvedIntegrationsConfig,
 ) -> anyhow::Result<u32> {
     let manifest = bundle::load_current_bundle_manifest()?;
-    build_images_for_bundle(
-        runtime,
-        &enabled_images(integrations),
-        &manifest.bundle_id,
-        None,
-    )
+    build_images_for_bundle(runtime, &enabled_images(integrations), &manifest.bundle_id)
 }
 
-/// Builds the subset of `images` not yet present for `bundle_id`, with progress.
-/// Returns the count of images actually built (0 = all present).
+/// Builds images from `images` not yet present for `bundle_id`. Returns count built.
 pub fn build_missing_images(
     runtime: &dyn ContainerRuntime,
     images: &[&ImageDef],
     bundle_id: &str,
-    progress: &(dyn Fn(BuildProgress) + Sync),
 ) -> anyhow::Result<u32> {
     let missing: Vec<&ImageDef> = images
         .iter()
@@ -497,7 +451,7 @@ pub fn build_missing_images(
     if missing.is_empty() {
         return Ok(0);
     }
-    build_images_for_bundle(runtime, &missing, bundle_id, Some(progress))?;
+    build_images_for_bundle(runtime, &missing, bundle_id)?;
     Ok(missing.len() as u32)
 }
 
@@ -563,13 +517,12 @@ pub fn build_images_for_bundle(
     runtime: &dyn ContainerRuntime,
     images: &[&ImageDef],
     bundle_id: &str,
-    progress: Option<&(dyn Fn(BuildProgress) + Sync)>,
 ) -> anyhow::Result<u32> {
     let root = resolve_build_root()?;
     let vm_root = runtime.prepare_build_context(&root)?;
     let needs_cleanup = vm_root != root;
 
-    let result = try_build_images(runtime, images, &vm_root, bundle_id, progress).or_else(|first_err| {
+    let result = try_build_images(runtime, images, &vm_root, bundle_id).or_else(|first_err| {
         if is_snapshotter_error(&first_err) {
             log::warn!(
                 "build failed with containerd snapshotter error, pruning and retrying: {first_err}"
@@ -577,7 +530,7 @@ pub fn build_images_for_bundle(
             if let Err(prune_err) = runtime.system_prune() {
                 log::warn!("system prune failed: {prune_err}");
             }
-            try_build_images(runtime, images, &vm_root, bundle_id, progress).map_err(|second_err| {
+            try_build_images(runtime, images, &vm_root, bundle_id).map_err(|second_err| {
                 anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
             })
         } else if is_transient_build_error(&first_err) {
@@ -592,7 +545,7 @@ pub fn build_images_for_bundle(
                     delay.as_secs()
                 );
                 std::thread::sleep(delay);
-                match try_build_images(runtime, images, &vm_root, bundle_id, progress) {
+                match try_build_images(runtime, images, &vm_root, bundle_id) {
                     Ok(n) => return Ok(n),
                     Err(e) => last_err = e,
                 }
@@ -627,19 +580,13 @@ pub fn build_images_for_bundle(
 }
 
 /// Builds `images` using a bounded worker pool. Extracted so the retry logic in
-/// [`build_images_for_bundle`] can re-call it.
-///
-/// Worker count is bounded by CPU parallelism and image count (see ADR-032).
-/// All worker errors are collected; the one to propagate upstream is chosen by priority:
-/// snapshotter-class > transient-class > lowest-index fallback. Non-chosen errors are
-/// logged after scope join. `progress`, when set, fires `ImageStarted`/`ImageDone` per
-/// image and one `AllDone` / `Failed` at the end.
+/// [`build_images_for_bundle`] can re-call it. Worker count bounded by CPU + image
+/// count (ADR-032). Errors collected; propagate by priority: snapshotter > transient > first.
 fn try_build_images(
     runtime: &dyn ContainerRuntime,
     images: &[&ImageDef],
     vm_root: &std::path::Path,
     bundle_id: &str,
-    progress: Option<&(dyn Fn(BuildProgress) + Sync)>,
 ) -> anyhow::Result<u32> {
     let total = images.len();
     if total == 0 {
@@ -657,9 +604,7 @@ fn try_build_images(
     let root_str = vm_root.to_string_lossy();
     let root_str = root_str.trim_end_matches('/');
 
-    // Distribute indices across workers as static slices — no work-stealing queue
-    // needed for a fixed, small input list (ADR-032 §4). chunks.len() may be < worker_count
-    // when total doesn't divide evenly, so we log the actual thread count.
+    // Distribute indices across workers (ADR-032 §4); chunks.len() may be < worker_count.
     let indices: Vec<usize> = (0..total).collect();
     let chunks: Vec<&[usize]> = if worker_count == 0 {
         vec![]
@@ -671,15 +616,9 @@ fn try_build_images(
         vm_root.display(),
         chunks.len()
     );
-    let emit = |p: BuildProgress| {
-        if let Some(cb) = progress {
-            cb(p);
-        }
-    };
 
-    // Per-worker results collected into a flat Vec after scope join. The Mutex
-    // can only be poisoned if a worker panics, which causes thread::scope to
-    // re-panic on the calling thread — making the into_inner() poison path unreachable.
+    // Per-worker results collected into a flat Vec; Mutex poison unreachable
+    // (thread::scope re-panics on the calling thread if any worker panics).
     let results = std::sync::Mutex::new(Vec::<(usize, anyhow::Result<()>)>::with_capacity(total));
 
     std::thread::scope(|s| {
@@ -688,9 +627,9 @@ fn try_build_images(
                 for &idx in *chunk {
                     let img = images[idx];
                     let tag = image_ref(img.name, bundle_id);
-                    // String-concat with "/" rather than PathBuf::join: vm_root may be a
-                    // WSL/Linux path on a Windows host, and PathBuf::join treats a
-                    // `/`-prefixed path as an absolute root there.
+                    // String-concat with "/" rather than PathBuf::join: vm_root may be
+                    // a WSL/Linux path on Windows where PathBuf::join treats /-prefixed
+                    // paths as absolute roots.
                     let abs_context = format!("{}/{}", root_str, img.context_dir);
                     let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
                     log::info!(
@@ -701,25 +640,11 @@ fn try_build_images(
                         img.context_dir,
                         img.containerfile
                     );
-                    emit(BuildProgress {
-                        image_name: img.name,
-                        current: idx as u32 + 1,
-                        total: total as u32,
-                        phase: BuildPhase::ImageStarted,
-                        error: None,
-                    });
                     let res =
                         runtime.build_image(&tag, &abs_context, &abs_containerfile, img.build_args);
                     match &res {
                         Ok(()) => {
                             log::info!("build_images: [{}/{}] {} built OK", idx + 1, total, tag);
-                            emit(BuildProgress {
-                                image_name: img.name,
-                                current: idx as u32 + 1,
-                                total: total as u32,
-                                phase: BuildPhase::ImageDone,
-                                error: None,
-                            });
                         }
                         Err(err) => {
                             log::error!(
@@ -728,13 +653,6 @@ fn try_build_images(
                                 total,
                                 tag
                             );
-                            emit(BuildProgress {
-                                image_name: img.name,
-                                current: idx as u32 + 1,
-                                total: total as u32,
-                                phase: BuildPhase::Failed,
-                                error: Some(format!("{err:#}")),
-                            });
                         }
                     }
                     results
@@ -788,13 +706,6 @@ fn try_build_images(
 
     if total_errors == 0 {
         log::info!("build_images: all {total} images built successfully");
-        emit(BuildProgress {
-            image_name: images[total - 1].name,
-            current: total as u32,
-            total: total as u32,
-            phase: BuildPhase::AllDone,
-            error: None,
-        });
         return Ok(total as u32);
     }
 
@@ -936,7 +847,7 @@ mod tests {
 
     /// Builds the full `IMAGES` set, mirroring the old `build_all_images_for_bundle`.
     fn build_all_for_bundle(rt: &dyn ContainerRuntime, bundle_id: &str) -> anyhow::Result<u32> {
-        build_images_for_bundle(rt, &all_images(), bundle_id, None)
+        build_images_for_bundle(rt, &all_images(), bundle_id)
     }
 
     /// Runs the worker pool over the full `IMAGES` set (old `try_build_all`).
@@ -945,7 +856,7 @@ mod tests {
         vm_root: &std::path::Path,
         bundle_id: &str,
     ) -> anyhow::Result<u32> {
-        try_build_images(rt, &all_images(), vm_root, bundle_id, None)
+        try_build_images(rt, &all_images(), vm_root, bundle_id)
     }
 
     #[test]
@@ -1531,22 +1442,6 @@ mod tests {
     }
 
     #[test]
-    fn test_estimated_build_seconds() {
-        assert!(
-            estimated_build_seconds(IMAGE_MCP_PLAYWRIGHT)
-                > estimated_build_seconds(IMAGE_MCP_SLACK)
-        );
-        assert_eq!(estimated_build_seconds("speedwave-does-not-exist"), 0);
-        for img in IMAGES {
-            assert!(
-                img.estimated_build_seconds > 0,
-                "{} needs an estimate",
-                img.name
-            );
-        }
-    }
-
-    #[test]
     fn test_is_snapshotter_error_matches_apply_layer() {
         let err =
             anyhow::anyhow!("nerdctl failed: apply layer error for \"docker.io/library/img\"");
@@ -1963,7 +1858,7 @@ mod tests {
             ..ResolvedIntegrationsConfig::default()
         };
         let rt = LazyBuildMock::new(root, vec![]);
-        let n = build_images_for_bundle(&rt, &enabled_images(&cfg), "b1", None).unwrap();
+        let n = build_images_for_bundle(&rt, &enabled_images(&cfg), "b1").unwrap();
         assert_eq!(n, 3);
         let mut built: Vec<String> = rt.builds.lock().unwrap().clone();
         built.sort();
@@ -1978,7 +1873,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_missing_images_skips_present_and_reports_progress() {
+    fn test_build_missing_images_skips_present() {
         let (_tmp, root) = create_fake_build_root();
         // claude + mcp-hub already present; mcp-playwright missing.
         let rt = LazyBuildMock::new(root, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
@@ -1987,21 +1882,12 @@ mod tests {
             IMAGES.iter().find(|i| i.name == IMAGE_CLAUDE).unwrap(),
             IMAGES.iter().find(|i| i.name == IMAGE_MCP_HUB).unwrap(),
         ];
-        let events: Arc<Mutex<Vec<(String, BuildPhase)>>> = Arc::new(Mutex::new(Vec::new()));
-        let ev = Arc::clone(&events);
-        let cb = move |p: BuildProgress| {
-            ev.lock().unwrap().push((p.image_name.to_string(), p.phase));
-        };
-        let n = build_missing_images(&rt, &images, "b1", &cb).unwrap();
+        let n = build_missing_images(&rt, &images, "b1").unwrap();
         assert_eq!(n, 1, "only the missing playwright image is built");
         assert_eq!(
             *rt.builds.lock().unwrap(),
             vec![image_ref(IMAGE_MCP_PLAYWRIGHT, "b1")]
         );
-        let ev = events.lock().unwrap();
-        assert!(ev.contains(&(IMAGE_MCP_PLAYWRIGHT.to_string(), BuildPhase::ImageStarted)));
-        assert!(ev.contains(&(IMAGE_MCP_PLAYWRIGHT.to_string(), BuildPhase::ImageDone)));
-        assert!(ev.iter().any(|(_, ph)| *ph == BuildPhase::AllDone));
     }
 
     #[test]
@@ -2012,8 +1898,7 @@ mod tests {
             .into_iter()
             .filter(|i| i.name == IMAGE_CLAUDE || i.name == IMAGE_MCP_HUB)
             .collect();
-        let cb = |_: BuildProgress| panic!("no progress when nothing is built");
-        let n = build_missing_images(&rt, &images, "b1", &cb).unwrap();
+        let n = build_missing_images(&rt, &images, "b1").unwrap();
         assert_eq!(n, 0);
         assert!(rt.builds.lock().unwrap().is_empty());
     }
