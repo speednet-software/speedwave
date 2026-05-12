@@ -38,14 +38,14 @@ export function truncate(text: string, maxChars: number): { content: string; tru
  * @returns A Markdown string covering every sheet.
  */
 function workbookToMarkdown(wb: XLSX.WorkBook): string {
-  // Escape backslash first, then pipe — otherwise a literal `\|` in a cell would round-trip as
-  // `\\|` (escaped backslash + cell-breaking pipe) instead of `\\\|` (escaped backslash + escaped pipe).
-  // Newlines (Excel Alt+Enter) collapse to a space so they don't break the table row.
+  // One-pass cell escape for a Markdown-table cell: `\` → `\\`, `|` → `\|`, and any run of
+  // newlines (Excel Alt+Enter) → a single space (so the cell doesn't break the table row).
+  // A single replace with a callback (rather than chained `.replace` calls) keeps the escaping
+  // atomic — there is no intermediate state where `|` is escaped before `\`.
   const escape = (cell: unknown): string =>
-    (cell == null ? '' : String(cell))
-      .replace(/\\/g, '\\\\')
-      .replace(/\|/g, '\\|')
-      .replace(/[\r\n]+/g, ' ');
+    (cell == null ? '' : String(cell)).replace(/[\\|]|[\r\n]+/g, (m) =>
+      m === '\\' ? '\\\\' : m === '|' ? '\\|' : ' '
+    );
   const parts: string[] = [];
   for (const name of wb.SheetNames) {
     const sheet = wb.Sheets[name];
