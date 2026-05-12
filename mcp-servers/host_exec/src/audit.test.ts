@@ -94,19 +94,18 @@ describe('auditRecipeCall', () => {
   it('truncates the log to the last ~half when it grows past LOG_MAX_BYTES', async () => {
     const logFile = path.join(dir, 'log');
     process.env.HOST_EXEC_LOG_FILE = logFile;
-    // Seed with > LOG_MAX_BYTES of newline-aligned junk, including a unique
-    // marker near the start (which truncation should drop) and near the end.
+    // Pre-allocate in one `join` — pre `+=`-loop variant was O(n²) and
+    // tripped vitest's 5 s timeout on slow CI runners.
     const blockLine = 'x'.repeat(199) + '\n';
-    let seed = 'START-MARKER\n';
-    while (Buffer.byteLength(seed, 'utf-8') <= LOG_MAX_BYTES) seed += blockLine;
-    seed += blockLine + 'END-MARKER\n';
+    const blocks = Math.ceil(LOG_MAX_BYTES / blockLine.length) + 1;
+    const seed = 'START-MARKER\n' + Array(blocks).fill(blockLine).join('') + 'END-MARKER\n';
     await fs.writeFile(logFile, seed, 'utf-8');
     await auditRecipeCall(recipe({ name: 't', exec: './t' }), ['./t'], RESULT);
     const content = await fs.readFile(logFile, 'utf-8');
     expect(content).not.toContain('START-MARKER');
     expect(content).toContain('END-MARKER');
     expect(content.trim().endsWith('}')).toBe(true); // the new audit line
-  });
+  }, 15_000);
 
   it('does not throw when HOST_EXEC_LOG_FILE is unset (logs to stderr)', async () => {
     delete process.env.HOST_EXEC_LOG_FILE;
