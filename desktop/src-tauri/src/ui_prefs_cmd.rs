@@ -1,4 +1,4 @@
-//! UI preferences commands — currently the beta-features toggle (ADR-054).
+//! UI preferences commands — currently the beta-features toggle (ADR-055).
 //!
 //! `apply_beta_toggle_inner` is the shared write path used by both the
 //! `set_beta_enabled` Tauri command and the tray menu's `toggle_beta` arm; it

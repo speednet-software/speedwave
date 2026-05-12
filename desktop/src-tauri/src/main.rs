@@ -1613,7 +1613,7 @@ fn main() {
             // Logging
             set_log_level,
             get_log_level,
-            // UI preferences (ADR-054)
+            // UI preferences (ADR-055)
             ui_prefs_cmd::get_beta_enabled,
             ui_prefs_cmd::set_beta_enabled,
             // Diagnostics

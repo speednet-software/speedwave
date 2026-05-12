@@ -2,7 +2,7 @@ import { Injectable, inject, signal, type Signal } from '@angular/core';
 import { TauriService } from './tauri.service';
 
 /**
- * Beta-features toggle (ADR-054). Reads the persisted state from user-config
+ * Beta-features toggle (ADR-055). Reads the persisted state from user-config
  * on startup and tracks live toggles emitted by the tray menu via the
  * `beta-changed` Tauri event. UI surfaces gate hidden / work-in-progress
  * sections on `enabled()`. Default = `false` when running outside Tauri

@@ -234,7 +234,7 @@ export class ShellComponent implements OnInit, OnDestroy {
    * is missing, the view itself surfaces the `auth required` block + a link
    * back to Settings instead of silently disappearing from the rail.
    * Meeting transcription is a beta-gated surface: hidden until the user
-   * enables beta features in the tray (ADR-054/056).
+   * enables beta features in the tray (ADR-055/056).
    */
   readonly visibleEntries = computed(() =>
     this.beta.enabled()
