@@ -3927,6 +3927,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
         let result = ChatSession::prepare_args("nonexistent", &user_config, None, None);
         assert!(result.is_err());
@@ -3951,6 +3952,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
         let result =
             ChatSession::prepare_args("test", &user_config, Some("../../../etc/passwd"), None);
@@ -3971,6 +3973,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
         let result = ChatSession::prepare_args(
             "test",
@@ -3995,6 +3998,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
         let result = ChatSession::prepare_args("myproject", &user_config, None, None);
         assert!(result.is_ok());
@@ -4017,6 +4021,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), None);
@@ -4041,6 +4046,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_me";

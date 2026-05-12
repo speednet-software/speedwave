@@ -42,6 +42,7 @@ mod system_settings_cmd;
 mod transcription_cmd;
 mod tray;
 mod types;
+mod ui_prefs_cmd;
 mod update_commands;
 mod updater;
 mod url_validation;
@@ -116,9 +117,6 @@ pub(crate) fn stash_cleanup_handle(
         }
     }
 }
-
-/// Tracks the latest available update version for the system tray menu.
-type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
 
 /// Serialises compose operations across `start_chat`, `resume_conversation`,
 /// and `reconcile_compose_port` to prevent concurrent `compose_up` /
@@ -1059,11 +1057,11 @@ fn main() {
     let transcript_forwarders: transcription_cmd::ForwardersHandle =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
-    // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
+    // Shared state for IDE Bridge, mcp-os process, and auto-check handle.
+    // (Tray menu state lives in a managed `TrayMenuState`, set up below.)
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
-    let update_version: SharedUpdateVersion = Arc::new(Mutex::new(None));
 
     let tray_available = Arc::new(AtomicBool::new(false));
     #[cfg_attr(target_os = "linux", allow(unused_variables))]
@@ -1079,7 +1077,13 @@ fn main() {
     };
     let cleanup_ctx_window = cleanup_ctx.clone();
     let cleanup_ctx_runevent = cleanup_ctx.clone();
-    let update_version_setup = update_version.clone();
+
+    // Seed tray state from persisted user-config so the beta-features
+    // checkbox reflects the previous session's choice on startup.
+    let initial_beta_enabled = config::load_user_config()
+        .map(|c| c.beta_enabled())
+        .unwrap_or(false);
+    let tray_state = tray::TrayMenuState::new(initial_beta_enabled);
 
     // Register SIGTERM/SIGINT handler so process signals trigger the same
     // cleanup as graceful window close. The CLEANUP_ONCE guard in
@@ -1188,6 +1192,7 @@ fn main() {
         .manage(model_store.clone())
         .manage(transcript_drivers.clone())
         .manage(transcript_forwarders.clone())
+        .manage(tray_state)
         .setup(move |app| {
             // Restore persisted log level (default: Info)
             let initial_level = config::load_user_config()
@@ -1300,9 +1305,14 @@ fn main() {
                 reconcile::reconcile_bundle_update(app.handle());
             }
 
-            // Build system tray.
-            let tray_menu = tray::build_tray_menu(app.handle(), &None)?;
-            let update_version_tray = update_version_setup.clone();
+            // Build system tray from the managed `TrayMenuState`.
+            use tauri::Manager;
+            let tray_menu = tray::build_tray_menu(
+                app.handle(),
+                None,
+                app.state::<tray::TrayMenuState>().beta_enabled(),
+                setup_wizard::is_setup_complete(),
+            )?;
             let tray_icon = tray::load_tray_icon()?;
 
             #[cfg_attr(target_os = "linux", allow(unused_mut))]
@@ -1345,11 +1355,12 @@ fn main() {
                         });
                     }
                     "install_update" => {
+                        let app_for_state = app.clone();
                         #[cfg(not(target_os = "linux"))]
                         let app_clone = app.clone();
-                        let uv = update_version_tray.clone();
                         tauri::async_runtime::spawn(async move {
-                            let version = uv.lock().ok().and_then(|g| g.clone());
+                            let version =
+                                app_for_state.state::<tray::TrayMenuState>().update_version();
                             if let Some(expected) = version {
                                 #[cfg(target_os = "linux")]
                                 let result = {
@@ -1377,6 +1388,18 @@ fn main() {
                                 }
                             } else {
                                 log::warn!("tray: install_update clicked but no version available");
+                            }
+                        });
+                    }
+                    "toggle_beta" => {
+                        let app_clone = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let current =
+                                app_clone.state::<tray::TrayMenuState>().beta_enabled();
+                            if let Err(e) =
+                                ui_prefs_cmd::apply_beta_toggle_inner(&app_clone, !current).await
+                            {
+                                log::error!("tray: beta toggle failed: {e}");
                             }
                         });
                     }
@@ -1469,20 +1492,17 @@ fn main() {
                 }
             }
 
-            // Listen for update_available events (from auto-check) to update tray menu
-            let update_version_listener = update_version_setup.clone();
+            // Listen for update_available events (from auto-check) to update tray menu.
             let app_handle_listener = app.handle().clone();
             use tauri::Listener;
             app.listen(
                 "update_available",
                 move |event| match serde_json::from_str::<updater::UpdateInfo>(event.payload()) {
                     Ok(info) => {
-                        let version = info.version;
-                        match update_version_listener.lock() {
-                            Ok(mut guard) => *guard = Some(version.clone()),
-                            Err(e) => log::warn!("update version mutex poisoned: {e}"),
-                        }
-                        tray::refresh_tray_menu(&app_handle_listener, &Some(version));
+                        app_handle_listener
+                            .state::<tray::TrayMenuState>()
+                            .set_update_version(Some(info.version));
+                        tray::refresh_tray_menu(&app_handle_listener);
                     }
                     Err(e) => {
                         log::warn!("tray: failed to deserialize update_available payload: {e}");
@@ -1593,6 +1613,9 @@ fn main() {
             // Logging
             set_log_level,
             get_log_level,
+            // UI preferences (ADR-055)
+            ui_prefs_cmd::get_beta_enabled,
+            ui_prefs_cmd::set_beta_enabled,
             // Diagnostics
             export_diagnostics,
             // Integrations
@@ -2066,6 +2089,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -2137,6 +2161,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let result = apply_switch_project(&mut cfg, "only");

@@ -24,6 +24,9 @@ describe('ShellComponent', () => {
       if (cmd === 'start_containers') return undefined;
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, oauth_authenticated: true };
+      // Default these specs to "beta on" so the meeting-transcription nav
+      // entry behaves as before; a dedicated test below flips it off.
+      if (cmd === 'get_beta_enabled') return true;
       return undefined;
     };
 
@@ -281,6 +284,34 @@ describe('ShellComponent', () => {
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('[data-testid="nav-chat"]')).not.toBeNull();
+  });
+
+  it('hides the meeting-transcription nav entry when beta is disabled', async () => {
+    // Re-create the component with a Tauri mock that reports beta off.
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_beta_enabled') return false;
+      if (cmd === 'list_projects')
+        return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+      if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+      return undefined;
+    };
+    const f = TestBed.createComponent(ShellComponent);
+    await f.componentInstance.ngOnInit();
+    await f.whenStable();
+    f.detectChanges();
+
+    const nav = f.nativeElement.querySelector('[data-testid="nav-rail"]');
+    const ids = Array.from(nav.querySelectorAll('a[data-testid^="nav-"]')).map((a) =>
+      (a as HTMLAnchorElement).getAttribute('data-testid')
+    );
+    expect(ids).not.toContain('nav-meeting-transcription');
+    expect(ids).toEqual([
+      'nav-chat',
+      'nav-integrations',
+      'nav-plugins',
+      'nav-settings',
+      'nav-logs',
+    ]);
   });
 
   describe('restart overlay', () => {

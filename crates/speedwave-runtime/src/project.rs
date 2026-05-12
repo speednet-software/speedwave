@@ -340,6 +340,7 @@ mod tests {
             selected_ide: None,
             log_level: None,
             transcription: None,
+            ui: None,
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 
@@ -382,6 +383,7 @@ mod tests {
             selected_ide: None,
             log_level: None,
             transcription: None,
+            ui: None,
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 

@@ -1208,6 +1208,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let result = resolve_project_for_cwd(&canonical, &user_config).unwrap();
@@ -1233,6 +1234,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let result = resolve_project_for_cwd(&sub, &user_config).unwrap();
@@ -1269,6 +1271,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
 
         // CWD inside nested project should match web-proj (longer prefix)
@@ -1290,6 +1293,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
 
         // Use a tempdir as CWD that doesn't match any project
@@ -1306,6 +1310,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1332,6 +1337,7 @@ mod tests {
             selected_ide: None,
             transcription: None,
             log_level: None,
+            ui: None,
         };
 
         // canonicalize strips trailing slash, so exact match should work

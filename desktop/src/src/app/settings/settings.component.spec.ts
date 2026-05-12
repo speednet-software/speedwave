@@ -25,6 +25,8 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return 'darwin';
       case 'get_auth_status':
         return { api_key_configured: false, oauth_authenticated: false };
+      case 'get_beta_enabled':
+        return true;
       default:
         return undefined;
     }
@@ -112,10 +114,33 @@ describe('SettingsComponent', () => {
     expect(advancedEl).not.toBeNull();
   });
 
-  it('renders TranscriptionSectionComponent', () => {
+  it('renders TranscriptionSectionComponent when beta is enabled', async () => {
+    fixture.detectChanges();
+    await fixture.whenStable();
     fixture.detectChanges();
     const el = fixture.nativeElement.querySelector('app-transcription-section');
     expect(el).not.toBeNull();
+  });
+
+  it('hides TranscriptionSectionComponent when beta is disabled', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_beta_enabled') return false;
+      if (cmd === 'list_projects')
+        return { projects: [{ name: 'p', dir: '/tmp/p' }], active_project: 'p' };
+      if (cmd === 'get_llm_config')
+        return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
+      if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 24 };
+      if (cmd === 'get_log_level') return 'info';
+      if (cmd === 'get_platform') return 'darwin';
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, oauth_authenticated: false };
+      return undefined;
+    };
+    const f = TestBed.createComponent(SettingsComponent);
+    f.detectChanges();
+    await f.whenStable();
+    f.detectChanges();
+    expect(f.nativeElement.querySelector('app-transcription-section')).toBeNull();
   });
 
   it('reloads project info on project_switch_succeeded event', async () => {
