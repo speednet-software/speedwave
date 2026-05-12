@@ -31,6 +31,7 @@ export default {
         'mcp-office',
         'mcp-playwright',
         'mcp-os',
+        'mcp-host-exec',
         'containers',
         'ci',
         'docs',

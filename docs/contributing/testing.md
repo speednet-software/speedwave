@@ -13,7 +13,7 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 | `make test-os`                        | OS MCP server tests only                                                                                                                                                                                                                                                                              |
 | `make test-mcp-office-py`             | Office worker's Python support-scripts against the real libraries (builds a throwaway venv); the vitest suite mocks these subprocesses, so this is the only gate that runs `docx_build`/`xlsx_build`/`pptx_build`/`pdf_ops`/`render_chart`/`weasyprint_render` for real. Runs in CI (the `test` job). |
 | `make test-angular`                   | Angular desktop UI tests (`vitest run`)                                                                                                                                                                                                                                                               |
-| `make test-e2e`                       | End-to-end CLI tests, incl. plugin-tamper bats against the debug CLI (requires `bats-core`)                                                                                                                                                                                                           |
+| `make test-e2e`                       | End-to-end CLI tests against the debug CLI: `speedwave.bats`, `plugin-tamper.bats`, `host-exec.bats` (requires `bats-core`)                                                                                                                                                                           |
 | `make test-e2e-plugin-tamper-release` | Plugin tamper / signature-bypass bats against the **release** CLI — verifies the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is compiled out (requires `bats-core`)                                                                                                                                       |
 | `make test-entrypoint`                | Container entrypoint script tests (requires `bats-core`)                                                                                                                                                                                                                                              |
 | `make test-swift`                     | Swift tests for native macOS CLI packages (macOS only)                                                                                                                                                                                                                                                |
@@ -177,6 +177,64 @@ See [ADR-024](../adr/ADR-024-e2e-testing-strategy.md) for full architectural rat
 ## Updater Pipeline Coverage
 
 Three BATS files guard the release pipeline against silent failures (Issue #26). `updater-config.bats` statically validates `tauri.conf.json` fields (`createUpdaterArtifacts`, `endpoints`, `pubkey`, and bundle targets) using intentionally broken fixtures in `_tests/desktop/fixtures/`. `version-consistency.bats` reads `release-please-config.json` dynamically and asserts every version-bearing file matches `.release-please-manifest.json`, catching version drift before a release ships. `verify-release-assets.bats` tests `scripts/verify-release-assets.sh` end-to-end by shimming `gh` — the script checks that all 20 expected assets (including 6 `.sig` companions and `latest.json`) are present and valid. Additional cases (16-25) validate that the script rejects missing or malformed `VERSION`, `REPO`, `TAG_NAME`, and `RID` inputs with structured `::error::` annotations. The split between `test-desktop-config` (in `make test`) and `test-release-gate` (CI-only) keeps the `gh` shim surface away from everyday development builds.
+
+## Host Exec — manual smoke (live Claude)
+
+`host_exec` (ADR-054) is exercised at four levels in CI:
+
+- **Unit / integration (Rust + TS + Angular):** `host_exec::validate_host_exec_config` (in `crates/speedwave-runtime/src/host_exec.rs`), the per-project process manager (`crates/speedwave-runtime/src/host_exec_process.rs` — two-projects two-ports, env-allowlist, login-shell PATH recovery, the chmod-600 file bookkeeping, stale-PID kill), the compose wiring (`compose.rs` — `WORKER_HOST_EXEC_URL` per project, `ENABLED_SERVICES` membership, the security-test exception), the Tauri settings commands (`host_exec_cmd.rs`), the CLI worker spawn (`crates/speedwave-cli/src/main.rs`), the TypeScript worker (`mcp-servers/host_exec/` — vitest, 100% lines/funcs/statements, `c8` branch ≥ 90% — incl. the process-tree `SIGKILL` on Unix, the per-stream output cap, the audit-log redaction), and the Angular Integrations card (`host-exec-config.component.spec.ts` — the danger modal that is the consent, the recipe editor, the docker-lifecycle warning, every validation path).
+- **CLI E2E (bats — `make test-e2e`):** `_tests/e2e/host-exec.bats` verifies the wire-format contract end-to-end through the real `speedwave` binary — a valid camelCase user config survives `speedwave check` unchanged; a `hostExec` block in repo `.speedwave.json` is silently ignored; a malformed user config does not panic the CLI.
+- **Desktop E2E (WebdriverIO — `make test-e2e-desktop`):** `desktop/e2e/specs/08-host-exec.spec.ts` drives the running Tauri app — the gated toggle / danger modal, the recipe-whitelist validation (shell-launcher / meta-tool / reserved-env / `cwdSub` escape / duplicate-name rejection), the snake_case → camelCase round-trip through `host_exec_save_settings` / `host_exec_load_settings`, and the `host_exec_resolve_executable` `which`-style PATH probe.
+- **Manual smoke (live Claude — see below):** the scenarios that require a real Anthropic API turn through the MCP hub and a live worker process.
+
+### Live-Claude scenarios (not in CI)
+
+These verify Claude's view of `host_exec` — what comes back in a tool result, that recipes run **without a prompt** (enabling Host Exec is the consent), and that two projects do not cross-talk. They are NOT in `make test-e2e` / `test-e2e-desktop` because they require a real Anthropic API key (cost + flakiness). The non-Claude invariants they would assert are already covered by the unit/integration suite above; running them is a release-gate smoke, not a CI gate. **Run them under both the Desktop app AND the `speedwave` CLI.**
+
+```bash
+# Prereqs:  SPEEDWAVE_DATA_DIR=~/.speedwave-smoke ;  Anthropic OAuth or API key
+# already wired into Claude Code inside the container ;  Speedwave running
+# (Desktop, and separately the `speedwave` CLI).  Two projects added (A and B),
+# each a repo where Docker is available (or any toolchain).
+
+# Scenario (a) — happy-path round-trip, NO prompt
+#   In project A:  Integrations → Host Exec → enable (confirm the danger
+#   modal) → add  { name: "docker_ps", exec: "docker", args: ["ps"] }.
+#   Ask Claude:  "Show the running docker containers."  Expected:
+#     - Claude does search_tools → execute_code({code:"return await
+#       host_exec.dockerPs()"}) — NO confirmation dialog appears (correct;
+#       there is no per-call confirmation).
+#     - Claude reports a structured result with status="exited", exitCode 0,
+#       the `docker ps` output in stdout, and durationMs.
+#   Then run the SAME thing via the CLI:  `speedwave` in project A's dir, ask
+#   Claude to run the docker_ps recipe — it works (the CLI spawned the worker
+#   before compose_up; the hub got WORKER_HOST_EXEC_URL).
+
+# Scenario (d) — exit ≠ 0 is a successful ToolResult, not a tool error
+#   Add a recipe that intentionally fails:
+#       { name: "fail_now", exec: "./gradlew", args: ["nonexistent-task"] }
+#   Ask Claude to run it.  Expected:  Claude reports a *successful* tool
+#   result with status="exited", exitCode=1, the error in stderr, and NO MCP
+#   tool error.  Tool errors are reserved for unknown recipe, regex fail,
+#   cwdSub escape, and spawn_error.
+
+# Audit log:  every run is recorded — confirm there is one line per recipe
+# call (recipe name, full argv, cwd, exitCode, status):
+#       cat $SPEEDWAVE_DATA_DIR/host-exec/<project>/log
+
+# Scenario (f) — two projects, two workers, no cross-talk
+#   In both project A and project B:  enable Host Exec + add a recipe.
+#   Confirm that
+#       $SPEEDWAVE_DATA_DIR/host-exec/<A>/{port,pid,auth-token}
+#       $SPEEDWAVE_DATA_DIR/host-exec/<B>/{port,pid,auth-token}
+#   each contain DIFFERENT values (`cat` each file).  Switch to project A in
+#   the Desktop UI, ask Claude to run the recipe — the spawn line in A's log
+#   appears, NOT in B's.  Switch to B — symmetric.  Throughout,
+#       ps aux | grep 'host_exec/dist/index.js' | grep -v grep
+#   shows two distinct Node processes.
+```
+
+The "definition of done" for a Host Exec release: all four CI levels green, plus a clean run of the live-Claude scenarios above against the release build, under both Desktop and the CLI.
 
 ## See Also
 

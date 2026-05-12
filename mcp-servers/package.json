@@ -18,7 +18,8 @@
     "github",
     "atlassian",
     "office",
-    "os"
+    "os",
+    "host_exec"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",

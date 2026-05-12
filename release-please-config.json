@@ -32,6 +32,7 @@
         "mcp-servers/atlassian/package.json",
         "mcp-servers/office/package.json",
         "mcp-servers/os/package.json",
+        "mcp-servers/host_exec/package.json",
         {
           "type": "toml",
           "path": "crates/speedwave-runtime/Cargo.toml",

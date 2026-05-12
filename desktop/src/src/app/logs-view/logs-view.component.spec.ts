@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { LogsViewComponent, parseLogLine } from './logs-view.component';
+import { LogsViewComponent, parseLogLine, sortLogLinesByTime } from './logs-view.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { HEALTH_REFRESH_INTERVAL_MS } from '../services/system-health.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 const MOCK_LOGS = [
@@ -112,22 +113,46 @@ describe('LogsViewComponent', () => {
     expect(time.getAttribute('title')).toBe('11:32:56');
   });
 
-  it('renders ISO timestamps as `YYYY-MM-DD HH:MM:SS` and exposes the raw value via title', async () => {
-    // `nerdctl compose logs --timestamps` prefixes lines with RFC3339
-    // stamps. The view shrinks them to a fixed-width `YYYY-MM-DD HH:MM:SS`
-    // for the time column and keeps the full ISO value in `[title]` so
-    // hovering still reveals microseconds + timezone.
+  it('renders an ISO timestamp in the host local timezone, raw value in title', async () => {
+    // `nerdctl compose logs --timestamps` is UTC `Z`; Speedwave loggers carry
+    // an offset. Either way the column shows local time (`YYYY-MM-DD HH:MM:SS`)
+    // — so a UTC `Z` stamp and a `+02:00` stamp for the same instant render
+    // identically. `[title]` keeps the raw value (micros + offset).
+    const raw = '2026-04-28T11:32:56.123456Z';
     mockTauri.invokeHandler = async (cmd: string) =>
-      cmd === 'get_all_logs'
-        ? 'speedwave_test_mcp-hub_1 | 2026-04-28T11:32:56.123456Z INFO  hello'
-        : undefined;
+      cmd === 'get_all_logs' ? `speedwave_test_mcp-hub_1 | ${raw} INFO  hello` : undefined;
 
     await component.ngOnInit();
     fixture.detectChanges();
 
+    // Expected = the same instant, formatted with the test process's local
+    // getters — `formatTime` must agree with a plain `new Date(...)`.
+    const d = new Date(raw);
+    const p2 = (n: number) => String(n).padStart(2, '0');
+    const expected =
+      `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+      `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+
     const time = fixture.nativeElement.querySelector('[data-testid="logs-time"]') as HTMLElement;
-    expect(time.textContent?.trim()).toBe('2026-04-28 11:32:56');
-    expect(time.getAttribute('title')).toBe('2026-04-28T11:32:56.123456Z');
+    expect(time.textContent?.trim()).toBe(expected);
+    expect(time.getAttribute('title')).toBe(raw);
+  });
+
+  it('renders a `+02:00`-offset ISO stamp identically to the same instant in UTC', async () => {
+    // The whole point of `formatTime`: source offset is irrelevant to the column.
+    const utc = '2026-04-28T11:32:56.000Z';
+    const plus2 = '2026-04-28T13:32:56.000+02:00'; // same instant
+    const render = async (raw: string): Promise<string> => {
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'get_all_logs' ? `speedwave_test_mcp-hub_1 | ${raw} INFO x` : undefined;
+      await component.ngOnInit();
+      fixture.detectChanges();
+      return (
+        (fixture.nativeElement.querySelector('[data-testid="logs-time"]') as HTMLElement)
+          .textContent ?? ''
+      ).trim();
+    };
+    expect(await render(utc)).toBe(await render(plus2));
   });
 
   // -- ARIA --
@@ -424,6 +449,151 @@ describe('parseLogLine', () => {
     expect(line.time).toBe('2024-01-15T14:34:02.814Z');
     expect(line.level).toBe('info');
     expect(line.message).toBe('started');
+  });
+
+  it('uses the drain ISO timestamp; strips STDOUT: and the redundant inline ts() from an mcp-os line', () => {
+    // Line shape: `<drain-ISO> STDOUT: [<ts()-ISO>] msg` — the column gets the
+    // drain stamp, `STDOUT:` and the duplicate `[<ts()-ISO>]` are removed.
+    const line = parseLogLine(
+      'mcp-os | 2026-05-12T14:34:02.814+02:00 STDOUT: [2026-05-12T14:34:02.810+02:00] mcp-os started'
+    );
+    expect(line.source).toBe('mcp-os');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe('mcp-os started');
+    expect(line.message).not.toContain('STDOUT:');
+    expect(line.message).not.toContain('[2026-');
+  });
+
+  it('strips STDERR: drain marker too', () => {
+    const line = parseLogLine('host-exec | 2026-05-12T14:34:02.814+02:00 STDERR: something broke');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe('something broke');
+  });
+
+  it('extracts the drain timestamp from a host-exec audit JSON line, keeping the JSON as message', () => {
+    // The audit JSON's `ts` field stays UTC `Z` (a JSON value, not a log-line
+    // prefix); only the drain prefix carries the local offset.
+    const line = parseLogLine(
+      'host-exec | 2026-05-12T14:34:02.814+02:00 {"ts":"2026-05-12T12:34:02.814Z","recipe":"docker_ps","status":"exited"}'
+    );
+    expect(line.source).toBe('host-exec');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe(
+      '{"ts":"2026-05-12T12:34:02.814Z","recipe":"docker_ps","status":"exited"}'
+    );
+  });
+
+  it('preserves the semantic SESSION: prefix on a claude-session line', () => {
+    const line = parseLogLine('claude | 2026-05-12T14:34:02.814+02:00 SESSION: started');
+    expect(line.source).toBe('claude');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe('SESSION: started');
+  });
+
+  it('parses a bare bracketed ISO timestamp via the extended BRACKETED_TIME_RE', () => {
+    // A worker `ts()` line with no drain/compose prefix — now local offset.
+    const line = parseLogLine('hub_1 | [2026-05-12T14:34:02.814+02:00] 🚀 Starting');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.message).toBe('🚀 Starting');
+  });
+
+  it('still parses a bare bracketed UTC `Z` ISO timestamp (older logs / nerdctl)', () => {
+    const line = parseLogLine('hub_1 | [2026-05-12T12:34:02.814Z] 🚀 Starting');
+    expect(line.time).toBe('2026-05-12T12:34:02.814Z');
+    expect(line.message).toBe('🚀 Starting');
+  });
+
+  it('compose-container line: nerdctl stamp → column, the worker `ts()` stamp dropped from the message', () => {
+    // `<container> | <nerdctl-RFC3339-UTC> [<ts()-ISO-local>] msg` — the column
+    // gets nerdctl's stamp (localised at render); the inline `[<ts()>]` is the
+    // same instant, so it's removed from the visible message.
+    const line = parseLogLine(
+      'speedwave_doc_mcp-hub_1 | 2026-05-12T13:00:39.816Z [2026-05-12T15:00:39.816+02:00] 🔗 Initializing HTTP bridges'
+    );
+    expect(line.source).toBe('mcp-hub');
+    expect(line.time).toBe('2026-05-12T13:00:39.816Z');
+    expect(line.message).toBe('🔗 Initializing HTTP bridges');
+    expect(line.message).not.toContain('[2026-');
+  });
+
+  it('rewrites the desktop ISO+bracketed-level line (colon offset) to a WARN chip', () => {
+    // tauri-plugin-log → `prefix_lines("desktop", …)` → `desktop | <ISO> WARN [target] msg`.
+    const line = parseLogLine(
+      'desktop | 2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] auto-disabled mail'
+    );
+    expect(line.source).toBe('desktop');
+    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
+    expect(line.level).toBe('warn');
+    expect(line.message).toBe('[speedwave_desktop::x] auto-disabled mail');
+  });
+});
+
+describe('sortLogLinesByTime', () => {
+  // Build a parsed line from a backend wire line via the real parser.
+  const ln = (raw: string) => parseLogLine(raw);
+
+  it('interleaves per-source blocks into one chronological stream', () => {
+    // Backend order: a `claude` block then a `mcp-hub` block, each internally
+    // ordered but overlapping in time. After the sort they're interleaved.
+    const sorted = sortLogLinesByTime([
+      ln('claude | 2026-05-12T14:53:49.000+02:00 SESSION: started'),
+      ln('claude | 2026-05-12T14:53:57.000+02:00 SYSTEM: init'),
+      ln('claude | 2026-05-12T14:54:32.000+02:00 RESULT: turn complete'),
+      ln('speedwave_test_mcp-hub_1 | 2026-05-12T14:53:48.000+02:00 INFO  Tool registered'),
+      ln('speedwave_test_mcp-hub_1 | 2026-05-12T14:53:49.500+02:00 INFO  Session created'),
+      ln('speedwave_test_mcp-hub_1 | 2026-05-12T14:54:13.000+02:00 INFO  Executing tool'),
+    ]);
+    expect(sorted.map((l) => l.time)).toEqual([
+      '2026-05-12T14:53:48.000+02:00', // hub
+      '2026-05-12T14:53:49.000+02:00', // claude
+      '2026-05-12T14:53:49.500+02:00', // hub
+      '2026-05-12T14:53:57.000+02:00', // claude
+      '2026-05-12T14:54:13.000+02:00', // hub
+      '2026-05-12T14:54:32.000+02:00', // claude
+    ]);
+  });
+
+  it('orders correctly across mixed offsets (UTC `Z` vs `+02:00`) by instant', () => {
+    const sorted = sortLogLinesByTime([
+      ln('claude | 2026-05-12T14:00:05.000+02:00 SESSION: started'), // 12:00:05Z
+      ln('speedwave_x_mcp-hub_1 | 2026-05-12T12:00:03.000Z hub line'), // 12:00:03Z
+      ln('claude | 2026-05-12T14:00:01.000+02:00 SESSION: prep'), // 12:00:01Z
+    ]);
+    expect(sorted.map((l) => l.time)).toEqual([
+      '2026-05-12T14:00:01.000+02:00', // 12:00:01Z
+      '2026-05-12T12:00:03.000Z', // 12:00:03Z
+      '2026-05-12T14:00:05.000+02:00', // 12:00:05Z
+    ]);
+  });
+
+  it('keeps a timestamp-less line attached to the preceding line (continuation)', () => {
+    const banner = parseLogLine('speedwave_x_mcp-hub_1 | ════════════');
+    expect(banner.time).toBe(''); // no timestamp
+    const sorted = sortLogLinesByTime([
+      ln('claude | 2026-05-12T14:00:10.000+02:00 b: later'),
+      ln('speedwave_x_mcp-hub_1 | 2026-05-12T14:00:01.000+02:00 a: first'),
+      banner, // inherits a:first's instant → stays right after it
+      ln('speedwave_x_mcp-hub_1 | 2026-05-12T14:00:02.000+02:00 a: second'),
+    ]);
+    expect(sorted.map((l) => l.message)).toEqual([
+      'a: first',
+      '════════════',
+      'a: second',
+      'b: later',
+    ]);
+  });
+
+  it('is stable for equal instants — keeps input order', () => {
+    const sorted = sortLogLinesByTime([
+      ln('claude | 2026-05-12T14:00:00.000+02:00 first'),
+      ln('speedwave_x_mcp-hub_1 | 2026-05-12T14:00:00.000+02:00 second'),
+      ln('mcp-os | 2026-05-12T14:00:00.000+02:00 STDOUT: third'),
+    ]);
+    expect(sorted.map((l) => l.message)).toEqual(['first', 'second', 'third']);
+  });
+
+  it('returns an empty array unchanged', () => {
+    expect(sortLogLinesByTime([])).toEqual([]);
   });
 });
 
@@ -847,9 +1017,9 @@ describe('LogsViewComponent — status bar layout', () => {
   //
   // The component now invokes `get_all_logs` instead of `get_compose_logs`
   // so that the dropdown surfaces every host-side log source (tauri-plugin-log,
-  // mcp-os.log, claude-session.log) in addition to compose containers. These
-  // tests pin the new behaviour so a future refactor cannot silently revert
-  // to compose-only output.
+  // mcp-os.log, host-exec/<project>/log, claude-session.log) in addition to
+  // compose containers. These tests pin the new behaviour so a future refactor
+  // cannot silently revert to compose-only output.
 
   it('invokes get_all_logs (not get_compose_logs) on refresh', async () => {
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -860,19 +1030,111 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(calledCommands).not.toContain('get_compose_logs');
   });
 
-  it('exposes desktop, mcp-os and claude as separate sources in the dropdown', async () => {
+  it('live-tail: arms a poll on the health cadence and clears it on destroy', async () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    try {
+      await component.ngOnInit();
+      // A poll is armed at the health cadence (the same `setInterval(_, 5000)`
+      // line; the health service also arms one — assert ours is among them).
+      const armed = setIntervalSpy.mock.calls.filter(
+        (c) => c[1] === HEALTH_REFRESH_INTERVAL_MS
+      ).length;
+      expect(armed).toBeGreaterThanOrEqual(1);
+
+      // It fires `get_all_logs` again on each tick.
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await vi.advanceTimersByTimeAsync(HEALTH_REFRESH_INTERVAL_MS);
+      expect(invokeSpy.mock.calls.some((c) => c[0] === 'get_all_logs')).toBe(true);
+
+      // Destroy clears it.
+      component.ngOnDestroy();
+      expect(clearIntervalSpy).toHaveBeenCalled();
+      expect(component['logsTimer']).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a silent refresh does not toggle the loading spinner; a normal one does', async () => {
+    await component.ngOnInit();
+    expect(component.loading()).toBe(false); // settled after the initial fetch
+
+    // Hold the fetch so we can observe `loading` mid-flight.
+    let release!: () => void;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd !== 'get_all_logs') return undefined;
+      await new Promise<void>((r) => (release = r));
+      return '';
+    };
+
+    // Silent: `loading` stays false throughout.
+    const silent = component['refresh'](true);
+    expect(component.loading()).toBe(false);
+    release();
+    await silent;
+    expect(component.loading()).toBe(false);
+
+    // Non-silent (the explicit refresh button): `loading` flips to true then back.
+    const loud = component['refresh']();
+    expect(component.loading()).toBe(true);
+    release();
+    await loud;
+    expect(component.loading()).toBe(false);
+  });
+
+  it('drops a silent poll while a fetch is in flight (refreshInFlight guard)', async () => {
+    await component.ngOnInit();
+    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+    const calls = () => invokeSpy.mock.calls.filter((c) => c[0] === 'get_all_logs').length;
+    let release!: () => void;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd !== 'get_all_logs') return undefined;
+      await new Promise<void>((r) => (release = r));
+      return '';
+    };
+
+    const first = component['refresh'](true);
+    const before = calls();
+    expect(before).toBe(1); // first silent refresh fired its invoke
+    // A second silent tick while `first` is still in flight must be dropped.
+    await component['refresh'](true);
+    expect(calls()).toBe(before); // no extra invoke
+    release();
+    await first;
+  });
+
+  it('skips re-render when the silent poll buffer is byte-identical (lastRaw guard)', async () => {
+    await component.ngOnInit();
+    mockTauri.invokeHandler = async (cmd: string) =>
+      cmd === 'get_all_logs' ? 'speedwave_test_mcp-hub_1 | hello' : undefined;
+    // First silent poll populates lastRaw + lines.
+    await component['refresh'](true);
+    const setSpy = vi.spyOn(component.lines, 'set');
+    // Second silent poll with identical raw response must skip `lines.set`.
+    await component['refresh'](true);
+    expect(setSpy).not.toHaveBeenCalled();
+  });
+
+  it('exposes desktop, mcp-os, host-exec and claude as separate sources in the dropdown', async () => {
     // Backend `get_all_logs` returns lines pre-prefixed with `<source> | …`.
     // The existing `parseLogLine` extracts that source token and the
     // `sources()` signal exposes distinct values. This test pins the
-    // contract: a merged backend response with all four token types must
-    // produce four entries in the dropdown.
+    // contract: a merged backend response with all token types must produce
+    // matching entries in the dropdown — including `host-exec` (per-project
+    // worker audit/stdout log, ADR-054).
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return [
-        'speedwave_test_mcp-hub_1 | [11:00:00] INFO container line',
-        'desktop | 2026-05-06T19:58:38.724+0200 INFO[target] desktop line',
-        'mcp-os | 2026-05-06T20:00:00 INFO mcp-os line',
-        'claude | 2026-05-06T20:00:01 INFO claude line',
+        // compose-container line: nerdctl `--timestamps` (UTC) + the worker's
+        // own `ts()` (local offset) inside the message.
+        'speedwave_test_mcp-hub_1 | 2026-05-12T12:00:00.123456Z [2026-05-12T14:00:00.123+02:00] INFO container line',
+        'desktop | 2026-05-12T14:34:02.814+02:00 INFO [target] desktop line',
+        'mcp-os | 2026-05-12T14:34:03.000+02:00 STDOUT: [2026-05-12T14:34:03.000+02:00] mcp-os line',
+        // audit JSON `ts` field stays UTC `Z`; the drain prefix is local offset.
+        'host-exec | 2026-05-12T14:34:04.000+02:00 {"ts":"2026-05-12T12:34:04.000Z","recipe":"docker_ps","status":"exited"}',
+        'claude | 2026-05-12T14:34:05.000+02:00 SESSION: started',
       ].join('\n');
     };
     await component.ngOnInit();
@@ -881,6 +1143,7 @@ describe('LogsViewComponent — status bar layout', () => {
     // Order is: 'all' first, then sorted distinct sources.
     expect(sources).toContain('desktop');
     expect(sources).toContain('mcp-os');
+    expect(sources).toContain('host-exec');
     expect(sources).toContain('claude');
     expect(sources).toContain('mcp-hub'); // compose container, prefix-stripped
     expect(sources[0]).toBe('all');
@@ -894,11 +1157,12 @@ describe('LogsViewComponent — status bar layout', () => {
     // The mock simulates what Rust `prefix_lines("desktop", …)` produces —
     // the bracketed `[WARN]` from tauri-plugin-log is rewritten to `WARN ` (with
     // trailing space, required by Angular `LEVEL_RE = /^LEVEL\s+/`) before
-    // the `desktop | ` prefix is added. If the Rust rewrite ever drops the
-    // trailing space, this test fails — which is the regression we want.
+    // the `desktop | ` prefix is added. The timestamp is now the colon-offset
+    // RFC-3339 form `log_ts::log_timestamp()` emits. If the Rust rewrite ever
+    // drops the trailing space, this test fails — which is the regression we want.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
-      return 'desktop | 2026-05-06T19:58:38.724+0200 WARN [x] auto-disabled mail';
+      return 'desktop | 2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] auto-disabled mail';
     };
     await component.ngOnInit();
 
@@ -906,5 +1170,6 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(lines.length).toBe(1);
     expect(lines[0].level).toBe('warn');
     expect(lines[0].source).toBe('desktop');
+    expect(lines[0].time).toBe('2026-05-12T14:34:02.814+02:00');
   });
 });

@@ -12,7 +12,7 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 
 - [CLI Usage](guides/cli.md) — terminal-based Claude Code via `speedwave`
 - [Desktop App](guides/desktop.md) — chat UI, project management, system integrations
-- [Integrations](guides/integrations.md) — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Office documents, Mail, Calendar
+- [Integrations](guides/integrations.md) — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Office documents, Mail, Calendar, Host Exec (run project commands on the host)
 - [IDE Bridge](guides/ide-bridge.md) — VS Code / JetBrains integration
 
 ## Troubleshooting

@@ -1,8 +1,10 @@
-//! Shared log-file utilities used by mcp-os and Claude session logging.
+//! Shared log-file utilities — chmod-600 append handles, timestamped lines,
+//! size-bounded rotation. Used by Desktop's claude-session log, the mcp-os
+//! drain, and the host_exec drain.
 
 use std::path::Path;
 
-/// Open a log file for appending with chmod 600 on Unix.
+/// Open a log file for appending with chmod 600 on Unix. `None` on error.
 pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.append(true).create(true);
@@ -14,36 +16,27 @@ pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
     opts.open(path).ok()
 }
 
-/// Format a DateTime as DD-MM-YYYY HH:MM:SS for log lines.
-fn format_timestamp<Tz: chrono::TimeZone>(dt: &chrono::DateTime<Tz>) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    dt.format("%d-%m-%Y %H:%M:%S").to_string()
-}
-
-/// Write a timestamped line to the log file. Errors are silently ignored.
-/// When `prefix` is empty, writes `[ts] line`; otherwise `[ts] prefix: line`.
+/// Write `<ISO> [prefix: ]line` to the log. Errors silently ignored.
+/// Unbracketed ISO so `/logs` view's `ISO_TIME_RE` matches.
 pub fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
     use std::io::Write;
     if let Some(ref mut f) = file {
-        let ts = format_timestamp(&chrono::Local::now());
+        let ts = crate::log_ts::log_timestamp();
         if prefix.is_empty() {
-            let _ = writeln!(f, "[{ts}] {line}");
+            let _ = writeln!(f, "{ts} {line}");
         } else {
-            let _ = writeln!(f, "[{ts}] {prefix}: {line}");
+            let _ = writeln!(f, "{ts} {prefix}: {line}");
         }
     }
 }
 
-/// Rotate a log file if it exceeds `max_bytes` by keeping the last half.
-/// This preserves the most recent entries which are most useful for debugging.
+/// Rotate a log file if it exceeds `max_bytes` by keeping the last half
+/// (line-aligned). Preserves the most recent entries. Best-effort.
 pub fn truncate_if_oversized(path: &Path, max_bytes: u64) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) if c.len() as u64 > max_bytes => c,
         _ => return,
     };
-    // Keep the last half, aligned to a line boundary
     let keep_from = content.len() / 2;
     let tail = match content[keep_from..].find('\n') {
         Some(pos) => &content[keep_from + pos + 1..],
@@ -61,6 +54,15 @@ pub fn truncate_if_oversized(path: &Path, max_bytes: u64) {
 mod tests {
     use super::*;
 
+    /// Split a written log line into `(timestamp, rest)` at the first space.
+    fn split_line(content: &str) -> (&str, &str) {
+        let first = content.lines().next().expect("at least one line");
+        let space = first
+            .find(' ')
+            .expect("line has a space after the timestamp");
+        (&first[..space], &first[space + 1..])
+    }
+
     #[test]
     fn open_log_file_creates_new_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -68,6 +70,15 @@ mod tests {
         let file = open_log_file(&path);
         assert!(file.is_some(), "should open/create log file");
         assert!(path.exists(), "log file should exist on disk");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "log file must be chmod 600"
+            );
+        }
     }
 
     #[test]
@@ -75,26 +86,6 @@ mod tests {
         let path = std::path::Path::new("/nonexistent/dir/impossible.log");
         let file = open_log_file(path);
         assert!(file.is_none(), "should return None for invalid path");
-    }
-
-    #[test]
-    fn format_timestamp_day_greater_than_12() {
-        use chrono::TimeZone;
-        let dt = chrono::FixedOffset::east_opt(3600)
-            .unwrap()
-            .with_ymd_and_hms(2026, 12, 25, 9, 5, 3)
-            .unwrap();
-        assert_eq!(format_timestamp(&dt), "25-12-2026 09:05:03");
-    }
-
-    #[test]
-    fn format_timestamp_day_less_than_12() {
-        use chrono::TimeZone;
-        let dt = chrono::FixedOffset::east_opt(0)
-            .unwrap()
-            .with_ymd_and_hms(2026, 3, 7, 0, 0, 0)
-            .unwrap();
-        assert_eq!(format_timestamp(&dt), "07-03-2026 00:00:00");
     }
 
     #[test]
@@ -106,23 +97,12 @@ mod tests {
         drop(file);
 
         let content = std::fs::read_to_string(&path).unwrap();
+        let (ts, rest) = split_line(&content);
         assert!(
-            content.contains("STDERR: something went wrong"),
-            "content: {content}"
+            chrono::DateTime::parse_from_rfc3339(ts).is_ok(),
+            "line must start with an RFC-3339 timestamp: {content}"
         );
-        assert!(
-            content.starts_with('['),
-            "should start with bracket: {content}"
-        );
-        let close = content.find(']').expect("should have closing bracket");
-        let ts_inner = &content[1..close];
-        assert_eq!(
-            ts_inner.len(),
-            19,
-            "timestamp should be 19 chars (DD-MM-YYYY HH:MM:SS): {content}"
-        );
-        let year: u32 = ts_inner[6..10].parse().expect("year should be numeric");
-        assert!(year >= 2025, "year should be plausible: {year}");
+        assert_eq!(rest, "STDERR: something went wrong");
     }
 
     #[test]
@@ -134,24 +114,29 @@ mod tests {
         drop(file);
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("] bare line"), "content: {content}");
+        let (ts, rest) = split_line(&content);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(ts).is_ok(),
+            "line must start with an RFC-3339 timestamp: {content}"
+        );
+        assert_eq!(rest, "bare line");
         assert!(
             !content.contains(": bare line"),
             "no colon separator when prefix is empty: {content}"
         );
-        assert!(
-            content.starts_with('['),
-            "should start with bracket: {content}"
-        );
-        let close = content.find(']').expect("should have closing bracket");
-        let ts_inner = &content[1..close];
-        assert_eq!(
-            ts_inner.len(),
-            19,
-            "timestamp should be 19 chars (DD-MM-YYYY HH:MM:SS): {content}"
-        );
-        let year: u32 = ts_inner[6..10].parse().expect("year should be numeric");
-        assert!(year >= 2025, "year should be plausible: {year}");
+    }
+
+    #[test]
+    fn write_log_line_unicode_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("unicode.log");
+        let mut file = open_log_file(&path);
+        write_log_line(&mut file, "STDOUT", "🚀 héllo — café");
+        drop(file);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let (_ts, rest) = split_line(&content);
+        assert_eq!(rest, "STDOUT: 🚀 héllo — café");
     }
 
     #[test]
@@ -165,7 +150,6 @@ mod tests {
     fn truncate_if_oversized_keeps_tail() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("big.log");
-        // Write lines totaling >2000 bytes
         let mut content = String::new();
         for i in 0..100 {
             content.push_str(&format!("[{i}] line number {i} with some padding text\n"));

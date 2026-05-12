@@ -68,6 +68,50 @@ impl OsIntegrationsConfig {
     }
 }
 
+/// One named parameter a recipe accepts from Claude. Regex semantics live in
+/// the JS worker; Rust only sanity-checks shape (ADR-054).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HostExecParam {
+    /// Parameter name — `snake_case`, unique within the recipe.
+    pub name: String,
+    /// Regex the worker anchors as `^(?:…)$`; non-empty, length-bounded.
+    pub pattern: String,
+    /// Optional upper bound on value length (≤ `HOST_EXEC_PARAM_MAX_LEN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_len: Option<usize>,
+}
+
+/// One whitelisted command. Exposed to Claude as `host_exec.<name>()` (ADR-054).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HostExecRecipe {
+    /// Recipe name — `^[a-z][a-z0-9_]{0,63}$`, unique across the whitelist.
+    pub name: String,
+    /// Executable. Basename checked against ban lists; relative resolves on `PATH`.
+    pub exec: String,
+    /// Fixed argv — literals plus `{name}` tokens (one element per substitution).
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional subdirectory inside the project dir; worker canonicalises and pins to root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_sub: Option<String>,
+    /// Named parameters Claude supplies; every `{name}` token needs a match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Vec<HostExecParam>>,
+    /// Literal env vars (no Claude values); reserved keys rejected. May hold secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+}
+
+/// Per-project `host_exec` config. User-config only (ADR-054).
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+pub struct HostExecConfig {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub commands: Vec<HostExecRecipe>,
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct IntegrationsConfig {
     pub slack: Option<IntegrationConfig>,
@@ -79,6 +123,9 @@ pub struct IntegrationsConfig {
     pub office: Option<IntegrationConfig>,
     pub playwright: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
+    /// Per-project `host_exec` whitelist (ADR-054). User-config only.
+    #[serde(default, rename = "hostExec", skip_serializing_if = "Option::is_none")]
+    pub host_exec: Option<HostExecConfig>,
     #[serde(default)]
     pub plugins: Option<HashMap<String, IntegrationConfig>>,
 }
@@ -113,6 +160,18 @@ impl IntegrationsConfig {
             },
         );
     }
+
+    /// Set the `host_exec.enabled` flag. Caller handles worker + compose.
+    pub fn set_host_exec_enabled(&mut self, enabled: bool) {
+        let cfg = self.host_exec.get_or_insert_with(HostExecConfig::default);
+        cfg.enabled = Some(enabled);
+    }
+
+    /// Replace the whitelist. Caller must have validated via `validate_host_exec_config`.
+    pub fn set_host_exec_commands(&mut self, commands: Vec<HostExecRecipe>) {
+        let cfg = self.host_exec.get_or_insert_with(HostExecConfig::default);
+        cfg.commands = commands;
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -129,6 +188,10 @@ pub struct ResolvedIntegrationsConfig {
     pub os_calendar: bool,
     pub os_mail: bool,
     pub os_notes: bool,
+    /// `host_exec` enabled flag — user-config only (ADR-054).
+    pub host_exec: bool,
+    /// Resolved whitelist (user-config only). On-disk snapshot is the authoritative copy.
+    pub host_exec_commands: Vec<HostExecRecipe>,
     pub plugins: HashMap<String, bool>,
 }
 
@@ -278,7 +341,11 @@ pub fn resolve_project_config(
             }
         }
         if let Some(repo_integrations) = repo.integrations {
-            apply_integrations_layer(&mut integrations, &repo_integrations);
+            apply_integrations_layer(
+                &mut integrations,
+                &repo_integrations,
+                /* from_repo = */ true,
+            );
         }
     }
 
@@ -291,7 +358,11 @@ pub fn resolve_project_config(
             }
         }
         if let Some(user_integrations) = &user.integrations {
-            apply_integrations_layer(&mut integrations, user_integrations);
+            apply_integrations_layer(
+                &mut integrations,
+                user_integrations,
+                /* from_repo = */ false,
+            );
         }
     }
 
@@ -341,6 +412,17 @@ pub fn resolve_integrations(
     resolve_project_config(project_dir, user_config, project_name).1
 }
 
+/// Builds `{ projectDir, commands }` for the worker snapshot. Caller must validate.
+pub fn host_exec_config_snapshot(
+    project_dir: &Path,
+    commands: &[HostExecRecipe],
+) -> serde_json::Value {
+    serde_json::json!({
+        "projectDir": project_dir.to_string_lossy(),
+        "commands": commands,
+    })
+}
+
 fn apply_toggle(target: &mut bool, source: &Option<IntegrationConfig>) {
     if let Some(cfg) = source {
         if let Some(enabled) = cfg.enabled {
@@ -349,7 +431,13 @@ fn apply_toggle(target: &mut bool, source: &Option<IntegrationConfig>) {
     }
 }
 
-fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &IntegrationsConfig) {
+/// Applies one integrations layer. `from_repo=true` skips security-class fields
+/// (currently `host_exec`; mirrors `merge_llm_repo`'s `provider`/`base_url` rule).
+fn apply_integrations_layer(
+    result: &mut ResolvedIntegrationsConfig,
+    layer: &IntegrationsConfig,
+    from_repo: bool,
+) {
     apply_toggle(&mut result.slack, &layer.slack);
     apply_toggle(&mut result.sharepoint, &layer.sharepoint);
     apply_toggle(&mut result.redmine, &layer.redmine);
@@ -363,6 +451,16 @@ fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &Int
         apply_toggle(&mut result.os_calendar, &os.calendar);
         apply_toggle(&mut result.os_mail, &os.mail);
         apply_toggle(&mut result.os_notes, &os.notes);
+    }
+    // `host_exec` is user-config only — repo layer ignored (ADR-054).
+    if !from_repo {
+        if let Some(ref he) = layer.host_exec {
+            if let Some(enabled) = he.enabled {
+                result.host_exec = enabled;
+            }
+            // User layer wins wholesale — no whitelist merging.
+            result.host_exec_commands = he.commands.clone();
+        }
     }
     if let Some(ref plugins) = layer.plugins {
         for (service_id, cfg) in plugins {
@@ -1062,6 +1160,11 @@ mod tests {
         assert!(!r.os_calendar, "os_calendar should be disabled");
         assert!(!r.os_mail, "os_mail should be disabled");
         assert!(!r.os_notes, "os_notes should be disabled");
+        assert!(!r.host_exec, "host_exec should be disabled");
+        assert!(
+            r.host_exec_commands.is_empty(),
+            "host_exec_commands should be empty by default"
+        );
     }
 
     #[test]
@@ -1093,7 +1196,7 @@ mod tests {
             );
 
             let mut resolved = ResolvedIntegrationsConfig::default();
-            apply_integrations_layer(&mut resolved, &layer);
+            apply_integrations_layer(&mut resolved, &layer, /* from_repo = */ false);
 
             let enabled = resolved
                 .is_service_enabled(svc.config_key)
@@ -1207,6 +1310,7 @@ mod tests {
             atlassian: None,
             office: None,
             playwright: None,
+            host_exec: None,
             os: Some(OsIntegrationsConfig {
                 reminders: Some(IntegrationConfig {
                     enabled: Some(false),
@@ -1264,6 +1368,7 @@ mod tests {
                     atlassian: None,
                     office: None,
                     playwright: None,
+                    host_exec: None,
                     os: None,
                     plugins: None,
                 }),
@@ -1282,6 +1387,224 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_host_exec_from_user_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let recipe = HostExecRecipe {
+            name: "test".to_string(),
+            exec: "./gradlew".to_string(),
+            args: vec!["test".to_string()],
+            cwd_sub: None,
+            params: None,
+            env: None,
+        };
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: Some(IntegrationsConfig {
+                    host_exec: Some(HostExecConfig {
+                        enabled: Some(true),
+                        commands: vec![recipe.clone()],
+                    }),
+                    ..Default::default()
+                }),
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+            ui: None,
+        };
+        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        assert!(resolved.host_exec, "host_exec enabled from user config");
+        assert_eq!(resolved.host_exec_commands.len(), 1);
+        assert_eq!(resolved.host_exec_commands[0].name, "test");
+        assert_eq!(resolved.host_exec_commands[0].exec, "./gradlew");
+    }
+
+    /// `host_exec` is a security-class field — a repo-supplied whitelist (or
+    /// `enabled` flag) in `.speedwave.json` must be ignored entirely (ADR-054),
+    /// the same way `provider`/`base_url` are ignored from the repo LLM config.
+    #[test]
+    fn test_resolve_host_exec_from_repo_config_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "integrations": {{
+                    "hostExec": {{
+                        "enabled": true,
+                        "commands": [
+                            {{ "name": "evil", "exec": "./pwn", "args": [] }}
+                        ]
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        assert!(
+            !resolved.host_exec,
+            "repo .speedwave.json must not enable host_exec"
+        );
+        assert!(
+            resolved.host_exec_commands.is_empty(),
+            "repo .speedwave.json must not contribute host_exec recipes"
+        );
+    }
+
+    /// Even when the user config also has a `host_exec` block, a repo block is
+    /// still ignored — the user block alone determines the result.
+    #[test]
+    fn test_resolve_host_exec_user_wins_repo_still_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{ "integrations": {{ "hostExec": {{ "enabled": true, "commands": [
+                {{ "name": "evil", "exec": "./pwn", "args": [] }}
+            ] }} }} }}"#
+        )
+        .unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: Some(IntegrationsConfig {
+                    host_exec: Some(HostExecConfig {
+                        enabled: Some(true),
+                        commands: vec![HostExecRecipe {
+                            name: "test".to_string(),
+                            exec: "./gradlew".to_string(),
+                            args: vec!["test".to_string()],
+                            cwd_sub: None,
+                            params: None,
+                            env: None,
+                        }],
+                    }),
+                    ..Default::default()
+                }),
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+            ui: None,
+        };
+        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        assert!(resolved.host_exec);
+        assert_eq!(resolved.host_exec_commands.len(), 1);
+        assert_eq!(
+            resolved.host_exec_commands[0].name, "test",
+            "the user's recipe wins; the repo's 'evil' recipe is ignored"
+        );
+    }
+
+    #[test]
+    fn test_integrations_config_set_host_exec_helpers() {
+        let mut cfg = IntegrationsConfig::default();
+        assert!(cfg.host_exec.is_none());
+        cfg.set_host_exec_enabled(true);
+        assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(true));
+        assert!(cfg.host_exec.as_ref().unwrap().commands.is_empty());
+        cfg.set_host_exec_commands(vec![HostExecRecipe {
+            name: "build".to_string(),
+            exec: "./gradlew".to_string(),
+            args: vec!["build".to_string()],
+            cwd_sub: None,
+            params: None,
+            env: None,
+        }]);
+        // enabled flag preserved when setting commands
+        assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(true));
+        assert_eq!(cfg.host_exec.as_ref().unwrap().commands.len(), 1);
+        // setting enabled again preserves commands
+        cfg.set_host_exec_enabled(false);
+        assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(false));
+        assert_eq!(cfg.host_exec.as_ref().unwrap().commands.len(), 1);
+    }
+
+    #[test]
+    fn test_host_exec_config_round_trips_json() {
+        let cfg = HostExecConfig {
+            enabled: Some(true),
+            commands: vec![HostExecRecipe {
+                name: "psql".to_string(),
+                exec: "docker".to_string(),
+                args: vec![
+                    "compose".to_string(),
+                    "exec".to_string(),
+                    "-T".to_string(),
+                    "db".to_string(),
+                    "psql".to_string(),
+                    "-c".to_string(),
+                    "{sql}".to_string(),
+                ],
+                cwd_sub: Some("services/db".to_string()),
+                params: Some(vec![HostExecParam {
+                    name: "sql".to_string(),
+                    pattern: "^SELECT .{0,500}$".to_string(),
+                    max_len: Some(600),
+                }]),
+                env: Some(HashMap::from([("CI".to_string(), "true".to_string())])),
+            }],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        // The on-disk JSON must use camelCase keys — both the user config and
+        // the TypeScript worker snapshot expect `cwdSub` / `maxLen`, never the
+        // Rust field names `cwd_sub` / `max_len` (regression guard for the
+        // worker-snapshot contract — `host_exec/src/types.ts`).
+        assert!(
+            json.contains("\"cwdSub\""),
+            "JSON must use camelCase cwdSub"
+        );
+        assert!(
+            json.contains("\"maxLen\""),
+            "JSON must use camelCase maxLen"
+        );
+        assert!(
+            !json.contains("cwd_sub") && !json.contains("max_len"),
+            "JSON must not leak Rust snake_case field names"
+        );
+        let back: HostExecConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.enabled, Some(true));
+        assert_eq!(back.commands.len(), 1);
+        let r = &back.commands[0];
+        assert_eq!(r.name, "psql");
+        assert_eq!(r.cwd_sub.as_deref(), Some("services/db"));
+        assert_eq!(r.params.as_ref().unwrap()[0].name, "sql");
+        assert_eq!(r.params.as_ref().unwrap()[0].max_len, Some(600));
+        // camelCase also parses *back* (what the user writes / the worker reads).
+        let from_camel: HostExecRecipe = serde_json::from_str(
+            r#"{ "name": "t", "exec": "./gradlew", "args": ["{tgt}"],
+                 "cwdSub": "frontend",
+                 "params": [{ "name": "tgt", "pattern": "^[a-z]+$", "maxLen": 30 }] }"#,
+        )
+        .unwrap();
+        assert_eq!(from_camel.cwd_sub.as_deref(), Some("frontend"));
+        assert_eq!(from_camel.params.as_ref().unwrap()[0].max_len, Some(30));
+        // A stray `confirm` key in an old config is silently ignored (no
+        // deny_unknown_fields), so existing configs keep parsing.
+        let with_stray: HostExecRecipe = serde_json::from_str(
+            r#"{ "name": "t", "exec": "./gradlew", "args": ["test"], "confirm": "ask" }"#,
+        )
+        .unwrap();
+        assert_eq!(with_stray.name, "t");
+        let minimal: HostExecRecipe =
+            serde_json::from_str(r#"{ "name": "t", "exec": "./gradlew", "args": ["test"] }"#)
+                .unwrap();
+        assert!(minimal.params.is_none());
+        assert!(minimal.cwd_sub.is_none());
+        assert!(minimal.env.is_none());
+    }
+
+    #[test]
     fn test_resolve_integrations_os_granular_disable() {
         let user_config = SpeedwaveUserConfig {
             projects: vec![ProjectUserEntry {
@@ -1297,6 +1620,7 @@ mod tests {
                     atlassian: None,
                     office: None,
                     playwright: None,
+                    host_exec: None,
                     os: Some(OsIntegrationsConfig {
                         reminders: Some(IntegrationConfig {
                             enabled: Some(false),
@@ -1343,6 +1667,7 @@ mod tests {
                     atlassian: None,
                     office: None,
                     playwright: None,
+                    host_exec: None,
                     os: None,
                     plugins: None,
                 }),
@@ -1633,6 +1958,7 @@ mod tests {
                     atlassian: None,
                     office: None,
                     playwright: None,
+                    host_exec: None,
                     os: None,
                     plugins: Some(HashMap::from([(
                         "presale".to_string(),
