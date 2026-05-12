@@ -21,6 +21,11 @@ pub const SAMPLE_RATE_HZ: u32 = 16_000;
 /// overhead; this is a reasonable default.
 pub const CHUNK_DURATION: Duration = Duration::from_millis(200);
 
+/// UI label for the default "system loopback + your microphone" source that
+/// every backend offers first (ADR-056 decision 15). Single source so all three
+/// backends — and the Angular test fixture — agree.
+pub const DEFAULT_MIXED_SOURCE_LABEL: &str = "Whole meeting (system audio + your microphone)";
+
 /// What to capture.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]

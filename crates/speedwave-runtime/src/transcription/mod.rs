@@ -22,10 +22,11 @@ pub mod transcript_store;
 pub use accel::{compiled_backends, has_gpu_backend, recommended_live_model, Backend};
 pub use audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, FileAudioCapture, ProcessSelector, CHUNK_DURATION, SAMPLE_RATE_HZ,
+    CaptureError, FileAudioCapture, ProcessSelector, CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL,
+    SAMPLE_RATE_HZ,
 };
 pub use diarizer::{DiarizeError, DiarizeOptions, Diarizer, SherpaDiarizer, SpeakerTurn};
-pub use mix::{mix_two, MixBuffer, MixSource};
+pub use mix::{chunk_samples, poll_mixed_chunk, MixBuffer, MixSource};
 pub use model_catalog::{
     default_diarization_model, diarization_model, whisper_model, DiarizationModelInfo,
     DiarizationModelKind, ModelRole, Quantization, WhisperModelInfo, DIARIZATION_MODELS,

@@ -101,13 +101,22 @@ final class AudioCaptureTests: XCTestCase {
         XCTAssertEqual(raw[3], 0x3f)
     }
 
-    /// Stream indices: 0 = app/system, 1 = mic. The Rust reader treats them
-    /// positionally — keep the meaning frozen.
-    func testStreamIndicesAreStable() {
-        // Document the contract; if you change these you must also change
-        // crates/speedwave-runtime/src/transcription/audio_macos.rs.
-        XCTAssertEqual(0, 0, "stream 0 = system/app audio")
-        XCTAssertEqual(1, 1, "stream 1 = microphone")
+    /// Stream indices: 0 = app/system, 1 = mic. A frame's 4-byte LE prefix is
+    /// that index; the Rust reader treats it positionally. Encode both and
+    /// decode them back — if the LE encoding ever changes this fails. (Changing
+    /// the *meaning* of 0/1 also requires changing
+    /// crates/speedwave-runtime/src/transcription/audio_macos.rs.)
+    func testStreamIndexEncodingRoundTrips() {
+        for idx: UInt32 in [0, 1] {
+            var le = idx.littleEndian
+            let bytes = withUnsafeBytes(of: &le) { Array($0) }
+            XCTAssertEqual(bytes.count, 4)
+            let decoded = UInt32(bytes[0])
+                | (UInt32(bytes[1]) << 8)
+                | (UInt32(bytes[2]) << 16)
+                | (UInt32(bytes[3]) << 24)
+            XCTAssertEqual(decoded, idx)
+        }
     }
 
     // MARK: - Source enum mapping

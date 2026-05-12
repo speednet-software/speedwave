@@ -24,14 +24,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use super::audio::ProcessSelector;
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, CHUNK_DURATION,
+    CaptureError, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
-use super::mix::{MixBuffer, MixSource};
+use super::mix::{chunk_samples, poll_mixed_chunk, MixBuffer, MixSource};
 
-/// Target output rate — Whisper wants 16 kHz mono.
-const TARGET_RATE: u32 = 16_000;
-/// Approximate chunk size (~200 ms at 16 kHz).
-const CHUNK_FRAMES: usize = 3_200;
 /// Channel depth for chunks in flight from the capture thread to the consumer.
 /// A few seconds of audio — enough to absorb a slow consumer without unbounded
 /// memory growth (a full channel drops the oldest, see the send site).
@@ -116,7 +112,7 @@ impl AudioCapture for WasapiAudioCapture {
                     system: Box::new(AudioSource::SystemWide),
                     mic: None,
                 },
-                label: "Whole meeting (system audio + your microphone)".to_string(),
+                label: DEFAULT_MIXED_SOURCE_LABEL.to_string(),
                 app_id: None,
             });
         }
@@ -162,7 +158,7 @@ impl AudioCapture for WasapiAudioCapture {
             AudioSource::SystemWide => {
                 let dev = resolve_system(&host, &source)?;
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
-                let stream = open_capture_stream(&dev, true, ResamplerSink::Channel(tx))?;
+                let stream = open_capture_stream(&dev, ResamplerSink::Channel(tx))?;
                 Ok(Box::new(CpalAudioStream {
                     _streams: vec![stream],
                     rx,
@@ -171,7 +167,7 @@ impl AudioCapture for WasapiAudioCapture {
             AudioSource::Microphone { device } => {
                 let dev = resolve_mic(&host, device)?;
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
-                let stream = open_capture_stream(&dev, false, ResamplerSink::Channel(tx))?;
+                let stream = open_capture_stream(&dev, ResamplerSink::Channel(tx))?;
                 Ok(Box::new(CpalAudioStream {
                     _streams: vec![stream],
                     rx,
@@ -185,10 +181,9 @@ impl AudioCapture for WasapiAudioCapture {
                 // one shared MixBuffer; next_chunk pops mixed chunks from it.
                 let sys_dev = resolve_system(&host, system)?;
                 let mic_dev = resolve_mic(&host, mic)?;
-                let buf = Arc::new(Mutex::new(MixBuffer::new(true)));
+                let buf = Arc::new(Mutex::new(MixBuffer::new()));
                 let sys_stream = open_capture_stream(
                     &sys_dev,
-                    true,
                     ResamplerSink::Mixed {
                         buf: Arc::clone(&buf),
                         source: MixSource::System,
@@ -196,7 +191,6 @@ impl AudioCapture for WasapiAudioCapture {
                 )?;
                 let mic_stream = open_capture_stream(
                     &mic_dev,
-                    false,
                     ResamplerSink::Mixed {
                         buf: Arc::clone(&buf),
                         source: MixSource::Mic,
@@ -248,30 +242,50 @@ fn build_stream(
     stream.map_err(|e| CaptureError::Failed(format!("build input stream: {e}")))
 }
 
-/// Opens a cpal capture stream on `device` (loopback if `is_loopback`, else mic
-/// input), resampling to 16 kHz mono into `sink`. Returns the running `Stream`.
+/// A resolved capture device tagged with which config API selects its stream
+/// format — a loopback capture inherits the device's *output* (render) config; a
+/// mic uses its *input* config. Carrying the kind in the type means the caller
+/// can't pick the wrong API.
+enum DeviceKind {
+    /// An output device captured as a loopback (system audio).
+    Loopback(cpal::Device),
+    /// An input device (microphone).
+    Input(cpal::Device),
+}
+
+impl DeviceKind {
+    fn device(&self) -> &cpal::Device {
+        match self {
+            DeviceKind::Loopback(d) | DeviceKind::Input(d) => d,
+        }
+    }
+
+    /// The supported stream config to capture this device with.
+    fn supported_config(&self) -> Result<cpal::SupportedStreamConfig, CaptureError> {
+        match self {
+            DeviceKind::Loopback(d) => d
+                .default_output_config()
+                .map_err(|e| CaptureError::Failed(format!("default output config: {e}"))),
+            DeviceKind::Input(d) => d
+                .default_input_config()
+                .map_err(|e| CaptureError::Failed(format!("default input config: {e}"))),
+        }
+    }
+}
+
+/// Opens a cpal capture stream on `kind`, resampling to 16 kHz mono into `sink`.
+/// Returns the running `Stream`.
 fn open_capture_stream(
-    device: &cpal::Device,
-    is_loopback: bool,
+    kind: &DeviceKind,
     sink: ResamplerSink,
 ) -> Result<cpal::Stream, CaptureError> {
-    // Loopback inherits the device's *output* (render) config; a mic uses its
-    // default input config.
-    let supported = if is_loopback {
-        device
-            .default_output_config()
-            .map_err(|e| CaptureError::Failed(format!("default output config: {e}")))?
-    } else {
-        device
-            .default_input_config()
-            .map_err(|e| CaptureError::Failed(format!("default input config: {e}")))?
-    };
+    let supported = kind.supported_config()?;
     let sample_format = supported.sample_format();
     let src_rate = supported.sample_rate().0;
     let src_channels = supported.channels() as usize;
     let config: cpal::StreamConfig = supported.into();
     let resampler = Resampler::new(src_rate, src_channels);
-    let stream = build_stream(device, &config, sample_format, resampler, sink)?;
+    let stream = build_stream(kind.device(), &config, sample_format, resampler, sink)?;
     stream
         .play()
         .map_err(|e| CaptureError::Failed(format!("start stream: {e}")))?;
@@ -279,14 +293,17 @@ fn open_capture_stream(
 }
 
 /// Resolves the *system* side of a source (a plain `SystemWide` or the inner
-/// `system` of a `Mixed`) to a cpal output device for loopback capture. Windows
-/// v1 doesn't ship per-process loopback, so a `Process` (or anything else) is
+/// `system` of a `Mixed`) to a loopback-captured output device. Windows v1
+/// doesn't ship per-process loopback, so a `Process` (or anything else) is
 /// rejected with a clear error — including when nested inside `Mixed`.
-fn resolve_system(host: &cpal::Host, src: &AudioSource) -> Result<cpal::Device, CaptureError> {
+fn resolve_system(host: &cpal::Host, src: &AudioSource) -> Result<DeviceKind, CaptureError> {
     match src {
-        AudioSource::SystemWide => host.default_output_device().ok_or_else(|| {
-            CaptureError::NoDevice("no default output device for loopback".to_string())
-        }),
+        AudioSource::SystemWide => host
+            .default_output_device()
+            .map(DeviceKind::Loopback)
+            .ok_or_else(|| {
+                CaptureError::NoDevice("no default output device for loopback".to_string())
+            }),
         AudioSource::Process { .. } => Err(CaptureError::Unsupported(
             "per-app capture isn't available on Windows yet — use System audio".to_string(),
         )),
@@ -296,18 +313,19 @@ fn resolve_system(host: &cpal::Host, src: &AudioSource) -> Result<cpal::Device, 
     }
 }
 
-/// Resolves an `AudioSource::Microphone { device }` to a cpal input device.
-fn resolve_mic(host: &cpal::Host, device: &Option<String>) -> Result<cpal::Device, CaptureError> {
-    match device {
+/// Resolves a mic device name (`None` = default input) to a cpal input device.
+fn resolve_mic(host: &cpal::Host, device: &Option<String>) -> Result<DeviceKind, CaptureError> {
+    let dev = match device {
         None => host
             .default_input_device()
-            .ok_or_else(|| CaptureError::NoDevice("no default input device".to_string())),
+            .ok_or_else(|| CaptureError::NoDevice("no default input device".to_string()))?,
         Some(name) => host
             .input_devices()
             .map_err(|e| CaptureError::Failed(format!("enumerate inputs: {e}")))?
             .find(|d| d.name().map(|n| &n == name).unwrap_or(false))
-            .ok_or_else(|| CaptureError::NoDevice(format!("input device {name:?} not found"))),
-    }
+            .ok_or_else(|| CaptureError::NoDevice(format!("input device {name:?} not found")))?,
+    };
+    Ok(DeviceKind::Input(dev))
 }
 
 /// Where a resampler delivers its 16 kHz mono output. Either a channel to a
@@ -347,7 +365,7 @@ impl ResamplerSink {
 }
 
 /// Down-mixes interleaved multi-channel f32 to mono and linear-resamples it to
-/// 16 kHz, emitting ~`CHUNK_FRAMES`-sample chunks to its `ResamplerSink`.
+/// 16 kHz, emitting ~`chunk_samples()`-sized chunks to its `ResamplerSink`.
 struct Resampler {
     /// Source sample rate (e.g. 48000).
     src_rate: u32,
@@ -358,7 +376,7 @@ struct Resampler {
     /// Last mono sample carried over between callbacks (for interpolation
     /// across the buffer boundary).
     last: f32,
-    /// Accumulating output chunk; flushed at `CHUNK_FRAMES`.
+    /// Accumulating output chunk; flushed at `chunk_samples()`.
     out: Vec<f32>,
     /// Total output samples emitted so far — used to stamp the chunk offset.
     emitted: u64,
@@ -372,7 +390,7 @@ impl Resampler {
             channels: channels.max(1),
             pos: 0.0,
             last: 0.0,
-            out: Vec::with_capacity(CHUNK_FRAMES),
+            out: Vec::with_capacity(chunk_samples()),
             emitted: 0,
         }
     }
@@ -383,7 +401,8 @@ impl Resampler {
             return;
         }
         // Step in source-sample units per output sample.
-        let step = self.src_rate as f64 / TARGET_RATE as f64;
+        let step = self.src_rate as f64 / SAMPLE_RATE_HZ as f64;
+        let want = chunk_samples();
         let channels = self.channels;
         let nmono = interleaved.len() / channels;
         if nmono == 0 {
@@ -424,7 +443,7 @@ impl Resampler {
             let s = a + (b - a) * frac;
             self.out.push(s);
             self.emitted += 1;
-            if self.out.len() >= CHUNK_FRAMES {
+            if self.out.len() >= want {
                 self.flush(sink);
             }
             self.pos += step;
@@ -446,9 +465,9 @@ impl Resampler {
         // `emitted` is incremented before each push, so it's ≥ n in normal
         // operation; `saturating_sub` keeps a directly-poked `out` (tests)
         // from underflowing.
-        let offset_ns = self.emitted.saturating_sub(n) * 1_000_000_000 / TARGET_RATE as u64;
+        let offset_ns = self.emitted.saturating_sub(n) * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
         sink.deliver(samples, offset_ns);
-        self.out = Vec::with_capacity(CHUNK_FRAMES);
+        self.out = Vec::with_capacity(chunk_samples());
     }
 }
 
@@ -472,9 +491,9 @@ impl AudioStream for CpalAudioStream {
 }
 
 /// `AudioStream` for a mixed capture: two cpal streams (system loopback + mic)
-/// feed one shared `MixBuffer`; `next_chunk` pops mixed chunks from it. There's
-/// no end-of-stream signal from cpal, so this never returns `Ok(None)` on its
-/// own — the driver stops by dropping it (which stops both cpal streams).
+/// feed one shared `MixBuffer`; `next_chunk` polls it via `mix::poll_mixed_chunk`
+/// (which handles the stall/poison/EOF cases). The driver also stops by dropping
+/// this, which stops both cpal streams.
 struct MixedCpalAudioStream {
     /// Held to keep both cpal streams alive (system + mic).
     _streams: Vec<cpal::Stream>,
@@ -484,39 +503,7 @@ struct MixedCpalAudioStream {
 
 impl AudioStream for MixedCpalAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        let want = ((TARGET_RATE as u128 * CHUNK_DURATION.as_millis() / 1000) as usize).max(1);
-        // Poll the mix buffer until a chunk is ready. cpal pushes from its own
-        // threads (~200 ms cadence per stream); a 20 ms poll keeps this off a
-        // busy loop. If nothing arrives for ~2 s the capture is effectively
-        // dead (a device unplugged, both streams stopped) — return EOF so the
-        // driver can finalize rather than spin forever.
-        const STALL_GIVE_UP: Duration = Duration::from_secs(2);
-        let mut waited = Duration::ZERO;
-        loop {
-            {
-                let mut b = self
-                    .buf
-                    .lock()
-                    .map_err(|_| CaptureError::Failed("mix buffer poisoned".to_string()))?;
-                let start_ns = b.offset_ns();
-                // While running we want full `want`-sized chunks; on a long
-                // stall fall back to draining whatever's left.
-                let chunk = b
-                    .pop(want, want)
-                    .or_else(|| (waited >= STALL_GIVE_UP).then(|| b.pop(1, want)).flatten());
-                if let Some(samples) = chunk {
-                    return Ok(Some(AudioChunk {
-                        samples,
-                        offset: Duration::from_nanos(start_ns),
-                    }));
-                }
-            }
-            if waited >= STALL_GIVE_UP {
-                return Ok(None); // stalled long enough — treat as end of stream
-            }
-            std::thread::sleep(Duration::from_millis(20));
-            waited += Duration::from_millis(20);
-        }
+        poll_mixed_chunk(&self.buf)
     }
 }
 
@@ -644,9 +631,9 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioChunk>(1);
         let sink = ResamplerSink::Channel(tx);
         let mut r = Resampler::new(16_000, 1);
-        r.out = vec![0.0; CHUNK_FRAMES];
+        r.out = vec![0.0; chunk_samples()];
         r.flush(&sink); // fills the channel
-        r.out = vec![0.0; CHUNK_FRAMES];
+        r.out = vec![0.0; chunk_samples()];
         r.flush(&sink); // would block on send() — try_send drops it instead
                         // If we got here without hanging, the non-blocking behaviour holds.
     }
@@ -655,7 +642,7 @@ mod tests {
     fn resampler_mixed_sink_pushes_into_the_shared_buffer() {
         // Two resamplers (system + mic) feeding one MixBuffer; the buffer sums
         // them. Same rate, mono → 1:1, easy to reason about.
-        let buf = std::sync::Arc::new(std::sync::Mutex::new(MixBuffer::new(true)));
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(MixBuffer::new()));
         let sys_sink = ResamplerSink::Mixed {
             buf: std::sync::Arc::clone(&buf),
             source: MixSource::System,
@@ -664,20 +651,43 @@ mod tests {
             buf: std::sync::Arc::clone(&buf),
             source: MixSource::Mic,
         };
-        // Feed CHUNK_FRAMES samples of 1.0 on each side so flush fires.
-        let ones = vec![1.0f32; CHUNK_FRAMES];
+        // Feed one chunk's worth of 1.0 on each side so flush fires.
+        let ones = vec![1.0f32; chunk_samples()];
         let mut rs = Resampler::new(16_000, 1);
         rs.feed(&ones, &sys_sink);
         let mut rm = Resampler::new(16_000, 1);
         rm.feed(&ones, &mic_sink);
-        // Both streams delivered ~CHUNK_FRAMES at offset 0 → mix pops 0.5+0.5=1.
+        // Both streams delivered ~chunk_samples() at offset 0 → mix pops 0.5+0.5=1.
         let mut b = buf.lock().unwrap();
-        let chunk = b.pop(1, CHUNK_FRAMES).expect("a mixed chunk is ready");
+        let chunk = b.pop(1, chunk_samples()).expect("a mixed chunk is ready");
         assert!(!chunk.is_empty());
         assert!(
             chunk.iter().all(|&s| (s - 1.0).abs() < 1e-4),
             "system 1.0 + mic 1.0, each ×0.5, summed = 1.0"
         );
+    }
+
+    #[test]
+    fn mixed_cpal_audio_stream_polls_the_shared_buffer_for_a_full_chunk() {
+        // No real cpal streams needed: feed the buffer directly, then verify
+        // next_chunk delivers (this exercises the poll_mixed_chunk path).
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(MixBuffer::new()));
+        {
+            let mut b = buf.lock().unwrap();
+            let want = chunk_samples();
+            b.push(MixSource::System, 0, &vec![1.0; want]);
+            b.push(MixSource::Mic, 0, &vec![1.0; want]);
+        }
+        let mut stream = MixedCpalAudioStream {
+            _streams: Vec::new(),
+            buf: std::sync::Arc::clone(&buf),
+        };
+        let chunk = stream.next_chunk().unwrap().expect("a chunk is delivered");
+        assert_eq!(chunk.samples.len(), chunk_samples());
+        assert!(chunk.samples.iter().all(|&s| (s - 1.0).abs() < 1e-4));
+        // After draining, finish() + empty → clean EOF.
+        buf.lock().unwrap().finish();
+        assert!(stream.next_chunk().unwrap().is_none());
     }
 
     #[test]

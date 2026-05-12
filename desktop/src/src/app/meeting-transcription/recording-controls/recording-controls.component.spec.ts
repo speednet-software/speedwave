@@ -98,6 +98,28 @@ describe('RecordingControlsComponent', () => {
     expect(component.mixedSourceSelected()).toBe(true);
   });
 
+  it('falls back to index 0 (and does not crash) when neither mixed nor system is offered', async () => {
+    // A Linux box with only mic sources, say. sourceIndex stays 0; the mixed
+    // computed reads sources()[0] safely (it's a microphone, not undefined).
+    svc.listAudioSources.mockResolvedValueOnce([
+      { source: { kind: 'microphone', device: 'mic-a' }, label: 'Mic A', app_id: null },
+      { source: { kind: 'microphone', device: 'mic-b' }, label: 'Mic B', app_id: null },
+    ]);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.sourceIndex()).toBe(0);
+    expect(component.mixedSourceSelected()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="mixed-source-note"]')).toBeNull();
+  });
+
+  it('does not crash with an empty sources list', async () => {
+    svc.listAudioSources.mockResolvedValueOnce([]);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.sources().length).toBe(0);
+    expect(component.mixedSourceSelected()).toBe(false);
+  });
+
   it('shows the mixed-source permission note only when the mixed source is selected', async () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
     await component.ngOnInit();

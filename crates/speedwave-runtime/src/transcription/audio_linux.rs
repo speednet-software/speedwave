@@ -17,15 +17,18 @@ use std::time::Duration;
 
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, ProcessSelector, CHUNK_DURATION,
+    CaptureError, ProcessSelector, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
-use super::mix::{MixBuffer, MixSource};
+use super::mix::{chunk_samples, poll_mixed_chunk, MixBuffer, MixSource};
 
-/// Approximate chunk size in frames (~200 ms at 16 kHz) — the granularity at
-/// which we hand audio to the engine.
-const CHUNK_FRAMES: usize = 3200;
-/// 16 kHz — the (only) output rate.
-const TARGET_RATE: u32 = 16_000;
+/// 16 kHz as the rate string the capture tools want (`--rate <RATE_ARG>`). A
+/// `&'static str` can't be derived from `SAMPLE_RATE_HZ` at const time, so a
+/// compile-time assert keeps the two in sync if either ever changes.
+const RATE_ARG: &str = "16000";
+const _: () = assert!(
+    SAMPLE_RATE_HZ == 16_000,
+    "RATE_ARG must match SAMPLE_RATE_HZ"
+);
 
 /// Which sound server we found on this host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +160,7 @@ impl AudioCapture for LinuxAudioCapture {
                     system: Box::new(AudioSource::SystemWide),
                     mic: None,
                 },
-                label: "Whole meeting (system audio + your microphone)".to_string(),
+                label: DEFAULT_MIXED_SOURCE_LABEL.to_string(),
                 app_id: None,
             },
             AudioSourceInfo {
@@ -227,9 +230,9 @@ impl AudioStream for RawPcmStream {
         if self.done {
             return Ok(None);
         }
-        // Read up to CHUNK_FRAMES f32 samples (4 bytes each). A short read at
-        // EOF is fine — we emit whatever we got, then stop on the next call.
-        let want = CHUNK_FRAMES * 4;
+        // Read up to one chunk's worth of f32 samples (4 bytes each). A short
+        // read at EOF is fine — we emit whatever we got, then stop next call.
+        let want = chunk_samples() * 4;
         let mut buf = vec![0u8; want];
         let mut filled = 0;
         while filled < want {
@@ -275,7 +278,7 @@ impl Drop for RawPcmStream {
 /// `AudioStream` for a mixed Linux capture: two child tools (system monitor +
 /// mic, both already 16 kHz mono f32-LE) drained by background threads into one
 /// shared `MixBuffer` that sums them. Dropping it kills both children, which
-/// makes the reader threads see EOF and exit.
+/// closes their stdout pipes and unblocks the reader threads.
 struct MixedRawPcmStream {
     /// System-side capture child (e.g. `pw-record --target @DEFAULT_MONITOR@`).
     sys_child: Child,
@@ -301,7 +304,7 @@ impl MixedRawPcmStream {
             .ok_or_else(|| CaptureError::Failed("mic capture stdout not piped".to_string()))?;
         drain_stderr(&mut sys_child);
         drain_stderr(&mut mic_child);
-        let buf = Arc::new(Mutex::new(MixBuffer::new(true)));
+        let buf = Arc::new(Mutex::new(MixBuffer::new()));
         let readers = vec![
             spawn_pcm_reader(sys_out, Arc::clone(&buf), MixSource::System),
             spawn_pcm_reader(mic_out, Arc::clone(&buf), MixSource::Mic),
@@ -315,9 +318,25 @@ impl MixedRawPcmStream {
     }
 }
 
-/// Reads raw f32-LE mono PCM from `stdout` and pushes ~`CHUNK_FRAMES`-sample
-/// runs into the shared `MixBuffer`, tagged with `source`, tracking a running
-/// offset (the tools give us no timestamps). Exits on EOF.
+/// Locks `buf` and runs `f`; logs (at warn) and is a no-op if the mutex is
+/// poisoned (a reader thread panicked) — the caller's `next_chunk` will then see
+/// the poison via `poll_mixed_chunk` and surface it.
+fn with_mix_buffer(buf: &Mutex<MixBuffer>, what: &str, f: impl FnOnce(&mut MixBuffer)) {
+    match buf.lock() {
+        Ok(mut b) => f(&mut b),
+        Err(_) => log::warn!(
+            target: "transcription::capture",
+            "linux-capture: mix buffer poisoned — {what} skipped"
+        ),
+    }
+}
+
+/// Reads raw f32-LE mono PCM from `stdout` and pushes ~one-chunk runs into the
+/// shared `MixBuffer`, tagged with `source`, tracking a running offset (the
+/// tools give us no timestamps). On a clean EOF it marks the buffer finished and
+/// exits; on an I/O error it logs and finishes (so the other side can drain) —
+/// a broken pipe / device-vanish on one side won't silently masquerade as a
+/// clean stream end.
 fn spawn_pcm_reader(
     mut stdout: std::process::ChildStdout,
     buf: Arc<Mutex<MixBuffer>>,
@@ -325,35 +344,57 @@ fn spawn_pcm_reader(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut byte_pos: u64 = 0; // bytes read from this stream so far
-        let want = CHUNK_FRAMES * 4;
+        let want = chunk_samples() * 4;
         loop {
             let mut chunk = vec![0u8; want];
             let mut filled = 0;
+            let mut io_err = false;
             while filled < want {
                 match stdout.read(&mut chunk[filled..]) {
-                    Ok(0) => break,
+                    Ok(0) => break, // clean EOF
                     Ok(n) => filled += n,
-                    Err(_) => break,
+                    Err(e) => {
+                        log::warn!(
+                            target: "transcription::capture",
+                            "linux-capture {source:?}: read error — {e}"
+                        );
+                        io_err = true;
+                        break;
+                    }
                 }
-            }
-            if filled == 0 {
-                // EOF — mark the buffer finished from this side and exit. (If
-                // the *other* side is still going, MixBuffer keeps padding this
-                // side with silence; finish() makes it drain on the last pop.)
-                if let Ok(mut b) = buf.lock() {
-                    b.finish();
-                }
-                return;
             }
             let usable = filled - (filled % 4);
+            if usable == 0 {
+                if filled > 0 {
+                    log::debug!(
+                        target: "transcription::capture",
+                        "linux-capture {source:?}: discarded {filled}-byte partial read (not a full f32 frame)"
+                    );
+                }
+                // EOF (clean or after an I/O error) — mark this side finished so
+                // a still-running other side drains on the last pop, then exit.
+                with_mix_buffer(&buf, "finish", |b| b.finish());
+                return;
+            }
+            if io_err {
+                // Some bytes salvaged before the error — push them, then finish.
+                let mut samples = Vec::with_capacity(usable / 4);
+                for f in chunk[..usable].chunks_exact(4) {
+                    samples.push(f32::from_le_bytes([f[0], f[1], f[2], f[3]]));
+                }
+                let offset_ns = byte_pos / 4 * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
+                with_mix_buffer(&buf, "push (final)", |b| {
+                    b.push(source, offset_ns, &samples);
+                    b.finish();
+                });
+                return;
+            }
             let mut samples = Vec::with_capacity(usable / 4);
             for f in chunk[..usable].chunks_exact(4) {
                 samples.push(f32::from_le_bytes([f[0], f[1], f[2], f[3]]));
             }
-            let offset_ns = byte_pos / 4 * 1_000_000_000 / TARGET_RATE as u64;
-            if let Ok(mut b) = buf.lock() {
-                b.push(source, offset_ns, &samples);
-            }
+            let offset_ns = byte_pos / 4 * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
+            with_mix_buffer(&buf, "push", |b| b.push(source, offset_ns, &samples));
             byte_pos += usable as u64;
         }
     })
@@ -361,35 +402,7 @@ fn spawn_pcm_reader(
 
 impl AudioStream for MixedRawPcmStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        let want = ((TARGET_RATE as u128 * CHUNK_DURATION.as_millis() / 1000) as usize).max(1);
-        // Poll the mix buffer; ~200 ms chunk cadence, 20 ms poll. A ~2 s stall
-        // (both children stopped without an EOF, e.g. a device vanished) →
-        // Ok(None) so the driver finalizes rather than spins forever.
-        const STALL_GIVE_UP: Duration = Duration::from_secs(2);
-        let mut waited = Duration::ZERO;
-        loop {
-            {
-                let mut b = self
-                    .buf
-                    .lock()
-                    .map_err(|_| CaptureError::Failed("mix buffer poisoned".to_string()))?;
-                let start_ns = b.offset_ns();
-                let chunk = b
-                    .pop(want, want)
-                    .or_else(|| (waited >= STALL_GIVE_UP).then(|| b.pop(1, want)).flatten());
-                if let Some(samples) = chunk {
-                    return Ok(Some(AudioChunk {
-                        samples,
-                        offset: Duration::from_nanos(start_ns),
-                    }));
-                }
-            }
-            if waited >= STALL_GIVE_UP {
-                return Ok(None);
-            }
-            std::thread::sleep(Duration::from_millis(20));
-            waited += Duration::from_millis(20);
-        }
+        poll_mixed_chunk(&self.buf)
     }
 }
 
@@ -414,7 +427,7 @@ impl Drop for MixedRawPcmStream {
 /// Spawns `pw-record` for the requested source.
 fn spawn_pw_record(source: &AudioSource) -> Result<Child, CaptureError> {
     let mut cmd = Command::new("pw-record");
-    cmd.args(["--rate", "16000", "--channels", "1", "--format", "f32"]);
+    cmd.args(["--rate", RATE_ARG, "--channels", "1", "--format", "f32"]);
     match source {
         AudioSource::SystemWide => {
             // No --target: pw-record defaults to the default sink's monitor
@@ -475,7 +488,7 @@ fn pw_record_target(target: &str) -> Result<Child, CaptureError> {
     Command::new("pw-record")
         .args([
             "--rate",
-            "16000",
+            RATE_ARG,
             "--channels",
             "1",
             "--format",
@@ -595,7 +608,7 @@ fn spawn_parec(source: &AudioSource) -> Result<Child, CaptureError> {
     let mut cmd = Command::new("parec");
     cmd.args([
         "--rate",
-        "16000",
+        RATE_ARG,
         "--channels",
         "1",
         "--format",
@@ -664,7 +677,7 @@ fn parec_device(device: &str) -> Result<Child, CaptureError> {
     Command::new("parec")
         .args([
             "--rate",
-            "16000",
+            RATE_ARG,
             "--channels",
             "1",
             "--format",

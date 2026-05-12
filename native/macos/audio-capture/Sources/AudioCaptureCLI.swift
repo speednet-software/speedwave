@@ -651,9 +651,13 @@ func preflightSystemAudioConsent() -> Bool {
         CFString, @escaping @convention(block) (Bool) -> Void
     ) -> Void
     guard let handle = dlopen(
-        "/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW),
-          let sym = dlsym(handle, "TCCAccessRequest")
+        "/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW)
     else {
+        logErr("TCC.framework unavailable — cannot prompt for System Audio Recording")
+        return false
+    }
+    defer { dlclose(handle) }
+    guard let sym = dlsym(handle, "TCCAccessRequest") else {
         logErr("TCCAccessRequest unavailable — cannot prompt for System Audio Recording")
         return false
     }
