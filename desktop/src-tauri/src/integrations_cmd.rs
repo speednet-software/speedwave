@@ -1096,6 +1096,7 @@ mod tests {
             "gitlab",
             "github",
             "atlassian",
+            "office",
             "playwright",
         ] {
             let mut cfg = config::IntegrationsConfig::default();

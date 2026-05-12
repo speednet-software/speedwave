@@ -1107,15 +1107,11 @@ fn start_host_exec_watchdog(host_exec: SharedHostExec) {
                         );
                         match proc.respawn() {
                             Ok(port) => {
-                                log::info!(
-                                    "host_exec watchdog: respawned '{name}' (port {port})"
-                                );
+                                log::info!("host_exec watchdog: respawned '{name}' (port {port})");
                                 respawned.push(name);
                             }
                             Err(e) => {
-                                log::error!(
-                                    "host_exec watchdog: respawn of '{name}' failed: {e}"
-                                )
+                                log::error!("host_exec watchdog: respawn of '{name}' failed: {e}")
                             }
                         }
                     }
@@ -1779,7 +1775,7 @@ fn main() {
             // Logging
             set_log_level,
             get_log_level,
-            // UI preferences (ADR-055)
+            // UI preferences (ADR-058)
             ui_prefs_cmd::get_beta_enabled,
             ui_prefs_cmd::set_beta_enabled,
             // Diagnostics

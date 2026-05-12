@@ -120,6 +120,7 @@ pub struct IntegrationsConfig {
     pub gitlab: Option<IntegrationConfig>,
     pub github: Option<IntegrationConfig>,
     pub atlassian: Option<IntegrationConfig>,
+    pub office: Option<IntegrationConfig>,
     pub playwright: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
     /// Per-project `host_exec` whitelist (ADR-054). User-config only.
@@ -140,6 +141,7 @@ impl IntegrationsConfig {
             "gitlab" => self.gitlab = Some(cfg),
             "github" => self.github = Some(cfg),
             "atlassian" => self.atlassian = Some(cfg),
+            "office" => self.office = Some(cfg),
             "playwright" => self.playwright = Some(cfg),
             _ => return false,
         }
@@ -180,6 +182,7 @@ pub struct ResolvedIntegrationsConfig {
     pub gitlab: bool,
     pub github: bool,
     pub atlassian: bool,
+    pub office: bool,
     pub playwright: bool,
     pub os_reminders: bool,
     pub os_calendar: bool,
@@ -205,6 +208,7 @@ impl ResolvedIntegrationsConfig {
             "gitlab" => Some(self.gitlab),
             "github" => Some(self.github),
             "atlassian" => Some(self.atlassian),
+            "office" => Some(self.office),
             "playwright" => Some(self.playwright),
             _ => None,
         }
@@ -255,7 +259,7 @@ pub struct SelectedIde {
     pub port: u16,
 }
 
-/// UI preferences (ADR-055). Top-level user-only — a checked-in repo
+/// UI preferences (ADR-058). Top-level user-only — a checked-in repo
 /// `.speedwave.json` is not allowed to flip beta UI on or off.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct UiPrefsConfig {
@@ -269,7 +273,7 @@ pub struct SpeedwaveUserConfig {
     pub active_project: Option<String>,
     pub selected_ide: Option<SelectedIde>,
     pub log_level: Option<String>,
-    /// UI preferences (ADR-055). Top-level, user-only.
+    /// UI preferences (ADR-058). Top-level, user-only.
     pub ui: Option<UiPrefsConfig>,
 }
 
@@ -440,6 +444,7 @@ fn apply_integrations_layer(
     apply_toggle(&mut result.gitlab, &layer.gitlab);
     apply_toggle(&mut result.github, &layer.github);
     apply_toggle(&mut result.atlassian, &layer.atlassian);
+    apply_toggle(&mut result.office, &layer.office);
     apply_toggle(&mut result.playwright, &layer.playwright);
     if let Some(ref os) = layer.os {
         apply_toggle(&mut result.os_reminders, &os.reminders);
@@ -585,7 +590,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    // ---- UiPrefsConfig (ADR-055) -------------------------------------------
+    // ---- UiPrefsConfig (ADR-058) -------------------------------------------
 
     #[test]
     fn beta_disabled_by_default() {
@@ -1149,6 +1154,7 @@ mod tests {
         assert!(!r.gitlab, "gitlab should be disabled");
         assert!(!r.github, "github should be disabled");
         assert!(!r.atlassian, "atlassian should be disabled");
+        assert!(!r.office, "office should be disabled");
         assert!(!r.playwright, "playwright should be disabled");
         assert!(!r.os_reminders, "os_reminders should be disabled");
         assert!(!r.os_calendar, "os_calendar should be disabled");
@@ -1302,6 +1308,7 @@ mod tests {
             gitlab: None,
             github: None,
             atlassian: None,
+            office: None,
             playwright: None,
             host_exec: None,
             os: Some(OsIntegrationsConfig {
@@ -1359,6 +1366,7 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
                     host_exec: None,
                     os: None,
@@ -1610,6 +1618,7 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
                     host_exec: None,
                     os: Some(OsIntegrationsConfig {
@@ -1656,6 +1665,7 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
                     host_exec: None,
                     os: None,
@@ -1729,6 +1739,7 @@ mod tests {
             gitlab: false,
             github: false,
             atlassian: false,
+            office: false,
             ..Default::default()
         };
         assert_eq!(r.is_service_enabled("slack"), Some(true));
@@ -1737,6 +1748,7 @@ mod tests {
         assert_eq!(r.is_service_enabled("gitlab"), Some(false));
         assert_eq!(r.is_service_enabled("github"), Some(false));
         assert_eq!(r.is_service_enabled("atlassian"), Some(false));
+        assert_eq!(r.is_service_enabled("office"), Some(false));
     }
 
     #[test]
@@ -1825,6 +1837,12 @@ mod tests {
         ));
         assert!(cfg.set_service(
             "github",
+            IntegrationConfig {
+                enabled: Some(true)
+            }
+        ));
+        assert!(cfg.set_service(
+            "office",
             IntegrationConfig {
                 enabled: Some(true)
             }
@@ -1938,6 +1956,7 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
                     host_exec: None,
                     os: None,

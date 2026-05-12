@@ -7,6 +7,7 @@ const workspaces = [
   'gitlab',
   'github',
   'atlassian',
+  'office',
   'redmine',
   'sharepoint',
   'os',

@@ -1391,7 +1391,11 @@ impl ChatSession {
                     match line {
                         Ok(l) => {
                             log::debug!("{l}");
-                            speedwave_runtime::log_file::write_log_line(&mut log_file, "STDERR", &l);
+                            speedwave_runtime::log_file::write_log_line(
+                                &mut log_file,
+                                "STDERR",
+                                &l,
+                            );
                         }
                         Err(e) => {
                             log::warn!("stderr reader: I/O error: {e}");
@@ -1569,7 +1573,11 @@ impl ChatSession {
                 // 2. Normal stream events
                 let (chunks, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
-                    speedwave_runtime::log_file::write_log_line(&mut log_file, entry.prefix, &entry.message);
+                    speedwave_runtime::log_file::write_log_line(
+                        &mut log_file,
+                        entry.prefix,
+                        &entry.message,
+                    );
                 }
                 // Track whether we received a terminal event so we can
                 // emit a fallback error on unexpected EOF.  Covers:

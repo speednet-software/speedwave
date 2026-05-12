@@ -37,7 +37,7 @@ Copy-Item mcp-servers\tsconfig.base.json "$dest\build-context\mcp-servers\"
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
-$services = @('shared','hub','slack','sharepoint','redmine','gitlab','github','atlassian','playwright')
+$services = @('shared','hub','slack','sharepoint','redmine','gitlab','github','atlassian','office','playwright')
 
 foreach ($svc in $services) {
     $svcDest = "$dest\build-context\mcp-servers\$svc"
@@ -52,6 +52,16 @@ foreach ($svc in $services) {
     }
     if (Test-Path "mcp-servers\$svc\tsconfig.json") {
         Copy-Item "mcp-servers\$svc\tsconfig.json" "$svcDest\"
+    }
+    # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
+    # Exclude test_*.py — pytest isn't in the runtime image and they're dead weight there.
+    if (Test-Path "mcp-servers\$svc\scripts") {
+        New-Item -ItemType Directory -Path "$svcDest\scripts" -Force | Out-Null
+        Get-ChildItem -Path "mcp-servers\$svc\scripts" -File | Where-Object { $_.Name -notlike 'test_*.py' } |
+            ForEach-Object { Copy-Item $_.FullName "$svcDest\scripts\" }
+    }
+    if (Test-Path "mcp-servers\$svc\requirements.txt") {
+        Copy-Item "mcp-servers\$svc\requirements.txt" "$svcDest\"
     }
     foreach ($f in @('Dockerfile','Containerfile')) {
         if (Test-Path "mcp-servers\$svc\$f") {

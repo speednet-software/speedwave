@@ -91,3 +91,6 @@ desktop/src-tauri/build-context/
 desktop/src-tauri/mcp-os/
 desktop/src-tauri/host_exec/
 .e2e-artifacts/
+
+# Local Python venvs (test tooling)
+.office-test-venv/

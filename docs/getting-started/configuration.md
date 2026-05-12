@@ -30,6 +30,9 @@ The user-level config file stores project definitions, the active project, IDE s
         "redmine": { "enabled": false },
         "gitlab": { "enabled": true },
         "github": { "enabled": false },
+        "atlassian": { "enabled": false },
+        "office": { "enabled": false },
+        "playwright": { "enabled": false },
         "os": {
           "reminders": { "enabled": true },
           "calendar": { "enabled": true },
@@ -58,7 +61,7 @@ The user-level config file stores project definitions, the active project, IDE s
 
 ### `ui.beta_enabled`
 
-Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). When `true`, the Desktop app reveals hidden / work-in-progress UI surfaces and shows a small `BETA` badge in the corner. Default is off. Toggle it from the tray-icon menu → **Beta features** (the item appears once initial setup is complete), or edit this field directly. This is a UI surface gate only — it is **not** a security control and does not unlock any privileged capability. See [ADR-055](../adr/ADR-055-beta-features-toggle.md).
+Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). When `true`, the Desktop app reveals hidden / work-in-progress UI surfaces and shows a small `BETA` badge in the corner. Default is off. Toggle it from the tray-icon menu → **Beta features** (the item appears once initial setup is complete), or edit this field directly. This is a UI surface gate only — it is **not** a security control and does not unlock any privileged capability. See [ADR-058](../adr/ADR-058-beta-features-toggle.md).
 
 ## Per-Project: `.speedwave.json`
 
@@ -89,21 +92,21 @@ When the selected provider is local (`ollama`, `lmstudio`, `llamacpp`) and a `ba
 
 `integrations.hostExec` configures **Host Exec** (`host_exec`) for the project — the per-project host-side worker that runs a user-defined whitelist of project-toolchain commands on the host machine. It is **user-config-only**: a `hostExec` block in the repo `.speedwave.json` is **ignored** (an executable command whitelist is a security-class field, like `claude.llm.provider`/`base_url`; see [ADR-054](../adr/ADR-054-host-exec-worker.md)). Edit it via **Service integrations → Host Exec** in the Desktop app — enabling it pops a blocking danger modal, which **is the consent** (there is no per-call confirmation; Claude runs whitelisted recipes unattended, the audit log records every run) — or by hand in `~/.speedwave/config.json`.
 
-| Field      | Type | Meaning |
-| ---------- | ---- | ------- |
-| `enabled`  | `boolean` | Whether Host Exec is on for this project. Default `false`. With `false`, or with an empty `commands`, Claude can run nothing. |
-| `commands` | array of recipe objects | The whitelist. Default `[]`. |
+| Field      | Type                    | Meaning                                                                                                                       |
+| ---------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`  | `boolean`               | Whether Host Exec is on for this project. Default `false`. With `false`, or with an empty `commands`, Claude can run nothing. |
+| `commands` | array of recipe objects | The whitelist. Default `[]`.                                                                                                  |
 
 Each recipe object:
 
-| Field      | Type | Meaning |
-| ---------- | ---- | ------- |
-| `name`     | `string` | `^[a-z][a-z0-9_]{0,63}$` (snake_case), unique. Claude calls it as `host_exec.<camelCase(name)>()`. |
-| `exec`     | `string` | The executable. Relative (`./gradlew`, `npm`, `docker`) resolves against the project dir or PATH; absolute is allowed (flagged in the UI). Rejected: shell/eval launchers (`bash`, `sh`, `eval`, `xargs`, …); `..`, NUL, `=`, newlines. |
-| `args`     | array of strings | Fixed arguments — literals plus `{name}` parameter tokens (each substitution = one argv element). A literal sub-command is fine (`["run", "build"]`); a bare `{param}` element after a meta-tool (`npm`, `make`, `node`, …) is rejected. |
-| `cwdSub`   | `string` (optional) | Subdirectory to run in (monorepos) — relative, no `..`, no symlink escape. |
-| `params`   | array (optional) | `{ name, pattern, maxLen? }` — `name` snake_case unique; `pattern` a regex the supplied value must fully match; `maxLen` ≤ 65536. |
-| `env`      | object (optional) | Literal env vars for the recipe. Reserved names (`PATH`, `LD_*`, `NODE_OPTIONS`, …) rejected. **Don't put secrets here** — use a repo `.env`; the snapshot is `0600` and the host log redacts these values, but a `.env` is still the right place. |
+| Field    | Type                | Meaning                                                                                                                                                                                                                                            |
+| -------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`   | `string`            | `^[a-z][a-z0-9_]{0,63}$` (snake_case), unique. Claude calls it as `host_exec.<camelCase(name)>()`.                                                                                                                                                 |
+| `exec`   | `string`            | The executable. Relative (`./gradlew`, `npm`, `docker`) resolves against the project dir or PATH; absolute is allowed (flagged in the UI). Rejected: shell/eval launchers (`bash`, `sh`, `eval`, `xargs`, …); `..`, NUL, `=`, newlines.            |
+| `args`   | array of strings    | Fixed arguments — literals plus `{name}` parameter tokens (each substitution = one argv element). A literal sub-command is fine (`["run", "build"]`); a bare `{param}` element after a meta-tool (`npm`, `make`, `node`, …) is rejected.           |
+| `cwdSub` | `string` (optional) | Subdirectory to run in (monorepos) — relative, no `..`, no symlink escape.                                                                                                                                                                         |
+| `params` | array (optional)    | `{ name, pattern, maxLen? }` — `name` snake_case unique; `pattern` a regex the supplied value must fully match; `maxLen` ≤ 65536.                                                                                                                  |
+| `env`    | object (optional)   | Literal env vars for the recipe. Reserved names (`PATH`, `LD_*`, `NODE_OPTIONS`, …) rejected. **Don't put secrets here** — use a repo `.env`; the snapshot is `0600` and the host log redacts these values, but a `.env` is still the right place. |
 
 There is no per-recipe `confirm` field — enabling Host Exec is the consent. (The Desktop add/edit dialog shows an amber warning when a recipe is a `docker`/`docker-compose`/`podman` lifecycle command or another state-changing one; it's a hint, not blocking.)
 

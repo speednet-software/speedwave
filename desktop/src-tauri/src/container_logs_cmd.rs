@@ -338,7 +338,8 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
         let mcp_os = read_tail_sanitized(&mcp_os_path, tail_us).unwrap_or_default();
 
         // host-exec — per-project worker log (`get_host_exec_logs`'s path)
-        let host_exec = read_tail_sanitized(&host_exec_log_path(&project), tail_us).unwrap_or_default();
+        let host_exec =
+            read_tail_sanitized(&host_exec_log_path(&project), tail_us).unwrap_or_default();
 
         // claude session log — same path resolution `get_claude_session_logs` uses
         let claude_path = speedwave_runtime::consts::claude_session_log_path(&project);
@@ -739,8 +740,9 @@ mod tests {
             compose: "claude_1 | first\n".to_string(),
             desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] d\n".to_string(),
             mcp_os: "ready\n".to_string(),
-            host_exec: r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#
-                .to_string(),
+            host_exec:
+                r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#
+                    .to_string(),
             claude: "session started\n".to_string(),
         });
         assert!(merged.contains("claude_1 | first"), "compose passthrough");

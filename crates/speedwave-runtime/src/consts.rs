@@ -303,6 +303,10 @@ pub struct McpServiceDescriptor {
     pub credential_files: &'static [&'static str],
     /// Optional UI badge label (e.g. "BETA", "NEW"). `None` = no badge.
     pub badge: Option<&'static str>,
+    /// True if this worker runs on its own egress-less network `{NETWORK_NAME}_{config_key}`
+    /// (e.g. `office`) rather than only the shared project network. When such a service is
+    /// disabled, its dedicated network and the hub's attachment to it are removed from compose.
+    pub egress_less: bool,
 }
 
 /// Toggleable MCP services — Single Source of Truth for service metadata.
@@ -338,6 +342,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         ],
         credential_files: &["bot_token", "user_token"],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "sharepoint",
@@ -416,6 +421,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "base_path",
         ],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "redmine",
@@ -463,6 +469,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "project_name",
         ],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "gitlab",
@@ -494,6 +501,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         ],
         credential_files: &["token", "host_url"],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "github",
@@ -513,6 +521,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         }],
         credential_files: &["token"],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "atlassian",
@@ -580,6 +589,19 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "confluence_space_keys",
         ],
         badge: None,
+        egress_less: false,
+    },
+    McpServiceDescriptor {
+        config_key: "office",
+        compose_name: "mcp-office",
+        worker_env: "WORKER_OFFICE_URL",
+        display_name: "Office documents",
+        description: "Read, write, convert Word/Excel/PowerPoint/PDF; render charts",
+        // A pure file processor — no service credentials. Operates on /workspace files only.
+        auth_fields: &[],
+        credential_files: &[],
+        badge: Some("BETA"),
+        egress_less: true,
     },
     McpServiceDescriptor {
         config_key: "playwright",
@@ -591,6 +613,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         auth_fields: &[],
         credential_files: &[],
         badge: Some("BETA"),
+        egress_less: false,
     },
 ];
 
@@ -664,6 +687,7 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-gitlab",
     "mcp-github",
     "mcp-atlassian",
+    "mcp-office",
     "mcp-playwright",
 ];
 
@@ -683,6 +707,7 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "gitlab",
     "github",
     "atlassian",
+    "office",
     "playwright",
     "os",
     "host_exec",
@@ -960,7 +985,7 @@ mod tests {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
         // Explicit field enumeration — update this when adding/removing MCP fields.
         // Using a const to force a compile-time reminder when struct changes.
-        const EXPECTED_MCP_FIELDS: usize = 7; // slack, sharepoint, redmine, gitlab, github, atlassian, playwright
+        const EXPECTED_MCP_FIELDS: usize = 8; // slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright
         let _ = (
             resolved.slack,
             resolved.sharepoint,
@@ -968,6 +993,7 @@ mod tests {
             resolved.gitlab,
             resolved.github,
             resolved.atlassian,
+            resolved.office,
             resolved.playwright,
         );
         assert_eq!(
@@ -1039,6 +1065,7 @@ mod tests {
             ("gitlab", 2),
             ("github", 1),
             ("atlassian", 5),
+            ("office", 0),
             ("playwright", 0),
         ];
         for &(key, count) in expected {
@@ -1059,7 +1086,7 @@ mod tests {
     /// public resources (e.g. Playwright scrapes public URLs). Kept as a
     /// small explicit allowlist so forgetting to declare auth for a new
     /// service that actually needs it still fails this test.
-    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright"];
+    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright", "office"];
 
     #[test]
     fn test_every_service_has_auth_fields() {

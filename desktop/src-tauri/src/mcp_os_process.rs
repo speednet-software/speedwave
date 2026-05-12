@@ -466,7 +466,11 @@ fn drain_and_read_port(
                                         anyhow::anyhow!("port {port} out of u16 range")
                                     }));
                                 port_sent = true;
-                                speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &line);
+                                speedwave_runtime::log_file::write_log_line(
+                                    &mut log_file,
+                                    "STDOUT",
+                                    &line,
+                                );
                                 continue;
                             }
                         }

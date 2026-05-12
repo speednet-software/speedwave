@@ -32,6 +32,7 @@ pub const IMAGE_MCP_REDMINE: &str = "speedwave-mcp-redmine";
 pub const IMAGE_MCP_GITLAB: &str = "speedwave-mcp-gitlab";
 pub const IMAGE_MCP_GITHUB: &str = "speedwave-mcp-github";
 pub const IMAGE_MCP_ATLASSIAN: &str = "speedwave-mcp-atlassian";
+pub const IMAGE_MCP_OFFICE: &str = "speedwave-mcp-office";
 pub const IMAGE_MCP_PLAYWRIGHT: &str = "speedwave-mcp-playwright";
 
 pub const IMAGES: &[ImageDef] = &[
@@ -81,6 +82,12 @@ pub const IMAGES: &[ImageDef] = &[
         name: IMAGE_MCP_ATLASSIAN,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/atlassian/Dockerfile",
+        build_args: &[],
+    },
+    ImageDef {
+        name: IMAGE_MCP_OFFICE,
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/office/Dockerfile",
         build_args: &[],
     },
     ImageDef {
@@ -1520,7 +1527,7 @@ mod tests {
     fn test_images_count() {
         // Catalogue size, not build behaviour — the build set is filtered per
         // project by `enabled_images`. Bump this when adding a built-in worker.
-        assert_eq!(IMAGES.len(), 9);
+        assert_eq!(IMAGES.len(), 10);
     }
 
     #[test]

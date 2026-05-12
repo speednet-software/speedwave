@@ -38,7 +38,7 @@ cp "$REPO_ROOT/mcp-servers/tsconfig.base.json" "$DEST/build-context/mcp-servers/
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
-MCP_SERVICES="shared hub slack sharepoint redmine gitlab github atlassian playwright"
+MCP_SERVICES="shared hub slack sharepoint redmine gitlab github atlassian office playwright"
 
 for svc in $MCP_SERVICES; do
   svc_src="$REPO_ROOT/mcp-servers/$svc"
@@ -49,6 +49,13 @@ for svc in $MCP_SERVICES; do
   # Some services (e.g. playwright) have no own src/ — they wrap an upstream npm package.
   [ -d "$svc_src/src" ] && cp -r "$svc_src/src" "$svc_dest/"
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
+  # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
+  # Exclude test_*.py — pytest isn't in the runtime image and they're dead weight there.
+  if [ -d "$svc_src/scripts" ]; then
+    mkdir -p "$svc_dest/scripts"
+    find "$svc_src/scripts" -maxdepth 1 -type f ! -name 'test_*.py' -exec cp {} "$svc_dest/scripts/" \;
+  fi
+  [ -f "$svc_src/requirements.txt" ] && cp "$svc_src/requirements.txt" "$svc_dest/"
   for f in Dockerfile Containerfile; do
     [ -f "$svc_src/$f" ] && cp "$svc_src/$f" "$svc_dest/"
   done
