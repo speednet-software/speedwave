@@ -181,26 +181,12 @@ pub(crate) fn list_running_projects(
 }
 
 /// Restores one project: compose_down, render, compose_up_recreate.
-/// Extracted for testability — `restore_projects` calls this in production.
 fn restore_one_project(
     project: &str,
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
 ) -> Result<(), String> {
     let _ = rt.compose_down(project);
     crate::containers_cmd::render_and_save_compose(project, rt)?;
-    rt.compose_up_recreate(project)
-        .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))
-}
-
-/// Test seam — takes the renderer as a function pointer so tests can inject stubs.
-#[cfg(test)]
-fn restore_one_project_with_renderer(
-    project: &str,
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
-    render: fn(&str, &dyn speedwave_runtime::runtime::ContainerRuntime) -> Result<(), String>,
-) -> Result<(), String> {
-    let _ = rt.compose_down(project);
-    render(project, rt)?;
     rt.compose_up_recreate(project)
         .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))
 }
