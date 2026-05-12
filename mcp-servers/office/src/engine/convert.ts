@@ -11,14 +11,10 @@ import { randomUUID } from 'node:crypto';
 import { runOk, runPythonScript } from '../subprocess.js';
 import { libreOfficeQueue } from '../lo-queue.js';
 import { ignoreError } from '../util.js';
-import {
-  resolveInputFile,
-  resolveOutputPath,
-  atomicMoveOnto,
-  PathPolicyError,
-} from '../path-policy.js';
-import { TIMEOUT_LIBREOFFICE_MS, MAX_INLINE_BYTES } from '../config.js';
-import { truncate } from './extract.js';
+import { resolveInputFile, resolveOutputPath, atomicMoveOnto } from '../path-policy.js';
+import { buildFileResult } from './file-result.js';
+import { ValidationError } from '../errors.js';
+import { TIMEOUT_LIBREOFFICE_MS, MAX_INLINE_BYTES, WORKSPACE_ROOT } from '../config.js';
 import type { FileResult } from '../types.js';
 
 /** Page-rendering options for HTML/Markdown → PDF. */
@@ -39,28 +35,32 @@ export type TextInput = { path: string } | { markdown: string } | { html: string
  * inline content (≤ `MAX_INLINE_BYTES`) is written to a temp file with the given extension.
  * @param input - The text input (path or inline).
  * @param inlineExt - Extension to use for the temp file when content is inline (e.g. `".md"`, `".html"`).
- * @returns The path to use and whether it is a temp file the caller should delete.
- * @throws {PathPolicyError} When inline content exceeds the size cap, or when `input` has no recognized key.
+ * @returns The path to use, whether it is a temp file the caller should delete, and the base URL
+ *   for resolving relative resources (the source dir for a `/workspace` path; `/workspace` root for inline).
+ * @throws {ValidationError} When inline content exceeds the size cap, or when `input` has no recognized key.
  */
 async function materializeTextInput(
   input: TextInput,
   inlineExt: string
-): Promise<{ filePath: string; isTemp: boolean }> {
+): Promise<{ filePath: string; isTemp: boolean; baseUrl: string }> {
   if ('path' in input && typeof input.path === 'string') {
-    return { filePath: await resolveInputFile(input.path), isTemp: false };
+    const filePath = await resolveInputFile(input.path);
+    return { filePath, isTemp: false, baseUrl: `file://${path.dirname(filePath)}/` };
   }
   const inline = 'markdown' in input ? input.markdown : 'html' in input ? input.html : undefined;
   if (typeof inline !== 'string') {
-    throw new PathPolicyError('Input must be { path } or { markdown } / { html }');
+    throw new ValidationError('Input must be { path } or { markdown } / { html }');
   }
   if (Buffer.byteLength(inline, 'utf8') > MAX_INLINE_BYTES) {
-    throw new PathPolicyError(
+    throw new ValidationError(
       `Inline content exceeds ${MAX_INLINE_BYTES} bytes — write it to a file under /workspace and pass { path } instead`
     );
   }
   const tmp = path.join(os.tmpdir(), `office-in-${randomUUID()}${inlineExt}`);
   await fsp.writeFile(tmp, inline);
-  return { filePath: tmp, isTemp: true };
+  // Inline content lives in /tmp, which weasyprint's url_fetcher rejects; resolve relative
+  // `<img>` etc. against /workspace so `![](chart.png)` in inline markdown still works.
+  return { filePath: tmp, isTemp: true, baseUrl: `file://${WORKSPACE_ROOT}/` };
 }
 
 /** A CSS named page size (`@page size`), e.g. `A4`, `Letter`, `A3 landscape`. Case-insensitive. */
@@ -78,23 +78,27 @@ function isCssMargin(value: string): boolean {
 
 /**
  * Validate `opts` and build the safe `@page` declaration (`size: …; margin: …;`). Rejects anything
- * that is not a CSS page-size keyword / `<length>` pair (size) or one-to-four CSS lengths (margin),
- * so caller-supplied option strings cannot inject arbitrary CSS into the rendered document.
+ * that is not a CSS page-size keyword (optionally with an orientation), a `<length>` list (1–4 tokens,
+ * since `size` also accepts `<width> <height>`), or — for `margin` — 1–4 CSS lengths, so caller-supplied
+ * option strings cannot inject arbitrary CSS into the rendered document.
  * @param opts - Page-rendering options.
  * @returns The validated `size: <...>; margin: <...>;` string for an `@page` block.
- * @throws {PathPolicyError} If `pageSize` or `margin` is not a recognized CSS value.
+ * @throws {ValidationError} If `pageSize` or `margin` is not a recognized CSS value.
  */
 function pageRuleBody(opts: PdfOptions): string {
   const rawSize = (opts.pageSize ?? 'A4').trim();
   if (!PAGE_SIZE_KEYWORD.test(rawSize) && !isCssMargin(rawSize)) {
-    throw new PathPolicyError(
+    throw new ValidationError(
       `pageSize must be a CSS page-size keyword (A4, Letter, …) or "<width> <height>" lengths, got: ${rawSize}`
     );
   }
-  const size = opts.landscape ? `${rawSize} landscape` : rawSize;
+  // Strip any trailing orientation already present in the keyword so `landscape: true` + "A4 landscape"
+  // does not produce the invalid "A4 landscape landscape".
+  const baseSize = rawSize.replace(/\s+(portrait|landscape)\s*$/i, '');
+  const size = opts.landscape ? `${baseSize} landscape` : rawSize;
   const margin = (opts.margin ?? '18mm').trim();
   if (!isCssMargin(margin)) {
-    throw new PathPolicyError(
+    throw new ValidationError(
       `margin must be one to four CSS lengths (e.g. "18mm"), got: ${margin}`
     );
   }
@@ -102,19 +106,28 @@ function pageRuleBody(opts: PdfOptions): string {
 }
 
 /**
- * Build a minimal print-oriented HTML wrapper around `bodyHtml` with a validated `@page` rule from `opts`.
+ * Build a minimal print-oriented HTML wrapper around `bodyHtml` using an already-validated `@page` rule body.
  * @param bodyHtml - The HTML body fragment to wrap.
- * @param opts - Page-rendering options.
+ * @param ruleBody - The validated `size: …; margin: …;` string from {@link pageRuleBody}.
  */
-function wrapPrintHtml(bodyHtml: string, opts: PdfOptions): string {
+function wrapPrintHtmlWithRule(bodyHtml: string, ruleBody: string): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-@page { ${pageRuleBody(opts)} }
+@page { ${ruleBody} }
 body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.5; }
 pre, code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 pre { background:#f6f8fa; padding:12px; border-radius:6px; overflow:auto; }
 table { border-collapse: collapse; } th, td { border: 1px solid #ccc; padding: 4px 8px; }
 img { max-width: 100%; }
 </style></head><body>${bodyHtml}</body></html>`;
+}
+
+/**
+ * Build a print HTML wrapper around `bodyHtml`, validating `opts` to produce the `@page` rule.
+ * @param bodyHtml - The HTML body fragment to wrap.
+ * @param opts - Page-rendering options.
+ */
+function wrapPrintHtml(bodyHtml: string, opts: PdfOptions): string {
+  return wrapPrintHtmlWithRule(bodyHtml, pageRuleBody(opts));
 }
 
 /**
@@ -136,18 +149,6 @@ async function htmlFileToPdf(htmlAbs: string, baseUrl: string, destAbs: string):
 }
 
 /**
- * Read a produced file's size and a short text preview (only meaningful for text-ish formats).
- * @param absPath - Absolute path of the file.
- * @param format - Output format token (e.g. "pdf").
- * @param previewText - Text to use for the result preview.
- */
-async function fileResult(absPath: string, format: string, previewText = ''): Promise<FileResult> {
-  const bytes = (await fsp.stat(absPath)).size;
-  const { content, truncated } = truncate(previewText, 2000);
-  return { path: absPath, bytes, format, preview: content, truncated };
-}
-
-/**
  * Markdown (path or inline) → PDF via pandoc → HTML → WeasyPrint.
  * @param input - The Markdown source.
  * @param outName - Output filename/path (optional; defaults under `/workspace/.speedwave-office/`).
@@ -161,7 +162,7 @@ export async function markdownToPdf(
   opts: PdfOptions = {},
   overwrite = false
 ): Promise<FileResult> {
-  const { filePath, isTemp } = await materializeTextInput(input, '.md');
+  const { filePath, isTemp, baseUrl } = await materializeTextInput(input, '.md');
   try {
     const r = await runOk('pandoc', ['-f', 'markdown', '-t', 'html', filePath]);
     const html = wrapPrintHtml(r.stdout, opts);
@@ -169,11 +170,11 @@ export async function markdownToPdf(
     await fsp.writeFile(tmpHtml, html);
     const dest = await resolveOutputPath(outName, `document-${Date.now()}.pdf`, overwrite);
     try {
-      await htmlFileToPdf(tmpHtml, `file://${path.dirname(filePath)}/`, dest);
+      await htmlFileToPdf(tmpHtml, baseUrl, dest);
     } finally {
       await fsp.rm(tmpHtml, { force: true }).catch(ignoreError);
     }
-    return fileResult(dest, 'pdf');
+    return buildFileResult(dest, 'pdf');
   } finally {
     if (isTemp) {
       await fsp.rm(filePath, { force: true }).catch(ignoreError);
@@ -195,26 +196,29 @@ export async function htmlToPdf(
   opts: PdfOptions = {},
   overwrite = false
 ): Promise<FileResult> {
-  const { filePath, isTemp } = await materializeTextInput(input, '.html');
+  const { filePath, isTemp, baseUrl } = await materializeTextInput(input, '.html');
   try {
+    // Validate `opts` once (throws on bad CSS), then reuse the rule body for both branches.
+    const ruleBody = pageRuleBody(opts);
     // If the HTML looks like a fragment, wrap it; otherwise inject our (validated) @page rule before </head>.
     const raw = await fsp.readFile(filePath, 'utf8');
-    const pageRule = `<style>@page { ${pageRuleBody(opts)} }</style>`;
     let finalHtml: string;
     if (/<html[\s>]/i.test(raw)) {
-      finalHtml = /<\/head>/i.test(raw) ? raw.replace(/<\/head>/i, `${pageRule}</head>`) : raw;
+      finalHtml = /<\/head>/i.test(raw)
+        ? raw.replace(/<\/head>/i, `<style>@page { ${ruleBody} }</style></head>`)
+        : raw;
     } else {
-      finalHtml = wrapPrintHtml(raw, opts);
+      finalHtml = wrapPrintHtmlWithRule(raw, ruleBody);
     }
     const tmpHtml = path.join(os.tmpdir(), `office-html-${randomUUID()}.html`);
     await fsp.writeFile(tmpHtml, finalHtml);
     const dest = await resolveOutputPath(outName, `document-${Date.now()}.pdf`, overwrite);
     try {
-      await htmlFileToPdf(tmpHtml, `file://${path.dirname(filePath)}/`, dest);
+      await htmlFileToPdf(tmpHtml, baseUrl, dest);
     } finally {
       await fsp.rm(tmpHtml, { force: true }).catch(ignoreError);
     }
-    return fileResult(dest, 'pdf');
+    return buildFileResult(dest, 'pdf');
   } finally {
     if (isTemp) {
       await fsp.rm(filePath, { force: true }).catch(ignoreError);
@@ -245,7 +249,7 @@ async function markdownViaPandoc(
     const dest = await resolveOutputPath(outName, defaultBase, overwrite);
     await runOk('pandoc', ['-f', 'markdown', '-t', writer, '-o', tmpOut, filePath]);
     await atomicMoveOnto(tmpOut, dest);
-    return fileResult(dest, writer);
+    return buildFileResult(dest, writer);
   } finally {
     if (isTemp) {
       await fsp.rm(filePath, { force: true }).catch(ignoreError);
@@ -356,7 +360,7 @@ export async function officeToPdf(
   const abs = await resolveInputFile(userPath);
   const ext = path.extname(abs).toLowerCase();
   if (!['.docx', '.xlsx', '.pptx', '.odt', '.ods', '.odp', '.rtf'].includes(ext)) {
-    throw new PathPolicyError(
+    throw new ValidationError(
       `officeToPdf does not support ${ext} — use readDocument or convertOffice`
     );
   }
@@ -367,7 +371,7 @@ export async function officeToPdf(
     overwrite
   );
   await atomicMoveOnto(staged, dest);
-  return fileResult(dest, 'pdf');
+  return buildFileResult(dest, 'pdf');
 }
 
 /**
@@ -377,7 +381,7 @@ export async function officeToPdf(
  * @param outName - Output filename/path (optional).
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the produced file.
- * @throws {PathPolicyError} If the source extension is unknown or the target is not allowed for it.
+ * @throws {ValidationError} If the source extension is unknown or the target is not allowed for it.
  */
 export async function convertOffice(
   userPath: string,
@@ -389,11 +393,11 @@ export async function convertOffice(
   const ext = path.extname(abs).toLowerCase();
   const allowed = CONVERT_MATRIX[ext];
   if (!allowed) {
-    throw new PathPolicyError(`convertOffice does not handle source type ${ext}`);
+    throw new ValidationError(`convertOffice does not handle source type ${ext}`);
   }
   const tgt = target.toLowerCase();
   if (!allowed.has(tgt)) {
-    throw new PathPolicyError(
+    throw new ValidationError(
       `convertOffice: ${ext} → ${tgt} is not in the supported matrix (allowed: ${[...allowed].join(', ')})`
     );
   }
@@ -404,5 +408,5 @@ export async function convertOffice(
     overwrite
   );
   await atomicMoveOnto(staged, dest);
-  return fileResult(dest, tgt);
+  return buildFileResult(dest, tgt);
 }

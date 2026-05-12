@@ -74,8 +74,7 @@ COPY --from=builder /build/office/node_modules ./node_modules
 COPY office/scripts ./scripts
 
 # Workspace mount point. `markitdown` console entry point lives in the venv — expose it on PATH.
-# NOTE: /tmp/lo (HOME) and /tmp/mpl (MPLCONFIGDIR) are NOT created here — compose mounts a fresh
-# empty tmpfs over /tmp at container start, so they are (re)created by the CMD wrapper instead.
+# /tmp is a fresh empty tmpfs at container start; HOME and MPLCONFIGDIR dirs are created by CMD.
 ENV PATH="/opt/office-venv/bin:${PATH}"
 RUN mkdir -p /workspace \
     && chown -R node:node /workspace /app /app/../shared

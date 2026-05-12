@@ -3,7 +3,7 @@
  * Best-output-wins engine chain: SheetJS for spreadsheet formats (native TS, reads
  * `.xls`/`.xlsb` that markitdown does not), `markitdown` as the primary for
  * `.docx`/`.pptx`/`.pdf`, then `pdftotext`/`pandoc`/the `python-docx` script as
- * fallback. Ported in spirit from the `presale` plugin's extraction engine.
+ * fallback (see ADR-055 §"Deliberate duplication with presale").
  * @module mcp-office/engine/extract
  */
 
@@ -94,8 +94,11 @@ export async function readDocumentToMarkdown(
     if (content.trim().length > 0) {
       return { content, bytes, truncated, engine: 'markitdown' };
     }
-  } catch {
-    // fall through to type-specific fallbacks
+    // markitdown ran but produced nothing — fall through to the type-specific fallbacks.
+  } catch (err) {
+    // markitdown crashed, timed out, or is missing from the venv (spawn ENOENT). The fallback
+    // engine below will still try; log so a broken venv is diagnosable rather than invisible.
+    process.stderr.write(`[office] markitdown failed (falling back): ${(err as Error).message}\n`);
   }
 
   if (ext === '.pdf') {

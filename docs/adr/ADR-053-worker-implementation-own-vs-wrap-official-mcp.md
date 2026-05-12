@@ -36,7 +36,7 @@ The criterion is **not met**: condition (2) fails — `github-mcp-server` is a G
 - **(d) No second protocol/process to map.** An own worker speaks JSON-RPC directly to the hub via `createMCPServer`. Wrapping a third-party MCP means owning its protocol quirks and lifecycle — see ADR-039, where `@playwright/mcp`'s default Streamable-HTTP heartbeat had to be `sed`-patched out at image build time because it did not fit the hub's request-response cycle.[^7]
 - **(e) Change cadence.** `github-mcp-server`'s library API is explicitly "unstable"; an upstream major bump to its tool surface becomes Speedwave's problem (Claude suddenly sees a different tool set).
 
-The tool **count** ("~110 tools") is deliberately *not* an argument against wrapping — `--toolsets`/`--read-only` let the wrapper narrow it. It is mentioned here only to be set aside.
+The tool **count** ("~110 tools") is deliberately _not_ an argument against wrapping — `--toolsets`/`--read-only` let the wrapper narrow it. It is mentioned here only to be set aside.
 
 → **GitHub gets an own thin worker, `mcp-servers/github/`, built on `@octokit/rest` (with `@octokit/plugin-throttling` and `@octokit/plugin-retry`), mirroring `mcp-servers/gitlab/`.**
 
@@ -48,6 +48,12 @@ There is no official Atlassian Node SDK, and the popular community libraries (`j
 
 → **Atlassian gets an own thin worker, `mcp-servers/atlassian/`, built on a thin `axios` HTTP client (no external SDK), covering Jira Cloud REST v3 + Agile 1.0 and Confluence Cloud REST v2 (plus v1 for CQL search and bulk label-add).**
 
+### Application to Office documents
+
+Same outcome again (ADR-055). Four upstream Office/PDF MCP servers were evaluated — `microsoft/markitdown-mcp`, `GongRzhe/Office-Word-MCP-Server`, `dvejsada/mcp-ms-office-documents`, `jenstangen1/pptx-xlsx-mcp` — and the gate fails on condition (1) "mature and covers the need": `markitdown-mcp` is read-only (no create/edit/PDF-generation/conversion/charts), `pptx-xlsx-mcp` uses `pywin32`/COM (Windows-only, useless in a Linux container), and the rest are single-maintainer community projects. There is no single upstream covering the full read/write/create/convert/charts scope, so `office` gets an own thin worker (TypeScript glue over `markitdown`/`pandoc`/LibreOffice/`weasyprint`/`pypdf`/`python-docx`/`openpyxl`/`python-pptx`/`matplotlib`/SheetJS) — not reinventing those tools, just the tool definitions and glue.
+
+→ **Office documents gets an own thin worker, `mcp-servers/office/`, a TypeScript MCP server plus Python support-scripts (the `presale` hybrid pattern); see ADR-055.**
+
 ### Retroactive explanation of existing workers
 
 - `slack`, `sharepoint`, `redmine`, `gitlab` — **own workers**, because no official MCP server exists for them (only community/archived servers).
@@ -56,9 +62,9 @@ There is no official Atlassian Node SDK, and the popular community libraries (`j
 
 ## Rejected alternatives
 
-- **A — Wrap `github/github-mcp-server`.** Rejected for reasons (a)–(e) above: Go toolchain inconsistent with the all-TypeScript `mcp-servers/`, upstream tool-naming convention, no `_meta` declarations, upstream log format/observability, a second protocol and lifecycle to own, and an "unstable" upstream API. The tool count is explicitly *not* part of this rejection — upstream supports narrowing it.
+- **A — Wrap `github/github-mcp-server`.** Rejected for reasons (a)–(e) above: Go toolchain inconsistent with the all-TypeScript `mcp-servers/`, upstream tool-naming convention, no `_meta` declarations, upstream log format/observability, a second protocol and lifecycle to own, and an "unstable" upstream API. The tool count is explicitly _not_ part of this rejection — upstream supports narrowing it.
 - **B — Use the remote hosted GitHub MCP server (`https://api.githubcopilot.com/mcp/`).** Rejected: it is designed around browser-based OAuth 2.1 + PKCE (integrated into Copilot IDEs); using it headless means sending the PAT as a bearer header to a GitHub-operated endpoint and depending on that hosted service's availability. Both contradict Speedwave's token-free-hub model and the self-contained-container posture (the hub has zero tokens; a worker holds only its own credential, mounted read-only).[^4]
-- **C — Use raw `fetch`/`axios` against the GitHub REST API instead of Octokit.** Rejected: it re-implements Link-header pagination, primary and secondary rate-limit handling, retry/backoff, and loses the OpenAPI-generated TypeScript types — well over the ~100-line "stop and reconsider" threshold, and a known footgun (a cluster of ReDoS advisories in `@octokit/*` in Feb–Mar 2025 was in exactly the Link-header / auth-header parsing regexes — evidence to *pin and audit a maintained parser*, not to hand-roll one).[^8][^9][^10] Octokit provides pagination, throttling, and retry as official plugins.[^11][^12][^13]
+- **C — Use raw `fetch`/`axios` against the GitHub REST API instead of Octokit.** Rejected: it re-implements Link-header pagination, primary and secondary rate-limit handling, retry/backoff, and loses the OpenAPI-generated TypeScript types — well over the ~100-line "stop and reconsider" threshold, and a known footgun (a cluster of ReDoS advisories in `@octokit/*` in Feb–Mar 2025 was in exactly the Link-header / auth-header parsing regexes — evidence to _pin and audit a maintained parser_, not to hand-roll one).[^8][^9][^10] Octokit provides pagination, throttling, and retry as official plugins.[^11][^12][^13]
 
 ## Consequences
 
@@ -77,7 +83,7 @@ There is no official Atlassian Node SDK, and the popular community libraries (`j
 
 **Neutral.**
 
-- "KISS — prefer existing tools over reimplementing" (CLAUDE.md) pulls toward wrapping. But Octokit *is* the existing tool here — the wheel we are not reinventing is pagination and rate-limit handling, which Octokit's plugins provide, not the GitHub API itself; mapping ~40 tools onto `octokit.rest.*` is glue, not a reimplementation. The Octokit ReDoS advisories are an argument *for pinning and auditing*, not an argument for or against Octokit per se.
+- "KISS — prefer existing tools over reimplementing" (CLAUDE.md) pulls toward wrapping. But Octokit _is_ the existing tool here — the wheel we are not reinventing is pagination and rate-limit handling, which Octokit's plugins provide, not the GitHub API itself; mapping ~40 tools onto `octokit.rest.*` is glue, not a reimplementation. The Octokit ReDoS advisories are an argument _for pinning and auditing_, not an argument for or against Octokit per se.
 
 ## Sources
 

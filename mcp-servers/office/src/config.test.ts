@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parsePositiveInt } from './config.js';
+import { parsePositiveInt, OUTPUT_DIR, WORKSPACE_ROOT } from './config.js';
 
 describe('parsePositiveInt', () => {
   it('returns the fallback when the value is undefined', () => {
@@ -18,5 +18,14 @@ describe('parsePositiveInt', () => {
     expect(parsePositiveInt('-3', 7)).toBe(7);
     expect(parsePositiveInt('abc', 7)).toBe(7);
     expect(parsePositiveInt('', 7)).toBe(7);
+  });
+});
+
+describe('paths', () => {
+  // Canary: several test mock factories hardcode `/workspace/.speedwave-office`. If this
+  // shape ever changes, those mocks (and the SKILL.md doc) must be updated alongside.
+  it('OUTPUT_DIR is `<WORKSPACE_ROOT>/.speedwave-office`', () => {
+    expect(WORKSPACE_ROOT).toBe('/workspace');
+    expect(OUTPUT_DIR).toBe('/workspace/.speedwave-office');
   });
 });

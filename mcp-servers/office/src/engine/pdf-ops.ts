@@ -4,20 +4,15 @@
  * @module mcp-office/engine/pdf-ops
  */
 
-import * as fsp from 'node:fs/promises';
 import { runPythonScript } from '../subprocess.js';
-import { resolveInputFile, resolveOutputPath, PathPolicyError } from '../path-policy.js';
+import { resolveInputFile, resolveOutputPath } from '../path-policy.js';
+import { buildFileResult } from './file-result.js';
+import { ValidationError } from '../errors.js';
 import { MAX_PDF_PAGES } from '../config.js';
 import type { FileResult } from '../types.js';
 
-/**
- * Build a {@link FileResult} for a produced PDF (no text preview for binary output).
- * @param absPath - Absolute path of the file.
- */
-async function pdfResult(absPath: string): Promise<FileResult> {
-  const bytes = (await fsp.stat(absPath)).size;
-  return { path: absPath, bytes, format: 'pdf', preview: '', truncated: false };
-}
+/** Cap on the number of PDFs/ranges a single merge/split call may take (each spawns a subprocess). */
+const MAX_PDF_BATCH = 200;
 
 /**
  * Read a PDF's metadata (page count, title/author/producer, encryption flag).
@@ -36,7 +31,7 @@ export async function pdfMetadata(userPath: string): Promise<Record<string, unkn
  * @param outName - Output filename/path (optional).
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the merged PDF.
- * @throws {PathPolicyError} If fewer than two inputs are given.
+ * @throws {ValidationError} If fewer than two inputs are given.
  */
 export async function mergePdf(
   userPaths: string[],
@@ -44,12 +39,15 @@ export async function mergePdf(
   overwrite = false
 ): Promise<FileResult> {
   if (!Array.isArray(userPaths) || userPaths.length < 2) {
-    throw new PathPolicyError('mergePdf needs at least two input PDFs');
+    throw new ValidationError('mergePdf needs at least two input PDFs');
+  }
+  if (userPaths.length > MAX_PDF_BATCH) {
+    throw new ValidationError(`mergePdf accepts at most ${MAX_PDF_BATCH} input PDFs`);
   }
   const abs = await Promise.all(userPaths.map((p) => resolveInputFile(p)));
   const dest = await resolveOutputPath(outName, `merged-${Date.now()}.pdf`, overwrite);
   await runPythonScript('pdf_ops.py', ['merge', dest, ...abs]);
-  return pdfResult(dest);
+  return buildFileResult(dest, 'pdf');
 }
 
 /**
@@ -59,7 +57,7 @@ export async function mergePdf(
  * @param outName - Base name for the outputs (optional); each part is suffixed `-part1`, `-part2`, …
  * @param overwrite - Permit overwriting existing outputs (default false).
  * @returns One {@link FileResult} per produced part.
- * @throws {PathPolicyError} If `ranges` is empty/malformed, or a range exceeds the page count.
+ * @throws {ValidationError} If `ranges` is empty/malformed, or a range exceeds the page count.
  */
 export async function splitPdf(
   userPath: string,
@@ -69,7 +67,10 @@ export async function splitPdf(
 ): Promise<FileResult[]> {
   const abs = await resolveInputFile(userPath);
   if (!Array.isArray(ranges) || ranges.length === 0) {
-    throw new PathPolicyError('splitPdf needs at least one [start, end] range');
+    throw new ValidationError('splitPdf needs at least one [start, end] range');
+  }
+  if (ranges.length > MAX_PDF_BATCH) {
+    throw new ValidationError(`splitPdf accepts at most ${MAX_PDF_BATCH} ranges`);
   }
   for (const r of ranges) {
     if (
@@ -80,18 +81,21 @@ export async function splitPdf(
       r[0] < 1 ||
       r[1] < r[0]
     ) {
-      throw new PathPolicyError(
+      throw new ValidationError(
         `Invalid page range: ${JSON.stringify(r)} (expected [start, end], 1-indexed)`
       );
     }
     if (r[1] > MAX_PDF_PAGES) {
-      throw new PathPolicyError(`Page range end ${r[1]} exceeds the ${MAX_PDF_PAGES}-page limit`);
+      throw new ValidationError(`Page range end ${r[1]} exceeds the ${MAX_PDF_PAGES}-page limit`);
     }
   }
+  // `outName` is the base for all parts; each gets a `-partN` suffix. We pass it via the
+  // `generatedBase` argument (the "no explicit outName" branch) because there is no single
+  // caller-supplied filename — every part is derived.
   const base = (outName ?? `split-${Date.now()}.pdf`).replace(/\.pdf$/i, '');
   const results: FileResult[] = [];
   for (let i = 0; i < ranges.length; i++) {
-    const dest = await resolveOutputPath(`${base}-part${i + 1}.pdf`, '', overwrite);
+    const dest = await resolveOutputPath(undefined, `${base}-part${i + 1}.pdf`, overwrite);
     await runPythonScript('pdf_ops.py', [
       'split',
       abs,
@@ -99,7 +103,7 @@ export async function splitPdf(
       String(ranges[i][0]),
       String(ranges[i][1]),
     ]);
-    results.push(await pdfResult(dest));
+    results.push(await buildFileResult(dest, 'pdf'));
   }
   return results;
 }
@@ -112,7 +116,7 @@ export async function splitPdf(
  * @param outName - Output filename/path (optional).
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the rotated PDF.
- * @throws {PathPolicyError} If `degrees` is not 90/180/270 or `pages` is empty/malformed.
+ * @throws {ValidationError} If `degrees` is not 90/180/270 or `pages` is empty/malformed.
  */
 export async function rotatePdf(
   userPath: string,
@@ -122,21 +126,21 @@ export async function rotatePdf(
   overwrite = false
 ): Promise<FileResult> {
   if (![90, 180, 270].includes(degrees)) {
-    throw new PathPolicyError('rotatePdf: degrees must be 90, 180, or 270');
+    throw new ValidationError('rotatePdf: degrees must be 90, 180, or 270');
   }
   if (
     !Array.isArray(pages) ||
     pages.length === 0 ||
     pages.some((p) => !Number.isInteger(p) || p < 1)
   ) {
-    throw new PathPolicyError(
+    throw new ValidationError(
       'rotatePdf: pages must be a non-empty list of 1-indexed page numbers'
     );
   }
   const abs = await resolveInputFile(userPath);
   const dest = await resolveOutputPath(outName, `rotated-${Date.now()}.pdf`, overwrite);
   await runPythonScript('pdf_ops.py', ['rotate', abs, dest, String(degrees), pages.join(',')]);
-  return pdfResult(dest);
+  return buildFileResult(dest, 'pdf');
 }
 
 /**
@@ -157,8 +161,16 @@ export async function watermarkPdf(
   const wm = await resolveInputFile(watermarkPath);
   const dest = await resolveOutputPath(outName, `watermarked-${Date.now()}.pdf`, overwrite);
   await runPythonScript('pdf_ops.py', ['watermark', abs, wm, dest]);
-  return pdfResult(dest);
+  return buildFileResult(dest, 'pdf');
 }
+
+/** Result of {@link fillPdfForm}: the file envelope plus whether the form was actually flattened and any per-field warnings. */
+export type FilledFormResult = FileResult & {
+  /** True if the AcroForm was flattened (only relevant when `flatten` was requested). */
+  flattened: boolean;
+  /** Non-fatal warnings from the fill step (e.g. a field name not present in the form). */
+  fieldWarnings?: string[];
+};
 
 /**
  * Fill an AcroForm PDF's text fields from a name→value map, flattening the result by default.
@@ -167,8 +179,9 @@ export async function watermarkPdf(
  * @param outName - Output filename/path (optional).
  * @param flatten - Whether to flatten the form so values become static content (default true).
  * @param overwrite - Permit overwriting an existing output (default false).
- * @returns The {@link FileResult} for the filled PDF.
- * @throws {PathPolicyError} If `fields` is not a plain object.
+ * @returns The {@link FilledFormResult}: file info, `flattened`, and any `fieldWarnings`. If `flatten`
+ *   was requested but could not be applied, `flattened` is false and a warning is written to stderr.
+ * @throws {ValidationError} If `fields` is not a plain object.
  */
 export async function fillPdfForm(
   userPath: string,
@@ -176,18 +189,38 @@ export async function fillPdfForm(
   outName?: string,
   flatten = true,
   overwrite = false
-): Promise<FileResult> {
+): Promise<FilledFormResult> {
   if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
-    throw new PathPolicyError('fillPdfForm: fields must be an object of name → value');
+    throw new ValidationError('fillPdfForm: fields must be an object of name → value');
+  }
+  // Coerce values to strings up front (the contract is name→string). A non-string value
+  // (number, boolean) is rejected rather than silently `String()`-ified at the Python boundary.
+  const strFields: Record<string, string> = {};
+  for (const [k, v] of Object.entries(fields)) {
+    if (typeof v !== 'string') {
+      throw new ValidationError(`fillPdfForm: fields[${JSON.stringify(k)}] must be a string`);
+    }
+    strFields[k] = v;
   }
   const abs = await resolveInputFile(userPath);
   const dest = await resolveOutputPath(outName, `filled-${Date.now()}.pdf`, overwrite);
-  await runPythonScript('pdf_ops.py', [
+  const out = await runPythonScript('pdf_ops.py', [
     'fillform',
     abs,
     dest,
     flatten ? '1' : '0',
-    JSON.stringify(fields),
+    JSON.stringify(strFields),
   ]);
-  return pdfResult(dest);
+  const flattened = out.flattened === true;
+  const fieldWarnings = Array.isArray(out.fill_warnings)
+    ? (out.fill_warnings as unknown[]).map(String)
+    : undefined;
+  if (flatten && !flattened) {
+    process.stderr.write('[office] fillPdfForm: flatten requested but could not be applied\n');
+  }
+  if (fieldWarnings && fieldWarnings.length > 0) {
+    process.stderr.write(`[office] fillPdfForm warnings: ${fieldWarnings.join('; ')}\n`);
+  }
+  const base = await buildFileResult(dest, 'pdf');
+  return { ...base, flattened, ...(fieldWarnings ? { fieldWarnings } : {}) };
 }

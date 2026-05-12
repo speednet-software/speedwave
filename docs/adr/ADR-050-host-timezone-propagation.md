@@ -37,15 +37,16 @@ The helper is invoked **after** `apply_plugins()` so plugin services injected dy
 
 ### `tzdata` in base images
 
-Setting `TZ=Europe/Warsaw` is a no-op without the zoneinfo database. The decision adds `tzdata` to three base images:
+Setting `TZ=Europe/Warsaw` is a no-op without the zoneinfo database. The decision adds `tzdata` to four base images:
 
 - `containers/Containerfile.claude` (`apt-get install ... tzdata`)
 - `containers/mcp-servers/Containerfile.mcp-base` (`apk add --no-cache tzdata`)
 - `mcp-servers/hub/Containerfile` (`apk add --no-cache curl tzdata`)
+- `mcp-servers/office/Dockerfile` (Debian/bookworm, `apt-get install ... tzdata` — ADR-055)
 
 The Playwright worker uses `mcr.microsoft.com/playwright:*-jammy`, which already ships `tzdata` from the Ubuntu base — no change.
 
-This pair (detection in `tz.rs` ↔ `tzdata` in three Containerfiles) is recorded in CLAUDE.md as a new SSOT-alignment row. Adding a fourth base image is a compile-time invitation to reread that row.
+This pair (detection in `tz.rs` ↔ `tzdata` in these base images) is recorded in CLAUDE.md as a new SSOT-alignment row. Adding another base image is a compile-time invitation to reread that row.
 
 ### Plugins
 

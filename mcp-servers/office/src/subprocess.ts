@@ -84,29 +84,25 @@ export function run(command: string, args: string[], opts: RunOptions = {}): Pro
     let timedOut = false;
     let settled = false;
 
-    const collect = (
-      chunks: Buffer[],
-      len: number,
-      trunc: boolean,
-      chunk: Buffer
-    ): [number, boolean] => {
+    // Append `chunk` to `chunks` up to MAX_SUBPROCESS_OUTPUT_BYTES; returns [newLen, truncated].
+    const collect = (chunks: Buffer[], len: number, chunk: Buffer): [number, boolean] => {
       if (len >= MAX_SUBPROCESS_OUTPUT_BYTES) {
         return [len, true];
       }
       const remaining = MAX_SUBPROCESS_OUTPUT_BYTES - len;
       if (chunk.length <= remaining) {
         chunks.push(chunk);
-        return [len + chunk.length, trunc];
+        return [len + chunk.length, false];
       }
       chunks.push(chunk.subarray(0, remaining));
       return [MAX_SUBPROCESS_OUTPUT_BYTES, true];
     };
 
     child.stdout.on('data', (c: Buffer) => {
-      [outLen, outTrunc] = collect(outChunks, outLen, outTrunc, c);
+      [outLen, outTrunc] = collect(outChunks, outLen, c);
     });
     child.stderr.on('data', (c: Buffer) => {
-      [errLen, errTrunc] = collect(errChunks, errLen, errTrunc, c);
+      [errLen, errTrunc] = collect(errChunks, errLen, c);
     });
 
     const timer = setTimeout(() => {
@@ -131,7 +127,7 @@ export function run(command: string, args: string[], opts: RunOptions = {}): Pro
     };
 
     child.on('error', (err) => {
-      /* v8 ignore next 3 -- defensive: 'error' firing after the process already settled cannot be triggered deterministically */
+      /* v8 ignore next 3 -- 'error' after close is not deterministically triggerable */
       if (settled) {
         return;
       }

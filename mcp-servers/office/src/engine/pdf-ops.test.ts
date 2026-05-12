@@ -68,6 +68,11 @@ describe('mergePdf', () => {
     // @ts-expect-error — runtime guard
     await expect(mergePdf('x')).rejects.toThrow(/at least two/);
   });
+
+  it('rejects more than the batch cap', async () => {
+    const many = Array.from({ length: 201 }, (_, i) => `f${i}.pdf`);
+    await expect(mergePdf(many)).rejects.toThrow(/at most 200 input PDFs/);
+  });
 });
 
 describe('splitPdf', () => {
@@ -104,6 +109,11 @@ describe('splitPdf', () => {
       /Invalid page range/
     );
     await expect(splitPdf('a.pdf', [[1, 999]])).rejects.toThrow(/exceeds the 100-page limit/);
+  });
+
+  it('rejects more than the batch cap of ranges', async () => {
+    const many = Array.from({ length: 201 }, () => [1, 1] as [number, number]);
+    await expect(splitPdf('a.pdf', many)).rejects.toThrow(/at most 200 ranges/);
   });
 });
 
@@ -170,5 +180,28 @@ describe('fillPdfForm', () => {
   it('rejects a non-object fields', async () => {
     // @ts-expect-error — runtime guard
     await expect(fillPdfForm('form.pdf', ['x'])).rejects.toThrow(/fields must be an object/);
+  });
+
+  it('rejects a non-string field value', async () => {
+    // @ts-expect-error — exercising the value-type guard
+    await expect(fillPdfForm('form.pdf', { age: 42 })).rejects.toThrow(/must be a string/);
+  });
+
+  it('surfaces flattened + fieldWarnings from the script', async () => {
+    runPythonScript.mockResolvedValueOnce({
+      ok: true,
+      flattened: true,
+      fill_warnings: ['KeyError: no such field'],
+    });
+    const r = await fillPdfForm('form.pdf', { name: 'Ada' });
+    expect(r.flattened).toBe(true);
+    expect(r.fieldWarnings).toEqual(['KeyError: no such field']);
+  });
+
+  it('reports flatten:false when the script could not flatten (default flatten requested)', async () => {
+    runPythonScript.mockResolvedValueOnce({ ok: true, flattened: false });
+    const r = await fillPdfForm('form.pdf', { name: 'Ada' });
+    expect(r.flattened).toBe(false);
+    expect(r.fieldWarnings).toBeUndefined();
   });
 });

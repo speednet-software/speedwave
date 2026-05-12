@@ -6,7 +6,7 @@
  * @module mcp-office/lo-queue
  */
 
-/** A FIFO mutex: `run(fn)` resolves with `fn`'s result, but `fn` runs only after all earlier `run` calls have settled. */
+/** Serial queue: `run(fn)` resolves with `fn`'s result; `fn` starts only after all earlier `run` calls have settled. */
 class SerialQueue {
   private tail: Promise<unknown> = Promise.resolve();
 

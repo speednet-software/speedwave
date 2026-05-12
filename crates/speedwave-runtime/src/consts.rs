@@ -263,6 +263,10 @@ pub struct McpServiceDescriptor {
     pub credential_files: &'static [&'static str],
     /// Optional UI badge label (e.g. "BETA", "NEW"). `None` = no badge.
     pub badge: Option<&'static str>,
+    /// True if this worker runs on its own egress-less network `{NETWORK_NAME}_{config_key}`
+    /// (e.g. `office`) rather than only the shared project network. When such a service is
+    /// disabled, its dedicated network and the hub's attachment to it are removed from compose.
+    pub egress_less: bool,
 }
 
 /// Toggleable MCP services — Single Source of Truth for service metadata.
@@ -298,6 +302,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         ],
         credential_files: &["bot_token", "user_token"],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "sharepoint",
@@ -376,6 +381,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "base_path",
         ],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "redmine",
@@ -423,6 +429,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "project_name",
         ],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "gitlab",
@@ -454,6 +461,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         ],
         credential_files: &["token", "host_url"],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "github",
@@ -473,6 +481,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         }],
         credential_files: &["token"],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "atlassian",
@@ -540,6 +549,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "confluence_space_keys",
         ],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "office",
@@ -551,6 +561,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         auth_fields: &[],
         credential_files: &[],
         badge: Some("BETA"),
+        egress_less: true,
     },
     McpServiceDescriptor {
         config_key: "playwright",
@@ -562,6 +573,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         auth_fields: &[],
         credential_files: &[],
         badge: Some("BETA"),
+        egress_less: false,
     },
 ];
 

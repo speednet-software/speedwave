@@ -30,6 +30,9 @@ The user-level config file stores project definitions, the active project, IDE s
         "redmine": { "enabled": false },
         "gitlab": { "enabled": true },
         "github": { "enabled": false },
+        "atlassian": { "enabled": false },
+        "office": { "enabled": false },
+        "playwright": { "enabled": false },
         "os": {
           "reminders": { "enabled": true },
           "calendar": { "enabled": true },

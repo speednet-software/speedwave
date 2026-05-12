@@ -870,17 +870,12 @@ fn apply_integrations_filter(
     };
 
     let mut enabled_names: Vec<&str> = Vec::new();
-    // `office` is the only egress-less worker so far (ADR-055); a second one = add a flag to McpServiceDescriptor.
-    let mut office_enabled = false;
 
     for svc in consts::TOGGLEABLE_MCP_SERVICES {
         let (config_key, compose_name, worker_env) =
             (svc.config_key, svc.compose_name, svc.worker_env);
         if service_enabled(config_key) {
             enabled_names.push(config_key);
-            if config_key == "office" {
-                office_enabled = true;
-            }
         } else {
             // Remove the service container from compose
             if let Some(services) = doc.get_mut("services") {
@@ -890,26 +885,23 @@ fn apply_integrations_filter(
             }
             // Remove WORKER_*_URL from hub environment
             remove_hub_env_var(&mut doc, worker_env);
-        }
-    }
-
-    // The office worker has its own egress-less network (ADR-055). When office is disabled,
-    // drop the network definition and the hub's attachment to it, so the rendered compose
-    // has no dangling internal network.
-    if !office_enabled {
-        let office_network = format!("{network_name}_office");
-        if let Some(networks) = doc.get_mut("networks") {
-            if let Some(map) = networks.as_mapping_mut() {
-                map.remove(serde_yaml_ng::Value::String(office_network.clone()));
+            // An egress-less worker (e.g. office, ADR-055) has its own internal network
+            // `{NETWORK_NAME}_{config_key}`; when it is disabled, drop that network and the
+            // hub's attachment to it so the rendered compose has no dangling internal network.
+            if svc.egress_less {
+                let net = format!("{network_name}_{config_key}");
+                if let Some(map) = doc.get_mut("networks").and_then(|n| n.as_mapping_mut()) {
+                    map.remove(serde_yaml_ng::Value::String(net.clone()));
+                }
+                if let Some(nets) = doc
+                    .get_mut("services")
+                    .and_then(|s| s.get_mut("mcp-hub"))
+                    .and_then(|h| h.get_mut("networks"))
+                    .and_then(|n| n.as_sequence_mut())
+                {
+                    nets.retain(|n| n.as_str() != Some(net.as_str()));
+                }
             }
-        }
-        if let Some(nets) = doc
-            .get_mut("services")
-            .and_then(|s| s.get_mut("mcp-hub"))
-            .and_then(|h| h.get_mut("networks"))
-            .and_then(|n| n.as_sequence_mut())
-        {
-            nets.retain(|n| n.as_str() != Some(office_network.as_str()));
         }
     }
 
@@ -3064,6 +3056,64 @@ services:
             env.iter().any(|v| v.as_str() == Some(port_line.as_str())),
             "mcp-playwright must set PORT={}",
             crate::consts::PORT_WORKER
+        );
+    }
+
+    /// mcp-office has no credentials — the generated compose must not mount any `/tokens`
+    /// volume, must mount `/workspace:rw`, and must be attached only to its egress-less
+    /// `{NETWORK_NAME}_office` network (ADR-055).
+    #[test]
+    fn test_render_compose_office_no_token_mount_workspace_rw_office_network_only() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            office: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let svc = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-office"))
+            .expect("mcp-office must be present when office is enabled");
+
+        let volumes = svc
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .expect("mcp-office must declare /workspace:rw");
+        let vol_strs: Vec<&str> = volumes.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            !vol_strs.iter().any(|v| v.contains("/tokens")),
+            "mcp-office must not mount any /tokens volume; got: {vol_strs:?}"
+        );
+        assert!(
+            vol_strs.iter().any(|v| v.ends_with(":/workspace:rw")),
+            "mcp-office must mount the project workspace at /workspace:rw; got: {vol_strs:?}"
+        );
+
+        let nets: Vec<&str> = svc
+            .get("networks")
+            .and_then(|n| n.as_sequence())
+            .map(|s| s.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            nets.len(),
+            1,
+            "mcp-office must be on exactly one (egress-less) network; got: {nets:?}"
+        );
+        assert!(
+            nets[0].ends_with("_office"),
+            "mcp-office's only network must be the egress-less *_office network; got: {nets:?}"
         );
     }
 

@@ -14,6 +14,27 @@ import * as path from 'node:path';
 
 let workspaceDir: string;
 
+// Make the Nth-from-now `lstat`/`lstatSync` call throw `err` (1 = the very next call). Lets a
+// test exercise the EACCES/EPERM branches that real temp dirs cannot reproduce in CI.
+const lstatThrow = vi.hoisted(() => ({
+  countdown: 0,
+  err: null as NodeJS.ErrnoException | null,
+  arm(skipBefore: number, err: NodeJS.ErrnoException) {
+    this.countdown = skipBefore;
+    this.err = err;
+  },
+  maybeThrow() {
+    if (this.err === null) return;
+    if (this.countdown > 0) {
+      this.countdown -= 1;
+      return;
+    }
+    const e = this.err;
+    this.err = null;
+    throw e;
+  },
+}));
+
 // Point WORKSPACE_ROOT / OUTPUT_DIR at a fresh temp dir for each test file run.
 vi.mock('./config.js', async () => {
   const realOs = await import('node:os');
@@ -24,6 +45,27 @@ vi.mock('./config.js', async () => {
     WORKSPACE_ROOT: dir,
     OUTPUT_DIR: realPath.join(dir, '.speedwave-office'),
     MAX_INPUT_BYTES: 1024 * 1024,
+  };
+});
+
+vi.mock('node:fs', async (orig) => {
+  const real = await orig<typeof import('node:fs')>();
+  return {
+    ...real,
+    lstatSync: (...args: Parameters<typeof real.lstatSync>) => {
+      lstatThrow.maybeThrow();
+      return real.lstatSync(...args);
+    },
+  };
+});
+vi.mock('node:fs/promises', async (orig) => {
+  const real = await orig<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    lstat: async (...args: Parameters<typeof real.lstat>) => {
+      lstatThrow.maybeThrow();
+      return real.lstat(...args);
+    },
   };
 });
 
@@ -126,6 +168,22 @@ describe('resolveInputFile', () => {
     await fsp.writeFile(big, Buffer.alloc(1024 * 1024 + 1));
     await expect(resolveInputFile('big.bin')).rejects.toThrow(/too large/);
   });
+
+  it('rethrows a permission error from the symlink-component walk (not silently skipped)', async () => {
+    await fsp.writeFile(path.join(workspaceDir, 'guarded.txt'), 'x');
+    // The symlink walk's first lstatSync (on `guarded.txt`) throws EACCES → rethrown, not skipped.
+    lstatThrow.arm(0, Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+    await expect(resolveInputFile('guarded.txt')).rejects.toThrow(/EACCES/);
+  });
+
+  it('reports the errno when the leaf lstat fails with a permission error', async () => {
+    await fsp.writeFile(path.join(workspaceDir, 'guarded.txt'), 'x');
+    // Skip the walk's lstatSync (call 1); fail the leaf lstat (call 2) → "Cannot access … (EACCES)".
+    lstatThrow.arm(1, Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+    await expect(resolveInputFile('guarded.txt')).rejects.toThrow(
+      /Cannot access input file \(EACCES\)/
+    );
+  });
 });
 
 describe('resolveOutputPath', () => {
@@ -161,6 +219,13 @@ describe('resolveOutputPath', () => {
     await fsp.writeFile(existing, 'x');
     await expect(resolveOutputPath('exists.pdf', 'x.pdf')).rejects.toThrow(/already exists/);
     await expect(resolveOutputPath('exists.pdf', 'x.pdf', true)).resolves.toBe(existing);
+  });
+
+  it('propagates a permission error from the overwrite check (not treated as "free")', async () => {
+    // The overwrite check is the first lstat call in resolveOutputPath (no symlink walk runs before it
+    // for a bare name under OUTPUT_DIR — resolveWithinWorkspace's walk uses lstatSync, which we skip).
+    lstatThrow.arm(1, Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+    await expect(resolveOutputPath('guarded.pdf', 'x.pdf')).rejects.toThrow(/EACCES/);
   });
 });
 

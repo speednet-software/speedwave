@@ -120,16 +120,16 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
     writer = PdfWriter()
     writer.append(reader)
     str_fields = {str(k): str(v) for k, v in fields.items()}
+    fill_warnings: list[str] = []
     for page in writer.pages:
         try:
             writer.update_page_form_field_values(page, str_fields, auto_regenerate=False)
-        except Exception:  # noqa: BLE001 — a page without form fields is fine; keep going
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # A page without form fields raises — expected; collect anything else so the worker surfaces it.
+            fill_warnings.append(f"{type(exc).__name__}: {exc}")
     flattened = False
     if flatten:
-        # Best-effort flatten: drop the AcroForm so values render as static content.
-        # Touches a private pypdf attribute (`_root_object`); if a pypdf upgrade renames it this
-        # silently degrades to a non-flat form, so emit a warning on stderr (the worker surfaces it).
+        # Best-effort flatten via the private _root_object; degrades to a non-flat form on a pypdf rename.
         try:
             from pypdf.generic import NameObject
 
@@ -144,7 +144,12 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
                 f"warning: could not flatten AcroForm ({type(exc).__name__}: {exc}); returning a non-flat form\n"
             )
     _write_pdf(writer, output)
-    ok(path=output, fields=list(str_fields.keys()), flattened=flattened)
+    ok(
+        path=output,
+        fields=list(str_fields.keys()),
+        flattened=flattened,
+        fill_warnings=fill_warnings if fill_warnings else None,
+    )
 
 
 def _run(argv: list[str]) -> None:

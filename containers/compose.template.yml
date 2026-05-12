@@ -244,6 +244,11 @@ services:
       - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
+      # Anti-DoS / resource limits. Defaults are baked into the worker; override here if needed.
+      - OFFICE_MAX_INPUT_BYTES=52428800
+      - OFFICE_MAX_PDF_PAGES=2000
+      - OFFICE_TIMEOUT_STANDARD_MS=60000
+      - OFFICE_TIMEOUT_LO_MS=120000
     networks:
       # Internal-only: no route to the gateway → no internet (defence in depth on top of the
       # application-level local-only resource loading in weasyprint/pandoc/LibreOffice).

@@ -40,7 +40,11 @@ vi.mock('../path-policy.js', () => ({
 }));
 vi.mock('../subprocess.js', () => ({ runOk, runPythonScript }));
 vi.mock('../lo-queue.js', () => ({ libreOfficeQueue: { run: <T>(fn: () => Promise<T>) => fn() } }));
-vi.mock('../config.js', () => ({ TIMEOUT_LIBREOFFICE_MS: 1000, MAX_INLINE_BYTES: 100 }));
+vi.mock('../config.js', () => ({
+  TIMEOUT_LIBREOFFICE_MS: 1000,
+  MAX_INLINE_BYTES: 100,
+  WORKSPACE_ROOT: '/workspace',
+}));
 vi.mock('node:fs/promises', async (orig) => {
   const real = await orig<typeof import('node:fs/promises')>();
   return {

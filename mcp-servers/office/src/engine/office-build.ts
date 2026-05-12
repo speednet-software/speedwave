@@ -6,43 +6,50 @@
  * @module mcp-office/engine/office-build
  */
 
-import * as fsp from 'node:fs/promises';
 import { runPythonScript } from '../subprocess.js';
-import { resolveInputFile, resolveOutputPath, PathPolicyError } from '../path-policy.js';
+import { resolveInputFile, resolveOutputPath } from '../path-policy.js';
+import { buildFileResult } from './file-result.js';
+import { ValidationError } from '../errors.js';
 import type {
   DocxSpec,
   DocxOp,
   DocxElement,
   XlsxSpec,
-  XlsxOp,
-  XlsxChart,
-  XlsxSheet,
   PptxSpec,
   PptxOp,
   PptxSlide,
-  PptxChart,
   FileResult,
 } from '../types.js';
 
+/** A candidate object plucked from `unknown` DSL input; fields accessed as `o['key']`, no per-field casts. */
+type Obj = Record<string, unknown>;
+
 /**
- * Build a {@link FileResult} for a produced Office file (no text preview).
- * @param absPath - Absolute path of the file.
- * @param format - Output format token (e.g. "pdf").
+ * Cast `v` to a plain object for field-by-field validation, or throw {@link ValidationError}.
+ * @param v - The candidate value.
+ * @param what - Path-in-spec label for the error message.
+ * @returns `v` typed as a plain object.
  */
-async function officeResult(absPath: string, format: string): Promise<FileResult> {
-  const bytes = (await fsp.stat(absPath)).size;
-  return { path: absPath, bytes, format, preview: '', truncated: false };
+function asObj(v: unknown, what: string): Obj {
+  if (typeof v !== 'object' || v === null) {
+    throw new ValidationError(`${what} must be an object`);
+  }
+  return v as Obj;
 }
 
 /**
- * Assert `v` is a non-empty string, else throw {@link PathPolicyError} mentioning `what`.
- * @param v - The value to check.
- * @param what - Name of the field, for the error message.
+ * Require `obj[key]` to be a non-empty string and return it, else throw {@link ValidationError}.
+ * @param obj - The object to read from.
+ * @param key - The field name.
+ * @param where - Path-in-spec label for the error message.
+ * @returns The validated non-empty string.
  */
-function assertString(v: unknown, what: string): asserts v is string {
+function reqStr(obj: Obj, key: string, where: string): string {
+  const v = obj[key];
   if (typeof v !== 'string' || v.length === 0) {
-    throw new PathPolicyError(`${what} must be a non-empty string`);
+    throw new ValidationError(`${where}.${key} must be a non-empty string`);
   }
+  return v;
 }
 
 /**
@@ -51,45 +58,41 @@ function assertString(v: unknown, what: string): asserts v is string {
  * @param where - Path-in-spec label for error messages.
  */
 function validateDocxElement(el: unknown, where: string): void {
-  if (typeof el !== 'object' || el === null) {
-    throw new PathPolicyError(`${where}: element must be an object`);
-  }
-  const e = el as Partial<DocxElement> & { type?: string };
-  switch (e.type) {
-    case 'heading':
-      assertString((e as { text?: unknown }).text, `${where}.text`);
-      if (
-        !Number.isInteger((e as { level?: unknown }).level) ||
-        (e as { level: number }).level < 1 ||
-        (e as { level: number }).level > 6
-      ) {
-        throw new PathPolicyError(`${where}.level must be an integer 1..6`);
+  const e = asObj(el, `${where}: element`);
+  switch (e['type']) {
+    case 'heading': {
+      reqStr(e, 'text', where);
+      const level = e['level'];
+      if (!Number.isInteger(level) || (level as number) < 1 || (level as number) > 6) {
+        throw new ValidationError(`${where}.level must be an integer 1..6`);
       }
       break;
+    }
     case 'paragraph':
-      assertString((e as { text?: unknown }).text, `${where}.text`);
+      reqStr(e, 'text', where);
       break;
     case 'table': {
-      const t = e as { header?: unknown; rows?: unknown };
-      if (!Array.isArray(t.header) || t.header.some((h) => typeof h !== 'string')) {
-        throw new PathPolicyError(`${where}.header must be an array of strings`);
+      const header = e['header'];
+      if (!Array.isArray(header) || header.some((h) => typeof h !== 'string')) {
+        throw new ValidationError(`${where}.header must be an array of strings`);
       }
+      const rows = e['rows'];
       if (
-        !Array.isArray(t.rows) ||
-        t.rows.some((r) => !Array.isArray(r) || r.some((c) => typeof c !== 'string'))
+        !Array.isArray(rows) ||
+        rows.some((r) => !Array.isArray(r) || r.some((c) => typeof c !== 'string'))
       ) {
-        throw new PathPolicyError(`${where}.rows must be an array of string arrays`);
+        throw new ValidationError(`${where}.rows must be an array of string arrays`);
       }
       break;
     }
     case 'image':
-      assertString((e as { path?: unknown }).path, `${where}.path`);
+      reqStr(e, 'path', where);
       // resolved later by the caller using resolveImagePaths
       break;
     case 'pagebreak':
       break;
     default:
-      throw new PathPolicyError(`${where}: unknown element type ${String(e.type)}`);
+      throw new ValidationError(`${where}: unknown element type ${String(e['type'])}`);
   }
 }
 
@@ -111,7 +114,7 @@ async function resolveImagePaths(elements: DocxElement[]): Promise<DocxElement[]
  * @param outName - Output filename/path (optional).
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the produced `.docx`.
- * @throws {PathPolicyError} If `spec` is malformed.
+ * @throws {ValidationError} If `spec` is malformed.
  */
 export async function createDocx(
   spec: unknown,
@@ -119,13 +122,13 @@ export async function createDocx(
   overwrite = false
 ): Promise<FileResult> {
   if (typeof spec !== 'object' || spec === null || !Array.isArray((spec as DocxSpec).elements)) {
-    throw new PathPolicyError('createDocx: spec must be { elements: Element[] }');
+    throw new ValidationError('createDocx: spec must be { elements: Element[] }');
   }
   (spec as DocxSpec).elements.forEach((el, i) => validateDocxElement(el, `elements[${i}]`));
   const resolved = await resolveImagePaths((spec as DocxSpec).elements);
   const dest = await resolveOutputPath(outName, `document-${Date.now()}.docx`, overwrite);
   await runPythonScript('docx_build.py', ['create', dest, JSON.stringify({ elements: resolved })]);
-  return officeResult(dest, 'docx');
+  return buildFileResult(dest, 'docx');
 }
 
 /**
@@ -135,7 +138,7 @@ export async function createDocx(
  * @param outName - Output filename/path (optional).
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the produced `.docx`.
- * @throws {PathPolicyError} If `ops` is malformed.
+ * @throws {ValidationError} If `ops` is malformed.
  */
 export async function editDocx(
   userPath: string,
@@ -144,26 +147,24 @@ export async function editDocx(
   overwrite = false
 ): Promise<FileResult> {
   if (!Array.isArray(ops)) {
-    throw new PathPolicyError('editDocx: ops must be an array');
+    throw new ValidationError('editDocx: ops must be an array');
   }
   for (let i = 0; i < ops.length; i++) {
-    const o = ops[i] as Partial<DocxOp> & { op?: string };
-    if (o.op === 'append') {
-      validateDocxElement((o as { element?: unknown }).element, `ops[${i}].element`);
-    } else if (o.op === 'replace_text') {
-      assertString((o as { find?: unknown }).find, `ops[${i}].find`);
-      if (typeof (o as { replace?: unknown }).replace !== 'string') {
-        throw new PathPolicyError(`ops[${i}].replace must be a string`);
+    const o = asObj(ops[i], `ops[${i}]`);
+    if (o['op'] === 'append') {
+      validateDocxElement(o['element'], `ops[${i}].element`);
+    } else if (o['op'] === 'replace_text') {
+      reqStr(o, 'find', `ops[${i}]`);
+      if (typeof o['replace'] !== 'string') {
+        throw new ValidationError(`ops[${i}].replace must be a string`);
       }
-    } else if (o.op === 'delete_paragraph') {
-      if (
-        !Number.isInteger((o as { index?: unknown }).index) ||
-        (o as { index: number }).index < 0
-      ) {
-        throw new PathPolicyError(`ops[${i}].index must be a non-negative integer`);
+    } else if (o['op'] === 'delete_paragraph') {
+      const index = o['index'];
+      if (!Number.isInteger(index) || (index as number) < 0) {
+        throw new ValidationError(`ops[${i}].index must be a non-negative integer`);
       }
     } else {
-      throw new PathPolicyError(`ops[${i}]: unknown op ${String(o.op)}`);
+      throw new ValidationError(`ops[${i}]: unknown op ${String(o['op'])}`);
     }
   }
   const src = await resolveInputFile(userPath);
@@ -180,7 +181,7 @@ export async function editDocx(
   );
   const dest = await resolveOutputPath(outName, `document-${Date.now()}.docx`, overwrite);
   await runPythonScript('docx_build.py', ['edit', src, dest, JSON.stringify(resolvedOps)]);
-  return officeResult(dest, 'docx');
+  return buildFileResult(dest, 'docx');
 }
 
 /**
@@ -189,15 +190,12 @@ export async function editDocx(
  * @param where - Path-in-spec label for error messages.
  */
 function validateXlsxChart(c: unknown, where: string): void {
-  if (typeof c !== 'object' || c === null) {
-    throw new PathPolicyError(`${where}: chart must be an object`);
+  const ch = asObj(c, `${where}: chart`);
+  if (!['bar', 'line', 'pie', 'scatter'].includes(String(ch['type']))) {
+    throw new ValidationError(`${where}.type must be one of bar|line|pie|scatter`);
   }
-  const ch = c as Partial<XlsxChart> & { type?: string };
-  if (!['bar', 'line', 'pie', 'scatter'].includes(String(ch.type))) {
-    throw new PathPolicyError(`${where}.type must be one of bar|line|pie|scatter`);
-  }
-  assertString((ch as { dataRange?: unknown }).dataRange, `${where}.dataRange`);
-  assertString((ch as { anchor?: unknown }).anchor, `${where}.anchor`);
+  reqStr(ch, 'dataRange', where);
+  reqStr(ch, 'anchor', where);
 }
 
 /**
@@ -206,26 +204,25 @@ function validateXlsxChart(c: unknown, where: string): void {
  * @param where - Path-in-spec label for error messages.
  */
 function validateXlsxSheet(s: unknown, where: string): void {
-  if (typeof s !== 'object' || s === null) {
-    throw new PathPolicyError(`${where}: sheet must be an object`);
+  const sh = asObj(s, `${where}: sheet`);
+  reqStr(sh, 'name', where);
+  const rows = sh['rows'];
+  if (!Array.isArray(rows) || rows.some((r) => !Array.isArray(r))) {
+    throw new ValidationError(`${where}.rows must be an array of arrays`);
   }
-  const sh = s as Partial<XlsxSheet>;
-  assertString(sh.name, `${where}.name`);
-  if (!Array.isArray(sh.rows) || sh.rows.some((r) => !Array.isArray(r))) {
-    throw new PathPolicyError(`${where}.rows must be an array of arrays`);
-  }
-  for (const r of sh.rows) {
-    for (const c of r as unknown[]) {
+  for (const r of rows as unknown[][]) {
+    for (const c of r) {
       if (c !== null && typeof c !== 'string' && typeof c !== 'number') {
-        throw new PathPolicyError(`${where}.rows cells must be string|number|null`);
+        throw new ValidationError(`${where}.rows cells must be string|number|null`);
       }
     }
   }
-  if (sh.charts !== undefined) {
-    if (!Array.isArray(sh.charts)) {
-      throw new PathPolicyError(`${where}.charts must be an array`);
+  const charts = sh['charts'];
+  if (charts !== undefined) {
+    if (!Array.isArray(charts)) {
+      throw new ValidationError(`${where}.charts must be an array`);
     }
-    sh.charts.forEach((c, i) => validateXlsxChart(c, `${where}.charts[${i}]`));
+    charts.forEach((c, i) => validateXlsxChart(c, `${where}.charts[${i}]`));
   }
 }
 
@@ -235,7 +232,7 @@ function validateXlsxSheet(s: unknown, where: string): void {
  * @param outName - Output filename/path (optional).
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the produced `.xlsx`.
- * @throws {PathPolicyError} If `spec` is malformed.
+ * @throws {ValidationError} If `spec` is malformed.
  */
 export async function createXlsx(
   spec: unknown,
@@ -248,14 +245,14 @@ export async function createXlsx(
     !Array.isArray((spec as XlsxSpec).sheets) ||
     (spec as XlsxSpec).sheets.length === 0
   ) {
-    throw new PathPolicyError(
+    throw new ValidationError(
       'createXlsx: spec must be { sheets: [{ name, rows, ... }, ...] } with at least one sheet'
     );
   }
   (spec as XlsxSpec).sheets.forEach((s, i) => validateXlsxSheet(s, `sheets[${i}]`));
   const dest = await resolveOutputPath(outName, `workbook-${Date.now()}.xlsx`, overwrite);
   await runPythonScript('xlsx_build.py', ['create', dest, JSON.stringify(spec)]);
-  return officeResult(dest, 'xlsx');
+  return buildFileResult(dest, 'xlsx');
 }
 
 /**
@@ -265,7 +262,7 @@ export async function createXlsx(
  * @param outName - Output filename/path (optional).
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the produced `.xlsx`.
- * @throws {PathPolicyError} If `ops` is malformed.
+ * @throws {ValidationError} If `ops` is malformed.
  */
 export async function editXlsx(
   userPath: string,
@@ -274,34 +271,35 @@ export async function editXlsx(
   overwrite = false
 ): Promise<FileResult> {
   if (!Array.isArray(ops)) {
-    throw new PathPolicyError('editXlsx: ops must be an array');
+    throw new ValidationError('editXlsx: ops must be an array');
   }
   for (let i = 0; i < ops.length; i++) {
-    const o = ops[i] as Partial<XlsxOp> & { op?: string };
-    if (o.op === 'set_cell') {
-      assertString((o as { sheet?: unknown }).sheet, `ops[${i}].sheet`);
-      assertString((o as { cell?: unknown }).cell, `ops[${i}].cell`);
-      const v = (o as { value?: unknown }).value;
+    const o = asObj(ops[i], `ops[${i}]`);
+    const w = `ops[${i}]`;
+    if (o['op'] === 'set_cell') {
+      reqStr(o, 'sheet', w);
+      reqStr(o, 'cell', w);
+      const v = o['value'];
       if (v !== null && typeof v !== 'string' && typeof v !== 'number') {
-        throw new PathPolicyError(`ops[${i}].value must be string|number|null`);
+        throw new ValidationError(`${w}.value must be string|number|null`);
       }
-    } else if (o.op === 'set_formula') {
-      assertString((o as { sheet?: unknown }).sheet, `ops[${i}].sheet`);
-      assertString((o as { cell?: unknown }).cell, `ops[${i}].cell`);
-      assertString((o as { formula?: unknown }).formula, `ops[${i}].formula`);
-    } else if (o.op === 'add_sheet') {
-      assertString((o as { name?: unknown }).name, `ops[${i}].name`);
-    } else if (o.op === 'add_chart') {
-      assertString((o as { sheet?: unknown }).sheet, `ops[${i}].sheet`);
-      validateXlsxChart((o as { chart?: unknown }).chart, `ops[${i}].chart`);
+    } else if (o['op'] === 'set_formula') {
+      reqStr(o, 'sheet', w);
+      reqStr(o, 'cell', w);
+      reqStr(o, 'formula', w);
+    } else if (o['op'] === 'add_sheet') {
+      reqStr(o, 'name', w);
+    } else if (o['op'] === 'add_chart') {
+      reqStr(o, 'sheet', w);
+      validateXlsxChart(o['chart'], `${w}.chart`);
     } else {
-      throw new PathPolicyError(`ops[${i}]: unknown op ${String(o.op)}`);
+      throw new ValidationError(`${w}: unknown op ${String(o['op'])}`);
     }
   }
   const src = await resolveInputFile(userPath);
   const dest = await resolveOutputPath(outName, `workbook-${Date.now()}.xlsx`, overwrite);
   await runPythonScript('xlsx_build.py', ['edit', src, dest, JSON.stringify(ops)]);
-  return officeResult(dest, 'xlsx');
+  return buildFileResult(dest, 'xlsx');
 }
 
 /**
@@ -310,24 +308,26 @@ export async function editXlsx(
  * @param where - Path-in-spec label for error messages.
  */
 function validatePptxChart(c: unknown, where: string): void {
-  if (typeof c !== 'object' || c === null) {
-    throw new PathPolicyError(`${where}: chart must be an object`);
+  const ch = asObj(c, `${where}: chart`);
+  if (!['column', 'line', 'pie', 'xy', 'bubble'].includes(String(ch['type']))) {
+    throw new ValidationError(`${where}.type must be one of column|line|pie|xy|bubble`);
   }
-  const ch = c as Partial<PptxChart> & { type?: string };
-  if (!['column', 'line', 'pie', 'xy', 'bubble'].includes(String(ch.type))) {
-    throw new PathPolicyError(`${where}.type must be one of column|line|pie|xy|bubble`);
+  const categories = ch['categories'];
+  if (!Array.isArray(categories) || categories.some((x) => typeof x !== 'string')) {
+    throw new ValidationError(`${where}.categories must be an array of strings`);
   }
-  if (!Array.isArray(ch.categories) || ch.categories.some((x) => typeof x !== 'string')) {
-    throw new PathPolicyError(`${where}.categories must be an array of strings`);
+  const series = ch['series'];
+  if (!Array.isArray(series) || series.length === 0) {
+    throw new ValidationError(`${where}.series must be a non-empty array`);
   }
-  if (!Array.isArray(ch.series) || ch.series.length === 0) {
-    throw new PathPolicyError(`${where}.series must be a non-empty array`);
-  }
-  for (let i = 0; i < ch.series.length; i++) {
-    const s = ch.series[i] as { name?: unknown; values?: unknown };
-    assertString(s.name, `${where}.series[${i}].name`);
-    if (!Array.isArray(s.values) || s.values.some((v) => typeof v !== 'number')) {
-      throw new PathPolicyError(`${where}.series[${i}].values must be an array of numbers`);
+  for (let i = 0; i < series.length; i++) {
+    const s = asObj(series[i], `${where}.series[${i}]`);
+    reqStr(s, 'name', `${where}.series[${i}]`);
+    if (
+      !Array.isArray(s['values']) ||
+      (s['values'] as unknown[]).some((v) => typeof v !== 'number')
+    ) {
+      throw new ValidationError(`${where}.series[${i}].values must be an array of numbers`);
     }
   }
 }
@@ -338,24 +338,22 @@ function validatePptxChart(c: unknown, where: string): void {
  * @param where - Path-in-spec label for error messages.
  */
 function validatePptxSlide(s: unknown, where: string): void {
-  if (typeof s !== 'object' || s === null) {
-    throw new PathPolicyError(`${where}: slide must be an object`);
+  const sl = asObj(s, `${where}: slide`);
+  if (sl['title'] !== undefined && typeof sl['title'] !== 'string') {
+    throw new ValidationError(`${where}.title must be a string`);
   }
-  const sl = s as Partial<PptxSlide>;
-  if (sl.title !== undefined && typeof sl.title !== 'string') {
-    throw new PathPolicyError(`${where}.title must be a string`);
-  }
+  const bullets = sl['bullets'];
   if (
-    sl.bullets !== undefined &&
-    (!Array.isArray(sl.bullets) || sl.bullets.some((b) => typeof b !== 'string'))
+    bullets !== undefined &&
+    (!Array.isArray(bullets) || bullets.some((b) => typeof b !== 'string'))
   ) {
-    throw new PathPolicyError(`${where}.bullets must be an array of strings`);
+    throw new ValidationError(`${where}.bullets must be an array of strings`);
   }
-  if (sl.image !== undefined) {
-    assertString((sl.image as { path?: unknown }).path, `${where}.image.path`);
+  if (sl['image'] !== undefined) {
+    reqStr(asObj(sl['image'], `${where}.image`), 'path', `${where}.image`);
   }
-  if (sl.chart !== undefined) {
-    validatePptxChart(sl.chart, `${where}.chart`);
+  if (sl['chart'] !== undefined) {
+    validatePptxChart(sl['chart'], `${where}.chart`);
   }
 }
 
@@ -377,7 +375,7 @@ async function resolveSlideImages(slides: PptxSlide[]): Promise<PptxSlide[]> {
  * @param outName - Output filename/path (optional).
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the produced `.pptx`.
- * @throws {PathPolicyError} If `spec` is malformed.
+ * @throws {ValidationError} If `spec` is malformed.
  */
 export async function createPptx(
   spec: unknown,
@@ -390,7 +388,7 @@ export async function createPptx(
     !Array.isArray((spec as PptxSpec).slides) ||
     (spec as PptxSpec).slides.length === 0
   ) {
-    throw new PathPolicyError(
+    throw new ValidationError(
       'createPptx: spec must be { slides: Slide[] } with at least one slide'
     );
   }
@@ -398,7 +396,7 @@ export async function createPptx(
   const resolved = await resolveSlideImages((spec as PptxSpec).slides);
   const dest = await resolveOutputPath(outName, `presentation-${Date.now()}.pptx`, overwrite);
   await runPythonScript('pptx_build.py', ['create', dest, JSON.stringify({ slides: resolved })]);
-  return officeResult(dest, 'pptx');
+  return buildFileResult(dest, 'pptx');
 }
 
 /**
@@ -408,7 +406,7 @@ export async function createPptx(
  * @param outName - Output filename/path (optional).
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the produced `.pptx`.
- * @throws {PathPolicyError} If `ops` is malformed.
+ * @throws {ValidationError} If `ops` is malformed.
  */
 export async function editPptx(
   userPath: string,
@@ -417,29 +415,26 @@ export async function editPptx(
   overwrite = false
 ): Promise<FileResult> {
   if (!Array.isArray(ops)) {
-    throw new PathPolicyError('editPptx: ops must be an array');
+    throw new ValidationError('editPptx: ops must be an array');
   }
   for (let i = 0; i < ops.length; i++) {
-    const o = ops[i] as Partial<PptxOp> & { op?: string };
-    if (o.op === 'add_slide') {
-      validatePptxSlide((o as { slide?: unknown }).slide, `ops[${i}].slide`);
-    } else if (o.op === 'set_title') {
-      if (
-        !Number.isInteger((o as { index?: unknown }).index) ||
-        (o as { index: number }).index < 0
-      ) {
-        throw new PathPolicyError(`ops[${i}].index must be a non-negative integer`);
+    const o = asObj(ops[i], `ops[${i}]`);
+    const w = `ops[${i}]`;
+    if (o['op'] === 'add_slide') {
+      validatePptxSlide(o['slide'], `${w}.slide`);
+    } else if (o['op'] === 'set_title') {
+      const index = o['index'];
+      if (!Number.isInteger(index) || (index as number) < 0) {
+        throw new ValidationError(`${w}.index must be a non-negative integer`);
       }
-      assertString((o as { text?: unknown }).text, `ops[${i}].text`);
-    } else if (o.op === 'delete_slide') {
-      if (
-        !Number.isInteger((o as { index?: unknown }).index) ||
-        (o as { index: number }).index < 0
-      ) {
-        throw new PathPolicyError(`ops[${i}].index must be a non-negative integer`);
+      reqStr(o, 'text', w);
+    } else if (o['op'] === 'delete_slide') {
+      const index = o['index'];
+      if (!Number.isInteger(index) || (index as number) < 0) {
+        throw new ValidationError(`${w}.index must be a non-negative integer`);
       }
     } else {
-      throw new PathPolicyError(`ops[${i}]: unknown op ${String(o.op)}`);
+      throw new ValidationError(`${w}: unknown op ${String(o['op'])}`);
     }
   }
   const src = await resolveInputFile(userPath);
@@ -455,5 +450,5 @@ export async function editPptx(
   );
   const dest = await resolveOutputPath(outName, `presentation-${Date.now()}.pptx`, overwrite);
   await runPythonScript('pptx_build.py', ['edit', src, dest, JSON.stringify(resolvedOps)]);
-  return officeResult(dest, 'pptx');
+  return buildFileResult(dest, 'pptx');
 }

@@ -150,7 +150,7 @@ This is part of the decision, not an implementation detail:
 - The Playwright-bridge improvisation is no longer needed: "content → PDF in `/workspace`" is one `markdownToPdf`/`htmlToPdf` call, with no HTTP server in Claude's container, no private IP, no base64 through context.
 - Full Office/PDF handling — read, write, create, convert in both directions, manipulate, charts — in one worker, with a deterministic tool contract.
 - The malware-bearing parser runs in an isolated, token-free, egress-less container; a compromise is confined to `/workspace`.
-- Consistent with the nine existing workers — hub, discovery, `WORKER_*_URL`, `_meta` policy all apply unchanged.
+- Consistent with the existing built-in workers — hub, discovery, `WORKER_*_URL`, `_meta` policy all apply unchanged.
 
 **Negative.**
 

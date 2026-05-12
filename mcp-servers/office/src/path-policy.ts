@@ -12,17 +12,20 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { WORKSPACE_ROOT, OUTPUT_DIR, MAX_INPUT_BYTES } from './config.js';
 import { ignoreError } from './util.js';
+import { PathPolicyError } from './errors.js';
 
-/** Thrown when a path violates the policy (outside `/workspace`, symlinked component, oversize input, …). */
-export class PathPolicyError extends Error {
-  /**
-   * Construct a path-policy violation.
-   * @param message - Human-readable reason.
-   */
-  constructor(message: string) {
-    super(message);
-    this.name = 'PathPolicyError';
-  }
+export { PathPolicyError } from './errors.js';
+
+/**
+ * True if `err` means the path simply does not / cannot exist (`ENOENT`, or `ENOTDIR` when a
+ * prefix component is not a directory). Permission errors (`EACCES`/`EPERM`) are NOT included —
+ * those must propagate, since silently treating them as "absent" would defeat the symlink guard.
+ * @param err - The error thrown by an `lstat`/`lstatSync` call.
+ * @returns Whether `err` indicates the path does not / cannot exist.
+ */
+function isPathAbsent(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 /**
@@ -51,12 +54,17 @@ function assertNoSymlinkComponents(absPath: string): void {
   let cur = WORKSPACE_ROOT;
   for (const part of parts) {
     cur = path.join(cur, part);
-    let st: fs.Stats | undefined;
+    let st: fs.Stats;
     try {
       st = fs.lstatSync(cur);
-    } catch {
-      // Component does not exist yet — fine for an output path that has not been created.
-      return;
+    } catch (err) {
+      // ENOENT: this component (and everything below) does not exist yet — fine for an
+      // output path not yet created. Any other errno (EACCES, EPERM, EIO) must propagate:
+      // silently skipping the symlink walk on a permission error would defeat the guard.
+      if (isPathAbsent(err)) {
+        return;
+      }
+      throw err;
     }
     if (st.isSymbolicLink()) {
       throw new PathPolicyError(`Path component is a symlink, refused: ${part}`);
@@ -99,8 +107,12 @@ export async function resolveInputFile(userPath: string): Promise<string> {
   let st: fs.Stats;
   try {
     st = await fsp.lstat(abs);
-  } catch {
-    throw new PathPolicyError(`Input file not found: ${userPath}`);
+  } catch (err) {
+    if (isPathAbsent(err)) {
+      throw new PathPolicyError(`Input file not found: ${userPath}`);
+    }
+    const code = (err as NodeJS.ErrnoException).code ?? 'unknown error';
+    throw new PathPolicyError(`Cannot access input file (${code}): ${userPath}`);
   }
   if (!st.isFile()) {
     throw new PathPolicyError(`Input path is not a regular file: ${userPath}`);
@@ -134,7 +146,8 @@ export async function resolveOutputPath(
   let abs: string;
   if (!outName) {
     abs = path.join(OUTPUT_DIR, generatedBase);
-  } else if (outName.includes('/') || outName.includes(path.sep)) {
+  } else if (outName.includes('/')) {
+    // Container is Linux, so '/' is the only separator that can appear here.
     abs = resolveWithinWorkspace(outName);
   } else {
     if (outName.includes('\0')) {
@@ -142,7 +155,7 @@ export async function resolveOutputPath(
     }
     abs = path.join(OUTPUT_DIR, outName);
   }
-  // Re-validate the final path (covers the OUTPUT_DIR join cases too).
+  // A bare `outName` joined onto OUTPUT_DIR can still be unsafe (e.g. `..`); re-check.
   abs = resolveWithinWorkspace(abs);
   if (!overwrite) {
     try {
@@ -154,7 +167,11 @@ export async function resolveOutputPath(
       if (err instanceof PathPolicyError) {
         throw err;
       }
-      // ENOENT — good, the target is free.
+      // ENOENT: the target is free. Any other errno (EACCES, EPERM) must propagate
+      // rather than be mistaken for "free" — otherwise the later write fails opaquely.
+      if (!isPathAbsent(err)) {
+        throw err;
+      }
     }
   }
   await fsp.mkdir(path.dirname(abs), { recursive: true });
@@ -180,8 +197,10 @@ export async function atomicWrite(absPath: string, data: Buffer | string): Promi
 }
 
 /**
- * Atomically move an already-written source file (e.g. a tool's `/tmp` output) onto the validated destination.
- * Falls back to copy+unlink when `rename` crosses devices (`/tmp` is a tmpfs, `/workspace` is the host mount).
+ * Move an already-written source file (e.g. a tool's `/tmp` output) onto the validated
+ * destination: copy to a sibling `*.tmp-<uuid>`, `rename` over the target, then delete the
+ * source. Uses copy+rename rather than a direct `rename` because the source (under `/tmp`
+ * tmpfs) and the destination (under the `/workspace` host mount) are always on different devices.
  * @param srcAbs - Absolute path of the source file (typically under `/tmp`).
  * @param destAbs - Canonical absolute destination under `/workspace` (already validated).
  */

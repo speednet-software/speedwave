@@ -85,6 +85,22 @@ describe('readDocumentToMarkdown — spreadsheets (SheetJS)', () => {
     expect(r.truncated).toBe(true);
     expect(r.content.length).toBe(5);
   });
+
+  it('reads a .csv via SheetJS too', async () => {
+    fileBytes['/workspace/d.csv'] = Buffer.from('a,b\n1,2\n');
+    const r = await readDocumentToMarkdown('d.csv');
+    expect(r.engine).toBe('sheetjs');
+    expect(r.content).toContain('| a | b |');
+    expect(r.content).toContain('| 1 | 2 |');
+    expect(runOk).not.toHaveBeenCalled();
+  });
+
+  it('escapes a backslash before a pipe (literal `\\|` round-trips as `\\\\\\|`)', async () => {
+    fileBytes['/workspace/bs.csv'] = Buffer.from('"a\\|b"\n');
+    const r = await readDocumentToMarkdown('bs.csv');
+    // `\|` in the cell → `\\` (escaped backslash) then `\|` (escaped pipe) → `\\\|`.
+    expect(r.content).toContain('| a\\\\\\|b |');
+  });
 });
 
 describe('readDocumentToMarkdown — markitdown chain', () => {
