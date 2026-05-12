@@ -10,8 +10,8 @@ Accepted
 
 The heavy images amplify the cost:
 
-- `speedwave-mcp-playwright` ~2.5 GB (Chromium)[^1]
-- the upcoming `speedwave-mcp-office` ~700 MB–1 GB (Debian + LibreOffice + Python venv: markitdown / weasyprint / pdfminer / onnxruntime / pandas / …)
+- `speedwave-mcp-playwright` is the biggest built-in image because it ships Chromium and its system dependencies.[^1]
+- the upcoming `speedwave-mcp-office` adds Debian + LibreOffice + a Python venv (markitdown / weasyprint / pdfminer / onnxruntime / pandas / …) on top.
 - plugin `presale` and similar ML plugins multiple GB (docling, embeddings)
 
 Effects on the user:
@@ -65,7 +65,7 @@ Build only the images that the user actually needs:
 
 ---
 
-[^1]: [Microsoft Playwright Docker image size — Chromium dependencies](https://playwright.dev/docs/docker)
+[^1]: [Playwright Docker images — Chromium + system dependencies](https://playwright.dev/docs/docker)
 
 [^2]: [docs/adr/ADR-030-bundle-reconcile-after-app-update.md](ADR-030-bundle-reconcile-after-app-update.md)
 

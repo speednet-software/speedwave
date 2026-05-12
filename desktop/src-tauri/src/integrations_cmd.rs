@@ -1055,7 +1055,8 @@ pub async fn restart_integration_containers(
             ));
         }
 
-        // Drop worker images that no project enables anymore (warn-only).
+        // Drop worker images this project no longer enables (ADR-055 per-project
+        // scope; other projects rebuild lazily on switch). Warn-only.
         prune_unused_worker_images(&*rt, &project);
 
         Ok(())

@@ -49,7 +49,10 @@ export class ProjectStateService {
   restarting = false;
   restartError = '';
 
-  /** Service just toggled on; forwarded to backend for rollback on build fail. */
+  /**
+   * Service just toggled on, forwarded to backend for rollback on build fail.
+   * Tracks the most recent toggle only; rapid A→B enables overwrite to B.
+   */
   pendingJustEnabled: string | null = null;
 
   /**

@@ -105,9 +105,9 @@ pub fn enabled_images(integrations: &ResolvedIntegrationsConfig) -> Vec<&'static
         .collect()
 }
 
-/// `ImageDef` for a built-in MCP integration config key; `None` for non-worker
-/// keys (`claude` / `hub` / `os` / plugin IDs).
-pub fn image_for_service_key(config_key: &str) -> Option<&'static ImageDef> {
+/// `ImageDef` for a built-in MCP integration config key; test-only helper.
+#[cfg(test)]
+fn image_for_service_key(config_key: &str) -> Option<&'static ImageDef> {
     if config_key == "hub" {
         return None;
     }
@@ -463,9 +463,9 @@ pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) ->
     }
 }
 
-/// Force-removes worker tags `<current_bundle_id>` that are no longer in `keep`.
-/// Cleans zombie images left when the user disables an integration without
-/// bumping the bundle.
+/// Force-removes orphan tags for `current_bundle_id` — tags that exist in the
+/// runtime but are not in `keep`. Filtered through `image_exists` so a fresh
+/// setup that never built a worker doesn't spam `rmi: no such image` warnings.
 pub fn prune_orphan_current_bundle_images(
     runtime: &dyn ContainerRuntime,
     current_bundle_id: &str,
@@ -476,6 +476,7 @@ pub fn prune_orphan_current_bundle_images(
         .iter()
         .filter(|img| !keep_names.contains(img.name))
         .map(|img| image_ref(img.name, current_bundle_id))
+        .filter(|tag| runtime.image_exists(tag).unwrap_or(false))
         .collect();
     if stale.is_empty() {
         return Ok(());
