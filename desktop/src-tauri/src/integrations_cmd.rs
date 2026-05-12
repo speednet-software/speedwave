@@ -978,9 +978,13 @@ pub fn ensure_project_images_built(
         .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))
 }
 
-/// Removes worker images of the current bundle that no project enables anymore.
-/// Warn-only — failure to prune never blocks restart success.
-fn prune_unused_worker_images(rt: &dyn speedwave_runtime::runtime::ContainerRuntime) {
+/// Removes worker images that `project` no longer enables. Per-project scope
+/// (ADR-055): switching to a project that needs a pruned image triggers a
+/// lazy build. Warn-only — failure never blocks restart.
+fn prune_unused_worker_images(
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    project: &str,
+) {
     let user_config = match speedwave_runtime::config::load_user_config() {
         Ok(c) => c,
         Err(e) => {
@@ -988,8 +992,19 @@ fn prune_unused_worker_images(rt: &dyn speedwave_runtime::runtime::ContainerRunt
             return;
         }
     };
-    let union = crate::integrations_union::union_integrations(&user_config);
-    let keep = speedwave_runtime::build::enabled_images(&union);
+    let dir = match user_config.find_project(project) {
+        Some(p) => p.dir.clone(),
+        None => {
+            log::warn!("prune_unused_worker_images: project '{project}' not in config");
+            return;
+        }
+    };
+    let integrations = speedwave_runtime::config::resolve_integrations(
+        std::path::Path::new(&dir),
+        &user_config,
+        project,
+    );
+    let keep = speedwave_runtime::build::enabled_images(&integrations);
     let manifest = match speedwave_runtime::bundle::load_current_bundle_manifest() {
         Ok(m) => m,
         Err(e) => {
@@ -1089,7 +1104,7 @@ pub async fn restart_integration_containers(
         }
 
         // Drop worker images that no project enables anymore (warn-only).
-        prune_unused_worker_images(&*rt);
+        prune_unused_worker_images(&*rt, &project);
 
         Ok(())
     })

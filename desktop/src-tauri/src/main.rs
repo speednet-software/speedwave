@@ -22,7 +22,6 @@ mod history;
 mod http_util;
 mod ide_bridge;
 mod integrations_cmd;
-mod integrations_union;
 mod llm_cmd;
 mod log_file;
 mod logging_cmd;
