@@ -179,62 +179,59 @@ Three BATS files guard the release pipeline against silent failures (Issue #26).
 
 `host_exec` (ADR-054) is exercised at four levels in CI:
 
-- **Unit / integration (Rust + TS + Angular):** `host_exec::validate_host_exec_config` (43+ tests in `crates/speedwave-runtime/src/host_exec.rs`), the per-project process manager (`desktop/src-tauri/src/host_exec_process.rs` — 43 tests, incl. fd-3 confirm round-trip, two-projects two-ports, `(project, recipe, argv, cwd, config-hash)` session-cache, env-allowlist, login-shell PATH recovery, process-tree kill on Unix), the compose wiring (`compose.rs` — `WORKER_HOST_EXEC_URL` per project, `ENABLED_SERVICES` membership, the security-test exception), the Tauri settings commands (`host_exec_cmd.rs`), the TypeScript worker (`mcp-servers/host_exec/` — 110 vitest tests, 100% lines/funcs/statements, `c8` branch ≥ 90%), and the Angular Integrations card (`host-exec-config.component.spec.ts` — 44 tests covering the danger modal, the recipe editor, the per-call confirm prompt, every validation path).
+- **Unit / integration (Rust + TS + Angular):** `host_exec::validate_host_exec_config` (in `crates/speedwave-runtime/src/host_exec.rs`), the per-project process manager (`crates/speedwave-runtime/src/host_exec_process.rs` — two-projects two-ports, env-allowlist, login-shell PATH recovery, the chmod-600 file bookkeeping, stale-PID kill), the compose wiring (`compose.rs` — `WORKER_HOST_EXEC_URL` per project, `ENABLED_SERVICES` membership, the security-test exception), the Tauri settings commands (`host_exec_cmd.rs`), the CLI worker spawn (`crates/speedwave-cli/src/main.rs`), the TypeScript worker (`mcp-servers/host_exec/` — vitest, 100% lines/funcs/statements, `c8` branch ≥ 90% — incl. the process-tree `SIGKILL` on Unix, the per-stream output cap, the audit-log redaction), and the Angular Integrations card (`host-exec-config.component.spec.ts` — the danger modal that is the consent, the recipe editor, the docker-lifecycle warning, every validation path).
 - **CLI E2E (bats — `make test-e2e`):** `_tests/e2e/host-exec.bats` verifies the wire-format contract end-to-end through the real `speedwave` binary — a valid camelCase user config survives `speedwave check` unchanged; a `hostExec` block in repo `.speedwave.json` is silently ignored; a malformed user config does not panic the CLI.
-- **Desktop E2E (WebdriverIO — `make test-e2e-desktop`):** `desktop/e2e/specs/08-host-exec.spec.ts` drives the running Tauri app — the gated toggle / danger modal, the recipe-whitelist validation (shell-launcher / state-changing / meta-tool / reserved-env / `cwdSub` escape / duplicate-name rejection), the snake_case → camelCase round-trip through `host_exec_save_settings` / `host_exec_load_settings`, and the `host_exec_resolve_executable` `which`-style PATH probe.
+- **Desktop E2E (WebdriverIO — `make test-e2e-desktop`):** `desktop/e2e/specs/08-host-exec.spec.ts` drives the running Tauri app — the gated toggle / danger modal, the recipe-whitelist validation (shell-launcher / meta-tool / reserved-env / `cwdSub` escape / duplicate-name rejection), the snake_case → camelCase round-trip through `host_exec_save_settings` / `host_exec_load_settings`, and the `host_exec_resolve_executable` `which`-style PATH probe.
 - **Manual smoke (live Claude — see below):** the scenarios that require a real Anthropic API turn through the MCP hub and a live worker process.
 
 ### Live-Claude scenarios (not in CI)
 
-These verify Claude's view of `host_exec` — what comes back in a tool result, what happens when a confirmation is not answered, and that two projects do not cross-talk. They are NOT in `make test-e2e` / `test-e2e-desktop` because they require a real Anthropic API key (cost + flakiness). The non-Claude invariants they would assert are already covered by the unit/integration suite above; running them is a release-gate smoke, not a CI gate.
+These verify Claude's view of `host_exec` — what comes back in a tool result, that recipes run **without a prompt** (enabling Host Exec is the consent), and that two projects do not cross-talk. They are NOT in `make test-e2e` / `test-e2e-desktop` because they require a real Anthropic API key (cost + flakiness). The non-Claude invariants they would assert are already covered by the unit/integration suite above; running them is a release-gate smoke, not a CI gate. **Run them under both the Desktop app AND the `speedwave` CLI.**
 
 ```bash
 # Prereqs:  SPEEDWAVE_DATA_DIR=~/.speedwave-smoke ;  Anthropic OAuth or API key
 # already wired into Claude Code inside the container ;  Speedwave running
-# (Desktop or `speedwave` CLI).  Two projects added (A and B), each a Gradle
-# repo so `./gradlew` is available.
+# (Desktop, and separately the `speedwave` CLI).  Two projects added (A and B),
+# each a repo where Docker is available (or any toolchain).
 
-# Scenario (a) — happy-path round-trip
-#   In project A:  Integrations → Host Exec → enable → add
-#       { name: "test", exec: "./gradlew", args: ["test"], confirm: "session" }
-#   Ask Claude:  "Run the test recipe."  Expected:
-#     - A confirmation dialog appears with the exact argv and cwd.
-#     - Click "allow for this session" → Claude reports a structured result
-#       with status="exited", an exitCode (0 or 1 — both fine), the captured
-#       stdout / stderr, and durationMs.
-
-# Scenario (c) — confirm:ask, no reply → fail-closed
-#   With the same recipe set to confirm: "ask", ask Claude to run it AGAIN.
-#   When the per-call dialog appears, DO NOT click anything.  After ~120 s the
-#   worker's own guard fires and Claude reports a tool error "confirmation
-#   unavailable" — the command must NOT have started.  Verify by reading the
-#   host log:
-#       cat $SPEEDWAVE_DATA_DIR/host-exec/<project>/log
-#   has the reply-timeout entry but no spawn line for that call.
+# Scenario (a) — happy-path round-trip, NO prompt
+#   In project A:  Integrations → Host Exec → enable (confirm the danger
+#   modal) → add  { name: "docker_ps", exec: "docker", args: ["ps"] }.
+#   Ask Claude:  "Show the running docker containers."  Expected:
+#     - Claude does search_tools → execute_code({code:"return await
+#       host_exec.dockerPs()"}) — NO confirmation dialog appears (correct;
+#       there is no per-call confirmation).
+#     - Claude reports a structured result with status="exited", exitCode 0,
+#       the `docker ps` output in stdout, and durationMs.
+#   Then run the SAME thing via the CLI:  `speedwave` in project A's dir, ask
+#   Claude to run the docker_ps recipe — it works (the CLI spawned the worker
+#   before compose_up; the hub got WORKER_HOST_EXEC_URL).
 
 # Scenario (d) — exit ≠ 0 is a successful ToolResult, not a tool error
 #   Add a recipe that intentionally fails:
-#       { name: "fail_now", exec: "./gradlew",
-#         args: ["nonexistent-task"], confirm: "session" }
+#       { name: "fail_now", exec: "./gradlew", args: ["nonexistent-task"] }
 #   Ask Claude to run it.  Expected:  Claude reports a *successful* tool
-#   result with status="exited", exitCode=1, the Gradle error in stderr, and
-#   NO MCP tool error.  Tool errors are reserved for unknown recipe, regex
-#   fail, cwdSub escape, denied, confirmation-unavailable, and spawn_error.
+#   result with status="exited", exitCode=1, the error in stderr, and NO MCP
+#   tool error.  Tool errors are reserved for unknown recipe, regex fail,
+#   cwdSub escape, and spawn_error.
+
+# Audit log:  every run is recorded — confirm there is one line per recipe
+# call (recipe name, full argv, cwd, exitCode, status):
+#       cat $SPEEDWAVE_DATA_DIR/host-exec/<project>/log
 
 # Scenario (f) — two projects, two workers, no cross-talk
-#   In both project A and project B:  enable Host Exec + add a "test" recipe.
+#   In both project A and project B:  enable Host Exec + add a recipe.
 #   Confirm that
 #       $SPEEDWAVE_DATA_DIR/host-exec/<A>/{port,pid,auth-token}
 #       $SPEEDWAVE_DATA_DIR/host-exec/<B>/{port,pid,auth-token}
 #   each contain DIFFERENT values (`cat` each file).  Switch to project A in
-#   the Desktop UI, ask Claude to run host_exec.test() — the spawn line in
-#   A's log appears, NOT in B's.  Switch to B, ask Claude to run
-#   host_exec.test() — symmetric.  Throughout,
+#   the Desktop UI, ask Claude to run the recipe — the spawn line in A's log
+#   appears, NOT in B's.  Switch to B — symmetric.  Throughout,
 #       ps aux | grep 'host_exec/dist/index.js' | grep -v grep
 #   shows two distinct Node processes.
 ```
 
-The "definition of done" for a Host Exec release: all four CI levels green, plus a clean run of the four live-Claude scenarios above against the release build.
+The "definition of done" for a Host Exec release: all four CI levels green, plus a clean run of the live-Claude scenarios above against the release build, under both Desktop and the CLI.
 
 ## See Also
 

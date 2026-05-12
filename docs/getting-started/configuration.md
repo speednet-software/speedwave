@@ -42,8 +42,7 @@ The user-level config file stores project definitions, the active project, IDE s
             {
               "name": "gradle_test",
               "exec": "./gradlew",
-              "args": ["test"],
-              "confirm": "ask"
+              "args": ["test"]
             }
           ]
         }
@@ -83,7 +82,7 @@ When the selected provider is local (`ollama`, `lmstudio`, `llamacpp`) and a `ba
 
 ### `integrations.hostExec` — Host Exec whitelist
 
-`integrations.hostExec` configures **Host Exec** (`host_exec`) for the project — the per-project host-side worker that runs a user-defined whitelist of project-toolchain commands on the host machine. It is **user-config-only**: a `hostExec` block in the repo `.speedwave.json` is **ignored** (an executable command whitelist is a security-class field, like `claude.llm.provider`/`base_url`; see [ADR-054](../adr/ADR-054-host-exec-worker.md)). Edit it via **Service integrations → Host Exec** in the Desktop app — enabling it pops a blocking danger modal — or by hand in `~/.speedwave/config.json`.
+`integrations.hostExec` configures **Host Exec** (`host_exec`) for the project — the per-project host-side worker that runs a user-defined whitelist of project-toolchain commands on the host machine. It is **user-config-only**: a `hostExec` block in the repo `.speedwave.json` is **ignored** (an executable command whitelist is a security-class field, like `claude.llm.provider`/`base_url`; see [ADR-054](../adr/ADR-054-host-exec-worker.md)). Edit it via **Service integrations → Host Exec** in the Desktop app — enabling it pops a blocking danger modal, which **is the consent** (there is no per-call confirmation; Claude runs whitelisted recipes unattended, the audit log records every run) — or by hand in `~/.speedwave/config.json`.
 
 | Field      | Type | Meaning |
 | ---------- | ---- | ------- |
@@ -100,9 +99,10 @@ Each recipe object:
 | `cwdSub`   | `string` (optional) | Subdirectory to run in (monorepos) — relative, no `..`, no symlink escape. |
 | `params`   | array (optional) | `{ name, pattern, maxLen? }` — `name` snake_case unique; `pattern` a regex the supplied value must fully match; `maxLen` ≤ 65536. |
 | `env`      | object (optional) | Literal env vars for the recipe. Reserved names (`PATH`, `LD_*`, `NODE_OPTIONS`, …) rejected. **Don't put secrets here** — use a repo `.env`; the snapshot is `0600` and the host log redacts these values, but a `.env` is still the right place. |
-| `confirm`  | `"ask"` \| `"session"` \| `"always"` | When the per-call confirmation prompt shows. Default `"ask"`. `"always"` is rejected for recipes that look state-changing (DB clients; `docker compose up/down/exec/rm/prune`; migration tools). |
 
-The runtime serialises these objects camelCase (`cwdSub`, `maxLen`) in both `~/.speedwave/config.json` and the worker snapshot (`~/.speedwave/host-exec/<project>/config.json`). Invalid recipes are rejected by `host_exec::validate_host_exec_config` on save (the Desktop command surfaces a readable error). See [Integrations → Host Exec](../guides/integrations.md#host-exec) for the full guide and [Security Model → Host Exec](../architecture/security.md#host-exec--deliberate-scoped-weakening) for the threat analysis.
+There is no per-recipe `confirm` field — enabling Host Exec is the consent. (The Desktop add/edit dialog shows an amber warning when a recipe is a `docker`/`docker-compose`/`podman` lifecycle command or another state-changing one; it's a hint, not blocking.)
+
+The runtime serialises these objects camelCase (`cwdSub`, `maxLen`) in both `~/.speedwave/config.json` and the worker snapshot (`~/.speedwave/host-exec/<project>/config.json`); a stray `confirm` key from an older config is silently ignored. Invalid recipes are rejected by `host_exec::validate_host_exec_config` on save (the Desktop command surfaces a readable error). See [Integrations → Host Exec](../guides/integrations.md#host-exec) for the full guide and [Security Model → Host Exec](../architecture/security.md#host-exec--deliberate-scoped-weakening) for the threat analysis.
 
 ## Environment Variables
 
