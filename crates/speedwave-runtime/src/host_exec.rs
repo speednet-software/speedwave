@@ -139,20 +139,13 @@ fn is_token_name(name: &str) -> bool {
 /// option for such recipes).
 pub fn is_state_changing_recipe(recipe: &HostExecRecipe) -> bool {
     const DB_CLIENTS: &[&str] = &["psql", "mysql", "mysqlsh", "mongo", "mongosh", "sqlite3"];
-    const COMPOSE_LIFECYCLE: &[&str] = &["up", "down", "exec", "rm", "prune"];
     const MIGRATION_HINTS: &[&str] = &["migrat", "flyway", "liquibase"];
 
     let base = exec_basename_lower(&recipe.exec);
     if DB_CLIENTS.contains(&base.as_str()) {
         return true;
     }
-    let is_docker = base == "docker" || base == "docker-compose";
-    if is_docker
-        && recipe
-            .args
-            .iter()
-            .any(|a| COMPOSE_LIFECYCLE.contains(&a.to_ascii_lowercase().as_str()))
-    {
+    if is_container_lifecycle_recipe(recipe) {
         return true;
     }
     if recipe.args.iter().any(|a| {
@@ -162,6 +155,25 @@ pub fn is_state_changing_recipe(recipe: &HostExecRecipe) -> bool {
         return true;
     }
     false
+}
+
+/// True if `recipe` is a container-engine *lifecycle* command — `docker` /
+/// `docker-compose` / `podman` (`podman compose`) with `up` / `down` / `exec`
+/// / `rm` / `prune` in `args`. Such a recipe is `docker run` with arbitrary
+/// mounts/privileges from a compose file Claude can edit (`/workspace:rw`),
+/// i.e. effectively host root — so it gets stricter treatment than other
+/// state-changing recipes (`validate_host_exec_config` forces `confirm:"ask"`
+/// on it, not just bans `"always"`).
+pub fn is_container_lifecycle_recipe(recipe: &HostExecRecipe) -> bool {
+    const LIFECYCLE: &[&str] = &["up", "down", "exec", "rm", "prune"];
+    let base = exec_basename_lower(&recipe.exec);
+    if base != "docker" && base != "docker-compose" && base != "podman" {
+        return false;
+    }
+    recipe
+        .args
+        .iter()
+        .any(|a| LIFECYCLE.contains(&a.to_ascii_lowercase().as_str()))
 }
 
 /// Validates a per-project `host_exec` config (the `commands` whitelist plus
@@ -323,6 +335,22 @@ fn validate_recipe(recipe: &HostExecRecipe, name_re: &regex::Regex) -> anyhow::R
             "host_exec recipe '{}': confirm: \"always\" is not allowed for a state-changing \
              recipe (database client / `docker compose up|down|exec|rm|prune` / migration) — \
              the cost of an accidental run is too high; use \"ask\" or \"session\"",
+            recipe.name,
+        );
+    }
+    // A `docker`/`docker-compose`/`podman` lifecycle recipe must be `confirm: "ask"`
+    // — NOT `session`/`always`. Such a recipe is, by construction, `docker run`
+    // with whatever mounts/privileges the compose file (which Claude can edit via
+    // `/workspace:rw`) declares — effectively host root. `confirm:session` would
+    // let Claude re-run it silently after one approval with a rewritten compose
+    // file. So it must re-prompt every time. (See ADR-054 §Negative.)
+    if recipe.confirm != crate::config::HostExecConfirm::Ask && is_container_lifecycle_recipe(recipe)
+    {
+        anyhow::bail!(
+            "host_exec recipe '{}': a `docker`/`docker-compose`/`podman` lifecycle recipe \
+             (`up`/`down`/`exec`/`rm`/`prune`) must use confirm: \"ask\" — it can mount arbitrary \
+             host paths into a privileged container (effectively host root), and the compose file \
+             it runs is editable by Claude, so it must re-prompt on every invocation",
             recipe.name,
         );
     }
@@ -641,6 +669,10 @@ mod tests {
             "xargs",
             "find",
             "ssh",
+            // `busybox sh -c {x}` / `toybox sh -c {x}` is a shell.
+            "busybox",
+            "toybox",
+            "/bin/busybox",
         ] {
             let err = validate_host_exec_config(&cfg(vec![recipe("x", sh, &["-c", "{cmd}"])]))
                 .unwrap_err()
@@ -693,6 +725,11 @@ mod tests {
             ("npx", "{x}"),
             ("yarn", "{x}"),
             ("/usr/bin/node", "{x}"),
+            // `awk '{prog}'` runs an arbitrary AWK program (with `system()`).
+            ("awk", "{prog}"),
+            ("gawk", "{prog}"),
+            ("mawk", "{prog}"),
+            ("nawk", "{prog}"),
         ] {
             let mut r = recipe("x", exec, &[arg]);
             r.params = Some(vec![HostExecParam {
@@ -956,6 +993,56 @@ mod tests {
         let mut r = recipe("mig2", "./mvnw", &["liquibase:update"]);
         r.confirm = HostExecConfirm::Always;
         assert!(validate_host_exec_config(&cfg(vec![r])).is_err());
+    }
+
+    #[test]
+    fn container_lifecycle_recipe_must_be_confirm_ask() {
+        // `docker`/`docker-compose`/`podman` + a lifecycle verb ⇒ confirm must
+        // be "ask" (not session/always) — it's `docker run` with mounts/privs
+        // from a Claude-editable compose file (≈ host root); must re-prompt.
+        for (exec, args) in [
+            ("docker", &["compose", "up", "-d"][..]),
+            ("docker-compose", &["down"][..]),
+            ("podman", &["compose", "up"][..]),
+            ("/usr/bin/docker", &["compose", "exec", "db", "sh"][..]),
+            ("docker", &["compose", "rm", "-f"][..]),
+            ("docker", &["system", "prune"][..]),
+        ] {
+            let mut r = recipe("c", exec, args);
+            r.confirm = HostExecConfirm::Session;
+            assert!(
+                validate_host_exec_config(&cfg(vec![r.clone()])).is_err(),
+                "{exec} {args:?} with confirm:session must be rejected"
+            );
+            r.confirm = HostExecConfirm::Always;
+            assert!(
+                validate_host_exec_config(&cfg(vec![r.clone()])).is_err(),
+                "{exec} {args:?} with confirm:always must be rejected"
+            );
+            r.confirm = HostExecConfirm::Ask;
+            validate_host_exec_config(&cfg(vec![r])).unwrap_or_else(|e| {
+                panic!("{exec} {args:?} with confirm:ask must be allowed; got: {e}")
+            });
+        }
+        // Non-lifecycle docker (`ps`, `build`, `logs`) is unaffected — session OK.
+        for args in [
+            &["compose", "ps"][..],
+            &["build", "-t", "x", "."][..],
+            &["compose", "logs"][..],
+        ] {
+            let mut r = recipe("c", "docker", args);
+            r.confirm = HostExecConfirm::Session;
+            validate_host_exec_config(&cfg(vec![r.clone()])).unwrap_or_else(|e| {
+                panic!("docker {args:?} confirm:session should be allowed; got: {e}")
+            });
+            // ...but `build` IS state-changing-ish? no — only lifecycle verbs;
+            // `build` isn't on the list, so `always` is also fine here.
+            r.confirm = HostExecConfirm::Always;
+            // `compose logs`/`compose ps`/`build` are not state-changing either.
+            validate_host_exec_config(&cfg(vec![r])).unwrap_or_else(|e| {
+                panic!("docker {args:?} confirm:always should be allowed; got: {e}")
+            });
+        }
     }
 
     #[test]

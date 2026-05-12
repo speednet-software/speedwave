@@ -78,33 +78,30 @@ const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[
     "PROGRAMDATA",
 ];
 
-/// The confirmation-cache key. A bare recipe name would be wrong: `allow-session`
-/// for one `argv`/`cwd` must not authorise a *different* `argv`, and an edited
-/// recipe must re-prompt — so the key folds in the resolved `argv`, the working
-/// directory label, and a hash of the recipe's serialized config (ADR-054
-/// §Confirmation flow).
+/// The confirmation-cache key (ADR-054 §Confirmation flow). `argv` is the
+/// resolved `Vec<String>` itself — NOT a delimited join: a join isn't
+/// injective over Claude-supplied param values (a value can contain the
+/// separator byte; the param regex may admit control chars incl. U+001F), so
+/// two distinct argv could collide and the second invocation would auto-allow
+/// off the first's session entry — a `confirm:session` bypass.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ConfirmCacheKey {
     /// Project the worker belongs to.
     pub project: String,
     /// Recipe name (as Claude called it).
     pub recipe_name: String,
-    /// The fully-resolved argv joined with `\u{1f}` (a separator that cannot
-    /// appear in an argv element — argv elements with NUL/newline are rejected
-    /// at config-validation time, and U+001F is reserved likewise). Joining
-    /// rather than keeping a `Vec` lets the key derive `Hash`/`Eq` trivially.
-    pub argv_joined: String,
+    /// The fully-resolved argv (`exec` first, then args with params substituted).
+    pub argv: Vec<String>,
     /// The working-directory label (`"."` or the `cwdSub`).
     pub cwd_label: String,
     /// Hex SHA-256 of the recipe's serialized JSON in the *current* config
     /// snapshot — so editing the recipe invalidates its cache entry. Empty
-    /// string when the recipe is no longer in the snapshot (in which case the
-    /// reader thread fails closed anyway).
+    /// string when the recipe is no longer in the snapshot.
     pub recipe_config_hash: String,
 }
 
 impl ConfirmCacheKey {
-    /// Builds the key. `argv` is joined with U+001F (unit separator).
+    /// Builds the key from the resolved argv (kept verbatim — see the type doc).
     fn new(
         project: &str,
         recipe_name: &str,
@@ -115,7 +112,7 @@ impl ConfirmCacheKey {
         Self {
             project: project.to_string(),
             recipe_name: recipe_name.to_string(),
-            argv_joined: argv.join("\u{1f}"),
+            argv: argv.to_vec(),
             cwd_label: cwd_label.to_string(),
             recipe_config_hash: recipe_config_hash.to_string(),
         }
@@ -323,6 +320,9 @@ impl HostExecProcess {
 
         // Keep the audit log bounded (the worker appends to it indefinitely).
         crate::log_file::truncate_if_oversized(&log_path, LOG_MAX_BYTES);
+        // Pre-create it chmod 600 so the worker's `appendFile` (audit.ts)
+        // opens an already-restricted file instead of creating it `0644`.
+        let _ = crate::log_file::open_log_file(&log_path);
 
         // Bearer token — chmod 600.
         write_restricted_file(&token_path, &token)?;
@@ -1104,22 +1104,17 @@ fn drain_and_read_port(
 
 // ---------------------------------------------------------------------------
 // Restricted file write (chmod 600 / icacls) — same shape as mcp_os_process.
-// (This is the third occurrence of the pattern; extracting it to a shared
-// `speedwave_runtime` helper is tracked as a follow-up so the icacls/chmod
-// drift between copies can't reappear — see the PR #645 review.)
+// Third copy of this pattern; extracting it to a shared `speedwave_runtime`
+// helper (which would also close the Windows TOCTOU window below) is a
+// tracked follow-up — see the PR #645 review.
 // ---------------------------------------------------------------------------
 
-/// Write `content` to `path` with `chmod 600` on Unix (current-user-only ACL
-/// via `icacls` on Windows). The token / port / PID / config-snapshot files all
-/// use this — the config snapshot in particular may contain recipe `env` values
-/// (possibly secrets), so it must not be world-readable (ADR-054).
-///
-/// **Windows TOCTOU window (known limitation, shared with `mcp_os_process`):**
-/// the Windows path writes the file first, then tightens the ACL with `icacls`,
-/// so on a multi-user box the content is briefly readable by other users. The
-/// Unix path has no gap (it `OpenOptions::mode(0o600)` at creation). Fixing
-/// this (write to a temp file + `rename`, or pre-create with a restricted ACL)
-/// is tracked as a follow-up alongside the `fs_util` extraction.
+/// Write `content` to `path` chmod 600 (current-user-only ACL via `icacls` on
+/// Windows). Used for the token / port / PID / config-snapshot files — the
+/// snapshot may hold recipe `env` values (possibly secrets), so it must not be
+/// world-readable (ADR-054). Windows known limitation: writes the file then
+/// tightens the ACL, so the content is briefly readable by other users on a
+/// multi-user box; the Unix path opens with `mode(0o600)` at creation.
 fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
     if path.is_dir() {
         log::warn!(
@@ -1142,7 +1137,7 @@ fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
     }
     #[cfg(windows)]
     {
-        // TOCTOU window — see the doc comment above.
+        // TOCTOU window — see the doc comment.
         std::fs::write(path, content)?;
         let status = speedwave_runtime::binary::system_command("icacls")
             .args([
@@ -1378,6 +1373,43 @@ setTimeout(() => {}, 60000);
             ConfirmDecision::AskFrontend,
             "an allow-session for one argv must not authorise a different argv"
         );
+    }
+
+    #[test]
+    fn confirm_cache_key_is_injective_over_control_chars_in_argv_elements() {
+        // The key must NOT be a delimited join: a Claude-supplied parameter
+        // value can contain any byte a permissive regex (e.g. `^.*$`) admits —
+        // including the U+001F "unit separator". With two adjacent `{param}`
+        // tokens, `R(a="p", b="q\u{1f}r")` and `R(a="p\u{1f}q", b="r")` would
+        // collapse to the same `"exec\u{1f}p\u{1f}q\u{1f}r"` under any join,
+        // and the second one would auto-allow off the first one's session
+        // cache entry — a confirm:session bypass of the per-invocation
+        // confirmation that is the primary prompt-injection mitigation.
+        let approved = key("p", "r", &["exec", "p", "q\u{1f}r"], ".", "h");
+        let evil = key("p", "r", &["exec", "p\u{1f}q", "r"], ".", "h");
+        assert_ne!(
+            approved, evil,
+            "argv with a U+001F inside an element must not collide with a different argv"
+        );
+        let mut warm = HashSet::new();
+        warm.insert(approved.clone());
+        assert_eq!(
+            decide_confirmation(HostExecConfirm::Session, &approved, &warm),
+            ConfirmDecision::AutoAllow
+        );
+        assert_eq!(
+            decide_confirmation(HostExecConfirm::Session, &evil, &warm),
+            ConfirmDecision::AskFrontend,
+            "an allow-session for one argv must not authorise a control-char-shifted argv"
+        );
+        // Same property for NUL and newline (also bytes a `.*` regex won't
+        // contain, but `[\\s\\S]*` would for NUL).
+        let n1 = key("p", "r", &["exec", "p", "q\nr"], ".", "h");
+        let n2 = key("p", "r", &["exec", "p\nq", "r"], ".", "h");
+        assert_ne!(n1, n2);
+        let z1 = key("p", "r", &["exec", "p", "q\0r"], ".", "h");
+        let z2 = key("p", "r", &["exec", "p\0q", "r"], ".", "h");
+        assert_ne!(z1, z2);
     }
 
     #[test]

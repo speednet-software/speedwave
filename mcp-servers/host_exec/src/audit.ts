@@ -1,22 +1,40 @@
 /**
- * Per-project audit log for `host_exec` (ADR-054). Every recipe invocation is
- * appended to `HOST_EXEC_LOG_FILE` (a path the Tauri side sets, under
- * `<data_dir>/host-exec/<project>/log`) with the recipe name, the **full
- * resolved argv**, the working directory, exit code/status/duration, and the
- * confirmation decision — but with the recipe's `env` *values* redacted (keys
- * only). The ToolResult Claude sees carries only the recipe name; the full argv
- * stays here so an operator can audit after an incident. The Tauri side surfaces
- * this file in the diagnostics / system-health views.
- *
- * If the log file path is not set or the append fails, the worker logs the
- * failure to stderr and carries on — auditing is best-effort and must not block
- * a recipe.
+ * Per-project audit log for `host_exec` (ADR-054). Each recipe invocation is
+ * appended to `HOST_EXEC_LOG_FILE` (`<data_dir>/host-exec/<project>/log` — the
+ * Tauri side pre-creates it `0600`; we re-assert `mode` here in case it
+ * doesn't exist) with the recipe name, the **full resolved argv**, the cwd,
+ * exit/status/duration, and the confirmation decision. Recipe `env` *values*
+ * are redacted (keys only) — but the argv is logged verbatim, so a recipe
+ * that substitutes a `{param}` token records whatever value Claude supplied
+ * (which may be sensitive). Best-effort: a missing path or failed append goes
+ * to stderr and execution continues.
  * @module host_exec/audit
  */
 
-import { appendFile } from 'node:fs/promises';
+import { appendFile, stat, readFile, writeFile } from 'node:fs/promises';
 import { ts } from '@speedwave/mcp-shared';
+import { LOG_MAX_BYTES } from './constants.js';
 import type { HostExecRecipe, HostExecResult } from './types.js';
+
+/**
+ * If the log exceeds {@link LOG_MAX_BYTES}, rewrite it keeping the last ~half
+ * (line-aligned) — so a long-lived worker doesn't grow the log unbounded
+ * between respawns. Best-effort; any error is ignored (the append still runs).
+ * @param logPath - Path to the audit log file.
+ */
+async function truncateLogIfOversized(logPath: string): Promise<void> {
+  try {
+    const size = (await stat(logPath)).size;
+    if (size <= LOG_MAX_BYTES) return;
+    const content = await readFile(logPath, 'utf-8');
+    const keepFrom = Math.floor(content.length / 2);
+    const nl = content.indexOf('\n', keepFrom);
+    const tail = nl >= 0 ? content.slice(nl + 1) : content.slice(keepFrom);
+    await writeFile(logPath, tail, { encoding: 'utf-8', mode: 0o600 });
+  } catch {
+    /* best-effort */
+  }
+}
 
 /**
  * Append one audit-log line for a completed (or failed-to-start) recipe call.
@@ -55,7 +73,10 @@ export async function auditRecipeCall(
     return;
   }
   try {
-    await appendFile(logPath, line, 'utf-8');
+    await truncateLogIfOversized(logPath);
+    // `mode` only applies if the file is being created — the Tauri side
+    // normally pre-creates it 0600, but if it didn't, don't create it 0644.
+    await appendFile(logPath, line, { encoding: 'utf-8', mode: 0o600 });
   } catch (e) {
     console.error(
       `${ts()} host_exec: failed to append to audit log ${logPath}: ${e instanceof Error ? e.message : String(e)}`

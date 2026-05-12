@@ -127,6 +127,18 @@ interface RecipeDraft {
           asks before it runs.
         </p>
 
+        @if (isWindows) {
+          <div
+            class="mono mx-4 mb-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[11.5px] text-amber-300"
+            data-testid="host-exec-windows-unavailable"
+            role="status"
+          >
+            Host Exec is not yet available on Windows — the per-recipe confirmation channel isn't
+            wired here, so recipes fail closed ("confirmation unavailable"). You can configure
+            recipes, but they won't run until this lands.
+          </div>
+        }
+
         @if (error) {
           <div
             class="mono mx-4 mb-3 rounded border border-red-500/30 bg-red-500/5 p-2 text-[11.5px] text-red-300"
@@ -683,6 +695,11 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
   // ---- state -------------------------------------------------------------
   /** Whether host_exec is enabled for the active project. */
   enabled = false;
+  /**
+   * True on Windows, where the fd-3 confirm channel isn't wired — recipes
+   * fail closed there, so the UI shows a banner saying so.
+   */
+  isWindows = false;
   /** The persisted whitelist (last loaded/saved). */
   private persisted: HostExecCommand[] = [];
   /** The working copy edited in the UI; saved via `host_exec_save_settings`. */
@@ -761,6 +778,15 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
   /** Loads status, subscribes to confirm requests, reloads on project change. */
   async ngOnInit(): Promise<void> {
     this.project = this.projectState.activeProject;
+    this.tauri
+      .invoke<string>('get_platform')
+      .then((p) => {
+        this.isWindows = p === 'windows';
+        this.cdr.markForCheck();
+      })
+      .catch(() => {
+        /* non-fatal — the Windows banner just won't show */
+      });
     await this.load();
     this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       this.project = this.projectState.activeProject;
@@ -1192,7 +1218,7 @@ export class HostExecConfigComponent implements OnInit, OnDestroy {
     if (HOST_EXEC_SHELL_LAUNCHERS.includes(execBase)) {
       return `"${execBase}" is a shell / eval launcher and is not allowed — it would let Claude run arbitrary commands. Point Host Exec at the actual tool.`;
     }
-    const args = d.args.map((a) => a).filter((a) => a.length > 0 || true); // keep blanks → caught below
+    const args = d.args;
     for (const a of args) {
       if (a === '') return 'Arguments must not be empty — remove the blank row.';
       if (a.includes('\0') || a.includes('\n'))

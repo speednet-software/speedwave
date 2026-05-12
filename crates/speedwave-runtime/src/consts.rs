@@ -103,9 +103,13 @@ pub const HOST_EXEC_PARAM_PATTERN_MAX_LEN: usize = 4096;
 /// (the "parameterised meta-invocation" rule in `host_exec::validate_*`).
 ///
 /// Compared case-insensitively, on the `exec` path's basename. SSOT —
-/// referenced from `host_exec::validate_host_exec_config()`.
+/// referenced from `host_exec::validate_host_exec_config()`. NOT exhaustive: it
+/// bans these *names*; a renamed interpreter, or another shell-equivalent tool
+/// not listed, is the recipe author's risk (see ADR-054 §Negative).
+/// `busybox`/`toybox` are here because `busybox sh -c {x}` is a shell.
 pub const HOST_EXEC_SHELL_LAUNCHERS: &[&str] = &[
     "bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "env", "xargs", "find", "ssh", "sshpass",
+    "busybox", "toybox",
 ];
 
 /// `exec` basenames that are meta-tools (interpreters / package-script
@@ -113,9 +117,12 @@ pub const HOST_EXEC_SHELL_LAUNCHERS: &[&str] = &[
 /// `args` contains a *bare parameter token* (the whole element is `{param}`)
 /// is rejected — that is "run whatever Claude types" through a meta-tool.
 /// Compared case-insensitively, on the `exec` path's basename. SSOT —
-/// referenced from `host_exec::validate_host_exec_config()`.
+/// referenced from `host_exec::validate_host_exec_config()`. Like the launcher
+/// list, NOT exhaustive (`awk '{prog}'` is caught; `sed -e '{prog}'` /
+/// `git -c core.pager={x}` are not bare-param shapes — see ADR-054 §Negative).
 pub const HOST_EXEC_META_TOOLS: &[&str] = &[
     "node", "deno", "python", "python3", "perl", "ruby", "make", "npm", "npx", "pnpm", "yarn",
+    "awk", "gawk", "mawk", "nawk",
 ];
 
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";

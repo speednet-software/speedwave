@@ -48,6 +48,14 @@ export const MAX_OUTPUT_LINES = 2000;
 export const PARAM_MAX_LEN = 65536;
 
 /**
+ * Audit-log size ceiling (bytes). When the worker's append would push the log
+ * past this, it truncates to the last ~half first, so a long-lived worker
+ * doesn't grow the log unbounded between respawns. Matches the Tauri side's
+ * `LOG_MAX_BYTES` (2 MiB), which truncates at spawn.
+ */
+export const LOG_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
  * Read a non-negative integer from an env var, falling back to `fallback` if
  * unset, empty, or not a valid non-negative integer. Exported for testing.
  * @param name - Environment variable name.

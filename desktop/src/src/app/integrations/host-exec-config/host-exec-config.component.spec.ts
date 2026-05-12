@@ -101,6 +101,22 @@ describe('HostExecConfigComponent', () => {
     ).toBe(true);
   });
 
+  it('does NOT show the Windows-unavailable banner on a non-Windows platform', async () => {
+    // The default invoke mock returns undefined for `get_platform` → not Windows.
+    await init();
+    expect(component.isWindows).toBe(false);
+    expect(q('[data-testid="host-exec-windows-unavailable"]')).toBeNull();
+  });
+
+  it('shows the Windows-unavailable banner when get_platform === "windows"', async () => {
+    responses['get_platform'] = 'windows';
+    await init();
+    expect(component.isWindows).toBe(true);
+    const banner = q('[data-testid="host-exec-windows-unavailable"]');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('not yet available on Windows');
+  });
+
   it('shows the recipe editor and the whitelist when enabled', async () => {
     await init(makeStatus({ enabled: true, commands: [testRecipe()] }));
     expect(q('[data-testid="host-exec-badge"]')?.textContent).toContain('enabled');

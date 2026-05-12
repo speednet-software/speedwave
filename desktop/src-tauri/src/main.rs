@@ -1086,17 +1086,11 @@ pub(crate) fn ensure_host_exec_running(
     }
 }
 
-/// Write the `host_exec` config snapshot JSON to `path` with `chmod 600`
-/// (current-user-only ACL on Windows). The snapshot may contain recipe `env`
-/// values (possibly secrets) — ADR-054.
-///
-/// **Windows TOCTOU window (known limitation):** the Windows path writes the
-/// file then tightens the ACL with `icacls`, so the content is briefly
-/// readable by other users on a multi-user box. Same gap as
-/// `host_exec_process::write_restricted_file` / `mcp_os_process`; the fix
-/// (temp file + `rename`, or pre-create with a restricted ACL) is tracked as a
-/// follow-up alongside extracting this trio into a shared `fs_util` helper —
-/// see the PR #645 review.
+/// Write the `host_exec` config snapshot JSON to `path` chmod 600
+/// (current-user-only ACL on Windows). The snapshot may hold recipe `env`
+/// values (possibly secrets) — ADR-054. Same Windows TOCTOU caveat as
+/// `host_exec_process::write_restricted_file`; extracting this trio into a
+/// shared `fs_util` helper is a tracked follow-up.
 pub(crate) fn write_host_exec_config_snapshot(
     path: &std::path::Path,
     snapshot: &serde_json::Value,
