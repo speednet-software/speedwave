@@ -1,4 +1,4 @@
-# ADR-055: Beta Features Toggle in the Tray Menu
+# ADR-054: Beta Features Toggle in the Tray Menu
 
 **Status:** Accepted
 

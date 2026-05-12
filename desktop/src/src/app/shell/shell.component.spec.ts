@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
+import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
@@ -12,8 +14,12 @@ describe('ShellComponent', () => {
   let fixture: ComponentFixture<ShellComponent>;
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
+  // Stub the root BetaService so specs control beta state directly; default
+  // "on" so the meeting-transcription nav entry behaves as before.
+  const betaEnabled = signal(true);
 
   beforeEach(async () => {
+    betaEnabled.set(true);
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_projects')
@@ -24,9 +30,6 @@ describe('ShellComponent', () => {
       if (cmd === 'start_containers') return undefined;
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, oauth_authenticated: true };
-      // Default these specs to "beta on" so the meeting-transcription nav
-      // entry behaves as before; a dedicated test below flips it off.
-      if (cmd === 'get_beta_enabled') return true;
       return undefined;
     };
 
@@ -41,7 +44,10 @@ describe('ShellComponent', () => {
           { path: 'logs', component: ShellComponent },
         ]),
       ],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ShellComponent);
@@ -286,21 +292,11 @@ describe('ShellComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="nav-chat"]')).not.toBeNull();
   });
 
-  it('hides the meeting-transcription nav entry when beta is disabled', async () => {
-    // Re-create the component with a Tauri mock that reports beta off.
-    mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_beta_enabled') return false;
-      if (cmd === 'list_projects')
-        return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-      if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
-      return undefined;
-    };
-    const f = TestBed.createComponent(ShellComponent);
-    await f.componentInstance.ngOnInit();
-    await f.whenStable();
-    f.detectChanges();
+  it('hides the meeting-transcription nav entry when beta is disabled', () => {
+    betaEnabled.set(false);
+    fixture.detectChanges();
 
-    const nav = f.nativeElement.querySelector('[data-testid="nav-rail"]');
+    const nav = fixture.nativeElement.querySelector('[data-testid="nav-rail"]');
     const ids = Array.from(nav.querySelectorAll('a[data-testid^="nav-"]')).map((a) =>
       (a as HTMLAnchorElement).getAttribute('data-testid')
     );

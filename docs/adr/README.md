@@ -60,10 +60,10 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-051](ADR-051-plugin-signature-runtime-verification.md)            | Plugin Signature as a Runtime Invariant                                    | Accepted              |
 | [ADR-052](ADR-052-anthropic-oauth-login-flow.md)                       | Claude Code Login Surface + Clipboard Bridge                               | Accepted              |
 | [ADR-053](ADR-053-worker-implementation-own-vs-wrap-official-mcp.md)   | Worker Implementation — Own Thin Worker vs Wrapping an Official MCP Server | Accepted              |
-| [ADR-055](ADR-055-beta-features-toggle.md)                             | Beta Features Toggle in the Tray Menu                                      | Accepted              |
+| [ADR-054](ADR-054-beta-features-toggle.md)                             | Beta Features Toggle in the Tray Menu                                      | Accepted              |
 | [ADR-056](ADR-056-host-side-audio-transcription.md)                    | Host-Side Audio Capture and Local Meeting Transcription                    | Proposed              |
 
-> ADR-054 (host_exec worker) is reserved on a feature branch not yet merged to `dev`; it will fill the gap above when merged.
+> ADR-055 is reserved on a feature branch not yet merged to `dev`; it will fill the gap above when merged.
 
 ## Creating a New ADR
 

@@ -207,7 +207,7 @@ pub struct TranscriptionConfig {
     pub keep_audio_after_finalize: Option<bool>,
 }
 
-/// UI preferences (ADR-055). Top-level user-only — a checked-in repo
+/// UI preferences (ADR-054). Top-level user-only — a checked-in repo
 /// `.speedwave.json` is not allowed to flip beta UI on or off.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct UiPrefsConfig {
@@ -223,7 +223,7 @@ pub struct SpeedwaveUserConfig {
     pub log_level: Option<String>,
     /// Meeting-transcription preferences (ADR-056). Top-level (not per-project).
     pub transcription: Option<TranscriptionConfig>,
-    /// UI preferences (ADR-055). Top-level, user-only.
+    /// UI preferences (ADR-054). Top-level, user-only.
     pub ui: Option<UiPrefsConfig>,
 }
 
@@ -589,7 +589,7 @@ mod tests {
         );
     }
 
-    // ---- UiPrefsConfig (ADR-055) -------------------------------------------
+    // ---- UiPrefsConfig (ADR-054) -------------------------------------------
 
     #[test]
     fn beta_disabled_by_default() {

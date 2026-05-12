@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
 import { TauriService } from '../services/tauri.service';
+import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_IDS } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
@@ -25,8 +27,6 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return 'darwin';
       case 'get_auth_status':
         return { api_key_configured: false, oauth_authenticated: false };
-      case 'get_beta_enabled':
-        return true;
       default:
         return undefined;
     }
@@ -37,14 +37,21 @@ describe('SettingsComponent', () => {
   let component: SettingsComponent;
   let fixture: ComponentFixture<SettingsComponent>;
   let mockTauri: MockTauriService;
+  // Stub the root BetaService; default "on" so the transcription section
+  // renders as before. The beta-off case flips it.
+  const betaEnabled = signal(true);
 
   beforeEach(async () => {
+    betaEnabled.set(true);
     mockTauri = new MockTauriService();
     setupMockTauri(mockTauri);
 
     await TestBed.configureTestingModule({
       imports: [SettingsComponent, RouterModule.forRoot([])],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(SettingsComponent);
@@ -114,33 +121,16 @@ describe('SettingsComponent', () => {
     expect(advancedEl).not.toBeNull();
   });
 
-  it('renders TranscriptionSectionComponent when beta is enabled', async () => {
-    fixture.detectChanges();
-    await fixture.whenStable();
+  it('renders TranscriptionSectionComponent when beta is enabled', () => {
     fixture.detectChanges();
     const el = fixture.nativeElement.querySelector('app-transcription-section');
     expect(el).not.toBeNull();
   });
 
-  it('hides TranscriptionSectionComponent when beta is disabled', async () => {
-    mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_beta_enabled') return false;
-      if (cmd === 'list_projects')
-        return { projects: [{ name: 'p', dir: '/tmp/p' }], active_project: 'p' };
-      if (cmd === 'get_llm_config')
-        return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
-      if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 24 };
-      if (cmd === 'get_log_level') return 'info';
-      if (cmd === 'get_platform') return 'darwin';
-      if (cmd === 'get_auth_status')
-        return { api_key_configured: false, oauth_authenticated: false };
-      return undefined;
-    };
-    const f = TestBed.createComponent(SettingsComponent);
-    f.detectChanges();
-    await f.whenStable();
-    f.detectChanges();
-    expect(f.nativeElement.querySelector('app-transcription-section')).toBeNull();
+  it('hides TranscriptionSectionComponent when beta is disabled', () => {
+    betaEnabled.set(false);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-transcription-section')).toBeNull();
   });
 
   it('reloads project info on project_switch_succeeded event', async () => {
