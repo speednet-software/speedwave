@@ -13,7 +13,9 @@ import type { HostExecConfigSnapshot, HostExecRecipe } from './types.js';
 
 const NODE = process.execPath;
 
-function recipe(p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>): HostExecRecipe {
+function recipe(
+  p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>
+): HostExecRecipe {
   return { args: [], ...p };
 }
 
@@ -68,7 +70,9 @@ describe('buildInputSchema', () => {
 
 describe('buildToolDefinition', () => {
   it('names the tool after the recipe and renders the command + example', () => {
-    const t = buildToolDefinition(recipe({ name: 'gradle_help', exec: './gradlew', args: ['help'] }));
+    const t = buildToolDefinition(
+      recipe({ name: 'gradle_help', exec: './gradlew', args: ['help'] })
+    );
     expect(t.name).toBe('gradle_help');
     expect(t.description).toContain('`./gradlew help`');
     expect(t.description).toContain("project's directory");

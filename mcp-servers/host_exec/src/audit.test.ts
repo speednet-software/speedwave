@@ -6,7 +6,9 @@ import { auditRecipeCall } from './audit.js';
 import { LOG_MAX_BYTES } from './constants.js';
 import type { HostExecRecipe, HostExecResult } from './types.js';
 
-function recipe(p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>): HostExecRecipe {
+function recipe(
+  p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>
+): HostExecRecipe {
   return { args: [], ...p };
 }
 
@@ -37,7 +39,11 @@ describe('auditRecipeCall', () => {
   it('appends a JSON line with recipe name, full argv, and result fields', async () => {
     const logFile = path.join(dir, 'log');
     process.env.HOST_EXEC_LOG_FILE = logFile;
-    await auditRecipeCall(recipe({ name: 'test', exec: './gradlew', args: ['test'] }), ['./gradlew', 'test'], RESULT);
+    await auditRecipeCall(
+      recipe({ name: 'test', exec: './gradlew', args: ['test'] }),
+      ['./gradlew', 'test'],
+      RESULT
+    );
     const content = await fs.readFile(logFile, 'utf-8');
     const entry = JSON.parse(content.trim());
     expect(entry.recipe).toBe('test');

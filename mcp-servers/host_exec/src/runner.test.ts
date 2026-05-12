@@ -8,7 +8,9 @@ import type { HostExecConfigSnapshot, HostExecRecipe } from './types.js';
 const NODE = process.execPath;
 const onWindows = process.platform === 'win32';
 
-function recipe(p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>): HostExecRecipe {
+function recipe(
+  p: Partial<HostExecRecipe> & Pick<HostExecRecipe, 'name' | 'exec'>
+): HostExecRecipe {
   return { args: [], ...p };
 }
 
@@ -198,59 +200,62 @@ describe('spawnRecipe', () => {
   // bare `child.kill()` would leave it running. (Skipped on Windows, where the
   // kill path is `taskkill /T /F` and process groups don't apply the same way;
   // the Unix case is the one we can verify deterministically here.)
-  it.skipIf(onWindows)('SIGKILLs the whole process group on timeout (grandchild dies)', async () => {
-    // Grandchild: ignores SIGTERM, writes its pid to a file, then sleeps long.
-    // The pid-file path goes through `process.argv`, not string-interpolated
-    // into the source — CodeQL flagged the old `${JSON.stringify(pidFile)}`
-    // pattern as `js/bad-code-sanitization` even though `dir` is a
-    // `mkdtemp`-controlled path. Keeping both `grandchildSrc` and
-    // `recipeSrc` as constant strings removes any code-construction-from-data.
-    //
-    // NB: with `node -e <code> <arg1> <arg2>`, Node strips `-e` AND `<code>`
-    // from argv, so the first trailing arg is `process.argv[1]`, not [2].
-    const pidFile = path.join(dir, 'grandchild.pid');
-    const grandchildSrc =
-      "process.on('SIGTERM',()=>{}); " +
-      "require('fs').writeFileSync(process.argv[1], String(process.pid)); " +
-      'setTimeout(()=>{}, 120_000);';
-    // Recipe: spawn the grandchild in the SAME process group (no `detached`),
-    // wait for it to write its pid file, then sleep long itself.
-    const recipeSrc =
-      "const cp=require('child_process'), fs=require('fs'); " +
-      'const grandchildSrc=process.argv[1], pidFile=process.argv[2]; ' +
-      "cp.spawn(process.execPath,['-e',grandchildSrc,pidFile],{stdio:'ignore'}); " +
-      'const wait=()=>{ if(fs.existsSync(pidFile)) { setTimeout(()=>{}, 120_000); } else { setTimeout(wait, 50); } }; ' +
-      'wait();';
-    const r = await spawnRecipe(
-      NODE,
-      ['-e', recipeSrc, grandchildSrc, pidFile],
-      dir,
-      'tree',
-      '.',
-      { PATH: process.env.PATH },
-      2000
-    );
-    expect(r.status).toBe('killed_timeout');
-    // Give the OS a moment, then read the grandchild pid and assert it's dead.
-    await new Promise((res) => setTimeout(res, 500));
-    const gcPid = Number.parseInt(await fs.readFile(pidFile, 'utf-8'), 10);
-    expect(Number.isInteger(gcPid)).toBe(true);
-    let alive = true;
-    try {
-      process.kill(gcPid, 0); // throws ESRCH if not alive
-    } catch {
-      alive = false;
-    }
-    if (alive) {
-      // best-effort cleanup if the assertion is about to fail
+  it.skipIf(onWindows)(
+    'SIGKILLs the whole process group on timeout (grandchild dies)',
+    async () => {
+      // Grandchild: ignores SIGTERM, writes its pid to a file, then sleeps long.
+      // The pid-file path goes through `process.argv`, not string-interpolated
+      // into the source — CodeQL flagged the old `${JSON.stringify(pidFile)}`
+      // pattern as `js/bad-code-sanitization` even though `dir` is a
+      // `mkdtemp`-controlled path. Keeping both `grandchildSrc` and
+      // `recipeSrc` as constant strings removes any code-construction-from-data.
+      //
+      // NB: with `node -e <code> <arg1> <arg2>`, Node strips `-e` AND `<code>`
+      // from argv, so the first trailing arg is `process.argv[1]`, not [2].
+      const pidFile = path.join(dir, 'grandchild.pid');
+      const grandchildSrc =
+        "process.on('SIGTERM',()=>{}); " +
+        "require('fs').writeFileSync(process.argv[1], String(process.pid)); " +
+        'setTimeout(()=>{}, 120_000);';
+      // Recipe: spawn the grandchild in the SAME process group (no `detached`),
+      // wait for it to write its pid file, then sleep long itself.
+      const recipeSrc =
+        "const cp=require('child_process'), fs=require('fs'); " +
+        'const grandchildSrc=process.argv[1], pidFile=process.argv[2]; ' +
+        "cp.spawn(process.execPath,['-e',grandchildSrc,pidFile],{stdio:'ignore'}); " +
+        'const wait=()=>{ if(fs.existsSync(pidFile)) { setTimeout(()=>{}, 120_000); } else { setTimeout(wait, 50); } }; ' +
+        'wait();';
+      const r = await spawnRecipe(
+        NODE,
+        ['-e', recipeSrc, grandchildSrc, pidFile],
+        dir,
+        'tree',
+        '.',
+        { PATH: process.env.PATH },
+        2000
+      );
+      expect(r.status).toBe('killed_timeout');
+      // Give the OS a moment, then read the grandchild pid and assert it's dead.
+      await new Promise((res) => setTimeout(res, 500));
+      const gcPid = Number.parseInt(await fs.readFile(pidFile, 'utf-8'), 10);
+      expect(Number.isInteger(gcPid)).toBe(true);
+      let alive = true;
       try {
-        process.kill(gcPid, 'SIGKILL');
+        process.kill(gcPid, 0); // throws ESRCH if not alive
       } catch {
-        /* ignore */
+        alive = false;
       }
+      if (alive) {
+        // best-effort cleanup if the assertion is about to fail
+        try {
+          process.kill(gcPid, 'SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }
+      expect(alive).toBe(false);
     }
-    expect(alive).toBe(false);
-  });
+  );
 });
 
 describe('killTree', () => {
