@@ -1,5 +1,8 @@
 {
   "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
     "resources": {
       "lima/bin/limactl": "lima/bin/limactl",
       "lima/share/": "lima/share/",
