@@ -335,7 +335,10 @@ SCRIPT
     windows_ps <<SCRIPT
 \$ErrorActionPreference = 'Stop'
 \$distro = '${wsl_distro}'
-\$installed = wsl.exe -l -q 2>\$null | Where-Object { \$_ -match [regex]::Escape(\$distro) }
+# wsl.exe -l -q emits UTF-16 LE. PowerShell over SSH receives the raw bytes
+# as null-interlaced ASCII (e.g. "U\0b\0u\0n\0t\0u\0"), so a naive -match
+# against the plain distro name never hits. Strip nulls before matching.
+\$installed = (wsl.exe -l -q 2>\$null) -replace "\`0","" | Where-Object { \$_ -match [regex]::Escape(\$distro) }
 if (\$installed) {
     Write-Host "WSL2 distro \$distro already installed"
 } else {
