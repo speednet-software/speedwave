@@ -209,6 +209,13 @@ export class ShellComponent implements OnInit, OnDestroy {
       shortcut: '⌘3',
     },
     {
+      id: 'meeting-transcription',
+      label: 'Meeting transcription',
+      route: '/meeting-transcription',
+      iconName: 'microphone',
+      shortcut: '⌘4',
+    },
+    {
       id: 'settings',
       label: 'Settings',
       route: '/settings',
@@ -226,8 +233,14 @@ export class ShellComponent implements OnInit, OnDestroy {
    * of project status — when the user lands on `/chat` while authentication
    * is missing, the view itself surfaces the `auth required` block + a link
    * back to Settings instead of silently disappearing from the rail.
+   * Meeting transcription is a beta-gated surface: hidden until the user
+   * enables beta features in the tray (ADR-058/056).
    */
-  readonly visibleEntries = computed(() => this.entryCatalog);
+  readonly visibleEntries = computed(() =>
+    this.beta.enabled()
+      ? this.entryCatalog
+      : this.entryCatalog.filter((e) => e.id !== 'meeting-transcription')
+  );
 
   /** Active entry id derived from the current router URL — used by the rail. */
   readonly activeViewId = computed(() => {
@@ -324,6 +337,13 @@ export class ShellComponent implements OnInit, OnDestroy {
       case '3':
         event.preventDefault();
         void this.router.navigateByUrl('/plugins');
+        return;
+      case '4':
+        event.preventDefault();
+        // Beta-gated route — the shortcut is inert until beta is enabled.
+        if (this.beta.enabled()) {
+          void this.router.navigateByUrl('/meeting-transcription');
+        }
         return;
       case ',':
         event.preventDefault();

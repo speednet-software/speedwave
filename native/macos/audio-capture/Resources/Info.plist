@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>audio-capture-cli</string>
+	<key>CFBundleIdentifier</key>
+	<string>pl.speedwave.desktop.audio-capture</string>
+	<key>CFBundleName</key>
+	<string>audio-capture-cli</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.10.0</string> <!-- x-release-please-version -->
+	<key>CFBundleVersion</key>
+	<string>0.10.0</string> <!-- x-release-please-version -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Speedwave records meeting audio from apps on this Mac so Claude can transcribe and summarize it. Audio is processed locally.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Speedwave records your microphone so your voice is included in meeting transcripts. Audio is processed locally.</string>
+</dict>
+</plist>

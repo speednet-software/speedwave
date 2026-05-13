@@ -158,6 +158,41 @@ pub const BUNDLE_RESOURCES_ENV: &str = "SPEEDWAVE_RESOURCES_DIR";
 /// The CLI reads it to locate bundled resources without the env var.
 pub const RESOURCES_MARKER: &str = "resources-dir";
 
+// --- Meeting transcription (ADR-056) ---------------------------------------
+
+/// Subdirectory of `data_dir()` holding recorded meetings + their transcripts.
+/// Layout: `<data_dir>/transcripts/<uuid>/{audio.wav,transcript.json,capture.pid}`.
+/// Directory perms `0o700`, files `0o600` — these contain microphone/system audio.
+pub const TRANSCRIPTS_SUBDIR: &str = "transcripts";
+
+/// Subdirectory of `data_dir()` holding downloaded Whisper + diarization models.
+/// Layout: `<data_dir>/models/whisper/ggml-*.bin`, `<data_dir>/models/diarization/*.onnx`.
+/// Directory perms `0o700`, files `0o600`.
+pub const MODELS_SUBDIR: &str = "models";
+
+/// Global ceiling (with headroom) on the total size of downloaded transcription
+/// models. `large-v3` alone is ~2.9 GiB; a realistic "I keep one model per role
+/// plus a couple of alternates" set is ~7 GiB, so this dome (~12 GiB) sits
+/// comfortably above that while still catching a misconfigured catalogue that
+/// would try to fill the disk. The per-model cap from the catalogue is the
+/// first-line check; this is the overall backstop.
+pub const MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES: u64 = 12 * 1024 * 1024 * 1024;
+
+/// Hosts the transcription model downloader is allowed to follow a redirect to.
+/// Hugging Face `302`-redirects model downloads to its Xet CDN and GitHub
+/// release assets redirect to their own CDN — both with signed URLs — so the
+/// downloader uses a custom redirect policy that follows redirects only to
+/// these hosts (exact match or a subdomain). An unrecognised redirect host
+/// produces a "model URL changed — report this" error rather than being
+/// followed. Frozen by ADR-056 spike 0C; HF CDN hostnames have changed before,
+/// so this list may need updating with a model-catalog bump.
+pub const TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS: &[&str] = &[
+    "huggingface.co",
+    "cas-bridge.xethub.hf.co",
+    "github.com",
+    "release-assets.githubusercontent.com",
+];
+
 /// Error message returned when `newuidmap` is not found on the system.
 /// Used by both `NerdctlRuntime::ensure_ready()` and `setup_wizard::init_vm_linux()`.
 pub const UIDMAP_MISSING_MSG: &str = "newuidmap not found. Install the uidmap package:\n\

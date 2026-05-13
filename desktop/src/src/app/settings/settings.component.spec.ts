@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
 import { TauriService } from '../services/tauri.service';
+import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_IDS } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
@@ -35,14 +37,21 @@ describe('SettingsComponent', () => {
   let component: SettingsComponent;
   let fixture: ComponentFixture<SettingsComponent>;
   let mockTauri: MockTauriService;
+  // Stub the root BetaService; default "on" so the transcription section
+  // renders as before. The beta-off case flips it.
+  const betaEnabled = signal(true);
 
   beforeEach(async () => {
+    betaEnabled.set(true);
     mockTauri = new MockTauriService();
     setupMockTauri(mockTauri);
 
     await TestBed.configureTestingModule({
       imports: [SettingsComponent, RouterModule.forRoot([])],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(SettingsComponent);
@@ -110,6 +119,18 @@ describe('SettingsComponent', () => {
     fixture.detectChanges();
     const advancedEl = fixture.nativeElement.querySelector('app-advanced-section');
     expect(advancedEl).not.toBeNull();
+  });
+
+  it('renders TranscriptionSectionComponent when beta is enabled', () => {
+    fixture.detectChanges();
+    const el = fixture.nativeElement.querySelector('app-transcription-section');
+    expect(el).not.toBeNull();
+  });
+
+  it('hides TranscriptionSectionComponent when beta is disabled', () => {
+    betaEnabled.set(false);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-transcription-section')).toBeNull();
   });
 
   it('reloads project info on project_switch_succeeded event', async () => {

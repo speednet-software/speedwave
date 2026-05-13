@@ -112,8 +112,16 @@ jobs:
           npm ci --ignore-scripts
           cd mcp-servers && npm ci
 
+      # cmake is needed to build whisper.cpp (vendored submodule of whisper-rs)
+      # for the audio-transcription feature tests below. ADR-056.
+      - name: Install cmake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
       - name: Rust tests
         run: make test-rust
+
+      - name: Transcription tests (audio-transcription feature)
+        run: make test-transcription
 
       - name: MCP tests + coverage
         run: make coverage-mcp

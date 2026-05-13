@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PACKAGES=(reminders calendar mail notes)
+PACKAGES=(reminders calendar mail notes audio-capture)
 ARCHS="${SPEEDWAVE_SWIFT_ARCHS:-arm64 x86_64}"
 TAURI_CONF="$REPO_ROOT/desktop/src-tauri/tauri.conf.json"
 

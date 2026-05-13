@@ -3933,6 +3933,7 @@ mod tests {
             projects: vec![],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -3957,6 +3958,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -3977,6 +3979,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -4001,6 +4004,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -4023,6 +4027,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -4047,6 +4052,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };

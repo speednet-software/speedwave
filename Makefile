@@ -32,8 +32,8 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
-        build-native-macos build-os-cli bundle-native-assets verify-bundled-assets \
-        test-rust test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
+        build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
+        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
@@ -214,6 +214,7 @@ build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nod
 	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@scripts/bundle-build-context.sh
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
+	@$(MAKE) bundle-static-licenses
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe
@@ -236,6 +237,7 @@ build-native-macos:
 		cd $(CURDIR)/native/macos/calendar && swift build -c release && \
 		cd $(CURDIR)/native/macos/mail && swift build -c release && \
 		cd $(CURDIR)/native/macos/notes && swift build -c release && \
+		cd $(CURDIR)/native/macos/audio-capture && swift build -c release && \
 		echo "✅ macOS native CLI binaries built"; \
 	fi
 
@@ -245,7 +247,7 @@ test-swift:
 	@if [ "$$(uname)" != "Darwin" ]; then \
 		echo "⬚  Skipping Swift tests (not macOS)"; \
 	else \
-		for pkg in shared reminders calendar mail notes; do \
+		for pkg in shared reminders calendar mail notes audio-capture; do \
 			echo "Testing $$pkg..." && \
 			(cd $(CURDIR)/native/macos/$$pkg && swift test) || exit 1; \
 		done && \
@@ -254,6 +256,16 @@ test-swift:
 
 bundle-native-assets:
 	@scripts/bundle-native-assets.sh
+
+# Copy the static third-party licenses we keep in-repo (whisper.cpp, sherpa-onnx,
+# onnxruntime, cpal, transcription model weights — ADR-056) into the bundled
+# THIRD-PARTY-LICENSES/ dir, alongside the lima/nodejs/nerdctl licenses the
+# download-* targets fetch there. The static dir is VCS-tracked; the bundled
+# dir is generated.
+bundle-static-licenses:
+	@mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
+	@cp desktop/src-tauri/licenses-static/* desktop/src-tauri/THIRD-PARTY-LICENSES/
+	@echo "✅ Static third-party licenses copied into THIRD-PARTY-LICENSES/"
 
 verify-bundled-assets:
 ifeq ($(OS),Windows_NT)
@@ -287,7 +299,19 @@ test-rust:
 	@# Parallel cargo-test threads race on those paths and surface `os error 2`
 	@# from `render_compose`. Run serially to keep the suite deterministic.
 	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime -p speedwave-cli -- --test-threads=1
+	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
+	@# is off by default — the CLI never enables it — so the default run above
+	@# doesn't compile the `transcription` module. Test it explicitly here.
+	$(MAKE) test-transcription
 	@echo "✅ Rust tests passed"
+
+test-transcription:
+	@echo "🧪 Testing speedwave-runtime with the audio-transcription feature..."
+	@# whisper-rs / sherpa-onnx / cpal are added to this feature in later phases
+	@# (1b/1c/4) and need `cmake` + network access at build time then; for now
+	@# the feature only pulls in `hound` (WAV I/O), so a plain cargo build works.
+	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime --features audio-transcription -- --test-threads=1
+	@echo "✅ audio-transcription tests passed"
 
 test-cli:
 	@echo "🧪 Testing CLI..."
@@ -555,6 +579,9 @@ setup-e2e-vms:
 
 check-clippy:
 	cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+	@# The `audio-transcription` feature is off by default, so the line above
+	@# doesn't lint the `transcription` module — clippy it explicitly too.
+	cargo clippy -p speedwave-runtime --features audio-transcription -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp

@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
+import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
@@ -12,8 +14,12 @@ describe('ShellComponent', () => {
   let fixture: ComponentFixture<ShellComponent>;
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
+  // Stub the root BetaService so specs control beta state directly; default
+  // "on" so the meeting-transcription nav entry behaves as before.
+  const betaEnabled = signal(true);
 
   beforeEach(async () => {
+    betaEnabled.set(true);
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_projects')
@@ -38,7 +44,10 @@ describe('ShellComponent', () => {
           { path: 'logs', component: ShellComponent },
         ]),
       ],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ShellComponent);
@@ -246,6 +255,7 @@ describe('ShellComponent', () => {
       'nav-chat',
       'nav-integrations',
       'nav-plugins',
+      'nav-meeting-transcription',
       'nav-settings',
       'nav-logs',
     ]);
@@ -265,6 +275,7 @@ describe('ShellComponent', () => {
       'nav-chat',
       'nav-integrations',
       'nav-plugins',
+      'nav-meeting-transcription',
       'nav-settings',
       'nav-logs',
     ]);
@@ -279,6 +290,24 @@ describe('ShellComponent', () => {
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('[data-testid="nav-chat"]')).not.toBeNull();
+  });
+
+  it('hides the meeting-transcription nav entry when beta is disabled', () => {
+    betaEnabled.set(false);
+    fixture.detectChanges();
+
+    const nav = fixture.nativeElement.querySelector('[data-testid="nav-rail"]');
+    const ids = Array.from(nav.querySelectorAll('a[data-testid^="nav-"]')).map((a) =>
+      (a as HTMLAnchorElement).getAttribute('data-testid')
+    );
+    expect(ids).not.toContain('nav-meeting-transcription');
+    expect(ids).toEqual([
+      'nav-chat',
+      'nav-integrations',
+      'nav-plugins',
+      'nav-settings',
+      'nav-logs',
+    ]);
   });
 
   describe('restart overlay', () => {

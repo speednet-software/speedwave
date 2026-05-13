@@ -11,9 +11,11 @@ import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, type ThemeId } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
+import { BetaService } from '../services/beta.service';
 import { AuthSectionComponent } from './auth-section/auth-section.component';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
+import { TranscriptionSectionComponent } from './transcription-section/transcription-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ProjectList } from '../models/update';
@@ -46,6 +48,7 @@ const THEME_CARDS: readonly ThemeCard[] = [
     LlmProviderComponent,
     AuthSectionComponent,
     AdvancedSectionComponent,
+    TranscriptionSectionComponent,
     UpdateSectionComponent,
     ProjectPillComponent,
   ],
@@ -148,6 +151,10 @@ const THEME_CARDS: readonly ThemeCard[] = [
           </p>
         </section>
 
+        @if (beta.enabled()) {
+          <app-transcription-section (errorOccurred)="error = $event" />
+        }
+
         <app-advanced-section
           (errorOccurred)="error = $event"
           (resetCompleted)="onResetCompleted()"
@@ -167,6 +174,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly theme = inject(ThemeService);
   /** UI state service exposed for the project switcher trigger in the header. */
   readonly ui = inject(UiStateService);
+  /** Beta-features gate — the meeting-transcription section is beta-only. */
+  readonly beta = inject(BetaService);
 
   private router = inject(Router);
   private cdr = inject(ChangeDetectorRef);

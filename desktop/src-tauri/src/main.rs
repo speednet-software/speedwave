@@ -40,6 +40,7 @@ mod setup_wizard;
 mod slash_cmd;
 mod subscribe_cmd;
 mod system_settings_cmd;
+mod transcription_cmd;
 mod tray;
 mod types;
 mod ui_prefs_cmd;
@@ -1230,6 +1231,17 @@ fn main() {
     let compose_lock: ComposeLock = Arc::new(Mutex::new(()));
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
+    // Meeting-transcription stores (ADR-056). Active sessions live in memory;
+    // both stores walk the disk lazily on first access. `transcript_drivers`
+    // maps an in-flight recording to its stop signal.
+    let transcript_store: transcription_cmd::TranscriptStoreHandle =
+        Arc::new(speedwave_runtime::transcription::TranscriptStore::new());
+    let model_store: transcription_cmd::ModelStoreHandle =
+        Arc::new(speedwave_runtime::transcription::ModelStore::new());
+    let transcript_drivers: transcription_cmd::DriversHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let transcript_forwarders: transcription_cmd::ForwardersHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
     // Shared state: IDE Bridge, mcp-os, per-project host_exec workers,
     // auto-check handle. (Tray menu state is a managed `TrayMenuState`, below.)
@@ -1357,6 +1369,10 @@ fn main() {
         .manage(host_exec.clone())
         .manage(queue_service.clone())
         .manage(msg_store_registry.clone())
+        .manage(transcript_store.clone())
+        .manage(model_store.clone())
+        .manage(transcript_drivers.clone())
+        .manage(transcript_forwarders.clone())
         .manage(tray_state)
         .setup(move |app| {
             // Restore persisted log level (default: Info)
@@ -1737,6 +1753,25 @@ fn main() {
             queue_cmd::peek_queued_message,
             // JSON-Patch stream protocol (ADR-042/043)
             subscribe_cmd::subscribe_session,
+            // Meeting transcription (ADR-056)
+            transcription_cmd::transcription_enabled,
+            transcription_cmd::set_transcription_enabled,
+            transcription_cmd::get_transcription_config,
+            transcription_cmd::set_transcription_config,
+            transcription_cmd::transcription_capabilities,
+            transcription_cmd::list_audio_sources,
+            transcription_cmd::start_transcription,
+            transcription_cmd::stop_transcription,
+            transcription_cmd::subscribe_transcript,
+            transcription_cmd::list_transcripts,
+            transcription_cmd::get_transcript,
+            transcription_cmd::delete_transcript,
+            transcription_cmd::discard_transcript_audio,
+            transcription_cmd::relabel_speaker,
+            transcription_cmd::get_transcript_markdown,
+            transcription_cmd::list_transcription_models,
+            transcription_cmd::download_transcription_model,
+            transcription_cmd::delete_transcription_model,
             // Chat history
             list_conversations,
             get_conversation,
@@ -1823,6 +1858,10 @@ fn main() {
             // CloudStorage TCC
             system_settings_cmd::open_files_folders_pane,
             cloudstorage_cmd::detect_cloudstorage_path,
+            // Meeting-transcription TCC (ADR-056) — deep-links to the macOS
+            // Microphone / Audio Recording privacy panes for permission recovery.
+            system_settings_cmd::open_microphone_pane,
+            system_settings_cmd::open_audio_capture_pane,
         ])
         .on_window_event(move |window, event| {
             match event {
@@ -2254,6 +2293,7 @@ mod tests {
             ],
             active_project: Some("alpha".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         }
@@ -2325,6 +2365,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };

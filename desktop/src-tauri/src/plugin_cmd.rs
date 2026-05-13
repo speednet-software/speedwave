@@ -924,6 +924,7 @@ mod tests {
             }],
             active_project: Some("test-project".into()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -971,6 +972,7 @@ mod tests {
             }],
             active_project: Some("test-project".into()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -998,6 +1000,7 @@ mod tests {
             }],
             active_project: Some("test-project".into()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -1053,6 +1056,7 @@ mod tests {
             ],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -1120,6 +1124,7 @@ mod tests {
             ],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };
@@ -1422,6 +1427,7 @@ mod tests {
             }],
             active_project: Some("my-project".into()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
             ui: None,
         };

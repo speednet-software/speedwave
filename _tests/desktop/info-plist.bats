@@ -19,6 +19,8 @@ REQUIRED_TCC_KEYS=(
     NSContactsUsageDescription
     NSAppleEventsUsageDescription
     NSFileProviderDomainUsageDescription
+    NSAudioCaptureUsageDescription
+    NSMicrophoneUsageDescription
 )
 
 plist_get() {
