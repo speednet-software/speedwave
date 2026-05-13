@@ -221,11 +221,12 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_files_recursive(plugin_dir, &mut files)?;
 
-    // Sort by relative path for determinism
+    // OsStr byte sort matches Python's as_posix() string sort in the sign script.
+    // Path::cmp is component-based: "X/..." < "X.ts", but byte-wise '.' (0x2E) < '/' (0x2F).
     files.sort_by(|a, b| {
         let ra = a.strip_prefix(plugin_dir).unwrap_or(a);
         let rb = b.strip_prefix(plugin_dir).unwrap_or(b);
-        ra.cmp(rb)
+        ra.as_os_str().cmp(rb.as_os_str())
     });
 
     let mut hasher = Sha256::new();
@@ -575,6 +576,41 @@ mod tests {
         assert!(
             err.to_string().contains("symlink"),
             "expected symlink rejection, got: {err}"
+        );
+    }
+
+    /// "X.ts" must sort before "X/…" (byte '.' < '/') to match the Python sign script.
+    #[test]
+    fn test_sort_file_before_same_prefix_directory() {
+        use sha2::{Digest, Sha256};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // "schemas.ts" file at the same level as "schemas/" directory
+        std::fs::write(dir.join("schemas.ts"), b"file").unwrap();
+        std::fs::create_dir(dir.join("schemas")).unwrap();
+        std::fs::write(dir.join("schemas").join("index.ts"), b"index").unwrap();
+
+        let actual = compute_plugin_digest(dir).unwrap();
+
+        // Expected digest: "schemas.ts" hashed BEFORE "schemas/index.ts"
+        // (Python POSIX byte order: '.' = 0x2E < '/' = 0x2F)
+        let mut hasher = Sha256::new();
+        for (rel, content) in [
+            (b"schemas.ts" as &[u8], b"file" as &[u8]),
+            (b"schemas/index.ts", b"index"),
+        ] {
+            hasher.update((rel.len() as u64).to_le_bytes());
+            hasher.update(rel);
+            hasher.update((content.len() as u64).to_le_bytes());
+            hasher.update(content);
+        }
+        let expected = hasher.finalize().to_vec();
+
+        assert_eq!(
+            actual, expected,
+            "file 'X.ts' must sort BEFORE 'X/<files>' (POSIX byte order, matching Python sign script)"
         );
     }
 
