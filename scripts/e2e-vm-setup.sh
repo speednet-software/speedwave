@@ -242,6 +242,44 @@ Start-Process -Wait -FilePath "$env:TEMP\vs_buildtools.exe" -ArgumentList $insta
 Remove-Item "$env:TEMP\vs_buildtools.exe"
 SCRIPT
 
+    echo "[windows] Installing CMake (Kitware — required by whisper-rs-sys)..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = 'Stop'
+# whisper-rs-sys uses the `cmake` Rust crate to drive a real cmake invocation
+# (Visual Studio's bundled cmake is not on PATH and the crate spawns
+# `cmake.exe` from PATH, not from VS's private layout). Install the official
+# Kitware build so `cmake.exe` lives in `C:\Program Files\CMake\bin` and is
+# on the Machine PATH for every process started afterwards.
+# Idempotent: skip if cmake.exe already present at the expected path.
+$cmakeBin = 'C:\Program Files\CMake\bin'
+if (Test-Path "$cmakeBin\cmake.exe") {
+    Write-Host "CMake already installed: $cmakeBin"
+} else {
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($arch -eq 'ARM64') {
+        $url = 'https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-windows-arm64.msi'
+    } else {
+        $url = 'https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-windows-x86_64.msi'
+    }
+    Write-Host "Downloading $url..."
+    Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\cmake-installer.msi"
+    # ADD_CMAKE_TO_PATH=System adds cmake.exe to the Machine PATH automatically.
+    Start-Process -Wait msiexec -ArgumentList '/i',"$env:TEMP\cmake-installer.msi",'/qn','/norestart','ADD_CMAKE_TO_PATH=System'
+    Remove-Item "$env:TEMP\cmake-installer.msi"
+    if (-not (Test-Path "$cmakeBin\cmake.exe")) {
+        Write-Error "CMake installation completed but cmake.exe not found at $cmakeBin"
+        exit 1
+    }
+}
+# Belt-and-braces: ensure Machine PATH contains the cmake bin (the msi flag
+# usually does this, but verify so subsequent SSH sessions inherit it).
+$currentPath = [System.Environment]::GetEnvironmentVariable('Path','Machine')
+if (-not $currentPath.Contains($cmakeBin)) {
+    [System.Environment]::SetEnvironmentVariable('Path', "$currentPath;$cmakeBin", 'Machine')
+    Write-Host "Added $cmakeBin to Machine PATH"
+}
+SCRIPT
+
     echo "[windows] Installing LLVM (libclang for bindgen / whisper-rs-sys)..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'
@@ -359,6 +397,7 @@ Write-Host "npm:  $(npm --version)"
 Write-Host "Rust: $(rustc --version)"
 Write-Host "Cargo: $(cargo --version)"
 Write-Host "tauri-cli: $(cargo tauri --version 2>&1)"
+Write-Host "cmake: $(cmake --version 2>&1 | Select-Object -First 1)"
 Write-Host "LIBCLANG_PATH: $([System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH','Machine'))"
 Write-Host "Arch: $env:PROCESSOR_ARCHITECTURE"
 SCRIPT

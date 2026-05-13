@@ -84,16 +84,16 @@ ensure_provisioned_linux() {
 
 ensure_provisioned_windows() {
     # Check that WSL2 distro exists and PowerShell can find node + cargo +
-    # libclang.dll (LIBCLANG_PATH set by setup script; required by
-    # whisper-rs-sys / bindgen — ADR-056 meeting transcription).
+    # cmake + libclang.dll (LIBCLANG_PATH set by setup script; both required
+    # by whisper-rs-sys / bindgen — ADR-056 meeting transcription).
     local ok=1
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
-        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
+        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
-        echo "[windows] Provisioning: OK (WSL2 + node + cargo + libclang found)"
+        echo "[windows] Provisioning: OK (WSL2 + node + cargo + cmake + libclang found)"
         return
     fi
     echo "[windows] Provisioning: missing tools — running setup..."
