@@ -307,10 +307,14 @@ test-rust:
 
 test-transcription:
 	@echo "🧪 Testing speedwave-runtime with the audio-transcription feature..."
-	@# whisper-rs / sherpa-onnx / cpal are added to this feature in later phases
-	@# (1b/1c/4) and need `cmake` + network access at build time then; for now
-	@# the feature only pulls in `hound` (WAV I/O), so a plain cargo build works.
-	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime --features audio-transcription -- --test-threads=1
+	@# Only the `transcription` module is gated behind this feature (see
+	@# `src/lib.rs` — `#[cfg(feature = "audio-transcription")] pub mod transcription;`).
+	@# The rest of the crate (compose, plugin, build, …) is identical with or
+	@# without the feature and is already exercised by `test-rust`. Without the
+	@# `transcription::` filter, cargo re-runs the whole suite a second time
+	@# (~100 compose tests at ~5s each under `--test-threads=1`), which alone
+	@# blows past the 15-minute CI job budget.
+	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime --features audio-transcription transcription:: -- --test-threads=1
 	@echo "✅ audio-transcription tests passed"
 
 test-cli:

@@ -12,7 +12,7 @@ All Rust code uses the `log` crate facade for diagnostic output. **Never use `ep
 
 | Binary                        | Backend                                         | Config                                     |
 | ----------------------------- | ----------------------------------------------- | ------------------------------------------ |
-| Desktop (`speedwave-desktop`) | `tauri-plugin-log` v2 (file + stdout + webview) | Initialized in `main.rs` `.plugin()` chain |
+| Desktop (`speedwave-desktop`) | `tauri-plugin-log` v2 (file + stdout)           | Initialized in `main.rs` `.plugin()` chain |
 | CLI (`speedwave`)             | `env_logger` (stderr, respects `RUST_LOG`)      | Initialized at CLI `main()` start          |
 | Library (`speedwave-runtime`) | `log` crate facade only (no backend opinion)    | Callers provide the backend                |
 
