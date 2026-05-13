@@ -256,9 +256,11 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('beta gating (ADR-058)', () => {
+    const betaServices = ['office', 'github', 'atlassian'] as const;
+
     // Backend always returns the beta services; whether the user sees them is governed by the BetaService signal.
     function setupWithBetaServices(): void {
-      const extra = ['office', 'github', 'atlassian'].map((svc) => ({
+      const extra = betaServices.map((svc) => ({
         service: svc,
         enabled: false,
         configured: false,
@@ -292,17 +294,14 @@ describe('IntegrationsComponent', () => {
       };
     }
 
-    it.each(['office', 'github', 'atlassian'])(
-      'hides %s row when beta is off (default for new users)',
-      async (svc) => {
-        setupWithBetaServices();
-        betaEnabled.set(false);
-        await component.ngOnInit();
-        expect(component.services.map((s) => s.service)).not.toContain(svc);
-      }
-    );
+    it.each(betaServices)('hides %s row when beta is off (default for new users)', async (svc) => {
+      setupWithBetaServices();
+      betaEnabled.set(false);
+      await component.ngOnInit();
+      expect(component.services.map((s) => s.service)).not.toContain(svc);
+    });
 
-    it.each(['office', 'github', 'atlassian'])('shows %s row when beta is on', async (svc) => {
+    it.each(betaServices)('shows %s row when beta is on', async (svc) => {
       setupWithBetaServices();
       betaEnabled.set(true);
       await component.ngOnInit();
@@ -335,7 +334,7 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
       const namesOff = component.services.map((s) => s.service);
-      for (const svc of ['office', 'github', 'atlassian']) {
+      for (const svc of betaServices) {
         expect(namesOff).not.toContain(svc);
       }
       expect(
@@ -348,7 +347,7 @@ describe('IntegrationsComponent', () => {
       fixture.detectChanges();
 
       const namesOn = component.services.map((s) => s.service);
-      for (const svc of ['office', 'github', 'atlassian']) {
+      for (const svc of betaServices) {
         expect(namesOn).toContain(svc);
       }
       expect(
