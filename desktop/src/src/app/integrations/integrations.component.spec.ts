@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { IntegrationsComponent } from './integrations.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { LoggerService } from '../services/logger.service';
+import { BetaService } from '../services/beta.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 /**
@@ -165,8 +167,12 @@ describe('IntegrationsComponent', () => {
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
+  // Stub BetaService so each test controls beta-gating directly. Default
+  // matches production: beta off until the user toggles it via tray menu.
+  const betaEnabled = signal(false);
 
   beforeEach(async () => {
+    betaEnabled.set(false);
     mockTauri = new MockTauriService();
     setupMockTauri(mockTauri);
     mockLogger = makeMockLogger();
@@ -183,6 +189,7 @@ describe('IntegrationsComponent', () => {
       providers: [
         { provide: TauriService, useValue: mockTauri },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
       ],
     }).compileComponents();
 
@@ -247,6 +254,105 @@ describe('IntegrationsComponent', () => {
     expect(serviceNames).toContain('sharepoint');
     expect(serviceNames).toContain('gitlab');
     expect(serviceNames).toContain('redmine');
+  });
+
+  describe('beta gating (ADR-058)', () => {
+    /**
+     * Backend handler that returns the mock services + an extra `office` row.
+     * Whether the user sees `office` is governed entirely by the BetaService
+     * stub signal, not by the backend payload — exactly like production.
+     */
+    function setupWithOffice(): void {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return {
+              projects: [{ name: 'test-project', dir: '/tmp/test' }],
+              active_project: 'test-project',
+            };
+          case 'get_integrations':
+            return {
+              services: [
+                ...cloneMockIntegrations().services,
+                {
+                  service: 'office',
+                  enabled: false,
+                  configured: false,
+                  display_name: 'Office documents',
+                  description: 'Word/Excel/PowerPoint/PDF',
+                  auth_fields: [],
+                  current_values: {},
+                  mappings: undefined,
+                },
+              ],
+              os: [],
+            };
+          case 'list_available_ides':
+            return [];
+          case 'get_selected_ide':
+            return null;
+          case 'validate_os_integrations_on_startup':
+            return [];
+          default:
+            return undefined;
+        }
+      };
+    }
+
+    it('hides office row when beta is off (default for new users)', async () => {
+      setupWithOffice();
+      betaEnabled.set(false);
+      await component.ngOnInit();
+      expect(component.services.map((s) => s.service)).not.toContain('office');
+    });
+
+    it('shows office row when beta is on', async () => {
+      setupWithOffice();
+      betaEnabled.set(true);
+      await component.ngOnInit();
+      expect(component.services.map((s) => s.service)).toContain('office');
+    });
+
+    it('hides host-exec slot when beta is off', async () => {
+      betaEnabled.set(false);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const slot = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-host-exec-slot"]'
+      );
+      expect(slot).toBeNull();
+    });
+
+    it('shows host-exec slot when beta is on', async () => {
+      betaEnabled.set(true);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const slot = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-host-exec-slot"]'
+      );
+      expect(slot).not.toBeNull();
+    });
+
+    it('reveals office + host-exec when beta toggles off → on mid-session', async () => {
+      setupWithOffice();
+      betaEnabled.set(false);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(component.services.map((s) => s.service)).not.toContain('office');
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="integrations-host-exec-slot"]')
+      ).toBeNull();
+
+      betaEnabled.set(true);
+      // Wait for the effect's auto-loadIntegrations to settle.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.detectChanges();
+
+      expect(component.services.map((s) => s.service)).toContain('office');
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="integrations-host-exec-slot"]')
+      ).not.toBeNull();
+    });
   });
 
   it('should set error when loadIntegrations fails', async () => {

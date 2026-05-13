@@ -2,13 +2,16 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  EffectRef,
   OnDestroy,
   OnInit,
+  effect,
   inject,
 } from '@angular/core';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { LoggerService } from '../services/logger.service';
+import { BetaService } from '../services/beta.service';
 import {
   DeviceCodeInfo,
   IntegrationsResponse,
@@ -274,9 +277,11 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
           }
         }
 
-        <div class="mt-6" data-testid="integrations-host-exec-slot">
-          <app-host-exec-config />
-        </div>
+        @if (betaEnabled()) {
+          <div class="mt-6" data-testid="integrations-host-exec-slot">
+            <app-host-exec-config />
+          </div>
+        }
 
         <div class="mt-6" data-testid="integrations-ide-bridge-slot">
           <app-ide-bridge />
@@ -322,6 +327,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
   private static readonly HIDDEN_SERVICES = new Set(['slack']);
+  private static readonly BETA_ONLY_SERVICES = new Set(['office']);
 
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
@@ -365,8 +371,18 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private logger = inject(LoggerService);
+  private beta = inject(BetaService);
   private unsubProjectSettled: (() => void) | null = null;
   private unsubStatusRefresher: (() => void) | null = null;
+
+  /** Live signal: beta-features toggle (ADR-058). Gates office + host-exec. */
+  readonly betaEnabled = this.beta.enabled;
+
+  /** Re-filter the services table when beta toggles mid-session. */
+  private betaEffect: EffectRef = effect(() => {
+    this.betaEnabled();
+    if (this.activeProject) void this.loadIntegrations();
+  });
 
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {
@@ -535,9 +551,12 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // Slack is not yet publicly available (#91)
+      // Slack is not yet publicly available (#91); office is beta-only (ADR-058).
+      const betaOn = this.betaEnabled();
       this.services = response.services.filter(
-        (s) => !IntegrationsComponent.HIDDEN_SERVICES.has(s.service)
+        (s) =>
+          !IntegrationsComponent.HIDDEN_SERVICES.has(s.service) &&
+          (betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service))
       );
       this.osIntegrations = response.os;
     } catch (e: unknown) {
