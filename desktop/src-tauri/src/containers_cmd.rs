@@ -281,7 +281,6 @@ pub async fn init_vm() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn create_project(
-    app: tauri::AppHandle,
     name: String,
     dir: String,
 ) -> Result<(), String> {
@@ -293,12 +292,7 @@ pub async fn create_project(
         })
     })
     .await
-    .map_err(|e| e.to_string())??;
-
-    // Last setup step → `is_setup_complete()` flips true; rebuild so setup-gated
-    // tray items (the ADR-058 beta toggle) appear.
-    crate::tray::refresh_tray_menu(&app);
-    Ok(())
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -476,7 +470,15 @@ pub async fn start_containers(
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    // `start_containers` is the last setup step that flips `is_setup_complete()`
+    // (the wizard order is runtime_ready → vm_ready → images_built →
+    // project_created → containers_started; cli_linked is independent). Rebuild
+    // the tray here so setup-gated items (the ADR-058 beta toggle) appear
+    // immediately after the wizard finishes.
+    crate::tray::refresh_tray_menu(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1854,6 +1856,54 @@ mod tests {
         assert!(
             fn_body.contains("check_os_warnings"),
             "run_system_check must call check_os_warnings()"
+        );
+    }
+
+    /// Structural test: `start_containers()` is the last setup step that flips
+    /// `is_setup_complete()`. It must call `refresh_tray_menu` so the
+    /// setup-gated tray items (the ADR-058 beta toggle) appear immediately
+    /// after the wizard finishes — without a manual refresh.
+    #[test]
+    fn start_containers_refreshes_tray_after_setup_completes() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn start_containers(")
+            .expect("start_containers function must exist");
+        let fn_body = &source[fn_start..];
+        let next_fn = fn_body[1..]
+            .find("\npub ")
+            .map(|i| i + 1)
+            .unwrap_or(fn_body.len());
+        let fn_body = &fn_body[..next_fn];
+        assert!(
+            fn_body.contains("tray::refresh_tray_menu"),
+            "start_containers must call crate::tray::refresh_tray_menu so the \
+             ADR-058 beta toggle appears after the wizard's final step"
+        );
+    }
+
+    /// Structural test: `create_project()` must NOT call `refresh_tray_menu`.
+    /// It runs at step 4 of 5, before `containers_started = true` is
+    /// persisted, so `is_setup_complete()` would still return `false` and the
+    /// tray rebuild would drop the beta toggle anyway (the bug fixed in this
+    /// commit). The refresh belongs in `start_containers()` instead.
+    #[test]
+    fn create_project_does_not_refresh_tray_prematurely() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn create_project(")
+            .expect("create_project function must exist");
+        let fn_body = &source[fn_start..];
+        let next_fn = fn_body[1..]
+            .find("\npub ")
+            .map(|i| i + 1)
+            .unwrap_or(fn_body.len());
+        let fn_body = &fn_body[..next_fn];
+        assert!(
+            !fn_body.contains("tray::refresh_tray_menu"),
+            "create_project must not call refresh_tray_menu — at that point \
+             is_setup_complete() is still false (containers_started is set \
+             later by start_containers)"
         );
     }
 }
