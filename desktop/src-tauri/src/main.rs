@@ -1329,7 +1329,6 @@ fn main() {
                     Target::new(TargetKind::LogDir {
                         file_name: Some("speedwave-desktop".into()),
                     }),
-                    Target::new(TargetKind::Webview),
                 ])
                 .level(log::LevelFilter::Trace)
                 .level_for("hyper", log::LevelFilter::Warn)
