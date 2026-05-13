@@ -376,7 +376,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
   readonly betaEnabled = this.beta.enabled;
 
-  /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal office. */
+  /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal beta-only services. */
   constructor() {
     effect(() => {
       this.betaEnabled();
@@ -551,7 +551,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // Slack is not yet publicly available (#91); office is beta-only (ADR-058).
+      // Slack hidden always (#91); BETA_ONLY_SERVICES hidden unless beta is on (ADR-058).
       const betaOn = this.betaEnabled();
       this.services = response.services.filter(
         (s) =>
