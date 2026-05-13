@@ -339,8 +339,7 @@ describe('IntegrationsComponent', () => {
       ).toBeNull();
 
       betaEnabled.set(true);
-      // One macrotask lets the signal-effect's microtask queue flush
-      // (fakeAsync doesn't integrate with Angular Signals under Vitest).
+      // fakeAsync doesn't integrate with Angular Signals under Vitest — one macrotask lets the effect flush.
       await new Promise((resolve) => setTimeout(resolve, 0));
       fixture.detectChanges();
 
