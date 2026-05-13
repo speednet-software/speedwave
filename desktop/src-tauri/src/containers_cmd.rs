@@ -452,7 +452,6 @@ pub async fn start_containers(
     crate::ensure_mcp_os_running(&mcp_os, &app, compose_lock.inner().clone());
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
 
-    let app_for_refresh = app.clone();
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
@@ -478,7 +477,7 @@ pub async fn start_containers(
     // project_created → containers_started; cli_linked is independent). Rebuild
     // the tray here so setup-gated items (the ADR-058 beta toggle) appear
     // immediately after the wizard finishes.
-    crate::tray::refresh_tray_menu(&app_for_refresh);
+    crate::tray::refresh_tray_menu(&app);
     Ok(())
 }
 
