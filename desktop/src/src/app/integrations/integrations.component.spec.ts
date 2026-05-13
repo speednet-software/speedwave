@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { IntegrationsComponent } from './integrations.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { LoggerService } from '../services/logger.service';
+import { BetaService } from '../services/beta.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 /**
@@ -165,8 +167,11 @@ describe('IntegrationsComponent', () => {
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
+  // BetaService stub; defaults false to match production (tray toggles it).
+  const betaEnabled = signal(false);
 
   beforeEach(async () => {
+    betaEnabled.set(false);
     mockTauri = new MockTauriService();
     setupMockTauri(mockTauri);
     mockLogger = makeMockLogger();
@@ -183,6 +188,7 @@ describe('IntegrationsComponent', () => {
       providers: [
         { provide: TauriService, useValue: mockTauri },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
       ],
     }).compileComponents();
 
@@ -247,6 +253,107 @@ describe('IntegrationsComponent', () => {
     expect(serviceNames).toContain('sharepoint');
     expect(serviceNames).toContain('gitlab');
     expect(serviceNames).toContain('redmine');
+  });
+
+  describe('beta gating (ADR-058)', () => {
+    const betaServices = ['office', 'github', 'atlassian'] as const;
+
+    // Backend always returns the beta services; whether the user sees them is governed by the BetaService signal.
+    function setupWithBetaServices(): void {
+      const extra = betaServices.map((svc) => ({
+        service: svc,
+        enabled: false,
+        configured: false,
+        display_name: svc,
+        description: '',
+        auth_fields: [],
+        current_values: {},
+        mappings: undefined,
+      }));
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return {
+              projects: [{ name: 'test-project', dir: '/tmp/test' }],
+              active_project: 'test-project',
+            };
+          case 'get_integrations':
+            return {
+              services: [...cloneMockIntegrations().services, ...extra],
+              os: [],
+            };
+          case 'list_available_ides':
+            return [];
+          case 'get_selected_ide':
+            return null;
+          case 'validate_os_integrations_on_startup':
+            return [];
+          default:
+            return undefined;
+        }
+      };
+    }
+
+    it.each(betaServices)('hides %s row when beta is off (default for new users)', async (svc) => {
+      setupWithBetaServices();
+      betaEnabled.set(false);
+      await component.ngOnInit();
+      expect(component.services.map((s) => s.service)).not.toContain(svc);
+    });
+
+    it.each(betaServices)('shows %s row when beta is on', async (svc) => {
+      setupWithBetaServices();
+      betaEnabled.set(true);
+      await component.ngOnInit();
+      expect(component.services.map((s) => s.service)).toContain(svc);
+    });
+
+    it('hides host-exec slot when beta is off', async () => {
+      betaEnabled.set(false);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const slot = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-host-exec-slot"]'
+      );
+      expect(slot).toBeNull();
+    });
+
+    it('shows host-exec slot when beta is on', async () => {
+      betaEnabled.set(true);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const slot = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-host-exec-slot"]'
+      );
+      expect(slot).not.toBeNull();
+    });
+
+    it('reveals all beta surfaces when beta toggles off → on mid-session', async () => {
+      setupWithBetaServices();
+      betaEnabled.set(false);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const namesOff = component.services.map((s) => s.service);
+      for (const svc of betaServices) {
+        expect(namesOff).not.toContain(svc);
+      }
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="integrations-host-exec-slot"]')
+      ).toBeNull();
+
+      betaEnabled.set(true);
+      // fakeAsync doesn't integrate with Angular Signals under Vitest — one macrotask lets the effect flush.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.detectChanges();
+
+      const namesOn = component.services.map((s) => s.service);
+      for (const svc of betaServices) {
+        expect(namesOn).toContain(svc);
+      }
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="integrations-host-exec-slot"]')
+      ).not.toBeNull();
+    });
   });
 
   it('should set error when loadIntegrations fails', async () => {
