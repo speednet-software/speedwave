@@ -86,7 +86,8 @@ sudo -E apt-get install -y \
     libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
     librsvg2-dev patchelf \
     webkit2gtk-driver xvfb xauth \
-    uidmap rsync gnupg
+    uidmap rsync gnupg \
+    cmake clang libclang-dev
 SCRIPT
 
     echo "[linux] Installing Node.js 24..."
@@ -203,6 +204,8 @@ echo "Rust: $(rustc --version)"
 echo "Cargo: $(cargo --version)"
 echo "tauri-cli: $(cargo tauri --version 2>/dev/null || echo 'not found')"
 echo "tauri-driver: $(command -v tauri-driver || echo 'not found')"
+echo "cmake: $(cmake --version 2>/dev/null | head -1 || echo 'not found')"
+echo "clang: $(clang --version 2>/dev/null | head -1 || echo 'not found')"
 SCRIPT
 
     echo "[linux] DONE"
@@ -237,6 +240,35 @@ if ($arch -eq 'ARM64') { $installArgs += ' --add Microsoft.VisualStudio.Componen
 Write-Host "Running: vs_buildtools.exe $installArgs"
 Start-Process -Wait -FilePath "$env:TEMP\vs_buildtools.exe" -ArgumentList $installArgs
 Remove-Item "$env:TEMP\vs_buildtools.exe"
+SCRIPT
+
+    echo "[windows] Installing LLVM (libclang for bindgen / whisper-rs-sys)..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = 'Stop'
+# whisper-rs-sys (ADR-056) uses bindgen, which requires libclang.dll.
+# Idempotent: skip if libclang.dll already present at the expected path.
+$llvmBin = 'C:\Program Files\LLVM\bin'
+if (Test-Path "$llvmBin\libclang.dll") {
+    Write-Host "LLVM already installed: $llvmBin"
+} else {
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($arch -eq 'ARM64') {
+        $url = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe'
+    } else {
+        $url = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe'
+    }
+    Write-Host "Downloading $url..."
+    Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\llvm-installer.exe"
+    Start-Process -Wait -FilePath "$env:TEMP\llvm-installer.exe" -ArgumentList '/S'
+    Remove-Item "$env:TEMP\llvm-installer.exe"
+    if (-not (Test-Path "$llvmBin\libclang.dll")) {
+        Write-Error "LLVM installation completed but libclang.dll not found at $llvmBin"
+        exit 1
+    }
+}
+# bindgen reads LIBCLANG_PATH at build time to locate libclang.dll.
+[System.Environment]::SetEnvironmentVariable('LIBCLANG_PATH', $llvmBin, 'Machine')
+Write-Host "LIBCLANG_PATH set to $llvmBin"
 SCRIPT
 
     echo "[windows] Configuring MSVC environment (PATH, INCLUDE, LIB)..."
@@ -324,6 +356,7 @@ Write-Host "npm:  $(npm --version)"
 Write-Host "Rust: $(rustc --version)"
 Write-Host "Cargo: $(cargo --version)"
 Write-Host "tauri-cli: $(cargo tauri --version 2>&1)"
+Write-Host "LIBCLANG_PATH: $([System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH','Machine'))"
 Write-Host "Arch: $env:PROCESSOR_ARCHITECTURE"
 SCRIPT
 
@@ -355,6 +388,8 @@ fi
 eval "$(/opt/homebrew/bin/brew shellenv)"
 brew install node@24
 brew link node@24 --overwrite --force 2>/dev/null || true
+# cmake — required by whisper-rs-sys build script (ADR-056 meeting transcription)
+command -v cmake >/dev/null 2>&1 || brew install cmake
 SCRIPT
 
     echo "[macos] Installing Rust and tauri-cli..."
@@ -383,6 +418,7 @@ echo "npm:  $(npm --version)"
 echo "Rust: $(rustc --version)"
 echo "Cargo: $(cargo --version)"
 echo "tauri-cli: $(cargo tauri --version 2>/dev/null || echo 'not found')"
+echo "cmake: $(cmake --version 2>/dev/null | head -1 || echo 'not found')"
 echo "Arch: $(uname -m)"
 echo "macOS: $(sw_vers -productVersion)"
 SCRIPT
