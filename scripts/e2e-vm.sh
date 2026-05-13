@@ -73,8 +73,9 @@ ensure_provisioned_linux() {
     # ~/.cargo/bin which is only on PATH for interactive/login shells. SSH
     # commands here run as a non-interactive, non-login shell, so without
     # sourcing the env we'd always see cargo as "missing" and re-run setup.
-    if linux_ssh '. "$HOME/.cargo/env" 2>/dev/null; command -v npm && command -v cargo' >/dev/null 2>&1; then
-        echo "[linux] Provisioning: OK (npm + cargo found)"
+    # cmake + clang required by whisper-rs-sys (ADR-056 meeting transcription).
+    if linux_ssh '. "$HOME/.cargo/env" 2>/dev/null; command -v npm && command -v cargo && command -v cmake && command -v clang' >/dev/null 2>&1; then
+        echo "[linux] Provisioning: OK (npm + cargo + cmake + clang found)"
         return
     fi
     echo "[linux] Provisioning: missing tools — running setup..."
@@ -82,15 +83,17 @@ ensure_provisioned_linux() {
 }
 
 ensure_provisioned_windows() {
-    # Check that WSL2 distro exists and PowerShell can find node + cargo
+    # Check that WSL2 distro exists and PowerShell can find node + cargo +
+    # libclang.dll (LIBCLANG_PATH set by setup script; required by
+    # whisper-rs-sys / bindgen — ADR-056 meeting transcription).
     local ok=1
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
-        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
+        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
-        echo "[windows] Provisioning: OK (WSL2 + node + cargo found)"
+        echo "[windows] Provisioning: OK (WSL2 + node + cargo + libclang found)"
         return
     fi
     echo "[windows] Provisioning: missing tools — running setup..."
@@ -98,8 +101,9 @@ ensure_provisioned_windows() {
 }
 
 ensure_provisioned_macos() {
-    if macos_ssh "command -v npm && command -v cargo" >/dev/null 2>&1; then
-        echo "[macos] Provisioning: OK (npm + cargo found)"
+    # cmake required by whisper-rs-sys (ADR-056 meeting transcription).
+    if macos_ssh "command -v npm && command -v cargo && command -v cmake" >/dev/null 2>&1; then
+        echo "[macos] Provisioning: OK (npm + cargo + cmake found)"
         return
     fi
     echo "[macos] Provisioning: missing tools — running setup..."
