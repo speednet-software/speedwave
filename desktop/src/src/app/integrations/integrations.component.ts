@@ -2,7 +2,6 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  EffectRef,
   OnDestroy,
   OnInit,
   effect,
@@ -375,14 +374,19 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private unsubProjectSettled: (() => void) | null = null;
   private unsubStatusRefresher: (() => void) | null = null;
 
-  /** Live signal: beta-features toggle (ADR-058). Gates office + host-exec. */
   readonly betaEnabled = this.beta.enabled;
 
-  /** Re-filter the services table when beta toggles mid-session. */
-  private betaEffect: EffectRef = effect(() => {
-    this.betaEnabled();
-    if (this.activeProject) void this.loadIntegrations();
-  });
+  /**
+   * Reloads the services list when the beta toggle flips mid-session so
+   * `office` + the host-exec slot appear (or disappear) without a manual
+   * refresh — the raw `response.services` payload is not cached.
+   */
+  constructor() {
+    effect(() => {
+      this.betaEnabled();
+      if (this.activeProject) void this.loadIntegrations();
+    });
+  }
 
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {

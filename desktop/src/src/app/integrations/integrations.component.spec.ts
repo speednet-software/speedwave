@@ -344,7 +344,8 @@ describe('IntegrationsComponent', () => {
       ).toBeNull();
 
       betaEnabled.set(true);
-      // Wait for the effect's auto-loadIntegrations to settle.
+      // One macrotask lets the signal-effect's microtask queue flush
+      // (fakeAsync doesn't integrate with Angular Signals under Vitest).
       await new Promise((resolve) => setTimeout(resolve, 0));
       fixture.detectChanges();
 
