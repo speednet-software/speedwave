@@ -435,9 +435,19 @@ case "$TARGET" in
     windows|win)    setup_windows ;;
     macos|mac)      setup_macos ;;
     all)
-        setup_ubuntu
-        setup_windows
-        setup_macos
+        PIDS=()
+        for fn in setup_ubuntu setup_windows setup_macos; do
+            $fn &
+            PIDS+=($!)
+        done
+        FAILED=0
+        for pid in "${PIDS[@]}"; do
+            if ! wait "$pid"; then FAILED=$((FAILED + 1)); fi
+        done
+        if [ "$FAILED" -ne 0 ]; then
+            echo "$FAILED platform(s) failed to provision" >&2
+            exit 1
+        fi
         ;;
     *)
         echo "Usage: $0 [ubuntu|windows|macos|all]" >&2
