@@ -167,8 +167,7 @@ describe('IntegrationsComponent', () => {
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
-  // Stub BetaService so each test controls beta-gating directly. Default
-  // matches production: beta off until the user toggles it via tray menu.
+  // BetaService stub; defaults false to match production (tray toggles it).
   const betaEnabled = signal(false);
 
   beforeEach(async () => {
