@@ -256,8 +256,18 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('beta gating (ADR-058)', () => {
-    // Backend always includes office; whether the user sees it is governed by the BetaService signal.
-    function setupWithOffice(): void {
+    // Backend always returns the beta services; whether the user sees them is governed by the BetaService signal.
+    function setupWithBetaServices(): void {
+      const extra = ['office', 'github', 'atlassian'].map((svc) => ({
+        service: svc,
+        enabled: false,
+        configured: false,
+        display_name: svc,
+        description: '',
+        auth_fields: [],
+        current_values: {},
+        mappings: undefined,
+      }));
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {
           case 'list_projects':
@@ -267,19 +277,7 @@ describe('IntegrationsComponent', () => {
             };
           case 'get_integrations':
             return {
-              services: [
-                ...cloneMockIntegrations().services,
-                {
-                  service: 'office',
-                  enabled: false,
-                  configured: false,
-                  display_name: 'Office documents',
-                  description: 'Word/Excel/PowerPoint/PDF',
-                  auth_fields: [],
-                  current_values: {},
-                  mappings: undefined,
-                },
-              ],
+              services: [...cloneMockIntegrations().services, ...extra],
               os: [],
             };
           case 'list_available_ides':
@@ -294,18 +292,21 @@ describe('IntegrationsComponent', () => {
       };
     }
 
-    it('hides office row when beta is off (default for new users)', async () => {
-      setupWithOffice();
-      betaEnabled.set(false);
-      await component.ngOnInit();
-      expect(component.services.map((s) => s.service)).not.toContain('office');
-    });
+    it.each(['office', 'github', 'atlassian'])(
+      'hides %s row when beta is off (default for new users)',
+      async (svc) => {
+        setupWithBetaServices();
+        betaEnabled.set(false);
+        await component.ngOnInit();
+        expect(component.services.map((s) => s.service)).not.toContain(svc);
+      }
+    );
 
-    it('shows office row when beta is on', async () => {
-      setupWithOffice();
+    it.each(['office', 'github', 'atlassian'])('shows %s row when beta is on', async (svc) => {
+      setupWithBetaServices();
       betaEnabled.set(true);
       await component.ngOnInit();
-      expect(component.services.map((s) => s.service)).toContain('office');
+      expect(component.services.map((s) => s.service)).toContain(svc);
     });
 
     it('hides host-exec slot when beta is off', async () => {
@@ -328,12 +329,15 @@ describe('IntegrationsComponent', () => {
       expect(slot).not.toBeNull();
     });
 
-    it('reveals office + host-exec when beta toggles off → on mid-session', async () => {
-      setupWithOffice();
+    it('reveals all beta surfaces when beta toggles off → on mid-session', async () => {
+      setupWithBetaServices();
       betaEnabled.set(false);
       await component.ngOnInit();
       fixture.detectChanges();
-      expect(component.services.map((s) => s.service)).not.toContain('office');
+      const namesOff = component.services.map((s) => s.service);
+      for (const svc of ['office', 'github', 'atlassian']) {
+        expect(namesOff).not.toContain(svc);
+      }
       expect(
         fixture.nativeElement.querySelector('[data-testid="integrations-host-exec-slot"]')
       ).toBeNull();
@@ -343,7 +347,10 @@ describe('IntegrationsComponent', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       fixture.detectChanges();
 
-      expect(component.services.map((s) => s.service)).toContain('office');
+      const namesOn = component.services.map((s) => s.service);
+      for (const svc of ['office', 'github', 'atlassian']) {
+        expect(namesOn).toContain(svc);
+      }
       expect(
         fixture.nativeElement.querySelector('[data-testid="integrations-host-exec-slot"]')
       ).not.toBeNull();

@@ -326,7 +326,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
   private static readonly HIDDEN_SERVICES = new Set(['slack']);
-  private static readonly BETA_ONLY_SERVICES = new Set(['office']);
+  private static readonly BETA_ONLY_SERVICES = new Set(['office', 'github', 'atlassian']);
 
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
