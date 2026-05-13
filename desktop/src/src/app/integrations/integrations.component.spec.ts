@@ -257,11 +257,7 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('beta gating (ADR-058)', () => {
-    /**
-     * Backend handler that returns the mock services + an extra `office` row.
-     * Whether the user sees `office` is governed entirely by the BetaService
-     * stub signal, not by the backend payload — exactly like production.
-     */
+    // Backend always includes office; whether the user sees it is governed by the BetaService signal.
     function setupWithOffice(): void {
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {

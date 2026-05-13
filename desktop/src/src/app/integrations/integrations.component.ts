@@ -376,11 +376,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
   readonly betaEnabled = this.beta.enabled;
 
-  /**
-   * Reloads the services list when the beta toggle flips mid-session so
-   * `office` + the host-exec slot appear (or disappear) without a manual
-   * refresh — the raw `response.services` payload is not cached.
-   */
+  /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal office. */
   constructor() {
     effect(() => {
       this.betaEnabled();
