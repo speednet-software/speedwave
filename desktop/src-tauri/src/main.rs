@@ -19,11 +19,12 @@ mod fs_perms;
 mod git_cmd;
 mod health;
 mod history;
+mod host_exec_cmd;
+mod host_path;
 mod http_util;
 mod ide_bridge;
 mod integrations_cmd;
 mod llm_cmd;
-mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
 mod oauth_cmd;
@@ -39,8 +40,10 @@ mod setup_wizard;
 mod slash_cmd;
 mod subscribe_cmd;
 mod system_settings_cmd;
+mod transcription_cmd;
 mod tray;
 mod types;
+mod ui_prefs_cmd;
 mod update_commands;
 mod updater;
 mod url_validation;
@@ -58,7 +61,12 @@ use std::sync::{Arc, Mutex};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
-use reconcile::{ExitCleanupContext, SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs};
+use reconcile::{
+    ExitCleanupContext, SharedAutoCheckHandle, SharedHostExec, SharedIdeBridge, SharedMcpOs,
+};
+
+pub(crate) use host_path::recovered_host_path;
+use speedwave_runtime::host_exec_process::{write_host_exec_config_snapshot, HostExecProcess};
 
 /// Joins a cleanup thread handle with a watchdog that force-exits after
 /// `EXIT_CLEANUP_TIMEOUT_SECS`. If the cleanup thread panics, exits with
@@ -116,9 +124,6 @@ pub(crate) fn stash_cleanup_handle(
     }
 }
 
-/// Tracks the latest available update version for the system tray menu.
-type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
-
 /// Serialises compose operations across `start_chat`, `resume_conversation`,
 /// and `reconcile_compose_port` to prevent concurrent `compose_up` /
 /// `compose_up_recreate` calls during container restart.
@@ -129,6 +134,10 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
 /// to prevent the watchdog from respawning mcp-os during shutdown.
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop flag for the `host_exec` watchdog (set during exit cleanup).
+static HOST_EXEC_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Chat commands
@@ -150,8 +159,15 @@ fn start_session_inner(
     resume_session_id: Option<&str>,
     compose_arc: ComposeLock,
     session_arc: SharedChatSession,
+    host_exec_arc: SharedHostExec,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    // Spawn host_exec before the container check — the hub needs port/auth-token files (ADR-054).
+    let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, project);
+    if host_exec_just_started {
+        host_exec_cmd::recreate_project_containers_if_running(project);
+    }
+
     // Pre-flight: verify Claude is authenticated.  `check_claude_auth`
     // also calls `ensure_exec_healthy`, so containers are guaranteed
     // healthy after this returns.  The compose lock serialises this with
@@ -198,13 +214,22 @@ async fn start_chat(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
     compose_lock: tauri::State<'_, ComposeLock>,
+    host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
     check_project(&project)?;
     log::info!("start_chat: project={project}");
     let session_arc = state.inner().clone();
     let compose_arc = compose_lock.inner().clone();
+    let host_exec_arc = host_exec.inner().clone();
     tokio::task::spawn_blocking(move || {
-        start_session_inner(&project, None, compose_arc, session_arc, app_handle)
+        start_session_inner(
+            &project,
+            None,
+            compose_arc,
+            session_arc,
+            host_exec_arc,
+            app_handle,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -328,18 +353,21 @@ async fn resume_conversation(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
     compose_lock: tauri::State<'_, ComposeLock>,
+    host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
     check_project(&project)?;
     history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
     log::info!("resume_conversation: project={project}");
     let session_arc = state.inner().clone();
     let compose_arc = compose_lock.inner().clone();
+    let host_exec_arc = host_exec.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
             Some(&session_id),
             compose_arc,
             session_arc,
+            host_exec_arc,
             app_handle,
         )
     })
@@ -385,6 +413,7 @@ async fn switch_project(
     name: String,
     app: tauri::AppHandle,
     chat_state: tauri::State<'_, SharedChatSession>,
+    host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
     use containers_cmd::{switch_project_core, teardown_and_restore, teardown_only, SwitchResult};
 
@@ -400,6 +429,13 @@ async fn switch_project(
         Ok(prev)
     })
     .map_err(|e| e.to_string())?;
+
+    // Tear down the previous project's `host_exec` worker (best-effort).
+    if let Some(ref prev) = previous {
+        if prev != &name {
+            reconcile::teardown_host_exec_for_project(host_exec.inner(), prev);
+        }
+    }
 
     use tauri::Emitter;
     let _ = app.emit(
@@ -420,8 +456,11 @@ async fn switch_project(
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, rt| {
             check_project(proj)?;
+            // Lazy build for the destination project (ADR-057).
+            if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
+                return Err(format!("Image build failed: {sanitized}"));
+            }
             // compose_down(prev) already handled by switch_project_core step 2.
-            // Here we only render the new compose and start containers.
             containers_cmd::render_and_save_compose(proj, rt)?;
             rt.compose_up_recreate(proj).map_err(|e| e.to_string())
         })
@@ -943,6 +982,152 @@ fn ensure_mcp_os_running(
     }
 }
 
+/// Spawn the project's `host_exec` worker if enabled and not running.
+/// Writes the chmod-600 config snapshot first. Returns `true` on fresh spawn.
+pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str) -> bool {
+    let mut map = match host_exec.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!("ensure_host_exec_running: map mutex poisoned: {e}");
+            return false;
+        }
+    };
+    if let Some(proc) = map.get(project) {
+        if proc.is_alive() {
+            return false; // already running and healthy
+        }
+        // A dead-but-still-mapped worker — drop it; we'll respawn below.
+        log::warn!("host_exec[{project}]: stale worker in the map — replacing");
+        if let Some(mut dead) = map.remove(project) {
+            let _ = dead.stop();
+            dead.cleanup_files();
+        }
+    }
+
+    // Resolve project dir + config (user-config only).
+    let user_config = match config::load_user_config() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("ensure_host_exec_running: cannot load user config: {e}");
+            return false;
+        }
+    };
+    let project_dir = match user_config.find_project(project) {
+        Some(p) => std::path::PathBuf::from(&p.dir),
+        None => {
+            log::warn!("ensure_host_exec_running: unknown project '{project}'");
+            return false;
+        }
+    };
+    let resolved = config::resolve_integrations(&project_dir, &user_config, project);
+    if !resolved.host_exec {
+        log::debug!("ensure_host_exec_running: host_exec disabled for '{project}' — not spawning");
+        return false;
+    }
+
+    // Write chmod-600 config snapshot (may hold env-value secrets, ADR-054).
+    let state_dir = speedwave_runtime::host_exec::host_exec_project_dir(
+        speedwave_runtime::consts::data_dir(),
+        project,
+    );
+    if let Err(e) = std::fs::create_dir_all(&state_dir) {
+        log::warn!("ensure_host_exec_running: cannot create state dir for '{project}': {e}");
+        return false;
+    }
+    let snapshot = config::host_exec_config_snapshot(&project_dir, &resolved.host_exec_commands);
+    let config_path = state_dir.join(speedwave_runtime::consts::HOST_EXEC_CONFIG_FILE);
+    if let Err(e) = write_host_exec_config_snapshot(&config_path, &snapshot) {
+        log::warn!("ensure_host_exec_running: cannot write config snapshot for '{project}': {e}");
+        return false;
+    }
+
+    let script = match speedwave_runtime::build::resolve_host_exec_script() {
+        Some(s) => s.to_string_lossy().to_string(),
+        None => {
+            log::warn!(
+                "ensure_host_exec_running: host_exec worker script not found — \
+                 host_exec will be unavailable for '{project}'"
+            );
+            return false;
+        }
+    };
+    match HostExecProcess::spawn_in(
+        project,
+        &project_dir,
+        &script,
+        recovered_host_path(),
+        speedwave_runtime::consts::data_dir(),
+    ) {
+        Ok(proc) => {
+            log::info!("host_exec[{project}]: started (port {})", proc.port());
+            map.insert(project.to_string(), proc);
+            drop(map); // release before touching the watchdog flag
+            HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+            true
+        }
+        Err(e) => {
+            log::error!("host_exec[{project}]: spawn failed: {e}");
+            false
+        }
+    }
+}
+
+/// Per-project `host_exec` watchdog — 30s checks, mirrors `start_mcp_os_watchdog`.
+fn start_host_exec_watchdog(host_exec: SharedHostExec) {
+    std::thread::spawn(move || {
+        use std::time::Duration;
+        const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+        loop {
+            std::thread::sleep(CHECK_INTERVAL);
+            if HOST_EXEC_WATCHDOG_STOP.load(Ordering::Relaxed) {
+                break;
+            }
+            // Respawn under the lock; defer container recreate until after we release it.
+            let respawned: Vec<String> = {
+                let mut map = match host_exec.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        log::error!("host_exec watchdog: map mutex poisoned: {e}");
+                        break;
+                    }
+                };
+                if map.is_empty() {
+                    continue; // a project may enable host_exec later
+                }
+                // Collect names first so we don't hold an iterator while mutating.
+                let names: Vec<String> = map.keys().cloned().collect();
+                let mut respawned = Vec::new();
+                for name in names {
+                    let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
+                    if alive {
+                        continue;
+                    }
+                    if let Some(proc) = map.get_mut(&name) {
+                        log::warn!(
+                            "host_exec watchdog: worker for '{name}' unhealthy — respawning"
+                        );
+                        match proc.respawn() {
+                            Ok(port) => {
+                                log::info!("host_exec watchdog: respawned '{name}' (port {port})");
+                                respawned.push(name);
+                            }
+                            Err(e) => {
+                                log::error!("host_exec watchdog: respawn of '{name}' failed: {e}")
+                            }
+                        }
+                    }
+                }
+                respawned
+            };
+            // Lock released — recreate hub containers so they see the new port.
+            for name in respawned {
+                host_exec_cmd::recreate_project_containers_if_running(&name);
+            }
+        }
+        log::info!("host_exec watchdog: stopped");
+    });
+}
+
 /// Shows the audit-failure dialog and terminates the process. Returns
 /// only via `process::exit`.
 ///
@@ -1046,28 +1231,46 @@ fn main() {
     let compose_lock: ComposeLock = Arc::new(Mutex::new(()));
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
+    // Meeting-transcription stores (ADR-056). Active sessions live in memory;
+    // both stores walk the disk lazily on first access. `transcript_drivers`
+    // maps an in-flight recording to its stop signal.
+    let transcript_store: transcription_cmd::TranscriptStoreHandle =
+        Arc::new(speedwave_runtime::transcription::TranscriptStore::new());
+    let model_store: transcription_cmd::ModelStoreHandle =
+        Arc::new(speedwave_runtime::transcription::ModelStore::new());
+    let transcript_drivers: transcription_cmd::DriversHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let transcript_forwarders: transcription_cmd::ForwardersHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
-    // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
+    // Shared state: IDE Bridge, mcp-os, per-project host_exec workers,
+    // auto-check handle. (Tray menu state is a managed `TrayMenuState`, below.)
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
+    let host_exec: SharedHostExec = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
-    let update_version: SharedUpdateVersion = Arc::new(Mutex::new(None));
 
     let tray_available = Arc::new(AtomicBool::new(false));
     #[cfg_attr(target_os = "linux", allow(unused_variables))]
     let tray_available_setup = tray_available.clone();
     let tray_available_close = tray_available.clone();
 
-    // Bundle the three shared-state Arcs into a single context struct so each
-    // exit path only needs one clone instead of three parallel Arc clones.
+    // One context struct → one clone per exit path instead of N parallel Arc clones.
     let cleanup_ctx = ExitCleanupContext {
         ide_bridge: ide_bridge.clone(),
         mcp_os: mcp_os.clone(),
+        host_exec: host_exec.clone(),
         auto_check_handle: auto_check_handle.clone(),
     };
     let cleanup_ctx_window = cleanup_ctx.clone();
     let cleanup_ctx_runevent = cleanup_ctx.clone();
-    let update_version_setup = update_version.clone();
+
+    // Seed tray state from persisted user-config so the beta-features
+    // checkbox reflects the previous session's choice on startup.
+    let initial_beta_enabled = config::load_user_config()
+        .map(|c| c.beta_enabled())
+        .unwrap_or(false);
+    let tray_state = tray::TrayMenuState::new(initial_beta_enabled);
 
     // Register SIGTERM/SIGINT handler so process signals trigger the same
     // cleanup as graceful window close. The CLEANUP_ONCE guard in
@@ -1119,16 +1322,13 @@ fn main() {
     builder
         .plugin({
             use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
-            // Note: no timezone_strategy() here — the custom `.format(...)`
-            // below takes over and uses `chrono::Local::now()` directly, so
-            // the plugin's TimezoneStrategy would be dead config.
+            // No timezone_strategy — custom `.format(...)` below uses `log_ts` SSOT.
             tauri_plugin_log::Builder::new()
                 .targets([
                     Target::new(TargetKind::Stdout),
                     Target::new(TargetKind::LogDir {
                         file_name: Some("speedwave-desktop".into()),
                     }),
-                    Target::new(TargetKind::Webview),
                 ])
                 .level(log::LevelFilter::Trace)
                 .level_for("hyper", log::LevelFilter::Warn)
@@ -1139,13 +1339,8 @@ fn main() {
                 .format(move |callback, message, record| {
                     let sanitized =
                         speedwave_runtime::log_sanitizer::sanitize(&format!("{message}"));
-                    // ISO8601 local-time timestamp with millisecond precision.
-                    // Shipped in every log line so post-mortem timing analysis
-                    // (e.g. shutdown-sequence profiling) does not need a
-                    // separate overlay. `%.3f` keeps the millis in the
-                    // fractional-seconds slot; `%z` is the numeric UTC offset
-                    // from chrono::Local::now(), which reads the system timezone.
-                    let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z");
+                    // SSOT log timestamp (see `speedwave_runtime::log_ts`).
+                    let ts = speedwave_runtime::log_ts::log_timestamp();
                     callback.finish(format_args!(
                         "{ts} [{level}][{target}] {sanitized}",
                         level = record.level(),
@@ -1170,8 +1365,14 @@ fn main() {
         .manage(compose_lock.clone())
         .manage(ide_bridge.clone())
         .manage(mcp_os.clone())
+        .manage(host_exec.clone())
         .manage(queue_service.clone())
         .manage(msg_store_registry.clone())
+        .manage(transcript_store.clone())
+        .manage(model_store.clone())
+        .manage(transcript_drivers.clone())
+        .manage(transcript_forwarders.clone())
+        .manage(tray_state)
         .setup(move |app| {
             // Restore persisted log level (default: Info)
             let initial_level = config::load_user_config()
@@ -1222,6 +1423,13 @@ fn main() {
                 }
             });
 
+            // Recover the user's login-shell PATH once, on a background thread
+            // so a slow shell rc doesn't delay `setup()`. The `host_exec`
+            // worker (and its recipes) need this — a GUI-launched app has only
+            // a stunted PATH. Idempotent; `recovered_host_path()` returns the
+            // cached value (or computes it lazily) afterwards. ADR-054 §PATH.
+            std::thread::spawn(host_path::init_recovered_host_path);
+
             if setup_started {
                 // Start IDE Bridge
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
@@ -1258,8 +1466,16 @@ fn main() {
                     app.handle().clone(),
                     compose_lock.clone(),
                 );
+
+                // Start the per-project host_exec watchdog. No worker is
+                // spawned here — host_exec is per-project and spawned on
+                // demand (ensure_host_exec_running), e.g. when a chat starts
+                // for a project that has it enabled (ADR-054). The watchdog
+                // simply respawns any that die.
+                HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+                start_host_exec_watchdog(host_exec.clone());
             } else {
-                log::info!("setup not started, deferring IDE Bridge / mcp-os / link_cli until setup completes");
+                log::info!("setup not started, deferring IDE Bridge / mcp-os / host_exec / link_cli until setup completes");
             }
 
             // Start background auto-update check (store handle for cancellation)
@@ -1284,9 +1500,14 @@ fn main() {
                 reconcile::reconcile_bundle_update(app.handle());
             }
 
-            // Build system tray.
-            let tray_menu = tray::build_tray_menu(app.handle(), &None)?;
-            let update_version_tray = update_version_setup.clone();
+            // Build system tray from the managed `TrayMenuState`.
+            use tauri::Manager;
+            let tray_menu = tray::build_tray_menu(
+                app.handle(),
+                None,
+                app.state::<tray::TrayMenuState>().beta_enabled(),
+                setup_wizard::is_setup_complete(),
+            )?;
             let tray_icon = tray::load_tray_icon()?;
 
             #[cfg_attr(target_os = "linux", allow(unused_mut))]
@@ -1329,11 +1550,12 @@ fn main() {
                         });
                     }
                     "install_update" => {
+                        let app_for_state = app.clone();
                         #[cfg(not(target_os = "linux"))]
                         let app_clone = app.clone();
-                        let uv = update_version_tray.clone();
                         tauri::async_runtime::spawn(async move {
-                            let version = uv.lock().ok().and_then(|g| g.clone());
+                            let version =
+                                app_for_state.state::<tray::TrayMenuState>().update_version();
                             if let Some(expected) = version {
                                 #[cfg(target_os = "linux")]
                                 let result = {
@@ -1361,6 +1583,18 @@ fn main() {
                                 }
                             } else {
                                 log::warn!("tray: install_update clicked but no version available");
+                            }
+                        });
+                    }
+                    "toggle_beta" => {
+                        let app_clone = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let current =
+                                app_clone.state::<tray::TrayMenuState>().beta_enabled();
+                            if let Err(e) =
+                                ui_prefs_cmd::apply_beta_toggle_inner(&app_clone, !current).await
+                            {
+                                log::error!("tray: beta toggle failed: {e}");
                             }
                         });
                     }
@@ -1453,20 +1687,17 @@ fn main() {
                 }
             }
 
-            // Listen for update_available events (from auto-check) to update tray menu
-            let update_version_listener = update_version_setup.clone();
+            // Listen for update_available events (from auto-check) to update tray menu.
             let app_handle_listener = app.handle().clone();
             use tauri::Listener;
             app.listen(
                 "update_available",
                 move |event| match serde_json::from_str::<updater::UpdateInfo>(event.payload()) {
                     Ok(info) => {
-                        let version = info.version;
-                        match update_version_listener.lock() {
-                            Ok(mut guard) => *guard = Some(version.clone()),
-                            Err(e) => log::warn!("update version mutex poisoned: {e}"),
-                        }
-                        tray::refresh_tray_menu(&app_handle_listener, &Some(version));
+                        app_handle_listener
+                            .state::<tray::TrayMenuState>()
+                            .set_update_version(Some(info.version));
+                        tray::refresh_tray_menu(&app_handle_listener);
                     }
                     Err(e) => {
                         log::warn!("tray: failed to deserialize update_available payload: {e}");
@@ -1521,6 +1752,25 @@ fn main() {
             queue_cmd::peek_queued_message,
             // JSON-Patch stream protocol (ADR-042/043)
             subscribe_cmd::subscribe_session,
+            // Meeting transcription (ADR-056)
+            transcription_cmd::transcription_enabled,
+            transcription_cmd::set_transcription_enabled,
+            transcription_cmd::get_transcription_config,
+            transcription_cmd::set_transcription_config,
+            transcription_cmd::transcription_capabilities,
+            transcription_cmd::list_audio_sources,
+            transcription_cmd::start_transcription,
+            transcription_cmd::stop_transcription,
+            transcription_cmd::subscribe_transcript,
+            transcription_cmd::list_transcripts,
+            transcription_cmd::get_transcript,
+            transcription_cmd::delete_transcript,
+            transcription_cmd::discard_transcript_audio,
+            transcription_cmd::relabel_speaker,
+            transcription_cmd::get_transcript_markdown,
+            transcription_cmd::list_transcription_models,
+            transcription_cmd::download_transcription_model,
+            transcription_cmd::delete_transcription_model,
             // Chat history
             list_conversations,
             get_conversation,
@@ -1536,6 +1786,7 @@ fn main() {
             container_logs_cmd::get_container_logs,
             container_logs_cmd::get_compose_logs,
             container_logs_cmd::get_mcp_os_logs,
+            container_logs_cmd::get_host_exec_logs,
             container_logs_cmd::get_claude_session_logs,
             container_logs_cmd::get_all_logs,
             // IDE Bridge
@@ -1558,6 +1809,9 @@ fn main() {
             // Logging
             set_log_level,
             get_log_level,
+            // UI preferences (ADR-058)
+            ui_prefs_cmd::get_beta_enabled,
+            ui_prefs_cmd::set_beta_enabled,
             // Diagnostics
             export_diagnostics,
             // Integrations
@@ -1576,6 +1830,15 @@ fn main() {
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,
+            // host_exec (ADR-054): Integrations-tab settings commands
+            // (status / toggle / edit the whitelist / resolve an executable for
+            // the "browse…" picker). No per-call confirmation — enabling
+            // host_exec is the consent.
+            host_exec_cmd::get_host_exec,
+            host_exec_cmd::set_host_exec_enabled,
+            host_exec_cmd::host_exec_save_settings,
+            host_exec_cmd::host_exec_load_settings,
+            host_exec_cmd::host_exec_resolve_executable,
             // Plugins
             plugin_cmd::get_plugins,
             plugin_cmd::peek_plugin_manifest,
@@ -1594,6 +1857,10 @@ fn main() {
             // CloudStorage TCC
             system_settings_cmd::open_files_folders_pane,
             cloudstorage_cmd::detect_cloudstorage_path,
+            // Meeting-transcription TCC (ADR-056) — deep-links to the macOS
+            // Microphone / Audio Recording privacy panes for permission recovery.
+            system_settings_cmd::open_microphone_pane,
+            system_settings_cmd::open_audio_capture_pane,
         ])
         .on_window_event(move |window, event| {
             match event {
@@ -2025,7 +2292,9 @@ mod tests {
             ],
             active_project: Some("alpha".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -2095,7 +2364,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let result = apply_switch_project(&mut cfg, "only");

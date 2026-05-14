@@ -1369,9 +1369,9 @@ impl ChatSession {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            crate::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
-            let mut f = crate::log_file::open_log_file(&path);
-            crate::log_file::write_log_line(&mut f, "SESSION", "started");
+            speedwave_runtime::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
+            let mut f = speedwave_runtime::log_file::open_log_file(&path);
+            speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "started");
             Some(path)
         };
         self.session_log_path = session_log_path.clone();
@@ -1385,13 +1385,17 @@ impl ChatSession {
             let h = std::thread::spawn(move || {
                 let mut log_file = stderr_log_path
                     .as_deref()
-                    .and_then(crate::log_file::open_log_file);
+                    .and_then(speedwave_runtime::log_file::open_log_file);
                 let reader = BufReader::new(stderr);
                 for line in reader.lines() {
                     match line {
                         Ok(l) => {
                             log::debug!("{l}");
-                            crate::log_file::write_log_line(&mut log_file, "STDERR", &l);
+                            speedwave_runtime::log_file::write_log_line(
+                                &mut log_file,
+                                "STDERR",
+                                &l,
+                            );
                         }
                         Err(e) => {
                             log::warn!("stderr reader: I/O error: {e}");
@@ -1446,7 +1450,7 @@ impl ChatSession {
             }
             let mut log_file = stdout_log_path
                 .as_deref()
-                .and_then(crate::log_file::open_log_file);
+                .and_then(speedwave_runtime::log_file::open_log_file);
             let reader = BufReader::new(stdout);
             let mut got_result = false;
             for line in reader.lines() {
@@ -1462,7 +1466,7 @@ impl ChatSession {
                 let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(v) => v,
                     Err(_) => {
-                        crate::log_file::write_log_line(
+                        speedwave_runtime::log_file::write_log_line(
                             &mut log_file,
                             "STDOUT",
                             "[non-json stdout suppressed]",
@@ -1475,7 +1479,7 @@ impl ChatSession {
 
                 // 1. Check for control_request
                 if let Some(ctrl) = StreamParser::try_parse_control_request(&parsed) {
-                    crate::log_file::write_log_line(
+                    speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
                         "CONTROL",
                         &format!("request: {} ({})", ctrl.tool_name, ctrl.tool_use_id),
@@ -1569,7 +1573,11 @@ impl ChatSession {
                 // 2. Normal stream events
                 let (chunks, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
-                    crate::log_file::write_log_line(&mut log_file, entry.prefix, &entry.message);
+                    speedwave_runtime::log_file::write_log_line(
+                        &mut log_file,
+                        entry.prefix,
+                        &entry.message,
+                    );
                 }
                 // Track whether we received a terminal event so we can
                 // emit a fallback error on unexpected EOF.  Covers:
@@ -1915,8 +1923,8 @@ impl ChatSession {
         }
         // Log session end ONLY if session actually started
         if let Some(ref log_path) = self.session_log_path {
-            let mut f = crate::log_file::open_log_file(log_path);
-            crate::log_file::write_log_line(&mut f, "SESSION", "stopped");
+            let mut f = speedwave_runtime::log_file::open_log_file(log_path);
+            speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "stopped");
         }
         self.session_log_path = None;
         if let Ok(mut map) = self.pending_requests.lock() {
@@ -3925,7 +3933,9 @@ mod tests {
             projects: vec![],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let result = ChatSession::prepare_args("nonexistent", &user_config, None, None);
         assert!(result.is_err());
@@ -3948,7 +3958,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let result =
             ChatSession::prepare_args("test", &user_config, Some("../../../etc/passwd"), None);
@@ -3967,7 +3979,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let result = ChatSession::prepare_args(
             "test",
@@ -3990,7 +4004,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let result = ChatSession::prepare_args("myproject", &user_config, None, None);
         assert!(result.is_ok());
@@ -4011,7 +4027,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), None);
@@ -4034,7 +4052,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_me";

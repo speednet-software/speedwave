@@ -4,11 +4,13 @@ import {
   Component,
   OnDestroy,
   OnInit,
+  effect,
   inject,
 } from '@angular/core';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { LoggerService } from '../services/logger.service';
+import { BetaService } from '../services/beta.service';
 import {
   DeviceCodeInfo,
   IntegrationsResponse,
@@ -19,6 +21,7 @@ import {
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
+import { HostExecConfigComponent } from './host-exec-config/host-exec-config.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 
@@ -45,7 +48,13 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
-  imports: [ServiceCardComponent, RedmineConfigComponent, IdeBridgeComponent, ProjectPillComponent],
+  imports: [
+    ServiceCardComponent,
+    RedmineConfigComponent,
+    HostExecConfigComponent,
+    IdeBridgeComponent,
+    ProjectPillComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -267,6 +276,12 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
           }
         }
 
+        @if (betaEnabled()) {
+          <div class="mt-6" data-testid="integrations-host-exec-slot">
+            <app-host-exec-config />
+          </div>
+        }
+
         <div class="mt-6" data-testid="integrations-ide-bridge-slot">
           <app-ide-bridge />
         </div>
@@ -311,6 +326,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
   private static readonly HIDDEN_SERVICES = new Set(['slack']);
+  private static readonly BETA_ONLY_SERVICES = new Set(['office', 'github', 'atlassian']);
 
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
@@ -354,7 +370,19 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private logger = inject(LoggerService);
+  private beta = inject(BetaService);
   private unsubProjectSettled: (() => void) | null = null;
+  private unsubStatusRefresher: (() => void) | null = null;
+
+  readonly betaEnabled = this.beta.enabled;
+
+  /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal beta-only services. */
+  constructor() {
+    effect(() => {
+      this.betaEnabled();
+      if (this.activeProject) void this.loadIntegrations();
+    });
+  }
 
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {
@@ -377,6 +405,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       }
       await this.loadActiveProject();
       await this.loadIntegrations();
+    });
+    // After a failed restart (build/compose), backend may have rolled the
+    // just-enabled service back to disabled — refresh the rows to match.
+    this.unsubStatusRefresher = this.projectState.registerIntegrationStatusRefresher(() => {
+      void this.loadIntegrations();
     });
 
     this.tauri
@@ -418,6 +451,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     if (this.unsubProjectSettled) {
       this.unsubProjectSettled();
       this.unsubProjectSettled = null;
+    }
+    if (this.unsubStatusRefresher) {
+      this.unsubStatusRefresher();
+      this.unsubStatusRefresher = null;
     }
     if (this.unlistenOAuth) {
       this.unlistenOAuth();
@@ -514,9 +551,12 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // Slack is not yet publicly available (#91)
+      // Slack hidden always (#91); BETA_ONLY_SERVICES hidden unless beta is on (ADR-058).
+      const betaOn = this.betaEnabled();
       this.services = response.services.filter(
-        (s) => !IntegrationsComponent.HIDDEN_SERVICES.has(s.service)
+        (s) =>
+          !IntegrationsComponent.HIDDEN_SERVICES.has(s.service) &&
+          (betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service))
       );
       this.osIntegrations = response.os;
     } catch (e: unknown) {
@@ -582,12 +622,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     svc.enabled = next;
     this.cdr.markForCheck();
     try {
-      await this.tauri.invoke('set_integration_enabled', {
-        project: this.activeProject,
-        service: svc.service,
-        enabled: next,
-      });
-      this.projectState.requestRestart();
+      await this.applyServiceToggle(svc, next);
     } catch (e: unknown) {
       svc.enabled = previous;
       this.error = e instanceof Error ? e.message : String(e);
@@ -757,18 +792,32 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   async toggleService(svc: IntegrationStatusEntry, event: Event): Promise<void> {
     const enabled = (event.target as HTMLInputElement).checked;
     try {
-      await this.tauri.invoke('set_integration_enabled', {
-        project: this.activeProject,
-        service: svc.service,
-        enabled,
-      });
-      svc.enabled = enabled;
-      this.projectState.requestRestart();
+      await this.applyServiceToggle(svc, enabled);
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
       (event.target as HTMLInputElement).checked = !enabled;
     }
     this.cdr.markForCheck();
+  }
+
+  /**
+   * SSOT for "user flipped an MCP service toggle".
+   * Persists the new value, marks `pendingJustEnabled` on enable so a failed
+   * restart can roll it back, and requests the container restart.
+   * @param svc - the integration being toggled.
+   * @param enabled - target enabled state.
+   */
+  private async applyServiceToggle(svc: IntegrationStatusEntry, enabled: boolean): Promise<void> {
+    await this.tauri.invoke('set_integration_enabled', {
+      project: this.activeProject,
+      service: svc.service,
+      enabled,
+    });
+    svc.enabled = enabled;
+    if (enabled) {
+      this.projectState.pendingJustEnabled = svc.service;
+    }
+    this.projectState.requestRestart();
   }
 
   /**

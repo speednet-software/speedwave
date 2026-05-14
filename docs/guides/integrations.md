@@ -4,18 +4,22 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 
 ## Available Integrations
 
-| Integration | Service            | Container                            | Token Path                                  |
-| ----------- | ------------------ | ------------------------------------ | ------------------------------------------- |
-| Slack       | Messaging          | `speedwave_<project>_mcp_slack`      | `~/.speedwave/tokens/<project>/slack/`      |
-| SharePoint  | Documents          | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/` |
-| GitLab      | Code hosting       | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`     |
-| GitHub      | Code hosting       | `speedwave_<project>_mcp_github`     | `~/.speedwave/tokens/<project>/github/`     |
-| Atlassian   | Jira & Confluence  | `speedwave_<project>_mcp_atlassian`  | `~/.speedwave/tokens/<project>/atlassian/`  |
-| Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`    |
-| Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                        |
-| OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                          |
+| Integration | Service            | Container                            | Token Path                                    |
+| ----------- | ------------------ | ------------------------------------ | --------------------------------------------- |
+| Slack       | Messaging          | `speedwave_<project>_mcp_slack`      | `~/.speedwave/tokens/<project>/slack/`        |
+| SharePoint  | Documents          | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/`   |
+| GitLab      | Code hosting       | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`       |
+| GitHub      | Code hosting       | `speedwave_<project>_mcp_github`     | `~/.speedwave/tokens/<project>/github/`       |
+| Atlassian   | Jira & Confluence  | `speedwave_<project>_mcp_atlassian`  | `~/.speedwave/tokens/<project>/atlassian/`    |
+| Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`      |
+| Office      | Word/Excel/PPT/PDF | `speedwave_<project>_mcp_office`     | N/A (no credentials)                          |
+| Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                          |
+| OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                            |
+| Host Exec   | Project toolchain  | host-exec (per-project host process) | N/A (whitelist in `~/.speedwave/config.json`) |
 
 OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the host — they access native APIs directly (EventKit on macOS, CalDAV/zbus on Linux, WinRT/MAPI on Windows).
+
+**Host Exec** (`host_exec`) is opt-in per project and runs a **user-defined whitelist** of project-toolchain commands (build / test / lint, `docker compose`, …) on the host machine, in the project folder — so Claude (running in a container) can finally drive your toolchain. It is a deliberate, scoped weakening of Speedwave's container isolation; see [Host Exec](#host-exec) below and [Security Model → Host Exec](../architecture/security.md#host-exec--deliberate-scoped-weakening).
 
 #### macOS Permission Check
 
@@ -81,15 +85,22 @@ Mail and Notes tools use AppleScript-based automation and have different paramet
 
 Each MCP integration requires specific credentials to function. Fields marked as optional do not block the "Configured" status — the integration works without them.
 
-| Integration | Required Fields                                                 | Optional Fields                                      |
-| ----------- | --------------------------------------------------------------- | ---------------------------------------------------- |
-| Slack       | `bot_token`, `user_token`                                       | —                                                    |
-| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                    |
-| GitLab      | `token`, `host_url`                                             | —                                                    |
-| GitHub      | `token`                                                         | —                                                    |
+| Integration | Required Fields                                                 | Optional Fields                                                        |
+| ----------- | --------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Slack       | `bot_token`, `user_token`                                       | —                                                                      |
+| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                                      |
+| GitLab      | `token`, `host_url`                                             | —                                                                      |
+| GitHub      | `token`                                                         | —                                                                      |
 | Atlassian   | `site_url`, `email`, `api_token`                                | `jira_project_keys`, `confluence_space_keys` (allowlists; empty = all) |
-| Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project) |
-| Playwright  | _(none — no credentials required)_                              | —                                                    |
+| Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project)                   |
+| Office      | _(none — no credentials required)_                              | —                                                                      |
+| Playwright  | _(none — no credentials required)_                              | —                                                                      |
+
+### Enabling an integration — first build on demand
+
+When you toggle an integration on for the first time in a project, Speedwave builds its worker container image on demand (ADR-057). The build is part of the "Restarting containers…" wait. First builds of heavy images (e.g. `playwright`, which pulls Chromium; `office`, which pulls LibreOffice + a Python venv) noticeably extend that wait; subsequent toggles are near-instant because the build is cached.
+
+If the build fails (network, disk), the integration row reverts to disabled — your running containers keep their prior configuration. Disabling an integration drops its worker image; re-enabling rebuilds.
 
 ### GitHub — Code Hosting
 
@@ -172,6 +183,35 @@ Inside a worker, Speedwave's convention is: use the service's official SDK (or a
 
 33 tools. Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
 Confluence: `listSpaces`, `getSpace`, `searchPages`, `getPage`, `getPageByTitle`, `createPage`, `updatePage`, `getPageChildren`, `addPageComment`, `getPageComments`, `addPageLabels`, `getPageLabels`, `listAttachments`.
+
+### Office — Documents
+
+The Office integration is a built-in MCP worker for **Word, Excel, PowerPoint, and PDF** files. It is a pure file processor: it has **no credentials** (no `/tokens` mount), **no network egress** (attached only to an `internal: true` compose network — see [ADR-055](../adr/ADR-055-built-in-office-document-worker.md)), and its only window onto the host is the project workspace mounted read-write. Generated files are written under `/workspace/.speedwave-office/`.
+
+It is a thin TypeScript worker on `@speedwave/mcp-shared` plus Python support-scripts invoked via `spawn` — the `presale` plugin's hybrid pattern — gluing mature tools: `markitdown` and SheetJS for extraction, `pandoc` for Markdown↔document conversion, `weasyprint` for HTML/Markdown→PDF, LibreOffice headless for Office→PDF and Office↔Office conversion, `python-docx`/`openpyxl`/`python-pptx` for creating and editing Office files (including native Excel/PowerPoint charts), `pypdf` for PDF manipulation, and `matplotlib` for standalone chart images. Per [ADR-053](../adr/ADR-053-worker-implementation-own-vs-wrap-official-mcp.md) this is an own thin worker rather than wrapping an upstream MCP server: `microsoft/markitdown-mcp` covers read only (not create/edit/PDF/charts), and the other community servers are single-maintainer or Windows-only COM-based.
+
+#### When to use Office vs reading files directly
+
+- To turn an existing `.docx`/`.xlsx`/`.pptx`/`.pdf` into Markdown (to read or summarize), use `readDocument` — it picks the best engine per format (SheetJS for `.xlsx`/`.xls`/`.xlsb`/`.ods`, `markitdown` for `.docx`/`.pptx`/`.pdf`, with `pdftotext`/`pandoc`/`python-docx` fallbacks). For just the raw text layer of a PDF, use `readPdfText`.
+- To produce a PDF: from Markdown use `markdownToPdf`; from HTML use `htmlToPdf` (only local resources under `/workspace` are loaded — no remote `http(s)`); from an existing Office file use `officeToPdf` (a true LibreOffice render).
+- To produce an editable Office file: from Markdown use `markdownToDocx` / `markdownToPptx`; from a structured spec (headings/tables/cells/slides/native charts) use `createDocx` / `createXlsx` / `createPptx`; to modify an existing one use `editDocx` / `editXlsx` / `editPptx`.
+- To make a chart image to embed in a PDF/doc/deck, use `renderChart` (PNG or SVG); for a native, editable chart inside an Excel/PowerPoint file, use the `charts`/`chart` keys of `createXlsx` / `createPptx`.
+- For PDF surgery: `mergePdf`, `splitPdf`, `rotatePdf`, `watermarkPdf`, `fillPdfForm`, `pdfMetadata`.
+
+The full `spec`/`ops` DSL and the `convertOffice` conversion matrix are normative in [ADR-055](../adr/ADR-055-built-in-office-document-worker.md). Inputs are paths under `/workspace` by preference; inline `markdown`/`html`/`spec` is accepted only up to ~200 KB.
+
+#### Limitations
+
+- `convertOffice` supports a curated matrix only — `.docx→{pdf,odt,txt,html,rtf}`, `.odt→{pdf,docx}`, `.pptx→{pdf,odp}`, `.odp→{pdf,pptx}`, `.xlsx→{pdf,ods,csv}`, `.ods→{pdf,xlsx,csv}`. Anything outside it (e.g. `xlsx→docx`) is rejected, because such conversions are lossy and not useful.
+- No OCR / scanned-PDF text extraction in v1 (the `docling` ML pipeline is deliberately excluded to keep the image size down).
+- No "editable `.docx` from a PDF" at full fidelity — `readDocument` gives you the PDF as Markdown, which covers the realistic case.
+- `python-docx` has no native chart objects, so a chart inside a `.docx` is an image (`renderChart` + an `image` element). Native charts are available in `.xlsx` and `.pptx`.
+- HTML→PDF and Markdown→PDF load no remote resources (no egress) — reference images as local files under `/workspace`.
+- LibreOffice conversions are serialized by an in-worker mutex (`soffice --headless` is not reentrant), so parallel `officeToPdf` calls queue.
+
+#### Tool surface
+
+21 tools. Read: `readDocument`, `readPdfText`, `pdfMetadata`. Markdown/HTML→document: `markdownToDocx`, `markdownToPptx`, `markdownToPdf`, `htmlToPdf`. Charts: `renderChart`. Create/edit Office: `createDocx`, `editDocx`, `createXlsx`, `editXlsx`, `createPptx`, `editPptx`. Office→PDF / Office↔Office: `officeToPdf`, `convertOffice`. PDF manipulation: `mergePdf`, `splitPdf`, `rotatePdf`, `watermarkPdf`, `fillPdfForm`.
 
 ### Redmine Configuration Wizard
 
@@ -329,6 +369,53 @@ Plugin authors should set `speedwave_compat` in `plugin.json` to declare which S
 
 This prevents `core.autocrlf=true` (the default on Windows-hosted Git) from rewriting `*.sh` line endings to CRLF on checkout. A plugin `Containerfile` that runs a CRLF `*.sh` will fail with `exit code: 127` (`/bin/sh: 1: …: not found`) when Buildkit invokes the kernel's shebang resolver — see Speedwave issue #603 for context.
 
+## Host Exec
+
+Claude Code runs inside the `claude` container (Node + git only). It **cannot build, test, lint, or run your project**, and it cannot drive the host's Docker / `docker compose`. **Host Exec** (`host_exec`) closes that gap: it runs a **user-defined whitelist** of your project's commands on the host machine, in the project folder, behind the per-project MCP hub — Claude calls them as `host_exec.<recipeName>()`.
+
+> **Host Exec is a deliberate, scoped weakening of Speedwave's container isolation.** A recipe runs on _your machine_ with your user's privileges, and the commands it runs execute code from _your repository_ (`./gradlew test` runs `build.gradle`, `npm run test` runs `node_modules`, `docker compose up` runs the images in `docker-compose.yml`). Because Claude can also _edit_ your repository, a prompt-injected Claude could write a malicious build script and then run it. **Enabling Host Exec is the consent — there is no per-command prompt; once on, Claude runs any whitelisted recipe anytime** (the audit log records every run). Only enable Host Exec for repositories you trust, and only whitelist commands you're OK with Claude running unattended. See [Security Model → Host Exec](../architecture/security.md#host-exec--deliberate-scoped-weakening) for the full mitigations and residual risks. Works under both the Desktop app and the `speedwave` CLI.
+
+### Enabling it
+
+1. **Service integrations → Host Exec → toggle on.** Enabling pops a blocking danger modal that explains the consequences; nothing happens until you confirm it. **That click is the consent** — there is no per-command prompt afterwards. (Disabling needs no modal.)
+2. The whitelist starts **empty** — Claude can run nothing until you add a command.
+3. **+ add command** opens the recipe editor (see below). Add e.g. `{ name: gradle_test, exec: ./gradlew, args: [test] }`. Click **save changes**.
+4. Ask Claude to run it: `host_exec.gradleTest()` — Claude calls it directly, with no prompt, and gets the structured result (exit code + captured output). The CLI works the same: `speedwave` in the project dir, then ask Claude to run the recipe.
+
+The whitelist lives **only in your user config** (`~/.speedwave/config.json`, under `integrations.hostExec`). The repo `.speedwave.json` **cannot** enable Host Exec or contribute recipes — an executable command whitelist is a security-class field, like the LLM `provider` / `base_url` (see [ADR-054](../adr/ADR-054-host-exec-worker.md)). The recipe set is per project, and each project gets its own worker process on its own loopback port; two projects' workers don't share anything.
+
+### Defining a recipe
+
+A recipe is a fixed command — never a free-form string Claude types:
+
+| Field    | Meaning                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`   | `snake_case`, unique. Claude calls it as `host_exec.<camelCase(name)>()` — `gradle_test` → `host_exec.gradleTest()`.                                                                                                                                                                                                                                                                           |
+| `exec`   | The executable. A relative path (`./gradlew`, `npm`, `docker`) resolves against the project directory or your PATH; an absolute path is allowed (the editor flags it so you can double-check). **Shell / eval launchers are rejected** — `bash`, `sh`, `zsh`, `eval`, `env`, `xargs`, `find`, `ssh`, … — because `{"exec":"bash","args":["-c","{cmd}"]}` would be "run anything Claude types". |
+| `args`   | Fixed argument list — literals plus `{name}` parameter tokens. Each token substitution becomes **one** argv element, never re-split. There is no "pass the rest through". A literal sub-command is fine (`npm run build`, `make test`); a **bare `{param}`** as the whole element after a meta-tool (`npm`, `make`, `node`, `python`, …) is rejected (same "run anything" reason).             |
+| `cwdSub` | Optional subdirectory to run in (monorepos) — relative, no `..`, no symlink escape; the worker canonicalises `projectDir/cwdSub` and refuses anything outside the project root.                                                                                                                                                                                                                |
+| `params` | Optional named parameters Claude may supply: `{ name, pattern, maxLen? }`. The `pattern` is a regex the supplied value must **fully** match (the worker anchors it as `^(?:…)$`). Keep it tight.                                                                                                                                                                                               |
+| `env`    | Optional literal environment variables for the recipe (e.g. `CI=true`, `SPRING_PROFILES_ACTIVE=test`). Reserved names (`PATH`, `LD_*`, `NODE_OPTIONS`, …) are rejected. **Don't put secrets here** — use a `.env` in the repo. The on-disk snapshot is `0600` and the host log redacts these values, but a repo `.env` is still the right place for credentials.                               |
+
+There is **no per-recipe `confirm` field** — enabling Host Exec is the consent (above). The recipe editor shows an amber warning when you add a recipe that mounts arbitrary host paths into a privileged container (`docker`/`docker-compose`/`podman` with `up`/`down`/`exec`/`rm`/`prune` — effectively host root from a `docker-compose.yml` Claude can edit), and a milder warning for database clients / migrations; neither is blocking. If you don't want a recipe to run unattended, don't whitelist it.
+
+### Reading a command's result
+
+When Claude runs a recipe it gets a structured result: a `status` (`exited` / `killed_timeout` / `spawn_error`), an `exitCode` (when it exited on its own), `stdout`, `stderr` (separate streams), `truncated`, `durationMs`, the recipe `name`, and the directory it ran in. Two things to know:
+
+- **A non-zero exit code is _not_ an error to Claude — it's a successful result carrying the code.** "Tests failed (exit 1)" is information, not a tool failure; Claude sees the `stderr` and can act on it. Tool _errors_ are reserved for: an unknown/removed recipe, a parameter that fails its regex, a `cwdSub` that escapes the project, and the executable not being found.
+- **Output may be truncated**, and **output ≠ full state.** Each stream is capped (the tail is kept, ANSI stripped); Claude should not assume `stdout` is the whole picture, and for anything that changes state it should separately check the side effects (run the test report, query the DB) rather than trust the captured text.
+
+A per-command timeout (≈7 minutes) kills the **whole process tree** if a recipe (or a daemon it spawned — Gradle daemon, `docker compose` children) runs away; the result then has `status: killed_timeout`.
+
+### "Honest `shell:false`" — what the bans actually buy you
+
+`host_exec` always runs `exec` with `shell: false` and no `-c`/eval option, and it rejects shell-launcher execs and bare-parameter meta-invocations. **This is defense-in-depth, not a guarantee.** `npm run`, `make`, `gradle`, `docker compose` all execute repo-controlled code — often via `/bin/sh` themselves — and the launcher ban is by _basename_, so `./node_modules/.bin/node …` is not caught (a documented residual). The real safety boundary for Host Exec is: **it's off by default, it's user-local, and the whitelist is the one you deliberately chose at enable time** (there is no per-call prompt — the audit log is the after-the-fact record). Treat a whitelisted recipe as "this repo's code, on my machine, runnable by Claude without a prompt" — which is exactly what it is.
+
+### Don't hand-roll an agent on `0.0.0.0` (anti-pattern)
+
+Before Host Exec existed, some users wired their own bridge — an LLM-generated `agent.js` on `0.0.0.0:8765` with a token committed to the repo — so Claude could run `./gradlew test`. **Don't.** Binding to `0.0.0.0` exposes a command-execution endpoint to your whole LAN; a token in the repo is a token in everyone's git history; and a hand-rolled bridge runs _anything_ Claude asks (no whitelist, no audit). Host Exec is the safe path: loopback-only, a per-(project, app-session) bearer the hub never sees in the repo, a user-local whitelist of fixed commands you chose, and a `0600` audit log.
+
 ## Local LLM Setup
 
 You can run Claude Code inside Speedwave against a local LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to select a provider.
@@ -374,3 +461,4 @@ The `custom` provider no longer exists. If your LLM server is at a non-standard 
 - [ADR-036: Self-Declaring Worker Policy](../adr/ADR-036-self-declaring-worker-policy.md)
 - [ADR-040: Remove LiteLLM — Direct Local Provider Injection](../adr/ADR-040-remove-litellm-direct-provider-injection.md)
 - [ADR-041: Local LLM Model Discovery and SSRF Policy](../adr/ADR-041-local-llm-model-discovery.md)
+- [ADR-054: Host Exec — Host-Side Per-Project Toolchain Worker](../adr/ADR-054-host-exec-worker.md)

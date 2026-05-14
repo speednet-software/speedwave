@@ -375,10 +375,9 @@ fn main() -> anyhow::Result<()> {
             use std::io::Write;
             let sanitized =
                 speedwave_runtime::log_sanitizer::sanitize(&format!("{}", record.args()));
-            // ISO8601 local-time timestamp with millis — kept in sync with
-            // the desktop logger format so merged log views (e.g. user
-            // pasting CLI + desktop logs side-by-side) stay comparable.
-            let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z");
+            // One timestamp format for every Speedwave log line — see
+            // `speedwave_runtime::log_ts` (the Rust SSOT).
+            let ts = speedwave_runtime::log_ts::log_timestamp();
             writeln!(
                 buf,
                 "{ts} [{level}][{target}] {sanitized}",
@@ -735,6 +734,10 @@ fn main() -> anyhow::Result<()> {
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
 
+    // Spawn host_exec BEFORE render_compose — hub needs port/auth-token files (ADR-054).
+    let _host_exec_worker =
+        maybe_spawn_host_exec_worker(&project_name, &project_dir, &integrations);
+
     let compose_yml = compose::render_compose(
         &project_name,
         &project_dir.to_string_lossy(),
@@ -873,6 +876,51 @@ fn main() -> anyhow::Result<()> {
     // (where nerdctl translates SIGKILL → exit code 137).
     let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
     std::process::exit(code);
+}
+
+/// Spawn per-project `host_exec` worker if enabled; the handle keeps it alive.
+/// Best-effort: failures are logged and `None` returned.
+fn maybe_spawn_host_exec_worker(
+    project_name: &str,
+    project_dir: &Path,
+    integrations: &config::ResolvedIntegrationsConfig,
+) -> Option<speedwave_runtime::host_exec_process::HostExecProcess> {
+    use speedwave_runtime::host_exec_process::{write_host_exec_config_snapshot, HostExecProcess};
+    if !integrations.host_exec {
+        return None;
+    }
+    let data_dir = consts::data_dir();
+    let state_dir = speedwave_runtime::host_exec::host_exec_project_dir(data_dir, project_name);
+    if let Err(e) = std::fs::create_dir_all(&state_dir) {
+        log::warn!("host_exec[{project_name}]: cannot create state dir: {e}");
+        return None;
+    }
+    let snapshot = config::host_exec_config_snapshot(project_dir, &integrations.host_exec_commands);
+    let config_path = state_dir.join(consts::HOST_EXEC_CONFIG_FILE);
+    if let Err(e) = write_host_exec_config_snapshot(&config_path, &snapshot) {
+        log::warn!("host_exec[{project_name}]: cannot write config snapshot: {e}");
+        return None;
+    }
+    let script = match speedwave_runtime::build::resolve_host_exec_script() {
+        Some(s) => s.to_string_lossy().to_string(),
+        None => {
+            log::warn!(
+                "host_exec[{project_name}]: worker script not found — host_exec unavailable"
+            );
+            return None;
+        }
+    };
+    let host_path = std::env::var("PATH").unwrap_or_default();
+    match HostExecProcess::spawn_in(project_name, project_dir, &script, &host_path, data_dir) {
+        Ok(proc) => {
+            log::info!("host_exec[{project_name}]: started (port {})", proc.port());
+            Some(proc)
+        }
+        Err(e) => {
+            log::warn!("host_exec[{project_name}]: spawn failed: {e}");
+            None
+        }
+    }
 }
 
 /// Resolves project name from CWD path matching against configured projects.
@@ -1180,6 +1228,38 @@ mod tests {
     }
 
     #[test]
+    fn host_exec_worker_does_not_spawn_when_integration_disabled() {
+        // Disabled host_exec → no worker, no snapshot written. (The enabled
+        // path needs a fake worker + an injectable data dir; the e2e suite
+        // exercises it end-to-end.)
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = config::ResolvedIntegrationsConfig::default(); // host_exec: false
+        assert!(!integrations.host_exec);
+        let handle = maybe_spawn_host_exec_worker("proj", tmp.path(), &integrations);
+        assert!(
+            handle.is_none(),
+            "no worker should spawn when host_exec is disabled"
+        );
+    }
+
+    #[test]
+    fn host_exec_worker_is_spawned_before_render_compose() {
+        // Structural guard: the worker spawn must precede `render_compose` so
+        // `apply_host_exec_config` sees the port/auth-token files (ADR-054).
+        let source = include_str!("main.rs");
+        let spawn_idx = source
+            .find("maybe_spawn_host_exec_worker(&project_name")
+            .expect("the CLI must call maybe_spawn_host_exec_worker in main()");
+        let render_idx = source
+            .find("compose::render_compose(")
+            .expect("the CLI must call render_compose in main()");
+        assert!(
+            spawn_idx < render_idx,
+            "the host_exec worker must be spawned before render_compose"
+        );
+    }
+
+    #[test]
     fn test_exec_cmd_includes_resolved_flags() {
         use speedwave_runtime::defaults;
         let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
@@ -1206,7 +1286,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let result = resolve_project_for_cwd(&canonical, &user_config).unwrap();
@@ -1230,7 +1312,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let result = resolve_project_for_cwd(&sub, &user_config).unwrap();
@@ -1265,7 +1349,9 @@ mod tests {
             ],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         // CWD inside nested project should match web-proj (longer prefix)
@@ -1285,7 +1371,9 @@ mod tests {
             }],
             active_project: Some("fallback-project".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         // Use a tempdir as CWD that doesn't match any project
@@ -1300,7 +1388,9 @@ mod tests {
             projects: vec![],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1325,7 +1415,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         // canonicalize strips trailing slash, so exact match should work

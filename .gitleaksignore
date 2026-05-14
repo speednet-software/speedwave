@@ -29,3 +29,11 @@ desktop/src-tauri/src/log_commands.rs:generic-api-key:128
 # PII tokenizer test — fake API key in test fixture.
 desktop/src-tauri/build-context/mcp-servers/hub/src/pii-tokenizer.test.ts:generic-api-key:87
 mcp-servers/hub/src/pii-tokenizer.test.ts:generic-api-key:87
+
+# Whisper model names in the transcription model catalogue (ADR-056).
+# "large-v3-turbo" / "large-v3-turbo-q5_0" / "large-v3-q5_0" are official
+# OpenAI Whisper model identifiers, not API keys — gitleaks' generic-api-key
+# rule flags them only because hyphen+digit strings score high on entropy.
+crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:143
+crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:154
+crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:176

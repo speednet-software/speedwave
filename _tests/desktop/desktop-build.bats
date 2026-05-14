@@ -77,7 +77,7 @@ assert 'cli/speedwave' in resources, f'CLI missing from macos bundle resources: 
 import json, sys
 conf = json.load(open('$TAURI_DIR/tauri.macos.conf.json'))
 resources = conf.get('bundle', {}).get('resources', {})
-required = ['reminders-cli', 'calendar-cli', 'mail-cli', 'notes-cli']
+required = ['reminders-cli', 'calendar-cli', 'mail-cli', 'notes-cli', 'audio-capture-cli']
 missing = [key for key in required if key not in resources]
 assert not missing, f'macOS helpers missing from bundle resources: {missing}; have {list(resources.keys())}'
 "

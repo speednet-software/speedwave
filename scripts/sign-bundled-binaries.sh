@@ -36,6 +36,7 @@ VIRTUALIZATION_ENTITLEMENTS="$SRC_TAURI/entitlements/virtualization.plist"
 CALENDARS_ENTITLEMENTS="$SRC_TAURI/entitlements/calendars.plist"
 REMINDERS_ENTITLEMENTS="$SRC_TAURI/entitlements/reminders.plist"
 APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
+AUDIO_CAPTURE_ENTITLEMENTS="$SRC_TAURI/entitlements/audio-capture.plist"
 
 # Paths that tauri.macos.conf.json copies into .app/Contents/Resources/.
 # Source: desktop/src-tauri/tauri.macos.conf.json → bundle.resources.
@@ -46,13 +47,15 @@ APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 # Binaries using restricted platform APIs under Hardened Runtime must carry
 # entitlements plists to opt back in. See ADR-037 for the full inventory
 # (virtualization for limactl, Apple Events for mail/notes CLIs, calendars
-# for calendar-cli and reminders for reminders-cli, JIT for Node.js).
+# for calendar-cli and reminders for reminders-cli, audio-input for
+# audio-capture-cli per ADR-056, JIT for Node.js).
 SIGN_TARGETS=(
   "$SRC_TAURI/cli/speedwave:"
   "$SRC_TAURI/reminders-cli:$REMINDERS_ENTITLEMENTS"
   "$SRC_TAURI/calendar-cli:$CALENDARS_ENTITLEMENTS"
   "$SRC_TAURI/mail-cli:$APPLE_EVENTS_ENTITLEMENTS"
   "$SRC_TAURI/notes-cli:$APPLE_EVENTS_ENTITLEMENTS"
+  "$SRC_TAURI/audio-capture-cli:$AUDIO_CAPTURE_ENTITLEMENTS"
   "$SRC_TAURI/lima/bin/limactl:$VIRTUALIZATION_ENTITLEMENTS"
   "$SRC_TAURI/nodejs/bin/node:$NODE_ENTITLEMENTS"
 )
@@ -153,10 +156,10 @@ verify_macho() {
 # permission rows by, so a mismatch means recovery commands like `tccutil reset
 # Calendar pl.speedwave.desktop.calendar` won't work for users.
 #
-# This function is invoked only for the four native macOS CLIs (calendar-cli,
-# reminders-cli, mail-cli, notes-cli) — other bundled binaries either have no
-# user-visible TCC binding (speedwave, node) or use a fixed system identifier
-# (limactl).
+# This function is invoked only for the native macOS CLIs (calendar-cli,
+# reminders-cli, mail-cli, notes-cli, audio-capture-cli) — other bundled
+# binaries either have no user-visible TCC binding (speedwave, node) or use a
+# fixed system identifier (limactl).
 verify_identifier() {
   local path="$1"
   local expected="$2"
@@ -182,6 +185,7 @@ get_expected_identifier() {
     reminders-cli) echo "pl.speedwave.desktop.reminders" ;;
     mail-cli) echo "pl.speedwave.desktop.mail" ;;
     notes-cli) echo "pl.speedwave.desktop.notes" ;;
+    audio-capture-cli) echo "pl.speedwave.desktop.audio-capture" ;;
     *) echo "" ;;
   esac
 }

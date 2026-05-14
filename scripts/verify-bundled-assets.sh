@@ -67,6 +67,7 @@ case "$platform" in
     require_exec "$root/calendar-cli"
     require_exec "$root/mail-cli"
     require_exec "$root/notes-cli"
+    require_exec "$root/audio-capture-cli"
     ;;
   linux)
     require_non_empty_dir "$root/nerdctl-full/bin"

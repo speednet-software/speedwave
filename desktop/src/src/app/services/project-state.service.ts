@@ -50,6 +50,12 @@ export class ProjectStateService {
   restartError = '';
 
   /**
+   * Service just toggled on, forwarded to backend for rollback on build fail.
+   * Tracks the most recent toggle only; rapid A→B enables overwrite to B.
+   */
+  pendingJustEnabled: string | null = null;
+
+  /**
    * Structured error kind set when a CloudStorage TCC failure is detected.
    * `'cloudstorage_tcc_required'` routes the shell to `<app-cloudstorage-modal>`.
    * Reset to `undefined` at the start of every new project switch attempt.
@@ -62,6 +68,11 @@ export class ProjectStateService {
 
   private initialized = false;
   private tauri = inject(TauriService);
+  /**
+   * Set of integration status re-fetchers registered by the integrations component;
+   * called after a failed restart so the toggled-on row reverts to reality.
+   */
+  private statusRefreshers: Array<() => void> = [];
   private changeListeners: Array<() => void> = [];
   private readyListeners: Array<() => void> = [];
   private failedListeners: Array<(error: string) => void> = [];
@@ -319,21 +330,35 @@ export class ProjectStateService {
     this.notifyChange();
   }
 
-  /** Restarts integration containers to apply pending changes. */
+  /**
+   * Registers a status re-fetcher; the integrations component uses this so
+   * that on a failed enable (build/restart) the row visibly reverts.
+   * @param cb - Callback invoked after a failed restart so the caller can
+   *   re-fetch integration statuses and reflect the backend's rollback.
+   */
+  registerIntegrationStatusRefresher(cb: () => void): () => void {
+    this.statusRefreshers.push(cb);
+    return () => {
+      this.statusRefreshers = this.statusRefreshers.filter((l) => l !== cb);
+    };
+  }
+
+  /** Restarts integration containers; backend rebuilds missing worker images. */
   async restartContainers(): Promise<void> {
     if (!this.activeProject || this.restarting) return;
     const project = this.activeProject;
+    const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
     this.notifyChange();
+
     let restartedOk = false;
     try {
-      await this.tauri.invoke('restart_integration_containers', { project });
+      await this.tauri.invoke('restart_integration_containers', { project, justEnabled });
       this.needsRestart = false;
       restartedOk = true;
       // Slash discovery is cached host-side for 10 min; compose recreate
-      // does not invalidate it. Without this nudge, the next slash-menu
-      // open returns the pre-restart list. Cache miss is non-fatal.
+      // does not invalidate it.
       try {
         await this.tauri.invoke('invalidate_slash_cache', { projectId: project });
       } catch (err: unknown) {
@@ -341,8 +366,12 @@ export class ProjectStateService {
       }
     } catch (e: unknown) {
       this.restartError = e instanceof Error ? e.message : String(e);
+      // Backend rolled `justEnabled` back to disabled — refresh the rows.
+      for (const cb of this.statusRefreshers) cb();
     }
+
     this.restarting = false;
+    this.pendingJustEnabled = null;
     this.notifyChange();
     if (restartedOk) {
       this.notifyReady();

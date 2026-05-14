@@ -30,6 +30,46 @@ pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
+
+/// Subdirectory under the data dir holding per-project `host_exec` state.
+/// SSOT — do not hard-code `"host-exec"` at call sites.
+pub const HOST_EXEC_SUBDIR: &str = "host-exec";
+/// Per-project worker snapshot, written `0o600` (may hold env-value secrets).
+pub const HOST_EXEC_CONFIG_FILE: &str = "config.json";
+/// Per-project bearer token (`0o600`).
+pub const HOST_EXEC_AUTH_TOKEN_FILE: &str = "auth-token";
+/// Per-project worker listening port file.
+pub const HOST_EXEC_PORT_FILE: &str = "port";
+/// Per-project worker PID file — used for stale-process cleanup.
+pub const HOST_EXEC_PID_FILE: &str = "pid";
+/// Per-project audit log; env values redacted (ADR-054 §"Security model").
+pub const HOST_EXEC_LOG_FILE: &str = "log";
+
+/// Per-command timeout (7 min, fits under the hub's 600s long timeout).
+pub const HOST_EXEC_TIMEOUT_MS: u64 = 420_000;
+/// Per-stream stdout/stderr tail-cap.
+pub const HOST_EXEC_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Per-stream line cap, applied alongside the byte cap.
+pub const HOST_EXEC_MAX_OUTPUT_LINES: usize = 2000;
+/// Ceiling on a recipe parameter's value length and on the declared `maxLen`.
+pub const HOST_EXEC_PARAM_MAX_LEN: usize = 65536;
+/// Sanity ceiling on a parameter's regex `pattern` length (semantics live in the worker).
+pub const HOST_EXEC_PARAM_PATTERN_MAX_LEN: usize = 4096;
+
+/// Banned `exec` basenames (shell / eval launchers).
+/// SSOT; case-insensitive. See ADR-054 §"Hard ban on direct shell/eval launchers".
+pub const HOST_EXEC_SHELL_LAUNCHERS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "env", "xargs", "find", "ssh", "sshpass",
+    "busybox", "toybox",
+];
+
+/// Meta-tools banned only with a *bare* `{param}` argv element.
+/// SSOT; case-insensitive. See ADR-054 §"Config schema" (parameterised meta-invocation rule).
+pub const HOST_EXEC_META_TOOLS: &[&str] = &[
+    "node", "deno", "python", "python3", "perl", "ruby", "make", "npm", "npx", "pnpm", "yarn",
+    "awk", "gawk", "mawk", "nawk",
+];
+
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
@@ -117,6 +157,41 @@ pub const BUNDLE_RESOURCES_ENV: &str = "SPEEDWAVE_RESOURCES_DIR";
 /// Marker file name written by the Desktop app inside `~/.speedwave/`.
 /// The CLI reads it to locate bundled resources without the env var.
 pub const RESOURCES_MARKER: &str = "resources-dir";
+
+// --- Meeting transcription (ADR-056) ---------------------------------------
+
+/// Subdirectory of `data_dir()` holding recorded meetings + their transcripts.
+/// Layout: `<data_dir>/transcripts/<uuid>/{audio.wav,transcript.json,capture.pid}`.
+/// Directory perms `0o700`, files `0o600` — these contain microphone/system audio.
+pub const TRANSCRIPTS_SUBDIR: &str = "transcripts";
+
+/// Subdirectory of `data_dir()` holding downloaded Whisper + diarization models.
+/// Layout: `<data_dir>/models/whisper/ggml-*.bin`, `<data_dir>/models/diarization/*.onnx`.
+/// Directory perms `0o700`, files `0o600`.
+pub const MODELS_SUBDIR: &str = "models";
+
+/// Global ceiling (with headroom) on the total size of downloaded transcription
+/// models. `large-v3` alone is ~2.9 GiB; a realistic "I keep one model per role
+/// plus a couple of alternates" set is ~7 GiB, so this dome (~12 GiB) sits
+/// comfortably above that while still catching a misconfigured catalogue that
+/// would try to fill the disk. The per-model cap from the catalogue is the
+/// first-line check; this is the overall backstop.
+pub const MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES: u64 = 12 * 1024 * 1024 * 1024;
+
+/// Hosts the transcription model downloader is allowed to follow a redirect to.
+/// Hugging Face `302`-redirects model downloads to its Xet CDN and GitHub
+/// release assets redirect to their own CDN — both with signed URLs — so the
+/// downloader uses a custom redirect policy that follows redirects only to
+/// these hosts (exact match or a subdomain). An unrecognised redirect host
+/// produces a "model URL changed — report this" error rather than being
+/// followed. Frozen by ADR-056 spike 0C; HF CDN hostnames have changed before,
+/// so this list may need updating with a model-catalog bump.
+pub const TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS: &[&str] = &[
+    "huggingface.co",
+    "cas-bridge.xethub.hf.co",
+    "github.com",
+    "release-assets.githubusercontent.com",
+];
 
 /// Error message returned when `newuidmap` is not found on the system.
 /// Used by both `NerdctlRuntime::ensure_ready()` and `setup_wizard::init_vm_linux()`.
@@ -263,6 +338,10 @@ pub struct McpServiceDescriptor {
     pub credential_files: &'static [&'static str],
     /// Optional UI badge label (e.g. "BETA", "NEW"). `None` = no badge.
     pub badge: Option<&'static str>,
+    /// True if this worker runs on its own egress-less network `{NETWORK_NAME}_{config_key}`
+    /// (e.g. `office`) rather than only the shared project network. When such a service is
+    /// disabled, its dedicated network and the hub's attachment to it are removed from compose.
+    pub egress_less: bool,
 }
 
 /// Toggleable MCP services — Single Source of Truth for service metadata.
@@ -298,6 +377,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         ],
         credential_files: &["bot_token", "user_token"],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "sharepoint",
@@ -376,6 +456,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "base_path",
         ],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "redmine",
@@ -423,6 +504,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "project_name",
         ],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "gitlab",
@@ -454,6 +536,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         ],
         credential_files: &["token", "host_url"],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "github",
@@ -473,6 +556,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         }],
         credential_files: &["token"],
         badge: None,
+        egress_less: false,
     },
     McpServiceDescriptor {
         config_key: "atlassian",
@@ -540,6 +624,19 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "confluence_space_keys",
         ],
         badge: None,
+        egress_less: false,
+    },
+    McpServiceDescriptor {
+        config_key: "office",
+        compose_name: "mcp-office",
+        worker_env: "WORKER_OFFICE_URL",
+        display_name: "Office documents",
+        description: "Read, write, convert Word/Excel/PowerPoint/PDF; render charts",
+        // A pure file processor — no service credentials. Operates on /workspace files only.
+        auth_fields: &[],
+        credential_files: &[],
+        badge: Some("BETA"),
+        egress_less: true,
     },
     McpServiceDescriptor {
         config_key: "playwright",
@@ -551,6 +648,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         auth_fields: &[],
         credential_files: &[],
         badge: Some("BETA"),
+        egress_less: false,
     },
 ];
 
@@ -624,11 +722,19 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-gitlab",
     "mcp-github",
     "mcp-atlassian",
+    "mcp-office",
     "mcp-playwright",
 ];
 
 /// Built-in service IDs (logical names, not compose names).
 /// Used by plugin install to prevent slug collisions.
+///
+/// `host_exec` is here even though it has no compose service — it is a
+/// host-side worker (like `os`/`mcp-os`) reached via `WORKER_HOST_EXEC_URL`
+/// on the hub (ADR-054). It is the first multi-word entry; the hub builds the
+/// worker env var as `WORKER_${id.toUpperCase()}_URL` and treats `_`
+/// literally, so `host_exec` → `WORKER_HOST_EXEC_URL` (a hyphen would give the
+/// broken `WORKER_HOST-EXEC_URL`).
 pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "slack",
     "sharepoint",
@@ -636,8 +742,10 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "gitlab",
     "github",
     "atlassian",
+    "office",
     "playwright",
     "os",
+    "host_exec",
 ];
 
 /// Environment variable names that plugins are forbidden from setting via
@@ -669,6 +777,10 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
     "IFS",
     "BASH_ENV",
     "ENV",
+    // host_exec worker-internal env (must never reach a recipe child)
+    "HOST_EXEC_AUTH_TOKEN",
+    "HOST_EXEC_CONFIG_PATH",
+    "HOST_EXEC_LOG_FILE",
 ];
 
 /// Upper bound for plugin `mem_limit`, normalised to MiB. A plugin requesting
@@ -788,7 +900,7 @@ mod tests {
         // A change here is deliberate — bumping this count signals a new
         // hijack vector was added (and the matching test in plugin.rs
         // should grow too). Catches accidental deletions.
-        assert_eq!(RESERVED_ENV_KEYS.len(), 16);
+        assert_eq!(RESERVED_ENV_KEYS.len(), 19);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
                 k,
@@ -908,7 +1020,7 @@ mod tests {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
         // Explicit field enumeration — update this when adding/removing MCP fields.
         // Using a const to force a compile-time reminder when struct changes.
-        const EXPECTED_MCP_FIELDS: usize = 7; // slack, sharepoint, redmine, gitlab, github, atlassian, playwright
+        const EXPECTED_MCP_FIELDS: usize = 8; // slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright
         let _ = (
             resolved.slack,
             resolved.sharepoint,
@@ -916,6 +1028,7 @@ mod tests {
             resolved.gitlab,
             resolved.github,
             resolved.atlassian,
+            resolved.office,
             resolved.playwright,
         );
         assert_eq!(
@@ -987,6 +1100,7 @@ mod tests {
             ("gitlab", 2),
             ("github", 1),
             ("atlassian", 5),
+            ("office", 0),
             ("playwright", 0),
         ];
         for &(key, count) in expected {
@@ -1007,7 +1121,7 @@ mod tests {
     /// public resources (e.g. Playwright scrapes public URLs). Kept as a
     /// small explicit allowlist so forgetting to declare auth for a new
     /// service that actually needs it still fails this test.
-    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright"];
+    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright", "office"];
 
     #[test]
     fn test_every_service_has_auth_fields() {

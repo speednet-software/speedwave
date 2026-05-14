@@ -68,6 +68,50 @@ impl OsIntegrationsConfig {
     }
 }
 
+/// One named parameter a recipe accepts from Claude. Regex semantics live in
+/// the JS worker; Rust only sanity-checks shape (ADR-054).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HostExecParam {
+    /// Parameter name — `snake_case`, unique within the recipe.
+    pub name: String,
+    /// Regex the worker anchors as `^(?:…)$`; non-empty, length-bounded.
+    pub pattern: String,
+    /// Optional upper bound on value length (≤ `HOST_EXEC_PARAM_MAX_LEN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_len: Option<usize>,
+}
+
+/// One whitelisted command. Exposed to Claude as `host_exec.<name>()` (ADR-054).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HostExecRecipe {
+    /// Recipe name — `^[a-z][a-z0-9_]{0,63}$`, unique across the whitelist.
+    pub name: String,
+    /// Executable. Basename checked against ban lists; relative resolves on `PATH`.
+    pub exec: String,
+    /// Fixed argv — literals plus `{name}` tokens (one element per substitution).
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional subdirectory inside the project dir; worker canonicalises and pins to root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_sub: Option<String>,
+    /// Named parameters Claude supplies; every `{name}` token needs a match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Vec<HostExecParam>>,
+    /// Literal env vars (no Claude values); reserved keys rejected. May hold secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+}
+
+/// Per-project `host_exec` config. User-config only (ADR-054).
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+pub struct HostExecConfig {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub commands: Vec<HostExecRecipe>,
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct IntegrationsConfig {
     pub slack: Option<IntegrationConfig>,
@@ -76,8 +120,12 @@ pub struct IntegrationsConfig {
     pub gitlab: Option<IntegrationConfig>,
     pub github: Option<IntegrationConfig>,
     pub atlassian: Option<IntegrationConfig>,
+    pub office: Option<IntegrationConfig>,
     pub playwright: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
+    /// Per-project `host_exec` whitelist (ADR-054). User-config only.
+    #[serde(default, rename = "hostExec", skip_serializing_if = "Option::is_none")]
+    pub host_exec: Option<HostExecConfig>,
     #[serde(default)]
     pub plugins: Option<HashMap<String, IntegrationConfig>>,
 }
@@ -93,6 +141,7 @@ impl IntegrationsConfig {
             "gitlab" => self.gitlab = Some(cfg),
             "github" => self.github = Some(cfg),
             "atlassian" => self.atlassian = Some(cfg),
+            "office" => self.office = Some(cfg),
             "playwright" => self.playwright = Some(cfg),
             _ => return false,
         }
@@ -111,6 +160,18 @@ impl IntegrationsConfig {
             },
         );
     }
+
+    /// Set the `host_exec.enabled` flag. Caller handles worker + compose.
+    pub fn set_host_exec_enabled(&mut self, enabled: bool) {
+        let cfg = self.host_exec.get_or_insert_with(HostExecConfig::default);
+        cfg.enabled = Some(enabled);
+    }
+
+    /// Replace the whitelist. Caller must have validated via `validate_host_exec_config`.
+    pub fn set_host_exec_commands(&mut self, commands: Vec<HostExecRecipe>) {
+        let cfg = self.host_exec.get_or_insert_with(HostExecConfig::default);
+        cfg.commands = commands;
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -121,11 +182,16 @@ pub struct ResolvedIntegrationsConfig {
     pub gitlab: bool,
     pub github: bool,
     pub atlassian: bool,
+    pub office: bool,
     pub playwright: bool,
     pub os_reminders: bool,
     pub os_calendar: bool,
     pub os_mail: bool,
     pub os_notes: bool,
+    /// `host_exec` enabled flag — user-config only (ADR-054).
+    pub host_exec: bool,
+    /// Resolved whitelist (user-config only). On-disk snapshot is the authoritative copy.
+    pub host_exec_commands: Vec<HostExecRecipe>,
     pub plugins: HashMap<String, bool>,
 }
 
@@ -142,6 +208,7 @@ impl ResolvedIntegrationsConfig {
             "gitlab" => Some(self.gitlab),
             "github" => Some(self.github),
             "atlassian" => Some(self.atlassian),
+            "office" => Some(self.office),
             "playwright" => Some(self.playwright),
             _ => None,
         }
@@ -192,12 +259,39 @@ pub struct SelectedIde {
     pub port: u16,
 }
 
+/// Meeting-transcription preferences (ADR-056). Top-level user config only —
+/// **not** part of `ProjectRepoConfig` (a checked-in repo file must not be
+/// able to turn on host-audio recording — privacy-sensitive host capability).
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct TranscriptionConfig {
+    /// Feature toggle. `None` or `Some(false)` keeps the feature off.
+    pub enabled: Option<bool>,
+    /// Default Whisper model key for the live pass (e.g. `"small"`).
+    pub default_live_model: Option<String>,
+    /// Default forced language (`"pl"` / `"en"`).
+    pub default_language: Option<String>,
+    /// Keep `audio.wav` after the offline pass finishes. Default = keep.
+    pub keep_audio_after_finalize: Option<bool>,
+}
+
+/// UI preferences (ADR-058). Top-level user-only — a checked-in repo
+/// `.speedwave.json` is not allowed to flip beta UI on or off.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct UiPrefsConfig {
+    /// Reveal hidden / work-in-progress UI surfaces. Default = off.
+    pub beta_enabled: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct SpeedwaveUserConfig {
     pub projects: Vec<ProjectUserEntry>,
     pub active_project: Option<String>,
     pub selected_ide: Option<SelectedIde>,
     pub log_level: Option<String>,
+    /// Meeting-transcription preferences (ADR-056). Top-level (not per-project).
+    pub transcription: Option<TranscriptionConfig>,
+    /// UI preferences (ADR-058). Top-level, user-only.
+    pub ui: Option<UiPrefsConfig>,
 }
 
 impl SpeedwaveUserConfig {
@@ -223,6 +317,22 @@ impl SpeedwaveUserConfig {
         self.active_project
             .as_deref()
             .and_then(|n| self.find_project(n))
+    }
+
+    /// `true` if the user toggled meeting transcription on (top-level only).
+    pub fn transcription_enabled(&self) -> bool {
+        self.transcription
+            .as_ref()
+            .and_then(|t| t.enabled)
+            .unwrap_or(false)
+    }
+
+    /// `true` if beta-features UI surface is enabled (top-level only).
+    pub fn beta_enabled(&self) -> bool {
+        self.ui
+            .as_ref()
+            .and_then(|u| u.beta_enabled)
+            .unwrap_or(false)
     }
 }
 
@@ -256,7 +366,11 @@ pub fn resolve_project_config(
             }
         }
         if let Some(repo_integrations) = repo.integrations {
-            apply_integrations_layer(&mut integrations, &repo_integrations);
+            apply_integrations_layer(
+                &mut integrations,
+                &repo_integrations,
+                /* from_repo = */ true,
+            );
         }
     }
 
@@ -269,7 +383,11 @@ pub fn resolve_project_config(
             }
         }
         if let Some(user_integrations) = &user.integrations {
-            apply_integrations_layer(&mut integrations, user_integrations);
+            apply_integrations_layer(
+                &mut integrations,
+                user_integrations,
+                /* from_repo = */ false,
+            );
         }
     }
 
@@ -319,6 +437,17 @@ pub fn resolve_integrations(
     resolve_project_config(project_dir, user_config, project_name).1
 }
 
+/// Builds `{ projectDir, commands }` for the worker snapshot. Caller must validate.
+pub fn host_exec_config_snapshot(
+    project_dir: &Path,
+    commands: &[HostExecRecipe],
+) -> serde_json::Value {
+    serde_json::json!({
+        "projectDir": project_dir.to_string_lossy(),
+        "commands": commands,
+    })
+}
+
 fn apply_toggle(target: &mut bool, source: &Option<IntegrationConfig>) {
     if let Some(cfg) = source {
         if let Some(enabled) = cfg.enabled {
@@ -327,19 +456,36 @@ fn apply_toggle(target: &mut bool, source: &Option<IntegrationConfig>) {
     }
 }
 
-fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &IntegrationsConfig) {
+/// Applies one integrations layer. `from_repo=true` skips security-class fields
+/// (currently `host_exec`; mirrors `merge_llm_repo`'s `provider`/`base_url` rule).
+fn apply_integrations_layer(
+    result: &mut ResolvedIntegrationsConfig,
+    layer: &IntegrationsConfig,
+    from_repo: bool,
+) {
     apply_toggle(&mut result.slack, &layer.slack);
     apply_toggle(&mut result.sharepoint, &layer.sharepoint);
     apply_toggle(&mut result.redmine, &layer.redmine);
     apply_toggle(&mut result.gitlab, &layer.gitlab);
     apply_toggle(&mut result.github, &layer.github);
     apply_toggle(&mut result.atlassian, &layer.atlassian);
+    apply_toggle(&mut result.office, &layer.office);
     apply_toggle(&mut result.playwright, &layer.playwright);
     if let Some(ref os) = layer.os {
         apply_toggle(&mut result.os_reminders, &os.reminders);
         apply_toggle(&mut result.os_calendar, &os.calendar);
         apply_toggle(&mut result.os_mail, &os.mail);
         apply_toggle(&mut result.os_notes, &os.notes);
+    }
+    // `host_exec` is user-config only — repo layer ignored (ADR-054).
+    if !from_repo {
+        if let Some(ref he) = layer.host_exec {
+            if let Some(enabled) = he.enabled {
+                result.host_exec = enabled;
+            }
+            // User layer wins wholesale — no whitelist merging.
+            result.host_exec_commands = he.commands.clone();
+        }
     }
     if let Some(ref plugins) = layer.plugins {
         for (service_id, cfg) in plugins {
@@ -465,9 +611,146 @@ fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // ---- TranscriptionConfig (ADR-056 Phase 3) ------------------------------
+
+    #[test]
+    fn transcription_disabled_by_default() {
+        let cfg = SpeedwaveUserConfig::default();
+        assert!(!cfg.transcription_enabled(), "off by default");
+        assert!(cfg.transcription.is_none());
+    }
+
+    #[test]
+    fn transcription_enabled_only_when_user_set_it() {
+        let cfg = SpeedwaveUserConfig {
+            transcription: Some(TranscriptionConfig {
+                enabled: Some(true),
+                default_language: Some("pl".to_string()),
+                default_live_model: Some("small".to_string()),
+                keep_audio_after_finalize: Some(true),
+            }),
+            ..Default::default()
+        };
+        assert!(cfg.transcription_enabled());
+
+        let cfg_off = SpeedwaveUserConfig {
+            transcription: Some(TranscriptionConfig {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!cfg_off.transcription_enabled());
+
+        let cfg_none = SpeedwaveUserConfig {
+            transcription: Some(TranscriptionConfig::default()),
+            ..Default::default()
+        };
+        assert!(!cfg_none.transcription_enabled(), "enabled: None is off");
+    }
+
+    #[test]
+    fn transcription_config_round_trips_through_serde() {
+        let cfg = SpeedwaveUserConfig {
+            transcription: Some(TranscriptionConfig {
+                enabled: Some(true),
+                default_language: Some("en".to_string()),
+                default_live_model: Some("large-v3-turbo".to_string()),
+                keep_audio_after_finalize: Some(false),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.transcription, cfg.transcription,
+            "round-trip preserves the field"
+        );
+    }
+
+    #[test]
+    fn repo_config_cannot_enable_transcription() {
+        // Decision 13: a checked-in repo .speedwave.json must not turn on host-
+        // audio recording. ProjectRepoConfig has no `transcription` field, so
+        // any unknown `transcription` key in a repo file is silently ignored.
+        let repo_json = r#"{
+            "claude": null,
+            "integrations": null,
+            "transcription": { "enabled": true, "default_language": "pl" }
+        }"#;
+        let parsed: ProjectRepoConfig = serde_json::from_str(repo_json).expect("repo parse");
+        // The repo struct has no transcription field; the json is ignored.
+        let json_back = serde_json::to_string(&parsed).expect("repo reserialize");
+        assert!(
+            !json_back.contains("transcription"),
+            "repo config must not surface a transcription field; got {json_back}"
+        );
+    }
+
+    // ---- UiPrefsConfig (ADR-058) -------------------------------------------
+
+    #[test]
+    fn beta_disabled_by_default() {
+        let cfg = SpeedwaveUserConfig::default();
+        assert!(!cfg.beta_enabled());
+        assert!(cfg.ui.is_none());
+    }
+
+    #[test]
+    fn beta_enabled_only_when_user_set_it() {
+        let cfg_on = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        assert!(cfg_on.beta_enabled());
+
+        let cfg_off = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(false),
+            }),
+            ..Default::default()
+        };
+        assert!(!cfg_off.beta_enabled());
+
+        let cfg_unset = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig::default()),
+            ..Default::default()
+        };
+        assert!(!cfg_unset.beta_enabled());
+    }
+
+    #[test]
+    fn ui_prefs_round_trip_through_serde() {
+        let cfg = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.ui, cfg.ui);
+    }
+
+    #[test]
+    fn user_config_without_ui_field_still_parses() {
+        let pre_adr_json = r#"{
+            "projects": [],
+            "active_project": null,
+            "selected_ide": null,
+            "log_level": null
+        }"#;
+        let parsed: SpeedwaveUserConfig = serde_json::from_str(pre_adr_json).expect("parse");
+        assert!(parsed.ui.is_none());
+        assert!(!parsed.beta_enabled());
+    }
 
     #[test]
     fn test_default_config_has_expected_env() {
@@ -579,7 +862,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -627,7 +912,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -721,7 +1008,9 @@ mod tests {
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SpeedwaveUserConfig = serde_json::from_str(&json).unwrap();
@@ -745,7 +1034,9 @@ mod tests {
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         save_user_config_to(&config, &config_path).unwrap();
@@ -766,7 +1057,9 @@ mod tests {
             projects: vec![],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         save_user_config_to(&config, &config_path).unwrap();
@@ -788,7 +1081,9 @@ mod tests {
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         save_user_config_to(&config, &config_path).unwrap();
@@ -821,7 +1116,9 @@ mod tests {
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         save_user_config_to(&config_v1, &config_path).unwrap();
 
@@ -836,7 +1133,9 @@ mod tests {
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         save_user_config_to(&config_v2, &config_path).unwrap();
 
@@ -857,6 +1156,8 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: Some("debug".to_string()),
+            transcription: None,
+            ui: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SpeedwaveUserConfig = serde_json::from_str(&json).unwrap();
@@ -895,7 +1196,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -943,7 +1246,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
         let flags = &resolved.flags;
@@ -962,11 +1267,17 @@ mod tests {
         assert!(!r.gitlab, "gitlab should be disabled");
         assert!(!r.github, "github should be disabled");
         assert!(!r.atlassian, "atlassian should be disabled");
+        assert!(!r.office, "office should be disabled");
         assert!(!r.playwright, "playwright should be disabled");
         assert!(!r.os_reminders, "os_reminders should be disabled");
         assert!(!r.os_calendar, "os_calendar should be disabled");
         assert!(!r.os_mail, "os_mail should be disabled");
         assert!(!r.os_notes, "os_notes should be disabled");
+        assert!(!r.host_exec, "host_exec should be disabled");
+        assert!(
+            r.host_exec_commands.is_empty(),
+            "host_exec_commands should be empty by default"
+        );
     }
 
     #[test]
@@ -998,7 +1309,7 @@ mod tests {
             );
 
             let mut resolved = ResolvedIntegrationsConfig::default();
-            apply_integrations_layer(&mut resolved, &layer);
+            apply_integrations_layer(&mut resolved, &layer, /* from_repo = */ false);
 
             let enabled = resolved
                 .is_service_enabled(svc.config_key)
@@ -1110,7 +1421,9 @@ mod tests {
             gitlab: None,
             github: None,
             atlassian: None,
+            office: None,
             playwright: None,
+            host_exec: None,
             os: Some(OsIntegrationsConfig {
                 reminders: Some(IntegrationConfig {
                     enabled: Some(false),
@@ -1166,7 +1479,9 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
+                    host_exec: None,
                     os: None,
                     plugins: None,
                 }),
@@ -1174,13 +1489,235 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
         assert!(resolved.slack); // user override wins
         assert!(!resolved.gitlab); // repo stays
         assert!(!resolved.sharepoint); // default is disabled
+    }
+
+    #[test]
+    fn test_resolve_host_exec_from_user_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let recipe = HostExecRecipe {
+            name: "test".to_string(),
+            exec: "./gradlew".to_string(),
+            args: vec!["test".to_string()],
+            cwd_sub: None,
+            params: None,
+            env: None,
+        };
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: Some(IntegrationsConfig {
+                    host_exec: Some(HostExecConfig {
+                        enabled: Some(true),
+                        commands: vec![recipe.clone()],
+                    }),
+                    ..Default::default()
+                }),
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+            transcription: None,
+            ui: None,
+        };
+        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        assert!(resolved.host_exec, "host_exec enabled from user config");
+        assert_eq!(resolved.host_exec_commands.len(), 1);
+        assert_eq!(resolved.host_exec_commands[0].name, "test");
+        assert_eq!(resolved.host_exec_commands[0].exec, "./gradlew");
+    }
+
+    /// `host_exec` is a security-class field — a repo-supplied whitelist (or
+    /// `enabled` flag) in `.speedwave.json` must be ignored entirely (ADR-054),
+    /// the same way `provider`/`base_url` are ignored from the repo LLM config.
+    #[test]
+    fn test_resolve_host_exec_from_repo_config_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "integrations": {{
+                    "hostExec": {{
+                        "enabled": true,
+                        "commands": [
+                            {{ "name": "evil", "exec": "./pwn", "args": [] }}
+                        ]
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        assert!(
+            !resolved.host_exec,
+            "repo .speedwave.json must not enable host_exec"
+        );
+        assert!(
+            resolved.host_exec_commands.is_empty(),
+            "repo .speedwave.json must not contribute host_exec recipes"
+        );
+    }
+
+    /// Even when the user config also has a `host_exec` block, a repo block is
+    /// still ignored — the user block alone determines the result.
+    #[test]
+    fn test_resolve_host_exec_user_wins_repo_still_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{ "integrations": {{ "hostExec": {{ "enabled": true, "commands": [
+                {{ "name": "evil", "exec": "./pwn", "args": [] }}
+            ] }} }} }}"#
+        )
+        .unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: Some(IntegrationsConfig {
+                    host_exec: Some(HostExecConfig {
+                        enabled: Some(true),
+                        commands: vec![HostExecRecipe {
+                            name: "test".to_string(),
+                            exec: "./gradlew".to_string(),
+                            args: vec!["test".to_string()],
+                            cwd_sub: None,
+                            params: None,
+                            env: None,
+                        }],
+                    }),
+                    ..Default::default()
+                }),
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+            transcription: None,
+            ui: None,
+        };
+        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        assert!(resolved.host_exec);
+        assert_eq!(resolved.host_exec_commands.len(), 1);
+        assert_eq!(
+            resolved.host_exec_commands[0].name, "test",
+            "the user's recipe wins; the repo's 'evil' recipe is ignored"
+        );
+    }
+
+    #[test]
+    fn test_integrations_config_set_host_exec_helpers() {
+        let mut cfg = IntegrationsConfig::default();
+        assert!(cfg.host_exec.is_none());
+        cfg.set_host_exec_enabled(true);
+        assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(true));
+        assert!(cfg.host_exec.as_ref().unwrap().commands.is_empty());
+        cfg.set_host_exec_commands(vec![HostExecRecipe {
+            name: "build".to_string(),
+            exec: "./gradlew".to_string(),
+            args: vec!["build".to_string()],
+            cwd_sub: None,
+            params: None,
+            env: None,
+        }]);
+        // enabled flag preserved when setting commands
+        assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(true));
+        assert_eq!(cfg.host_exec.as_ref().unwrap().commands.len(), 1);
+        // setting enabled again preserves commands
+        cfg.set_host_exec_enabled(false);
+        assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(false));
+        assert_eq!(cfg.host_exec.as_ref().unwrap().commands.len(), 1);
+    }
+
+    #[test]
+    fn test_host_exec_config_round_trips_json() {
+        let cfg = HostExecConfig {
+            enabled: Some(true),
+            commands: vec![HostExecRecipe {
+                name: "psql".to_string(),
+                exec: "docker".to_string(),
+                args: vec![
+                    "compose".to_string(),
+                    "exec".to_string(),
+                    "-T".to_string(),
+                    "db".to_string(),
+                    "psql".to_string(),
+                    "-c".to_string(),
+                    "{sql}".to_string(),
+                ],
+                cwd_sub: Some("services/db".to_string()),
+                params: Some(vec![HostExecParam {
+                    name: "sql".to_string(),
+                    pattern: "^SELECT .{0,500}$".to_string(),
+                    max_len: Some(600),
+                }]),
+                env: Some(HashMap::from([("CI".to_string(), "true".to_string())])),
+            }],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        // The on-disk JSON must use camelCase keys — both the user config and
+        // the TypeScript worker snapshot expect `cwdSub` / `maxLen`, never the
+        // Rust field names `cwd_sub` / `max_len` (regression guard for the
+        // worker-snapshot contract — `host_exec/src/types.ts`).
+        assert!(
+            json.contains("\"cwdSub\""),
+            "JSON must use camelCase cwdSub"
+        );
+        assert!(
+            json.contains("\"maxLen\""),
+            "JSON must use camelCase maxLen"
+        );
+        assert!(
+            !json.contains("cwd_sub") && !json.contains("max_len"),
+            "JSON must not leak Rust snake_case field names"
+        );
+        let back: HostExecConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.enabled, Some(true));
+        assert_eq!(back.commands.len(), 1);
+        let r = &back.commands[0];
+        assert_eq!(r.name, "psql");
+        assert_eq!(r.cwd_sub.as_deref(), Some("services/db"));
+        assert_eq!(r.params.as_ref().unwrap()[0].name, "sql");
+        assert_eq!(r.params.as_ref().unwrap()[0].max_len, Some(600));
+        // camelCase also parses *back* (what the user writes / the worker reads).
+        let from_camel: HostExecRecipe = serde_json::from_str(
+            r#"{ "name": "t", "exec": "./gradlew", "args": ["{tgt}"],
+                 "cwdSub": "frontend",
+                 "params": [{ "name": "tgt", "pattern": "^[a-z]+$", "maxLen": 30 }] }"#,
+        )
+        .unwrap();
+        assert_eq!(from_camel.cwd_sub.as_deref(), Some("frontend"));
+        assert_eq!(from_camel.params.as_ref().unwrap()[0].max_len, Some(30));
+        // A stray `confirm` key in an old config is silently ignored (no
+        // deny_unknown_fields), so existing configs keep parsing.
+        let with_stray: HostExecRecipe = serde_json::from_str(
+            r#"{ "name": "t", "exec": "./gradlew", "args": ["test"], "confirm": "ask" }"#,
+        )
+        .unwrap();
+        assert_eq!(with_stray.name, "t");
+        let minimal: HostExecRecipe =
+            serde_json::from_str(r#"{ "name": "t", "exec": "./gradlew", "args": ["test"] }"#)
+                .unwrap();
+        assert!(minimal.params.is_none());
+        assert!(minimal.cwd_sub.is_none());
+        assert!(minimal.env.is_none());
     }
 
     #[test]
@@ -1197,7 +1734,9 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
+                    host_exec: None,
                     os: Some(OsIntegrationsConfig {
                         reminders: Some(IntegrationConfig {
                             enabled: Some(false),
@@ -1214,7 +1753,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1241,7 +1782,9 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
+                    host_exec: None,
                     os: None,
                     plugins: None,
                 }),
@@ -1249,7 +1792,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1312,6 +1857,7 @@ mod tests {
             gitlab: false,
             github: false,
             atlassian: false,
+            office: false,
             ..Default::default()
         };
         assert_eq!(r.is_service_enabled("slack"), Some(true));
@@ -1320,6 +1866,7 @@ mod tests {
         assert_eq!(r.is_service_enabled("gitlab"), Some(false));
         assert_eq!(r.is_service_enabled("github"), Some(false));
         assert_eq!(r.is_service_enabled("atlassian"), Some(false));
+        assert_eq!(r.is_service_enabled("office"), Some(false));
     }
 
     #[test]
@@ -1408,6 +1955,12 @@ mod tests {
         ));
         assert!(cfg.set_service(
             "github",
+            IntegrationConfig {
+                enabled: Some(true)
+            }
+        ));
+        assert!(cfg.set_service(
+            "office",
             IntegrationConfig {
                 enabled: Some(true)
             }
@@ -1521,7 +2074,9 @@ mod tests {
                     gitlab: None,
                     github: None,
                     atlassian: None,
+                    office: None,
                     playwright: None,
+                    host_exec: None,
                     os: None,
                     plugins: Some(HashMap::from([(
                         "presale".to_string(),
@@ -1534,7 +2089,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
@@ -1565,7 +2122,9 @@ mod tests {
             ],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -1639,7 +2198,9 @@ mod tests {
             ],
             active_project: Some("beta".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let entry = config.active_project_entry();
         assert!(entry.is_some());
@@ -1664,7 +2225,9 @@ mod tests {
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         assert!(
             config.active_project_entry().is_none(),

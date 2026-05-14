@@ -3,7 +3,9 @@
 use crate::ide_bridge;
 use crate::mcp_os_process;
 use crate::types::BundleReconcileStatus;
+use speedwave_runtime::host_exec_process::HostExecProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -15,20 +17,38 @@ pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
 /// Shared handle for the mcp-os process.
 pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
 
+/// Per-project `host_exec` workers, keyed by project name (ADR-054).
+pub(crate) type SharedHostExec = Arc<Mutex<HashMap<String, HostExecProcess>>>;
+
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
 
-/// The three shared-state Arcs required by every `run_exit_cleanup` call site.
-///
-/// Wrapping them in a struct eliminates the nine parallel Arc clones that would
-/// otherwise appear at each of the three call sites (signal handler,
-/// `WindowEvent::Destroyed`, `RunEvent::ExitRequested`). Clone the struct once
-/// per exit path instead of cloning each Arc individually.
+/// Shared Arcs needed by `run_exit_cleanup` — clone once per exit path.
 #[derive(Clone)]
 pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
     pub(crate) mcp_os: SharedMcpOs,
+    /// Per-project `host_exec` workers — stopped + files cleaned on exit.
+    pub(crate) host_exec: SharedHostExec,
     pub(crate) auto_check_handle: SharedAutoCheckHandle,
+}
+
+/// Stop + remove a project's worker; cleans token/port/pid/config (keeps audit log).
+pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project: &str) {
+    let proc = match host_exec.lock() {
+        Ok(mut map) => map.remove(project),
+        Err(e) => {
+            log::warn!("teardown_host_exec_for_project: map mutex poisoned: {e}");
+            return;
+        }
+    };
+    if let Some(mut proc) = proc {
+        log::info!("host_exec[{project}]: tearing down worker");
+        if let Err(e) = proc.stop() {
+            log::warn!("host_exec[{project}]: stop error during teardown: {e}");
+        }
+        proc.cleanup_files();
+    }
 }
 
 /// Reconcile phase: nothing running.
@@ -181,26 +201,12 @@ pub(crate) fn list_running_projects(
 }
 
 /// Restores one project: compose_down, render, compose_up_recreate.
-/// Extracted for testability — `restore_projects` calls this in production.
 fn restore_one_project(
     project: &str,
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
 ) -> Result<(), String> {
     let _ = rt.compose_down(project);
     crate::containers_cmd::render_and_save_compose(project, rt)?;
-    rt.compose_up_recreate(project)
-        .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))
-}
-
-/// Test seam — takes the renderer as a function pointer so tests can inject stubs.
-#[cfg(test)]
-fn restore_one_project_with_renderer(
-    project: &str,
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
-    render: fn(&str, &dyn speedwave_runtime::runtime::ContainerRuntime) -> Result<(), String>,
-) -> Result<(), String> {
-    let _ = rt.compose_down(project);
-    render(project, rt)?;
     rt.compose_up_recreate(project)
         .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))
 }
@@ -269,6 +275,23 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         bundle_changed,
     );
 
+    // Scope: active project only; project switch builds the rest on demand (ADR-057).
+    let user_config_for_active = config::load_user_config().unwrap_or_default();
+    let active_integrations = match user_config_for_active.active_project.as_deref() {
+        Some(name) => match user_config_for_active.find_project(name) {
+            Some(p) => config::resolve_integrations(
+                std::path::Path::new(&p.dir),
+                &user_config_for_active,
+                name,
+            ),
+            None => {
+                log::warn!("reconcile: active_project '{name}' not in config — building core only");
+                config::ResolvedIntegrationsConfig::default()
+            }
+        },
+        None => config::ResolvedIntegrationsConfig::default(),
+    };
+
     let rt = speedwave_runtime::runtime::detect_runtime();
 
     // Call ensure_ready() once and track whether it succeeded. This avoids a
@@ -281,7 +304,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
 
     // Even when bundle_id matches, verify images actually exist.
     // They may have been lost after containerd reinstall or VM recreation.
-    if !bundle_changed && runtime_ready && !build::images_exist(&*rt) {
+    if !bundle_changed && runtime_ready && !build::images_exist(&*rt, &active_integrations) {
         log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
         bundle_changed = true;
     }
@@ -374,7 +397,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // Here we escalate: restart engine → retry build. Safe because we are in the
         // pre-restore phase — no containers are running yet (see ContainerRuntime
         // trait docs for restart_container_engine).
-        match build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id) {
+        let enabled = build::enabled_images(&active_integrations);
+        match build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id) {
             Ok(_) => {}
             Err(e)
                 if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
@@ -386,13 +410,12 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                     log::error!("reconcile_bundle: {msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
-                build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id).map_err(
-                    |e| {
+                build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id)
+                    .map_err(|e| {
                         let msg = format!("Image rebuild failed after engine restart: {e}");
                         log::error!("reconcile_bundle: {msg}");
                         set_bundle_error(&mut state, msg)
-                    },
-                )?;
+                    })?;
             }
             Err(e) => {
                 let msg = format!("Image rebuild failed: {e}");
@@ -400,10 +423,16 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 return Err(set_bundle_error(&mut state, msg));
             }
         }
-        // Opportunistically rebuild any missing plugin images (best-effort, warn-only).
-        // If this fails, per-project enforcement in render_compose() still catches it.
-        if let Err(e) = plugin::ensure_all_plugin_images(rt.as_ref()) {
+        // Plugin images enabled in the active project (warn-only).
+        let enabled_plugins: Vec<&str> = active_integrations.enabled_plugin_service_ids();
+        if let Err(e) = plugin::ensure_plugin_images(rt.as_ref(), &enabled_plugins) {
             log::warn!("reconcile_bundle: failed to rebuild some plugin images: {e}");
+        }
+        // Drop tags from this bundle that no longer belong to enabled set (warn-only).
+        if let Err(e) =
+            build::prune_orphan_current_bundle_images(rt.as_ref(), &manifest.bundle_id, &enabled)
+        {
+            log::warn!("reconcile_bundle: orphan-tag prune failed: {e}");
         }
 
         state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
@@ -739,9 +768,11 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     }
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::HOST_EXEC_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let ide_bridge = ctx.ide_bridge.clone();
     let mcp_os = ctx.mcp_os.clone();
+    let host_exec = ctx.host_exec.clone();
     let auto_check = ctx.auto_check_handle.clone();
 
     let handle = std::thread::spawn(move || {
@@ -778,6 +809,17 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 }
             }
             Err(e) => log::warn!("mcp-os cleanup skipped: mutex poisoned: {e}"),
+        }
+        match host_exec.lock() {
+            Ok(mut map) => {
+                for (project, mut proc) in map.drain() {
+                    if let Err(e) = proc.stop() {
+                        log::warn!("host_exec[{project}] stop error: {e}");
+                    }
+                    proc.cleanup_files();
+                }
+            }
+            Err(e) => log::warn!("host_exec cleanup skipped: map mutex poisoned: {e}"),
         }
         match auto_check.lock() {
             Ok(mut guard) => {
@@ -848,6 +890,14 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn teardown_host_exec_for_project_is_noop_when_absent() {
+        let map: SharedHostExec = SharedHostExec::default();
+        // No worker registered for "ghost" — must not panic.
+        teardown_host_exec_for_project(&map, "ghost");
+        assert!(map.lock().unwrap().is_empty());
+    }
 
     // stop_all_containers is compiled out on macOS (see its definition).
     // Its tests are gated to match, otherwise the `use super::stop_all_containers`
@@ -1608,6 +1658,7 @@ mod tests {
         let ctx = ExitCleanupContext {
             ide_bridge: SharedIdeBridge::default(),
             mcp_os: SharedMcpOs::default(),
+            host_exec: SharedHostExec::default(),
             auto_check_handle: SharedAutoCheckHandle::default(),
         };
 
@@ -1683,10 +1734,9 @@ mod tests {
         );
     }
 
-    /// Structural test: verifies that `prune_old_bundle_images` is called BEFORE
-    /// `build_all_images_for_bundle` inside `reconcile_bundle_update_inner`.
-    /// Pruning before building ensures old images are cleaned up first — no data
-    /// loss possible since new images haven't been built yet at prune time.
+    /// Structural test: `prune_old_bundle_images` must run BEFORE the image build
+    /// in `reconcile_bundle_update_inner`. Pruning first ensures old images are
+    /// cleaned up before new ones land — no data loss since new images aren't built yet.
     #[test]
     fn reconcile_prunes_old_images_before_building_new_ones() {
         let source = include_str!("reconcile.rs");
@@ -1699,72 +1749,61 @@ mod tests {
             .find("prune_old_bundle_images")
             .expect("prune_old_bundle_images call must exist in reconcile_bundle_update_inner");
         let build_pos = inner_fn
-            .find("build_all_images_for_bundle")
-            .expect("build_all_images_for_bundle call must exist in reconcile_bundle_update_inner");
+            .find("build_images_for_bundle")
+            .expect("build_images_for_bundle call must exist in reconcile_bundle_update_inner");
 
         assert!(
             prune_pos < build_pos,
             "prune_old_bundle_images (at byte {prune_pos}) must appear before \
-             build_all_images_for_bundle (at byte {build_pos}) in \
-             reconcile_bundle_update_inner — pruning first ensures old images are \
-             removed before building new ones"
+             build_images_for_bundle (at byte {build_pos}) in reconcile_bundle_update_inner"
         );
     }
 
-    /// Structural test: verifies that `ensure_all_plugin_images` is called AFTER
-    /// `build_all_images_for_bundle` and BEFORE the `set_image_readiness(ImageReadiness::Ready)`
-    /// that follows it. Also verifies it uses warn-only error handling (not `?` propagation).
+    /// Structural test: `ensure_plugin_images` is called AFTER the built-in build
+    /// and BEFORE `set_image_readiness(Ready)`, with warn-only error handling.
     #[test]
-    fn test_ensure_all_plugin_images_after_core_build_before_ready() {
+    fn test_ensure_plugin_images_after_core_build_before_ready() {
         let source = include_str!("reconcile.rs");
         let inner_fn = source
             .split("fn reconcile_bundle_update_inner(")
             .nth(1)
             .expect("reconcile_bundle_update_inner function should exist");
 
-        // Verify ensure_all_plugin_images is present
         assert!(
-            inner_fn.contains("ensure_all_plugin_images"),
-            "reconcile_bundle_update_inner must call ensure_all_plugin_images"
+            inner_fn.contains("ensure_plugin_images"),
+            "reconcile_bundle_update_inner must call ensure_plugin_images"
         );
 
         let build_pos = inner_fn
-            .find("build_all_images_for_bundle")
-            .expect("build_all_images_for_bundle call must exist");
+            .find("build_images_for_bundle")
+            .expect("build_images_for_bundle call must exist");
         let plugin_pos = inner_fn
-            .find("ensure_all_plugin_images")
-            .expect("ensure_all_plugin_images call must exist");
+            .find("ensure_plugin_images")
+            .expect("ensure_plugin_images call must exist");
 
         assert!(
             build_pos < plugin_pos,
-            "ensure_all_plugin_images (offset {plugin_pos}) must appear after \
-             build_all_images_for_bundle (offset {build_pos})"
+            "ensure_plugin_images (offset {plugin_pos}) must appear after \
+             build_images_for_bundle (offset {build_pos})"
         );
 
-        // Find the set_image_readiness(ImageReadiness::Ready) that comes AFTER
-        // ensure_all_plugin_images (not any earlier occurrence in the function).
         let after_plugin = &inner_fn[plugin_pos..];
         let ready_pos_relative = after_plugin
             .find("set_image_readiness(ImageReadiness::Ready)")
-            .expect(
-                "set_image_readiness(Ready) must appear after ensure_all_plugin_images in \
-                 reconcile_bundle_update_inner",
-            );
+            .expect("set_image_readiness(Ready) must appear after ensure_plugin_images");
         let ready_pos = plugin_pos + ready_pos_relative;
 
         assert!(
             plugin_pos < ready_pos,
-            "ensure_all_plugin_images (offset {plugin_pos}) must appear before \
+            "ensure_plugin_images (offset {plugin_pos}) must appear before \
              set_image_readiness(Ready) (offset {ready_pos})"
         );
 
-        // Verify warn-only error handling: the call is inside an `if let Err` block
-        // with `log::warn!`, NOT a `?` propagation
+        // Warn-only handling: `if let Err` / `warn!`, not `?`.
         let plugin_context = &inner_fn[plugin_pos.saturating_sub(100)..plugin_pos + 200];
         assert!(
             plugin_context.contains("if let Err") || plugin_context.contains("warn!"),
-            "ensure_all_plugin_images must use warn-only error handling, not '?' propagation: \
-             context around call: {plugin_context}"
+            "ensure_plugin_images must use warn-only error handling: {plugin_context}"
         );
     }
 }

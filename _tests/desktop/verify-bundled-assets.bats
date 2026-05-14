@@ -51,6 +51,7 @@ populate_macos() {
     write_exec "$ROOT/calendar-cli"
     write_exec "$ROOT/mail-cli"
     write_exec "$ROOT/notes-cli"
+    write_exec "$ROOT/audio-capture-cli"
 }
 
 populate_linux() {

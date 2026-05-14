@@ -10,7 +10,11 @@ pub mod config;
 pub mod consts;
 pub mod defaults;
 pub mod fs_security;
+pub mod host_exec;
+pub mod host_exec_process;
+pub mod log_file;
 pub mod log_sanitizer;
+pub mod log_ts;
 pub mod os_prereqs;
 pub mod plugin;
 pub mod project;
@@ -20,6 +24,11 @@ pub mod session;
 pub mod signing;
 pub mod slash;
 pub mod stream;
+/// Host-side meeting transcription (audio capture, Whisper, diarization, model
+/// catalogue) — gated behind the `audio-transcription` feature so the CLI
+/// (which never enables it) stays lean. See `docs/adr/ADR-056-*`.
+#[cfg(feature = "audio-transcription")]
+pub mod transcription;
 pub mod tz;
 pub mod update;
 pub mod validation;
