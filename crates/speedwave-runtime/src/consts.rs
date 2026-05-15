@@ -1728,4 +1728,33 @@ mod tests {
              rename it there too (CLAUDE.md SSOT alignment)"
         );
     }
+
+    // Cross-language SSOT for container host aliases. The TypeScript MCP-shared
+    // SSRF guard duplicates the alias allowlist (it cannot import the Rust
+    // const). Both lists must stay in lockstep — these guards catch any drift.
+
+    #[test]
+    fn container_host_aliases_appear_in_mcp_shared_ts() {
+        let src = include_str!("../../../mcp-servers/shared/src/security.ts");
+        for alias in CONTAINER_HOST_ALIASES {
+            assert!(
+                src.contains(&format!("'{alias}'")),
+                "{alias} not found in mcp-servers/shared/src/security.ts \
+                 HOST_GATEWAY_ALLOWLIST; the TS allowlist must mirror Rust \
+                 CONTAINER_HOST_ALIASES"
+            );
+        }
+    }
+
+    #[test]
+    fn container_host_aliases_appear_in_compose_template() {
+        let src = include_str!("../../../containers/compose.template.yml");
+        for alias in CONTAINER_HOST_ALIASES {
+            assert!(
+                src.contains(&format!("\"{alias}:")),
+                "{alias} not found in containers/compose.template.yml extra_hosts; \
+                 the template must list every alias from Rust CONTAINER_HOST_ALIASES"
+            );
+        }
+    }
 }

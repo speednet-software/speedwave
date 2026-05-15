@@ -432,10 +432,11 @@ pub fn strip_trailing_v1(url: &str) -> String {
 /// Returns the default base URL for a known local model provider.
 /// Used by the frontend to show a placeholder without duplicating the URL logic.
 pub fn default_base_url(provider: &str) -> Option<String> {
+    let host = consts::DOCKER_HOST;
     match provider {
-        "ollama" => Some("http://host.docker.internal:11434".to_string()),
-        "lmstudio" => Some("http://host.docker.internal:1234".to_string()),
-        "llamacpp" => Some("http://host.docker.internal:8080".to_string()),
+        "ollama" => Some(format!("http://{host}:11434")),
+        "lmstudio" => Some(format!("http://{host}:1234")),
+        "llamacpp" => Some(format!("http://{host}:8080")),
         _ => None,
     }
 }
