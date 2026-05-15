@@ -1,6 +1,6 @@
 # ADR-026: Linux Rootless nerdctl — Per-Platform Container User
 
-> **Status:** Accepted
+> **Status:** Superseded by [ADR-059](ADR-059-drop-linux-support.md) — Linux is no longer supported; the `${CONTAINER_USER}` template variable has been removed and `compose.template.yml` hardcodes `1000:1000`.
 > **Date:** 2026-03-10
 
 ---

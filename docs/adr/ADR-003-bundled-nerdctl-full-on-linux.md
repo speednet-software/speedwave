@@ -1,6 +1,6 @@
 # ADR-003: Bundled nerdctl-full on Linux
 
-> **Status:** Accepted (replaces "Podman Instead of nerdctl on Linux")
+> **Status:** Superseded by [ADR-059](ADR-059-drop-linux-support.md) — Linux is no longer a supported platform. Original status: Accepted (replaces "Podman Instead of nerdctl on Linux").
 
 ---
 

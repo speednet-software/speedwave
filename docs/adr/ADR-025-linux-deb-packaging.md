@@ -1,6 +1,6 @@
 # ADR-025: Linux .deb Packaging (Replaces AppImage)
 
-> **Status:** Accepted
+> **Status:** Superseded by [ADR-059](ADR-059-drop-linux-support.md) — Linux is no longer a supported platform; `.deb` is no longer built.
 > **Supersedes:** [ADR-023](ADR-023-appimage-static-runtime-for-fuse-independence.md)
 
 ---
