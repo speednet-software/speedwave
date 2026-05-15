@@ -1080,12 +1080,6 @@ fn read_worker_port_file(port_path: &std::path::Path, label: &str) -> Option<u16
 
 /// Test-only alias — implementation is `read_worker_port_file`.
 #[cfg(test)]
-fn read_mcp_os_port(port_path: &std::path::Path) -> Option<u16> {
-    read_worker_port_file(port_path, "mcp-os")
-}
-
-/// Test-only alias — implementation is `read_worker_port_file`.
-#[cfg(test)]
 fn read_host_exec_port(port_path: &std::path::Path) -> Option<u16> {
     read_worker_port_file(port_path, "host_exec")
 }

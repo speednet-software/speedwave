@@ -52,7 +52,7 @@ fn host_total_memory_gib_impl() -> Option<u32> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 fn host_total_memory_gib_impl() -> Option<u32> {
     // Windows: RAM detection not implemented — falls back to 16 GiB,
     // which the adaptive formula maps to 8 GiB VM / 4 g Claude container.
@@ -93,7 +93,7 @@ pub fn effective_claude_memory_gib() -> u32 {
         let vm_mem = desired_vm_memory_gib(host_total_memory_gib());
         desired_claude_memory_gib(vm_mem, VM_OVERHEAD_GIB)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         desired_claude_memory_gib(host_total_memory_gib(), HOST_OVERHEAD_GIB)
     }

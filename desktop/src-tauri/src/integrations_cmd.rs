@@ -1148,7 +1148,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn set_os_integration_enabled_rejects_on_non_macos() {
+    fn set_os_integration_enabled_rejects_on_windows() {
         let result = set_os_integration_enabled("test".into(), "reminders".into(), true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only available on macOS"));
@@ -1165,7 +1165,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn validate_os_integrations_returns_empty_on_non_macos() {
+    fn validate_os_integrations_returns_empty_on_windows() {
         // OS integrations are macOS-only — the validator must short-circuit
         // with Ok([]) on Windows hosts so the Angular ngOnInit hook can call
         // it unconditionally.

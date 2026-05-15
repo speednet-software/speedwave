@@ -19,7 +19,11 @@ defaults:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    # macOS runner: `cargo clippy -p speedwave-runtime` instantiates
+    # `detect_runtime()`, which compile_error!s on any target_os other than
+    # macos/windows after ADR-059. Ubuntu would fire that error before clippy
+    # ever runs. macOS-latest is the cheapest runner that satisfies the cfg.
+    runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -78,7 +82,9 @@ jobs:
         run: npx eslint .
 
   test:
-    runs-on: ubuntu-latest
+    # macOS runner: see comment on the `lint` job above — speedwave-runtime
+    # compile_error!s on Linux per ADR-059.
+    runs-on: macos-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -115,7 +121,7 @@ jobs:
       # cmake is needed to build whisper.cpp (vendored submodule of whisper-rs)
       # for the audio-transcription feature tests below. ADR-056.
       - name: Install cmake
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: brew install cmake
 
       - name: Rust tests
         run: make test-rust
@@ -132,7 +138,7 @@ jobs:
         run: make test-mcp-office-py
 
       - name: Install bats
-        run: sudo apt-get update && sudo apt-get install -y bats
+        run: brew install bats-core
 
       - name: Entrypoint tests
         run: make test-entrypoint

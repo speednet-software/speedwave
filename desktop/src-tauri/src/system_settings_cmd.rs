@@ -59,7 +59,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pane_openers_return_ok_on_non_macos() {
+    fn pane_openers_return_ok_on_windows() {
         // On non-macOS these are no-ops — verify they return Ok without panicking.
         #[cfg(target_os = "windows")]
         {

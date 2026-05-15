@@ -1127,7 +1127,7 @@ mod tests {
 
         #[cfg(target_os = "windows")]
         #[test]
-        fn full_cleanup_calls_in_order_non_macos() {
+        fn full_cleanup_calls_in_order_on_windows() {
             // Note: runs on any non-macOS target. Windows dev hosts execute
             // this test routinely, but Windows CI
             // (.github/workflows/desktop-build.yml) runs only `cargo build`,
