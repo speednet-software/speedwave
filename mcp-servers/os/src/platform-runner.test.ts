@@ -106,32 +106,6 @@ describe('platform-runner', () => {
         Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
       });
 
-      it('resolves linux dev paths to native-os-cli in target/release', () => {
-        mockPlatform('linux');
-        delete process.env.SPEEDWAVE_PROD;
-
-        const paths = resolvePaths();
-
-        expect(paths.reminders).toContain(path.join('target', 'release', 'native-os-cli'));
-        expect(paths.calendar).toBe(paths.reminders);
-        expect(paths.mail).toBe(paths.reminders);
-        expect(paths.notes).toBe(paths.reminders);
-        expect(path.isAbsolute(paths.reminders)).toBe(true);
-      });
-
-      it('resolves linux production paths to Resources/native-os-cli', () => {
-        mockPlatform('linux');
-        process.env.SPEEDWAVE_PROD = '1';
-
-        const paths = resolvePaths();
-
-        expect(paths.reminders).toContain('native-os-cli');
-        expect(paths.reminders).toContain('Resources');
-        expect(paths.calendar).toBe(paths.reminders);
-        expect(paths.mail).toBe(paths.reminders);
-        expect(paths.notes).toBe(paths.reminders);
-      });
-
       it('resolves win32 production paths to native-os-cli.exe', () => {
         mockPlatform('win32');
         process.env.SPEEDWAVE_PROD = '1';
@@ -151,21 +125,10 @@ describe('platform-runner', () => {
         expect(paths.reminders).toContain('native-os-cli.exe');
         expect(paths.reminders).toContain(path.join('target', 'release'));
       });
-
-      it('uses SPEEDWAVE_RESOURCES_DIR for linux production', () => {
-        mockPlatform('linux');
-        process.env.SPEEDWAVE_PROD = '1';
-        process.env.SPEEDWAVE_RESOURCES_DIR = '/opt/speedwave/resources';
-
-        const paths = resolvePaths();
-
-        expect(paths.reminders).toMatch(/^\/opt\/speedwave\/resources\//);
-        expect(paths.reminders).toContain('native-os-cli');
-      });
     });
 
-    // Exercises resolveDarwinPaths() regardless of the host platform — on a Linux CI
-    // runner the `process.platform === 'darwin'` branch is otherwise never taken.
+    // Exercises resolveDarwinPaths() directly so that the `process.platform === 'darwin'`
+    // branch is covered on any host the tests happen to run on.
     describe('macOS paths (resolveDarwinPaths)', () => {
       const originalPlatform = process.platform;
 
@@ -267,8 +230,8 @@ describe('platform-runner', () => {
       expect(result.parsed).toEqual({ lists: [] });
     });
 
-    it('calls execFile with the domain.command form on Linux/Windows', async () => {
-      mockPlatform('linux');
+    it('calls execFile with the domain.command form on Windows', async () => {
+      mockPlatform('win32');
       execFileAsyncMock.mockResolvedValue({ stdout: '{"reminders": []}', stderr: '' });
 
       const result = await runCommand('reminders', 'list_reminders', { limit: 20 });
@@ -285,7 +248,7 @@ describe('platform-runner', () => {
       mockPlatform('darwin');
       await expect(runCommand('reminders', 'list_lists')).rejects.toThrow(/Swift CLI binaries/);
 
-      mockPlatform('linux');
+      mockPlatform('win32');
       await expect(runCommand('reminders', 'list_lists')).rejects.toThrow(/Rust CLI binaries/);
     });
 

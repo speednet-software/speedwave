@@ -217,10 +217,6 @@ export class SetupWizardComponent {
           next[0] = { ...next[0], description: 'Verify system requirements' };
           next[1] = { ...next[1], description: 'Set up WSL2 distribution' };
           break;
-        case 'linux':
-          next[0] = { ...next[0], description: 'Verify nerdctl (rootless)' };
-          next[1] = { ...next[1], description: 'Set up rootless containerd' };
-          break;
       }
       this.stepsSig.set(next);
       this.cdr.markForCheck();
