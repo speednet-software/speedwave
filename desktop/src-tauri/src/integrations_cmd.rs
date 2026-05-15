@@ -1167,8 +1167,8 @@ mod tests {
     #[test]
     fn validate_os_integrations_returns_empty_on_non_macos() {
         // OS integrations are macOS-only — the validator must short-circuit
-        // with Ok([]) on Linux/Windows hosts so the Angular ngOnInit hook
-        // can call it unconditionally.
+        // with Ok([]) on Windows hosts so the Angular ngOnInit hook can call
+        // it unconditionally.
         let result = validate_os_integrations_on_startup("test".into());
         assert!(result.is_ok(), "expected Ok on non-macOS, got {result:?}");
         assert_eq!(

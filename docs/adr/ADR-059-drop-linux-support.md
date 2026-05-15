@@ -11,7 +11,7 @@ Speedwave previously shipped on three host platforms: macOS (via Lima), Windows 
 - A 937-line `NerdctlRuntime` that installed and supervised user-level containerd + buildkit via `systemd --user`, parsed `nerdctl info` for rootless-mode enforcement, and managed an AppArmor profile for rootlesskit.
 - A platform-specific UID mapping (`CONTAINER_USER = "0:0"`) and slirp4netns host-gateway address (`169.254.169.254`), threaded through `compose.template.yml` (see superseded ADR-026).
 - A `.deb` bundle target with `uidmap` / `dbus-user-session` package dependencies, a bundled `nerdctl-full` distribution (~80 MB of containerd/runc/CNI/rootlesskit binaries shipped inside the Debian package, per superseded ADR-003), and an AppArmor profile installed to `/etc/apparmor.d/speedwave.rootlesskit`.
-- A Linux-specific audio-capture backend (`audio_linux.rs`, 937 lines) for the host-side transcription feature.
+- A Linux-specific audio-capture backend (`audio_linux.rs`, 902 lines) for the host-side transcription feature.
 - An `ubuntu-22.04` matrix entry in three GitHub Actions workflows, plus `make _e2e-linux` and `scripts/e2e-vm*.sh` SSH-driven end-to-end provisioning of a fresh Ubuntu host.
 - A non-trivial slice of the desktop frontend (setup wizard step copy, update notification UI, settings panel) that branched on `platform === 'linux'` because Linux has no in-app updater (Tauri's `NSIS`/`squirrel`-equivalent flow is unavailable; users download the new `.deb` manually).
 
@@ -34,7 +34,7 @@ Drop Linux as a supported host platform. The application targets macOS (Lima) an
 
 ### Simplified
 
-- `compose.template.yml`'s `${CONTAINER_USER}` template variable is gone — both remaining platforms resolve to `1000:1000`, which is now hardcoded. The `compose::container_user()` helper is deleted.
+- `compose::container_user()` is kept (the `${CONTAINER_USER}` placeholder still appears in `compose.template.yml` and is still substituted by `render_compose`), but the function now unconditionally returns `"1000:1000"`. No platform branch, no rootless `"0:0"` fallback. Call sites are unchanged for minimal churn.
 - `detect_runtime()` returns `Box<dyn ContainerRuntime>` from `LimaRuntime` on macOS and `WslRuntime` on Windows; any other `target_os` is a compile error.
 - The platform-detection enum in the Angular setup wizard collapses from `'darwin' | 'win32' | 'linux'` to `'darwin' | 'win32'`.
 

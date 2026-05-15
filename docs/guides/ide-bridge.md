@@ -65,11 +65,10 @@ The IDE Bridge uses the same MCP JSON-RPC 2.0 protocol as all editor extensions,
 
 ## Platform Specifics
 
-| Platform | Gateway DNS               | Isolation        | Notes                                               |
-| -------- | ------------------------- | ---------------- | --------------------------------------------------- |
-| macOS    | `host.lima.internal`      | Lima VM          | Lima's hostagent registers DNS in gvproxy           |
-| Linux    | `host.docker.internal`    | nerdctl (native) | nerdctl adds this to `/etc/hosts` inside containers |
-| Windows  | `host.speedwave.internal` | WSL2             | `extra_hosts` in compose resolves to host IP        |
+| Platform | Gateway DNS               | Isolation | Notes                                        |
+| -------- | ------------------------- | --------- | -------------------------------------------- |
+| macOS    | `host.lima.internal`      | Lima VM   | Lima's hostagent registers DNS in gvproxy    |
+| Windows  | `host.speedwave.internal` | WSL2      | `extra_hosts` in compose resolves to host IP |
 
 On all platforms, the Bridge binds to `127.0.0.1` only — the port is never exposed to the LAN.
 

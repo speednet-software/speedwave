@@ -443,8 +443,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         log::info!("reconcile_bundle: all images built, waiters unblocked");
         emit_bundle_status(app_handle);
 
-        // After heavy image builds, containerd may be degraded (especially Linux
-        // rootless). Re-check readiness before querying running containers.
+        // After heavy image builds, containerd may be degraded. Re-check readiness
+        // before querying running containers.
         rt.ensure_ready().map_err(|e| {
             let msg = format!("Runtime not ready after image build: {e}");
             log::error!("reconcile_bundle: {msg}");

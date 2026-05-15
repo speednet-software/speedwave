@@ -432,12 +432,12 @@ describe('platform-runner', () => {
 
     it('omits keys not present in process.env', () => {
       delete process.env.SDKROOT;
-      delete process.env.DBUS_SESSION_BUS_ADDRESS;
+      delete process.env.DEVELOPER_DIR;
 
       const env = buildChildEnv();
 
       expect('SDKROOT' in env).toBe(false);
-      expect('DBUS_SESSION_BUS_ADDRESS' in env).toBe(false);
+      expect('DEVELOPER_DIR' in env).toBe(false);
     });
 
     it('only contains allowlisted keys', () => {

@@ -271,8 +271,6 @@ ifeq ($(OS),Windows_NT)
 else
 	@if [ "$$(uname)" = "Darwin" ]; then \
 		scripts/verify-bundled-assets.sh macos; \
-	elif [ "$$(uname)" = "Linux" ]; then \
-		scripts/verify-bundled-assets.sh linux; \
 	else \
 		echo "Unsupported host for bundled asset verification"; \
 		exit 1; \
@@ -493,17 +491,12 @@ E2E_BINARY = desktop/src-tauri/target/release/speedwave-desktop
 #
 # State directories per platform:
 #   macOS:  ~/.speedwave/, ~/Library/Caches/lima/
-#   Linux:  ~/.speedwave/, ~/.local/share/{containerd,buildkit,nerdctl}/,
-#           ~/.config/systemd/user/containerd.service
 #   Windows: not supported for local E2E (use scripts/e2e-vm.sh windows)
 _e2e-run:
 	@echo "── Killing any existing Speedwave instances..."
 	@pkill -f speedwave-desktop 2>/dev/null || true
 	@pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 	@pkill -9 -f limactl 2>/dev/null || true
-	@if [ "$$(uname)" = "Linux" ]; then \
-		systemctl --user stop containerd 2>/dev/null || true; \
-	fi
 	@sleep 1
 	@rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 	@mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
@@ -517,34 +510,15 @@ _e2e-run:
 	backup_dir "$$SPEEDWAVE_DATA_DIR" "$$E2E_BAK"; \
 	if [ "$$(uname)" = "Darwin" ]; then \
 		backup_dir "$$HOME/Library/Caches/lima" "$$HOME/Library/Caches/lima.e2e-bak"; \
-	elif [ "$$(uname)" = "Linux" ]; then \
-		backup_dir "$$HOME/.local/share/containerd" "$$HOME/.local/share/containerd.e2e-bak"; \
-		backup_dir "$$HOME/.local/share/buildkit" "$$HOME/.local/share/buildkit.e2e-bak"; \
-		backup_dir "$$HOME/.local/share/nerdctl" "$$HOME/.local/share/nerdctl.e2e-bak"; \
-		if [ -f "$$HOME/.config/systemd/user/containerd.service" ]; then \
-			mv "$$HOME/.config/systemd/user/containerd.service" "$$HOME/.config/systemd/user/containerd.service.e2e-bak"; \
-		fi; \
 	fi; \
 	restore_state() { \
 		pkill -f speedwave-desktop 2>/dev/null || true; \
 		pkill -f 'mcp-os.*index.js' 2>/dev/null || true; \
 		pkill -9 -f limactl 2>/dev/null || true; \
-		if [ "$$(uname)" = "Linux" ]; then \
-			systemctl --user stop containerd 2>/dev/null || true; \
-		fi; \
 		sleep 1; \
 		restore_dir "$$SPEEDWAVE_DATA_DIR" "$$E2E_BAK"; \
 		if [ "$$(uname)" = "Darwin" ]; then \
 			restore_dir "$$HOME/Library/Caches/lima" "$$HOME/Library/Caches/lima.e2e-bak"; \
-		elif [ "$$(uname)" = "Linux" ]; then \
-			restore_dir "$$HOME/.local/share/containerd" "$$HOME/.local/share/containerd.e2e-bak"; \
-			restore_dir "$$HOME/.local/share/buildkit" "$$HOME/.local/share/buildkit.e2e-bak"; \
-			restore_dir "$$HOME/.local/share/nerdctl" "$$HOME/.local/share/nerdctl.e2e-bak"; \
-			if [ -f "$$HOME/.config/systemd/user/containerd.service.e2e-bak" ]; then \
-				mv "$$HOME/.config/systemd/user/containerd.service.e2e-bak" "$$HOME/.config/systemd/user/containerd.service"; \
-			fi; \
-			systemctl --user daemon-reload 2>/dev/null || true; \
-			systemctl --user start containerd 2>/dev/null || true; \
 		fi; \
 	}; \
 	$(E2E_BINARY) & APP_PID=$$!; \
@@ -766,7 +740,6 @@ clean-wsl-resources:
 dev: build-cli build-os-cli build-mcp download-nodejs
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@echo "Preparing build context..."
 	@scripts/bundle-build-context.sh

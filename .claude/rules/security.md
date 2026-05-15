@@ -4,7 +4,7 @@
 
 ## Security principles inherited from v1 (non-negotiable)
 
-- Claude container: no tokens, no container socket, per-platform container user (UID 1000 on macOS/Windows, UID 0 in Linux rootless user namespace — see ADR-026)
+- Claude container: no tokens, no container socket, container user UID 1000:1000 (containerd runs inside a VM on both supported platforms — Lima on macOS, WSL2 on Windows; see ADR-059)
 - OWASP container hardening: `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
 - Token isolation: each MCP worker mounts **only its own** service credentials at `/tokens` read-only — a compromised worker exposes only that service. Exception: SharePoint uses `:rw` for OAuth token refresh (see ADR-009)
 - Hub has zero tokens — compromise of the hub exposes nothing

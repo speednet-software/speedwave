@@ -208,8 +208,9 @@ impl MixBuffer {
 }
 
 /// The shared `AudioStream::next_chunk` body for a mixed capture whose two
-/// sources feed `buf` from background threads (Windows cpal callbacks, Linux
-/// `pw-record`/`parec` reader threads). Polls for a full `CHUNK_SAMPLES`-sized
+/// sources feed `buf` from background threads (Windows cpal callbacks; macOS
+/// uses the bundled `audio-capture-cli` stdout reader). Polls for a full
+/// `CHUNK_SAMPLES`-sized
 /// chunk; once `STALL_GIVE_UP` elapses with nothing arriving — either both
 /// sources stopped without an EOF, or the buffer is poisoned — it drains
 /// whatever is left and then returns `Err(CaptureError::Failed)` so the driver
