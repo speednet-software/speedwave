@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Tests for containers/entrypoint.sh
-# Runs on the host (macOS/Linux) — no container required.
+# Runs on the host (macOS) — no container required.
 # Stubs out 'curl' and 'claude' to avoid network calls.
 
 ENTRYPOINT="$BATS_TEST_DIRNAME/../../containers/entrypoint.sh"

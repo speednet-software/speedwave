@@ -9,7 +9,7 @@
 Speedwave's macOS-specific CLI binaries (Reminders, Calendar, Mail, Notes) were originally placed at the repository root as `swift-reminders/`, `swift-calendar/`, `swift-mail/`, and `swift-notes/`. This had two problems:
 
 1. **Root-level clutter** — four directories at the top level for a single platform, alongside `crates/`, `mcp-servers/`, `desktop/`, and other groups.
-2. **Language-specific naming** — the `swift-` prefix describes the implementation language, not the purpose. Per ADR-010, Linux and Windows will use Rust binaries for the same OS integration.[^1] A language-neutral grouping is needed.
+2. **Language-specific naming** — the `swift-` prefix describes the implementation language, not the purpose. Per ADR-010, Windows will use a Rust binary for the same OS integration.[^1] A language-neutral grouping is needed.
 
 Other top-level directories in the repository already group by purpose: `crates/` for Rust libraries, `mcp-servers/` for TypeScript MCP servers, `desktop/` for the Tauri app.[^2] The native OS CLI binaries deserve the same treatment.
 
@@ -25,7 +25,6 @@ native/
 │   ├── calendar/     # was swift-calendar/
 │   ├── mail/         # was swift-mail/
 │   └── notes/        # was swift-notes/
-├── linux/            # placeholder (future Rust crate, per ADR-010)
 └── windows/          # placeholder (future Rust crate, per ADR-010)
 ```
 
@@ -61,7 +60,7 @@ The Makefile target `build-swift` is renamed to `build-native-macos` to reflect 
 
 ### Positive
 
-- **Scalable structure** — when Linux/Windows native CLI binaries are implemented (ADR-010), they slot into `native/linux/` and `native/windows/` with zero structural changes.
+- **Scalable structure** — when Windows native CLI binaries are implemented (ADR-010), they slot into `native/windows/` with zero structural changes.
 - **Consistent naming** — directory names describe the platform and domain (e.g., `native/macos/reminders`), not the implementation language.
 - **Cleaner root** — four root-level directories consolidated into one.
 
@@ -77,6 +76,6 @@ The Makefile target `build-swift` is renamed to `build-native-macos` to reflect 
 
 ---
 
-[^1]: ADR-010: mcp-os as Host Process Per Platform — defines that Linux uses a Rust binary (`native-os-cli`) and Windows uses a Rust binary (`native-os-cli.exe`) for the same OS integration purpose. See `docs/adr/ADR-010-mcp-os-as-host-process-per-platform.md`.
+[^1]: ADR-010: mcp-os as Host Process Per Platform — defines that Windows uses a Rust binary (`native-os-cli.exe`) for the same OS integration purpose. See `docs/adr/ADR-010-mcp-os-as-host-process-per-platform.md`.
 
 [^2]: Speedwave repository structure overview: [`CLAUDE.md`](../../CLAUDE.md) § Repository Structure.

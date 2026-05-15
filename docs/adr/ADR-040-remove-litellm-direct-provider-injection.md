@@ -30,7 +30,7 @@ Remove LiteLLM entirely. Inject `ANTHROPIC_BASE_URL` and related env vars direct
 | `lmstudio`  | 0.4.1        | `http://host.docker.internal:1234`  |
 | `llamacpp`  | Jan 2026     | `http://host.docker.internal:8080`  |
 
-All local providers use `host.docker.internal` which is mapped to the host gateway via `extra_hosts` in `compose.template.yml`. This works identically on macOS (Lima), Linux (nerdctl rootless), and Windows (WSL2).
+All local providers use `host.docker.internal` which is mapped to the host gateway via `extra_hosts` in `compose.template.yml`. This works identically on macOS (Lima) and Windows (WSL2).
 
 ## Environment Variables Injected
 

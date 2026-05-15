@@ -41,10 +41,6 @@ The `/SD IDNO` flag causes unattended `uninstall.exe /S` installations to defaul
 
 Speedwave publishes both NSIS `.exe` and MSI for managed deployments (`docs/getting-started/installation.md` line 60).[^3] MSI custom actions require a `<CustomAction>` element, a `<InstallExecuteSequence>` entry, impersonation (`Impersonate="yes"`), and an opt-in checkbox in the UI — substantially more work than the NSIS hook and outside the scope of this fix. MSI parity is tracked as a follow-up issue; until it ships, MSI users must run `wsl --unregister Speedwave` manually after uninstall (same as current v0.10.0 behaviour).
 
-### Linux `.deb postrm` (out of scope)
-
-There is no equivalent user-reported bug for Linux. If the analogous issue is reported, it will get a separate issue and ADR.
-
 ## Consequences
 
 - **After this change:** Uninstalling via Add/Remove Programs and answering "Yes" to the cleanup prompt, or triggering factory reset from the Desktop UI, will leave no phantom WSL distro. A fresh re-install proceeds through `verify_wsl_distro_origin()` without errors. The bundled Node.js directory at `$LOCALAPPDATA\Speedwave\nodejs` is removed unconditionally (regardless of the cleanup prompt) because it is application payload, not user-generated data.

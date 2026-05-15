@@ -7,7 +7,7 @@
 
 ## Context
 
-The "zero dependencies beyond Speedwave" principle (ADR-000) was not fully realized in the initial implementation. On macOS, users were required to run `brew install lima` before using Speedwave. On Linux, users had to manually `apt install podman`. On Windows, the `init_vm()` function was an empty stub with no WSL2 provisioning logic.
+The "zero dependencies beyond Speedwave" principle (ADR-000) was not fully realized in the initial implementation. On macOS, users were required to run `brew install lima` before using Speedwave. On Windows, the `init_vm()` function was an empty stub with no WSL2 provisioning logic.
 
 This violated the core product principle: the user downloads one file and everything works.
 
@@ -38,22 +38,6 @@ Binary resolution order:
 3. `.app/Contents/Resources/lima/bin/` (production, resolved via `std::env::current_exe()`)
 4. System PATH fallback (development mode only)
 
-### Linux: Bundle nerdctl-full in .deb
-
-nerdctl-full is bundled inside the .deb package at `/usr/lib/Speedwave/nerdctl-full/`. On first launch, Speedwave runs `containerd-rootless-setuptool.sh install` to start containerd as a systemd --user service.
-
-System requirements (not bundled):
-
-- `uidmap` package (`newuidmap` / `newgidmap`) — for rootless user namespace mapping[^3]
-- `systemd --user` — for the containerd service unit
-- `/etc/subuid` + `/etc/subgid` configured for the user
-
-Binary resolution order:
-
-1. `SPEEDWAVE_RESOURCES_DIR` environment variable (development mode)
-2. `<resources>/nerdctl-full/bin/` (production, from extracted bundle)
-3. System PATH fallback (development mode only)
-
 ### Windows: Auto-install WSL2 via Setup Wizard
 
 The Setup Wizard detects whether WSL2 is available and, if missing, installs it:
@@ -74,7 +58,6 @@ The CLI (`speedwave`) is a thin client that requires a running Desktop applicati
 The CLI binary itself is bundled inside the Desktop app at build time:
 
 - macOS: `.app/Contents/Resources/cli/speedwave`
-- Linux: `<exe_dir>/resources/cli/speedwave`
 - Windows: `<exe_dir>/resources/cli/speedwave.exe`
 
 On every Desktop startup (and during initial setup), `setup_wizard::link_cli()` copies the bundled CLI to the user's PATH (`~/.local/bin/` on Unix, `~/.speedwave/bin/` on Windows). This ensures version alignment between CLI and Desktop — a Desktop update automatically distributes the matching CLI version. See ADR-016 for PATH details.
@@ -89,7 +72,7 @@ Only the `node` binary is bundled — npm and other tools are not needed at runt
 Resources/
 └── nodejs/
     └── bin/
-        └── node          # Unix (macOS, Linux)
+        └── node          # macOS
     └── node.exe          # Windows
 ```
 
@@ -104,10 +87,6 @@ SHA256 integrity is verified at download time against the official `SHASUMS256.t
 GUI applications on macOS do not inherit the user's shell PATH[^7]. A `.app` launched from Finder or Spotlight has a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which does not include Homebrew's `/opt/homebrew/bin`. Requiring `brew install lima` would mean the Desktop app cannot find `limactl` without PATH hacks.
 
 Bundling is the established pattern for macOS GUI apps. Rancher Desktop (CNCF sandbox project) bundles Lima in the same way[^8]. The isolation via `LIMA_HOME=~/.speedwave/lima` prevents any conflict with a user-installed Lima instance.
-
-### Why bundle nerdctl-full on Linux?
-
-The previous approach (Podman as .deb dependency) added external dependency management burden. Bundling nerdctl-full inside the .deb package makes Linux self-contained — matching the macOS and Windows experience. All three platforms now use the same container runtime (nerdctl), reducing the maintenance surface from three runtime implementations to two (LimaRuntime wraps nerdctl-in-VM, NerdctlRuntime and WslRuntime call nerdctl directly).
 
 ### Why auto-install WSL2 on Windows?
 
@@ -153,8 +132,6 @@ Lima binaries are downloaded during the build process (CI) with SHA256 verificat
 The Makefile and CI pipeline enforce checksum verification — builds fail if checksums do not match. The Lima version is pinned in `.lima-version` at the repository root (SSOT for both Makefile and CI).
 
 ---
-
-[^3]: [rootless containers — subuid/subgid + newuidmap/newgidmap requirement](https://rootlesscontaine.rs/getting-started/common/subuid/)
 
 [^4]: [Install WSL - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/install)
 

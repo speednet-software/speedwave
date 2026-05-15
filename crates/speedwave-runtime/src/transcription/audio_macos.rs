@@ -412,7 +412,7 @@ fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureE
     }
 }
 
-/// Extracts a PID from a `ProcessSelector`, rejecting Linux-style node ids.
+/// Extracts a PID from a `ProcessSelector`, rejecting the reserved `NodeId` variant.
 fn pid_of(selector: &ProcessSelector) -> Result<i32, CaptureError> {
     match selector {
         ProcessSelector::Pid { pid } => Ok(*pid),

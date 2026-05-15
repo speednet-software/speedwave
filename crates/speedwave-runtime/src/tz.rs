@@ -99,7 +99,7 @@ pub(crate) fn windows_to_iana(id: &str) -> Option<&'static str> {
         .find_map(|(win, iana)| if *win == id { Some(*iana) } else { None })
 }
 
-/// Extracts IANA name from a `zoneinfo/...` symlink target (Linux + macOS layouts).
+/// Extracts IANA name from a `zoneinfo/...` symlink target (macOS layout).
 fn extract_zoneinfo_suffix(target: &Path) -> Option<String> {
     let s = target.to_str()?;
     let needle = "zoneinfo/";
@@ -283,12 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_zoneinfo_suffix_linux() {
-        let p = Path::new("/usr/share/zoneinfo/America/New_York");
-        assert_eq!(extract_zoneinfo_suffix(p), iana("America/New_York"));
-    }
-
-    #[test]
     fn extract_zoneinfo_suffix_macos() {
         let p = Path::new("/var/db/timezone/zoneinfo/Europe/Warsaw");
         assert_eq!(extract_zoneinfo_suffix(p), iana("Europe/Warsaw"));
@@ -296,7 +290,7 @@ mod tests {
 
     #[test]
     fn extract_zoneinfo_suffix_three_segments() {
-        let p = Path::new("/usr/share/zoneinfo/America/Argentina/Buenos_Aires");
+        let p = Path::new("/var/db/timezone/zoneinfo/America/Argentina/Buenos_Aires");
         assert_eq!(
             extract_zoneinfo_suffix(p),
             iana("America/Argentina/Buenos_Aires")

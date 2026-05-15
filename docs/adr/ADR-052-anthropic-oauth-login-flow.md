@@ -31,7 +31,7 @@ We need a login surface reachable from both the CLI (`speedwave login`) and the 
 ### Surface
 
 - **CLI**: `speedwave login [--project <name>]` runs `compose up`, ensures the claude container is exec-healthy, then runs `nerdctl exec -it … claude <flags>`. The user types `/login` and follows Claude Code's prompts. `speedwave logout` mirrors this for credential removal.
-- **Desktop**: a "Open terminal and log in" button in `auth-terminal.component.ts` invokes the Tauri command `start_oauth_login`, which spawns the host's terminal application running `speedwave login --project <name>`. On macOS, iTerm2 is preferred when installed (it honors OSC 52 — see Steps 9/10 below); otherwise Apple Terminal.app via `osascript`. On Windows: PowerShell via `cmd.exe /c start powershell.exe -NoExit -Command`. On Linux: gnome-terminal → konsole → xterm in order. The existing `get_auth_status` poll detects when `claude auth status` inside the container starts succeeding.
+- **Desktop**: a "Open terminal and log in" button in `auth-terminal.component.ts` invokes the Tauri command `start_oauth_login`, which spawns the host's terminal application running `speedwave login --project <name>`. On macOS, iTerm2 is preferred when installed (it honors OSC 52 — see Steps 9/10 below); otherwise Apple Terminal.app via `osascript`. On Windows: PowerShell via `cmd.exe /c start powershell.exe -NoExit -Command`. The existing `get_auth_status` poll detects when `claude auth status` inside the container starts succeeding.
 - A secondary "Or run this command yourself" copy block (`get_auth_command`) renders the same `cd … && speedwave login --project '…'` for users whose preferred terminal is not auto-detected.
 
 ### Scope: no Speedwave-managed token storage

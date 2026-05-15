@@ -14,7 +14,7 @@ Speedwave's desktop application (Tauri v2 + Angular) lacked end-to-end tests exe
 
 None of these validate the full stack: Angular frontend communicating with the Rust backend through Tauri IPC in a real window on the real OS.
 
-A critical gap is that Speedwave relies on platform-specific infrastructure — Lima VMs on macOS, rootless nerdctl with systemd --user on Linux, WSL2 on Windows — that cannot be faithfully reproduced in a container. Testing the complete user experience (first launch → setup wizard → runtime install → containers → chat) requires a real OS environment on each platform.
+A critical gap is that Speedwave relies on platform-specific infrastructure — Lima VMs on macOS and WSL2 on Windows — that cannot be faithfully reproduced in a container. Testing the complete user experience (first launch → setup wizard → runtime install → containers → chat) requires a real OS environment on each platform.
 
 ### Approaches considered
 
@@ -36,24 +36,23 @@ We use **SSH-based orchestration to real machines** with per-platform WebDriver 
 
 ### Machine Configuration
 
-- **3 target machines**: Ubuntu (latest LTS), Windows 11, macOS — connected via SSH (configured via `SPEEDWAVE_LINUX_HOST`, `SPEEDWAVE_WINDOWS_HOST`, `SPEEDWAVE_MACOS_HOST` environment variables)
-- **Clean state before each run**: Platform-specific clean-state functions (`linux_clean_state`, `windows_clean_state`, `macos_clean_state`) uninstall any previous Speedwave installation and remove user data (`~/.speedwave/`, built binaries, tokens), guaranteeing zero state leakage between runs
-- **Repo access**: The repository is copied to the remote machine via `rsync` (Linux/macOS) or `scp` (Windows) before building
+- **2 target machines**: Windows 11 and macOS — connected via SSH (configured via `SPEEDWAVE_WINDOWS_HOST` and `SPEEDWAVE_MACOS_HOST` environment variables)
+- **Clean state before each run**: Platform-specific clean-state functions (`windows_clean_state`, `macos_clean_state`) uninstall any previous Speedwave installation and remove user data (`~/.speedwave/`, built binaries, tokens), guaranteeing zero state leakage between runs
+- **Repo access**: The repository is copied to the remote machine via `rsync` (macOS) or `scp` (Windows) before building
 
 ### Per-Platform WebDriver
 
-| Platform       | WebDriver mechanism                      | Display                     | Notes                                                                                                                                                                 |
-| -------------- | ---------------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linux (Ubuntu) | `tauri-driver`[^1] (official)            | `xvfb-run`[^7] for headless | `webkit2gtk-driver` required                                                                                                                                          |
-| Windows        | `tauri-driver`[^1] (official)            | Native desktop              | Uses `msedgedriver` for WebView2                                                                                                                                      |
-| macOS          | `tauri-plugin-webdriver`[^3] (community) | Native desktop              | `tauri-driver` does not work on WKWebView[^2]; plugin compiled only when `--features e2e` is passed; production releases omit the feature, so zero attack surface[^5] |
+| Platform | WebDriver mechanism                      | Display        | Notes                                                                                                                                                                 |
+| -------- | ---------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows  | `tauri-driver`[^1] (official)            | Native desktop | Uses `msedgedriver` for WebView2                                                                                                                                      |
+| macOS    | `tauri-plugin-webdriver`[^3] (community) | Native desktop | `tauri-driver` does not work on WKWebView[^2]; plugin compiled only when `--features e2e` is passed; production releases omit the feature, so zero attack surface[^5] |
 
-All platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C WebDriver protocol[^6].
+Both platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C WebDriver protocol[^6].
 
 ### Orchestration
 
-- **`scripts/e2e-vm.sh`**: Orchestrates the full cycle per platform via SSH — clean previous state, copy repo to remote machine, build the full release artifact (.deb / NSIS / .dmg), install, launch app, run WebdriverIO tests, collect results
-- **`make test-e2e-all`**: Runs `scripts/e2e-vm.sh` for all 3 platforms in parallel (requires SSH access to each target machine)
+- **`scripts/e2e-vm.sh`**: Orchestrates the full cycle per platform via SSH — clean previous state, copy repo to remote machine, build the full release artifact (NSIS / .dmg), install, launch app, run WebdriverIO tests, collect results
+- **`make test-e2e-all`**: Runs `scripts/e2e-vm.sh` for both platforms in parallel (requires SSH access to each target machine)
 - **`make test-e2e-desktop`**: Runs E2E tests on the current machine only (no SSH orchestration) — useful for local development on any platform
 
 ### Selectors
@@ -65,16 +64,16 @@ All platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C
 
 - **Full OS-level isolation**: Each target machine has its own kernel, filesystem, and network stack — a compromised test cannot affect the orchestrating host or other target machines
 - **Clean-state reset**: Platform-specific clean-state functions remove all Speedwave state (binaries, `~/.speedwave/`, tokens, container images) before every test run, ensuring no state leakage between runs
-- **`tauri-plugin-webdriver` gated behind a Cargo feature flag**: The `#[cfg(feature = "e2e")]`[^5] gate ensures the embedded WebDriver server is never included in production releases — only builds with `--features e2e` include it. Only macOS targets use this plugin; Linux and Windows use the external `tauri-driver` process which is never shipped
+- **`tauri-plugin-webdriver` gated behind a Cargo feature flag**: The `#[cfg(feature = "e2e")]`[^5] gate ensures the embedded WebDriver server is never included in production releases — only builds with `--features e2e` include it. Only macOS targets use this plugin; Windows uses the external `tauri-driver` process which is never shipped
 - **No token access**: WebDriver commands operate in the webview context only — they cannot access Tauri backend state, tokens, or host filesystem
 - **Standard protocol**: Uses the well-audited W3C WebDriver specification[^6] rather than a custom wire protocol
 
 ## Consequences
 
-- **Requires SSH access** to target machines (Linux, Windows, macOS) for cross-platform testing. Machines can be physical, cloud VMs, or local VMs reachable via the network — no dependency on a specific hypervisor
+- **Requires SSH access** to target machines (Windows, macOS) for cross-platform testing. Machines can be physical, cloud VMs, or local VMs reachable via the network — no dependency on a specific hypervisor
 - **First run per machine takes ~15–20 minutes** due to full Rust compilation of the Tauri app from source. Subsequent runs take ~5 minutes with incremental compilation (Cargo build cache persists on the target machine between runs)
-- **Full user experience tested**: clean state → build → install artifact → setup wizard → runtime install (Lima/nerdctl/WSL2) → container lifecycle → chat UI — the complete Speedwave flow that no other testing approach can cover
-- **3 platforms tested in parallel**: `make test-e2e-all` runs tests on Ubuntu, Windows, and macOS machines concurrently via SSH
+- **Full user experience tested**: clean state → build → install artifact → setup wizard → runtime install (Lima/WSL2) → container lifecycle → chat UI — the complete Speedwave flow that no other testing approach can cover
+- **Both platforms tested in parallel**: `make test-e2e-all` runs tests on Windows and macOS machines concurrently via SSH
 - **`make test-e2e-desktop`** runs on the current machine without SSH orchestration — available on any platform for local development iteration
 - Tests are NOT part of the default `make test` target due to requiring SSH-accessible target machines and a full Tauri build
 - All Angular component templates include `data-testid` attributes on interactive elements

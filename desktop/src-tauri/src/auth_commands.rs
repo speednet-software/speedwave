@@ -111,7 +111,7 @@ pub(crate) fn ps_escape_single_quoted(s: &str) -> String {
 /// \\?\ prefix stripping) versus POSIX-shaped output (cd, &&, export,
 /// '\'' escape). The flag is taken as a parameter — not derived inside the
 /// function from `cfg!()` — so both branches are reachable from unit tests
-/// on any host, including macOS/Linux where `make test-desktop` runs.
+/// on macOS where `make test-desktop` runs.
 ///
 /// The trailing command is `speedwave login --project '<project>'` — once
 /// stored, the OAuth token is per-project, so the exact name is bound into

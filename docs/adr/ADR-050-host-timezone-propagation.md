@@ -10,10 +10,10 @@ Speedwave containers (claude, mcp-hub, all MCP workers, plugin workers) inherit 
 
 The fix surface has two halves:
 
-1. **Detection on the host.** The Tauri process knows the host's IANA timezone via the OS (`/etc/localtime` symlink on macOS/Linux, `Get-TimeZone` on Windows).
-2. **Propagation into containers.** The mechanism must work uniformly across Lima (macOS), rootless nerdctl (Linux), and WSL2 (Windows), and must extend to plugin worker containers built by a separate repository (`speedwave-plugins`) without breaking their existing contract.
+1. **Detection on the host.** The Tauri process knows the host's IANA timezone via the OS (`/etc/localtime` symlink on macOS, `Get-TimeZone` on Windows).
+2. **Propagation into containers.** The mechanism must work uniformly across Lima (macOS) and WSL2 (Windows), and must extend to plugin worker containers built by a separate repository (`speedwave-plugins`) without breaking their existing contract.
 
-A bind-mount of `/etc/localtime` was considered (the Docker convention on Linux). Rejected because Windows has no equivalent file and the per-platform divergence would invert the "single SSOT for container env" rule already established in `compose.rs`.
+A bind-mount of `/etc/localtime` was considered (the Docker convention). Rejected because Windows has no equivalent file and the per-platform divergence would invert the "single SSOT for container env" rule already established in `compose.rs`.
 
 ## Decision
 
@@ -25,7 +25,7 @@ A new module `crates/speedwave-runtime/src/tz.rs` exposes:
 pub fn detect_host_timezone() -> String
 ```
 
-- **Unix:** read `/etc/localtime` as a symlink; extract the path suffix after the last `zoneinfo/` segment (handles both `/usr/share/zoneinfo/...` on Linux and `/var/db/timezone/zoneinfo/...` on macOS). Fall back to `$TZ` if the symlink is missing or doesn't point into `zoneinfo/`. The fallback validates `$TZ` against an IANA-shape regex to reject glibc-isms like `:Europe/Warsaw` and path-traversal strings.[^1][^2]
+- **Unix (macOS):** read `/etc/localtime` as a symlink; extract the path suffix after the last `zoneinfo/` segment (e.g. `/var/db/timezone/zoneinfo/...`). Fall back to `$TZ` if the symlink is missing or doesn't point into `zoneinfo/`. The fallback validates `$TZ` against an IANA-shape regex to reject glibc-isms like `:Europe/Warsaw` and path-traversal strings.[^1][^2]
 - **Windows:** invoke `powershell -NoProfile -NonInteractive -Command "(Get-TimeZone).Id"` (5 s deadline) and map the Windows zone ID to IANA via an inline `WINDOWS_TO_IANA` table sourced from CLDR `windowsZones.xml` (territory `001`).[^3][^4]
 - **Fallback:** on any failure, log `warn!` and return `"Etc/UTC"`. Never panics, never returns `Err`.
 
