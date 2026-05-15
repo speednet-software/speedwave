@@ -66,3 +66,7 @@ PY
 @test "verify-bundled-assets requires audio-capture-cli on macOS" {
     grep -qF 'audio-capture-cli' "$REPO_ROOT/scripts/verify-bundled-assets.sh"
 }
+
+@test "audio-capture-cli has a stub in create-desktop-stubs.sh" {
+    grep -qF 'audio-capture-cli' "$REPO_ROOT/scripts/create-desktop-stubs.sh"
+}
