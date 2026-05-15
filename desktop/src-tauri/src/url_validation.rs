@@ -171,13 +171,11 @@ pub fn open_url(url: String) -> Result<(), String> {
     open::that(parsed.as_str()).map_err(|e| e.to_string())
 }
 
-/// Returns the current platform as a string ("macos", "linux", or "windows").
+/// Returns the current platform as a string ("macos" or "windows").
 #[tauri::command]
 pub fn get_platform() -> String {
     if cfg!(target_os = "macos") {
         "macos".to_string()
-    } else if cfg!(target_os = "linux") {
-        "linux".to_string()
     } else if cfg!(target_os = "windows") {
         "windows".to_string()
     } else {
@@ -597,7 +595,7 @@ mod tests {
     fn get_platform_returns_known_value() {
         let platform = get_platform();
         assert!(
-            ["macos", "linux", "windows"].contains(&platform.as_str()),
+            ["macos", "windows"].contains(&platform.as_str()),
             "get_platform() returned unexpected value: {platform}"
         );
     }

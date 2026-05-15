@@ -133,9 +133,6 @@ pub(crate) fn build_tray_menu(
                 builder = builder.item(&it);
             }
             TrayItemSpec::InstallUpdate(version) => {
-                #[cfg(target_os = "linux")]
-                let label = format!("Download Update v{version}");
-                #[cfg(not(target_os = "linux"))]
                 let label = format!("Install Update v{version}");
                 let it = MenuItemBuilder::with_id("install_update", label).build(app)?;
                 builder = builder.item(&it);

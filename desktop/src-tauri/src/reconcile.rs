@@ -838,7 +838,6 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
 ///
 /// Platform conventions:
 /// - macOS: `<exe>/../../Resources` (inside .app bundle)
-/// - Linux: `<exe>/../lib/Speedwave` (.deb — Tauri convention)
 /// - Windows: `<exe>/resources` (NSIS installer)
 ///
 /// Returns `None` in dev mode (no bundle structure present).
@@ -848,16 +847,6 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
             .parent()
             .map(|p| vec![p.join("Resources")])
             .unwrap_or_default()
-    } else if cfg!(target_os = "linux") {
-        // .deb: resources at <exe>/../lib/<productName>/
-        let lib_path = exe_parent.parent().map(|p| p.join("lib").join("Speedwave"));
-        let mut paths = Vec::new();
-        if let Some(p) = lib_path {
-            paths.push(p);
-        }
-        // Fallback: <exe>/resources (dev builds / non-standard layouts)
-        paths.push(exe_parent.join("resources"));
-        paths
     } else {
         // Windows NSIS: resources are installed alongside the .exe (no subdirectory).
         // Fallback: <exe>/resources (dev builds / non-standard layouts).
@@ -1443,78 +1432,6 @@ mod tests {
             std::fs::create_dir_all(&exe_parent).unwrap();
 
             assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    mod resolve_resources_dir_tests {
-        use super::resolve_resources_dir;
-        use tempfile::TempDir;
-
-        fn mark_as_resources(dir: &std::path::Path) {
-            std::fs::create_dir_all(dir.join("cli")).unwrap();
-        }
-
-        #[test]
-        fn linux_deb_layout_resolves_lib_speedwave() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            mark_as_resources(&lib_dir);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(lib_dir));
-        }
-
-        #[test]
-        fn linux_dev_mode_returns_none() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn linux_fallback_to_resources_subdir() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(resources));
-        }
-
-        #[test]
-        fn linux_returns_none_when_lib_dir_empty() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            // lib dir exists but has no marker → should return None
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn linux_lib_speedwave_takes_priority_over_resources() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&lib_dir);
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(lib_dir));
         }
     }
 

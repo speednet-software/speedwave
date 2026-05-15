@@ -10,7 +10,6 @@ use tauri::Manager;
 /// (`now_ms.saturating_sub(prev_ms)`) is less than `threshold_ms`. Uses saturating
 /// subtraction so that a backward clock jump suppresses rather than
 /// double-toggles.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) fn should_debounce(prev_ms: u64, now_ms: u64, threshold_ms: u64) -> bool {
     now_ms.saturating_sub(prev_ms) < threshold_ms
 }

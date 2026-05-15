@@ -432,17 +432,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn desktop_log_dir_linux_path_under_local_share() {
-        let dir = desktop_log_dir().unwrap();
-        let s = dir.to_string_lossy();
-        assert!(
-            s.contains(".local/share/pl.speedwave.desktop/logs"),
-            "Linux path must point at .local/share/pl.speedwave.desktop/logs, got {s}"
-        );
-    }
-
     #[test]
     fn cleanup_log_dir_ignores_subdirectories() {
         let tmp = tempfile::tempdir().unwrap();
