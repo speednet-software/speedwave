@@ -10,7 +10,7 @@ The desktop shell is a Tauri backend with an Angular frontend. It owns the setup
 
 The Desktop app bundles the `speedwave` CLI binary in its resources. On every startup (and during initial setup), the app copies the bundled CLI to the user's PATH:
 
-- **macOS / Linux:** `~/.local/bin/speedwave`
+- **macOS:** `~/.local/bin/speedwave`
 - **Windows:** `%USERPROFILE%\.speedwave\bin\speedwave.exe`
 
 This ensures the CLI and Desktop versions always stay in sync — a Desktop update automatically distributes the matching CLI. If the CLI binary is missing, the "Open Terminal" button in Settings shows an error banner instructing the user to restart the app.
@@ -31,7 +31,7 @@ After restart, the desktop backend compares the installed bundle against `~/.spe
 3. Recreate only the projects that were running before the update
 4. Emit `bundle_reconcile_status` so the UI can show progress or retry
 
-The same startup reconcile also runs after a manual app upgrade outside the desktop UI. On Linux `.deb`, the app update itself is still manual, but the next app launch still applies the new bundle to resources and containers automatically.
+The same startup reconcile also runs after a manual app upgrade outside the desktop UI.
 
 ## Bundle Identity
 
@@ -89,8 +89,6 @@ Settings invalidates the persisted layer by calling `ChatStateService.refreshLlm
 While Claude is responding, press **Esc** or click the red **Stop** button next to the message input to interrupt the current turn. The partial response is preserved in the conversation history, in-flight tools are stopped, and the input is immediately re-enabled so you can send the next message. **Esc is ignored while an "ask user" question is visible** — answer or dismiss that prompt first; the Stop button still works in that case and will drop the question.
 
 ## System Tray
-
-<!-- Content to be written: macOS/Windows click-toggle, Linux menu-only, libappindicator requirement -->
 
 ## Logs & system health
 

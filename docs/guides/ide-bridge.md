@@ -8,7 +8,7 @@ Speedwave.app acts as an active MCP proxy between Claude (isolated in a Lima VM 
 
 1. **IDE Bridge binds** a random TCP port on `127.0.0.1` and writes a lock file to `~/.speedwave/ide-bridge/<port>.lock`.
 2. **Host directory is mounted** read-only into the Claude container as `~/.claude/ide/`.
-3. **Claude detects the lock file**, derives the port from the **filename** (e.g. `37100.lock` → port 37100), and connects via WebSocket using the platform-specific gateway DNS name (`host.lima.internal` on macOS, `host.docker.internal` on Linux, `host.speedwave.internal` on Windows).
+3. **Claude detects the lock file**, derives the port from the **filename** (e.g. `37100.lock` → port 37100), and connects via WebSocket using the platform-specific gateway DNS name (`host.lima.internal` on macOS, `host.speedwave.internal` on Windows; `host.docker.internal` and `host.containers.internal` are also injected as compatibility aliases).
 4. **IDE Bridge receives events** from Claude (e.g. `openFile`, `getDiagnostics`) and forwards them to the real IDE extension.
 5. **The IDE responds** — VS Code opens files automatically as Claude edits them.
 

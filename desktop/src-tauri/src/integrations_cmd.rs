@@ -1146,7 +1146,7 @@ mod tests {
 
     // -- OS integration platform guards --
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     #[test]
     fn set_os_integration_enabled_rejects_on_non_macos() {
         let result = set_os_integration_enabled("test".into(), "reminders".into(), true);
@@ -1163,7 +1163,7 @@ mod tests {
     // tests here cover the boundary behaviour reachable without spawning
     // child processes.
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     #[test]
     fn validate_os_integrations_returns_empty_on_non_macos() {
         // OS integrations are macOS-only — the validator must short-circuit

@@ -98,17 +98,15 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
   │  [job: resolve]  validate inputs, look up draft release ID                    │
   │        │                                                                      │
   │        ▼                                                                      │
-  │  [job: publish-tauri]  matrix build (4 runners in parallel)                   │
+  │  [job: publish-tauri]  matrix build (3 runners in parallel)                   │
   │    ├─ macOS arm64    ─► macOS_Apple_Silicon .dmg + .app.tar.gz + .sig  (3)    │
   │    ├─ macOS x86_64   ─► macOS_Intel .dmg + .app.tar.gz + .sig  (3)           │
-  │    ├─ Linux x86_64   ─► .deb + .sig  (3)                                     │
   │    └─ Windows x86_64 ─► .msi + .nsis.zip + .sig  (3)                         │
   │        │                                                                      │
   │        ▼                                                                      │
-  │  [job: cli]  cross-compile CLI binary (4 targets)                             │
+  │  [job: cli]  cross-compile CLI binary (3 targets)                             │
   │    ├─ aarch64-apple-darwin     ─► .tar.gz                                     │
   │    ├─ x86_64-apple-darwin      ─► .tar.gz                                     │
-  │    ├─ x86_64-unknown-linux-gnu ─► .tar.gz                                     │
   │    └─ x86_64-pc-windows-msvc   ─► .zip                                       │
   │        │                                                                      │
   │        ▼                                                                      │
@@ -141,8 +139,8 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
         │      └─ audit (cargo-audit, npm audit)
         │
         └──► desktop-build.yml  (push/PR to main only, when desktop/** crates/** Cargo.toml Cargo.lock change)
-               ├─ PR to main:   Linux only ($0.008/min vs macOS $0.08/min)
-               └─ push to main: all 4 platforms (unsigned)
+               ├─ PR to main:   macOS only
+               └─ push to main: macOS + Windows (unsigned)
 ```
 
 ## How to Create a Release
@@ -393,7 +391,7 @@ gh workflow run desktop-release.yml --ref main -f version=0.3.0
 
 **Note:** `workflow_dispatch` now checks whether the tag exists. If `v0.3.0` tag exists, the build checks out that tag (builds from tagged code with correct version). If no tag exists, falls back to branch HEAD (for testing only — version in artifacts will match whatever the branch has).
 
-Or use `desktop-build.yml` which runs automatically on PRs to `main` (Linux only) and on push to `main` (all platforms). These builds are unsigned.
+Or use `desktop-build.yml` which runs automatically on PRs to `main` (macOS only) and on push to `main` (macOS + Windows). These builds are unsigned.
 
 ## Files Involved
 
@@ -422,40 +420,37 @@ gh release view v0.3.1 --repo speednet-software/speedwave
 curl -sL https://github.com/speednet-software/speedwave/releases/latest/download/latest.json | jq .version
 ```
 
-Expected assets per release (20 assets, of which 6 require companion .sig files):
+Expected assets per release (18 assets, of which 6 require companion .sig files):
 
-| Asset                                            | Needs .sig? |
-| ------------------------------------------------ | ----------- |
-| `latest.json`                                    | no          |
-| `Speedwave_<V>_macOS_Apple_Silicon.app.tar.gz`   | **yes**     |
-| `Speedwave_<V>_macOS_Apple_Silicon.dmg`          | no          |
-| `Speedwave_<V>_macOS_Intel.app.tar.gz`           | **yes**     |
-| `Speedwave_<V>_macOS_Intel.dmg`                  | no          |
-| `Speedwave_<V>_amd64.deb`                        | no          |
-| `Speedwave_<V>_x64-setup.exe`                    | **yes**     |
-| `Speedwave_<V>_x64-setup.nsis.zip`               | **yes**     |
-| `Speedwave_<V>_x64_en-US.msi`                    | **yes**     |
-| `Speedwave_<V>_x64_en-US.msi.zip`                | **yes**     |
-| `speedwave-v<V>-aarch64-apple-darwin.tar.gz`     | no          |
-| `speedwave-v<V>-x86_64-apple-darwin.tar.gz`      | no          |
-| `speedwave-v<V>-x86_64-unknown-linux-gnu.tar.gz` | no          |
-| `speedwave-v<V>-x86_64-pc-windows-msvc.zip`      | no          |
+| Asset                                          | Needs .sig? |
+| ---------------------------------------------- | ----------- |
+| `latest.json`                                  | no          |
+| `Speedwave_<V>_macOS_Apple_Silicon.app.tar.gz` | **yes**     |
+| `Speedwave_<V>_macOS_Apple_Silicon.dmg`        | no          |
+| `Speedwave_<V>_macOS_Intel.app.tar.gz`         | **yes**     |
+| `Speedwave_<V>_macOS_Intel.dmg`                | no          |
+| `Speedwave_<V>_x64-setup.exe`                  | **yes**     |
+| `Speedwave_<V>_x64-setup.nsis.zip`             | **yes**     |
+| `Speedwave_<V>_x64_en-US.msi`                  | **yes**     |
+| `Speedwave_<V>_x64_en-US.msi.zip`              | **yes**     |
+| `speedwave-v<V>-aarch64-apple-darwin.tar.gz`   | no          |
+| `speedwave-v<V>-x86_64-apple-darwin.tar.gz`    | no          |
+| `speedwave-v<V>-x86_64-pc-windows-msvc.zip`    | no          |
 
 Breakdown by platform:
 
 - macOS (per arch): `.dmg` (no sig) + `.app.tar.gz` + `.app.tar.gz.sig` × 2 archs = 6 assets
-- Linux: `.deb` (no sig) = 1 asset
 - Windows: `.exe` + `.exe.sig` + `.nsis.zip` + `.nsis.zip.sig` + `.msi` + `.msi.sig` + `.msi.zip` + `.msi.zip.sig` = 8 assets
-- CLI archives: 4 (`.tar.gz` / `.zip` per target, no sig)
+- CLI archives: 3 (`.tar.gz` / `.zip` per target, no sig)
 - `latest.json`: 1
 
-**Total: 20 assets, 6 `.sig` companions.**
+**Total: 18 assets, 6 `.sig` companions.**
 
 Asset names use `assetNamePattern: [name]_[version]_{arch_label}[setup][ext]` from `tauri-apps/tauri-action` (see `.github/workflows/desktop-release.yml`).
 
 The `publish-release` job runs three steps:
 
-1. **Pre-publish gate:** `scripts/verify-release-assets.sh` enumerates every required asset, verifies each `.sig` is non-empty, validates `latest.json` reports the expected bare semver version (no `v` prefix), and checks all 7 required `platforms.*` keys (`darwin-*`, `windows-*`) have non-empty `signature` and `url` fields with the expected `https://github.com/<repo>/releases/` prefix. Linux is excluded — `updater.rs` disables auto-update on Linux.
+1. **Pre-publish gate:** `scripts/verify-release-assets.sh` enumerates every required asset, verifies each `.sig` is non-empty, validates `latest.json` reports the expected bare semver version (no `v` prefix), and checks all 7 required `platforms.*` keys (`darwin-*`, `windows-*`) have non-empty `signature` and `url` fields with the expected `https://github.com/<repo>/releases/` prefix.
 2. **Publish:** flips the draft release to live via `gh api --method PATCH … -f draft=false`.
 3. **Post-publish safety net:** re-runs `scripts/verify-release-assets.sh` against the live release; if it fails, the workflow reverts back to draft so the broken release is not user-visible.
 

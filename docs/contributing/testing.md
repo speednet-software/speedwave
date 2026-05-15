@@ -90,38 +90,37 @@ Pattern: `desktop/src/src/app/settings/settings-update.spec.ts`
 
 ## Desktop E2E Testing
 
-Desktop E2E tests use WebdriverIO against a Tauri release binary. The app embeds `tauri-plugin-webdriver` which serves W3C WebDriver on port 4445 — no external driver binary is needed on any platform. On Linux, `xvfb` provides a headless X11 display.
+Desktop E2E tests use WebdriverIO against a Tauri release binary. The app embeds `tauri-plugin-webdriver` which serves W3C WebDriver on port 4445 — no external driver binary is needed on any platform.
 
 ### Running Desktop E2E Tests
 
-| Command                 | Description                                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------------------------- |
-| `make test-e2e-desktop` | Build release binary on the current machine and run WebdriverIO E2E tests                         |
-| `make test-e2e-all`     | Run E2E on all 3 platforms (macOS, Linux, Windows) via SSH to dedicated test machines in parallel |
+| Command                 | Description                                                                               |
+| ----------------------- | ----------------------------------------------------------------------------------------- |
+| `make test-e2e-desktop` | Build release binary on the current machine and run WebdriverIO E2E tests                 |
+| `make test-e2e-all`     | Run E2E on both platforms (macOS, Windows) via SSH to dedicated test machines in parallel |
 
 Desktop E2E tests are **not** included in the default `make test` target because they have a significantly longer execution time.
 
 ### Local E2E (`make test-e2e-desktop`)
 
-Builds the Tauri release binary natively on the current machine, then runs the WebdriverIO test suite against it. The app embeds `tauri-plugin-webdriver` on port 4445 on all platforms — no external `tauri-driver` is needed. On Linux, the Makefile launches `xvfb` for headless display.
+Builds the Tauri release binary natively on the current machine, then runs the WebdriverIO test suite against it. The app embeds `tauri-plugin-webdriver` on port 4445 on all platforms — no external `tauri-driver` is needed.
 
 Prerequisites depend on the platform:
 
 - **macOS:** Xcode command-line tools, Rust, Node.js
-- **Linux:** Rust, Node.js, `webkit2gtk` dev libraries, `xvfb`
 - **Windows:** Rust, Node.js, WebView2
 
 ### Cross-platform E2E (`make test-e2e-all`)
 
-Runs Desktop E2E tests on all three platforms via SSH to dedicated test machines. The machines are configured via environment variables: `SPEEDWAVE_LINUX_HOST`, `SPEEDWAVE_WINDOWS_HOST`, `SPEEDWAVE_MACOS_HOST`.
+Runs Desktop E2E tests on both supported platforms via SSH to dedicated test machines. The machines are configured via environment variables: `SPEEDWAVE_WINDOWS_HOST`, `SPEEDWAVE_MACOS_HOST`.
 
-The `scripts/e2e-vm.sh` script orchestrates the following three-phase flow for each platform (Ubuntu, Windows, macOS) **in parallel**:
+The `scripts/e2e-vm.sh` script orchestrates the following three-phase flow for each platform (Windows, macOS) **in parallel**:
 
 **All platforms (three-phase):**
 
-1. **Phase 1 — Build artifact:** Copy repo source via rsync/tar-over-SSH, build release artifact (.deb on Linux, NSIS installer on Windows, .dmg on macOS), copy artifact back to host
+1. **Phase 1 — Build artifact:** Copy repo source via rsync/tar-over-SSH, build release artifact (NSIS installer on Windows, .dmg on macOS), copy artifact back to host
 2. **Phase 2 — Test on clean system:** Clean previous state (uninstall app, remove user data, stop containers). Copy only the artifact + E2E test suite. Install the artifact like a real user would, launch it, and run WebdriverIO tests against it
-3. **Phase 3 — Second fresh install:** Clean ALL state again (same as Phase 2), reinstall the artifact, and run the full E2E suite a second time. This catches issues with leftover system-level state (systemd units, Lima cache, WSL2 distros, registry entries) that survive user-data removal
+3. **Phase 3 — Second fresh install:** Clean ALL state again (same as Phase 2), reinstall the artifact, and run the full E2E suite a second time. This catches issues with leftover system-level state (Lima cache, WSL2 distros, registry entries) that survive user-data removal
 
 This three-phase approach verifies the app works correctly on both a first and second fresh install.
 
@@ -129,23 +128,22 @@ This three-phase approach verifies the app works correctly on both a first and s
 
 Each test machine must have the following pre-installed:
 
-| Dependency     | All platforms             | Notes                                              |
-| -------------- | ------------------------- | -------------------------------------------------- |
-| Rust toolchain | `rustup` + stable channel | Cargo, rustc, cargo-tauri                          |
-| Node.js        | LTS (v20+)                | npm included                                       |
-| Git            | Latest                    | For submodule/dependency operations                |
-| make           | GNU Make                  | `make` on Linux/macOS, via MSYS2 or similar on Win |
-| SSH server     | OpenSSH                   | Required for remote access from the CI host        |
+| Dependency     | All platforms             | Notes                                        |
+| -------------- | ------------------------- | -------------------------------------------- |
+| Rust toolchain | `rustup` + stable channel | Cargo, rustc, cargo-tauri                    |
+| Node.js        | LTS (v20+)                | npm included                                 |
+| Git            | Latest                    | For submodule/dependency operations          |
+| make           | GNU Make                  | `make` on macOS, via MSYS2 or similar on Win |
+| SSH server     | OpenSSH                   | Required for remote access from the CI host  |
 
 Platform-specific dependencies:
 
-- **Linux (Ubuntu):** `webkit2gtk-4.1` dev libraries, `xvfb`, `libappindicator3-dev`
 - **Windows:** WebView2 runtime, Visual Studio Build Tools (C++ workload), Git for Windows, native OpenSSH server (port 22), WSL2 with Ubuntu distro
 - **macOS:** Xcode command-line tools (includes WebKit framework), Homebrew
 
-Default host addresses are defined in `scripts/e2e-vm.sh`. Override with `SPEEDWAVE_LINUX_HOST`, `SPEEDWAVE_WINDOWS_HOST`, `SPEEDWAVE_MACOS_HOST` environment variables. The host repo path defaults to the git root of the script's location (override with `SPEEDWAVE_REPO_DIR`).
+Default host addresses are defined in `scripts/e2e-vm.sh`. Override with `SPEEDWAVE_WINDOWS_HOST`, `SPEEDWAVE_MACOS_HOST` environment variables. The host repo path defaults to the git root of the script's location (override with `SPEEDWAVE_REPO_DIR`).
 
-To run a single platform: `scripts/e2e-vm.sh ubuntu`, `scripts/e2e-vm.sh windows`, or `scripts/e2e-vm.sh macos`.
+To run a single platform: `scripts/e2e-vm.sh windows` or `scripts/e2e-vm.sh macos`.
 
 ### Test Structure
 

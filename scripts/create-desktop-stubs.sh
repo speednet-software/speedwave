@@ -18,10 +18,6 @@ stub_file() {
 }
 
 # Platform-agnostic stubs (covers all platforms for clippy)
-stub_dir "$DEST/nerdctl-full/bin"
-stub_dir "$DEST/nerdctl-full/lib"
-stub_dir "$DEST/nerdctl-full/libexec"
-stub_dir "$DEST/nerdctl-full/share"
 stub_dir "$DEST/build-context/containers/claude-resources"
 stub_dir "$DEST/build-context/mcp-servers"
 stub_dir "$DEST/mcp-os/os/dist"

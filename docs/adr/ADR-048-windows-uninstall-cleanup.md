@@ -26,7 +26,7 @@ Add a `reset_vm()` method to the `ContainerRuntime` trait (default no-op) and ov
 
 The call is inserted in `setup_wizard::factory_reset()` between the macOS Lima VM teardown and `wipe_data_dir()`, so the WSL VHDX is still at its expected path when `wsl --unregister` runs. Errors from `reset_vm()` are logged as warnings and do not abort the data-dir wipe — the primary remediation must complete regardless.
 
-`LimaRuntime` and `NerdctlRuntime` inherit the default no-op, so the call site in `factory_reset` is ungated (no `#[cfg(target_os = "windows")]`).
+`LimaRuntime` inherits the default no-op, so the call site in `factory_reset` is ungated (no `#[cfg(target_os = "windows")]`). `NerdctlRuntime` was removed when Linux was dropped — see ADR-059.
 
 ### NSIS uninstall hook
 

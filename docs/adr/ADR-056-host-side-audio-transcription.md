@@ -187,11 +187,11 @@ The 882-line `patch_emitter.rs` plus `MsgStoreRegistry` and the RFC 6902 machine
 
 ### Positive
 
-- A self-contained, opt-in meeting-transcription feature that works on macOS / Windows / Linux, with everything in the SSOT layer (`speedwave-runtime`) and a thin Tauri command surface — consistent with the rest of the codebase.
+- A self-contained, opt-in meeting-transcription feature that works on macOS and Windows, with everything in the SSOT layer (`speedwave-runtime`) and a thin Tauri command surface — consistent with the rest of the codebase. (Originally scoped to also include Linux; Linux was dropped per ADR-059 and `LinuxAudioCapture` was removed in the same commit.)
 - **The container threat model is untouched** — no v1 security invariant is relaxed; Claude's container learns nothing about audio; the transcript reaches Claude only through the normal chat path as user-supplied text.
 - Audio inference is local — no audio leaves the machine for transcription or diarization.
-- The `trait AudioCapture` → `WasapiAudioCapture` / `MacOsAudioCapture` / `LinuxAudioCapture` split mirrors `ContainerRuntime` → `LimaRuntime` / `NerdctlRuntime` / `WslRuntime` (Open/Closed; a new platform is a new impl).
-- Heavy lifting is delegated, not reimplemented: transcription = `whisper-rs`, diarization = sherpa-onnx, Linux capture = `pw-record`/`parec`, macOS capture = adapted `AudioCap`/`AudioTee`, Windows capture = `cpal`, downloader = `reqwest` + the existing `http_util` hardening, process lifecycle = `mcp_os_process.rs`, live stream = the `history_plus_stream` delivery pattern.
+- The `trait AudioCapture` → `WasapiAudioCapture` / `MacOsAudioCapture` split mirrors `ContainerRuntime` → `LimaRuntime` / `WslRuntime` (Open/Closed; a new platform is a new impl).
+- Heavy lifting is delegated, not reimplemented: transcription = `whisper-rs`, diarization = sherpa-onnx, macOS capture = adapted `AudioCap`/`AudioTee`, Windows capture = `cpal`, downloader = `reqwest` + the existing `http_util` hardening, process lifecycle = `mcp_os_process.rs`, live stream = the `history_plus_stream` delivery pattern.
 
 ### Negative
 

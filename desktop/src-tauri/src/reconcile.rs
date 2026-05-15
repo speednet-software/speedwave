@@ -696,7 +696,7 @@ pub(crate) fn reconcile_compose_port(
 /// `LimaRuntime::stop_vm` hard-powers the Apple Virtualization VM off via
 /// `limactl stop --force` and reaps containers with it, so this function is
 /// not called on macOS (compiled out by the cfg).
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 fn stop_all_containers(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     projects: &[config::ProjectUserEntry],
@@ -734,7 +734,7 @@ pub(crate) fn run_container_cleanup(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     projects: &[config::ProjectUserEntry],
 ) {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     stop_all_containers(rt, projects);
     #[cfg(target_os = "macos")]
     log::info!(
@@ -887,7 +887,7 @@ mod tests {
     // stop_all_containers is compiled out on macOS (see its definition).
     // Its tests are gated to match, otherwise the `use super::stop_all_containers`
     // would fail to resolve on macOS.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     mod stop_all_containers_tests {
         use super::stop_all_containers;
         use speedwave_runtime::config::ProjectUserEntry;
@@ -1125,7 +1125,7 @@ mod tests {
             }
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         #[test]
         fn full_cleanup_calls_in_order_non_macos() {
             // Note: runs on any non-macOS target. Windows dev hosts execute

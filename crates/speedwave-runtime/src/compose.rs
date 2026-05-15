@@ -1096,7 +1096,7 @@ fn worker_gateway_url(port: u16) -> String {
     {
         format!("http://host.lima.internal:{port}")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         format!("http://host.containers.internal:{port}")
     }
@@ -1124,7 +1124,7 @@ pub fn host_gateway_ip() -> &'static str {
     {
         consts::LIMA_VZ_HOST_IP // "192.168.5.2"
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         consts::WSL_HOST_IP // "192.168.65.1"
     }
@@ -1152,7 +1152,7 @@ fn ide_host_override() -> &'static str {
     {
         consts::LIMA_HOST // "host.lima.internal"
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         consts::WSL_HOST // "host.speedwave.internal"
     }
@@ -4922,7 +4922,7 @@ services:
                 "macOS: containers reach mcp-os via host.lima.internal"
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         {
             assert_eq!(
                 url,
@@ -5143,7 +5143,7 @@ services:
         );
         #[cfg(target_os = "macos")]
         assert_eq!(url, "http://host.lima.internal:49215");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         assert_eq!(url, "http://host.containers.internal:49215");
         // Same alias scheme as mcp-os — only the port differs.
         assert_eq!(host_exec_gateway_url(1), mcp_os_gateway_url(1));
@@ -5575,7 +5575,7 @@ services:
         );
         #[cfg(target_os = "macos")]
         assert_eq!(host, consts::LIMA_HOST);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         assert_eq!(host, consts::WSL_HOST);
     }
 

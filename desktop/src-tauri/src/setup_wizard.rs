@@ -1349,7 +1349,7 @@ fn parse_shell_env(shell: &str) -> UserShell {
         // macOS default shell is zsh since Catalina (10.15).
         #[cfg(target_os = "macos")]
         return UserShell::Zsh;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         return UserShell::Unknown;
     } else {
         UserShell::Unknown
@@ -2511,7 +2511,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     #[test]
     #[serial(env)]
     fn resolve_cli_source_finds_resources_path() {

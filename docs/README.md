@@ -5,7 +5,7 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 ## Getting Started
 
 - [Quickstart](getting-started/README.md)
-- [Installation](getting-started/installation.md) — per-platform setup (macOS, Linux, Windows)
+- [Installation](getting-started/installation.md) — per-platform setup (macOS, Windows)
 - [Configuration](getting-started/configuration.md) — `config.json`, environment variables, `.speedwave.json`
 
 ## Guides
@@ -24,7 +24,7 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 - [Overview](architecture/README.md) — system diagram and component map
 - [Security Model](architecture/security.md) — container hardening, token isolation, threat model
 - [Containers](architecture/containers.md) — OCI images, compose templates, per-project isolation
-- [Platform Matrix](architecture/platform-matrix.md) — macOS / Linux / Windows specifics
+- [Platform Matrix](architecture/platform-matrix.md) — macOS and Windows specifics
 - [Bundled Resources](architecture/bundled-resources.md) — resources injected into the Claude container
 
 ## Contributing

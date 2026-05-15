@@ -9,7 +9,7 @@ use tauri::Manager;
 
 #[cfg(target_os = "macos")]
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon-white.png");
 
 /// Variable inputs to the tray menu — `update_version` (set by the updater) and
