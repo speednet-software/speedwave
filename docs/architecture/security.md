@@ -6,7 +6,7 @@ Security is a core obsession in Speedwave. Every architectural decision preserve
 
 The following security principles are inherited from Speedwave v1 and are **non-negotiable**:
 
-- **Claude container isolation** — no tokens, no container socket, per-platform container user (UID 1000 on macOS/Windows, UID 0 in Linux rootless user namespace — see [ADR-026](../adr/ADR-026-linux-rootless-container-user.md))
+- **Claude container isolation** — no tokens, no container socket, container user UID 1000:1000 (containerd runs inside a VM on both macOS and Windows, so no user-namespace remapping is needed; see [ADR-059](../adr/ADR-059-drop-linux-support.md))
 - **OWASP container hardening** — `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
 - **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. All MCP workers also mount the project directory at `/workspace:rw` for file operations.
 - **Hub has zero tokens** — compromise of the hub exposes nothing
@@ -176,9 +176,9 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 
 ### Container User Rule
 
-| Rule             | Scope          | What it checks                                                                                                                                                                                  |
-| ---------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CONTAINER_USER` | All containers | `user:` field matches the platform-expected value from `container_user()` (UID 1000 on macOS/Windows, UID 0 on Linux rootless — see [ADR-026](../adr/ADR-026-linux-rootless-container-user.md)) |
+| Rule             | Scope          | What it checks                                                                     |
+| ---------------- | -------------- | ---------------------------------------------------------------------------------- |
+| `CONTAINER_USER` | All containers | `user:` field matches `container_user()` (UID 1000:1000 on both macOS and Windows) |
 
 ### Plugin Security Rules
 
@@ -269,7 +269,6 @@ Because the full project directory is mounted as `/workspace:rw`, the `path-vali
 `os_prereqs::check_os_prereqs()` validates host-level requirements before any container operations:
 
 - **Windows**: Verifies WSL2 is available via `wsl.exe --status` (10s timeout). If missing, reports actionable remediation (DISM commands or Windows Features GUI).
-- **Linux**: Verifies `newuidmap` is installed (required for rootless user namespaces).
 - **macOS**: No OS prerequisites — Lima runtime is bundled by Speedwave.
 
 These checks run at multiple points: setup wizard (before VM init), container start (blocking overlay in Desktop, exit in CLI), and update/rollback. Violations produce `PrereqViolation` structs with remediation text, following the same pattern as `SecurityCheck` violations.
@@ -336,7 +335,7 @@ The Desktop app includes a Tauri command `discover_llm_models` that probes a loc
 Meeting transcription runs **on the Desktop host** — the Claude container has no audio access (a v1 invariant), so this is a separate threat surface, like the LLM-discovery and Redmine commands. The full design and rationale is [ADR-056](adr/ADR-056-host-side-audio-transcription.md); the security-relevant points:
 
 - **Opt-in, off by default, no repo override.** The feature is gated behind a top-level user-config flag (`~/.speedwave/config.json`). Repository `.speedwave.json` **cannot** enable it (privacy invariant — a repo must not be able to turn on the user's microphone). With the flag off, no capture code runs.
-- **Capture surface.** When enabled, the app can record the host's system-audio loopback (what the user hears — the other call participants) and the microphone, mixed into one stream (the "Whole meeting" default). Each platform uses its OS primitive: macOS CoreAudio process taps via the bundled `audio-capture-cli` (14.4+), Windows WASAPI loopback via `cpal`, Linux `pw-record` / `parec` shell-outs. The bundled macOS CLI is a signed Mach-O (`pl.speedwave.desktop.audio-capture`, embedded `Info.plist`) — see _Binary Authenticity_ below.
+- **Capture surface.** When enabled, the app can record the host's system-audio loopback (what the user hears — the other call participants) and the microphone, mixed into one stream (the "Whole meeting" default). Each platform uses its OS primitive: macOS CoreAudio process taps via the bundled `audio-capture-cli` (14.4+), and Windows WASAPI loopback via `cpal`. The bundled macOS CLI is a signed Mach-O (`pl.speedwave.desktop.audio-capture`, embedded `Info.plist`) — see _Binary Authenticity_ below.
 - **OS permission prompts.** The microphone prompt fires via the public `AVCaptureDevice.requestAccess` API. The **system-audio** ("System Audio Recording") prompt has _no public trigger_ on macOS, so `audio-capture-cli` requests it via the private `TCCAccessRequest(kTCCServiceAudioCapture)` API (the AudioCap / AudioTee approach; works on a notarized `.dmg`, not an App Store app). This is the one private-platform-API dependency in the codebase; it is `dlopen`/`dlsym`-guarded — if a future macOS removes the symbol the CLI exits "permission unavailable" and the UI deep-links the user to System Settings, rather than crashing — and isolated to one commented function (the precedent for a guarded private call is `desktop/src-tauri/src/fs_perms.rs`). ADR-056 decision 3 records this; the public alternative (ScreenCaptureKit audio) was rejected for needing the heavyweight Screen Recording permission and having macOS 15 audio-only defects.
 - **Files on disk.** Recordings and transcripts live under `~/.speedwave/transcripts/<id>/` (`audio.wav` + `transcript.json`, `0600`). Models live under `~/.speedwave/models/{whisper,diarization}/` (`0700` dirs, `0600` files), SHA-256-verified on download. There is no auto-retention in v1 — the user deletes recordings manually (the UI also offers "discard audio, keep transcript").
 - **"Local" is true only for inference.** Whisper transcription and sherpa diarization run locally — no audio leaves the machine for inference. **Model downloads use the network** (HTTPS to Hugging Face / GitHub via the model-store's redirect-allowlist + streaming hash — same hardening posture as elsewhere; see ADR-056 decision 9). **"Send to Claude"** uploads the rendered transcript _text_ to the user's configured LLM provider (with a confirm dialog). The UI states both on every relevant surface.
@@ -357,7 +356,7 @@ chat access. Enforced at two layers:
   is configured, the auth overlay offers two ways to log in:
   - **Primary — "Open terminal and log in" (`start_oauth_login`).** Spawns the
     host's terminal application (iTerm2 → Apple Terminal on macOS; PowerShell on
-    Windows; gnome-terminal/konsole/xterm on Linux) running `speedwave login`,
+    Windows) running `speedwave login`,
     so the user types `/login` at Claude Code's prompt. The command string
     handed to the terminal is built by `build_auth_command_for_platform` (same
     renderer as the copy-paste fallback), and every component that flows into it
@@ -420,7 +419,7 @@ Treat the Apple Developer ID as the primary secret. The Tauri key is a defense-i
 ## See Also
 
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)
-- [ADR-026: Linux Rootless nerdctl — Per-Platform Container User](../adr/ADR-026-linux-rootless-container-user.md)
+- [ADR-059: Drop Linux Support](../adr/ADR-059-drop-linux-support.md)
 - [ADR-037: Code Signing and Bundled Binary Signing](../adr/ADR-037-code-signing-and-bundled-binary-signing.md)
 - [ADR-051: Plugin Signature Runtime Verification](../adr/ADR-051-plugin-signature-runtime-verification.md)
 - [ADR-054: Host Exec — Host-Side Per-Project Toolchain Worker](../adr/ADR-054-host-exec-worker.md)
