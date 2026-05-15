@@ -102,9 +102,9 @@ pub(crate) fn tray_menu_spec(
 /// Loads the platform-appropriate tray icon embedded in the binary.
 ///
 /// macOS uses a black glyph paired with `icon_as_template(true)` so the system
-/// inverts it for the active appearance. Windows and Linux use a white glyph
-/// because their notification areas commonly render on a dark background and
-/// have no template mode.
+/// inverts it for the active appearance. Windows uses a white glyph because the
+/// notification area commonly renders on a dark background and has no template
+/// mode.
 pub(crate) fn load_tray_icon() -> Result<Image<'static>, tauri::Error> {
     Image::from_bytes(TRAY_ICON_PNG)
 }

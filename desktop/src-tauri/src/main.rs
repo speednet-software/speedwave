@@ -1383,10 +1383,8 @@ fn main() {
             // go through the verified-only command gates), but the
             // command surface would be live for unrelated calls. We
             // refuse to bring the rest of the app online at all: the
-            // dialog is shown via the OS-native blocking path on
-            // platforms where it is reliable, and the process exits the
-            // moment the user dismisses it (or after a timeout fallback
-            // on Linux, where blocking-show can deadlock).
+            // dialog is shown via the OS-native blocking path and the
+            // process exits the moment the user dismisses it.
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
                 log::error!("plugin audit failed:\n{}", body);
@@ -1868,12 +1866,11 @@ fn main() {
                 // limactl stop thread while the window is still visible —
                 // WindowServer then draws the beachball.
                 //
-                // Safe on Linux and Windows too: on those platforms the
-                // window is typically already being destroyed when
-                // ExitRequested fires (tray-less setups), making this a
-                // harmless no-op. Do NOT gate this to macOS — a
-                // `#[cfg(target_os = "macos")]` guard would re-introduce the
-                // beachball if macOS ever reorders event delivery, and
+                // Safe on Windows too: the window is typically already being
+                // destroyed when ExitRequested fires (tray-less setups),
+                // making this a harmless no-op. Do NOT gate this to macOS —
+                // a `#[cfg(target_os = "macos")]` guard would re-introduce
+                // the beachball if macOS ever reorders event delivery, and
                 // removing it costs nothing elsewhere.
                 hide_main_window(app_handle);
                 if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_runevent) {

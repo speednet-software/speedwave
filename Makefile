@@ -224,7 +224,7 @@ endif
 	cd desktop/src-tauri && cargo tauri build
 	@echo "\n✅ Tauri production bundle built"
 
-# ── Native OS CLI builds (macOS: Swift, Linux/Windows: Rust — planned) ───────
+# ── Native OS CLI builds (macOS: Swift, Windows: Rust — planned) ─────────────
 
 build-native-macos:
 	@if [ "$$(uname)" != "Darwin" ]; then \
@@ -677,7 +677,6 @@ download-nodejs:
 	esac; \
 	case "$$(uname -s)" in \
 		Darwin) NODE_PLATFORM="darwin" ;; \
-		Linux) NODE_PLATFORM="linux" ;; \
 		*) echo "Unsupported OS: $$(uname -s)"; exit 1 ;; \
 	esac; \
 	TARBALL="node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH.tar.gz"; \

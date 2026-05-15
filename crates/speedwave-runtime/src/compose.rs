@@ -10,8 +10,9 @@ use strum::EnumProperty;
 /// Converts a host path to the path seen by the container engine.
 ///
 /// On Windows, nerdctl runs inside WSL2 so host paths must be translated
-/// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS and Linux the
-/// container engine runs on the host so paths are returned unchanged.
+/// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS, Lima mounts the
+/// host home directory at the same path inside the VM, so paths are
+/// returned unchanged.
 pub(crate) fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
     #[cfg(target_os = "windows")]
     {
@@ -2554,9 +2555,10 @@ mod tests {
             .map(|s| s[prefix.len()..].to_string())
     }
 
-    /// Returns VALID_COMPOSE with hardcoded user values replaced by the
-    /// platform-correct value from `container_user()`. This ensures tests
-    /// pass on all platforms (Linux uses "0:0", macOS/Windows use "1000:1000").
+    /// Returns VALID_COMPOSE with hardcoded user values replaced by the value
+    /// from `container_user()` ("1000:1000" on both supported platforms).
+    /// Kept as a helper so the existing fixture string stays the SSOT for the
+    /// rest of the compose shape.
     fn valid_compose_yaml() -> String {
         VALID_COMPOSE.replace(
             "user: \"1000:1000\"",

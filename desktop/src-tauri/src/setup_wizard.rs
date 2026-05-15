@@ -1162,7 +1162,7 @@ pub fn factory_reset() -> anyhow::Result<()> {
     // 2b. Reset VM/distro across platforms.
     //     Windows: WslRuntime::reset_vm runs `wsl --terminate` + `--unregister`,
     //     each bounded by CommandRunner::run_with_timeout (10s + 25s).
-    //     macOS/Linux: trait default no-op (Lima VM already destroyed above).
+    //     macOS: trait default no-op (Lima VM already destroyed above).
     //     Run BEFORE wipe_data_dir so the WSL VHDX path is still where WSL
     //     expects it (~/.speedwave/wsl/Speedwave/ext4.vhdx).
     {
@@ -1208,7 +1208,6 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
 ///
 /// Layout at runtime:
 /// - macOS:   `.app/Contents/Resources/cli/speedwave`
-/// - Linux .deb: `<exe_dir>/resources/cli/speedwave`
 /// - Windows: `<exe_dir>/resources/cli/speedwave.exe`
 /// - Dev mode fallback: `<exe_dir>/speedwave` (existing behaviour)
 pub fn resolve_cli_source() -> Option<std::path::PathBuf> {
@@ -1226,7 +1225,6 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
     let binary_name = "speedwave.exe";
 
     // SPEEDWAVE_RESOURCES_DIR — set by Tauri in production builds.
-    // On Linux .deb, resources are in /usr/lib/Speedwave/ while the exe is in /usr/bin/.
     if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         let bundled = std::path::PathBuf::from(&resources_dir)
             .join("cli")
@@ -1364,9 +1362,6 @@ fn parse_shell_env(shell: &str) -> UserShell {
 /// - **bash on macOS**: login shell reads first of `.bash_profile` > `.bash_login` >
 ///   `.profile` (then stops). macOS terminals always open login shells, so only the
 ///   login file is needed. Creates `.bash_profile` if none of the three exist.
-/// - **bash on Linux**: interactive shells read `.bashrc`; login shells (SSH, tty)
-///   read `.bash_profile` > `.bash_login` > `.profile`. We write to both `.bashrc`
-///   AND the first existing login file to cover both session types.
 /// - **zsh**: `.zshrc` is sourced for both login and interactive shells on all platforms.
 /// - **Unknown**: `.profile` — POSIX portable fallback.
 #[cfg(unix)]
@@ -2945,8 +2940,7 @@ mod tests {
             ".bash_profile should contain PATH export"
         );
 
-        // On macOS, .bashrc should NOT be modified (macOS opens login shells).
-        // On Linux, .bashrc IS also a target — so this assertion is macOS-only.
+        // macOS opens login shells, so .bashrc should NOT be modified.
         #[cfg(target_os = "macos")]
         {
             let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read");

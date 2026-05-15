@@ -54,21 +54,6 @@ populate_macos() {
     write_exec "$ROOT/audio-capture-cli"
 }
 
-populate_linux() {
-    mkdir -p "$ROOT/nerdctl-full/bin"
-    mkdir -p "$ROOT/nerdctl-full/lib"
-    mkdir -p "$ROOT/nerdctl-full/libexec"
-    mkdir -p "$ROOT/nerdctl-full/share"
-    mkdir -p "$ROOT/nodejs/bin"
-    mkdir -p "$ROOT/cli"
-    write_file "$ROOT/nerdctl-full/bin/nerdctl"
-    write_file "$ROOT/nerdctl-full/lib/libcontainerd.so"
-    write_file "$ROOT/nerdctl-full/libexec/helper"
-    write_file "$ROOT/nerdctl-full/share/readme.txt"
-    write_exec "$ROOT/nodejs/bin/node"
-    write_exec "$ROOT/cli/speedwave"
-}
-
 @test "verify-bundled-assets script exists and is executable" {
     [ -x "$SCRIPT" ]
 }
@@ -102,13 +87,4 @@ populate_linux() {
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"mcp-shared"* ]]
-}
-
-@test "verify-bundled-assets accepts complete linux tree" {
-    populate_common
-    populate_linux
-
-    run "$SCRIPT" linux "$ROOT"
-
-    [ "$status" -eq 0 ]
 }

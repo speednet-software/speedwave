@@ -90,7 +90,6 @@ if data["version"] != expected:
 platforms = data["platforms"]
 if not isinstance(platforms, dict) or not platforms:
     sys.exit("latest.json platforms is empty")
-# Linux is excluded: updater.rs disables auto-update on Linux.
 # Missing keys = auto-update broken for that platform. Extra keys are allowed.
 required_keys = (
     "darwin-x86_64", "darwin-x86_64-app",

@@ -14,13 +14,16 @@ const PATH_SEP: char = ':';
 
 /// Resolves the path to a binary command.
 ///
-/// Lima (macOS), nerdctl-full (Linux), Node.js (all platforms), and the native
-/// macOS CLI helpers (`reminders-cli`, `audio-capture-cli`, …) are bundled in
-/// the app resources directory. WSL2 uses system-installed nerdctl.
+/// Lima (macOS), Node.js, and the native macOS CLI helpers (`reminders-cli`,
+/// `audio-capture-cli`, …) are bundled in the app resources directory. WSL2
+/// uses the nerdctl bundle installed inside the distro, not on the host.
 ///
 /// Resolution order (each step only if `SPEEDWAVE_RESOURCES_DIR` is set):
 /// 1. `<dir>/lima/bin/<cmd>` (macOS Lima bundle).
-/// 2. `<dir>/nerdctl-full/bin/<cmd>` (Linux nerdctl-full bundle).
+/// 2. `<dir>/nerdctl-full/bin/<cmd>` — reserved for any future host-side
+///    nerdctl-full bundle layout; not currently populated in production
+///    (kept so `command()` can set CNI_PATH + PATH for callers that *do*
+///    drop a nerdctl tree under `Resources/`, e.g. in tests).
 /// 3. `<dir>/nodejs/bin/<cmd>` (Unix) or `<dir>/nodejs/<cmd>.exe` (Windows).
 /// 4. `<dir>/<cmd>` — native CLI helpers placed at the top of `Resources/`
 ///    (matches `tauri.macos.conf.json` `bundle.resources`).
@@ -35,7 +38,7 @@ pub fn resolve_binary(cmd: &str) -> String {
             return lima_bundled.to_string_lossy().to_string();
         }
 
-        // Try nerdctl-full bundle (Linux)
+        // Try nerdctl-full bundle (reserved layout — see fn docstring)
         let nerdctl_bundled = resources
             .join(consts::NERDCTL_FULL_SUBDIR)
             .join("bin")

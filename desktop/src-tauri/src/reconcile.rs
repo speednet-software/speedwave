@@ -689,14 +689,13 @@ pub(crate) fn reconcile_compose_port(
 /// Stop containers for all projects. Best-effort — failures are logged
 /// but do not prevent remaining cleanup.
 ///
-/// Runs on platforms where container state outlives the runtime process:
-/// Linux (native containerd keeps running after app exit) and Windows
-/// (WSL2 distro is system-managed; `WslRuntime::stop_vm` inherits the
-/// no-op default from `ContainerRuntime` — see
-/// `crates/speedwave-runtime/src/runtime/mod.rs:142-149`). On macOS,
-/// `LimaRuntime::stop_vm` hard-powers the Apple Virtualization VM off
-/// via `limactl stop --force` and reaps containers with it, so this
-/// function is not called on macOS (compiled out by the cfg).
+/// Runs on Windows, where container state outlives the runtime process: the
+/// WSL2 distro is system-managed and `WslRuntime::stop_vm` inherits the no-op
+/// default from `ContainerRuntime` — see
+/// `crates/speedwave-runtime/src/runtime/mod.rs:142-149`. On macOS,
+/// `LimaRuntime::stop_vm` hard-powers the Apple Virtualization VM off via
+/// `limactl stop --force` and reaps containers with it, so this function is
+/// not called on macOS (compiled out by the cfg).
 #[cfg(not(target_os = "macos"))]
 fn stop_all_containers(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
@@ -717,15 +716,12 @@ fn stop_all_containers(
 /// applicable). Extracted so tests can call it directly with a mock
 /// runtime.
 ///
-/// Platform split (macOS is the outlier; Linux and Windows share the same
-/// per-project loop):
+/// Platform split:
 ///
 /// - macOS (Lima): `limactl stop --force` poweroffs the VM. Every
 ///   container inside dies with the VM, so the per-project `compose_down`
 ///   loop is pure UX drag (each `compose down` waits up to ~10 s for
 ///   nerdctl's hard-coded graceful stop). Skipped.
-/// - Linux (native containerd): no VM. `compose_down` is the only thing
-///   that stops containers.
 /// - Windows (WSL2): `WslRuntime::stop_vm` is a no-op (Speedwave does not
 ///   own the WSL distro lifecycle), so without `compose_down` containers
 ///   would keep running in the `Speedwave` distro until next Windows boot
@@ -1132,11 +1128,11 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         #[test]
         fn full_cleanup_calls_in_order_non_macos() {
-            // Note: runs on any non-macOS target. Linux dev hosts + Ubuntu CI
-            // execute this test routinely. Windows dev hosts would too — but
-            // Windows CI (.github/workflows/desktop-build.yml) runs only
-            // `cargo build`, not `cargo test`. Enabling `cargo test` on the
-            // Windows matrix leg is tracked as a follow-up PR.
+            // Note: runs on any non-macOS target. Windows dev hosts execute
+            // this test routinely, but Windows CI
+            // (.github/workflows/desktop-build.yml) runs only `cargo build`,
+            // not `cargo test`. Enabling `cargo test` on the Windows matrix
+            // leg is tracked as a follow-up PR.
             let (rt, calls) = TrackingRuntime::new();
             let projects = vec![project("alpha"), project("beta")];
             run_container_cleanup(&rt, &projects);

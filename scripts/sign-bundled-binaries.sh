@@ -7,10 +7,9 @@
 # every Mach-O listed in tauri.macos.conf.json under bundle.resources that
 # ends up as an executable must be signed here, before tauri bundles them.
 #
-# macOS only. On Linux/Windows exits 0 — those platforms do not require
-# OS-level code signing today (Linux updater integrity is covered by Tauri's
-# Ed25519 signature). If Windows signing is added (issue #376), a separate
-# branch in this script will handle it.
+# macOS only. On Windows exits 0 — Windows does not require OS-level code
+# signing today. If Windows signing is added (issue #376), a separate branch
+# in this script will handle it.
 #
 # Required env when signing is active:
 #   APPLE_SIGNING_IDENTITY — "Developer ID Application: Name (TEAMID)"

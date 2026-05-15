@@ -369,7 +369,7 @@ describe('security', () => {
       expect(validateWorkerUrl('http://host.lima.internal:4007')).toBe(true);
     });
 
-    it('accepts Linux host gateway', () => {
+    it('accepts Docker-compatibility host gateway', () => {
       expect(validateWorkerUrl('http://host.docker.internal:4007')).toBe(true);
     });
 

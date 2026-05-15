@@ -95,7 +95,7 @@ describe('platform-runner', () => {
       expect(path.isAbsolute(paths.notes)).toBe(true);
     });
 
-    describe('Linux/Windows paths (resolveNativePaths)', () => {
+    describe('Windows paths (resolveNativePaths)', () => {
       const originalPlatform = process.platform;
 
       function mockPlatform(platform: string): void {

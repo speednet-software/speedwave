@@ -84,16 +84,6 @@ assert not missing, f'macOS helpers missing from bundle resources: {missing}; ha
     [ "$status" -eq 0 ]
 }
 
-@test "CLI binary declared in tauri.linux.conf.json resources" {
-    run python3 -c "
-import json, sys
-conf = json.load(open('$TAURI_DIR/tauri.linux.conf.json'))
-resources = conf.get('bundle', {}).get('resources', {})
-assert 'cli/speedwave' in resources, f'CLI missing from linux bundle resources: {list(resources.keys())}'
-"
-    [ "$status" -eq 0 ]
-}
-
 @test "CLI binary declared in tauri.windows.conf.json resources" {
     run python3 -c "
 import json, sys
