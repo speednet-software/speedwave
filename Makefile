@@ -34,7 +34,7 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
-        test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
+        test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
@@ -42,7 +42,6 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
-        download-nerdctl-full clean-nerdctl-full \
         download-wsl-resources clean-wsl-resources
 
 # ── Developer setup (run once after cloning) ─────────────────────────────────
@@ -210,7 +209,6 @@ build-desktop:
 
 build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@scripts/bundle-build-context.sh
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
@@ -324,7 +322,6 @@ test-cli:
 
 test-desktop: build-cli build-angular build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -s desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
@@ -462,7 +459,6 @@ test-release-gate:
 # Used by e2e-vm.sh (build as root, test as desktop user with display access).
 test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -s desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
@@ -564,9 +560,6 @@ _e2e-run:
 # Run E2E on a single platform via SSH to dedicated test machines
 _e2e-macos:
 	@scripts/e2e-vm.sh macos
-
-_e2e-linux:
-	@scripts/e2e-vm.sh ubuntu
 
 _e2e-windows:
 	@scripts/e2e-vm.sh windows
@@ -739,48 +732,13 @@ download-nodejs:
 clean-nodejs:
 	rm -rf desktop/src-tauri/nodejs
 
-# ── nerdctl-full bundling (Linux Desktop .deb only) ──────────────────────────
+# ── Windows offline bundle resources (WSL2 nerdctl-full + Ubuntu rootfs) ─────
 
 NERDCTL_FULL_VERSION     := $(shell grep -A1 '^pub const NERDCTL_FULL_VERSION' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 NERDCTL_FULL_SHA256_AMD64 := $(shell grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 WSL_ROOTFS_URL_AMD64     := $(shell grep -A1 '^pub const WSL_ROOTFS_URL_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 WSL_ROOTFS_SHA256_AMD64  := $(shell grep -A1 '^pub const WSL_ROOTFS_SHA256_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 
-download-nerdctl-full:
-	@echo "Downloading nerdctl-full $(NERDCTL_FULL_VERSION)..."
-	@rm -rf desktop/src-tauri/nerdctl-full
-	@mkdir -p desktop/src-tauri/nerdctl-full desktop/src-tauri/THIRD-PARTY-LICENSES
-	@ARCH=$$(uname -m); \
-	case "$$ARCH" in \
-		x86_64|amd64) NERDCTL_ARCH="amd64" ;; \
-		aarch64|arm64) NERDCTL_ARCH="arm64" ;; \
-		*) echo "Unsupported architecture: $$ARCH"; exit 1 ;; \
-	esac; \
-	TARBALL="nerdctl-full-$(NERDCTL_FULL_VERSION)-linux-$$NERDCTL_ARCH.tar.gz"; \
-	URL="https://github.com/containerd/nerdctl/releases/download/v$(NERDCTL_FULL_VERSION)/$$TARBALL"; \
-	SUMS_URL="https://github.com/containerd/nerdctl/releases/download/v$(NERDCTL_FULL_VERSION)/SHA256SUMS"; \
-	echo "  Downloading $$URL"; \
-	curl -fsSL "$$URL" -o "/tmp/$$TARBALL" && \
-	curl -fsSL "$$SUMS_URL" -o /tmp/nerdctl-SHA256SUMS && \
-	echo "  Verifying SHA256 checksum..." && \
-	EXPECTED=$$(grep "$$TARBALL" /tmp/nerdctl-SHA256SUMS | awk '{print $$1}') && \
-	ACTUAL=$$( (sha256sum "/tmp/$$TARBALL" 2>/dev/null || shasum -a 256 "/tmp/$$TARBALL") | awk '{print $$1}') && \
-	if [ "$$EXPECTED" != "$$ACTUAL" ]; then \
-		echo "CHECKSUM MISMATCH! Expected $$EXPECTED, got $$ACTUAL"; exit 1; \
-	fi && \
-	echo "  Checksum OK" && \
-	tar -xzf "/tmp/$$TARBALL" -C desktop/src-tauri/nerdctl-full/ && \
-	rm -f "/tmp/$$TARBALL" /tmp/nerdctl-SHA256SUMS
-	@cp desktop/src-tauri/nerdctl-full/share/doc/nerdctl-full/LICENSE \
-		desktop/src-tauri/THIRD-PARTY-LICENSES/nerdctl-full-LICENSE 2>/dev/null || \
-	cp desktop/src-tauri/nerdctl-full/share/doc/nerdctl/LICENSE \
-		desktop/src-tauri/THIRD-PARTY-LICENSES/nerdctl-full-LICENSE 2>/dev/null || true
-	@echo "  ✅ nerdctl-full $(NERDCTL_FULL_VERSION) ready"
-
-clean-nerdctl-full:
-	rm -rf desktop/src-tauri/nerdctl-full
-
-# ── Windows offline bundle resources (WSL2 nerdctl-full + Ubuntu rootfs) ─────
 # Downloads the nerdctl-full tarball and Ubuntu rootfs for bundling inside the
 # Windows NSIS installer. Run `make download-wsl-resources` before `make build-tauri`
 # on Windows, or in CI for windows-latest builds.

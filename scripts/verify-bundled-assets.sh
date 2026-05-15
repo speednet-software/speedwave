@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/verify-bundled-assets.sh <macos|linux|windows> [resources-root]
+Usage: scripts/verify-bundled-assets.sh <macos|windows> [resources-root]
 EOF
 }
 
@@ -40,7 +40,7 @@ if [[ -z "$platform" ]]; then
 fi
 
 case "$platform" in
-  macos | linux | windows) ;;
+  macos | windows) ;;
   *)
     usage
     fail "Unsupported platform: $platform"
@@ -68,14 +68,6 @@ case "$platform" in
     require_exec "$root/mail-cli"
     require_exec "$root/notes-cli"
     require_exec "$root/audio-capture-cli"
-    ;;
-  linux)
-    require_non_empty_dir "$root/nerdctl-full/bin"
-    require_non_empty_dir "$root/nerdctl-full/lib"
-    require_non_empty_dir "$root/nerdctl-full/libexec"
-    require_non_empty_dir "$root/nerdctl-full/share"
-    require_exec "$root/nodejs/bin/node"
-    require_exec "$root/cli/speedwave"
     ;;
   windows)
     require_file "$root/wsl/nerdctl-full.tar.gz"

@@ -40,10 +40,8 @@ UNSIGNED_ASSETS=(
   "latest.json"
   "Speedwave_${V}_macOS_Apple_Silicon.dmg"
   "Speedwave_${V}_macOS_Intel.dmg"
-  "Speedwave_${V}_amd64.deb"
   "speedwave-v${V}-aarch64-apple-darwin.tar.gz"
   "speedwave-v${V}-x86_64-apple-darwin.tar.gz"
-  "speedwave-v${V}-x86_64-unknown-linux-gnu.tar.gz"
   "speedwave-v${V}-x86_64-pc-windows-msvc.zip"
 )
 
