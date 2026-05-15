@@ -126,33 +126,6 @@ const MACOS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     },
 ];
 
-const LINUX_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
-    BundledAssetSpec {
-        path: "nerdctl-full/bin",
-        kind: BundledAssetKind::Directory,
-    },
-    BundledAssetSpec {
-        path: "nerdctl-full/lib",
-        kind: BundledAssetKind::Directory,
-    },
-    BundledAssetSpec {
-        path: "nerdctl-full/libexec",
-        kind: BundledAssetKind::Directory,
-    },
-    BundledAssetSpec {
-        path: "nerdctl-full/share",
-        kind: BundledAssetKind::Directory,
-    },
-    BundledAssetSpec {
-        path: "nodejs/bin/node",
-        kind: BundledAssetKind::ExecutableFile,
-    },
-    BundledAssetSpec {
-        path: "cli/speedwave",
-        kind: BundledAssetKind::ExecutableFile,
-    },
-];
-
 const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     BundledAssetSpec {
         path: "wsl/nerdctl-full.tar.gz",
@@ -318,7 +291,6 @@ pub fn required_bundled_assets(target_os: &str) -> anyhow::Result<Vec<BundledAss
     let mut assets = COMMON_BUNDLED_ASSETS.to_vec();
     match target_os {
         "macos" => assets.extend_from_slice(MACOS_BUNDLED_ASSETS),
-        "linux" => assets.extend_from_slice(LINUX_BUNDLED_ASSETS),
         "windows" => assets.extend_from_slice(WINDOWS_BUNDLED_ASSETS),
         other => anyhow::bail!("unsupported target OS for bundled assets validation: {other}"),
     }
@@ -647,20 +619,6 @@ mod tests {
                 write_executable(&root.join("mail-cli"));
                 write_executable(&root.join("notes-cli"));
             }
-            "linux" => {
-                std::fs::create_dir_all(root.join("nerdctl-full/bin")).unwrap();
-                std::fs::create_dir_all(root.join("nerdctl-full/lib")).unwrap();
-                std::fs::create_dir_all(root.join("nerdctl-full/libexec")).unwrap();
-                std::fs::create_dir_all(root.join("nerdctl-full/share")).unwrap();
-                std::fs::create_dir_all(root.join("nodejs/bin")).unwrap();
-                std::fs::create_dir_all(root.join("cli")).unwrap();
-                std::fs::write(root.join("nerdctl-full/bin/nerdctl"), "binary").unwrap();
-                std::fs::write(root.join("nerdctl-full/lib/libfile"), "binary").unwrap();
-                std::fs::write(root.join("nerdctl-full/libexec/helper"), "binary").unwrap();
-                std::fs::write(root.join("nerdctl-full/share/readme"), "binary").unwrap();
-                write_executable(&root.join("nodejs/bin/node"));
-                write_executable(&root.join("cli/speedwave"));
-            }
             "windows" => {
                 std::fs::create_dir_all(root.join("wsl")).unwrap();
                 std::fs::create_dir_all(root.join("cli")).unwrap();
@@ -778,15 +736,6 @@ mod tests {
 
         let err = validate_bundled_runtime_assets(temp.path(), "macos", false).unwrap_err();
         assert!(err.to_string().contains("notes-cli"));
-    }
-
-    #[test]
-    fn validate_bundled_runtime_assets_accepts_complete_linux_tree() {
-        let temp = tempfile::tempdir().unwrap();
-        write_common_bundled_assets(temp.path());
-        write_platform_bundled_assets(temp.path(), "linux");
-
-        validate_bundled_runtime_assets(temp.path(), "linux", false).unwrap();
     }
 
     #[test]
