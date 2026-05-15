@@ -287,8 +287,8 @@ jobs:
   # Runtime exec-transport tests on Windows — locks in the WSL path
   # (`wsl.exe -d distro -- sh -c <quoted>`). Without a Windows runner,
   # `runtime::wsl::container_exec` shell-quoting could regress silently —
-  # `lint` and `test` run on `ubuntu-latest` for Rust unit tests and don't
-  # exercise the Windows shell-quoting path. We deliberately restrict the
+  # `lint` and `test` run on `macos-latest` and don't exercise the Windows
+  # shell-quoting path. We deliberately restrict the
   # test set to `runtime::lima` and `runtime::wsl` modules: the rest of
   # `speedwave-runtime` (binary resolution, build context, compose
   # rendering, consts) uses `/`-rooted paths in fixtures, which fail on

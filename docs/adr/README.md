@@ -9,7 +9,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-000](ADR-000-product-principles.md)                               | Speedwave — Product Principles                                                           | Accepted              |
 | [ADR-001](ADR-001-eliminate-docker-desktop.md)                         | Eliminate Docker Desktop                                                                 | Accepted              |
 | [ADR-002](ADR-002-lima-as-vm-manager-on-macos.md)                      | Lima as VM Manager on macOS                                                              | Accepted              |
-| [ADR-003](ADR-003-bundled-nerdctl-full-on-linux.md)                    | Bundled nerdctl-full on Linux                                                            | Accepted              |
+| [ADR-003](ADR-003-bundled-nerdctl-full-on-linux.md)                    | Bundled nerdctl-full on Linux                                                            | Superseded by ADR-059 |
 | [ADR-004](ADR-004-wsl2-and-nerdctl-on-windows.md)                      | WSL2 + nerdctl on Windows                                                                | Accepted              |
 | [ADR-005](ADR-005-two-interfaces-cli-and-desktop.md)                   | Two Interfaces — CLI and Desktop                                                         | Accepted              |
 | [ADR-006](ADR-006-chat-ui-via-stream-json.md)                          | Chat UI via claude -p --stream-json                                                      | Accepted              |
@@ -31,8 +31,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-022](ADR-022-bundled-claude-resources-and-project-coexistence.md) | Bundled .claude Resources and Project-Level Coexistence                                  | Accepted              |
 | [ADR-023](ADR-023-appimage-static-runtime-for-fuse-independence.md)    | AppImage Static Runtime for FUSE Independence                                            | Superseded by ADR-025 |
 | [ADR-024](ADR-024-e2e-testing-strategy.md)                             | Desktop E2E Testing Strategy                                                             | Accepted              |
-| [ADR-025](ADR-025-linux-deb-packaging.md)                              | Linux .deb Packaging (Replaces AppImage)                                                 | Accepted              |
-| [ADR-026](ADR-026-linux-rootless-container-user.md)                    | Linux Rootless nerdctl — Per-Platform Container User                                     | Accepted              |
+| [ADR-025](ADR-025-linux-deb-packaging.md)                              | Linux .deb Packaging (Replaces AppImage)                                                 | Superseded by ADR-059 |
+| [ADR-026](ADR-026-linux-rootless-container-user.md)                    | Linux Rootless nerdctl — Per-Platform Container User                                     | Superseded by ADR-059 |
 | [ADR-027](ADR-027-native-directory-structure.md)                       | Native Directory Structure                                                               | Accepted              |
 | [ADR-028](ADR-028-tauri-over-electron.md)                              | Tauri v2 over Electron for Desktop Shell                                                 | Accepted              |
 | [ADR-029](ADR-029-sandbox-prototype-chain-hardening.md)                | Sandbox Prototype Chain Hardening                                                        | Accepted              |
@@ -65,6 +65,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-056](ADR-056-host-side-audio-transcription.md)                    | Host-Side Audio Capture and Local Meeting Transcription                                  | Proposed              |
 | [ADR-057](ADR-057-lazy-build-of-enabled-worker-images.md)              | Lazy Build of Enabled Worker Container Images                                            | Accepted              |
 | [ADR-058](ADR-058-beta-features-toggle.md)                             | Beta Features Toggle in the Tray Menu                                                    | Accepted              |
+| [ADR-059](ADR-059-drop-linux-support.md)                               | Drop Linux Support — Windows and macOS Only                                              | Accepted              |
 
 ## Creating a New ADR
 
