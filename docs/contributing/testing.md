@@ -180,12 +180,13 @@ Three BATS files guard the release pipeline against silent failures (Issue #26).
 
 ## Host Exec — manual smoke (live Claude)
 
-`host_exec` (ADR-054) is exercised at four levels in CI:
+`host_exec` (ADR-054) is exercised at three levels in CI:
 
 - **Unit / integration (Rust + TS + Angular):** `host_exec::validate_host_exec_config` (in `crates/speedwave-runtime/src/host_exec.rs`), the per-project process manager (`crates/speedwave-runtime/src/host_exec_process.rs` — two-projects two-ports, env-allowlist, login-shell PATH recovery, the chmod-600 file bookkeeping, stale-PID kill), the compose wiring (`compose.rs` — `WORKER_HOST_EXEC_URL` per project, `ENABLED_SERVICES` membership, the security-test exception), the Tauri settings commands (`host_exec_cmd.rs`), the CLI worker spawn (`crates/speedwave-cli/src/main.rs`), the TypeScript worker (`mcp-servers/host_exec/` — vitest, 100% lines/funcs/statements, `c8` branch ≥ 90% — incl. the process-tree `SIGKILL` on Unix, the per-stream output cap, the audit-log redaction), and the Angular Integrations card (`host-exec-config.component.spec.ts` — the danger modal that is the consent, the recipe editor, the docker-lifecycle warning, every validation path).
 - **CLI E2E (bats — `make test-e2e`):** `_tests/e2e/host-exec.bats` verifies the wire-format contract end-to-end through the real `speedwave` binary — a valid camelCase user config survives `speedwave check` unchanged; a `hostExec` block in repo `.speedwave.json` is silently ignored; a malformed user config does not panic the CLI.
-- **Desktop E2E (WebdriverIO — `make test-e2e-desktop`):** `desktop/e2e/specs/08-host-exec.spec.ts` drives the running Tauri app — the gated toggle / danger modal, the recipe-whitelist validation (shell-launcher / meta-tool / reserved-env / `cwdSub` escape / duplicate-name rejection), the snake_case → camelCase round-trip through `host_exec_save_settings` / `host_exec_load_settings`, and the `host_exec_resolve_executable` `which`-style PATH probe.
 - **Manual smoke (live Claude — see below):** the scenarios that require a real Anthropic API turn through the MCP hub and a live worker process.
+
+> Note: the Desktop WebdriverIO E2E for the Integrations card was removed when ADR-058 gated the host-exec slot behind the beta toggle — the card is hidden in the default app shell that `make test-e2e-desktop` drives. The same UI surface remains covered by `host-exec-config.component.spec.ts` (Angular component tests). If the gate is lifted in the future, restore the WebdriverIO spec from git history (was `desktop/e2e/specs/08-host-exec.spec.ts`).
 
 ### Live-Claude scenarios (not in CI)
 
