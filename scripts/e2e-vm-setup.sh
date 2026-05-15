@@ -86,7 +86,8 @@ sudo -E apt-get install -y \
     libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
     librsvg2-dev patchelf \
     webkit2gtk-driver xvfb xauth \
-    uidmap rsync gnupg
+    uidmap rsync gnupg \
+    cmake clang libclang-dev
 SCRIPT
 
     echo "[linux] Installing Node.js 24..."
@@ -203,6 +204,8 @@ echo "Rust: $(rustc --version)"
 echo "Cargo: $(cargo --version)"
 echo "tauri-cli: $(cargo tauri --version 2>/dev/null || echo 'not found')"
 echo "tauri-driver: $(command -v tauri-driver || echo 'not found')"
+echo "cmake: $(cmake --version 2>/dev/null | head -1 || echo 'not found')"
+echo "clang: $(clang --version 2>/dev/null | head -1 || echo 'not found')"
 SCRIPT
 
     echo "[linux] DONE"
@@ -237,6 +240,73 @@ if ($arch -eq 'ARM64') { $installArgs += ' --add Microsoft.VisualStudio.Componen
 Write-Host "Running: vs_buildtools.exe $installArgs"
 Start-Process -Wait -FilePath "$env:TEMP\vs_buildtools.exe" -ArgumentList $installArgs
 Remove-Item "$env:TEMP\vs_buildtools.exe"
+SCRIPT
+
+    echo "[windows] Installing CMake (Kitware — required by whisper-rs-sys)..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = 'Stop'
+# whisper-rs-sys uses the `cmake` Rust crate to drive a real cmake invocation
+# (Visual Studio's bundled cmake is not on PATH and the crate spawns
+# `cmake.exe` from PATH, not from VS's private layout). Install the official
+# Kitware build so `cmake.exe` lives in `C:\Program Files\CMake\bin` and is
+# on the Machine PATH for every process started afterwards.
+# Idempotent: skip if cmake.exe already present at the expected path.
+$cmakeBin = 'C:\Program Files\CMake\bin'
+if (Test-Path "$cmakeBin\cmake.exe") {
+    Write-Host "CMake already installed: $cmakeBin"
+} else {
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($arch -eq 'ARM64') {
+        $url = 'https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-windows-arm64.msi'
+    } else {
+        $url = 'https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-windows-x86_64.msi'
+    }
+    Write-Host "Downloading $url..."
+    Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\cmake-installer.msi"
+    # ADD_CMAKE_TO_PATH=System adds cmake.exe to the Machine PATH automatically.
+    Start-Process -Wait msiexec -ArgumentList '/i',"$env:TEMP\cmake-installer.msi",'/qn','/norestart','ADD_CMAKE_TO_PATH=System'
+    Remove-Item "$env:TEMP\cmake-installer.msi"
+    if (-not (Test-Path "$cmakeBin\cmake.exe")) {
+        Write-Error "CMake installation completed but cmake.exe not found at $cmakeBin"
+        exit 1
+    }
+}
+# Belt-and-braces: ensure Machine PATH contains the cmake bin (the msi flag
+# usually does this, but verify so subsequent SSH sessions inherit it).
+$currentPath = [System.Environment]::GetEnvironmentVariable('Path','Machine')
+if (-not $currentPath.Contains($cmakeBin)) {
+    [System.Environment]::SetEnvironmentVariable('Path', "$currentPath;$cmakeBin", 'Machine')
+    Write-Host "Added $cmakeBin to Machine PATH"
+}
+SCRIPT
+
+    echo "[windows] Installing LLVM (libclang for bindgen / whisper-rs-sys)..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = 'Stop'
+# whisper-rs-sys (ADR-056) uses bindgen, which requires libclang.dll.
+# Idempotent: skip if libclang.dll already present at the expected path.
+$llvmBin = 'C:\Program Files\LLVM\bin'
+if (Test-Path "$llvmBin\libclang.dll") {
+    Write-Host "LLVM already installed: $llvmBin"
+} else {
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($arch -eq 'ARM64') {
+        $url = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe'
+    } else {
+        $url = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe'
+    }
+    Write-Host "Downloading $url..."
+    Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\llvm-installer.exe"
+    Start-Process -Wait -FilePath "$env:TEMP\llvm-installer.exe" -ArgumentList '/S'
+    Remove-Item "$env:TEMP\llvm-installer.exe"
+    if (-not (Test-Path "$llvmBin\libclang.dll")) {
+        Write-Error "LLVM installation completed but libclang.dll not found at $llvmBin"
+        exit 1
+    }
+}
+# bindgen reads LIBCLANG_PATH at build time to locate libclang.dll.
+[System.Environment]::SetEnvironmentVariable('LIBCLANG_PATH', $llvmBin, 'Machine')
+Write-Host "LIBCLANG_PATH set to $llvmBin"
 SCRIPT
 
     echo "[windows] Configuring MSVC environment (PATH, INCLUDE, LIB)..."
@@ -303,7 +373,10 @@ SCRIPT
     windows_ps <<SCRIPT
 \$ErrorActionPreference = 'Stop'
 \$distro = '${wsl_distro}'
-\$installed = wsl.exe -l -q 2>\$null | Where-Object { \$_ -match [regex]::Escape(\$distro) }
+# wsl.exe -l -q emits UTF-16 LE. PowerShell over SSH receives the raw bytes
+# as null-interlaced ASCII (e.g. "U\0b\0u\0n\0t\0u\0"), so a naive -match
+# against the plain distro name never hits. Strip nulls before matching.
+\$installed = (wsl.exe -l -q 2>\$null) -replace "\`0","" | Where-Object { \$_ -match [regex]::Escape(\$distro) }
 if (\$installed) {
     Write-Host "WSL2 distro \$distro already installed"
 } else {
@@ -324,6 +397,8 @@ Write-Host "npm:  $(npm --version)"
 Write-Host "Rust: $(rustc --version)"
 Write-Host "Cargo: $(cargo --version)"
 Write-Host "tauri-cli: $(cargo tauri --version 2>&1)"
+Write-Host "cmake: $(cmake --version 2>&1 | Select-Object -First 1)"
+Write-Host "LIBCLANG_PATH: $([System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH','Machine'))"
 Write-Host "Arch: $env:PROCESSOR_ARCHITECTURE"
 SCRIPT
 
@@ -355,6 +430,8 @@ fi
 eval "$(/opt/homebrew/bin/brew shellenv)"
 brew install node@24
 brew link node@24 --overwrite --force 2>/dev/null || true
+# cmake — required by whisper-rs-sys build script (ADR-056 meeting transcription)
+command -v cmake >/dev/null 2>&1 || brew install cmake
 SCRIPT
 
     echo "[macos] Installing Rust and tauri-cli..."
@@ -383,6 +460,7 @@ echo "npm:  $(npm --version)"
 echo "Rust: $(rustc --version)"
 echo "Cargo: $(cargo --version)"
 echo "tauri-cli: $(cargo tauri --version 2>/dev/null || echo 'not found')"
+echo "cmake: $(cmake --version 2>/dev/null | head -1 || echo 'not found')"
 echo "Arch: $(uname -m)"
 echo "macOS: $(sw_vers -productVersion)"
 SCRIPT
@@ -399,9 +477,19 @@ case "$TARGET" in
     windows|win)    setup_windows ;;
     macos|mac)      setup_macos ;;
     all)
-        setup_ubuntu
-        setup_windows
-        setup_macos
+        PIDS=()
+        for fn in setup_ubuntu setup_windows setup_macos; do
+            $fn &
+            PIDS+=($!)
+        done
+        FAILED=0
+        for pid in "${PIDS[@]}"; do
+            if ! wait "$pid"; then FAILED=$((FAILED + 1)); fi
+        done
+        if [ "$FAILED" -ne 0 ]; then
+            echo "$FAILED platform(s) failed to provision" >&2
+            exit 1
+        fi
         ;;
     *)
         echo "Usage: $0 [ubuntu|windows|macos|all]" >&2
