@@ -280,16 +280,16 @@ jobs:
 
   # Runtime exec-transport tests on Windows — locks in the WSL path
   # (`wsl.exe -d distro -- sh -c <quoted>`). Without a Windows runner,
-  # `runtime::wsl::container_exec` shell-quoting could regress silently
-  # because every other job runs on Linux/macOS. We deliberately restrict
-  # the test set to `runtime::lima` and `runtime::wsl` modules: the rest
-  # of `speedwave-runtime` (binary resolution, build context, compose
-  # rendering, consts) was authored for Linux/macOS hosts and uses
-  # `/`-rooted paths in fixtures, which fail on Windows for reasons
-  # unrelated to this PR. Git Bash ships on the windows-latest image, so
-  # the `bash -nc` shell-roundtrip regression in those modules runs as-is.
-  # Lima/SSH paths are exercised by the macOS `test` job above; Linux-only
-  # `nerdctl` direct-exec needs no shell quoting at all.
+  # `runtime::wsl::container_exec` shell-quoting could regress silently —
+  # `lint` and `test` run on `ubuntu-latest` for Rust unit tests and don't
+  # exercise the Windows shell-quoting path. We deliberately restrict the
+  # test set to `runtime::lima` and `runtime::wsl` modules: the rest of
+  # `speedwave-runtime` (binary resolution, build context, compose
+  # rendering, consts) uses `/`-rooted paths in fixtures, which fail on
+  # Windows for reasons unrelated to this PR. Git Bash ships on the
+  # windows-latest image, so the `bash -nc` shell-roundtrip regression in
+  # those modules runs as-is. Lima/SSH shell-quoting is exercised by the
+  # macOS `desktop` job above.
   runtime-windows:
     runs-on: windows-latest
     timeout-minutes: 15

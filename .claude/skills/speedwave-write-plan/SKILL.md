@@ -36,7 +36,7 @@ The remaining context still requires tool reads:
 
 2. **Read `docs/architecture/containers.md`** — container topology, compose template, resource limits
 
-3. **Read `docs/architecture/platform-matrix.md`** — macOS/Linux/Windows differences
+3. **Read `docs/architecture/platform-matrix.md`** — macOS and Windows differences
 
 4. **Read `docs/contributing/testing.md`** — test strategy, coverage thresholds, test patterns
 
@@ -100,7 +100,7 @@ For EVERY change, answer:
 
 - Does this change add or modify a bundled macOS binary? If yes, follow the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary) — it is the authoritative source for SIGN_TARGETS, entitlements plists, `Info.plist` TCC keys, and ADR-037 updates.
 
-- Filesystem case sensitivity? (macOS VirtioFS insensitive, Linux ext4 sensitive)
+- Filesystem case sensitivity? (host: macOS APFS insensitive; container: ext4 sensitive)
 
 If the change is platform-independent, state WHY it's platform-independent — don't just skip this section.
 

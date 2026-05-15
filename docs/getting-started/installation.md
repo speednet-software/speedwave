@@ -90,12 +90,10 @@ When Claude Code shows the OAuth URL, pressing `c` asks the terminal to copy it 
 | Terminal                                                                                          | OSC 52     |
 | ------------------------------------------------------------------------------------------------- | ---------- |
 | iTerm2 (with Settings → General → Selection → "Applications in terminal may access clipboard" ON) | ✅         |
-| Alacritty, WezTerm, Ghostty, kitty, foot                                                          | ✅ default |
+| Alacritty, WezTerm, Ghostty, kitty                                                                | ✅ default |
 | Windows Terminal                                                                                  | ✅ default |
-| KDE konsole                                                                                       | ✅ default |
 | VS Code integrated terminal                                                                       | ✅ default |
 | Apple Terminal.app                                                                                | ❌         |
-| gnome-terminal                                                                                    | ❌ default |
 | Bare `cmd.exe`                                                                                    | ❌         |
 
 If your terminal does not support OSC 52, the URL still appears on screen — select it with your mouse, or paste the auth code Claude Code prompts for. The login flow itself works on every terminal.

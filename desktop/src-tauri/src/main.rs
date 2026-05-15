@@ -30,6 +30,11 @@ mod mcp_os_process;
 mod oauth_cmd;
 mod oauth_login_cmd;
 mod patch_emitter;
+// `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
+// which is Windows-only (gnome-terminal / xterm spawning was removed with the
+// Linux backend in ADR-059). Gating the module declaration keeps clippy quiet
+// on macOS without needing per-fn `#[cfg(target_os = "windows")]`.
+#[cfg(target_os = "windows")]
 mod path_util;
 mod plugin_cmd;
 mod queue_cmd;

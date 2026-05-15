@@ -35,7 +35,7 @@ Beyond that block, complete these reads before analysis:
 
 2. **Read `docs/architecture/containers.md`** — container topology, compose template, resource limits, stale container recovery
 
-3. **Read `docs/architecture/platform-matrix.md`** — macOS/Linux/Windows differences that plans forget
+3. **Read `docs/architecture/platform-matrix.md`** — macOS and Windows differences that plans forget
 
 4. **Read `docs/contributing/testing.md`** — test strategy, coverage thresholds, E2E structure, test patterns
 
@@ -261,7 +261,7 @@ Check:
 
 **Severity: SSOT violation = HIGH. Creates silent drift that manifests as production bugs weeks later.**
 
-### 3. PLATFORM COVERAGE (macOS / Linux / Windows)
+### 3. PLATFORM COVERAGE (macOS / Windows)
 
 Plans that work on the developer's macOS laptop and break on Windows are the #1 source of release blockers.
 
@@ -277,17 +277,17 @@ Check:
 
 - **Installer:** .dmg (macOS), .exe NSIS (Windows). Does the plan affect either installer artifact?
 
-- **Filesystem:** macOS VirtioFS is case-insensitive by default, the Linux containers inside WSL2 are case-sensitive. Path comparisons must handle this.
+- **Filesystem:** the host (macOS APFS) is case-insensitive by default; the Linux containers running inside Lima or WSL2 use ext4 (case-sensitive). Path comparisons that cross the host/container boundary must handle the asymmetry.
 
 - **Host commands:** NEVER call host `limactl`, `nerdctl`, or `docker` directly. All operations through `speedwave-runtime` (`detect_runtime()`).
 
 - **OS prerequisites:** Does the plan add requirements? Check against `os_prereqs.rs` — Windows needs WSL2, macOS has no prerequisites.
 
-- **Desktop log paths:** `~/Library/Logs/` (macOS) vs `~/.local/share/.../logs/` (Linux). Plan must not assume one.
+- **Desktop log paths:** `~/Library/Logs/pl.speedwave.desktop/` (macOS) vs `%APPDATA%/pl.speedwave.desktop/` (Windows). Plan must not assume one.
 
 - **Build context:** `prepare_build_context()` handles path translation for VMs. Does the plan respect this?
 
-- **Resource limits:** Adaptive on macOS/Linux (formulas in `resources.rs`), fixed on Windows. Does the plan change memory/CPU assumptions?
+- **Resource limits:** Adaptive on both supported platforms via the formulas in `resources.rs` (macOS uses VM-memory − VM-overhead; Windows uses host-RAM − host-overhead). Does the plan change memory/CPU assumptions?
 
 - **macOS code signing:** If the plan adds or modifies a bundled binary, verify against the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary) — this is the single source of truth for SIGN_TARGETS, entitlements, `Info.plist` TCC keys, and ADR-037 updates.
 
