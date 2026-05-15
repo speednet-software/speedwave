@@ -7,7 +7,8 @@ use std::process::ExitStatus;
 /// VM overhead: kernel + containerd + MCP hub + MCP workers ≈ 4 GiB.
 pub const VM_OVERHEAD_GIB: u32 = 4;
 
-/// Host overhead on Linux (no VM layer): OS + desktop + browser + apps ≈ 6 GiB.
+/// Host overhead on Windows (WSL2 shares host RAM dynamically rather than
+/// reserving a hard partition like Lima): OS + desktop + browser + apps ≈ 6 GiB.
 pub const HOST_OVERHEAD_GIB: u32 = 6;
 
 // ---------------------------------------------------------------------------
@@ -19,7 +20,7 @@ pub const HOST_OVERHEAD_GIB: u32 = 6;
 /// Floor is intentionally safer than rounding: a 16 GB MacBook with ~15.7 GiB
 /// usable RAM returns 15, which the adaptive formula (`host/2`) then maps to
 /// 7 GiB VM — avoiding an unexpected jump to 8 GiB.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+#[cfg(any(target_os = "macos", test))]
 fn bytes_to_gib(bytes: u64) -> u32 {
     (bytes / (1024 * 1024 * 1024)) as u32
 }
@@ -51,20 +52,7 @@ fn host_total_memory_gib_impl() -> Option<u32> {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn host_total_memory_gib_impl() -> Option<u32> {
-    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let kb_str = rest.trim().strip_suffix("kB")?.trim();
-            let kb: u64 = kb_str.parse().ok()?;
-            return Some(bytes_to_gib(kb * 1024));
-        }
-    }
-    None
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(target_os = "macos"))]
 fn host_total_memory_gib_impl() -> Option<u32> {
     // Windows: RAM detection not implemented — falls back to 16 GiB,
     // which the adaptive formula maps to 8 GiB VM / 4 g Claude container.
@@ -86,30 +74,26 @@ pub fn desired_vm_memory_gib(host_ram_gib: u32) -> u32 {
 
 /// Desired Claude container memory in GiB.
 ///
-/// `available_gib` is the VM memory on macOS or host RAM on Linux.
+/// `available_gib` is the Lima VM memory on macOS or host RAM on Windows.
 /// `overhead_gib` reserves space for kernel/containerd/hub/workers (macOS)
-/// or OS/desktop/browser (Linux).
+/// or OS/desktop/browser (Windows).
 pub fn desired_claude_memory_gib(available_gib: u32, overhead_gib: u32) -> u32 {
     available_gib.saturating_sub(overhead_gib).clamp(4, 28)
 }
 
 /// SSOT: effective Claude container memory in GiB for the current platform.
 ///
-/// - macOS: VM memory minus VM overhead (kernel, containerd, hub, workers).
-/// - Linux: host RAM minus host overhead (OS, desktop, browser, apps).
-/// - Windows: same formula as Linux; falls back to 10 g when RAM detection fails
-///   (`host_total_memory_gib()` returns 16 on failure → 16 − 6 = 10).
+/// - macOS: Lima VM memory minus VM overhead (kernel, containerd, hub, workers).
+/// - Windows: host RAM minus host overhead (OS, desktop, browser, apps); falls
+///   back to 10 g when RAM detection fails (`host_total_memory_gib()` returns
+///   16 on failure → 16 − 6 = 10).
 pub fn effective_claude_memory_gib() -> u32 {
     #[cfg(target_os = "macos")]
     {
         let vm_mem = desired_vm_memory_gib(host_total_memory_gib());
         desired_claude_memory_gib(vm_mem, VM_OVERHEAD_GIB)
     }
-    #[cfg(target_os = "linux")]
-    {
-        desired_claude_memory_gib(host_total_memory_gib(), HOST_OVERHEAD_GIB)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(target_os = "macos"))]
     {
         desired_claude_memory_gib(host_total_memory_gib(), HOST_OVERHEAD_GIB)
     }
@@ -121,13 +105,12 @@ pub fn effective_claude_memory_gib() -> u32 {
 
 /// Returns `true` if the exit status likely indicates an OOM kill.
 ///
-/// Process chain: `Rust Command → limactl → SSH → nerdctl exec → Claude`.
+/// Process chain: `Rust Command → limactl/wsl → nerdctl exec → Claude`.
 /// When the OOM killer sends SIGKILL to Claude inside the container, nerdctl
-/// translates it to exit code 137 (128 + 9, shell convention) and limactl
-/// propagates that code.  Therefore `ExitStatus::code()` returns `Some(137)`.
-///
-/// On Linux with `NerdctlRuntime` (no SSH layer) the host process could
-/// receive a raw signal instead, so we also check `signal() == Some(9)`.
+/// translates it to exit code 137 (128 + 9, shell convention) and the host-side
+/// driver (`limactl`/`wsl`) propagates that code, so `ExitStatus::code()`
+/// returns `Some(137)`. On Unix we additionally check `signal() == Some(9)` to
+/// catch host-side raw-signal teardown that bypasses the driver.
 ///
 /// Known false-positives: signal 9 can also be sent by `kill -9`, OS
 /// shutdown, or security sandbox enforcement.  The "likely" wording in
@@ -275,15 +258,15 @@ mod tests {
         assert_eq!(desired_claude_memory_gib(vm, VM_OVERHEAD_GIB), 28);
     }
 
-    // -- composition (Linux-like: host overhead = 6) ------------------------
+    // -- composition (Windows-like: host RAM minus host overhead = 6) -------
 
     #[test]
-    fn composition_linux_16gib_host() {
+    fn composition_windows_16gib_host() {
         assert_eq!(desired_claude_memory_gib(16, HOST_OVERHEAD_GIB), 10);
     }
 
     #[test]
-    fn composition_linux_32gib_host() {
+    fn composition_windows_32gib_host() {
         assert_eq!(desired_claude_memory_gib(32, HOST_OVERHEAD_GIB), 26);
     }
 

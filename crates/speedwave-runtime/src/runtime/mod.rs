@@ -5,7 +5,6 @@ use std::process::Command;
 use std::sync::Mutex;
 
 pub mod lima;
-pub mod nerdctl;
 pub mod wsl;
 
 /// Serializes concurrent `ensure_ready()` calls across all runtime instances.
@@ -66,12 +65,12 @@ pub trait ContainerRuntime: Send + Sync {
     ) -> anyhow::Result<()>;
     /// Translates a host build-root path into one accessible by the container engine.
     ///
-    /// Default: identity (Linux nerdctl — paths are already native).
     /// Lima override: copies to `~/.speedwave/build-cache/` when outside `~` (VM only mounts `~`).
     /// WSL override: converts `C:\…` → `/mnt/c/…`.
     ///
-    /// **Implementors on VM/translation-layer platforms must override this.**
-    /// The default identity pass-through is only correct for native Linux nerdctl.
+    /// Both supported runtimes mediate via a VM, so the default identity pass-through
+    /// is never the right answer in production — it exists only so the trait stays
+    /// implementable in tests.
     fn prepare_build_context(
         &self,
         build_root: &std::path::Path,
@@ -93,10 +92,9 @@ pub trait ContainerRuntime: Send + Sync {
     /// (untagged) images and build cache, so successfully-built tagged
     /// images survive a partial-build retry.
     ///
-    /// This bug affects all containerd overlayfs setups, including native
-    /// Linux (NerdctlRuntime), Lima VM (LimaRuntime), and WSL2 (WslRuntime).
-    /// All three current runtime implementations (`LimaRuntime`, `NerdctlRuntime`,
-    /// `WslRuntime`) override this method with `nerdctl system prune --force`.
+    /// This bug affects all containerd overlayfs setups, including Lima VM
+    /// (LimaRuntime) and WSL2 (WslRuntime). Both runtime implementations
+    /// override this method with `nerdctl system prune --force`.
     fn system_prune(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -140,10 +138,9 @@ pub trait ContainerRuntime: Send + Sync {
 
     /// Stops the underlying VM (e.g. Lima on macOS) to free reserved RAM.
     ///
-    /// Default is a no-op. Linux (native nerdctl) has no VM layer. Windows
-    /// (WSL2) has a distro managed by Speedwave, but stopping it mid-session
-    /// is not meaningful — use `reset_vm()` for destructive teardown instead.
-    /// Only `LimaRuntime` overrides this method.
+    /// Default is a no-op. Windows (WSL2) has a distro managed by Speedwave, but
+    /// stopping it mid-session is not meaningful — use `reset_vm()` for destructive
+    /// teardown instead. Only `LimaRuntime` overrides this method.
     ///
     /// Callers MUST treat errors as non-fatal: log them and continue. Exit
     /// cleanup must never block app termination on a VM stop failure.
@@ -714,16 +711,12 @@ pub fn detect_runtime() -> Box<dyn ContainerRuntime> {
     {
         Box::new(lima::LimaRuntime::new())
     }
-    #[cfg(target_os = "linux")]
-    {
-        Box::new(nerdctl::NerdctlRuntime::new())
-    }
     #[cfg(target_os = "windows")]
     {
         Box::new(wsl::WslRuntime::new())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    compile_error!("Speedwave requires macOS, Linux, or Windows");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    compile_error!("Speedwave requires macOS or Windows");
 }
 
 #[cfg(test)]

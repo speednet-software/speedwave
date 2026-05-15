@@ -469,10 +469,6 @@ impl std::error::Error for SnapshotterRecoveryFailed {
 }
 
 fn platform_restart_hint() -> &'static str {
-    #[cfg(target_os = "linux")]
-    {
-        "systemctl --user restart containerd && systemctl --user restart buildkit"
-    }
     #[cfg(target_os = "macos")]
     {
         "limactl shell speedwave -- sudo systemctl restart containerd && \
@@ -484,7 +480,7 @@ fn platform_restart_hint() -> &'static str {
         "wsl.exe -d Speedwave -- systemctl restart containerd && \
          wsl.exe -d Speedwave -- systemctl restart buildkit"
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         "restart containerd and buildkit manually"
     }

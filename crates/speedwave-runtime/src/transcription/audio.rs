@@ -1,12 +1,12 @@
 //! The `AudioCapture` trait and its `FileAudioCapture` test/dev implementation.
 //!
 //! `AudioCapture` is the seam between the OS-specific capture backends (Windows
-//! WASAPI loopback, macOS CoreAudio process taps, Linux `pw-record`/`parec`) and
-//! the rest of the engine — the same shape as `ContainerRuntime` →
-//! `LimaRuntime`/`NerdctlRuntime`/`WslRuntime`. `FileAudioCapture` "plays back" a
-//! 16 kHz mono WAV in fixed chunks so the orchestration (the transcriber, the
-//! diarizer, the driver) can be exercised without a real device — and doubles as
-//! the dev affordance ("transcribe a WAV file").
+//! WASAPI loopback, macOS CoreAudio process taps) and the rest of the engine —
+//! the same shape as `ContainerRuntime` → `LimaRuntime`/`WslRuntime`.
+//! `FileAudioCapture` "plays back" a 16 kHz mono WAV in fixed chunks so the
+//! orchestration (the transcriber, the diarizer, the driver) can be exercised
+//! without a real device — and doubles as the dev affordance ("transcribe a
+//! WAV file").
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
