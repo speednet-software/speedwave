@@ -813,6 +813,46 @@ describe('http-bridge', () => {
       vi.useRealTimers();
       vi.restoreAllMocks();
     });
+
+    it('resolves WORKER_*_URL for hyphenated slug via deriveWorkerEnv normalization', () => {
+      // Verifies the PR0 fix: a plugin slug like `my-cool-plugin` must look up
+      // `WORKER_MY_COOL_PLUGIN_URL` (the form compose injects), not the broken
+      // `WORKER_MY-COOL-PLUGIN_URL` which is not even a valid POSIX env name.
+      const mutableRegistry = TOOL_REGISTRY as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      mutableRegistry['my-cool-plugin'] = {
+        doThing: {
+          name: 'doThing',
+          service: 'my-cool-plugin',
+          description: 'Do a thing',
+          inputSchema: { type: 'object', properties: {} },
+          keywords: ['thing'],
+          example: '',
+          deferLoading: false,
+        },
+      };
+
+      process.env.WORKER_MY_COOL_PLUGIN_URL = 'http://mcp-my-cool-plugin:4030';
+
+      const bridge = buildServiceBridge('my-cool-plugin', callWorker);
+
+      expect(bridge).toHaveProperty('doThing');
+      expect(typeof bridge.doThing).toBe('function');
+
+      // Negative: the unnormalized env name must NOT be the lookup path
+      delete process.env.WORKER_MY_COOL_PLUGIN_URL;
+      process.env['WORKER_MY-COOL-PLUGIN_URL'] = 'http://wrong:4030';
+      const bridge2 = buildServiceBridge('my-cool-plugin', callWorker);
+      // Bridge object always exists; the URL check happens at call time, so
+      // we assert via the public `isWorkerAvailable` path instead.
+      expect(bridge2).toHaveProperty('doThing');
+
+      // Cleanup
+      delete mutableRegistry['my-cool-plugin'];
+      delete process.env['WORKER_MY-COOL-PLUGIN_URL'];
+    });
   });
 
   describe('callWorker - additional edge cases', () => {

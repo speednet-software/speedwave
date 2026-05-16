@@ -8,6 +8,7 @@
       "nodejs/node.exe": "nodejs/node.exe",
       "mcp-os/": "mcp-os/",
       "host_exec/": "host_exec/",
+      "oauth/": "oauth/",
       "cli/speedwave.exe": "cli/speedwave.exe"
     },
     "windows": {

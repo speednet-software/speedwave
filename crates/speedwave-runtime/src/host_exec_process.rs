@@ -6,6 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread::JoinHandle;
 
 use crate::consts;
+use crate::fs_perms::write_restricted_file;
 
 /// Worker port-announcement read timeout (same value as `mcp-os`).
 const PORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -429,66 +430,7 @@ fn drain_and_read_port(
     }
 }
 
-// Restricted file write — mirrors `mcp_os_process`; ADR-054 tracks the share-helper follow-up.
-
-/// Write `content` to `path` chmod 600 (icacls on Windows; TOCTOU window — ADR-054).
-fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
-    if path.is_dir() {
-        log::warn!(
-            "host_exec write_restricted_file: removing unexpected directory at {}",
-            path.display()
-        );
-        std::fs::remove_dir_all(path)?;
-    }
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-    }
-    #[cfg(windows)]
-    {
-        // TOCTOU window — see the doc comment.
-        std::fs::write(path, content)?;
-        let status = crate::binary::system_command("icacls")
-            .args([
-                path.as_os_str(),
-                "/inheritance:r".as_ref(),
-                "/grant:r".as_ref(),
-            ])
-            .arg(format!(
-                "{}:(F)",
-                std::env::var("USERNAME").unwrap_or_default()
-            ))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => log::warn!(
-                "icacls failed (exit {}): {} may have overly permissive ACLs",
-                s,
-                path.display()
-            ),
-            Err(e) => log::warn!(
-                "failed to run icacls on {}: {} — file may have overly permissive ACLs",
-                path.display(),
-                e
-            ),
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        compile_error!("host_exec write_restricted_file: unsupported platform — add file permission logic for this target");
-    }
-    Ok(())
-}
+// Restricted file write — see `crate::fs_perms::write_restricted_file` (SSOT extracted in PR1).
 
 // Test-only accessors — gated behind `cfg(test)` to keep clippy honest.
 
@@ -649,35 +591,6 @@ setTimeout(() => {}, 60000);
         assert_eq!(t.len(), 36);
         assert_eq!(t.chars().filter(|c| *c == '-').count(), 4);
         assert!(t.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
-    }
-
-    // -- write_restricted_file ----------------------------------------------
-
-    #[test]
-    fn write_restricted_file_writes_content() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("f");
-        write_restricted_file(&p, "secret-token").unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "secret-token");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
-                0o600,
-                "config/token/port/pid files must be chmod 600"
-            );
-        }
-    }
-
-    #[test]
-    fn write_restricted_file_overwrites_unexpected_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("was-a-dir");
-        std::fs::create_dir(&p).unwrap();
-        write_restricted_file(&p, "now-a-file").unwrap();
-        assert!(p.is_file());
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "now-a-file");
     }
 
     // -- kill_stale_by_pid_file ---------------------------------------------

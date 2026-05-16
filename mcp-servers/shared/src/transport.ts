@@ -121,8 +121,14 @@ async function handleMCPPostInner(
       return;
     }
 
+    const caller = (res.locals as { caller?: unknown } | undefined)?.caller;
+    const ctx = typeof caller === 'string' ? { caller } : undefined;
     const results: ProcessRequestResult[] = await Promise.all(
-      body.map((item: unknown) => rpcHandler.processRequest(item, sessionId))
+      body.map((item: unknown) =>
+        ctx === undefined
+          ? rpcHandler.processRequest(item, sessionId)
+          : rpcHandler.processRequest(item, sessionId, ctx)
+      )
     );
 
     // Set session header if any result produced a sessionId (initialize in batch)
@@ -154,7 +160,12 @@ async function handleMCPPostInner(
   }
 
   // Single request/notification
-  const result = await rpcHandler.processRequest(body, sessionId);
+  const singleCaller = (res.locals as { caller?: unknown } | undefined)?.caller;
+  const singleCtx = typeof singleCaller === 'string' ? { caller: singleCaller } : undefined;
+  const result =
+    singleCtx === undefined
+      ? await rpcHandler.processRequest(body, sessionId)
+      : await rpcHandler.processRequest(body, sessionId, singleCtx);
 
   if (result.sessionId) {
     res.setHeader('Mcp-Session-Id', result.sessionId);

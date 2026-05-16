@@ -4,6 +4,7 @@ use crate::ide_bridge;
 use crate::mcp_os_process;
 use crate::types::BundleReconcileStatus;
 use speedwave_runtime::host_exec_process::HostExecProcess;
+use speedwave_runtime::oauth_process::OauthProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -20,6 +21,9 @@ pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
 /// Per-project `host_exec` workers, keyed by project name (ADR-054).
 pub(crate) type SharedHostExec = Arc<Mutex<HashMap<String, HostExecProcess>>>;
 
+/// Per-project `oauth` workers, keyed by project name (ADR-060).
+pub(crate) type SharedOauth = Arc<Mutex<HashMap<String, OauthProcess>>>;
+
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
 
@@ -30,6 +34,8 @@ pub(crate) struct ExitCleanupContext {
     pub(crate) mcp_os: SharedMcpOs,
     /// Per-project `host_exec` workers — stopped + files cleaned on exit.
     pub(crate) host_exec: SharedHostExec,
+    /// Per-project `oauth` workers (ADR-060) — stopped + files cleaned on exit.
+    pub(crate) oauth: SharedOauth,
     pub(crate) auto_check_handle: SharedAutoCheckHandle,
 }
 
@@ -50,6 +56,10 @@ pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project
         proc.cleanup_files();
     }
 }
+
+// `teardown_oauth_for_project` intentionally omitted — added in PR3 when the
+// SharePoint reconciler needs to tear down the oauth worker on integration disable.
+// Until then, cleanup happens only on process exit via `run_exit_cleanup`.
 
 /// Reconcile phase: nothing running.
 const RECONCILE_IDLE: u8 = 0;
@@ -765,10 +775,12 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::HOST_EXEC_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let ide_bridge = ctx.ide_bridge.clone();
     let mcp_os = ctx.mcp_os.clone();
     let host_exec = ctx.host_exec.clone();
+    let oauth = ctx.oauth.clone();
     let auto_check = ctx.auto_check_handle.clone();
 
     let handle = std::thread::spawn(move || {
@@ -816,6 +828,17 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 }
             }
             Err(e) => log::warn!("host_exec cleanup skipped: map mutex poisoned: {e}"),
+        }
+        match oauth.lock() {
+            Ok(mut map) => {
+                for (project, mut proc) in map.drain() {
+                    if let Err(e) = proc.stop() {
+                        log::warn!("oauth[{project}] stop error: {e}");
+                    }
+                    proc.cleanup_files();
+                }
+            }
+            Err(e) => log::warn!("oauth cleanup skipped: map mutex poisoned: {e}"),
         }
         match auto_check.lock() {
             Ok(mut guard) => {
@@ -1572,6 +1595,7 @@ mod tests {
             ide_bridge: SharedIdeBridge::default(),
             mcp_os: SharedMcpOs::default(),
             host_exec: SharedHostExec::default(),
+            oauth: SharedOauth::default(),
             auto_check_handle: SharedAutoCheckHandle::default(),
         };
 

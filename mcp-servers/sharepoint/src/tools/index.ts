@@ -7,15 +7,22 @@
 import { ToolDefinition } from '@speedwave/mcp-shared';
 import { SharePointClient } from '../client.js';
 
-export { withValidation, ToolResult } from './validation.js';
+export { withValidation, validateGraphId, ToolResult } from './validation.js';
 
 import { createFileTools } from './file-tools.js';
 import { createUserTools } from './user-tools.js';
+import { createPageTools } from './page-tools.js';
+import { createListTools } from './list-tools.js';
 
 /**
  * Creates complete tool definitions array for SharePoint MCP server.
  * @param client - SharePoint client instance
  */
 export function createToolDefinitions(client: SharePointClient | null): ToolDefinition[] {
-  return [...createFileTools(client), ...createUserTools(client)];
+  return [
+    ...createFileTools(client),
+    ...createUserTools(client),
+    ...createPageTools(client),
+    ...createListTools(client),
+  ];
 }

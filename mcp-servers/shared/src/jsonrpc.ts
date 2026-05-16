@@ -11,6 +11,7 @@ import type {
   ToolsListResult,
   Tool,
   ToolHandler,
+  ToolHandlerContext,
   ProcessRequestResult,
 } from './types.js';
 import { JSONRPCErrorCode, SUPPORTED_PROTOCOL_VERSIONS, LATEST_PROTOCOL_VERSION } from './types.js';
@@ -130,14 +131,16 @@ export class JSONRPCHandler {
   }
 
   /**
-   * Process a JSON-RPC request or notification
+   * Process a JSON-RPC request or notification.
    * @param body Request body
    * @param sessionId Session ID (or null for new session)
+   * @param context Optional per-call context (caller id resolved from bearer)
    * @returns ProcessRequestResult with response (null for notifications) and optional sessionId
    */
   public async processRequest(
     body: unknown,
-    sessionId: string | null
+    sessionId: string | null,
+    context?: ToolHandlerContext
   ): Promise<ProcessRequestResult> {
     // Check for notification before full validation (notifications have no id)
     const message = body as Record<string, unknown>;
@@ -171,7 +174,7 @@ export class JSONRPCHandler {
           return { response: await this.handleToolsList(request, sessionId) };
 
         case 'tools/call':
-          return { response: await this.handleToolsCall(request, sessionId) };
+          return { response: await this.handleToolsCall(request, sessionId, context) };
 
         default:
           return {
@@ -345,11 +348,13 @@ export class JSONRPCHandler {
    * Handle tools/call request
    * @param request - The tool execution request from the client
    * @param sessionId - Current session ID or null for new session
+   * @param context - Optional per-call context (caller id resolved from bearer)
    * @returns JSON-RPC response with tool execution result
    */
   private async handleToolsCall(
     request: JSONRPCRequest,
-    sessionId: string | null
+    sessionId: string | null,
+    context?: ToolHandlerContext
   ): Promise<JSONRPCResponse> {
     if (!sessionId || !sessionManager.getSession(sessionId)) {
       sessionManager.createSession({ name: 'auto-reconnect', version: '1.0' });
@@ -401,7 +406,8 @@ export class JSONRPCHandler {
 
     try {
       console.log(`${ts()} 🔧 Executing tool: ${name}`);
-      const result = await handler(args);
+      // Pass context only when present so tests asserting `handler(args)` keep passing.
+      const result = context === undefined ? await handler(args) : await handler(args, context);
       return { jsonrpc: '2.0', id: request.id, result };
     } catch (error) {
       return this.buildErrorResponse(request.id, JSONRPCErrorBuilder.internalError(error));

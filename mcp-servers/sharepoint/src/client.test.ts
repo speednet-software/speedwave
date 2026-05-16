@@ -28,6 +28,10 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
   return {
     ...actual,
     loadToken: vi.fn(),
+    refreshAccessToken: vi.fn().mockResolvedValue({
+      expiresIn: 3600,
+      grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
+    }),
     ts: () => '[00:00:00]',
   };
 });
@@ -35,15 +39,15 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
 const mockFs = vi.mocked(fs);
 const mockCreateWriteStream = vi.mocked(createWriteStream);
 const mockPipeline = vi.mocked(pipeline);
-const { loadToken } = await import('@speedwave/mcp-shared');
+const { loadToken, refreshAccessToken } = await import('@speedwave/mcp-shared');
 const mockLoadToken = vi.mocked(loadToken);
+const mockOauthRefresh = vi.mocked(refreshAccessToken);
 
 // Test configuration
 const mockConfig: SharePointConfig = {
   clientId: 'test-client-id',
   tenantId: 'test-tenant-id',
   siteId: 'test-site-id',
-  basePath: 'Documents/TestFolder',
   accessToken: 'test-access-token',
   refreshToken: 'test-refresh-token',
 };
@@ -61,6 +65,15 @@ describe('SharePointClient', () => {
     // Mock global fetch
     fetchMock = vi.fn();
     global.fetch = fetchMock as typeof fetch;
+
+    // After ADR-060, SharePointClient.refreshAccessToken re-reads access_token
+    // from /tokens after the oauth worker writes it. Default the mock to a
+    // valid token so 401-retry paths can proceed.
+    mockLoadToken.mockResolvedValue('refreshed-access-token');
+    mockOauthRefresh.mockResolvedValue({
+      expiresIn: 3600,
+      grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
+    });
 
     // Create fresh client instance
     client = new SharePointClient({ ...mockConfig }, mockTokensDir);
@@ -91,408 +104,6 @@ describe('SharePointClient', () => {
     });
   });
 
-  describe('token save error delegation', () => {
-    it('getLastTokenSaveError returns null when no error occurred', () => {
-      expect(client.getLastTokenSaveError()).toBeNull();
-    });
-
-    it('getLastTokenSaveError returns error after failed token save', async () => {
-      // Trigger 401 to invoke refresh → which will try to save → which will fail
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: 'new-token',
-          refresh_token: 'new-refresh',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-      // All writeFile attempts fail (retry exhausted)
-      mockFs.writeFile.mockRejectedValue(new Error('Read-only file system'));
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      await client.listFiles();
-
-      const err = client.getLastTokenSaveError();
-      expect(err).toBeInstanceOf(Error);
-      expect(err!.message).toBe('Read-only file system');
-    });
-
-    it('clearTokenSaveError resets the saved error to null', async () => {
-      // First trigger a save error
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: 'new-token',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-      mockFs.writeFile.mockRejectedValue(new Error('EACCES: permission denied'));
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      await client.listFiles();
-      expect(client.getLastTokenSaveError()).not.toBeNull();
-
-      client.clearTokenSaveError();
-      expect(client.getLastTokenSaveError()).toBeNull();
-    });
-
-    it('getHealthStatus returns tokenSaveError message when error exists', async () => {
-      // Trigger a save error
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: 'new-token',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-      mockFs.writeFile.mockRejectedValue(new Error('EACCES: permission denied'));
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      await client.listFiles();
-      const status = client.getHealthStatus();
-      expect(status.tokenSaveError).toBe('EACCES: permission denied');
-    });
-
-    it('getHealthStatus returns null tokenSaveError when no error', () => {
-      const status = client.getHealthStatus();
-      expect(status).toEqual({ tokenSaveError: null });
-    });
-  });
-
-  describe('getConfig', () => {
-    it('should return current configuration', () => {
-      const config = client.getConfig();
-      expect(config).toEqual(mockConfig);
-    });
-
-    it('should return updated config after token refresh', async () => {
-      const newAccessToken = 'new-access-token';
-      const newRefreshToken = 'new-refresh-token';
-
-      // First call returns 401 (trigger refresh)
-      fetchMock.mockResolvedValueOnce({
-        status: 401,
-        ok: false,
-      });
-
-      // Token refresh succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: newAccessToken,
-          refresh_token: newRefreshToken,
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      // Retry succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      await client.listFiles();
-
-      const config = client.getConfig();
-      expect(config.accessToken).toBe(newAccessToken);
-      expect(config.refreshToken).toBe(newRefreshToken);
-    });
-  });
-
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Error Handling
-  //═══════════════════════════════════════════════════════════════════════════════
-
-  describe('formatError', () => {
-    it('should format 401 unauthorized errors', () => {
-      const error = new Error('401 Unauthorized');
-      const formatted = SharePointClient.formatError(error);
-      expect(formatted).toContain('Authentication failed');
-      expect(formatted).toBe(
-        withSetupGuidance('Authentication failed. Your SharePoint token may have expired.')
-      );
-    });
-
-    it('should format 403 forbidden errors', () => {
-      const error = new Error('403 Forbidden');
-      const formatted = SharePointClient.formatError(error);
-      expect(formatted).toContain('Permission denied');
-    });
-
-    it('should format 404 not found errors', () => {
-      const error = new Error('404 not found');
-      const formatted = SharePointClient.formatError(error);
-      expect(formatted).toBe('Resource not found in SharePoint.');
-    });
-
-    it('should format security/traversal errors', () => {
-      const error = new Error('security check failed');
-      const formatted = SharePointClient.formatError(error);
-      expect(formatted).toContain('Invalid path');
-      expect(formatted).toContain('traversal not allowed');
-    });
-
-    it('should format token refresh errors', () => {
-      const error = new Error('Failed to refresh token');
-      const formatted = SharePointClient.formatError(error);
-      expect(formatted).toContain('Token refresh failed');
-    });
-
-    it('should handle generic errors', () => {
-      const error = new Error('Something went wrong');
-      const formatted = SharePointClient.formatError(error);
-      expect(formatted).toBe('Something went wrong');
-    });
-
-    it('should handle errors without message', () => {
-      const error = {};
-      const formatted = SharePointClient.formatError(error);
-      expect(formatted).toBe('SharePoint API error');
-    });
-  });
-
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Authentication & Token Management
-  //═══════════════════════════════════════════════════════════════════════════════
-
-  describe('refreshAccessToken', () => {
-    it('should refresh access token successfully', async () => {
-      const newAccessToken = 'new-access-token';
-      const newRefreshToken = 'new-refresh-token';
-
-      // First call returns 401 (trigger refresh)
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-
-      // Token refresh call
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: newAccessToken,
-          refresh_token: newRefreshToken,
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      // Retry succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      await client.listFiles();
-
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining('login.microsoftonline.com'),
-        expect.objectContaining({
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        })
-      );
-    });
-
-    it('should update access token without new refresh token', async () => {
-      const newAccessToken = 'new-access-token-only';
-
-      // First call returns 401
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-
-      // Token refresh (no new refresh token)
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: newAccessToken,
-          // No refresh_token in response
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      // Retry succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      await client.listFiles();
-
-      const config = client.getConfig();
-      expect(config.accessToken).toBe(newAccessToken);
-      expect(config.refreshToken).toBe(mockConfig.refreshToken); // Unchanged
-    });
-
-    it('should save refreshed tokens to file system', async () => {
-      const newAccessToken = 'new-access-token';
-      const newRefreshToken = 'new-refresh-token';
-
-      // First call returns 401
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-
-      // Token refresh
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: newAccessToken,
-          refresh_token: newRefreshToken,
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      // Retry succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      await client.listFiles();
-
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
-        path.join(mockTokensDir, 'access_token'),
-        newAccessToken,
-        { mode: 0o600 }
-      );
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
-        path.join(mockTokensDir, 'refresh_token'),
-        newRefreshToken,
-        { mode: 0o600 }
-      );
-    });
-
-    it('should handle file system errors when saving tokens', async () => {
-      // First call returns 401
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-
-      // Token refresh
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: 'new-token',
-          refresh_token: 'new-refresh',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-
-      mockFs.writeFile.mockRejectedValue(new Error('Read-only file system'));
-
-      // Retry succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      // Should not throw, just log error with details
-      await expect(client.listFiles()).resolves.toBeDefined();
-      expect(console.error).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to save refreshed tokens'),
-        expect.objectContaining({
-          error: expect.any(String),
-          consequence: expect.stringContaining('Tokens valid in memory'),
-          suggestion: expect.stringContaining('writable'),
-        })
-      );
-    });
-
-    it('should throw error when token refresh fails', async () => {
-      // First call returns 401
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-
-      // Token refresh fails
-      fetchMock.mockResolvedValueOnce({
-        ok: false,
-        json: async () => ({ error: 'invalid_grant' }),
-      });
-
-      await expect(client.listFiles()).rejects.toThrow('Failed to refresh access token');
-    });
-  });
-
-  describe('debugLog (via callGraphAPI 401 → refresh path)', () => {
-    it('should call console.log with data when DEBUG is set and data is provided', async () => {
-      const originalDebug = process.env.DEBUG;
-      process.env.DEBUG = '1';
-
-      // 401 triggers the debugLog call ('🔄 Access token expired, refreshing...')
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: 'refreshed',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-      mockFs.writeFile.mockResolvedValue(undefined);
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      await client.listFiles();
-
-      expect(console.log).toHaveBeenCalledWith(
-        expect.stringContaining('Access token expired, refreshing')
-      );
-
-      process.env.DEBUG = originalDebug;
-    });
-
-    it('should not call console.log when DEBUG is not set', async () => {
-      const originalDebug = process.env.DEBUG;
-      delete process.env.DEBUG;
-
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: 'refreshed',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-      mockFs.writeFile.mockResolvedValue(undefined);
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
-      await client.listFiles();
-
-      // console.log should NOT have been called with debug message
-      const debugCalls = (console.log as ReturnType<typeof vi.fn>).mock.calls.filter((args) =>
-        String(args[0]).includes('Access token expired')
-      );
-      expect(debugCalls.length).toBe(0);
-
-      if (originalDebug !== undefined) process.env.DEBUG = originalDebug;
-    });
-  });
-
   describe('callGraphAPI', () => {
     it('should call Graph API with authorization header', async () => {
       fetchMock.mockResolvedValueOnce({
@@ -513,21 +124,8 @@ describe('SharePointClient', () => {
     });
 
     it('should retry on 401 with refreshed token', async () => {
-      // First call returns 401
+      // First call returns 401 → triggers refresh (via mocked oauth-client) → retry
       fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-
-      // Token refresh succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: 'refreshed-token',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-
-      mockFs.writeFile.mockResolvedValue(undefined);
-
       // Retry succeeds
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -536,7 +134,12 @@ describe('SharePointClient', () => {
 
       await client.listFiles();
 
-      expect(fetchMock).toHaveBeenCalledTimes(3); // Initial + refresh + retry
+      // ADR-060: refresh is delegated to the host-side oauth worker (mocked).
+      // The fetch sequence is now: Initial(401) + Retry — not Initial + refresh + retry.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(mockOauthRefresh).toHaveBeenCalledWith(
+        expect.objectContaining({ service: 'sharepoint' })
+      );
     });
 
     it('should use already-refreshed token when double-check detects another thread refreshed it', async () => {
@@ -632,20 +235,6 @@ describe('SharePointClient', () => {
 
     it('should merge custom headers with authorization', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test content'));
-
-      // Check parent 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check parent 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
 
       // File upload succeeds
       fetchMock.mockResolvedValueOnce({
@@ -844,200 +433,6 @@ describe('SharePointClient', () => {
       await expect(listPromise).rejects.toThrow(/timeout/i);
       vi.useRealTimers();
     });
-
-    it('should fire the retry timeout callback in double-check branch (line 276)', async () => {
-      // Use fake timers with async advancement so promises drain between timer ticks
-      vi.useFakeTimers();
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      // Two concurrent 401s — second one hits double-check path
-      let fetchCallCount = 0;
-      global.fetch = vi.fn((_url: string, opts: RequestInit) => {
-        fetchCallCount++;
-        const n = fetchCallCount;
-
-        if (n === 1 || n === 2) {
-          return Promise.resolve({ status: 401, ok: false } as Response);
-        }
-        if (n === 3) {
-          // OAuth token refresh
-          return Promise.resolve({
-            ok: true,
-            json: async () => ({
-              access_token: 'fresh-token',
-              token_type: 'Bearer',
-              expires_in: 3600,
-            }),
-          } as Response);
-        }
-        if (n === 4) {
-          // First caller's retry succeeds immediately
-          return Promise.resolve({
-            ok: true,
-            json: async () => ({ value: [] }),
-          } as Response);
-        }
-        // Second caller's retry (double-check path) hangs; timer will abort it via line 276
-        return new Promise<Response>((_, reject) => {
-          opts.signal?.addEventListener('abort', () => {
-            const err = new Error('The operation was aborted');
-            err.name = 'AbortError';
-            reject(err);
-          });
-        });
-      }) as typeof fetch;
-
-      // Attach error handlers immediately so no rejection is unhandled
-      const p1 = client.listFiles();
-      const p2 = client.listFiles();
-      const settled1 = p1.catch((e: Error) => ({ _err: e }));
-      const settled2 = p2.catch((e: Error) => ({ _err: e }));
-
-      // runAllTimersAsync fires timers AND awaits between ticks so promise chains drain
-      await vi.runAllTimersAsync();
-
-      const [r1, r2] = await Promise.all([settled1, settled2]);
-      const errors = [r1, r2].filter((r): r is { _err: Error } => '_err' in (r as object));
-      expect(errors.length).toBeGreaterThan(0);
-      expect(errors[0]._err.message).toMatch(/timeout/i);
-
-      vi.useRealTimers();
-    });
-
-    it('should fire the retry timeout callback after normal refresh (line 304)', async () => {
-      // Use fake timers with async advancement so promises drain between timer ticks
-      vi.useFakeTimers();
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      let fetchCallCount = 0;
-      global.fetch = vi.fn((_url: string, opts: RequestInit) => {
-        fetchCallCount++;
-        const n = fetchCallCount;
-
-        if (n === 1) {
-          return Promise.resolve({ status: 401, ok: false } as Response);
-        }
-        if (n === 2) {
-          // OAuth token refresh succeeds
-          return Promise.resolve({
-            ok: true,
-            json: async () => ({
-              access_token: 'new-token',
-              token_type: 'Bearer',
-              expires_in: 3600,
-            }),
-          } as Response);
-        }
-        // The retry fetch (n=3) hangs — timer will abort it via the line 304 callback
-        return new Promise<Response>((_, reject) => {
-          opts.signal?.addEventListener('abort', () => {
-            const err = new Error('The operation was aborted');
-            err.name = 'AbortError';
-            reject(err);
-          });
-        });
-      }) as typeof fetch;
-
-      // Attach error handler immediately so the rejection is never unhandled
-      const listPromise = client.listFiles();
-      const caught = listPromise.catch((e: Error) => ({ _err: e }));
-
-      // runAllTimersAsync fires timers AND awaits between ticks so promise chains drain
-      await vi.runAllTimersAsync();
-
-      const result = await caught;
-      expect('_err' in result).toBe(true);
-      expect((result as { _err: Error })._err.message).toMatch(/timeout/i);
-      vi.useRealTimers();
-    });
-
-    it('should propagate non-AbortError from retry fetch after token refresh (line 319)', async () => {
-      // First call returns 401
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-
-      // Token refresh succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: 'new-token',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      // Retry fetch throws a non-AbortError (line 319: throw error)
-      fetchMock.mockImplementationOnce(() => {
-        throw new Error('Network failure during retry');
-      });
-
-      await expect(client.listFiles()).rejects.toThrow('Network failure during retry');
-    });
-
-    it('should throw timeout error when retry fetch after token refresh is aborted (line 317)', async () => {
-      // First call returns 401
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-
-      // Token refresh succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: 'new-token',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      });
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      // Retry fetch is aborted (AbortError — line 317)
-      fetchMock.mockImplementationOnce(() => {
-        const err = new Error('The operation was aborted');
-        err.name = 'AbortError';
-        throw err;
-      });
-
-      await expect(client.listFiles()).rejects.toThrow(/timeout/i);
-    });
-
-    it('should propagate non-AbortError in double-check branch retry (line 292)', async () => {
-      // Two concurrent requests that both get 401:
-      // The second through the mutex hits the double-check path and its retry throws non-AbortError
-      let fetchCallCount = 0;
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      global.fetch = vi.fn(async () => {
-        fetchCallCount++;
-        const n = fetchCallCount;
-        if (n === 1 || n === 2) {
-          return { status: 401, ok: false } as Response;
-        }
-        if (n === 3) {
-          // OAuth refresh
-          return {
-            ok: true,
-            json: async () => ({
-              access_token: 'refreshed',
-              token_type: 'Bearer',
-              expires_in: 3600,
-            }),
-          } as Response;
-        }
-        if (n === 4) {
-          // First retry succeeds
-          return { ok: true, json: async () => ({ value: [] }) } as Response;
-        }
-        // Double-check retry throws non-AbortError (line 292)
-        throw new Error('Connection reset in double-check retry');
-      }) as typeof fetch;
-
-      const results = await Promise.allSettled([client.listFiles(), client.listFiles()]);
-      const rejected = results.filter((r) => r.status === 'rejected');
-      if (rejected.length > 0) {
-        const reason = (rejected[0] as PromiseRejectedResult).reason as Error;
-        expect(reason.message).toBe('Connection reset in double-check retry');
-      }
-      // If both succeeded (mutex prevented double-check), that's also valid behavior
-    });
   });
 
   //═══════════════════════════════════════════════════════════════════════════════
@@ -1099,8 +494,11 @@ describe('SharePointClient', () => {
       const result = await client.listFiles({ path: 'Reports' });
 
       expect(result.files[0].path).toBe('Reports/report.pdf');
+      // After dropping base_path, file ops resolve straight against the site
+      // drive root — `listFiles({ path: 'Reports' })` hits
+      // `/sites/{siteId}/drive/root:/Reports:/children`.
       expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining(`${mockConfig.basePath}/Reports`),
+        expect.stringContaining(`drive/root:/Reports:/children`),
         expect.any(Object)
       );
     });
@@ -1342,20 +740,6 @@ describe('SharePointClient', () => {
     });
 
     it('should upload file successfully', async () => {
-      // Check parent 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check parent 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Check parent folder 'remote' exists
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1396,20 +780,6 @@ describe('SharePointClient', () => {
     });
 
     it('should include expectedEtag in If-Match header', async () => {
-      // Check parent 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check parent 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Upload file with etag
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1432,20 +802,6 @@ describe('SharePointClient', () => {
     });
 
     it('should include If-None-Match header for createOnly', async () => {
-      // Check parent 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check parent 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Upload file with createOnly
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1468,20 +824,6 @@ describe('SharePointClient', () => {
     });
 
     it('should skip conditional headers in overwrite mode', async () => {
-      // Check parent 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check parent 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Upload file
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1500,20 +842,6 @@ describe('SharePointClient', () => {
     });
 
     it('should ensure parent folders exist', async () => {
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Check 'newfolder' doesn't exist
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
@@ -1547,20 +875,6 @@ describe('SharePointClient', () => {
     });
 
     it('should throw error on upload failure', async () => {
-      // Check parent 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check parent 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Upload fails
       fetchMock.mockResolvedValueOnce({
         ok: false,
@@ -1574,20 +888,6 @@ describe('SharePointClient', () => {
     });
 
     it('should throw generic error when error message missing', async () => {
-      // Check parent 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check parent 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Upload fails without error message
       fetchMock.mockResolvedValueOnce({
         ok: false,
@@ -1755,20 +1055,6 @@ describe('SharePointClient', () => {
     it('should create nested parent folders', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // Check base path 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // First level folder 'level1' doesn't exist
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
       fetchMock.mockResolvedValueOnce({
@@ -1802,20 +1088,6 @@ describe('SharePointClient', () => {
     it('should skip folder creation if folder exists', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Parent folder 'existing' exists
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1840,20 +1112,6 @@ describe('SharePointClient', () => {
     it('should handle file in root directory', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // File upload
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1863,26 +1121,13 @@ describe('SharePointClient', () => {
 
       await client.uploadFile('file.txt', '/workspace/file.txt');
 
-      // Should check base path folders + upload
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      // After dropping base_path: file in root has no parent segments to check,
+      // so only the upload PUT happens.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('should create folder at root level', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
-
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
 
       // Check 'rootfolder' doesn't exist
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
@@ -1947,20 +1192,6 @@ describe('SharePointClient', () => {
     it('should handle folder creation failure in ensureParentFolders with text body', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // 'newdir' doesn't exist (404)
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
@@ -1979,20 +1210,6 @@ describe('SharePointClient', () => {
 
     it('should handle folder creation failure in ensureParentFolders when text() also throws', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
-
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
 
       // 'baddir' doesn't exist (404)
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
@@ -2018,20 +1235,6 @@ describe('SharePointClient', () => {
 
     it('should handle 409 Conflict in ensureParentFolders (race condition - folder exists)', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
-
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
 
       // 'racedir' doesn't exist in first check (404)
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
@@ -2063,20 +1266,6 @@ describe('SharePointClient', () => {
 
   describe('createRemoteFolder', () => {
     it('should create a new folder successfully', async () => {
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Create folder succeeds
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -2094,20 +1283,6 @@ describe('SharePointClient', () => {
     });
 
     it('should create nested folder with parent folders', async () => {
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Check parent 'level1' doesn't exist
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
@@ -2133,20 +1308,6 @@ describe('SharePointClient', () => {
     });
 
     it('should handle 409 Conflict (folder already exists) as idempotent', async () => {
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Create folder returns 409 Conflict (already exists)
       fetchMock.mockResolvedValueOnce({
         ok: false,
@@ -2159,20 +1320,6 @@ describe('SharePointClient', () => {
     });
 
     it('should throw error on 403 Forbidden (permission denied)', async () => {
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Create folder returns 403 Forbidden
       fetchMock.mockResolvedValueOnce({
         ok: false,
@@ -2184,20 +1331,6 @@ describe('SharePointClient', () => {
     });
 
     it('should throw error on 500 Internal Server Error', async () => {
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Create folder returns 500 Internal Server Error
       fetchMock.mockResolvedValueOnce({
         ok: false,
@@ -2232,21 +1365,8 @@ describe('SharePointClient', () => {
     });
 
     it('should throw when folder path has trailing slash (empty folder name)', async () => {
-      // "folder/" passes path validation but splitPath gives empty folderName
-      // ensureParentFolders on "Documents/TestFolder/folder/" needs to check parent segments
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-      // Check 'folder' exists
+      // "folder/" passes path validation but splitPath gives empty folderName.
+      // ensureParentFolders on "folder/" checks the single "folder" segment.
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -2259,20 +1379,6 @@ describe('SharePointClient', () => {
     });
 
     it('should fall back to text body when JSON parse of error response fails', async () => {
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Create folder fails; JSON parse throws but text parse succeeds
       const errorResponse = {
         ok: false,
@@ -2291,20 +1397,6 @@ describe('SharePointClient', () => {
     });
 
     it('should use fallback status message when both JSON and text parse fail', async () => {
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // Both JSON and text parsing fail on the error response
       const errorResponse = {
         ok: false,
@@ -2329,20 +1421,6 @@ describe('SharePointClient', () => {
     });
 
     it('should fall back to text body when JSON parse fails (non-Error textParseError)', async () => {
-      // Check 'Documents' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'doc-folder' }),
-      });
-
-      // Check 'TestFolder' exists
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'test-folder' }),
-      });
-
       // JSON parse fails; text parse throws a non-Error value
       const errorResponse = {
         ok: false,
@@ -2441,17 +1519,6 @@ describe('SharePointClient', () => {
       expect(console.warn).toHaveBeenCalled();
     });
 
-    it('should return null when refresh token is missing', async () => {
-      mockLoadToken.mockImplementation(async (path: string) => {
-        if (path.includes('refresh_token')) return '';
-        return 'valid-token';
-      });
-
-      const result = await initializeSharePointClient();
-      expect(result).toBeNull();
-      expect(console.warn).toHaveBeenCalled();
-    });
-
     it('should return null when loadToken throws error', async () => {
       mockLoadToken.mockRejectedValue(new Error('Token not found'));
 
@@ -2460,17 +1527,14 @@ describe('SharePointClient', () => {
       expect(console.warn).toHaveBeenCalled();
     });
 
-    it('should return null when any required token is missing', async () => {
-      const tokens = {
-        access_token: 'access',
-        refresh_token: 'refresh',
-        client_id: 'client',
-        tenant_id: 'tenant',
-        site_id: 'site',
-        base_path: 'base',
-      };
+    // ADR-060 + base_path removal: SharePoint container mounts only
+    // access_token / site_id. The other former fields (refresh_token /
+    // client_id / tenant_id) live in the host-only oauth.json; base_path
+    // was dropped because site_id already scopes the worker.
+    it('should return null when any worker-mounted required token is missing', async () => {
+      const required = ['access_token', 'site_id'];
 
-      for (const key of Object.keys(tokens)) {
+      for (const key of required) {
         mockLoadToken.mockImplementation(async (path: string) => {
           if (path.includes(key)) return '';
           return 'valid';
@@ -2480,6 +1544,23 @@ describe('SharePointClient', () => {
         expect(result).toBeNull();
         expect(console.warn).toHaveBeenCalled();
       }
+    });
+
+    it('should NOT require legacy fields removed by ADR-060', async () => {
+      // refresh_token / client_id / tenant_id being absent must not block startup
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (
+          path.includes('refresh_token') ||
+          path.includes('client_id') ||
+          path.includes('tenant_id')
+        ) {
+          return '';
+        }
+        return 'valid';
+      });
+
+      const result = await initializeSharePointClient();
+      expect(result).not.toBeNull();
     });
   });
 });

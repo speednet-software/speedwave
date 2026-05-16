@@ -89,6 +89,32 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "host_exec/host_exec/node_modules/@speedwave/mcp-shared",
         kind: BundledAssetKind::Directory,
     },
+    // `oauth` worker (ADR-060) — same bundling shape as `host_exec`. Resolved
+    // by `build::resolve_oauth_script` at `oauth/oauth/dist/index.js`.
+    BundledAssetSpec {
+        path: "oauth/oauth/dist/index.js",
+        kind: BundledAssetKind::File,
+    },
+    BundledAssetSpec {
+        path: "oauth/shared/dist",
+        kind: BundledAssetKind::Directory,
+    },
+    BundledAssetSpec {
+        path: "oauth/shared/package.json",
+        kind: BundledAssetKind::File,
+    },
+    BundledAssetSpec {
+        path: "oauth/shared/package-lock.json",
+        kind: BundledAssetKind::File,
+    },
+    BundledAssetSpec {
+        path: "oauth/shared/node_modules",
+        kind: BundledAssetKind::Directory,
+    },
+    BundledAssetSpec {
+        path: "oauth/oauth/node_modules/@speedwave/mcp-shared",
+        kind: BundledAssetKind::Directory,
+    },
 ];
 
 const MACOS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
@@ -587,6 +613,25 @@ mod tests {
         std::fs::write(he_shared_dest.join("dist/index.js"), "export {};").unwrap();
         std::fs::write(he_shared_dest.join("package.json"), "{}").unwrap();
         std::fs::write(he_shared_dest.join("package-lock.json"), "{}").unwrap();
+
+        // oauth worker — staged the same way as mcp-os (ADR-060).
+        std::fs::create_dir_all(root.join("oauth/oauth/dist")).unwrap();
+        std::fs::create_dir_all(root.join("oauth/shared/dist")).unwrap();
+        std::fs::create_dir_all(root.join("oauth/shared/node_modules/pkg")).unwrap();
+        std::fs::write(root.join("oauth/oauth/dist/index.js"), "console.log('ok');").unwrap();
+        std::fs::write(root.join("oauth/shared/dist/index.js"), "export {};").unwrap();
+        std::fs::write(root.join("oauth/shared/package.json"), "{}").unwrap();
+        std::fs::write(root.join("oauth/shared/package-lock.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("oauth/shared/node_modules/pkg/index.js"),
+            "module.exports = {};",
+        )
+        .unwrap();
+        let oa_shared_dest = root.join("oauth/oauth/node_modules/@speedwave/mcp-shared");
+        std::fs::create_dir_all(oa_shared_dest.join("dist")).unwrap();
+        std::fs::write(oa_shared_dest.join("dist/index.js"), "export {};").unwrap();
+        std::fs::write(oa_shared_dest.join("package.json"), "{}").unwrap();
+        std::fs::write(oa_shared_dest.join("package-lock.json"), "{}").unwrap();
     }
 
     #[cfg(unix)]
@@ -778,6 +823,17 @@ mod tests {
         std::fs::write(temp.path().join("host_exec/host_exec/dist/index.js"), "").unwrap();
         std::fs::write(temp.path().join("host_exec/shared/package.json"), "").unwrap();
         std::fs::write(temp.path().join("host_exec/shared/package-lock.json"), "").unwrap();
+        std::fs::create_dir_all(temp.path().join("oauth/oauth/dist")).unwrap();
+        std::fs::create_dir_all(temp.path().join("oauth/shared/dist")).unwrap();
+        std::fs::create_dir_all(temp.path().join("oauth/shared/node_modules")).unwrap();
+        std::fs::create_dir_all(
+            temp.path()
+                .join("oauth/oauth/node_modules/@speedwave/mcp-shared"),
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("oauth/oauth/dist/index.js"), "").unwrap();
+        std::fs::write(temp.path().join("oauth/shared/package.json"), "").unwrap();
+        std::fs::write(temp.path().join("oauth/shared/package-lock.json"), "").unwrap();
         std::fs::write(temp.path().join("lima/bin/limactl"), "").unwrap();
         std::fs::write(temp.path().join("nodejs/bin/node"), "").unwrap();
         std::fs::write(temp.path().join("cli/speedwave"), "").unwrap();

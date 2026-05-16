@@ -564,7 +564,7 @@ check-desktop-clippy: build-angular build-mcp
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && npx tsc
-	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os host_exec; do \
+	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os host_exec oauth; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && npx tsc --noEmit) || exit 1; \
 	done

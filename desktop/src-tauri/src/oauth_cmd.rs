@@ -35,8 +35,13 @@ struct MsTokenResponse {
     refresh_token: String,
     #[serde(rename = "token_type")]
     _token_type: String,
-    #[serde(rename = "expires_in")]
-    _expires_in: u64,
+    expires_in: u64,
+}
+
+impl MsTokenResponse {
+    fn expires_in(&self) -> u64 {
+        self.expires_in
+    }
 }
 
 #[derive(Deserialize)]
@@ -152,33 +157,109 @@ fn emit_progress(app: &tauri::AppHandle, status: &str, message: &str, request_id
     }
 }
 
-/// Save access_token and refresh_token to the given service directory.
-fn save_tokens_to_dir(svc_dir: &std::path::Path, tokens: &MsTokenResponse) -> Result<(), String> {
+/// Save the access_token to the worker-mounted tokens directory. The other
+/// fields (`refresh_token`, `client_id`, `tenant_id`, scopes) go to the
+/// host-only `oauth.json` via `save_oauth_state` — see ADR-060.
+fn save_access_token_to_dir(svc_dir: &std::path::Path, access_token: &str) -> Result<(), String> {
     let max = crate::types::MAX_CREDENTIAL_BYTES;
-    if tokens.access_token.len() > max {
+    if access_token.len() > max {
         return Err(format!("access_token exceeds {max} bytes"));
     }
-    if tokens.refresh_token.len() > max {
-        return Err(format!("refresh_token exceeds {max} bytes"));
-    }
     std::fs::create_dir_all(svc_dir).map_err(|e| e.to_string())?;
-
     let at_path = svc_dir.join("access_token");
-    std::fs::write(&at_path, &tokens.access_token).map_err(|e| e.to_string())?;
-    crate::fs_perms::set_owner_only(&at_path)?;
-
-    let rt_path = svc_dir.join("refresh_token");
-    std::fs::write(&rt_path, &tokens.refresh_token).map_err(|e| e.to_string())?;
-    crate::fs_perms::set_owner_only(&rt_path)?;
-
+    // Atomic O_CREAT|0o600 write — avoids the TOCTOU window present in the
+    // legacy fs::write + set_owner_only pair (PR1 / fs_perms SSOT).
+    speedwave_runtime::fs_perms::write_restricted_file(&at_path, access_token)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Save access_token and refresh_token to the tokens directory.
-fn save_tokens(project: &str, tokens: &MsTokenResponse) -> Result<(), String> {
+/// Write the host-only OAuth state file `~/.speedwave/oauth/<project>/<service>.json`
+/// with mode 0o600 in an owner-only parent directory (0o700). Used by
+/// `save_tokens` after a successful device-code flow; the `oauth` worker writes
+/// the same file shape on refresh (ADR-060).
+fn save_oauth_state(
+    project: &str,
+    service: &str,
+    client_id: &str,
+    tenant_id: &str,
+    refresh_token: &str,
+    scopes: &str,
+    expires_in: u64,
+) -> Result<(), String> {
+    let max = crate::types::MAX_CREDENTIAL_BYTES;
+    if refresh_token.len() > max {
+        return Err(format!("refresh_token exceeds {max} bytes"));
+    }
+    let path = speedwave_runtime::plugin::oauth_state_file(project, service);
+    let parent = path.parent().ok_or_else(|| "no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+
+    // Owner-only parent dir: defense in depth (the oauth worker also expects this).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let expires_at_iso = iso8601_from_unix_ms(now_ms + expires_in.saturating_mul(1000));
+    let last_refresh_iso = iso8601_from_unix_ms(now_ms);
+
+    // Granted scopes start equal to requested (initial consent succeeded).
+    let scopes_vec: Vec<&str> = scopes.split_whitespace().collect();
+
+    let state = serde_json::json!({
+        "provider": "microsoft",
+        "clientId": client_id,
+        "tenantId": tenant_id,
+        "scopes": scopes_vec,
+        "grantedScopes": scopes_vec,
+        "refreshToken": refresh_token,
+        "expiresAt": expires_at_iso,
+        "lastRefreshAt": last_refresh_iso,
+    });
+    let body = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())? + "\n";
+    // Atomic O_CREAT|0o600 — oauth.json contains refresh_token, must never
+    // exist with broader perms even for a microsecond.
+    speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Format `unix_ms` as `YYYY-MM-DDTHH:MM:SS.sssZ` (UTC).
+fn iso8601_from_unix_ms(unix_ms: u64) -> String {
+    let secs = (unix_ms / 1000) as i64;
+    let ms = (unix_ms % 1000) as u32;
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, ms * 1_000_000)
+        .unwrap_or_else(chrono::Utc::now);
+    dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+/// Save tokens after a successful device-code flow: splits across two locations
+/// per ADR-060.
+fn save_tokens(
+    project: &str,
+    client_id: &str,
+    tenant_id: &str,
+    tokens: &MsTokenResponse,
+) -> Result<(), String> {
     let svc_dir =
         speedwave_runtime::plugin::token_dir(project, "sharepoint").map_err(|e| e.to_string())?;
-    save_tokens_to_dir(&svc_dir, tokens)
+    save_access_token_to_dir(&svc_dir, &tokens.access_token)?;
+    save_oauth_state(
+        project,
+        "sharepoint",
+        client_id,
+        tenant_id,
+        &tokens.refresh_token,
+        speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+        tokens.expires_in(),
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +374,8 @@ pub async fn start_sharepoint_oauth(
     let poll_request_id = request_id.clone();
     let poll_project = project.clone();
     let poll_app = app.clone();
+    let poll_client_id = client_id.clone();
+    let poll_tenant_id = tenant_id.clone();
     let device_code = dc_resp.device_code.clone();
     let mut interval = dc_resp.interval;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(dc_resp.expires_in);
@@ -370,7 +453,9 @@ pub async fn start_sharepoint_oauth(
 
                     // Try parsing as success
                     if let Ok(tokens) = serde_json::from_slice::<MsTokenResponse>(&body_bytes) {
-                        if let Err(e) = save_tokens(&poll_project, &tokens) {
+                        if let Err(e) =
+                            save_tokens(&poll_project, &poll_client_id, &poll_tenant_id, &tokens)
+                        {
                             emit_progress(
                                 &poll_app,
                                 "error",
@@ -781,82 +866,167 @@ mod tests {
         );
     }
 
-    // -- save_tokens --
+    // -- save_access_token_to_dir & save_oauth_state (ADR-060 split) --
 
     #[test]
-    fn save_tokens_to_dir_writes_files_and_sets_permissions() {
+    fn save_access_token_to_dir_writes_access_token_only() {
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = tmp.path().join("sharepoint");
-        let tokens = MsTokenResponse {
-            access_token: "at-secret".to_string(),
-            refresh_token: "rt-secret".to_string(),
-            _token_type: "Bearer".to_string(),
-            _expires_in: 3600,
-        };
-
-        save_tokens_to_dir(&svc_dir, &tokens).unwrap();
+        save_access_token_to_dir(&svc_dir, "at-secret").unwrap();
 
         let at_path = svc_dir.join("access_token");
-        let rt_path = svc_dir.join("refresh_token");
         assert_eq!(std::fs::read_to_string(&at_path).unwrap(), "at-secret");
-        assert_eq!(std::fs::read_to_string(&rt_path).unwrap(), "rt-secret");
+        // refresh_token must NOT be written here — it lives in oauth.json per ADR-060.
+        assert!(
+            !svc_dir.join("refresh_token").exists(),
+            "refresh_token must not be in the worker-mounted tokens dir"
+        );
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let at_mode = std::fs::metadata(&at_path).unwrap().permissions().mode() & 0o777;
-            let rt_mode = std::fs::metadata(&rt_path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(at_mode, 0o600, "access_token should have 0o600 permissions");
-            assert_eq!(
-                rt_mode, 0o600,
-                "refresh_token should have 0o600 permissions"
-            );
+            let mode = std::fs::metadata(&at_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
         }
     }
 
     #[test]
-    fn save_tokens_to_dir_rejects_oversized_access_token() {
+    fn save_access_token_rejects_oversized() {
         let tmp = tempfile::tempdir().unwrap();
-        let tokens = MsTokenResponse {
-            access_token: "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1),
-            refresh_token: "rt".to_string(),
-            _token_type: "Bearer".to_string(),
-            _expires_in: 3600,
-        };
-        let result = save_tokens_to_dir(&tmp.path().join("sp"), &tokens);
-        assert!(result.is_err(), "should reject oversized access_token");
+        let big = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
+        let result = save_access_token_to_dir(&tmp.path().join("sp"), &big);
         assert!(result.unwrap_err().contains("access_token"));
     }
 
     #[test]
-    fn save_tokens_to_dir_rejects_oversized_refresh_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        let tokens = MsTokenResponse {
-            access_token: "at".to_string(),
-            refresh_token: "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1),
-            _token_type: "Bearer".to_string(),
-            _expires_in: 3600,
-        };
-        let result = save_tokens_to_dir(&tmp.path().join("sp"), &tokens);
-        assert!(result.is_err(), "should reject oversized refresh_token");
-        assert!(result.unwrap_err().contains("refresh_token"));
+    fn save_access_token_returns_err_on_unwritable_path() {
+        let impossible = std::path::Path::new("/dev/null/impossible");
+        let result = save_access_token_to_dir(impossible, "at");
+        assert!(result.is_err(), "must fail on unwritable path");
     }
 
     #[test]
-    fn save_tokens_to_dir_returns_err_on_unwritable_path() {
-        let tokens = MsTokenResponse {
-            access_token: "at".to_string(),
-            refresh_token: "rt".to_string(),
-            _token_type: "Bearer".to_string(),
-            _expires_in: 3600,
-        };
-        // /dev/null is a file, not a directory — create_dir_all will fail
-        let impossible = std::path::Path::new("/dev/null/impossible");
-        let result = save_tokens_to_dir(impossible, &tokens);
-        assert!(
-            result.is_err(),
-            "save_tokens_to_dir should fail on unwritable path"
+    #[serial]
+    fn save_oauth_state_writes_json_with_required_fields() {
+        // Use a one-off SPEEDWAVE_DATA_DIR so the oauth/<project>/ dir is in tempdir
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        save_oauth_state(
+            "test-project",
+            "sharepoint",
+            "11111111-1111-1111-1111-111111111111",
+            "common",
+            "rt-secret",
+            speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+            3600,
+        )
+        .unwrap();
+
+        let path = speedwave_runtime::plugin::oauth_state_file("test-project", "sharepoint");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(json["provider"], "microsoft");
+        assert_eq!(json["clientId"], "11111111-1111-1111-1111-111111111111");
+        assert_eq!(json["tenantId"], "common");
+        assert_eq!(json["refreshToken"], "rt-secret");
+        assert!(json["scopes"].as_array().unwrap().len() >= 2);
+        assert!(json["grantedScopes"].as_array().unwrap().len() >= 2);
+        assert!(json["expiresAt"].as_str().unwrap().ends_with('Z'));
+        assert!(json["lastRefreshAt"].as_str().unwrap().ends_with('Z'));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "oauth.json must be chmod 600");
+            // Parent dir 0o700 (defense in depth)
+            let parent_mode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(parent_mode, 0o700, "oauth/<project> dir must be 0o700");
+        }
+
+        // Restore env
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn save_oauth_state_rejects_oversized_refresh_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let big = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
+        let result = save_oauth_state(
+            "test-project",
+            "sharepoint",
+            "11111111-1111-1111-1111-111111111111",
+            "common",
+            &big,
+            speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+            3600,
         );
+        assert!(result.unwrap_err().contains("refresh_token"));
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn save_tokens_splits_into_two_locations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let tokens = MsTokenResponse {
+            access_token: "at-secret".to_string(),
+            refresh_token: "rt-secret".to_string(),
+            _token_type: "Bearer".to_string(),
+            expires_in: 3600,
+        };
+        save_tokens(
+            "test-project",
+            "11111111-1111-1111-1111-111111111111",
+            "common",
+            &tokens,
+        )
+        .unwrap();
+
+        // access_token in worker-mounted dir
+        let at_path = speedwave_runtime::plugin::token_dir("test-project", "sharepoint")
+            .unwrap()
+            .join("access_token");
+        assert_eq!(std::fs::read_to_string(&at_path).unwrap(), "at-secret");
+        // refresh_token NOT in worker-mounted dir
+        assert!(
+            !speedwave_runtime::plugin::token_dir("test-project", "sharepoint")
+                .unwrap()
+                .join("refresh_token")
+                .exists(),
+            "refresh_token must NOT be in the worker-mounted dir"
+        );
+        // refresh_token + client_id + tenant_id in oauth.json
+        let state_path = speedwave_runtime::plugin::oauth_state_file("test-project", "sharepoint");
+        let content = std::fs::read_to_string(&state_path).unwrap();
+        assert!(content.contains("rt-secret"));
+        assert!(content.contains("11111111-1111-1111-1111-111111111111"));
+        assert!(content.contains("common"));
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
     }
 
     #[test]
@@ -876,16 +1046,11 @@ mod tests {
             });
         }
 
-        // Simulate the polling task's error path: save_tokens returns Err, then
-        // the task calls clear_flow_if_current(&request_id)
-        let tokens = MsTokenResponse {
-            access_token: "at".to_string(),
-            refresh_token: "rt".to_string(),
-            _token_type: "Bearer".to_string(),
-            _expires_in: 3600,
-        };
+        // Simulate the polling task's error path: save fails, then the task calls
+        // clear_flow_if_current(&request_id). Use save_access_token_to_dir here
+        // (formerly save_tokens_to_dir before the ADR-060 split).
         let impossible = std::path::Path::new("/dev/null/impossible");
-        let save_result = save_tokens_to_dir(impossible, &tokens);
+        let save_result = save_access_token_to_dir(impossible, "at-secret");
         assert!(save_result.is_err(), "save should fail");
 
         // This is what the polling task does after save failure

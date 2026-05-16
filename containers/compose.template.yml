@@ -108,9 +108,11 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      # :rw required — SharePoint OAuth tokens expire and token-manager.ts
-      # writes refreshed access_token / refresh_token back to /tokens/
-      - ${TOKENS_DIR}/sharepoint:/tokens:rw
+      # :ro per ADR-060 — OAuth token refresh moved to the host-side `oauth`
+      # worker. The SharePoint container only reads access_token / site_id /
+      # base_path; refresh writes happen on the host (oauth worker) which
+      # updates /tokens/access_token visible through this read-only mount.
+      - ${TOKENS_DIR}/sharepoint:/tokens:ro
       - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}

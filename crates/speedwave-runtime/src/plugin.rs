@@ -306,6 +306,25 @@ pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
         .join(service_id))
 }
 
+/// Returns `~/.speedwave/oauth/<project>/<service_id>.json` — the host-only OAuth
+/// state file containing `refreshToken`, `clientId`, `tenantId`, scopes,
+/// `expiresAt`, `lastRefreshAt`, `grantedScopes` (ADR-060). This file is read
+/// and written only by the host (Tauri `oauth_cmd` for setup; the `oauth` worker
+/// for refresh). It is NOT mounted into any worker container.
+pub fn oauth_state_file(project: &str, service_id: &str) -> PathBuf {
+    oauth_state_file_in(consts::data_dir(), project, service_id)
+}
+
+/// Parameterised by `data_dir` so that one-shot migration code can avoid the
+/// `consts::data_dir()` `OnceLock` cache shared across the `cargo test` binary.
+/// Production callers go through `oauth_state_file` and inherit the SSOT path.
+pub fn oauth_state_file_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
+    data_dir
+        .join(consts::OAUTH_SUBDIR)
+        .join(project)
+        .join(format!("{service_id}.json"))
+}
+
 /// Testable version: constructs `<base>/.speedwave/tokens/<project>/<service_id>/`
 #[cfg(test)]
 fn token_dir_with_base(home: &Path, project: &str, service_id: &str) -> PathBuf {

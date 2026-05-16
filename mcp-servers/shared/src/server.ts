@@ -41,6 +41,17 @@ export interface MCPServerAuth {
   token: string;
   /** Paths excluded from auth (default: ['/health']) */
   publicPaths?: string[];
+  /**
+   * Optional additional bearer tokens mapped to a caller identifier (e.g. a
+   * consumer service id). When set, requests with a matching token authenticate
+   * as that caller; the resolved caller id is available on `res.locals.caller`
+   * for downstream tool handlers. The primary `token` always authenticates as
+   * caller `""` (used for the supervisor's own diagnostic calls).
+   *
+   * Used by the `oauth` worker (ADR-060) to derive the calling service id
+   * from the bearer instead of trusting a model-controlled `service` param.
+   */
+  callerTokens?: Record<string, string>;
 }
 
 /**
@@ -144,7 +155,17 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     if (!options.auth.token || !options.auth.token.trim()) {
       throw new Error(`${name}: auth.token must be a non-empty string`);
     }
-    const { token, publicPaths = ['/health'] } = options.auth;
+    const { token, publicPaths = ['/health'], callerTokens } = options.auth;
+    if (callerTokens) {
+      for (const [tok, caller] of Object.entries(callerTokens)) {
+        if (!tok || !tok.trim()) {
+          throw new Error(`${name}: auth.callerTokens has empty bearer for caller '${caller}'`);
+        }
+        if (!caller || !caller.trim()) {
+          throw new Error(`${name}: auth.callerTokens has empty caller id for one bearer`);
+        }
+      }
+    }
 
     /**
      * Named for test discoverability (shows as 'bearerAuth' in Express router stack).
@@ -161,14 +182,28 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
       const header = req.headers.authorization ?? '';
       const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
 
-      if (!provided || !safeTokenCompare(provided, token)) {
-        // eslint-disable-next-line no-control-regex -- intentional: strip C0/DEL control chars to prevent log injection
-        const safePath = req.path.replace(/[\x00-\x1f\x7f]/g, '?');
-        console.warn(`${ts()} AUTH DENIED ${req.method} ${safePath} from ${req.ip ?? 'unknown'}`);
-        res.status(401).json({ error: 'Unauthorized' });
+      // res.locals is set up by Express on real requests, but absent in some
+      // unit-test mocks — guard with an `??=`.
+      const locals: Record<string, unknown> = (res.locals ??= {});
+      if (provided && safeTokenCompare(provided, token)) {
+        locals.caller = '';
+        next();
         return;
       }
-      next();
+      if (callerTokens && provided) {
+        for (const [tok, caller] of Object.entries(callerTokens)) {
+          if (safeTokenCompare(provided, tok)) {
+            locals.caller = caller;
+            next();
+            return;
+          }
+        }
+      }
+
+      // eslint-disable-next-line no-control-regex -- intentional: strip C0/DEL control chars to prevent log injection
+      const safePath = req.path.replace(/[\x00-\x1f\x7f]/g, '?');
+      console.warn(`${ts()} AUTH DENIED ${req.method} ${safePath} from ${req.ip ?? 'unknown'}`);
+      res.status(401).json({ error: 'Unauthorized' });
     }
 
     app.use(bearerAuth);

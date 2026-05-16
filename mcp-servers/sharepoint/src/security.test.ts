@@ -15,7 +15,6 @@ const mockConfig: SharePointConfig = {
   clientId: 'test-client-id',
   tenantId: 'test-tenant-id',
   siteId: 'test-site-id',
-  basePath: 'Documents/TestFolder',
   accessToken: 'test-access-token',
   refreshToken: 'test-refresh-token',
 };

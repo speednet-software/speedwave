@@ -19,7 +19,8 @@
     "atlassian",
     "office",
     "os",
-    "host_exec"
+    "host_exec",
+    "oauth"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",

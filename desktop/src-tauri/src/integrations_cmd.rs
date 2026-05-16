@@ -9,6 +9,56 @@ use crate::types::{
 };
 use speedwave_runtime::config;
 use speedwave_runtime::log_sanitizer;
+use speedwave_runtime::plugin;
+
+/// For SharePoint only: returns `Some("scope_mismatch")` when the stored
+/// `grantedScopes` is a strict subset of the currently-required scopes (or
+/// empty, which is the migration sentinel ADR-060 writes). Returns `None`
+/// when there is no oauth.json yet (never configured) or when the granted
+/// scopes already cover the required set.
+///
+/// This lets the integrations page surface a "Re-authorize SharePoint" banner
+/// proactively instead of waiting for the first SharePoint tool call to fail
+/// with `OAUTH_SCOPE_MISMATCH`.
+fn detect_oauth_action_required(project: &str, service: &str) -> Option<String> {
+    if service != "sharepoint" {
+        return None;
+    }
+    let oauth_path = plugin::oauth_state_file(project, service);
+    let raw = std::fs::read_to_string(&oauth_path).ok()?;
+    let required = sharepoint_required_scopes();
+    detect_scope_mismatch(&raw, &required)
+}
+
+/// Pure helper for `detect_oauth_action_required` — given the raw `oauth.json`
+/// contents and the list of currently-required scopes, returns
+/// `Some("scope_mismatch")` if `grantedScopes` does not cover the required set.
+/// Extracted so unit tests don't have to round-trip through the filesystem and
+/// the `consts::data_dir()` `OnceLock` cache.
+fn detect_scope_mismatch(oauth_json_raw: &str, required: &[String]) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(oauth_json_raw).ok()?;
+    let granted: Vec<String> = json
+        .get("grantedScopes")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_lowercase()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if required.iter().all(|r| granted.contains(r)) {
+        None
+    } else {
+        Some("scope_mismatch".to_string())
+    }
+}
+
+fn sharepoint_required_scopes() -> Vec<String> {
+    speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES
+        .split_whitespace()
+        .map(|s| s.to_lowercase())
+        .collect()
+}
 
 /// Returns the field keys that Redmine stores in config.json (derived from SSOT in consts).
 fn redmine_config_json_fields() -> Vec<&'static str> {
@@ -111,15 +161,16 @@ fn save_redmine_credentials(
             config_obj[key] = serde_json::Value::String(value.clone());
         } else {
             let file_path = svc_dir.join(key);
-            std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
-            crate::fs_perms::set_owner_only(&file_path)?;
+            // Atomic O_CREAT|0o600 — close the TOCTOU window for credential files.
+            speedwave_runtime::fs_perms::write_restricted_file(&file_path, value)
+                .map_err(|e| e.to_string())?;
         }
     }
 
     if has_config_fields {
         let json = serde_json::to_string_pretty(&config_obj).map_err(|e| e.to_string())?;
-        std::fs::write(&config_path, &json).map_err(|e| e.to_string())?;
-        crate::fs_perms::set_owner_only(&config_path)?;
+        speedwave_runtime::fs_perms::write_restricted_file(&config_path, &json)
+            .map_err(|e| e.to_string())?;
     }
 
     Ok(())
@@ -194,6 +245,12 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             (values, None)
         };
 
+        let oauth_action_required = if configured {
+            detect_oauth_action_required(&project, svc)
+        } else {
+            None
+        };
+
         service_entries.push(IntegrationStatusEntry {
             service: svc.to_string(),
             enabled,
@@ -204,6 +261,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             current_values,
             mappings,
             badge: svc_desc.badge.map(|b| b.to_string()),
+            oauth_action_required,
         });
     }
 
@@ -251,19 +309,37 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         serde_json::json!({})
     };
 
+    // ADR-060: any service whose descriptor declares `oauth_state_fields` keeps
+    // those fields in `oauth/<project>/<service>.json` (off-mount). Today only
+    // SharePoint, but `svc_desc.oauth_state_fields.is_some()` is the SSOT so
+    // future OAuth-using services need no code change here.
+    let oauth_state_json: Option<serde_json::Value> = if svc_desc.oauth_state_fields.is_some() {
+        let path = speedwave_runtime::plugin::oauth_state_file(project, service);
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    } else {
+        None
+    };
+
     // Skip optional fields (e.g. Redmine project_id)
     svc_desc
         .auth_fields
         .iter()
         .filter(|f| !f.optional)
-        .all(|f| {
-            if f.stored_in_config_json {
-                config_json
-                    .get(f.key)
-                    .and_then(|v| v.as_str())
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false)
-            } else {
+        .all(|f| match f.storage {
+            speedwave_runtime::consts::FieldStorage::OAuthState => oauth_state_json
+                .as_ref()
+                .and_then(|j| j.get(snake_to_oauth_json_key(f.key)))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            speedwave_runtime::consts::FieldStorage::WorkerMountedConfig => config_json
+                .get(f.key)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            speedwave_runtime::consts::FieldStorage::WorkerMountedToken => {
                 let path = svc_token_dir.join(f.key);
                 std::fs::metadata(&path)
                     .map(|m| m.len() > 0)
@@ -272,7 +348,23 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         })
 }
 
+/// Map a descriptor's snake_case `key` to the camelCase property name used
+/// inside `oauth/<project>/<service>.json` (the Microsoft OAuth wire format).
+/// Centralised so the routing helper and `save_*_credentials` agree.
+fn snake_to_oauth_json_key(key: &str) -> &str {
+    match key {
+        "client_id" => "clientId",
+        "tenant_id" => "tenantId",
+        "refresh_token" => "refreshToken",
+        _ => key,
+    }
+}
+
 /// Testable core: takes an explicit `home` path so tests can inject a temp dir.
+/// Mirrors the routing logic of the production `is_service_configured`:
+/// `FieldStorage::OAuthState` fields are looked up in
+/// `<home>/.speedwave/oauth/<project>/<service>.json`, the rest in the
+/// worker-mounted `tokens/<project>/<service>/` dir.
 #[cfg(test)]
 fn is_service_configured_with_home(home: &std::path::Path, project: &str, service: &str) -> bool {
     let svc_desc = match speedwave_runtime::consts::find_mcp_service(service) {
@@ -284,11 +376,8 @@ fn is_service_configured_with_home(home: &std::path::Path, project: &str, servic
     if svc_desc.auth_fields.is_empty() {
         return true;
     }
-    let svc_token_dir = home
-        .join(speedwave_runtime::consts::DATA_DIR)
-        .join("tokens")
-        .join(project)
-        .join(service);
+    let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
+    let svc_token_dir = data_dir.join("tokens").join(project).join(service);
 
     let has_config_fields = svc_desc.auth_fields.iter().any(|f| f.stored_in_config_json);
     let config_json = if has_config_fields {
@@ -297,19 +386,36 @@ fn is_service_configured_with_home(home: &std::path::Path, project: &str, servic
         serde_json::json!({})
     };
 
+    let oauth_state_json: Option<serde_json::Value> = if svc_desc.oauth_state_fields.is_some() {
+        let path = data_dir
+            .join(speedwave_runtime::consts::OAUTH_SUBDIR)
+            .join(project)
+            .join(format!("{}.json", service));
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    } else {
+        None
+    };
+
     // Skip optional fields (e.g. Redmine project_id)
     svc_desc
         .auth_fields
         .iter()
         .filter(|f| !f.optional)
-        .all(|f| {
-            if f.stored_in_config_json {
-                config_json
-                    .get(f.key)
-                    .and_then(|v| v.as_str())
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false)
-            } else {
+        .all(|f| match f.storage {
+            speedwave_runtime::consts::FieldStorage::OAuthState => oauth_state_json
+                .as_ref()
+                .and_then(|j| j.get(snake_to_oauth_json_key(f.key)))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            speedwave_runtime::consts::FieldStorage::WorkerMountedConfig => config_json
+                .get(f.key)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            speedwave_runtime::consts::FieldStorage::WorkerMountedToken => {
                 let path = svc_token_dir.join(f.key);
                 std::fs::metadata(&path)
                     .map(|m| m.len() > 0)
@@ -799,27 +905,109 @@ pub fn save_integration_credentials(
         .join(&service);
     std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
 
-    // Redmine stores some fields in config.json — dispatch to dedicated handler
+    // Redmine stores some fields in `config.json` rather than as individual
+    // files; route through its dedicated handler. The Redmine pattern is the
+    // only built-in service that uses `WorkerMountedConfig`, so a per-service
+    // dispatch is simpler than weaving config.json semantics into the generic
+    // routing below.
     if service == "redmine" {
         return save_redmine_credentials(&svc_dir, &credentials, allowed);
     }
 
-    // Generic handler: write each credential as an individual file
-    for (key, value) in &credentials {
-        if !allowed.contains(&key.as_str()) {
+    // Generic routing driven by `FieldStorage` (plan §PR3:290-299). Each UI
+    // field lands in the storage tier its descriptor declares — `OAuthState`
+    // fields are merged into `oauth/<project>/<service>.json`, everything
+    // else lands in the worker-mounted tokens dir. Adding a new OAuth-using
+    // service means flipping `storage` on its descriptor; no edit here.
+    save_with_field_storage(&project, &service, &svc_dir, &credentials)
+}
+
+/// Generic per-field routing of UI credentials by `FieldStorage` tier.
+/// Partitions `credentials` into the worker-mounted file set and the OAuth
+/// state JSON merge set, then writes both atomically with `0o600`.
+fn save_with_field_storage(
+    project: &str,
+    service: &str,
+    svc_dir: &std::path::Path,
+    credentials: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    use std::collections::HashMap;
+    let svc_desc = speedwave_runtime::consts::find_mcp_service(service)
+        .ok_or_else(|| format!("unknown service: {}", service))?;
+
+    let mut to_oauth_json: HashMap<&str, &str> = HashMap::new();
+    let mut to_tokens_dir: HashMap<&str, &str> = HashMap::new();
+    for (key, value) in credentials {
+        if !crate::types::is_allowed_field(service, key) {
             return Err(format!(
                 "field '{}' not allowed for service '{}'",
                 key, service
             ));
         }
         validate_credential_field(key, value)?;
-
-        let file_path = svc_dir.join(key);
-        std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
-        crate::fs_perms::set_owner_only(&file_path)?;
+        match crate::types::field_storage(service, key) {
+            Some(speedwave_runtime::consts::FieldStorage::OAuthState) => {
+                to_oauth_json.insert(key.as_str(), value.as_str());
+            }
+            _ => {
+                to_tokens_dir.insert(key.as_str(), value.as_str());
+            }
+        }
     }
 
+    for (key, value) in &to_tokens_dir {
+        let file_path = svc_dir.join(key);
+        speedwave_runtime::fs_perms::write_restricted_file(&file_path, value)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if !to_oauth_json.is_empty() {
+        if svc_desc.oauth_state_fields.is_none() {
+            return Err(format!(
+                "service '{}' has no oauth_state_fields but received OAuth-state values",
+                service
+            ));
+        }
+        merge_oauth_state_json(project, service, &to_oauth_json)?;
+    }
     Ok(())
+}
+
+/// Read-modify-write merge into `oauth/<project>/<service>.json`. Atomic write
+/// preserves owner-only perms (0o600 on Unix). Caller's UI fields use
+/// snake_case keys; we translate them to the camelCase Microsoft OAuth wire
+/// format via {@link snake_to_oauth_json_key}.
+fn merge_oauth_state_json(
+    project: &str,
+    service: &str,
+    fields: &std::collections::HashMap<&str, &str>,
+) -> Result<(), String> {
+    let path = speedwave_runtime::plugin::oauth_state_file(project, service);
+    let parent = path.parent().ok_or_else(|| "no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    let mut state: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({ "provider": "microsoft" })
+    };
+    let obj = state
+        .as_object_mut()
+        .ok_or_else(|| "oauth state must be a JSON object".to_string())?;
+    for (key, value) in fields {
+        obj.insert(
+            snake_to_oauth_json_key(key).to_string(),
+            serde_json::json!(value),
+        );
+    }
+    let body = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())? + "\n";
+    speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -863,8 +1051,8 @@ pub fn save_redmine_mappings(
     config_obj["mappings"] = serde_json::Value::Object(mappings.into_iter().collect());
 
     let json = serde_json::to_string_pretty(&config_obj).map_err(|e| e.to_string())?;
-    std::fs::write(&config_path, &json).map_err(|e| e.to_string())?;
-    crate::fs_perms::set_owner_only(&config_path)?;
+    speedwave_runtime::fs_perms::write_restricted_file(&config_path, &json)
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -885,6 +1073,19 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
         let path = svc_dir.join(field);
         if path.exists() {
             std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // ADR-060: for any service whose descriptor declares `oauth_state_fields`,
+    // also remove the host-only `oauth/<project>/<service>.json`. It holds
+    // refreshToken / clientId / tenantId / grantedScopes / expiresAt /
+    // lastRefreshAt that are intentionally outside `allowed` (managed by the
+    // host-side `oauth` worker, not the UI form).
+    let svc_desc = speedwave_runtime::consts::find_mcp_service(&service);
+    if svc_desc.is_some_and(|d| d.oauth_state_fields.is_some()) {
+        let oauth_path = speedwave_runtime::plugin::oauth_state_file(&project, &service);
+        if oauth_path.exists() {
+            std::fs::remove_file(&oauth_path).map_err(|e| e.to_string())?;
         }
     }
 
@@ -1124,6 +1325,84 @@ mod tests {
                 enabled: Some(true)
             }
         ));
+    }
+
+    // -- detect_scope_mismatch tests (PR3 / FIX-P1-4 re-consent banner) --
+
+    #[test]
+    fn detect_scope_mismatch_returns_some_when_granted_is_empty() {
+        let raw = r#"{"provider":"microsoft","grantedScopes":[]}"#;
+        let required = vec!["sites.manage.all".to_string()];
+        assert_eq!(
+            detect_scope_mismatch(raw, &required),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_some_when_granted_is_strict_subset() {
+        let raw = r#"{"provider":"microsoft","grantedScopes":["user.read"]}"#;
+        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
+        assert_eq!(
+            detect_scope_mismatch(raw, &required),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_none_when_granted_covers_required() {
+        let raw = r#"{"provider":"microsoft","grantedScopes":["sites.manage.all","user.read","files.readwrite.all","offline_access"]}"#;
+        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
+        assert!(detect_scope_mismatch(raw, &required).is_none());
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_none_when_granted_matches_with_different_case() {
+        // grantedScopes typically come back in mixed case from Microsoft
+        // (e.g. `Sites.Manage.All`). The helper normalises both sides.
+        let raw = r#"{"provider":"microsoft","grantedScopes":["Sites.Manage.All","User.Read"]}"#;
+        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
+        assert!(detect_scope_mismatch(raw, &required).is_none());
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_none_on_malformed_json() {
+        // Best-effort — if oauth.json is corrupt we treat it as "no signal,
+        // don't surface a banner" (the next refresh will fail loudly).
+        let required = vec!["sites.manage.all".to_string()];
+        assert!(detect_scope_mismatch("not-json", &required).is_none());
+        assert!(detect_scope_mismatch("{}", &required).is_some());
+    }
+
+    #[test]
+    fn detect_scope_mismatch_treats_missing_grantedscopes_as_empty() {
+        let raw = r#"{"provider":"microsoft"}"#;
+        let required = vec!["sites.manage.all".to_string()];
+        assert_eq!(
+            detect_scope_mismatch(raw, &required),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_oauth_action_required_only_acts_on_sharepoint() {
+        // For non-sharepoint services we never even read the oauth.json — the
+        // fact that consts::data_dir() may be unrelated/empty must not matter.
+        assert!(detect_oauth_action_required("any-project", "slack").is_none());
+        assert!(detect_oauth_action_required("any-project", "redmine").is_none());
+        assert!(detect_oauth_action_required("any-project", "gitlab").is_none());
+    }
+
+    #[test]
+    fn sharepoint_required_scopes_matches_ssot_lowercased() {
+        let scopes = sharepoint_required_scopes();
+        let expected: Vec<String> = speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES
+            .split_whitespace()
+            .map(|s| s.to_lowercase())
+            .collect();
+        assert_eq!(scopes, expected);
+        // Sanity: PR3 bumped this to include Sites.Manage.All.
+        assert!(scopes.iter().any(|s| s.contains("sites.manage.all")));
     }
 
     #[test]
@@ -1451,7 +1730,7 @@ mod tests {
     #[test]
     fn is_service_configured_returns_false_when_only_secrets_exist() {
         // SharePoint: access_token + refresh_token exist (file-based secrets),
-        // but client_id/tenant_id/site_id/base_path are missing → false
+        // but client_id/tenant_id/site_id are missing → false
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
         std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
@@ -1465,19 +1744,27 @@ mod tests {
 
     #[test]
     fn is_service_configured_returns_true_when_all_fields_present() {
-        // SharePoint: all 6 auth_fields are file-based → all must exist as non-empty files
+        // SharePoint after base_path removal: access_token + site_id are
+        // worker-mounted; refresh_token / client_id / tenant_id live in
+        // oauth.json. is_service_configured_with_home checks the worker-mounted
+        // dir (we feed minimum), and the OAuthState fields via the JSON.
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
         std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
-        std::fs::write(svc_dir.join("refresh_token"), "ref").unwrap();
+        std::fs::write(svc_dir.join("site_id"), "my-site").unwrap();
+
+        let oauth_dir = tmp.path().join(".speedwave").join("oauth").join("proj");
+        std::fs::create_dir_all(&oauth_dir).unwrap();
         std::fs::write(
-            svc_dir.join("client_id"),
-            "550e8400-e29b-41d4-a716-446655440000",
+            oauth_dir.join("sharepoint.json"),
+            serde_json::json!({
+                "clientId": "550e8400-e29b-41d4-a716-446655440000",
+                "tenantId": "common",
+                "refreshToken": "ref",
+            })
+            .to_string(),
         )
         .unwrap();
-        std::fs::write(svc_dir.join("tenant_id"), "common").unwrap();
-        std::fs::write(svc_dir.join("site_id"), "my-site").unwrap();
-        std::fs::write(svc_dir.join("base_path"), "/Shared Documents").unwrap();
 
         assert!(
             is_service_configured_with_home(tmp.path(), "proj", "sharepoint"),

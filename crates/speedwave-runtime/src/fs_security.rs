@@ -122,11 +122,15 @@ pub(crate) fn collect_security_paths(
         data_dir.join("secrets"),
         data_dir.join("snapshots"),
         data_dir.join("tokens"),
+        // ADR-060: per-project OAuth state dir; refreshToken / clientId live here,
+        // never inside the SharePoint container's mount. Must be 0o700.
+        data_dir.join(consts::OAUTH_SUBDIR),
         // Per-project directories
         data_dir.join("secrets").join(project),
         data_dir.join("snapshots").join(project),
         data_dir.join("ide-bridge"),
         data_dir.join("tokens").join(project),
+        data_dir.join(consts::OAUTH_SUBDIR).join(project),
     ];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
@@ -194,6 +198,22 @@ pub(crate) fn collect_security_paths(
         }
     }
 
+    // --- oauth/<project>/* (ADR-060 OAuth worker state) ---
+    // Every file under here must be 0o600: oauth.json (refreshToken, clientId,
+    // tenantId, grantedScopes), `.bearer-map.json` (consumer → service map),
+    // per-consumer `bearer-<service>` tokens, supervisor `auth-token`, `port`,
+    // `pid`, and the rotating `audit.log` / `audit.log.1`.
+    let oauth_project_dir = data_dir.join(consts::OAUTH_SUBDIR).join(project);
+    if let Ok(entries) = std::fs::read_dir(&oauth_project_dir) {
+        for entry in entries.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_file() {
+                    files.push(entry.path());
+                }
+            }
+        }
+    }
+
     (dirs, files)
 }
 
@@ -236,6 +256,8 @@ mod tests {
             data_dir.join("tokens/proj/atlassian"),
             data_dir.join("tokens/proj/empty-service"),
             data_dir.join("ide-bridge"),
+            data_dir.join("oauth"),
+            data_dir.join("oauth/proj"),
         ];
         for dir in &dirs_to_create {
             std::fs::create_dir_all(dir).unwrap();
@@ -251,6 +273,15 @@ mod tests {
             data_dir.join("snapshots/proj/snapshot.json"),
             data_dir.join("ide-bridge/1234.lock"),
             data_dir.join("bundle-state.json"),
+            // ADR-060 oauth worker state (PR2/PR3):
+            data_dir.join("oauth/proj/sharepoint.json"),
+            data_dir.join("oauth/proj/.bearer-map.json"),
+            data_dir.join("oauth/proj/bearer-sharepoint"),
+            data_dir.join("oauth/proj/auth-token"),
+            data_dir.join("oauth/proj/port"),
+            data_dir.join("oauth/proj/pid"),
+            data_dir.join("oauth/proj/audit.log"),
+            data_dir.join("oauth/proj/audit.log.1"),
         ];
         for file in &files_to_create {
             std::fs::write(file, "test").unwrap();
@@ -272,10 +303,11 @@ mod tests {
 
         let (dirs, files) = collect_security_paths(data_dir, "proj");
 
-        // Expected dirs (12): secrets, secrets/proj, snapshots, snapshots/proj,
+        // Expected dirs (14): secrets, secrets/proj, snapshots, snapshots/proj,
         // tokens, tokens/proj, tokens/proj/slack, tokens/proj/gitlab,
-        // tokens/proj/github, tokens/proj/atlassian, tokens/proj/empty-service, ide-bridge
-        assert_eq!(dirs.len(), 12, "expected 12 dirs, got: {dirs:?}");
+        // tokens/proj/github, tokens/proj/atlassian, tokens/proj/empty-service,
+        // ide-bridge, oauth, oauth/proj
+        assert_eq!(dirs.len(), 14, "expected 14 dirs, got: {dirs:?}");
         assert!(dirs.contains(&data_dir.join("secrets")));
         assert!(dirs.contains(&data_dir.join("secrets/proj")));
         assert!(dirs.contains(&data_dir.join("snapshots")));
@@ -288,12 +320,17 @@ mod tests {
         assert!(dirs.contains(&data_dir.join("tokens/proj/atlassian")));
         assert!(dirs.contains(&data_dir.join("tokens/proj/empty-service")));
         assert!(dirs.contains(&data_dir.join("ide-bridge")));
+        assert!(dirs.contains(&data_dir.join("oauth")));
+        assert!(dirs.contains(&data_dir.join("oauth/proj")));
 
-        // Expected files (8): secrets/proj/worker-auth-token,
-        // tokens/proj/slack/token.txt, tokens/proj/gitlab/key.txt,
-        // tokens/proj/github/key.txt, tokens/proj/atlassian/api_token,
-        // snapshots/proj/snapshot.json, ide-bridge/1234.lock, bundle-state.json
-        assert_eq!(files.len(), 8, "expected 8 files, got: {files:?}");
+        // Expected files (16): 8 legacy + 8 oauth files added in PR2/PR3 +
+        // FIX-P1-3 rotation:
+        //   secrets/proj/worker-auth-token, tokens/proj/{slack,gitlab,github}/...
+        //   tokens/proj/atlassian/api_token, snapshots/proj/snapshot.json,
+        //   ide-bridge/1234.lock, bundle-state.json,
+        //   oauth/proj/{sharepoint.json,.bearer-map.json,bearer-sharepoint,
+        //   auth-token,port,pid,audit.log,audit.log.1}
+        assert_eq!(files.len(), 16, "expected 16 files, got: {files:?}");
         assert!(files.contains(&data_dir.join("secrets/proj/worker-auth-token")));
         assert!(files.contains(&data_dir.join("tokens/proj/slack/token.txt")));
         assert!(files.contains(&data_dir.join("tokens/proj/gitlab/key.txt")));
@@ -302,6 +339,14 @@ mod tests {
         assert!(files.contains(&data_dir.join("snapshots/proj/snapshot.json")));
         assert!(files.contains(&data_dir.join("ide-bridge/1234.lock")));
         assert!(files.contains(&data_dir.join("bundle-state.json")));
+        assert!(files.contains(&data_dir.join("oauth/proj/sharepoint.json")));
+        assert!(files.contains(&data_dir.join("oauth/proj/.bearer-map.json")));
+        assert!(files.contains(&data_dir.join("oauth/proj/bearer-sharepoint")));
+        assert!(files.contains(&data_dir.join("oauth/proj/auth-token")));
+        assert!(files.contains(&data_dir.join("oauth/proj/port")));
+        assert!(files.contains(&data_dir.join("oauth/proj/pid")));
+        assert!(files.contains(&data_dir.join("oauth/proj/audit.log")));
+        assert!(files.contains(&data_dir.join("oauth/proj/audit.log.1")));
 
         // non-.lock file must NOT be included
         assert!(

@@ -26,6 +26,39 @@ function formatResult(result: ToolResult): ToolsCallResult {
 }
 
 /**
+ * Permitted characters in a Microsoft Graph id segment used in page/list/item/column
+ * URLs. Graph guids and SharePoint page names are alphanumerics, dashes, and
+ * underscores; allowing dots covers some legacy page filenames (e.g. "Home.aspx").
+ *
+ * Used by the page and list tools to refuse model-supplied ids that contain
+ * path separators or URL meta characters (e.g. `"P1/../../drives/X/items"` or
+ * `"1?$select=secret"`). This is defense in depth on top of the "no site_id
+ * from model" invariant — the worker still controls `site_id`, but every other
+ * Graph-path segment comes from the model and must be a single safe token.
+ */
+const GRAPH_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * Assert that `value` is a non-empty string matching {@link GRAPH_ID_RE}.
+ * Returns `null` on success or a `ToolResult` error on failure (suitable for
+ * early return at the top of a handler).
+ * @param value - candidate id from the tool call
+ * @param fieldName - parameter name to mention in the error message
+ */
+export function validateGraphId(value: unknown, fieldName: string): ToolResult | null {
+  if (typeof value !== 'string' || !GRAPH_ID_RE.test(value)) {
+    return {
+      success: false,
+      error: {
+        code: 'INVALID_ID',
+        message: `${fieldName} must match ${GRAPH_ID_RE.source}`,
+      },
+    };
+  }
+  return null;
+}
+
+/**
  * Wrap handler with parameter validation
  * @param handler - Tool handler function
  */

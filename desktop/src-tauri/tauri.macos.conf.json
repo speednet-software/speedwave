@@ -12,6 +12,7 @@
       "nodejs/bin/node": "nodejs/bin/node",
       "mcp-os/": "mcp-os/",
       "host_exec/": "host_exec/",
+      "oauth/": "oauth/",
       "cli/speedwave": "cli/speedwave",
       "reminders-cli": "reminders-cli",
       "calendar-cli": "calendar-cli",

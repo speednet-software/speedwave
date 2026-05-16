@@ -3344,7 +3344,10 @@ services:
 
     #[test]
     fn start_containers_security_check_passes_valid_compose() {
-        // A compose YAML with all security requirements should produce zero violations.
+        // A compose YAML with all security requirements should produce zero
+        // compose-level violations. `FileSecurityViolation`s are filtered out
+        // because they depend on the real host's `~/.speedwave/` perms — this
+        // test is about YAML semantics, not host filesystem state.
         let yaml = r#"
 version: "3"
 services:
@@ -3368,10 +3371,13 @@ networks:
             "/test/project",
             "/test/.speedwave/tokens/test",
         );
-        let violations = compose::SecurityCheck::run(yaml, "test", &[], &expected_paths);
+        let violations: Vec<_> = compose::SecurityCheck::run(yaml, "test", &[], &expected_paths)
+            .into_iter()
+            .filter(|v| v.rule != compose::SecurityRule::FileSecurityViolation)
+            .collect();
         assert!(
             violations.is_empty(),
-            "Expected no violations for valid compose YAML, got: {:?}",
+            "Expected no compose-level violations for valid YAML, got: {:?}",
             violations
                 .iter()
                 .map(|v| format!("{v}"))

@@ -1,5 +1,7 @@
 # ADR-009: Per-Project Isolation Preserved
 
+**Status:** Accepted (the SharePoint `:rw` exception was retired in PR3; refresh moved to the host-side `oauth` worker — see [ADR-060](ADR-060-host-side-oauth-refresh-worker.md))
+
 ## Decision
 
 Each project has its own container network and tokens — identical to Speedwave v1.
