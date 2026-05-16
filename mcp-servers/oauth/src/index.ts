@@ -64,8 +64,13 @@ async function main(): Promise<void> {
     rateLimitOverride !== undefined &&
     (Number.isNaN(rateLimitSeconds!) || rateLimitSeconds! < 0)
   ) {
+    // Do NOT echo the offending value back: even though this is a numeric
+    // configuration name, an operator could put any string into the env var
+    // (incl. a paste of an unrelated secret), and CodeQL's taint-tracker
+    // correctly flags an unconditional log of `process.env.*` as a leak
+    // surface. The variable name in the message is enough to diagnose.
     console.error(
-      `${ts()} oauth FATAL: invalid OAUTH_REFRESH_RATE_LIMIT_SECONDS: ${rateLimitOverride}`
+      `${ts()} oauth FATAL: OAUTH_REFRESH_RATE_LIMIT_SECONDS must be a non-negative integer (got an invalid value)`
     );
     process.exit(1);
   }
