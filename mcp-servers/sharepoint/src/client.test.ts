@@ -104,6 +104,266 @@ describe('SharePointClient', () => {
     });
   });
 
+  // Health getters delegate to TokenManager. Cheap to test, important for
+  // the OAuth diagnostics path used by the Desktop integrations card.
+  describe('token save error getters', () => {
+    it('getLastTokenSaveError starts null and survives clear', () => {
+      expect(client.getLastTokenSaveError()).toBeNull();
+      client.clearTokenSaveError();
+      expect(client.getLastTokenSaveError()).toBeNull();
+    });
+
+    it('getHealthStatus exposes tokenSaveError', () => {
+      expect(client.getHealthStatus()).toEqual({ tokenSaveError: null });
+    });
+  });
+
+  describe('getSiteId', () => {
+    it('returns the configured site id (site-policy SSOT)', () => {
+      expect(client.getSiteId()).toBe(mockConfig.siteId);
+    });
+  });
+
+  // 401 → host-side oauth worker refresh → retry. The new path (ADR-060)
+  // replaces the v1 Microsoft endpoint hit; this batch covers the wiring.
+  describe('refreshAccessToken (delegated to host-side oauth worker)', () => {
+    it('on 401 calls oauthRefreshAccessToken and reloads access_token from /tokens', async () => {
+      // First call: Graph returns 401 → triggers refresh path.
+      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
+      mockOauthRefresh.mockResolvedValueOnce({
+        expiresIn: 3600,
+        grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
+      });
+      mockLoadToken.mockResolvedValueOnce('new-access-token-after-refresh');
+      // Retry call: Graph returns 200.
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ value: [] }),
+      });
+
+      await client.listFiles();
+
+      expect(mockOauthRefresh).toHaveBeenCalledWith({ service: 'sharepoint' });
+      expect(mockLoadToken).toHaveBeenCalled();
+    });
+
+    it('throws if oauth worker reports success but no access_token is written', async () => {
+      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
+      mockOauthRefresh.mockResolvedValueOnce({
+        expiresIn: 3600,
+        grantedScopes: [],
+      });
+      mockLoadToken.mockResolvedValueOnce(''); // empty / placeholder
+
+      await expect(client.listFiles()).rejects.toThrow(
+        /oauth worker returned success but access_token was not written/
+      );
+    });
+
+    it('propagates OAuthScopeMismatchError as-is so the tool layer can re-consent', async () => {
+      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
+      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
+      mockOauthRefresh.mockRejectedValueOnce(
+        new OAuthScopeMismatchError('Sites.Manage.All not granted')
+      );
+
+      await expect(client.listFiles()).rejects.toThrow(/Sites\.Manage\.All not granted/);
+    });
+
+    it('wraps non-Error rejections from the oauth worker in Error', async () => {
+      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
+      mockOauthRefresh.mockRejectedValueOnce('plain string rejection');
+
+      await expect(client.listFiles()).rejects.toThrow(/plain string rejection/);
+    });
+  });
+
+  // debugLog() is gated by process.env.DEBUG and only fires from the
+  // callGraphAPI 401 → refresh path. Covers both DEBUG branches.
+  describe('debugLog (via callGraphAPI 401 → refresh path)', () => {
+    it('emits the refresh log line when DEBUG is set', async () => {
+      const prev = process.env.DEBUG;
+      process.env.DEBUG = '1';
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
+        mockOauthRefresh.mockResolvedValueOnce({
+          expiresIn: 3600,
+          grantedScopes: [],
+        });
+        mockLoadToken.mockResolvedValueOnce('fresh-token');
+        fetchMock.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ value: [] }),
+        });
+
+        await client.listFiles();
+
+        expect(
+          logSpy.mock.calls.some((args) => String(args[0]).includes('Access token expired'))
+        ).toBe(true);
+      } finally {
+        logSpy.mockRestore();
+        if (prev === undefined) delete process.env.DEBUG;
+        else process.env.DEBUG = prev;
+      }
+    });
+
+    it('stays silent when DEBUG is not set', async () => {
+      const prev = process.env.DEBUG;
+      delete process.env.DEBUG;
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
+        mockOauthRefresh.mockResolvedValueOnce({
+          expiresIn: 3600,
+          grantedScopes: [],
+        });
+        mockLoadToken.mockResolvedValueOnce('fresh-token');
+        fetchMock.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ value: [] }),
+        });
+
+        await client.listFiles();
+
+        expect(
+          logSpy.mock.calls.some((args) => String(args[0]).includes('Access token expired'))
+        ).toBe(false);
+      } finally {
+        logSpy.mockRestore();
+        if (prev !== undefined) process.env.DEBUG = prev;
+      }
+    });
+  });
+
+  // graphRequest is the public Graph wrapper used by tools/page-tools.ts +
+  // tools/list-tools.ts (PR4 / PR5). Hits every code path of the helper:
+  // path form, absolute-URL form, body + Content-Type injection, 204 no
+  // content, non-2xx with Graph error message, non-2xx with non-JSON body.
+  describe('graphRequest', () => {
+    it('expands /sites/{site-id} path and adds v1.0 prefix', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ value: [] }),
+      });
+      await client.graphRequest('GET', '/sites/{site-id}/pages');
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(`https://graph.microsoft.com/v1.0/sites/${mockConfig.siteId}/pages`);
+    });
+
+    it('uses the path as-is when not in /sites/{site-id} form', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true }),
+      });
+      await client.graphRequest('GET', '/me');
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://graph.microsoft.com/v1.0/me');
+    });
+
+    it('passes an absolute URL through untouched', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+      });
+      await client.graphRequest('GET', 'https://graph.microsoft.com/v1.0/me');
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://graph.microsoft.com/v1.0/me');
+    });
+
+    it('JSON-stringifies body and sets Content-Type when body is provided', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'new' }),
+      });
+      const body = { displayName: 'List' };
+      await client.graphRequest('POST', '/sites/{site-id}/lists', body);
+      const [, opts] = fetchMock.mock.calls[0];
+      expect(opts.method).toBe('POST');
+      expect(opts.body).toBe(JSON.stringify(body));
+      expect((opts.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+    });
+
+    it('returns undefined for 204 No Content', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 204,
+        json: async () => ({}),
+      });
+      const result = await client.graphRequest('DELETE', '/sites/{site-id}/lists/L1');
+      expect(result).toBeUndefined();
+    });
+
+    it('throws Error with Graph error.message when response has JSON error body', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        json: async () => ({ error: { message: 'invalid_request' } }),
+      });
+      await expect(client.graphRequest('GET', '/sites/{site-id}/pages')).rejects.toThrow(
+        /Graph API GET .* failed: 400 Bad Request: invalid_request/
+      );
+    });
+
+    it('falls back to status line when error response body is not JSON', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: async () => {
+          throw new Error('not json');
+        },
+      });
+      await expect(client.graphRequest('GET', '/sites/{site-id}/pages')).rejects.toThrow(
+        /Graph API GET .* failed: 500 Internal Server Error/
+      );
+    });
+  });
+
+  // SharePointClient.formatError() is a static helper used by every tool's
+  // wrapErr() — coverage of its branches is what makes audit/diagnostics
+  // surfaces consistent.
+  describe('formatError', () => {
+    it('rewrites 401 / Unauthorized with setup guidance', () => {
+      expect(SharePointClient.formatError(new Error('401 Unauthorized'))).toMatch(
+        /token may have expired/
+      );
+    });
+
+    it('rewrites 403 / Forbidden', () => {
+      expect(SharePointClient.formatError(new Error('403 Forbidden'))).toMatch(/Permission denied/);
+    });
+
+    it('rewrites 404 / not found', () => {
+      expect(SharePointClient.formatError(new Error('404 not found'))).toMatch(
+        /Resource not found/
+      );
+    });
+
+    it('rewrites security check / traversal errors', () => {
+      expect(SharePointClient.formatError(new Error('security check failed'))).toMatch(
+        /security check failed/
+      );
+      expect(SharePointClient.formatError(new Error('path traversal not allowed'))).toMatch(
+        /security check failed/
+      );
+    });
+
+    it('passes other messages through verbatim', () => {
+      expect(SharePointClient.formatError(new Error('something else'))).toBe('something else');
+    });
+
+    it('handles errors without message (truthy empty)', () => {
+      expect(SharePointClient.formatError({ message: undefined })).toMatch(/SharePoint API error/);
+    });
+  });
+
   describe('callGraphAPI', () => {
     it('should call Graph API with authorization header', async () => {
       fetchMock.mockResolvedValueOnce({

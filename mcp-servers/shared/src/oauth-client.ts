@@ -102,19 +102,31 @@ export async function refreshAccessToken(
         `bearer file ${bearerPath} is empty; oauth worker did not provision this consumer`
       );
     }
-    const response = await fetchImpl(workerUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${bearer}`,
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: randomUUID(),
-        method: 'tools/call',
-        params: { name: 'refresh', arguments: {} },
-      }),
-    });
+    // 30s timeout on the loopback HTTP call to the host-side oauth worker.
+    // The worker is local and refresh is fast in practice; if it hangs (the
+    // worker stalled mid-refresh, mid-fsync, etc.) we want to fail the
+    // caller's tool invocation rather than block its handler forever.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+    let response: Response;
+    try {
+      response = await fetchImpl(workerUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${bearer}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: randomUUID(),
+          method: 'tools/call',
+          params: { name: 'refresh', arguments: {} },
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
     if (response.status === 401) {
       const err = new OAuthRefreshError('unauthorized', 'oauth worker returned 401');
       (err as { httpStatus?: number }).httpStatus = 401;

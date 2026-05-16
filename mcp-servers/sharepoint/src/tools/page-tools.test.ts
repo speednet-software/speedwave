@@ -451,6 +451,152 @@ describe('page-tools handlers — error paths', () => {
     expect(parsed.code).toBe('LIST_PAGES_FAILED');
   });
 
+  // Table-driven Graph-500 error tests for the page tools that wrap their
+  // own `XXX_FAILED` code. Covers every `wrapErr` line in page-tools.ts.
+  it.each([
+    ['getPage', { pageId: 'p1' }, 'GET_PAGE_FAILED'],
+    ['createPage', { title: 'Hi', name: 'hi.aspx' }, 'CREATE_PAGE_FAILED'],
+    [
+      'updatePage',
+      { pageId: 'p1', canvasLayout: { horizontalSections: [] } },
+      'UPDATE_PAGE_FAILED',
+    ],
+    ['publishPage', { pageId: 'p1' }, 'PUBLISH_PAGE_FAILED'],
+  ] as const)('%s surfaces Graph errors with %s', async (toolName, params, code) => {
+    const graph = vi.fn().mockRejectedValueOnce(new Error('Graph 500'));
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    const result = await tools.find((t) => t.tool.name === toolName)!.handler(params);
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe(code);
+  });
+
+  it('createPage with canvasLayout passes it through (covers the `if` branch)', async () => {
+    const graph = vi.fn().mockResolvedValueOnce({ id: 'p-new' });
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    await tools
+      .find((t) => t.tool.name === 'createPage')!
+      .handler({
+        title: 'Hi',
+        name: 'hi.aspx',
+        canvasLayout: { horizontalSections: [] },
+      });
+    const [, , body] = graph.mock.calls[0] as [string, string, Record<string, unknown>];
+    expect(body).toHaveProperty('canvasLayout');
+  });
+
+  it('addWebPart returns NOT_FOUND when getPage resolves to undefined', async () => {
+    // The defensive `if (!page)` branch — Graph returned 204 / null layout.
+    const graph = vi.fn().mockResolvedValueOnce(undefined);
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    const result = await tools
+      .find((t) => t.tool.name === 'addWebPart')!
+      .handler({
+        pageId: 'p1',
+        sectionIndex: 0,
+        columnIndex: 0,
+        innerHtml: '<p>x</p>',
+      });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('NOT_FOUND');
+  });
+
+  it('addWebPart rejects non-string innerHtml with INVALID_INPUT', async () => {
+    const tools = createPageTools(createMockClient());
+    const result = await tools
+      .find((t) => t.tool.name === 'addWebPart')!
+      .handler({
+        pageId: 'p1',
+        sectionIndex: 0,
+        columnIndex: 0,
+        innerHtml: 42 as unknown as string,
+      });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('INVALID_INPUT');
+  });
+
+  it('updateWebPart rejects non-string innerHtml with INVALID_INPUT', async () => {
+    const tools = createPageTools(createMockClient());
+    const result = await tools
+      .find((t) => t.tool.name === 'updateWebPart')!
+      .handler({
+        pageId: 'p1',
+        webPartId: 'wp-1',
+        innerHtml: null as unknown as string,
+      });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('INVALID_INPUT');
+  });
+
+  // Per-tool pageId / webPartId validateGraphId rejections. Covers every
+  // `if (idErr) return idErr;` line — without these the Graph URL builders
+  // would receive an injection-prone segment.
+  it.each([
+    [
+      'addWebPart',
+      { pageId: 'bad/../path', sectionIndex: 0, columnIndex: 0, innerHtml: '<p>x</p>' },
+    ],
+    ['publishPage', { pageId: 'bad/../path' }],
+    ['updateWebPart', { pageId: 'bad/../path', webPartId: 'wp1', innerHtml: '<p>x</p>' }],
+    ['updateWebPart', { pageId: 'p1', webPartId: 'wp/../bad', innerHtml: '<p>x</p>' }],
+    ['removeWebPart', { pageId: 'bad/../path', webPartId: 'wp1' }],
+  ] as const)('%s rejects malformed ids with INVALID_ID', async (toolName, params) => {
+    const graph = vi.fn();
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    const result = await tools.find((t) => t.tool.name === toolName)!.handler(params);
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('INVALID_ID');
+    expect(graph).not.toHaveBeenCalled();
+  });
+
+  it('addWebPart rejects malformed section.id from Graph response (defense-in-depth)', async () => {
+    // Graph normally generates safe ids, but the worker still validates them
+    // before stitching into a URL — covers the `if (sectErr)` defensive
+    // branch.
+    const graph = vi.fn().mockResolvedValueOnce({
+      id: 'p1',
+      canvasLayout: {
+        horizontalSections: [{ id: 'sec/../bad', columns: [{ id: 'c1', webparts: [] }] }],
+      },
+    });
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    const result = await tools
+      .find((t) => t.tool.name === 'addWebPart')!
+      .handler({
+        pageId: 'p1',
+        sectionIndex: 0,
+        columnIndex: 0,
+        innerHtml: '<p>x</p>',
+      });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('INVALID_ID');
+  });
+
+  it('addWebPart rejects malformed column.id from Graph response (defense-in-depth)', async () => {
+    const graph = vi.fn().mockResolvedValueOnce({
+      id: 'p1',
+      canvasLayout: {
+        horizontalSections: [{ id: 'sec1', columns: [{ id: 'col/../bad', webparts: [] }] }],
+      },
+    });
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    const result = await tools
+      .find((t) => t.tool.name === 'addWebPart')!
+      .handler({
+        pageId: 'p1',
+        sectionIndex: 0,
+        columnIndex: 0,
+        innerHtml: '<p>x</p>',
+      });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('INVALID_ID');
+  });
+
   it('rejects path-traversal pageId with INVALID_ID before any Graph call', async () => {
     const graph = vi.fn();
     const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);

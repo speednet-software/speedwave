@@ -50,12 +50,19 @@ export async function refreshMicrosoftToken(
     scope: req.scopes.join(' '),
   });
 
+  // 30s upper bound on the Microsoft token endpoint round-trip. A hang
+  // here would block every SharePoint tool call (refresh fires on 401),
+  // so we abort rather than wait indefinitely. The connection-pool kept-
+  // alive default is much shorter; this is purely a stall guard.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30_000);
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      signal: controller.signal,
     });
   } catch (err) {
     return {
@@ -65,6 +72,8 @@ export async function refreshMicrosoftToken(
         message: err instanceof Error ? err.message : String(err),
       },
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   let json: Record<string, unknown>;

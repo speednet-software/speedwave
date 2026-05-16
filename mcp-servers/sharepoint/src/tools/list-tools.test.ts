@@ -217,6 +217,20 @@ describe('list-tools handlers — happy paths', () => {
     expect(body.displayName).toBe('Title'); // default to `name`
   });
 
+  it.each([
+    ['number', 'number'],
+    ['boolean', 'boolean'],
+    ['dateTime', 'dateTime'],
+  ] as const)('addListColumn builds %s payload', async (type, bodyKey) => {
+    graph.mockResolvedValueOnce({ id: 'C-x' });
+    const tools = createListTools(client);
+    await tools
+      .find((t) => t.tool.name === 'addListColumn')!
+      .handler({ listId: 'L1', name: 'F', type });
+    const [, , body] = graph.mock.calls[0] as [string, string, Record<string, unknown>];
+    expect(body[bodyKey]).toEqual({});
+  });
+
   it('removeListColumn DELETEs the column', async () => {
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
@@ -327,6 +341,106 @@ describe('list-tools handlers — error paths', () => {
     expect(result.isError).toBe(true);
     const parsed = parseContent(result) as { code: string };
     expect(parsed.code).toBe('LIST_LISTS_FAILED');
+  });
+
+  // Each handler wraps Graph failures in its own `XXX_FAILED` code. One
+  // table-driven test per code so every `wrapErr` line gets a corresponding
+  // 500-response path.
+  it.each([
+    ['getList', { listId: 'L1' }, 'GET_LIST_FAILED'],
+    ['createList', { displayName: 'X', description: 'd', template: 't' }, 'CREATE_LIST_FAILED'],
+    ['updateList', { listId: 'L1', displayName: 'R' }, 'UPDATE_LIST_FAILED'],
+    ['deleteList', { listId: 'L1' }, 'DELETE_LIST_FAILED'],
+    ['addListColumn', { listId: 'L1', name: 'F', type: 'text' as const }, 'ADD_LIST_COLUMN_FAILED'],
+    ['removeListColumn', { listId: 'L1', columnId: 'C1' }, 'REMOVE_LIST_COLUMN_FAILED'],
+    ['listItems', { listId: 'L1' }, 'LIST_ITEMS_FAILED'],
+    ['getItem', { listId: 'L1', itemId: '1' }, 'GET_ITEM_FAILED'],
+    ['createItem', { listId: 'L1', fields: { Title: 'X' } }, 'CREATE_ITEM_FAILED'],
+    ['updateItem', { listId: 'L1', itemId: '1', fields: { Title: 'X' } }, 'UPDATE_ITEM_FAILED'],
+    ['deleteItem', { listId: 'L1', itemId: '1' }, 'DELETE_ITEM_FAILED'],
+    ['deletePage', { pageId: 'P1' }, 'DELETE_PAGE_FAILED'],
+  ] as const)('%s surfaces Graph errors with %s', async (toolName, params, code) => {
+    const graph = vi.fn().mockRejectedValueOnce(new Error('Graph 500'));
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    const result = await tools.find((t) => t.tool.name === toolName)!.handler(params);
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe(code);
+  });
+
+  it('updateList errors when description is provided alone', async () => {
+    // Covers the `if (params.description !== undefined)` branch when
+    // displayName is omitted (the dual-branch matters for branch coverage).
+    const graph = vi.fn().mockResolvedValueOnce(undefined);
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    await tools
+      .find((t) => t.tool.name === 'updateList')!
+      .handler({ listId: 'L1', description: 'new desc' });
+    const [, , body] = graph.mock.calls[0] as [string, string, Record<string, unknown>];
+    expect(body).toEqual({ description: 'new desc' });
+  });
+
+  it('createList omits description when not provided', async () => {
+    // Covers the `if (params.description) body.description = …` falsy branch.
+    const graph = vi.fn().mockResolvedValueOnce({ id: 'L-new' });
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    await tools.find((t) => t.tool.name === 'createList')!.handler({ displayName: 'X' });
+    const [, , body] = graph.mock.calls[0] as [string, string, Record<string, unknown>];
+    expect(body).not.toHaveProperty('description');
+  });
+
+  // Per-tool listId / itemId / columnId validateGraphId rejections. Covers
+  // every `if (XErr) return XErr;` line in list-tools.ts.
+  it.each([
+    ['getList', { listId: 'bad/../path' }],
+    ['updateList', { listId: 'bad/../path', displayName: 'X' }],
+    ['deleteList', { listId: 'bad/../path' }],
+    ['addListColumn', { listId: 'bad/../path', name: 'F', type: 'text' as const }],
+    [
+      'addListColumn',
+      {
+        listId: 'L1',
+        name: 'F',
+        type: 'lookup' as const,
+        lookupListId: 'bad/../path',
+        lookupColumnName: 'Title',
+      },
+    ],
+    ['removeListColumn', { listId: 'bad/../path', columnId: 'C1' }],
+    ['removeListColumn', { listId: 'L1', columnId: 'bad/../path' }],
+    ['listItems', { listId: 'bad/../path' }],
+    ['getItem', { listId: 'bad/../path', itemId: '1' }],
+    ['getItem', { listId: 'L1', itemId: 'bad/../path' }],
+    ['createItem', { listId: 'bad/../path', fields: {} }],
+    ['updateItem', { listId: 'bad/../path', itemId: '1', fields: {} }],
+    ['deleteItem', { listId: 'bad/../path', itemId: '1' }],
+    ['deleteItem', { listId: 'L1', itemId: 'bad/../path' }],
+    ['deletePage', { pageId: 'bad/../path' }],
+  ] as const)('%s rejects malformed id with INVALID_ID', async (toolName, params) => {
+    const graph = vi.fn();
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    const result = await tools.find((t) => t.tool.name === toolName)!.handler(params);
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('INVALID_ID');
+    expect(graph).not.toHaveBeenCalled();
+  });
+
+  it('listItems passes through optional filter and top', async () => {
+    // Covers the `if (params.filter)` and `if (params.top)` branches in
+    // handleListItems — without this only the no-args path was exercised.
+    const graph = vi.fn().mockResolvedValueOnce({ value: [] });
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    await tools
+      .find((t) => t.tool.name === 'listItems')!
+      .handler({ listId: 'L1', filter: "fields/Title eq 'X'", top: 25 });
+    const [, url] = graph.mock.calls[0];
+    expect(url).toContain('$filter=');
+    expect(url).toContain('$top=25');
+    expect(url).toContain('$expand=fields');
   });
 
   it('rejects path-traversal listId with INVALID_ID before any Graph call', async () => {
