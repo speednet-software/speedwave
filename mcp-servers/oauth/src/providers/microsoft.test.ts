@@ -76,6 +76,37 @@ describe('refreshMicrosoftToken', () => {
     }
   });
 
+  it('actually fires the AbortController callback on the 30s timeout', async () => {
+    // Cover the `() => controller.abort()` arrow passed to setTimeout —
+    // production timer is 30s; use fake timers so the callback fires in ms.
+    // No file I/O in this module, so fake timers do not interfere.
+    vi.useFakeTimers();
+    try {
+      let observedSignal: AbortSignal | undefined;
+      // Reject only when aborted; otherwise return a never-resolving promise.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+          observedSignal = init.signal as AbortSignal;
+          return new Promise((_resolve, reject) => {
+            observedSignal!.addEventListener('abort', () => {
+              const e = Object.assign(new Error('aborted'), { name: 'AbortError' });
+              reject(e);
+            });
+          });
+        })
+      );
+      const promise = refreshMicrosoftToken(baseReq);
+      await vi.advanceTimersByTimeAsync(31_000);
+      const result = await promise;
+      expect(observedSignal?.aborted).toBe(true);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('network');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns malformed when the response is not JSON', async () => {
     vi.stubGlobal(
       'fetch',
