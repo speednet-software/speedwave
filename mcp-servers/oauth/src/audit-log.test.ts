@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -122,6 +122,29 @@ describe('audit-log rotation', () => {
     // Live log gone (next append will recreate it).
     await expect(stat(logPath)).rejects.toThrow();
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'rotateIfNeeded swallows rename errors (best-effort, covers audit-log.ts:55)',
+    async () => {
+      // Make rotation fail: `${logPath}.1` is a non-empty directory →
+      // `rename` cannot replace it. The function must log the error and
+      // continue, not throw, so the calling append still gets a chance.
+      const { mkdir } = await import('node:fs/promises');
+      await writeFile(logPath, 'a'.repeat(20));
+      await mkdir(`${logPath}.1`);
+      await mkdir(`${logPath}.1/inner`); // non-empty so rename fails on POSIX
+
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await expect(rotateIfNeeded(logPath, 10)).resolves.not.toThrow();
+        expect(consoleSpy).toHaveBeenCalledWith(
+          expect.stringMatching(/oauth audit-log rotation failed/)
+        );
+      } finally {
+        consoleSpy.mockRestore();
+      }
+    }
+  );
 
   it('rotateIfNeeded overwrites a stale .1 instead of leaking copies', async () => {
     await writeFile(`${logPath}.1`, 'stale');

@@ -942,21 +942,15 @@ fn maybe_spawn_oauth_worker(
     use speedwave_runtime::oauth_process::OauthProcess;
 
     // List of enabled OAuth-consuming integrations (drives bearer-map).
+    // `is_service_enabled` is the SSOT match on `ResolvedIntegrationsConfig`
+    // (`speedwave_runtime::config`) — reused by Desktop's `ensure_oauth_running`.
     let oauth_consumers: Vec<&'static str> = consts::TOGGLEABLE_MCP_SERVICES
         .iter()
         .filter(|d| {
             d.uses_oauth_refresh
-                && match d.config_key {
-                    "slack" => integrations.slack,
-                    "sharepoint" => integrations.sharepoint,
-                    "redmine" => integrations.redmine,
-                    "gitlab" => integrations.gitlab,
-                    "github" => integrations.github,
-                    "atlassian" => integrations.atlassian,
-                    "office" => integrations.office,
-                    "playwright" => integrations.playwright,
-                    _ => false,
-                }
+                && integrations
+                    .is_service_enabled(d.config_key)
+                    .unwrap_or(false)
         })
         .map(|d| d.config_key)
         .collect();

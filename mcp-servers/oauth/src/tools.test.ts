@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, mkdir, readFile, chmod, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -112,6 +112,45 @@ describe('oauth tools', () => {
       const result = await refresh.handler({}, ctxFor(''));
       expect(result.isError).toBe(true);
       expect(getTextResult(result)).toContain('unauthorized');
+    });
+
+    it('rejects when ctx is missing entirely', async () => {
+      // `ctx?.caller` defaults to '' when ctx itself is undefined — covers
+      // the `?? ''` branch in resolveCaller (tools.ts:79).
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, undefined);
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('unauthorized');
+    });
+
+    it('falls back to Date.now / refreshMicrosoftToken when overrides absent', async () => {
+      // Covers the `deps.now ?? Date.now` and `deps.doRefresh ?? ...` fallback
+      // lines in tools.ts:102-103. We do NOT actually call Microsoft — fetch
+      // is mocked to fail, but the branch coverage we care about (the `??`
+      // fallback selection) is already executed by then.
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response('', { status: 500 }));
+      try {
+        const tools = buildTools({
+          stateDir: deps.stateDir,
+          project: deps.project,
+          auditLogPath: deps.auditLogPath,
+          accessTokenPathFor: deps.accessTokenPathFor,
+          // `now` and `doRefresh` deliberately omitted to exercise the fallback.
+        });
+        const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+        // The call may error (rate-limit / unhealthy mock) but the assertion
+        // is just that the handler reached `fetch`, proving the doRefresh
+        // fallback was selected.
+        await refresh.handler({}, ctxFor('sharepoint'));
+        expect(fetchSpy).toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
 
     it('rejects callers not in bearer-map', async () => {

@@ -80,7 +80,7 @@ The existing SharePoint flow is device code (`desktop/src-tauri/src/oauth_cmd.rs
 - Process supervisor: new `crates/speedwave-runtime/src/oauth_process.rs`, parallel to `host_exec_process.rs`, sharing `crate::fs_perms::write_restricted_file` (PR1) for token / port / pid files.
 - Spawn lifecycle: spawned by Tauri (`desktop/src-tauri/src/main.rs`) and CLI (`crates/speedwave-cli/src/run.rs`) on project switch / `compose_up` when at least one OAuth-using service is enabled in the project.
 - `oauth.json` schema: `{ provider, clientId, tenantId, scopes, grantedScopes, refreshToken, expiresAt, lastRefreshAt }`. Written atomically via `writeRestrictedSecret` from PR1.
-- Audit log: `~/.speedwave/audit.log`, append-only, mode 0o600. Entries: ISO-8601 timestamp, project, service, action (`refresh` | `forget`), outcome (`ok` | `error:<code>`). No token contents in the log.
+- Audit log: `~/.speedwave/oauth/<project>/audit.log`, append-only, mode 0o600. Entries: ISO-8601 timestamp, project, service, action (`refresh` | `forget`), outcome (`ok` | `error:<code>`). No token contents in the log. Rotated to `audit.log.1` past ~1 MiB; one historical copy retained.
 
 ## References
 

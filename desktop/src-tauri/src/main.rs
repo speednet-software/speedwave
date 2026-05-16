@@ -1091,22 +1091,9 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
     }
 }
 
-/// Map an integration `config_key` to its boolean enabled flag on
-/// `ResolvedIntegrationsConfig`. Returns false for unknown keys (including
-/// plugin slugs — only built-in services consume the oauth worker today).
-fn is_integration_enabled(r: &config::ResolvedIntegrationsConfig, config_key: &str) -> bool {
-    match config_key {
-        "slack" => r.slack,
-        "sharepoint" => r.sharepoint,
-        "redmine" => r.redmine,
-        "gitlab" => r.gitlab,
-        "github" => r.github,
-        "atlassian" => r.atlassian,
-        "office" => r.office,
-        "playwright" => r.playwright,
-        _ => false,
-    }
-}
+// (`is_service_enabled` lives on `ResolvedIntegrationsConfig` in
+// `speedwave-runtime::config` — used here and in the CLI's
+// `maybe_spawn_oauth_worker` so the match arms stay in one place.)
 
 /// Spawn the per-project `oauth` worker on demand. No-op if no project
 /// integration with `uses_oauth_refresh = true` is enabled, or if the worker
@@ -1143,7 +1130,9 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     // List of enabled OAuth-consuming integrations (drives bearer-map).
     let oauth_consumers: Vec<&'static str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
         .iter()
-        .filter(|d| d.uses_oauth_refresh && is_integration_enabled(&resolved, d.config_key))
+        .filter(|d| {
+            d.uses_oauth_refresh && resolved.is_service_enabled(d.config_key).unwrap_or(false)
+        })
         .map(|d| d.config_key)
         .collect();
     if oauth_consumers.is_empty() {

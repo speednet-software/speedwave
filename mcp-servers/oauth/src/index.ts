@@ -48,16 +48,34 @@ async function main(): Promise<void> {
   const auditLogPath = process.env.OAUTH_LOG_FILE ?? join(stateDir, 'audit.log');
   const project = requireEnv('OAUTH_PROJECT');
   const supervisorToken = requireEnv('OAUTH_SUPERVISOR_TOKEN');
+  // Fail-fast: the Rust supervisor always sets OAUTH_TOKENS_BASE; a missing
+  // value would have access tokens land in a relative `<project>/<service>/
+  // access_token` path that nothing else reads.
+  const tokensBase = requireEnv('OAUTH_TOKENS_BASE');
 
   // Load consumer bearers — bearer → service id.
   const bearerMap = await loadBearerMap(stateDir);
+
+  // ADR-060 §"Threat model" claims the refresh rate limit is configurable
+  // via OAUTH_REFRESH_RATE_LIMIT_SECONDS. Honour that contract here.
+  const rateLimitOverride = process.env.OAUTH_REFRESH_RATE_LIMIT_SECONDS;
+  const rateLimitSeconds = rateLimitOverride ? Number.parseInt(rateLimitOverride, 10) : undefined;
+  if (
+    rateLimitOverride !== undefined &&
+    (Number.isNaN(rateLimitSeconds!) || rateLimitSeconds! < 0)
+  ) {
+    console.error(
+      `${ts()} oauth FATAL: invalid OAUTH_REFRESH_RATE_LIMIT_SECONDS: ${rateLimitOverride}`
+    );
+    process.exit(1);
+  }
 
   const tools = buildTools({
     stateDir,
     project,
     auditLogPath,
-    accessTokenPathFor: (service) =>
-      join(process.env.OAUTH_TOKENS_BASE ?? '', project, service, 'access_token'),
+    accessTokenPathFor: (service) => join(tokensBase, project, service, 'access_token'),
+    rateLimitSeconds,
   });
 
   const server = createMCPServer({

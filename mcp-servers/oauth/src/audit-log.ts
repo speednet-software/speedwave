@@ -76,8 +76,9 @@ export async function appendAuditEvent(
   await rotateIfNeeded(logPath, maxBytes);
   try {
     await appendFile(logPath, line, { mode: 0o600 });
-    // chmod again — appendFile mode only applies on file creation
-    await chmod(logPath, 0o600).catch(() => {});
+    // chmod again — appendFile mode only applies on file creation. Any
+    // chmod failure falls through to the outer catch (logged best-effort).
+    await chmod(logPath, 0o600);
   } catch (err) {
     console.error(
       `oauth audit-log append failed: ${err instanceof Error ? err.message : String(err)}`
