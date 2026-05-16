@@ -6,7 +6,7 @@
  *
  * Platforms:
  * - macOS: 4 Swift binaries (reminders-cli, calendar-cli, mail-cli, notes-cli)
- * - Linux/Windows: 1 Rust binary (native-os-cli) with domain.command syntax
+ * - Windows: 1 Rust binary (native-os-cli) with domain.command syntax
  */
 
 import { execFile as execFileCb } from 'node:child_process';
@@ -105,7 +105,7 @@ function resolveDarwinPaths(): PlatformPaths {
 }
 
 /**
- * Resolve native CLI binary path for Linux/Windows (single Rust binary).
+ * Resolve native CLI binary path for Windows (single Rust binary).
  */
 function resolveNativePaths(): PlatformPaths {
   const ext = process.platform === 'win32' ? '.exe' : '';
@@ -158,11 +158,6 @@ export const SAFE_ENV_KEYS: readonly string[] = [
   'DEVELOPER_DIR',
   'SDKROOT',
   '__CF_USER_TEXT_ENCODING',
-  // Linux: XDG dirs for D-Bus / CalDAV discovery
-  'XDG_RUNTIME_DIR',
-  'XDG_DATA_HOME',
-  'XDG_CONFIG_HOME',
-  'DBUS_SESSION_BUS_ADDRESS',
 ];
 
 /** Build a filtered environment object containing only safe keys. */
@@ -205,7 +200,7 @@ export async function runCommand(
   }
 
   // macOS: separate binaries with <command> [json-args]
-  // Linux/Windows: single binary with <domain>.<command> [json-args]
+  // Windows: single binary with <domain>.<command> [json-args]
   const execArgs: string[] =
     process.platform === 'darwin'
       ? [command, JSON.stringify(args)]

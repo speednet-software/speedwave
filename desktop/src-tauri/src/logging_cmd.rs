@@ -42,7 +42,6 @@ fn persist_log_level(level: &str) -> anyhow::Result<()> {
 /// what the plugin's `LogDir` target resolves to:
 ///
 /// - macOS: `~/Library/Logs/pl.speedwave.desktop`
-/// - Linux: `~/.local/share/pl.speedwave.desktop/logs`
 /// - Windows: `%APPDATA%/pl.speedwave.desktop` (handled by AppData fallback)
 ///
 /// Returns `None` only when `dirs::home_dir()` itself fails (rare, sandbox
@@ -53,12 +52,10 @@ pub(crate) fn desktop_log_dir() -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
     if cfg!(target_os = "macos") {
         Some(home.join("Library/Logs/pl.speedwave.desktop"))
-    } else if cfg!(target_os = "windows") {
+    } else {
         // tauri-plugin-log on Windows defaults to %APPDATA%/<bundle id>; this
         // helper keeps the same convention so log lookup works after install.
         dirs::data_dir().map(|d| d.join("pl.speedwave.desktop"))
-    } else {
-        Some(home.join(".local/share/pl.speedwave.desktop/logs"))
     }
 }
 
@@ -429,17 +426,6 @@ mod tests {
         assert!(
             s.contains("Library/Logs/pl.speedwave.desktop"),
             "macOS path must point at Library/Logs/pl.speedwave.desktop, got {s}"
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn desktop_log_dir_linux_path_under_local_share() {
-        let dir = desktop_log_dir().unwrap();
-        let s = dir.to_string_lossy();
-        assert!(
-            s.contains(".local/share/pl.speedwave.desktop/logs"),
-            "Linux path must point at .local/share/pl.speedwave.desktop/logs, got {s}"
         );
     }
 

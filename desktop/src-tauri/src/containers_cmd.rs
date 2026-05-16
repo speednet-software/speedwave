@@ -280,10 +280,7 @@ pub async fn init_vm() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn create_project(
-    name: String,
-    dir: String,
-) -> Result<(), String> {
+pub async fn create_project(name: String, dir: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         log::info!("create_project: name={name}, dir={dir}");
         setup_wizard::create_project(&name, &dir).map_err(|e| {

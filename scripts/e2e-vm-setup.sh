@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
 # e2e-vm-setup.sh — Provisions E2E testing environments.
 #
-# Linux:   provisions a remote machine via SSH (SPEEDWAVE_LINUX_HOST).
 # Windows: provisions a remote machine via SSH to WSL2 (SPEEDWAVE_WINDOWS_HOST).
 # macOS:   provisions a remote machine via SSH (SPEEDWAVE_MACOS_HOST).
 #
 # Prerequisites:
-#   - Linux: SSH key-based auth to SPEEDWAVE_LINUX_HOST, passwordless sudo
 #   - Windows: SSH key-based auth to WSL2 on SPEEDWAVE_WINDOWS_HOST (port 2222),
 #     WSL2 with powershell.exe interop working
 #   - macOS: SSH key-based auth to SPEEDWAVE_MACOS_HOST, Xcode CLI Tools available
 #
 # Usage:
 #   scripts/e2e-vm-setup.sh              # provision all environments
-#   scripts/e2e-vm-setup.sh ubuntu       # provision Ubuntu only (SSH)
 #   scripts/e2e-vm-setup.sh windows      # provision Windows only (SSH)
 #   scripts/e2e-vm-setup.sh macos        # provision macOS only (SSH)
 
@@ -53,163 +50,6 @@ windows_ps() {
 
 # -- Ubuntu (SSH) --------------------------------------------------------------
 
-setup_ubuntu() {
-    echo "[linux] Checking SSH connectivity to $LINUX_HOST..."
-    linux_ssh "echo ready" || { echo "[linux] ERROR: cannot connect via SSH"; return 1; }
-
-    echo "[linux] Installing system dependencies..."
-    linux_ssh bash <<'SCRIPT'
-set -euo pipefail
-# Set DEBIAN_FRONTEND once for the whole apt-get chain — non-interactive,
-# no debconf prompts. We use apt-get (not apt) because apt is explicitly
-# "not stable for scripts" (it prints a warning).
-export DEBIAN_FRONTEND=noninteractive
-
-# Disarm the /etc/apt/apt.conf.d/20packagekit hook on systems where the
-# packagekit.service is masked (e2e VMs mask it to save RAM). The hook
-# unconditionally calls `gdbus … org.freedesktop.PackageKit` after every
-# `apt-get update` and dpkg run; with the unit masked, gdbus prints
-# "Error: GDBus.Error:org.freedesktop.systemd1.UnitMasked: Unit
-# packagekit.service is masked." on stderr. APT's `-o '…::='` syntax
-# only appends an empty list entry — it cannot REMOVE the gdbus entry
-# the conf.d file already added. The only reliable, scoped fix is to
-# disable the hook file itself. Idempotent: skip if already disabled.
-if [ -f /etc/apt/apt.conf.d/20packagekit ] && \
-   ! systemctl is-enabled packagekit.service >/dev/null 2>&1; then
-    sudo mv /etc/apt/apt.conf.d/20packagekit \
-            /etc/apt/apt.conf.d/20packagekit.disabled
-fi
-
-sudo -E apt-get update
-sudo -E apt-get install -y \
-    git make curl ca-certificates build-essential pkg-config libssl-dev \
-    libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-    librsvg2-dev patchelf \
-    webkit2gtk-driver xvfb xauth \
-    uidmap rsync gnupg \
-    cmake clang libclang-dev
-SCRIPT
-
-    echo "[linux] Installing Node.js 24..."
-    linux_ssh bash <<'SCRIPT'
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-# Idempotency: Node 24 already installed → skip the NodeSource setup pipe.
-if command -v node >/dev/null 2>&1 && node --version | grep -q '^v24\.'; then
-    echo "Node.js already installed: $(node --version)"
-    exit 0
-fi
-# Ensure user's ~/.gnupg exists with 0700 perms BEFORE any tool that may
-# invoke gpg, so gpg never warns "unsafe ownership on homedir".
-# Files inside .gnupg must be 0600.
-install -d -m 0700 "$HOME/.gnupg"
-find "$HOME/.gnupg" -type f -exec chmod 0600 {} + 2>/dev/null || true
-# Run NodeSource setup script as root WITHOUT -E so root's gpg uses
-# /root/.gnupg (created by gpg itself with correct 0700 perms) instead of
-# the user's ~/.gnupg — which would otherwise be touched by root and end
-# up with mismatched ownership, triggering "unsafe ownership" on the next
-# user-side gpg call.
-curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash -
-sudo -E apt-get install -y nodejs
-SCRIPT
-
-    echo "[linux] Installing Rust..."
-    linux_ssh bash <<'SCRIPT'
-set -euo pipefail
-# Source the rustup env so `rustup`/`rustc` are visible in this
-# non-interactive, non-login shell. Without this the gate below would
-# always miss and rustup-init would re-run, producing the
-# "existing rustup settings file" warning and wasting 1-2 minutes.
-[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-if command -v rustup >/dev/null 2>&1; then
-    echo "Rust already installed: $(rustc --version)"
-    exit 0
-fi
-# Defensive gnupg perms — rustup-init does not call gpg, but other tools
-# triggered later might, and this is a cheap one-liner.
-install -d -m 0700 "$HOME/.gnupg"
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-SCRIPT
-
-    echo "[linux] Installing tauri-driver and tauri-cli..."
-    linux_ssh bash <<'SCRIPT'
-set -euo pipefail
-[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-export PATH="$HOME/.cargo/bin:$PATH"
-# Idempotency: skip cargo install if the binary is already on PATH.
-# `cargo install` re-downloads + recompiles (~minutes) every time even
-# when the binary is up-to-date with --locked, so a `command -v` gate
-# turns subsequent provisioning runs into no-ops.
-if command -v tauri-driver >/dev/null 2>&1; then
-    # tauri-driver does not implement --version, so we just confirm the binary
-    # is present on PATH; cargo install would otherwise re-download + recompile.
-    echo "tauri-driver already installed: $(command -v tauri-driver)"
-else
-    cargo install tauri-driver --locked
-fi
-if command -v cargo-tauri >/dev/null 2>&1; then
-    echo "tauri-cli already installed: $(cargo tauri --version 2>&1 || true)"
-else
-    cargo install tauri-cli --locked
-fi
-SCRIPT
-
-    echo "[linux] Configuring rootless containers (subuid/subgid + userns)..."
-    linux_ssh bash <<'SCRIPT'
-set -euo pipefail
-USER=$(whoami)
-# Ensure subuid/subgid entries exist for the current user
-if ! grep -q "^${USER}:" /etc/subuid 2>/dev/null; then
-    sudo usermod --add-subuids 100000-165535 "$USER"
-fi
-if ! grep -q "^${USER}:" /etc/subgid 2>/dev/null; then
-    sudo usermod --add-subgids 100000-165535 "$USER"
-fi
-# Enable unprivileged user namespaces (required by rootlesskit)
-if [ -f /proc/sys/kernel/unprivileged_userns_clone ]; then
-    echo 1 | sudo tee /proc/sys/kernel/unprivileged_userns_clone
-    echo 'kernel.unprivileged_userns_clone=1' | sudo tee /etc/sysctl.d/99-userns.conf
-    sudo sysctl --system
-fi
-# Ubuntu 24.04+ uses AppArmor to restrict userns — allow it
-if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-    echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
-    echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-userns-apparmor.conf
-    sudo sysctl --system
-fi
-# AppArmor profile for rootlesskit at the Speedwave install path
-# (default profile only covers /usr/bin/rootlesskit)
-ROOTLESSKIT_PATH="/usr/lib/Speedwave/nerdctl-full/bin/rootlesskit"
-if [ -f "$ROOTLESSKIT_PATH" ] && command -v apparmor_parser >/dev/null 2>&1; then
-    sudo tee /etc/apparmor.d/speedwave-rootlesskit > /dev/null <<AAEOF
-abi <abi/4.0>,
-include <tunables/global>
-
-profile speedwave-rootlesskit ${ROOTLESSKIT_PATH} flags=(unconfined) {
-  userns,
-  include if exists <local/speedwave.rootlesskit>
-}
-AAEOF
-    sudo apparmor_parser -r /etc/apparmor.d/speedwave-rootlesskit
-fi
-echo "Rootless containers configured"
-SCRIPT
-
-    echo "[linux] Verifying installation..."
-    linux_ssh bash <<'SCRIPT'
-export PATH="$HOME/.cargo/bin:$PATH"
-echo "Node: $(node --version)"
-echo "npm:  $(npm --version)"
-echo "Rust: $(rustc --version)"
-echo "Cargo: $(cargo --version)"
-echo "tauri-cli: $(cargo tauri --version 2>/dev/null || echo 'not found')"
-echo "tauri-driver: $(command -v tauri-driver || echo 'not found')"
-echo "cmake: $(cmake --version 2>/dev/null | head -1 || echo 'not found')"
-echo "clang: $(clang --version 2>/dev/null | head -1 || echo 'not found')"
-SCRIPT
-
-    echo "[linux] DONE"
-}
 
 setup_windows() {
     echo "[windows] Checking SSH connectivity to $WINDOWS_HOST (port $WINDOWS_SSH_PORT)..."
@@ -473,12 +313,11 @@ SCRIPT
 TARGET="${1:-all}"
 
 case "$TARGET" in
-    ubuntu|linux)   setup_ubuntu ;;
     windows|win)    setup_windows ;;
     macos|mac)      setup_macos ;;
     all)
         PIDS=()
-        for fn in setup_ubuntu setup_windows setup_macos; do
+        for fn in setup_windows setup_macos; do
             $fn &
             PIDS+=($!)
         done
@@ -492,7 +331,7 @@ case "$TARGET" in
         fi
         ;;
     *)
-        echo "Usage: $0 [ubuntu|windows|macos|all]" >&2
+        echo "Usage: $0 [windows|macos|all]" >&2
         exit 1
         ;;
 esac

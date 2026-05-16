@@ -6,7 +6,7 @@
 
 ## Context
 
-Speedwave is distributed as a single installable desktop application on macOS, Windows, and Linux. Without code signing:
+Speedwave is distributed as a single installable desktop application on macOS and Windows. Without code signing:
 
 - **macOS Gatekeeper** blocks the app from launching — users see "Speedwave cannot be opened because the developer cannot be verified"[^1]
 - **Windows SmartScreen** warns "Windows protected your PC — Unknown publisher", forcing a "More info → Run anyway" click-through[^2]
@@ -139,9 +139,8 @@ If a future bundled binary requires JIT (e.g. a Python runtime with PyPy), virtu
 
 ### Neutral
 
-- **macOS only.** The script exits 0 on non-Darwin platforms. `beforeBundleCommand` runs on every platform, but the script itself has no Linux or Windows branch today.
+- **macOS only.** The script exits 0 on non-Darwin platforms. `beforeBundleCommand` runs on every platform, but the script itself has no Windows branch today.
 - **Windows signing (Azure Trusted Signing)** is tracked separately in issue #376 and has a distinct architecture (HSM-backed cloud signing, no local `.pfx`[^13]). When implemented, it will add a Windows branch to this script or a sibling script — the hook itself already runs on Windows.
-- **Linux signing** (AppImage / .deb) is not planned. Linux does not enforce runtime signature verification at the OS level; the existing Tauri updater's Ed25519 signature protects update integrity.
 
 ## Alternatives Considered
 

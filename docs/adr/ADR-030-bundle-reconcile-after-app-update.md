@@ -69,10 +69,6 @@ That backend flow:
 
 If installation fails before restart, the backend restores previously stopped projects and clears the pending bundle state.[^4]
 
-### 5. Linux keeps manual app installation
-
-Linux `.deb` still does not support in-place app installation through the Tauri updater. The desktop UI therefore keeps the download flow on Linux, but the next launch of the newer app still runs the same startup reconcile for resources and images.[^6][^7]
-
 ## Consequences
 
 ### Positive
@@ -109,9 +105,13 @@ Rejected because the backend needs to own the full sequence of saving running pr
 ---
 
 [^1]: [`crates/speedwave-runtime/src/update.rs` — Speedwave repository](https://github.com/speednet-software/speedwave/blob/main/crates/speedwave-runtime/src/update.rs)
+
 [^2]: [`crates/speedwave-runtime/src/bundle.rs` — Speedwave repository](https://github.com/speednet-software/speedwave/blob/main/crates/speedwave-runtime/src/bundle.rs)
+
 [^3]: [`crates/speedwave-runtime/src/build.rs` — Speedwave repository](https://github.com/speednet-software/speedwave/blob/main/crates/speedwave-runtime/src/build.rs)
+
 [^4]: [`desktop/src-tauri/src/reconcile.rs` — Speedwave repository](https://github.com/speednet-software/speedwave/blob/main/desktop/src-tauri/src/reconcile.rs)
+
 [^5]: [`crates/speedwave-runtime/src/compose.rs` — Speedwave repository](https://github.com/speednet-software/speedwave/blob/main/crates/speedwave-runtime/src/compose.rs)
+
 [^6]: [`desktop/src-tauri/src/update_commands.rs` — Speedwave repository](https://github.com/speednet-software/speedwave/blob/main/desktop/src-tauri/src/update_commands.rs)
-[^7]: [`desktop/src-tauri/src/updater.rs` — Speedwave repository](https://github.com/speednet-software/speedwave/blob/main/desktop/src-tauri/src/updater.rs)

@@ -10,7 +10,7 @@ The desktop shell is a Tauri backend with an Angular frontend. It owns the setup
 
 The Desktop app bundles the `speedwave` CLI binary in its resources. On every startup (and during initial setup), the app copies the bundled CLI to the user's PATH:
 
-- **macOS / Linux:** `~/.local/bin/speedwave`
+- **macOS:** `~/.local/bin/speedwave`
 - **Windows:** `%USERPROFILE%\.speedwave\bin\speedwave.exe`
 
 This ensures the CLI and Desktop versions always stay in sync — a Desktop update automatically distributes the matching CLI. If the CLI binary is missing, the "Open Terminal" button in Settings shows an error banner instructing the user to restart the app.
@@ -31,7 +31,7 @@ After restart, the desktop backend compares the installed bundle against `~/.spe
 3. Recreate only the projects that were running before the update
 4. Emit `bundle_reconcile_status` so the UI can show progress or retry
 
-The same startup reconcile also runs after a manual app upgrade outside the desktop UI. On Linux `.deb`, the app update itself is still manual, but the next app launch still applies the new bundle to resources and containers automatically.
+The same startup reconcile also runs after a manual app upgrade outside the desktop UI.
 
 ## Bundle Identity
 
@@ -90,8 +90,6 @@ While Claude is responding, press **Esc** or click the red **Stop** button next 
 
 ## System Tray
 
-<!-- Content to be written: macOS/Windows click-toggle, Linux menu-only, libappindicator requirement -->
-
 ## Logs & system health
 
 The `/logs` route hosts a single page that combines container logs, host-side service logs, and a compact system-health status bar. It replaced the previous Settings → Diagnostics block and the standalone System Health view.
@@ -122,7 +120,7 @@ A separate, **opt-in** Desktop integration that records system audio + microphon
 
 **Permissions (macOS).** The first time you record, macOS prompts for **Microphone** access (via the public `AVCaptureDevice` API) and — when the source includes system audio — for **System Audio Recording** access. The system-audio prompt has no public trigger, so `audio-capture-cli` requests it via the private `TCCAccessRequest(kTCCServiceAudioCapture)` API (the same approach AudioCap / AudioTee use; it works on a notarized `.dmg`) — see ADR-056 decision 3. The bundled CLI carries `NSMicrophoneUsageDescription` / `NSAudioCaptureUsageDescription` for the prompt text. If you denied either, open System Settings → Privacy & Security → Microphone / System Audio Recording and re-enable Speedwave; to reset the prompts entirely run `tccutil reset Microphone pl.speedwave.desktop.audio-capture` (and `tccutil reset AudioCapture pl.speedwave.desktop.audio-capture`). If the system-audio recording is silent while audio is clearly playing, the permission is most likely off — the UI surfaces this and links to the Settings pane.
 
-**Per-OS requirements.** macOS 14.4+ (CoreAudio process taps). Windows 10 build 20348+ for per-app capture — older Windows 10 falls back to system-wide audio only (the source picker hides per-app options and a tooltip explains why). Linux requires a running PipeWire (`pw-record`, per-app capture available) or PulseAudio (`parec`, system-audio only) server.
+**Per-OS requirements.** macOS 14.4+ (CoreAudio process taps). Windows 10 build 20348+ for per-app capture — older Windows 10 falls back to system-wide audio only (the source picker hides per-app options and a tooltip explains why).
 
 **Language support & limits.** The promise is "local best-effort live transcription + a higher-quality offline pass" — not perfect Polish. Public Polish WER benchmarks for `large-v3-turbo` are sparse, so the catalogue keeps `medium` as a middle ground; the offline pass with `large-v3` is as good as Whisper gets. Diarization is provisional, not a reliable speaker ID — live labels lag, crosstalk confuses them, and the offline pass can re-cluster.
 

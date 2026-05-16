@@ -145,7 +145,7 @@ pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider>
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 pub fn detect_cloudstorage_provider(_path: &Path) -> Option<CloudStorageProvider> {
     None
 }
@@ -310,7 +310,7 @@ mod tests {
         let result = detect_cloudstorage_provider(path);
         #[cfg(target_os = "macos")]
         assert_eq!(result, Some(CloudStorageProvider::OneDrive));
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         assert!(result.is_none());
     }
 
@@ -320,7 +320,7 @@ mod tests {
         let result = detect_cloudstorage_provider(path);
         #[cfg(target_os = "macos")]
         assert_eq!(result, Some(CloudStorageProvider::Dropbox));
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         assert!(result.is_none());
     }
 
@@ -332,7 +332,7 @@ mod tests {
         let result = detect_cloudstorage_provider(path);
         #[cfg(target_os = "macos")]
         assert_eq!(result, Some(CloudStorageProvider::GoogleDrive));
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         assert!(result.is_none());
     }
 

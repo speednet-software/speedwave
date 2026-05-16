@@ -10,8 +10,9 @@ use strum::EnumProperty;
 /// Converts a host path to the path seen by the container engine.
 ///
 /// On Windows, nerdctl runs inside WSL2 so host paths must be translated
-/// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS and Linux the
-/// container engine runs on the host so paths are returned unchanged.
+/// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS, Lima mounts the
+/// host home directory at the same path inside the VM, so paths are
+/// returned unchanged.
 pub(crate) fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
     #[cfg(target_os = "windows")]
     {
@@ -432,10 +433,11 @@ pub fn strip_trailing_v1(url: &str) -> String {
 /// Returns the default base URL for a known local model provider.
 /// Used by the frontend to show a placeholder without duplicating the URL logic.
 pub fn default_base_url(provider: &str) -> Option<String> {
+    let host = consts::DOCKER_HOST;
     match provider {
-        "ollama" => Some("http://host.docker.internal:11434".to_string()),
-        "lmstudio" => Some("http://host.docker.internal:1234".to_string()),
-        "llamacpp" => Some("http://host.docker.internal:8080".to_string()),
+        "ollama" => Some(format!("http://{host}:11434")),
+        "lmstudio" => Some(format!("http://{host}:1234")),
+        "llamacpp" => Some(format!("http://{host}:8080")),
         _ => None,
     }
 }
@@ -1078,12 +1080,6 @@ fn read_worker_port_file(port_path: &std::path::Path, label: &str) -> Option<u16
 
 /// Test-only alias — implementation is `read_worker_port_file`.
 #[cfg(test)]
-fn read_mcp_os_port(port_path: &std::path::Path) -> Option<u16> {
-    read_worker_port_file(port_path, "mcp-os")
-}
-
-/// Test-only alias — implementation is `read_worker_port_file`.
-#[cfg(test)]
 fn read_host_exec_port(port_path: &std::path::Path) -> Option<u16> {
     read_worker_port_file(port_path, "host_exec")
 }
@@ -1094,11 +1090,7 @@ fn worker_gateway_url(port: u16) -> String {
     {
         format!("http://host.lima.internal:{port}")
     }
-    #[cfg(target_os = "linux")]
-    {
-        format!("http://host.docker.internal:{port}")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
     {
         format!("http://host.containers.internal:{port}")
     }
@@ -1120,18 +1112,13 @@ fn host_exec_gateway_url(port: u16) -> String {
 /// Used for `extra_hosts` entries and constructing wsUrls in lock files.
 ///
 /// macOS: Lima vzNAT always assigns 192.168.5.2 to the macOS host — static, not DHCP.
-/// Linux: nerdctl rootless uses 10.0.2.2 for the host gateway (slirp4netns).
 /// Windows: nerdctl in WSL2 uses 192.168.65.1.
 pub fn host_gateway_ip() -> &'static str {
     #[cfg(target_os = "macos")]
     {
         consts::LIMA_VZ_HOST_IP // "192.168.5.2"
     }
-    #[cfg(target_os = "linux")]
-    {
-        consts::NERDCTL_LINUX_HOST_IP // "10.0.2.2"
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
     {
         consts::WSL_HOST_IP // "192.168.65.1"
     }
@@ -1139,19 +1126,12 @@ pub fn host_gateway_ip() -> &'static str {
 
 /// Returns the UID:GID to set as `user:` in compose services.
 ///
-/// Linux (rootless nerdctl): "0:0" — UID 0 in user namespace maps to host user UID.
-///   UID 1000 would map to subuid range (~101000), breaking bind-mount access.
-/// macOS (Lima) / Windows (WSL2): "1000:1000" — containerd runs as root,
-///   so UID 1000 maps directly to UID 1000. Unprivileged user as defense-in-depth.
+/// Both supported platforms (macOS via Lima, Windows via WSL2) run containerd
+/// as root inside a VM, so UID 1000 maps directly to UID 1000 inside the
+/// container — no user-namespace remapping. We always use the unprivileged
+/// user as defense-in-depth.
 pub fn container_user() -> &'static str {
-    #[cfg(target_os = "linux")]
-    {
-        consts::CONTAINER_USER_ROOTLESS // "0:0"
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        consts::CONTAINER_USER_UNPRIVILEGED // "1000:1000"
-    }
+    consts::CONTAINER_USER_UNPRIVILEGED // "1000:1000"
 }
 
 /// Returns the hostname Claude Code should use for IDE WebSocket connections.
@@ -1166,11 +1146,7 @@ fn ide_host_override() -> &'static str {
     {
         consts::LIMA_HOST // "host.lima.internal"
     }
-    #[cfg(target_os = "linux")]
-    {
-        consts::NERDCTL_LINUX_HOST // "host.docker.internal"
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
     {
         consts::WSL_HOST // "host.speedwave.internal"
     }
@@ -2573,9 +2549,10 @@ mod tests {
             .map(|s| s[prefix.len()..].to_string())
     }
 
-    /// Returns VALID_COMPOSE with hardcoded user values replaced by the
-    /// platform-correct value from `container_user()`. This ensures tests
-    /// pass on all platforms (Linux uses "0:0", macOS/Windows use "1000:1000").
+    /// Returns VALID_COMPOSE with hardcoded user values replaced by the value
+    /// from `container_user()` ("1000:1000" on both supported platforms).
+    /// Kept as a helper so the existing fixture string stays the SSOT for the
+    /// rest of the compose shape.
     fn valid_compose_yaml() -> String {
         VALID_COMPOSE.replace(
             "user: \"1000:1000\"",
@@ -4939,12 +4916,12 @@ services:
                 "macOS: containers reach mcp-os via host.lima.internal"
             );
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(target_os = "windows")]
         {
             assert_eq!(
                 url,
-                format!("http://host.docker.internal:{port}"),
-                "Linux: containers reach mcp-os via nerdctl rootless DNS name"
+                format!("http://host.containers.internal:{port}"),
+                "Windows: containers reach mcp-os via WSL2 host alias"
             );
         }
         // URL must never contain 0.0.0.0 — that's the bind address, not a routable address
@@ -5160,8 +5137,8 @@ services:
         );
         #[cfg(target_os = "macos")]
         assert_eq!(url, "http://host.lima.internal:49215");
-        #[cfg(target_os = "linux")]
-        assert_eq!(url, "http://host.docker.internal:49215");
+        #[cfg(target_os = "windows")]
+        assert_eq!(url, "http://host.containers.internal:49215");
         // Same alias scheme as mcp-os — only the port differs.
         assert_eq!(host_exec_gateway_url(1), mcp_os_gateway_url(1));
     }
@@ -5465,12 +5442,12 @@ services:
     }
 
     #[test]
-    fn test_container_user_returns_platform_value() {
-        let user = container_user();
-        #[cfg(target_os = "linux")]
-        assert_eq!(user, "0:0", "Linux rootless must use 0:0");
-        #[cfg(not(target_os = "linux"))]
-        assert_eq!(user, "1000:1000", "macOS/Windows must use 1000:1000");
+    fn test_container_user_returns_unprivileged_value() {
+        assert_eq!(
+            container_user(),
+            "1000:1000",
+            "macOS/Windows must use 1000:1000"
+        );
     }
 
     #[test]
@@ -5592,8 +5569,8 @@ services:
         );
         #[cfg(target_os = "macos")]
         assert_eq!(host, consts::LIMA_HOST);
-        #[cfg(target_os = "linux")]
-        assert_eq!(host, consts::NERDCTL_LINUX_HOST);
+        #[cfg(target_os = "windows")]
+        assert_eq!(host, consts::WSL_HOST);
     }
 
     #[test]

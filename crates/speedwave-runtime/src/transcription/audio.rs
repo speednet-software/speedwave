@@ -1,12 +1,12 @@
 //! The `AudioCapture` trait and its `FileAudioCapture` test/dev implementation.
 //!
 //! `AudioCapture` is the seam between the OS-specific capture backends (Windows
-//! WASAPI loopback, macOS CoreAudio process taps, Linux `pw-record`/`parec`) and
-//! the rest of the engine — the same shape as `ContainerRuntime` →
-//! `LimaRuntime`/`NerdctlRuntime`/`WslRuntime`. `FileAudioCapture` "plays back" a
-//! 16 kHz mono WAV in fixed chunks so the orchestration (the transcriber, the
-//! diarizer, the driver) can be exercised without a real device — and doubles as
-//! the dev affordance ("transcribe a WAV file").
+//! WASAPI loopback, macOS CoreAudio process taps) and the rest of the engine —
+//! the same shape as `ContainerRuntime` → `LimaRuntime`/`WslRuntime`.
+//! `FileAudioCapture` "plays back" a 16 kHz mono WAV in fixed chunks so the
+//! orchestration (the transcriber, the diarizer, the driver) can be exercised
+//! without a real device — and doubles as the dev affordance ("transcribe a
+//! WAV file").
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,10 +34,11 @@ pub enum AudioSource {
     SystemWide,
     /// A specific process's audio (e.g. just Teams). Requires per-process
     /// capture support — `CaptureCapabilities::supports_per_process` (Windows
-    /// build 20348+, macOS 14.4+, PipeWire on Linux).
+    /// build 20348+, macOS 14.4+).
     Process {
-        /// Process selector — a PID on Windows/macOS, a node/sink-input id on
-        /// Linux (the backend interprets it).
+        /// Process selector — a PID on Windows/macOS. `ProcessSelector::NodeId`
+        /// is reserved for non-PID backends; both current backends reject it
+        /// as `Unsupported`.
         selector: ProcessSelector,
     },
     /// A specific microphone input device (the user's own voice).
@@ -67,7 +68,8 @@ pub enum ProcessSelector {
         /// The PID.
         pid: i32,
     },
-    /// An opaque backend-specific node/stream id (Linux PipeWire/PulseAudio).
+    /// An opaque backend-specific node/stream id. Reserved variant — no current
+    /// backend accepts it; both reject it as `Unsupported`.
     NodeId {
         /// The node id, stringified.
         id: String,
@@ -93,12 +95,12 @@ pub struct AudioSourceInfo {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CaptureCapabilities {
     /// `true` if the backend can capture a single process's audio (Windows
-    /// build 20348+, macOS 14.4+, Linux PipeWire). When `false`, only
-    /// `SystemWide` (+ `Microphone`) is offered, with a tooltip explaining
-    /// the OS requirement.
+    /// build 20348+, macOS 14.4+). When `false`, only `SystemWide`
+    /// (+ `Microphone`) is offered, with a tooltip explaining the OS
+    /// requirement.
     pub supports_per_process: bool,
     /// `true` if capturing the system loopback at all is possible on this host
-    /// (e.g. `false` on macOS < 14.2, or Linux with no usable sound server).
+    /// (e.g. `false` on macOS < 14.2).
     pub supports_system_audio: bool,
     /// `true` if a microphone input is available.
     pub supports_microphone: bool,

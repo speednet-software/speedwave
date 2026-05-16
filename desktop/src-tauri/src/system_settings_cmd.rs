@@ -55,13 +55,13 @@ pub fn open_audio_capture_pane() -> Result<(), String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     use super::*;
 
     #[test]
-    fn pane_openers_return_ok_on_non_macos() {
+    fn pane_openers_return_ok_on_windows() {
         // On non-macOS these are no-ops — verify they return Ok without panicking.
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         {
             assert!(open_files_folders_pane().is_ok());
             assert!(open_microphone_pane().is_ok());

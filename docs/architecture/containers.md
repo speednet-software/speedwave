@@ -57,9 +57,13 @@ The Lima VM and Claude container memory scale based on host RAM. The VM never ta
 
 Formulas: VM = `(host_ram / 2).clamp(4, 32)`, Claude = `(vm_mem - 4).clamp(4, 28)`.
 
-### Adaptive scaling (Linux — native nerdctl)
+### Windows (WSL2)
 
-No VM layer. Claude container memory scales directly from host RAM with 6 GiB reserved for the OS and user applications:
+Claude container memory scales directly from host RAM with 6 GiB reserved for
+the OS and user applications. WSL2 shares host RAM dynamically rather than
+reserving a hard partition like Lima, so the formula bypasses the VM-memory
+step. Falls back to 10 g when RAM detection fails (`host_total_memory_gib()`
+returns 16 on failure → 16 − 6 = 10).
 
 | Host RAM | Claude container |
 | -------- | ---------------- |
@@ -67,10 +71,6 @@ No VM layer. Claude container memory scales directly from host RAM with 6 GiB re
 | 16 GiB   | 10 g             |
 | 32 GiB   | 26 g             |
 | 64 GiB   | 28 g (cap)       |
-
-### Windows (WSL2)
-
-Same adaptive formula as Linux. Falls back to 10 g when RAM detection fails (`host_total_memory_gib()` returns 16 on failure → 16 − 6 = 10).
 
 ### Migration
 
@@ -187,20 +187,16 @@ The Lima VM reserves ~9–32 GiB of RAM for the lifetime of the process — QEMU
 - **Cleanup is non-blocking:** All exit cleanup (VM stop, IDE Bridge, mcp-os) runs in a spawned background thread. The Tauri event loop is not blocked.
 - **Per-project `compose_down` is skipped on macOS:** the VM poweroff reaps every container in one shot; calling `compose_down` would add ~10 s per project of nerdctl's hard-coded graceful-stop timeout. The full macOS exit sequence is just `limactl stop --force` (hard Apple Virtualization Framework VM poweroff, typically under a second).
 
-### Linux (native nerdctl)
-
-There is no VM layer. Containers are stopped by `compose_down`. The containerd daemon continues as a systemd user service — this matches the Docker Desktop model where containerd is always available.
-
 ### Windows (WSL2)
 
-`stop_vm()` is a no-op for `WslRuntime`. Running `wsl --terminate Speedwave` would stop all processes in the WSL2 distro — including workloads unrelated to Speedwave. Windows manages WSL2 memory via the hypervisor; Speedwave does not control the distro lifecycle. Because `stop_vm()` is a no-op, containers are stopped via per-project `compose_down` on app exit (same path as Linux). Without it, containers would survive in the `Speedwave` distro until the next Windows boot or manual `wsl --shutdown`.
+`stop_vm()` is a no-op for `WslRuntime`. Running `wsl --terminate Speedwave` would stop all processes in the WSL2 distro — including workloads unrelated to Speedwave. Windows manages WSL2 memory via the hypervisor; Speedwave does not control the distro lifecycle. Because `stop_vm()` is a no-op, containers are stopped via per-project `compose_down` on app exit. Without it, containers would survive in the `Speedwave` distro until the next Windows boot or manual `wsl --shutdown`.
 
 ### Signal handling
 
 SIGTERM and SIGINT (and `SetConsoleCtrlHandler` on Windows) are handled by the `ctrlc` crate. The signal handler calls `run_exit_cleanup()`, which is guarded by `CLEANUP_ONCE` — the cleanup body runs exactly once across all three call sites:
 
 1. **Signal handler** (`ctrlc::set_handler`) — SIGTERM/SIGINT
-2. **`WindowEvent::Destroyed`** — main window destroyed (app closed without tray, or Linux without libappindicator)
+2. **`WindowEvent::Destroyed`** — main window destroyed (app closed without tray)
 3. **`RunEvent::ExitRequested`** — tray menu "Quit", macOS Cmd+Q / app-menu "Quit", or SIGTERM via the Tauri runtime (paths where the main window is hidden rather than destroyed)
 
 ## See Also

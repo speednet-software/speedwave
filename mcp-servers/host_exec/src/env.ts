@@ -4,7 +4,7 @@
  * `HOST_EXEC_CONFIG_PATH`, `PORT` — none of which must reach `build.gradle` /
  * `node_modules` / etc.). This is the `SAFE_ENV_KEYS` + `buildChildEnv` pattern
  * from `mcp-servers/os/src/platform-runner.ts`, extended for build tooling
- * (`JAVA_HOME`, `DOCKER_HOST`, `XDG_*`, …), plus the recipe's own `env` map
+ * (`JAVA_HOME`, `DOCKER_HOST`, …), plus the recipe's own `env` map
  * (validated Rust-side: no key in `RESERVED_ENV_KEYS`). See ADR-054.
  * @module host_exec/env
  */
@@ -35,12 +35,6 @@ export const SAFE_ENV_KEYS: readonly string[] = [
   'DEVELOPER_DIR',
   'SDKROOT',
   '__CF_USER_TEXT_ENCODING',
-  // Linux desktop / XDG (some toolchains read these)
-  'XDG_RUNTIME_DIR',
-  'XDG_DATA_HOME',
-  'XDG_CONFIG_HOME',
-  'XDG_CACHE_HOME',
-  'DBUS_SESSION_BUS_ADDRESS',
   // Windows
   'USERPROFILE',
   'SYSTEMROOT',

@@ -26,7 +26,7 @@ Add a `reset_vm()` method to the `ContainerRuntime` trait (default no-op) and ov
 
 The call is inserted in `setup_wizard::factory_reset()` between the macOS Lima VM teardown and `wipe_data_dir()`, so the WSL VHDX is still at its expected path when `wsl --unregister` runs. Errors from `reset_vm()` are logged as warnings and do not abort the data-dir wipe — the primary remediation must complete regardless.
 
-`LimaRuntime` and `NerdctlRuntime` inherit the default no-op, so the call site in `factory_reset` is ungated (no `#[cfg(target_os = "windows")]`).
+`LimaRuntime` inherits the default no-op, so the call site in `factory_reset` is ungated (no `#[cfg(target_os = "windows")]`). `NerdctlRuntime` was removed when Linux was dropped — see ADR-059.
 
 ### NSIS uninstall hook
 
@@ -40,10 +40,6 @@ The `/SD IDNO` flag causes unattended `uninstall.exe /S` installations to defaul
 ### MSI parity (deferred)
 
 Speedwave publishes both NSIS `.exe` and MSI for managed deployments (`docs/getting-started/installation.md` line 60).[^3] MSI custom actions require a `<CustomAction>` element, a `<InstallExecuteSequence>` entry, impersonation (`Impersonate="yes"`), and an opt-in checkbox in the UI — substantially more work than the NSIS hook and outside the scope of this fix. MSI parity is tracked as a follow-up issue; until it ships, MSI users must run `wsl --unregister Speedwave` manually after uninstall (same as current v0.10.0 behaviour).
-
-### Linux `.deb postrm` (out of scope)
-
-There is no equivalent user-reported bug for Linux. If the analogous issue is reported, it will get a separate issue and ADR.
 
 ## Consequences
 

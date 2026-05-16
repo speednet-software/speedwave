@@ -41,34 +41,6 @@ describe('UpdateNotificationComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('does not show update banner when install is managed externally', async () => {
-    const externalMock = new MockTauriService();
-    externalMock.invokeHandler = async (cmd: string) => {
-      switch (cmd) {
-        case 'get_platform':
-          return 'linux';
-        case 'check_for_update':
-          return { kind: 'managed_externally', manager: 'apt' };
-        case 'list_projects':
-          return { projects: [], active_project: null };
-        default:
-          return undefined;
-      }
-    };
-
-    await TestBed.resetTestingModule();
-    await TestBed.configureTestingModule({
-      imports: [UpdateNotificationComponent],
-      providers: [{ provide: TauriService, useValue: externalMock }],
-    }).compileComponents();
-
-    const f = TestBed.createComponent(UpdateNotificationComponent);
-    const c = f.componentInstance;
-    await f.whenStable();
-    expect(c.updateInfo).toBeNull();
-    expect(c.showUpdateBanner).toBe(false);
-  });
-
   describe('dismiss()', () => {
     it('sets dismissed to true', () => {
       component.dismissed = false;
@@ -140,59 +112,6 @@ describe('UpdateNotificationComponent', () => {
       expect(invokeSpy).toHaveBeenCalledWith('install_update_and_reconcile', {
         expectedVersion: '1.2.3',
       });
-    });
-  });
-
-  describe('isLinux', () => {
-    it('defaults to false', () => {
-      expect(component.isLinux).toBe(false);
-    });
-
-    it('is set to true when platform is linux', async () => {
-      const linuxMock = new MockTauriService();
-      linuxMock.invokeHandler = async (cmd: string) => {
-        switch (cmd) {
-          case 'get_platform':
-            return 'linux';
-          case 'check_for_update':
-            return { kind: 'up_to_date' };
-          case 'list_projects':
-            return { projects: [], active_project: null };
-          case 'check_containers_running':
-            return false;
-          default:
-            return undefined;
-        }
-      };
-
-      await TestBed.resetTestingModule();
-      await TestBed.configureTestingModule({
-        imports: [UpdateNotificationComponent],
-        providers: [{ provide: TauriService, useValue: linuxMock }],
-      }).compileComponents();
-
-      const linuxFixture = TestBed.createComponent(UpdateNotificationComponent);
-      const linuxComponent = linuxFixture.componentInstance;
-      await linuxFixture.whenStable();
-      expect(linuxComponent.isLinux).toBe(true);
-    });
-  });
-
-  describe('openReleasesPage()', () => {
-    it('invokes open_url with GitHub Releases URL', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      mockTauri.invokeHandler = async () => undefined;
-      await component.openReleasesPage();
-      expect(invokeSpy).toHaveBeenCalledWith('open_url', {
-        url: 'https://github.com/speednet-software/speedwave/releases',
-      });
-    });
-
-    it('does not throw when invoke fails', async () => {
-      mockTauri.invokeHandler = async () => {
-        throw new Error('not in Tauri');
-      };
-      await expect(component.openReleasesPage()).resolves.toBeUndefined();
     });
   });
 });

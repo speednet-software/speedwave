@@ -43,7 +43,6 @@ The Playwright container runs under Speedwave's standard hardening profile (`cap
 
 - **macOS:** Lima VM[^8] (ADR-002) provides a separate kernel. The Playwright container runs inside the Lima VM, which runs inside the macOS hypervisor.
 - **Windows:** WSL2 with a Hyper-V boundary[^9] (ADR-004) provides equivalent kernel separation.
-- **Linux:** rootless user namespaces (ADR-026) confine the entire container runtime; the container itself still drops all capabilities.
 
 The three-layer stack (hypervisor → container runtime → `cap_drop: ALL` + `no-new-privileges`) provides stronger isolation than Chromium's in-process sandbox alone would. Passing `--no-sandbox` delegates that role to the outer layers, which is the same approach taken by all major container-based browser testing platforms.[^10]
 

@@ -79,8 +79,7 @@ The `error` field is always passed through `speedwave_runtime::log_sanitizer::sa
 `spawn_blocking` is not cancellable from the host side. If the user closes the Plugins view or quits the app mid-install, behaviour is platform-specific:
 
 - **macOS Lima:** on app quit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm>` (where `<vm>` is derived from `SPEEDWAVE_DATA_DIR` per [ADR-031](ADR-031-data-dir-env-var-for-instance-isolation.md)[^4]) which poweroffs the VM, killing any in-VM `nerdctl build` immediately. The `.image_pending` marker on the host survives. On the next launch, `ensure_all_plugin_images` retries the build silently.
-- **Linux native nerdctl:** the build process is a child of the desktop process. After the desktop process exits, the child is reparented to `systemd-user`/`init` (Linux has no equivalent of `prctl(PR_SET_PDEATHSIG)`[^3] for the inverse case — and `PR_SET_PDEATHSIG` itself is Linux-only). The container runs as UID 0 in a user namespace per [ADR-026](ADR-026-linux-rootless-container-user.md)[^5], so the host-written `.image_pending` marker is owned by the desktop user and remains writable across the reparent. The build continues in the background; `.image_pending` is removed on success or remains on failure.
-- **Windows WSL2:** `wsl.exe -- nerdctl build` is a child of the desktop process; when the desktop exits, the host pipe breaks, but the in-WSL `nerdctl` may continue. Recovery is the same as Linux: `.image_pending` retry on next launch.
+- **Windows WSL2:** `wsl.exe -- nerdctl build` is a child of the desktop process; when the desktop exits, the host pipe breaks, but the in-WSL `nerdctl` may continue. The host-written `.image_pending` marker survives across the desktop exit; on the next launch, `ensure_all_plugin_images` retries the build silently.
 
 Explicit `kill_on_drop` of the in-flight child via a stored `Child` handle is left for follow-up; see "Out of scope".
 

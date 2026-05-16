@@ -174,37 +174,6 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Spawns a Linux terminal running `cmd`. Tries gnome-terminal, konsole, then
-/// xterm in order. After `cmd` completes the user sees a clear success/failure
-/// line, then drops to an interactive shell so they can keep working or close
-/// the window manually.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
-    let inner = format!("{cmd} && echo 'Login completed.' || echo 'Login failed.'; exec bash");
-
-    // (binary, args-before-the-command)
-    let attempts: [(&str, &[&str]); 3] = [
-        ("gnome-terminal", &["--", "bash", "-c"]),
-        ("konsole", &["-e", "bash", "-c"]),
-        ("xterm", &["-e", "bash", "-c"]),
-    ];
-    for (bin, prefix) in attempts {
-        let mut command = std::process::Command::new(bin);
-        command.args(prefix).arg(&inner);
-        match command.status() {
-            Ok(s) if s.success() => return Ok(()),
-            Ok(s) => log::debug!("{bin} exited with status {s}; trying next terminal"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => log::warn!("{bin} spawn error: {e}; trying next terminal"),
-        }
-    }
-
-    anyhow::bail!(
-        "no supported terminal found (tried gnome-terminal, konsole, xterm). \
-         Open a terminal manually and run: {cmd}"
-    );
-}
-
 /// Tauri command: opens a system terminal that runs `speedwave login` for the
 /// requested project. The actual OAuth flow happens inside Claude Code in the
 /// container; this command only launches the terminal.

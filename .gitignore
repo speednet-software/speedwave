@@ -74,7 +74,8 @@ desktop/src-tauri/THIRD-PARTY-LICENSES/
 # Bundled Node.js binary (downloaded by `make download-nodejs`)
 desktop/src-tauri/nodejs/
 
-# Bundled nerdctl-full (downloaded by `make download-nerdctl-full`, Linux .deb only)
+# Reserved nerdctl-full bundle layout — not currently populated in production,
+# kept so resolve_binary() can fall through to it if tests drop a tree here.
 desktop/src-tauri/nerdctl-full/
 
 # Bundled WSL2 resources (downloaded by `make download-wsl-resources`, Windows only)

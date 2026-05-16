@@ -40,10 +40,8 @@ UNSIGNED_ASSETS=(
   "latest.json"
   "Speedwave_${V}_macOS_Apple_Silicon.dmg"
   "Speedwave_${V}_macOS_Intel.dmg"
-  "Speedwave_${V}_amd64.deb"
   "speedwave-v${V}-aarch64-apple-darwin.tar.gz"
   "speedwave-v${V}-x86_64-apple-darwin.tar.gz"
-  "speedwave-v${V}-x86_64-unknown-linux-gnu.tar.gz"
   "speedwave-v${V}-x86_64-pc-windows-msvc.zip"
 )
 
@@ -92,7 +90,6 @@ if data["version"] != expected:
 platforms = data["platforms"]
 if not isinstance(platforms, dict) or not platforms:
     sys.exit("latest.json platforms is empty")
-# Linux is excluded: updater.rs disables auto-update on Linux.
 # Missing keys = auto-update broken for that platform. Extra keys are allowed.
 required_keys = (
     "darwin-x86_64", "darwin-x86_64-app",

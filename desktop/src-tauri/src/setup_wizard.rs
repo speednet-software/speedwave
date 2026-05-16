@@ -306,7 +306,7 @@ pub fn init_vm() -> anyhow::Result<()> {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        init_vm_linux()?;
+        anyhow::bail!("Unsupported platform — Speedwave only supports macOS and Windows");
     }
 
     let mut state = SetupState::load();
@@ -394,338 +394,6 @@ fn init_vm_macos() -> anyhow::Result<()> {
             consts::lima_vm_name()
         );
     }
-
-    Ok(())
-}
-
-/// Resolves the PATH with the setup tool's parent directory prepended,
-/// so that sibling binaries (containerd-rootless.sh, containerd, etc.)
-/// are discoverable by the setup script. .deb bundles place these
-/// binaries outside the system PATH.
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
-fn setup_tool_path_env(setup_tool: &str) -> Option<String> {
-    let setup_path = std::path::Path::new(setup_tool);
-    let bin_dir = setup_path.parent()?;
-    if bin_dir == std::path::Path::new("") {
-        return None;
-    }
-    let system_path = std::env::var("PATH").unwrap_or_default();
-    Some(format!("{}:{}", bin_dir.display(), system_path))
-}
-
-/// Cleans up a stale containerd rootless installation left by a previous run.
-///
-/// When upgrading from a previous .deb package version, the old systemd
-/// user units may reference stale ExecStart paths. On the next launch, systemd
-/// fails to start the unit because the old path no longer exists ("control
-/// process exited with error code" or "unit is masked").
-///
-/// This function forcefully removes the stale state so `install` can run fresh:
-/// 1. Stop containerd and buildkit services (ignore errors — they may already be dead)
-/// 2. Unmask the services (in case they got masked)
-/// 3. Remove the unit files so `install` recreates them with the new path
-/// 4. Reload systemd daemon to pick up the removal
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
-fn cleanup_stale_containerd() {
-    log::info!("Cleaning up stale containerd systemd units from previous run");
-
-    let services = ["containerd.service", "buildkit.service"];
-
-    for svc in &services {
-        // Stop + unmask (ignore errors — service may not exist or be dead)
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "stop", svc])
-            .output();
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "unmask", svc])
-            .output();
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "disable", svc])
-            .output();
-    }
-
-    // Remove unit files directly — the surest way to clear stale state.
-    if let Ok(home) = std::env::var("HOME") {
-        let unit_dir = std::path::PathBuf::from(&home).join(".config/systemd/user");
-        for svc in &services {
-            let unit_file = unit_dir.join(svc);
-            if unit_file.exists() {
-                if let Err(e) = std::fs::remove_file(&unit_file) {
-                    log::warn!("Failed to remove stale unit {}: {e}", unit_file.display());
-                }
-            }
-        }
-    }
-
-    // Reload daemon so systemd forgets the removed units.
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .output();
-}
-
-/// Returns `true` if a containerd systemd user unit exists (stale or active).
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
-fn has_stale_containerd_unit() -> bool {
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-    std::path::PathBuf::from(&home)
-        .join(".config/systemd/user/containerd.service")
-        .exists()
-}
-
-/// Runs `containerd-rootless-setuptool.sh install` using the given binary path.
-///
-/// Always cleans up stale systemd units from previous runs before installing.
-/// Upgrading .deb packages may change binary paths, so old units
-/// referencing previous paths must be removed to prevent startup failures.
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
-fn start_rootless_containerd(setup_tool: &str) -> anyhow::Result<()> {
-    let path_env = setup_tool_path_env(setup_tool);
-
-    if has_stale_containerd_unit() {
-        cleanup_stale_containerd();
-    }
-
-    let mut cmd = std::process::Command::new(setup_tool);
-    cmd.arg("install");
-    if let Some(ref p) = path_env {
-        cmd.env("PATH", p);
-    }
-
-    let output = cmd.output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    anyhow::bail!(
-        "Failed to start rootless containerd: {}\n\
-         Ensure systemd --user is available and /etc/subuid + /etc/subgid \
-         are configured for your user.",
-        stderr.trim()
-    );
-}
-
-/// Waits for containerd to become ready by polling `nerdctl info`.
-///
-/// Retries up to `max_retries` times with `interval` between attempts.
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
-fn wait_for_containerd(
-    nerdctl_bin: &str,
-    max_retries: u32,
-    interval: std::time::Duration,
-) -> anyhow::Result<()> {
-    for _ in 0..max_retries {
-        let verify = std::process::Command::new(nerdctl_bin)
-            .arg("info")
-            .output()?;
-        if verify.status.success() {
-            return Ok(());
-        }
-        std::thread::sleep(interval);
-    }
-    anyhow::bail!(
-        "containerd did not become ready after {}s. \
-         Try running: containerd-rootless-setuptool.sh install",
-        max_retries as u64 * interval.as_secs()
-    );
-}
-
-/// Returns `true` if AppArmor restricts unprivileged user namespaces on this kernel.
-///
-/// Ubuntu 24.04+ sets `kernel.apparmor_restrict_unprivileged_userns=1` by default,
-/// which blocks `rootlesskit` from creating user namespaces unless an AppArmor
-/// profile with the `userns` rule is loaded for the binary.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn is_apparmor_userns_restricted() -> bool {
-    std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false)
-}
-
-/// Converts an absolute binary path to an AppArmor profile filename.
-///
-/// Strips the leading `/` and replaces remaining `/` with `.`, matching
-/// the convention used by Ubuntu's shipped profiles (e.g.
-/// `/usr/bin/rootlesskit` → `rootlesskit`,
-/// `/home/user/.speedwave/nerdctl-full/bin/rootlesskit`
-/// → `home.user.speedwave.nerdctl-full.bin.rootlesskit`).
-#[cfg(all(test, not(any(target_os = "macos", target_os = "windows"))))]
-fn apparmor_profile_name(binary_path: &str) -> String {
-    binary_path
-        .strip_prefix('/')
-        .unwrap_or(binary_path)
-        .replace('/', ".")
-}
-
-/// Generates the AppArmor profile content for a rootlesskit binary path.
-///
-/// The profile uses `flags=(unconfined)` — it does not restrict the binary,
-/// it only exists to give it a "name" in AppArmor so the `userns` permission
-/// can be granted. This matches Docker Desktop's approach.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn apparmor_profile_content(binary_path: &str, profile_name: &str) -> String {
-    // Must match packaging/linux/apparmor-rootlesskit.profile exactly
-    // (except for the binary path) so that the equality check in
-    // ensure_apparmor_profile() passes after .deb installation.
-    format!(
-        "\
-abi <abi/4.0>,
-include <tunables/global>
-
-\"{binary_path}\" flags=(unconfined) {{
-  userns,
-
-  include if exists <local/{profile_name}>
-}}
-"
-    )
-}
-
-/// Stable profile name for Speedwave's rootlesskit AppArmor profile.
-///
-/// We use a fixed name rather than encoding the binary path into the filename.
-/// The .deb package pre-installs this profile via dpkg. At runtime, the app
-/// re-checks and updates the profile content if the binary path changes (e.g.
-/// after a package upgrade), but the filename remains constant.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const APPARMOR_PROFILE_NAME: &str = "speedwave.rootlesskit";
-
-/// Installs an AppArmor profile for rootlesskit if the kernel restricts
-/// unprivileged user namespaces (Ubuntu 24.04+).
-///
-/// This is a no-op when:
-/// - The restriction is not active (non-Ubuntu or older kernels)
-/// - AppArmor ABI 4.0 is not available
-///
-/// The profile is always (re-)written as a fallback — the .deb package
-/// pre-installs it via dpkg, but pkexec handles upgrades and manual installs.
-///
-/// When needed, uses `pkexec` to write the profile to `/etc/apparmor.d/`
-/// and load it via `apparmor_parser`. The user sees a graphical polkit
-/// authentication dialog (standard for GUI apps on Linux desktops).
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn ensure_apparmor_profile(rootlesskit_path: &str) -> anyhow::Result<()> {
-    if !is_apparmor_userns_restricted() {
-        log::debug!("AppArmor userns restriction not active, skipping profile install");
-        return Ok(());
-    }
-
-    if !std::path::Path::new("/etc/apparmor.d/abi/4.0").exists() {
-        log::debug!("AppArmor ABI 4.0 not available, skipping profile install");
-        return Ok(());
-    }
-
-    let profile_path = format!("/etc/apparmor.d/{APPARMOR_PROFILE_NAME}");
-    let content = apparmor_profile_content(rootlesskit_path, APPARMOR_PROFILE_NAME);
-
-    // Check if current profile already matches (avoid unnecessary pkexec prompts).
-    if let Ok(existing) = std::fs::read_to_string(&profile_path) {
-        if existing == content {
-            log::debug!("AppArmor profile already up-to-date: {profile_path}");
-            return Ok(());
-        }
-    }
-
-    log::info!("Installing AppArmor profile for rootlesskit: {profile_path}");
-
-    // Write profile content to a temp file first, then use pkexec to copy it
-    // into /etc/apparmor.d/. This avoids passing untrusted content through a
-    // shell heredoc, which could be exploited if the content contained the
-    // heredoc delimiter or shell metacharacters.
-    let tmp = tempfile::NamedTempFile::new()?;
-    std::fs::write(tmp.path(), &content)?;
-    let script = format!(
-        "cp '{}' '{}' && apparmor_parser -r '{}'",
-        tmp.path().display(),
-        profile_path,
-        profile_path
-    );
-
-    let output = std::process::Command::new("pkexec")
-        .args(["sh", "-c", &script])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // pkexec exit code 126 = user dismissed the auth dialog
-        if output.status.code() == Some(126) {
-            anyhow::bail!(
-                "Authentication required to configure rootless containers.\n\
-                 Speedwave needs to install an AppArmor profile for rootlesskit.\n\
-                 Please approve the authentication prompt when it appears."
-            );
-        }
-        anyhow::bail!(
-            "Failed to install AppArmor profile for rootlesskit: {}\n\
-             You can install it manually:\n\
-             sudo tee {} <<'EOF'\n{}\nEOF\n\
-             sudo apparmor_parser -r {}",
-            stderr.trim(),
-            profile_path,
-            content.trim(),
-            profile_path
-        );
-    }
-
-    log::info!("AppArmor profile installed and loaded: {profile_path}");
-    Ok(())
-}
-
-/// Runs `containerd-rootless-setuptool.sh install-buildkit` to set up BuildKit
-/// as a systemd --user service. Required for `nerdctl build` to work.
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
-fn install_buildkit(setup_tool: &str) -> anyhow::Result<()> {
-    let path_env = setup_tool_path_env(setup_tool);
-
-    let mut cmd = std::process::Command::new(setup_tool);
-    cmd.arg("install-buildkit");
-    if let Some(ref p) = path_env {
-        cmd.env("PATH", p);
-    }
-
-    let output = cmd.output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "Failed to install BuildKit: {}\n\
-             Try running: containerd-rootless-setuptool.sh install-buildkit",
-            stderr.trim()
-        );
-    }
-    Ok(())
-}
-
-/// Initializes rootless containerd on Linux using the bundled nerdctl-full.
-///
-/// Steps:
-/// 1. Verify `newuidmap` (uidmap package) is installed — required for rootless containers
-/// 2. Install AppArmor profile for rootlesskit (Ubuntu 24.04+ restricts user namespaces)
-/// 3. Run `containerd-rootless-setuptool.sh install` to start containerd as a systemd --user service
-/// 4. Wait for containerd readiness (up to 30s, retrying `nerdctl info`)
-/// 5. Run `containerd-rootless-setuptool.sh install-buildkit` for `nerdctl build` support
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn init_vm_linux() -> anyhow::Result<()> {
-    use speedwave_runtime::binary;
-
-    // OS prerequisite check (SSOT: os_prereqs module)
-    let violations = speedwave_runtime::os_prereqs::check_os_prereqs();
-    if let Some(v) = violations.first() {
-        anyhow::bail!("{v}");
-    }
-
-    let rootlesskit = binary::resolve_binary("rootlesskit");
-    ensure_apparmor_profile(&rootlesskit)?;
-
-    let setup_tool = binary::resolve_binary("containerd-rootless-setuptool.sh");
-    start_rootless_containerd(&setup_tool)?;
-
-    let nerdctl = binary::resolve_binary("nerdctl");
-    wait_for_containerd(&nerdctl, 15, std::time::Duration::from_secs(2))?;
-
-    install_buildkit(&setup_tool)?;
 
     Ok(())
 }
@@ -1494,7 +1162,7 @@ pub fn factory_reset() -> anyhow::Result<()> {
     // 2b. Reset VM/distro across platforms.
     //     Windows: WslRuntime::reset_vm runs `wsl --terminate` + `--unregister`,
     //     each bounded by CommandRunner::run_with_timeout (10s + 25s).
-    //     macOS/Linux: trait default no-op (Lima VM already destroyed above).
+    //     macOS: trait default no-op (Lima VM already destroyed above).
     //     Run BEFORE wipe_data_dir so the WSL VHDX path is still where WSL
     //     expects it (~/.speedwave/wsl/Speedwave/ext4.vhdx).
     {
@@ -1540,7 +1208,6 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
 ///
 /// Layout at runtime:
 /// - macOS:   `.app/Contents/Resources/cli/speedwave`
-/// - Linux .deb: `<exe_dir>/resources/cli/speedwave`
 /// - Windows: `<exe_dir>/resources/cli/speedwave.exe`
 /// - Dev mode fallback: `<exe_dir>/speedwave` (existing behaviour)
 pub fn resolve_cli_source() -> Option<std::path::PathBuf> {
@@ -1558,7 +1225,6 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
     let binary_name = "speedwave.exe";
 
     // SPEEDWAVE_RESOURCES_DIR — set by Tauri in production builds.
-    // On Linux .deb, resources are in /usr/lib/Speedwave/ while the exe is in /usr/bin/.
     if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         let bundled = std::path::PathBuf::from(&resources_dir)
             .join("cli")
@@ -1577,15 +1243,6 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
             .join("Resources")
             .join("cli")
             .join(binary_name);
-        if resources.exists() {
-            return Some(resources);
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // Standard Tauri resource path (dev mode and deb packages)
-        let resources = exe_dir.join("resources").join("cli").join(binary_name);
         if resources.exists() {
             return Some(resources);
         }
@@ -1692,7 +1349,7 @@ fn parse_shell_env(shell: &str) -> UserShell {
         // macOS default shell is zsh since Catalina (10.15).
         #[cfg(target_os = "macos")]
         return UserShell::Zsh;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         return UserShell::Unknown;
     } else {
         UserShell::Unknown
@@ -1705,9 +1362,6 @@ fn parse_shell_env(shell: &str) -> UserShell {
 /// - **bash on macOS**: login shell reads first of `.bash_profile` > `.bash_login` >
 ///   `.profile` (then stops). macOS terminals always open login shells, so only the
 ///   login file is needed. Creates `.bash_profile` if none of the three exist.
-/// - **bash on Linux**: interactive shells read `.bashrc`; login shells (SSH, tty)
-///   read `.bash_profile` > `.bash_login` > `.profile`. We write to both `.bashrc`
-///   AND the first existing login file to cover both session types.
 /// - **zsh**: `.zshrc` is sourced for both login and interactive shells on all platforms.
 /// - **Unknown**: `.profile` — POSIX portable fallback.
 #[cfg(unix)]
@@ -1723,17 +1377,6 @@ fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::pa
                 .find(|f| home.join(f).exists())
                 .unwrap_or(&".bash_profile"); // create .bash_profile if none exist
             targets.push(home.join(login_target));
-
-            // On Linux, also need .bashrc for interactive (non-login) shells
-            // (terminal emulators open non-login shells by default).
-            // macOS terminals always open login shells — .bashrc not needed.
-            #[cfg(target_os = "linux")]
-            {
-                let bashrc = home.join(".bashrc");
-                if !targets.contains(&bashrc) {
-                    targets.push(bashrc);
-                }
-            }
 
             targets
         }
@@ -2776,317 +2419,6 @@ mod tests {
         }
     }
 
-    // -- init_vm_linux helper tests (unix: macOS + Linux) --
-
-    #[cfg(unix)]
-    mod init_vm_linux_tests {
-        use super::super::{start_rootless_containerd, wait_for_containerd};
-        use serial_test::serial;
-        use std::os::unix::fs::PermissionsExt;
-
-        /// Creates an executable script in `dir` with given name and content.
-        fn create_mock_script(
-            dir: &std::path::Path,
-            name: &str,
-            content: &str,
-        ) -> std::path::PathBuf {
-            let path = dir.join(name);
-            std::fs::write(&path, content).expect("write mock script");
-            let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms).expect("chmod");
-            path
-        }
-
-        #[test]
-        fn start_rootless_containerd_success() {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let script = create_mock_script(
-                tmp.path(),
-                "containerd-rootless-setuptool.sh",
-                "#!/bin/sh\nexit 0\n",
-            );
-            let result = start_rootless_containerd(script.to_str().unwrap());
-            assert!(
-                result.is_ok(),
-                "should succeed when setup tool exits 0: {:?}",
-                result.err()
-            );
-        }
-
-        #[test]
-        fn start_rootless_containerd_failure_includes_stderr() {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let script = create_mock_script(
-                tmp.path(),
-                "containerd-rootless-setuptool.sh",
-                "#!/bin/sh\necho 'systemd not available' >&2\nexit 1\n",
-            );
-            let result = start_rootless_containerd(script.to_str().unwrap());
-            assert!(result.is_err());
-            let err = result.unwrap_err().to_string();
-            assert!(
-                err.contains("Failed to start rootless containerd"),
-                "error should describe failure: {err}"
-            );
-            assert!(
-                err.contains("systemd not available"),
-                "error should include stderr: {err}"
-            );
-            assert!(
-                err.contains("/etc/subuid"),
-                "error should mention subuid config: {err}"
-            );
-        }
-
-        #[test]
-        #[serial(env)]
-        fn has_stale_containerd_unit_detects_existing_file() {
-            use super::super::has_stale_containerd_unit;
-
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let unit_dir = tmp.path().join(".config/systemd/user");
-            std::fs::create_dir_all(&unit_dir).expect("create unit dir");
-            std::fs::write(unit_dir.join("containerd.service"), "[Unit]\n").expect("write unit");
-
-            // Override HOME to point at our tempdir
-            let orig_home = std::env::var("HOME").ok();
-            std::env::set_var("HOME", tmp.path());
-
-            let result = has_stale_containerd_unit();
-
-            // Restore HOME
-            if let Some(h) = orig_home {
-                std::env::set_var("HOME", h);
-            }
-            assert!(result, "should detect existing containerd.service");
-        }
-
-        #[test]
-        #[serial(env)]
-        fn has_stale_containerd_unit_returns_false_when_missing() {
-            use super::super::has_stale_containerd_unit;
-
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let orig_home = std::env::var("HOME").ok();
-            std::env::set_var("HOME", tmp.path());
-
-            let result = has_stale_containerd_unit();
-
-            if let Some(h) = orig_home {
-                std::env::set_var("HOME", h);
-            }
-            assert!(!result, "should return false when no unit file exists");
-        }
-
-        #[test]
-        fn wait_for_containerd_success_on_first_try() {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let script = create_mock_script(tmp.path(), "nerdctl", "#!/bin/sh\nexit 0\n");
-            let result = wait_for_containerd(
-                script.to_str().unwrap(),
-                3,
-                std::time::Duration::from_millis(10),
-            );
-            assert!(
-                result.is_ok(),
-                "should succeed when nerdctl info exits 0: {:?}",
-                result.err()
-            );
-        }
-
-        #[test]
-        fn wait_for_containerd_timeout_when_never_ready() {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let script = create_mock_script(tmp.path(), "nerdctl", "#!/bin/sh\nexit 1\n");
-            let result = wait_for_containerd(
-                script.to_str().unwrap(),
-                2,
-                std::time::Duration::from_millis(10),
-            );
-            assert!(result.is_err());
-            let err = result.unwrap_err().to_string();
-            assert!(
-                err.contains("did not become ready"),
-                "error should describe timeout: {err}"
-            );
-            assert!(
-                err.contains("containerd-rootless-setuptool.sh install"),
-                "error should suggest remedy: {err}"
-            );
-        }
-
-        #[test]
-        fn wait_for_containerd_succeeds_after_retries() {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            // Script that fails first 2 times, then succeeds on 3rd call.
-            // Uses a counter file to track invocations.
-            let counter_file = tmp.path().join("counter");
-            std::fs::write(&counter_file, "0").expect("init counter");
-            let script_content = format!(
-                "#!/bin/sh\n\
-                 COUNT=$(cat '{counter}')\n\
-                 COUNT=$((COUNT + 1))\n\
-                 echo $COUNT > '{counter}'\n\
-                 if [ $COUNT -ge 3 ]; then exit 0; else exit 1; fi\n",
-                counter = counter_file.display()
-            );
-            let script = create_mock_script(tmp.path(), "nerdctl", &script_content);
-            let result = wait_for_containerd(
-                script.to_str().unwrap(),
-                5,
-                std::time::Duration::from_millis(10),
-            );
-            assert!(
-                result.is_ok(),
-                "should succeed after retries: {:?}",
-                result.err()
-            );
-        }
-
-        #[test]
-        fn install_buildkit_success() {
-            use super::super::install_buildkit;
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let script = create_mock_script(
-                tmp.path(),
-                "containerd-rootless-setuptool.sh",
-                "#!/bin/sh\nexit 0\n",
-            );
-            let result = install_buildkit(script.to_str().unwrap());
-            assert!(
-                result.is_ok(),
-                "should succeed when install-buildkit exits 0: {:?}",
-                result.err()
-            );
-        }
-
-        #[test]
-        fn install_buildkit_failure_includes_stderr() {
-            use super::super::install_buildkit;
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let script = create_mock_script(
-                tmp.path(),
-                "containerd-rootless-setuptool.sh",
-                "#!/bin/sh\necho 'buildkitd not found' >&2\nexit 1\n",
-            );
-            let result = install_buildkit(script.to_str().unwrap());
-            assert!(result.is_err());
-            let err = result.unwrap_err().to_string();
-            assert!(
-                err.contains("Failed to install BuildKit"),
-                "error should describe failure: {err}"
-            );
-            assert!(
-                err.contains("buildkitd not found"),
-                "error should include stderr: {err}"
-            );
-        }
-    }
-
-    // -- AppArmor profile tests (Linux only) --
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    mod apparmor_tests {
-        use super::super::{
-            apparmor_profile_content, apparmor_profile_name, ensure_apparmor_profile,
-            APPARMOR_PROFILE_NAME,
-        };
-
-        #[test]
-        fn profile_name_from_usr_bin() {
-            assert_eq!(
-                apparmor_profile_name("/usr/bin/rootlesskit"),
-                "usr.bin.rootlesskit"
-            );
-        }
-
-        #[test]
-        fn profile_name_from_home_dir() {
-            assert_eq!(
-                apparmor_profile_name("/home/user/.speedwave/nerdctl-full/bin/rootlesskit"),
-                "home.user.speedwave.nerdctl-full.bin.rootlesskit"
-            );
-        }
-
-        #[test]
-        fn profile_name_strips_leading_slash() {
-            let name = apparmor_profile_name("/a/b/c");
-            assert!(!name.starts_with('.'), "should not start with dot: {name}");
-            assert_eq!(name, "a.b.c");
-        }
-
-        #[test]
-        fn profile_name_handles_no_leading_slash() {
-            assert_eq!(apparmor_profile_name("rootlesskit"), "rootlesskit");
-        }
-
-        #[test]
-        fn stable_profile_name_is_used() {
-            assert_eq!(APPARMOR_PROFILE_NAME, "speedwave.rootlesskit");
-        }
-
-        #[test]
-        fn profile_content_contains_abi_and_userns() {
-            let content = apparmor_profile_content("/usr/bin/rootlesskit", APPARMOR_PROFILE_NAME);
-            assert!(
-                content.contains("abi <abi/4.0>"),
-                "must declare ABI 4.0: {content}"
-            );
-            assert!(
-                content.contains("userns,"),
-                "must grant userns permission: {content}"
-            );
-            assert!(
-                content.contains("\"/usr/bin/rootlesskit\" flags=(unconfined)"),
-                "must reference binary path with unconfined flags: {content}"
-            );
-            assert!(
-                content.contains(&format!(
-                    "include if exists <local/{APPARMOR_PROFILE_NAME}>"
-                )),
-                "must include local overrides: {content}"
-            );
-        }
-
-        #[test]
-        fn profile_content_quotes_path_with_dots() {
-            let binary = "/home/user/.speedwave/nerdctl-full/bin/rootlesskit";
-            let content = apparmor_profile_content(binary, APPARMOR_PROFILE_NAME);
-            assert!(
-                content.contains(&format!("\"{binary}\" flags=(unconfined)")),
-                "path must be quoted for AppArmor: {content}"
-            );
-        }
-
-        #[test]
-        fn profile_content_changes_when_binary_path_changes() {
-            let content_a =
-                apparmor_profile_content("/tmp/.mount_A/rootlesskit", APPARMOR_PROFILE_NAME);
-            let content_b =
-                apparmor_profile_content("/tmp/.mount_B/rootlesskit", APPARMOR_PROFILE_NAME);
-            assert_ne!(
-                content_a, content_b,
-                "different binary paths must produce different profile content"
-            );
-        }
-
-        #[test]
-        fn ensure_apparmor_skips_when_restriction_not_active() {
-            // On most CI/dev machines (macOS, older Linux), the restriction is not active.
-            // We test the detection path — if restriction is off, should return Ok.
-            let sysctl = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
-            if !std::path::Path::new(sysctl).exists() {
-                let result = ensure_apparmor_profile("/nonexistent/rootlesskit");
-                assert!(
-                    result.is_ok(),
-                    "should be a no-op when restriction not active: {:?}",
-                    result.err()
-                );
-            }
-        }
-    }
-
     // ── copy_cli_binary tests ─────────────────────────────────────────────
 
     #[test]
@@ -3179,7 +2511,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     #[test]
     #[serial(env)]
     fn resolve_cli_source_finds_resources_path() {
@@ -3432,13 +2764,6 @@ mod tests {
         assert_eq!(parse_shell_env(""), UserShell::Zsh);
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn detect_shell_empty_defaults_to_unknown_on_linux() {
-        // On Linux, empty $SHELL should fall back to Unknown (→ .profile).
-        assert_eq!(parse_shell_env(""), UserShell::Unknown);
-    }
-
     // ── shell_config_targets tests ───────────────────────────────────────
 
     #[cfg(unix)]
@@ -3507,24 +2832,6 @@ mod tests {
         let targets = shell_config_targets(home, UserShell::Bash);
         // Should default to .bash_profile for creation
         assert!(targets.contains(&home.join(".bash_profile")));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn bash_linux_targets_bashrc_and_login() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let home = tmp.path();
-        std::fs::write(home.join(".bash_profile"), "# bp\n").expect("write");
-
-        let targets = shell_config_targets(home, UserShell::Bash);
-        assert!(
-            targets.contains(&home.join(".bash_profile")),
-            "should include login file"
-        );
-        assert!(
-            targets.contains(&home.join(".bashrc")),
-            "should include .bashrc for interactive shells on Linux"
-        );
     }
 
     // ── ensure_local_bin_on_path_for_shell tests ─────────────────────────
@@ -3633,8 +2940,7 @@ mod tests {
             ".bash_profile should contain PATH export"
         );
 
-        // On macOS, .bashrc should NOT be modified (macOS opens login shells).
-        // On Linux, .bashrc IS also a target — so this assertion is macOS-only.
+        // macOS opens login shells, so .bashrc should NOT be modified.
         #[cfg(target_os = "macos")]
         {
             let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read");
@@ -3643,41 +2949,6 @@ mod tests {
                 ".bashrc should not be modified on macOS"
             );
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn bash_linux_fresh_install_creates_both_files() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let home = tmp.path();
-        // No config files exist — simulates a fresh Linux install
-
-        ensure_local_bin_on_path_for_shell(home, UserShell::Bash).expect("should succeed");
-
-        // Both .bash_profile (login) and .bashrc (interactive) should be created
-        let bp = std::fs::read_to_string(home.join(".bash_profile")).expect("read .bash_profile");
-        assert!(
-            bp.contains(".local/bin"),
-            ".bash_profile should contain PATH export"
-        );
-
-        let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read .bashrc");
-        assert!(
-            bashrc.contains(".local/bin"),
-            ".bashrc should contain PATH export"
-        );
-
-        // Each file should have exactly one export line
-        let bp_count = bp.lines().filter(|l| l.contains(".local/bin")).count();
-        let bashrc_count = bashrc.lines().filter(|l| l.contains(".local/bin")).count();
-        assert_eq!(
-            bp_count, 1,
-            ".bash_profile: expected 1 export line, got {bp_count}"
-        );
-        assert_eq!(
-            bashrc_count, 1,
-            ".bashrc: expected 1 export line, got {bashrc_count}"
-        );
     }
 
     // ── copy_cli_binary overwrites existing binary ────────────────────────

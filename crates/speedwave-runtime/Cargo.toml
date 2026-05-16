@@ -3,7 +3,7 @@ name = "speedwave-runtime"
 version = "0.10.0"
 edition = "2021"
 publish = false
-description = "Container runtime abstraction for Speedwave (Lima, nerdctl, WSL2)"
+description = "Container runtime abstraction for Speedwave (Lima on macOS, WSL2 on Windows)"
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -72,9 +72,8 @@ whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 
 [target.'cfg(windows)'.dependencies]
 # Windows capture (Phase 4-W): WASAPI loopback via cpal. Windows-only — macOS
-# uses the bundled audio-capture-cli and Linux shells out to pw-record/parec,
-# so cpal is dead weight there. Still gated behind `audio-transcription` so the
-# CLI build stays lean.
+# uses the bundled audio-capture-cli, so cpal is dead weight there. Still gated
+# behind `audio-transcription` so the CLI build stays lean.
 cpal = { version = "0.16", optional = true }
 
 [features]

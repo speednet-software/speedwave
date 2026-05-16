@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Tests for containers/claude-resources/statusline.sh
-# Runs on the host (macOS/Linux) — no container required.
+# Runs on the host (macOS) — no container required.
 
 STATUSLINE="$BATS_TEST_DIRNAME/../../containers/claude-resources/statusline.sh"
 

@@ -1,6 +1,6 @@
 # Speedwave
 
-Security-first AI platform connecting Claude Code with external services (Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar) plus a built-in Office documents worker (Word/Excel/PowerPoint/PDF read·write·convert·charts). Claude runs in a hardened, token-free container — all service credentials are isolated per-worker. Additional VM-level isolation on macOS (Lima) and Windows (WSL2); rootless user namespaces on Linux. Ships as a single installable app (.dmg, .exe, .deb) without Docker Desktop. Two interfaces: CLI (terminal) and Desktop (chat UI).
+Security-first AI platform connecting Claude Code with external services (Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar) plus a built-in Office documents worker (Word/Excel/PowerPoint/PDF read·write·convert·charts). Claude runs in a hardened, token-free container — all service credentials are isolated per-worker. VM-level isolation on macOS (Lima) and Windows (WSL2). Ships as a single installable app (.dmg, .exe) without Docker Desktop. Two interfaces: CLI (terminal) and Desktop (chat UI). Linux as a host platform was dropped (ADR-059).
 
 ## Key Architecture
 
@@ -17,7 +17,7 @@ Security-first AI platform connecting Claude Code with external services (Slack,
 - **SSOT alignment:** `crates/speedwave-runtime/src/consts.rs::RESERVED_ENV_KEYS` is the single list of env names plugins cannot inject via `extra_env` (`PORT` reserved by Speedwave + dynamic-linker / language-runtime / shell-environment hijack vectors — `LD_*`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PATH`, `HOME`, `IFS`, `BASH_ENV`, …). It is consumed by `plugin::validate_manifest` and documented in `docs/architecture/security.md`. Adding a new vector = editing `consts.rs` only; do not duplicate the list in `validate_manifest`.
 - **SSOT alignment:** Plugin Ed25519 signature is a **runtime invariant**, not just an install gate (see [ADR-051](docs/adr/ADR-051-plugin-signature-runtime-verification.md)). Every read of a plugin tree goes through `signing::verify_plugin_signature_cached`; mutable per-plugin state (currently `image_pending`) lives at `<data_dir>/plugin-state/<slug>/`, never inside the signed tree. Adding a new mutable per-plugin file = adding it under `plugin-state/`, not under `plugins/<slug>/`; otherwise it invalidates the digest of every freshly-installed plugin.
 - **Per-project isolation:** `~/.speedwave/tokens/<project>/<service>/` (read-only mount), `speedwave_<project>_network` (isolated network)
-- **ContainerRuntime trait:** `Box<dyn ContainerRuntime>` — implementations: `LimaRuntime`, `NerdctlRuntime`, `WslRuntime`
+- **ContainerRuntime trait:** `Box<dyn ContainerRuntime>` — implementations: `LimaRuntime` (macOS), `WslRuntime` (Windows)
 - **MCP Hub:** port 4000, the ONLY MCP server Claude sees. Hub has zero tokens.
 - **IDE Bridge:** writes `~/.speedwave/ide-bridge/<port>.lock` on host, mounted as `~/.claude/ide/` in container
 - **Config merge:** defaults -> repo `.speedwave.json` -> user `~/.speedwave/config.json` (highest priority). See ADR-011
@@ -48,7 +48,7 @@ Granular targets:
 - **Check:** `check-clippy`, `check-desktop-clippy`, `check-fmt`, `check-mcp`, `check-mcp-lint`, `check-angular`, `check-angular-lint`
 - **Coverage:** `coverage-rust`, `coverage-mcp`, `coverage-angular`
 - **Audit:** `audit-rust`, `audit-mcp`, `audit-desktop`
-- **Download:** `download-lima`, `download-nodejs`, `download-nerdctl-full`, `download-wsl-resources` (+ `clean-*` variants)
+- **Download:** `download-lima`, `download-nodejs`, `download-wsl-resources` (+ `clean-*` variants)
 - **Other:** `lint`, `install-deps`, `install-hooks`, `clean`
 
 ## Git Workflow
@@ -129,7 +129,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - **KISS** — Speedwave is a thin orchestration layer. Prefer shelling out to existing tools over reimplementing. If >100 lines for something a CLI tool already does — stop.
 - **YAGNI** — build only what's needed now. No speculative features or "future extensibility".
 - **DRY** — `speedwave-runtime` = SSOT for container logic, `mcp-servers/shared/` = SSOT for MCP utilities. If same logic in two places — extract it.
-- **SOLID** — `Box<dyn ContainerRuntime>` with `LimaRuntime`/`NerdctlRuntime`/`WslRuntime`. New platform = new impl, zero changes to existing code.
+- **SOLID** — `Box<dyn ContainerRuntime>` with `LimaRuntime`/`WslRuntime`. New platform = new impl, zero changes to existing code.
 - **Boy Scout Rule** — leave code better than you found it. Fix bugs, typos, inconsistencies on sight.
 - **Rule of Three** — don't abstract until you see the same pattern three times.
 
@@ -145,7 +145,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - **NEVER use `#[allow(...)]` to suppress lint warnings** — fix the underlying issue instead. No `#[allow(missing_docs)]`, no `#[allow(clippy::unwrap_used)]`, no blanket `#![allow(...)]` at crate level. The only exception is `#[allow(clippy::unwrap_used, clippy::expect_used)]` on `#[cfg(test)] mod tests` blocks, where panicking on test failure is intentional.
 - **Every code change must include tests** in the same commit — covering happy paths, edge cases, error paths, and state transitions (see `.claude/rules/git-workflow.md` for details)
 - **SharePoint `:rw` token mount** — only exception to the `:ro` token mount rule (OAuth refresh, ADR-009). All MCP workers also mount `/workspace:rw` for file access
-- **Linux rootless:** container runs as UID 0 in user namespace (ADR-026)
+- **Container user:** runs as UID 1000:1000 on all supported platforms (macOS Lima, Windows WSL2). Linux as a host platform was dropped — see ADR-059.
 - **Documentation is a delivery requirement** — same as tests. New feature -> update guide. Decision -> write ADR.
 
 ## References
@@ -153,7 +153,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - `docs/architecture/README.md` — system architecture overview
 - `docs/architecture/security.md` — security model and threat analysis
 - `docs/architecture/containers.md` — container topology and compose template
-- `docs/architecture/platform-matrix.md` — macOS, Linux, Windows specifics
+- `docs/architecture/platform-matrix.md` — macOS and Windows specifics
 - `docs/contributing/development-setup.md` — dev environment and build targets
 - `docs/contributing/testing.md` — test strategy, patterns, and coverage thresholds
 - `docs/guides/cli.md` — CLI subcommands and usage

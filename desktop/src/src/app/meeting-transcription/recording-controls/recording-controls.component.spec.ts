@@ -99,7 +99,7 @@ describe('RecordingControlsComponent', () => {
   });
 
   it('falls back to index 0 (and does not crash) when neither mixed nor system is offered', async () => {
-    // A Linux box with only mic sources, say. sourceIndex stays 0; the mixed
+    // A host that only exposes mic sources. sourceIndex stays 0; the mixed
     // computed reads sources()[0] safely (it's a microphone, not undefined).
     svc.listAudioSources.mockResolvedValueOnce([
       { source: { kind: 'microphone', device: 'mic-a' }, label: 'Mic A', app_id: null },

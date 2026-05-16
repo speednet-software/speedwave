@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Tests for containers/install-claude.sh
-# Runs on the host (macOS/Linux) — no container required.
+# Runs on the host (macOS) — no container required.
 # Stubs out 'curl' and 'bash' execution to avoid network calls.
 
 INSTALL_SCRIPT="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"

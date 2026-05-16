@@ -85,10 +85,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "cargo:rerun-if-changed={}",
-        manifest_dir.join("tauri.linux.conf.json").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
         manifest_dir.join("tauri.windows.conf.json").display()
     );
     println!("cargo:rerun-if-env-changed=SPEEDWAVE_ALLOW_BUNDLE_STUBS");
@@ -105,7 +101,6 @@ fn validate_bundle_resource_declarations(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_name = match target_os {
         "macos" => "tauri.macos.conf.json",
-        "linux" => "tauri.linux.conf.json",
         "windows" => "tauri.windows.conf.json",
         other => {
             return Err(

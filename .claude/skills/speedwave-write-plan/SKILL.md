@@ -36,7 +36,7 @@ The remaining context still requires tool reads:
 
 2. **Read `docs/architecture/containers.md`** — container topology, compose template, resource limits
 
-3. **Read `docs/architecture/platform-matrix.md`** — macOS/Linux/Windows differences
+3. **Read `docs/architecture/platform-matrix.md`** — macOS and Windows differences
 
 4. **Read `docs/contributing/testing.md`** — test strategy, coverage thresholds, test patterns
 
@@ -90,19 +90,17 @@ Before proposing changes, demonstrate you understand the current state:
 
 For EVERY change, answer:
 
-- Does this behave differently on macOS / Linux / Windows?
+- Does this behave differently on macOS vs Windows?
 
-- Container user: does the change assume UID 1000 or handle both 1000:1000 (macOS/Win) and 0:0 (Linux rootless, ADR-026)?
+- VM layer: does it need path translation? (Lima `/tmp/lima/` on macOS, WSL `\\wsl$\` on Windows)
 
-- VM layer: does it need path translation? (Lima `/tmp/lima/`, WSL `\\wsl$\`)
+- Does it affect mcp-os? (macOS = AppleScript / EventKit, Windows = WinRT / mapi-rs)
 
-- Does it affect mcp-os? (macOS = AppleScript, Linux = CalDAV/zbus, Windows = WinRT/mapi-rs)
-
-- Does it affect installer artifacts? (.dmg, .deb, .exe)
+- Does it affect installer artifacts? (.dmg, .exe)
 
 - Does this change add or modify a bundled macOS binary? If yes, follow the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary) — it is the authoritative source for SIGN_TARGETS, entitlements plists, `Info.plist` TCC keys, and ADR-037 updates.
 
-- Filesystem case sensitivity? (macOS VirtioFS insensitive, Linux ext4 sensitive)
+- Filesystem case sensitivity? (host: macOS APFS insensitive; container: ext4 sensitive)
 
 If the change is platform-independent, state WHY it's platform-independent — don't just skip this section.
 
@@ -191,8 +189,6 @@ Answer EVERY question. "N/A" is acceptable only with justification.
 - [ ] SSRF protection touched? → Allowlist, port enforcement, redirect blocking intact?
 
 - [ ] OWASP hardening intact? (`cap_drop: ALL`, `no-new-privileges`, `read_only`, `tmpfs: /tmp:noexec,nosuid`)
-
-- [ ] Linux rootless UID 0 handled? (ADR-026)
 
 - [ ] Secrets in logs/serialization/display? → `log_sanitizer.rs` rules applied?
 

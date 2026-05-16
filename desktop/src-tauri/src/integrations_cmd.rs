@@ -1146,9 +1146,9 @@ mod tests {
 
     // -- OS integration platform guards --
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     #[test]
-    fn set_os_integration_enabled_rejects_on_non_macos() {
+    fn set_os_integration_enabled_rejects_on_windows() {
         let result = set_os_integration_enabled("test".into(), "reminders".into(), true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only available on macOS"));
@@ -1163,12 +1163,12 @@ mod tests {
     // tests here cover the boundary behaviour reachable without spawning
     // child processes.
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     #[test]
-    fn validate_os_integrations_returns_empty_on_non_macos() {
+    fn validate_os_integrations_returns_empty_on_windows() {
         // OS integrations are macOS-only — the validator must short-circuit
-        // with Ok([]) on Linux/Windows hosts so the Angular ngOnInit hook
-        // can call it unconditionally.
+        // with Ok([]) on Windows hosts so the Angular ngOnInit hook can call
+        // it unconditionally.
         let result = validate_os_integrations_on_startup("test".into());
         assert!(result.is_ok(), "expected Ok on non-macOS, got {result:?}");
         assert_eq!(

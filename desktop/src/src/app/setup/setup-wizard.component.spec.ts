@@ -135,20 +135,6 @@ describe('SetupWizardComponent', () => {
     expect(winFixture.componentInstance.steps[1].description).toBe('Set up WSL2 distribution');
   });
 
-  it('should set platform-specific step descriptions for linux', async () => {
-    mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_platform') return 'linux';
-      if (cmd === 'list_projects') return { projects: [], active_project: null };
-      if (cmd === 'check_runtime') return 'NotReady';
-      return undefined;
-    };
-    const linFixture = TestBed.createComponent(SetupWizardComponent);
-    linFixture.detectChanges();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(linFixture.componentInstance.steps[0].description).toBe('Verify nerdctl (rootless)');
-    expect(linFixture.componentInstance.steps[1].description).toBe('Set up rootless containerd');
-  });
-
   it('should return to welcome phase on backToWelcome', async () => {
     await component.startSetup();
     component.backToWelcome();

@@ -185,16 +185,6 @@ describe('UpdateSectionComponent', () => {
       expect(component.updateResult).toBe('up-to-date');
     });
 
-    it('sets updateResult to managed-externally when system package manages updates', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'check_for_update') return { kind: 'managed_externally', manager: 'apt' };
-        return undefined;
-      };
-      await component.checkForUpdate();
-      expect(component.updateResult).toBe('managed-externally');
-      expect(component.managedManager).toBe('apt');
-    });
-
     it('sets error on failure and emits errorOccurred', async () => {
       const errorSpy = vi.fn();
       component.errorOccurred.subscribe(errorSpy);
@@ -219,53 +209,6 @@ describe('UpdateSectionComponent', () => {
       resolveFn();
       await promise;
       expect(component.updateChecking).toBe(false);
-    });
-  });
-
-  describe('isLinux platform detection', () => {
-    it('defaults to false', () => {
-      expect(component.isLinux).toBe(false);
-    });
-
-    it('is set to true when platform is linux', async () => {
-      const linuxMock = new MockTauriService();
-      linuxMock.invokeHandler = async (cmd: string) => {
-        switch (cmd) {
-          case 'get_platform':
-            return 'linux';
-          case 'get_update_settings':
-            return { auto_check: true, check_interval_hours: 24 };
-          default:
-            return undefined;
-        }
-      };
-
-      await TestBed.resetTestingModule();
-      await TestBed.configureTestingModule({
-        imports: [UpdateSectionComponent],
-        providers: [{ provide: TauriService, useValue: linuxMock }],
-      }).compileComponents();
-
-      const linuxFixture = TestBed.createComponent(UpdateSectionComponent);
-      const linuxComponent = linuxFixture.componentInstance;
-      linuxComponent.ngOnInit();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(linuxComponent.isLinux).toBe(true);
-    });
-  });
-
-  describe('openReleasesPage()', () => {
-    it('invokes open_url with GitHub Releases URL', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
-      await component.openReleasesPage();
-      expect(invokeSpy).toHaveBeenCalledWith('open_url', {
-        url: 'https://github.com/speednet-software/speedwave/releases',
-      });
-    });
-
-    it('does not throw when invoke fails', async () => {
-      vi.spyOn(mockTauri, 'invoke').mockRejectedValue(new Error('not in tauri'));
-      await expect(component.openReleasesPage()).resolves.toBeUndefined();
     });
   });
 });

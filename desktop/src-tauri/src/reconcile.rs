@@ -443,8 +443,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         log::info!("reconcile_bundle: all images built, waiters unblocked");
         emit_bundle_status(app_handle);
 
-        // After heavy image builds, containerd may be degraded (especially Linux
-        // rootless). Re-check readiness before querying running containers.
+        // After heavy image builds, containerd may be degraded. Re-check readiness
+        // before querying running containers.
         rt.ensure_ready().map_err(|e| {
             let msg = format!("Runtime not ready after image build: {e}");
             log::error!("reconcile_bundle: {msg}");
@@ -689,15 +689,14 @@ pub(crate) fn reconcile_compose_port(
 /// Stop containers for all projects. Best-effort — failures are logged
 /// but do not prevent remaining cleanup.
 ///
-/// Runs on platforms where container state outlives the runtime process:
-/// Linux (native containerd keeps running after app exit) and Windows
-/// (WSL2 distro is system-managed; `WslRuntime::stop_vm` inherits the
-/// no-op default from `ContainerRuntime` — see
-/// `crates/speedwave-runtime/src/runtime/mod.rs:142-149`). On macOS,
-/// `LimaRuntime::stop_vm` hard-powers the Apple Virtualization VM off
-/// via `limactl stop --force` and reaps containers with it, so this
-/// function is not called on macOS (compiled out by the cfg).
-#[cfg(not(target_os = "macos"))]
+/// Runs on Windows, where container state outlives the runtime process: the
+/// WSL2 distro is system-managed and `WslRuntime::stop_vm` inherits the no-op
+/// default from `ContainerRuntime` — see
+/// `crates/speedwave-runtime/src/runtime/mod.rs:142-149`. On macOS,
+/// `LimaRuntime::stop_vm` hard-powers the Apple Virtualization VM off via
+/// `limactl stop --force` and reaps containers with it, so this function is
+/// not called on macOS (compiled out by the cfg).
+#[cfg(target_os = "windows")]
 fn stop_all_containers(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     projects: &[config::ProjectUserEntry],
@@ -717,15 +716,12 @@ fn stop_all_containers(
 /// applicable). Extracted so tests can call it directly with a mock
 /// runtime.
 ///
-/// Platform split (macOS is the outlier; Linux and Windows share the same
-/// per-project loop):
+/// Platform split:
 ///
 /// - macOS (Lima): `limactl stop --force` poweroffs the VM. Every
 ///   container inside dies with the VM, so the per-project `compose_down`
 ///   loop is pure UX drag (each `compose down` waits up to ~10 s for
 ///   nerdctl's hard-coded graceful stop). Skipped.
-/// - Linux (native containerd): no VM. `compose_down` is the only thing
-///   that stops containers.
 /// - Windows (WSL2): `WslRuntime::stop_vm` is a no-op (Speedwave does not
 ///   own the WSL distro lifecycle), so without `compose_down` containers
 ///   would keep running in the `Speedwave` distro until next Windows boot
@@ -738,7 +734,7 @@ pub(crate) fn run_container_cleanup(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     projects: &[config::ProjectUserEntry],
 ) {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     stop_all_containers(rt, projects);
     #[cfg(target_os = "macos")]
     log::info!(
@@ -838,7 +834,6 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
 ///
 /// Platform conventions:
 /// - macOS: `<exe>/../../Resources` (inside .app bundle)
-/// - Linux: `<exe>/../lib/Speedwave` (.deb — Tauri convention)
 /// - Windows: `<exe>/resources` (NSIS installer)
 ///
 /// Returns `None` in dev mode (no bundle structure present).
@@ -848,16 +843,6 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
             .parent()
             .map(|p| vec![p.join("Resources")])
             .unwrap_or_default()
-    } else if cfg!(target_os = "linux") {
-        // .deb: resources at <exe>/../lib/<productName>/
-        let lib_path = exe_parent.parent().map(|p| p.join("lib").join("Speedwave"));
-        let mut paths = Vec::new();
-        if let Some(p) = lib_path {
-            paths.push(p);
-        }
-        // Fallback: <exe>/resources (dev builds / non-standard layouts)
-        paths.push(exe_parent.join("resources"));
-        paths
     } else {
         // Windows NSIS: resources are installed alongside the .exe (no subdirectory).
         // Fallback: <exe>/resources (dev builds / non-standard layouts).
@@ -902,7 +887,7 @@ mod tests {
     // stop_all_containers is compiled out on macOS (see its definition).
     // Its tests are gated to match, otherwise the `use super::stop_all_containers`
     // would fail to resolve on macOS.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     mod stop_all_containers_tests {
         use super::stop_all_containers;
         use speedwave_runtime::config::ProjectUserEntry;
@@ -1140,14 +1125,14 @@ mod tests {
             }
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         #[test]
-        fn full_cleanup_calls_in_order_non_macos() {
-            // Note: runs on any non-macOS target. Linux dev hosts + Ubuntu CI
-            // execute this test routinely. Windows dev hosts would too — but
-            // Windows CI (.github/workflows/desktop-build.yml) runs only
-            // `cargo build`, not `cargo test`. Enabling `cargo test` on the
-            // Windows matrix leg is tracked as a follow-up PR.
+        fn full_cleanup_calls_in_order_on_windows() {
+            // Note: runs on any non-macOS target. Windows dev hosts execute
+            // this test routinely, but Windows CI
+            // (.github/workflows/desktop-build.yml) runs only `cargo build`,
+            // not `cargo test`. Enabling `cargo test` on the Windows matrix
+            // leg is tracked as a follow-up PR.
             let (rt, calls) = TrackingRuntime::new();
             let projects = vec![project("alpha"), project("beta")];
             run_container_cleanup(&rt, &projects);
@@ -1443,78 +1428,6 @@ mod tests {
             std::fs::create_dir_all(&exe_parent).unwrap();
 
             assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    mod resolve_resources_dir_tests {
-        use super::resolve_resources_dir;
-        use tempfile::TempDir;
-
-        fn mark_as_resources(dir: &std::path::Path) {
-            std::fs::create_dir_all(dir.join("cli")).unwrap();
-        }
-
-        #[test]
-        fn linux_deb_layout_resolves_lib_speedwave() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            mark_as_resources(&lib_dir);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(lib_dir));
-        }
-
-        #[test]
-        fn linux_dev_mode_returns_none() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn linux_fallback_to_resources_subdir() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(resources));
-        }
-
-        #[test]
-        fn linux_returns_none_when_lib_dir_empty() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            // lib dir exists but has no marker → should return None
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn linux_lib_speedwave_takes_priority_over_resources() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&lib_dir);
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(lib_dir));
         }
     }
 

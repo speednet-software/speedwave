@@ -9,7 +9,7 @@ use tauri::Manager;
 
 #[cfg(target_os = "macos")]
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon-white.png");
 
 /// Variable inputs to the tray menu — `update_version` (set by the updater) and
@@ -102,9 +102,9 @@ pub(crate) fn tray_menu_spec(
 /// Loads the platform-appropriate tray icon embedded in the binary.
 ///
 /// macOS uses a black glyph paired with `icon_as_template(true)` so the system
-/// inverts it for the active appearance. Windows and Linux use a white glyph
-/// because their notification areas commonly render on a dark background and
-/// have no template mode.
+/// inverts it for the active appearance. Windows uses a white glyph because the
+/// notification area commonly renders on a dark background and has no template
+/// mode.
 pub(crate) fn load_tray_icon() -> Result<Image<'static>, tauri::Error> {
     Image::from_bytes(TRAY_ICON_PNG)
 }
@@ -133,9 +133,6 @@ pub(crate) fn build_tray_menu(
                 builder = builder.item(&it);
             }
             TrayItemSpec::InstallUpdate(version) => {
-                #[cfg(target_os = "linux")]
-                let label = format!("Download Update v{version}");
-                #[cfg(not(target_os = "linux"))]
                 let label = format!("Install Update v{version}");
                 let it = MenuItemBuilder::with_id("install_update", label).build(app)?;
                 builder = builder.item(&it);

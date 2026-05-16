@@ -19,7 +19,11 @@ defaults:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    # macOS runner: `cargo clippy -p speedwave-runtime` instantiates
+    # `detect_runtime()`, which compile_error!s on any target_os other than
+    # macos/windows after ADR-059. Ubuntu would fire that error before clippy
+    # ever runs. macOS-latest is the cheapest runner that satisfies the cfg.
+    runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -78,7 +82,9 @@ jobs:
         run: npx eslint .
 
   test:
-    runs-on: ubuntu-latest
+    # macOS runner: see comment on the `lint` job above — speedwave-runtime
+    # compile_error!s on Linux per ADR-059.
+    runs-on: macos-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -115,7 +121,7 @@ jobs:
       # cmake is needed to build whisper.cpp (vendored submodule of whisper-rs)
       # for the audio-transcription feature tests below. ADR-056.
       - name: Install cmake
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: brew install cmake
 
       - name: Rust tests
         run: make test-rust
@@ -132,26 +138,19 @@ jobs:
         run: make test-mcp-office-py
 
       - name: Install bats
-        run: sudo apt-get update && sudo apt-get install -y bats
+        run: brew install bats-core
 
       - name: Entrypoint tests
         run: make test-entrypoint
 
   desktop:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # macOS runner: target_os=macos so build.rs/bundle.rs accept the target
+    # naturally. Linux runners would need a special-case linux-bundle path
+    # purely for CI — see ADR-059.
+    runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libssl-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
@@ -218,7 +217,7 @@ jobs:
         run: npx ng test --no-watch --coverage --runner-config vitest.config.ts
 
       - name: Install bats
-        run: sudo apt-get update && sudo apt-get install -y bats
+        run: brew install bats-core
 
       - name: Desktop config tests (fast)
         run: make test-desktop-config
@@ -287,16 +286,16 @@ jobs:
 
   # Runtime exec-transport tests on Windows — locks in the WSL path
   # (`wsl.exe -d distro -- sh -c <quoted>`). Without a Windows runner,
-  # `runtime::wsl::container_exec` shell-quoting could regress silently
-  # because every other job runs on Linux/macOS. We deliberately restrict
-  # the test set to `runtime::lima` and `runtime::wsl` modules: the rest
-  # of `speedwave-runtime` (binary resolution, build context, compose
-  # rendering, consts) was authored for Linux/macOS hosts and uses
-  # `/`-rooted paths in fixtures, which fail on Windows for reasons
-  # unrelated to this PR. Git Bash ships on the windows-latest image, so
-  # the `bash -nc` shell-roundtrip regression in those modules runs as-is.
-  # Lima/SSH paths are exercised by the macOS `test` job above; Linux-only
-  # `nerdctl` direct-exec needs no shell quoting at all.
+  # `runtime::wsl::container_exec` shell-quoting could regress silently —
+  # `lint` and `test` run on `macos-latest` and don't exercise the Windows
+  # shell-quoting path. We deliberately restrict the
+  # test set to `runtime::lima` and `runtime::wsl` modules: the rest of
+  # `speedwave-runtime` (binary resolution, build context, compose
+  # rendering, consts) uses `/`-rooted paths in fixtures, which fail on
+  # Windows for reasons unrelated to this PR. Git Bash ships on the
+  # windows-latest image, so the `bash -nc` shell-roundtrip regression in
+  # those modules runs as-is. Lima/SSH shell-quoting is exercised by the
+  # macOS `desktop` job above.
   runtime-windows:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -350,11 +349,10 @@ jobs:
           exit "$fail"
 
   desktop-windows-check:
-    # `desktop` job above only runs on ubuntu — it never catches Windows-only
-    # compile errors in speedwave-desktop (e.g. cfg-gated imports of types
-    # used in cross-platform fn signatures). This job runs `cargo check` on
-    # windows-latest with stubbed bundle resources to exercise the Windows
-    # codepaths without paying for a full Tauri bundle.
+    # `desktop` job above runs on macOS-latest. This job runs `cargo check`
+    # on windows-latest with stubbed bundle resources so Windows-only compile
+    # errors (e.g. cfg-gated imports of types used in cross-platform fn
+    # signatures) are caught in PR CI without paying for a full Tauri bundle.
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:

@@ -74,7 +74,7 @@ Types:
 Examples:
 
 ```
-feat(runtime): add nerdctl support for Linux
+feat(runtime): add nerdctl support for WSL2
 fix(cli): handle missing config file gracefully
 docs: update installation instructions
 chore(deps): bump tokio to 1.40

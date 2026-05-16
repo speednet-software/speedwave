@@ -31,7 +31,6 @@
     "active": true,
     "useLocalToolsDir": true,
     "targets": [
-      "deb",
       "nsis",
       "msi",
       "app",

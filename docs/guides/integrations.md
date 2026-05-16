@@ -17,7 +17,7 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 | OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                            |
 | Host Exec   | Project toolchain  | host-exec (per-project host process) | N/A (whitelist in `~/.speedwave/config.json`) |
 
-OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the host — they access native APIs directly (EventKit on macOS, CalDAV/zbus on Linux, WinRT/MAPI on Windows).
+OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the host — they access native APIs directly (EventKit on macOS, WinRT/MAPI on Windows).
 
 **Host Exec** (`host_exec`) is opt-in per project and runs a **user-defined whitelist** of project-toolchain commands (build / test / lint, `docker compose`, …) on the host machine, in the project folder — so Claude (running in a container) can finally drive your toolchain. It is a deliberate, scoped weakening of Speedwave's container isolation; see [Host Exec](#host-exec) below and [Security Model → Host Exec](../architecture/security.md#host-exec--deliberate-scoped-weakening).
 

@@ -30,6 +30,11 @@ mod mcp_os_process;
 mod oauth_cmd;
 mod oauth_login_cmd;
 mod patch_emitter;
+// `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
+// which is Windows-only (gnome-terminal / xterm spawning was removed with the
+// Linux backend in ADR-059). Gating the module declaration keeps clippy quiet
+// on macOS without needing per-fn `#[cfg(target_os = "windows")]`.
+#[cfg(target_os = "windows")]
 mod path_util;
 mod plugin_cmd;
 mod queue_cmd;
@@ -809,7 +814,6 @@ fn get_selected_ide() -> Result<Option<speedwave_runtime::config::SelectedIde>, 
 
 use diagnostics::export_diagnostics;
 use logging_cmd::{cleanup_old_logs, get_log_level, parse_log_level, set_log_level};
-#[cfg(not(target_os = "linux"))]
 use window::should_debounce;
 use window::{hide_main_window, should_prevent_close, should_run_cleanup, show_main_window};
 
@@ -1129,29 +1133,16 @@ fn start_host_exec_watchdog(host_exec: SharedHostExec) {
 }
 
 /// Shows the audit-failure dialog and terminates the process. Returns
-/// only via `process::exit`.
-///
-/// macOS / Windows: native `blocking_show()`. Linux: the dialog plugin
-/// queues onto the (not-yet-running) Tauri event loop and would
-/// deadlock or silently drop, so we skip it — the caller already
-/// logged the body via `log::error!`. Downgrade recorded in ADR-051.
+/// only via `process::exit`. Caller has already logged the body.
 fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> ! {
-    #[cfg(not(target_os = "linux"))]
-    {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-        let _ = app
-            .dialog()
-            .message(body)
-            .title("Plugin verification failed")
-            .kind(MessageDialogKind::Error)
-            .blocking_show();
-        std::process::exit(1);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = (app, body); // unused on this path
-        std::process::exit(1);
-    }
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    let _ = app
+        .dialog()
+        .message(body)
+        .title("Plugin verification failed")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
+    std::process::exit(1);
 }
 
 /// Formats the per-plugin failures from `plugin::audit_all` into a
@@ -1251,7 +1242,6 @@ fn main() {
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
 
     let tray_available = Arc::new(AtomicBool::new(false));
-    #[cfg_attr(target_os = "linux", allow(unused_variables))]
     let tray_available_setup = tray_available.clone();
     let tray_available_close = tray_available.clone();
 
@@ -1398,10 +1388,8 @@ fn main() {
             // go through the verified-only command gates), but the
             // command surface would be live for unrelated calls. We
             // refuse to bring the rest of the app online at all: the
-            // dialog is shown via the OS-native blocking path on
-            // platforms where it is reliable, and the process exits the
-            // moment the user dismisses it (or after a timeout fallback
-            // on Linux, where blocking-show can deadlock).
+            // dialog is shown via the OS-native blocking path and the
+            // process exits the moment the user dismisses it.
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
                 log::error!("plugin audit failed:\n{}", body);
@@ -1510,7 +1498,6 @@ fn main() {
             )?;
             let tray_icon = tray::load_tray_icon()?;
 
-            #[cfg_attr(target_os = "linux", allow(unused_mut))]
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon)
                 .icon_as_template(true)
@@ -1536,13 +1523,6 @@ fn main() {
                                 Ok(updater::UpdateCheckOutcome::UpToDate) => {
                                     log::info!("tray: already up to date");
                                 }
-                                Ok(updater::UpdateCheckOutcome::ManagedExternally {
-                                    manager,
-                                }) => {
-                                    log::info!(
-                                        "tray: updates managed by '{manager}' — no network check"
-                                    );
-                                }
                                 Err(e) => {
                                     log::error!("tray: check failed: {e}");
                                 }
@@ -1551,22 +1531,11 @@ fn main() {
                     }
                     "install_update" => {
                         let app_for_state = app.clone();
-                        #[cfg(not(target_os = "linux"))]
                         let app_clone = app.clone();
                         tauri::async_runtime::spawn(async move {
                             let version =
                                 app_for_state.state::<tray::TrayMenuState>().update_version();
                             if let Some(expected) = version {
-                                #[cfg(target_os = "linux")]
-                                let result = {
-                                    let _ = expected;
-                                    open::that(
-                                        "https://github.com/speednet-software/speedwave/releases",
-                                    )
-                                    .map_err(|e| e.to_string())
-                                };
-
-                                #[cfg(not(target_os = "linux"))]
                                 let result = update_commands::install_update_and_reconcile(
                                     app_clone.clone(),
                                     expected,
@@ -1607,9 +1576,6 @@ fn main() {
                 });
 
             // macOS/Windows: left-click on tray icon toggles window visibility.
-            // Linux: TrayIconEvent::Click is unsupported — users rely on the
-            // right-click menu "Open Speedwave" instead.
-            #[cfg(not(target_os = "linux"))]
             {
                 use std::sync::atomic::AtomicU64;
                 // Debounce: ignore clicks within 500ms of the previous one
@@ -1672,12 +1638,6 @@ fn main() {
             match tray_builder.build(app) {
                 Ok(_tray) => {
                     log::info!("tray: system tray created");
-                    // Linux: do not set tray_available — build() can return Ok
-                    // even when the icon is invisible (GNOME without AppIndicator
-                    // extension). Closing the window must always exit on Linux.
-                    // The tray menu (Open/Quit) still works when the icon is
-                    // visible.
-                    #[cfg(not(target_os = "linux"))]
                     tray_available_setup.store(true, Ordering::Relaxed);
                 }
                 Err(e) => {
@@ -1911,12 +1871,11 @@ fn main() {
                 // limactl stop thread while the window is still visible —
                 // WindowServer then draws the beachball.
                 //
-                // Safe on Linux and Windows too: on those platforms the
-                // window is typically already being destroyed when
-                // ExitRequested fires (tray-less setups), making this a
-                // harmless no-op. Do NOT gate this to macOS — a
-                // `#[cfg(target_os = "macos")]` guard would re-introduce the
-                // beachball if macOS ever reorders event delivery, and
+                // Safe on Windows too: the window is typically already being
+                // destroyed when ExitRequested fires (tray-less setups),
+                // making this a harmless no-op. Do NOT gate this to macOS —
+                // a `#[cfg(target_os = "macos")]` guard would re-introduce
+                // the beachball if macOS ever reorders event delivery, and
                 // removing it costs nothing elsewhere.
                 hide_main_window(app_handle);
                 if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_runevent) {

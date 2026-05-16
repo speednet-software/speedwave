@@ -79,38 +79,34 @@ pub const CONTAINER_PATH: &str = "/home/speedwave/.local/bin:/usr/local/bin:/usr
 
 /// Hostname reachable from inside Lima VM pointing to the macOS host.
 pub const LIMA_HOST: &str = "host.lima.internal";
-/// Hostname reachable from inside nerdctl rootless containers pointing to the Linux host.
-pub const NERDCTL_LINUX_HOST: &str = "host.docker.internal";
 /// Hostname reachable from inside WSL2/nerdctl containers pointing to the Windows host.
 pub const WSL_HOST: &str = "host.speedwave.internal";
 /// Podman-compatibility alias injected via `extra_hosts` in compose.template.yml.
 /// Containers use this when built for environments that expect the Podman convention.
 pub const CONTAINERS_HOST: &str = "host.containers.internal";
+/// Docker-compatibility alias. Speedwave does not use Docker, but every popular
+/// local-LLM runtime (Ollama, LM Studio, llama.cpp) and most third-party container
+/// docs use this name for "reach the host from inside a container" — a user
+/// copy-pasting that URL out of those docs must just work, so the alias is
+/// injected via `extra_hosts` alongside the Lima/WSL/Podman aliases.
+pub const DOCKER_HOST: &str = "host.docker.internal";
 
 /// All hostnames resolved inside containers to the host gateway via `extra_hosts`
 /// in `compose.template.yml`. Used by host-side code (Desktop settings) that needs
 /// to probe the same endpoint a container would hit: each alias is rewritten to
 /// `127.0.0.1` before a local HTTP probe because the aliases are not present in
-/// the host's resolver (Lima/WSL2/rootless nerdctl inject them only inside the VM).
-pub const CONTAINER_HOST_ALIASES: &[&str] =
-    &[LIMA_HOST, NERDCTL_LINUX_HOST, WSL_HOST, CONTAINERS_HOST];
+/// the host's resolver (Lima/WSL2 inject them only inside the VM).
+pub const CONTAINER_HOST_ALIASES: &[&str] = &[LIMA_HOST, WSL_HOST, CONTAINERS_HOST, DOCKER_HOST];
 
 /// IP of the macOS host as seen from inside nerdctl containers in the Lima vzNAT network.
 /// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
 pub const LIMA_VZ_HOST_IP: &str = "192.168.5.2";
-/// IP of the Linux host as seen from inside rootless nerdctl containers (slirp4netns gateway).
-pub const NERDCTL_LINUX_HOST_IP: &str = "10.0.2.2";
 /// IP of the Windows host as seen from inside WSL2 containers.
 pub const WSL_HOST_IP: &str = "192.168.65.1";
 
 /// Container user for unprivileged mode (macOS Lima, Windows WSL2).
-/// containerd runs as root → UID 1000 maps to UID 1000 on host.
+/// containerd runs as root inside the VM → UID 1000 maps to UID 1000 on host.
 pub const CONTAINER_USER_UNPRIVILEGED: &str = "1000:1000";
-/// Container user for rootless nerdctl (Linux native).
-/// In rootless mode, UID 0 in container maps to the host user's UID.
-/// UID 1000 would map to subuid range (~101000) and cannot access bind mounts.
-/// Security maintained by: cap_drop ALL, no-new-privileges, read_only, user namespace.
-pub const CONTAINER_USER_ROOTLESS: &str = "0:0";
 
 /// Subdirectory within resources for nerdctl-full binaries.
 pub const NERDCTL_FULL_SUBDIR: &str = "nerdctl-full";
@@ -193,13 +189,6 @@ pub const TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS: &[&str] = &[
     "release-assets.githubusercontent.com",
 ];
 
-/// Error message returned when `newuidmap` is not found on the system.
-/// Used by both `NerdctlRuntime::ensure_ready()` and `setup_wizard::init_vm_linux()`.
-pub const UIDMAP_MISSING_MSG: &str = "newuidmap not found. Install the uidmap package:\n\
-     - Debian/Ubuntu: sudo apt-get install -y uidmap\n\
-     - Fedora/RHEL:   sudo dnf install -y shadow-utils\n\
-     - openSUSE:      sudo zypper install -y shadow";
-
 /// Error message with remediation steps when WSL2 is not available on Windows.
 /// Used by `os_prereqs::check_os_prereqs()`.
 pub const WSL_NOT_AVAILABLE_MSG: &str = "Enable required Windows features:\n\n\
@@ -259,9 +248,8 @@ pub const WSL_SERVICE_CHECK_MAX_RETRIES: u32 = 10;
 pub const CONTAINERD_RESTART_READY_DELAY_SECS: u64 = 5;
 
 /// Maximum number of readiness retries after restarting containerd/buildkitd.
-/// Each retry waits `CONTAINERD_RESTART_READY_DELAY_SECS` seconds. Worst-case wait
-/// per phase: 6 × 5s = 30s. NerdctlRuntime runs two phases (systemd is-active then
-/// nerdctl info), so Linux rootless worst-case is 60s. Lima/WSL2 are single-phase (30s).
+/// Each retry waits `CONTAINERD_RESTART_READY_DELAY_SECS` seconds. Worst-case
+/// wait: 6 × 5s = 30s. Lima/WSL2 are single-phase.
 pub const CONTAINERD_RESTART_READY_MAX_RETRIES: u32 = 6;
 
 /// Maximum seconds to wait for `limactl start` to boot the Lima VM.
@@ -1071,10 +1059,7 @@ mod tests {
 
     #[test]
     fn test_container_user_constants_are_valid_uid_gid() {
-        for (name, value) in [
-            ("CONTAINER_USER_UNPRIVILEGED", CONTAINER_USER_UNPRIVILEGED),
-            ("CONTAINER_USER_ROOTLESS", CONTAINER_USER_ROOTLESS),
-        ] {
+        for (name, value) in [("CONTAINER_USER_UNPRIVILEGED", CONTAINER_USER_UNPRIVILEGED)] {
             let parts: Vec<&str> = value.split(':').collect();
             assert_eq!(
                 parts.len(),
@@ -1688,9 +1673,9 @@ mod tests {
         // that (separate template test does). This test catches the inverse:
         // renaming one of the named hosts without updating the composition.
         assert!(CONTAINER_HOST_ALIASES.contains(&LIMA_HOST));
-        assert!(CONTAINER_HOST_ALIASES.contains(&NERDCTL_LINUX_HOST));
         assert!(CONTAINER_HOST_ALIASES.contains(&WSL_HOST));
         assert!(CONTAINER_HOST_ALIASES.contains(&CONTAINERS_HOST));
+        assert!(CONTAINER_HOST_ALIASES.contains(&DOCKER_HOST));
         assert_eq!(
             CONTAINER_HOST_ALIASES.len(),
             4,
@@ -1742,5 +1727,34 @@ mod tests {
             "DATA_DIR ({DATA_DIR}) not found in installer-hooks.nsh; \
              rename it there too (CLAUDE.md SSOT alignment)"
         );
+    }
+
+    // Cross-language SSOT for container host aliases. The TypeScript MCP-shared
+    // SSRF guard duplicates the alias allowlist (it cannot import the Rust
+    // const). Both lists must stay in lockstep — these guards catch any drift.
+
+    #[test]
+    fn container_host_aliases_appear_in_mcp_shared_ts() {
+        let src = include_str!("../../../mcp-servers/shared/src/security.ts");
+        for alias in CONTAINER_HOST_ALIASES {
+            assert!(
+                src.contains(&format!("'{alias}'")),
+                "{alias} not found in mcp-servers/shared/src/security.ts \
+                 HOST_GATEWAY_ALLOWLIST; the TS allowlist must mirror Rust \
+                 CONTAINER_HOST_ALIASES"
+            );
+        }
+    }
+
+    #[test]
+    fn container_host_aliases_appear_in_compose_template() {
+        let src = include_str!("../../../containers/compose.template.yml");
+        for alias in CONTAINER_HOST_ALIASES {
+            assert!(
+                src.contains(&format!("\"{alias}:")),
+                "{alias} not found in containers/compose.template.yml extra_hosts; \
+                 the template must list every alias from Rust CONTAINER_HOST_ALIASES"
+            );
+        }
     }
 }

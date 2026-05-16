@@ -72,7 +72,7 @@ pub trait ContainerRuntime: Send + Sync {
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
 }
-// Implementations: LimaRuntime, NerdctlRuntime, WslRuntime
+// Implementations: LimaRuntime, WslRuntime (see ADR-059 — Linux dropped)
 ```
 
 ---
