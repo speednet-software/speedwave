@@ -9,7 +9,14 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { Mutex } from 'async-mutex';
-import { loadToken, TIMEOUTS, ts, withSetupGuidance } from '@speedwave/mcp-shared';
+import {
+  loadToken,
+  TIMEOUTS,
+  ts,
+  withSetupGuidance,
+  refreshAccessToken as oauthRefreshAccessToken,
+  OAuthScopeMismatchError,
+} from '@speedwave/mcp-shared';
 import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
 import { splitPath } from './path-utils.js';
@@ -24,7 +31,6 @@ import { splitPath } from './path-utils.js';
  * @property {string} clientId - Azure AD application client ID
  * @property {string} tenantId - Azure AD tenant ID
  * @property {string} siteId - SharePoint site ID
- * @property {string} basePath - Base path for file operations
  * @property {string} accessToken - OAuth access token
  * @property {string} refreshToken - OAuth refresh token
  */
@@ -32,7 +38,6 @@ export interface SharePointConfig {
   clientId: string;
   tenantId: string;
   siteId: string;
-  basePath: string;
   accessToken: string;
   refreshToken: string;
 }
@@ -178,6 +183,57 @@ export class SharePointClient {
     return this.tokenManager.getHealthStatus();
   }
 
+  /**
+   * Public Graph API wrapper used by `tools/page-tools.ts` and other domain
+   * tools that need to call non-file Graph endpoints (PR4 / PR5). Accepts a
+   * full URL or a `/sites/{site-id}/...` path; the path form auto-substitutes
+   * the configured site id and prefixes `https://graph.microsoft.com/v1.0`.
+   * Inherits the 401-refresh + retry behaviour of the file methods.
+   * @param method - HTTP method (GET, POST, PATCH, DELETE)
+   * @param urlOrPath - absolute URL or `/sites/{site-id}/...` path
+   * @param body - optional JSON-serialisable body
+   * @returns parsed JSON response (or undefined for 204 No Content)
+   * @throws {Error} on non-2xx status (with Graph error message when present)
+   */
+  async graphRequest<T = unknown>(
+    method: string,
+    urlOrPath: string,
+    body?: unknown
+  ): Promise<T | undefined> {
+    const url = urlOrPath.startsWith('http')
+      ? urlOrPath
+      : `https://graph.microsoft.com/v1.0${urlOrPath.replace('{site-id}', this.config.siteId)}`;
+
+    const options: RequestInit = { method };
+    if (body !== undefined) {
+      options.body = JSON.stringify(body);
+      options.headers = { 'Content-Type': 'application/json' };
+    }
+
+    const response = await this.callGraphAPI(url, options);
+    if (!response.ok) {
+      let detail = `${response.status} ${response.statusText}`;
+      try {
+        const errBody = (await response.json()) as { error?: { message?: string } };
+        if (errBody.error?.message) detail = `${detail}: ${errBody.error.message}`;
+      } catch {
+        // body not JSON — keep status line
+      }
+      throw new Error(`Graph API ${method} ${url} failed: ${detail}`);
+    }
+    if (response.status === 204) return undefined;
+    return (await response.json()) as T;
+  }
+
+  /**
+   * Return the configured site id. Page/list tools use this to enforce the
+   * "no site_id from model" invariant (ADR-060): the model never picks a site,
+   * the worker always uses the one stored in `/tokens/site_id`.
+   */
+  getSiteId(): string {
+    return this.config.siteId;
+  }
+
   //═════════════════════════════════════════════════════════════════════════════
   // Error Handling
   //═════════════════════════════════════════════════════════════════════════════
@@ -232,11 +288,28 @@ export class SharePointClient {
    * @private
    */
   private async refreshAccessToken(): Promise<void> {
-    const newTokens = await this.tokenManager.refreshAccessToken(this.config.refreshToken);
-
-    // Update config with new tokens
-    this.config.accessToken = newTokens.accessToken;
-    this.config.refreshToken = newTokens.refreshToken;
+    // ADR-060: refresh is delegated to the host-side `oauth` worker. We call it
+    // via the shared `oauth-client` helper; it writes the new access_token to
+    // `/tokens/access_token` (visible to us through the :ro mount), then we
+    // re-read the file. `clientId`/`tenantId`/`refreshToken` are NOT in this
+    // container — only the oauth worker has them.
+    try {
+      await oauthRefreshAccessToken({ service: 'sharepoint' });
+    } catch (err) {
+      if (err instanceof OAuthScopeMismatchError) {
+        // Surface scope-mismatch as a typed error so the tool layer can return
+        // an MCP error code that Desktop intercepts to trigger re-consent UI.
+        console.warn(`${ts()} SharePoint: oauth scope mismatch — re-consent required`);
+        throw err;
+      }
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    const tokensDir = process.env.TOKENS_DIR || '/tokens';
+    const fresh = await loadToken(path.join(tokensDir, 'access_token'));
+    if (!fresh) {
+      throw new Error('oauth worker returned success but access_token was not written');
+    }
+    this.config.accessToken = fresh;
   }
 
   /**
@@ -388,11 +461,12 @@ export class SharePointClient {
       throw new Error('Invalid path (security check failed)');
     }
 
-    const fullPath = relativePath
-      ? `${this.config.basePath}/${relativePath}`
-      : this.config.basePath;
-
-    const initialUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(fullPath)}:/children`;
+    // Empty path → list the site's drive root; otherwise list the supplied
+    // path relative to the drive root. `site_id` already scopes the worker
+    // to a single site, so no additional `base_path` sandbox is applied.
+    const initialUrl = relativePath
+      ? `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(relativePath)}:/children`
+      : `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root/children`;
 
     // Collect all items across paginated responses
     const allItems: Array<{
@@ -504,7 +578,7 @@ export class SharePointClient {
 
   /**
    * Upload file from local path to SharePoint with optional Compare-And-Swap (CAS)
-   * @param {string} sharepointPath - SharePoint path (relative to basePath)
+   * @param {string} sharepointPath - SharePoint path relative to the site's drive root
    * @param {string} localPath - Local file path (must be within /workspace)
    * @param {Object} [options] - Upload options
    * @param {string} [options.expectedEtag] - Expected ETag for CAS (If-Match header)
@@ -529,10 +603,9 @@ export class SharePointClient {
     }
 
     const buffer = await fs.readFile(localPath);
-    const fullPath = `${this.config.basePath}/${sharepointPath}`;
-    await this.ensureParentFolders(fullPath);
+    await this.ensureParentFolders(sharepointPath);
 
-    const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(fullPath)}:/content`;
+    const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(sharepointPath)}:/content`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/octet-stream',
@@ -571,7 +644,7 @@ export class SharePointClient {
 
   /**
    * Download file from SharePoint to local path using streaming
-   * @param {string} sharepointPath - SharePoint path (relative to basePath)
+   * @param {string} sharepointPath - SharePoint path relative to the site's drive root
    * @param {string} localPath - Local destination path (must be within /workspace)
    * @returns {Promise<void>}
    * @throws {Error} If local path is outside allowed directories or download fails
@@ -587,12 +660,9 @@ export class SharePointClient {
       throw new Error('Invalid sharepoint_path (security check failed)');
     }
 
-    // Get file metadata with download URL
-    const fullPath = sharepointPath
-      ? `${this.config.basePath}/${sharepointPath}`
-      : this.config.basePath;
-
-    const metadataUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(fullPath)}`;
+    // `site_id` already scopes us to a single site; the supplied path is
+    // resolved against the site's drive root (no `base_path` prefix).
+    const metadataUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(sharepointPath)}`;
     const metadataResponse = await this.callGraphAPI(metadataUrl);
 
     if (!metadataResponse.ok) {
@@ -630,7 +700,7 @@ export class SharePointClient {
 
   /**
    * Create a remote folder on SharePoint
-   * @param {string} remotePath - SharePoint folder path (relative to basePath)
+   * @param {string} remotePath - SharePoint folder path relative to the site's drive root
    * @returns {Promise<void>}
    * @throws {Error} If path is invalid, permission denied, or API call fails (except 409 Conflict)
    */
@@ -640,13 +710,11 @@ export class SharePointClient {
       throw new Error('Invalid path (security check failed)');
     }
 
-    const fullPath = `${this.config.basePath}/${remotePath}`;
-
     // 1. Ensure parent folders exist if needed
-    await this.ensureParentFolders(fullPath);
+    await this.ensureParentFolders(remotePath);
 
     // 2. Create the folder itself
-    const { parentDir, name: folderName } = splitPath(fullPath);
+    const { parentDir, name: folderName } = splitPath(remotePath);
 
     if (!folderName) {
       throw new Error('Invalid folder path: cannot determine folder name');
@@ -767,22 +835,17 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
   try {
     const tokensDir = process.env.TOKENS_DIR || '/tokens';
 
-    // Load tokens
+    // Load tokens that live in the worker-mounted dir (ADR-060). After PR3,
+    // `client_id`, `tenant_id`, and `refresh_token` are NO LONGER mounted into
+    // this container — they live in `~/.speedwave/oauth/<project>/sharepoint.json`
+    // on the host and are read only by the `oauth` worker.
     const accessToken = await loadToken(path.join(tokensDir, 'access_token'));
-    const refreshToken = await loadToken(path.join(tokensDir, 'refresh_token'));
-    const clientId = await loadToken(path.join(tokensDir, 'client_id'));
-    const tenantId = await loadToken(path.join(tokensDir, 'tenant_id'));
     const siteId = await loadToken(path.join(tokensDir, 'site_id'));
-    const basePath = await loadToken(path.join(tokensDir, 'base_path'));
 
     // Validate tokens are not empty (0-byte placeholder files)
     const missingTokens: string[] = [];
     if (!accessToken) missingTokens.push('access_token');
-    if (!refreshToken) missingTokens.push('refresh_token');
-    if (!clientId) missingTokens.push('client_id');
-    if (!tenantId) missingTokens.push('tenant_id');
     if (!siteId) missingTokens.push('site_id');
-    if (!basePath) missingTokens.push('base_path');
 
     if (missingTokens.length > 0) {
       console.warn(
@@ -796,12 +859,17 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
     console.log(`${ts()} ✅ SharePoint tokens loaded from /tokens/`);
 
     const config: SharePointConfig = {
-      clientId,
-      tenantId,
+      // clientId / tenantId no longer needed inside the worker — refresh is
+      // delegated to the host-side `oauth` worker (ADR-060). Kept as empty
+      // strings to preserve the `SharePointConfig` shape until the next
+      // refactor; the worker code path that read them has been removed.
+      clientId: '',
+      tenantId: '',
       siteId,
-      basePath,
       accessToken,
-      refreshToken,
+      // refreshToken is no longer in this container's mount (ADR-060).
+      // The host-side oauth worker holds it.
+      refreshToken: '',
     };
 
     return new SharePointClient(config, tokensDir);

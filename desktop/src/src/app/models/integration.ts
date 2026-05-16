@@ -19,6 +19,13 @@ export interface IntegrationStatusEntry {
   current_values: Record<string, string>;
   mappings?: Record<string, unknown>;
   badge?: string;
+  /**
+   * Reason the integration needs the user's attention even though it is
+   * configured. Currently only SharePoint sets this — when `grantedScopes`
+   * is a strict subset of the required scopes (typically after migration),
+   * the UI shows a "Re-authorize" banner. Undefined = no action required.
+   */
+  oauth_action_required?: string;
 }
 
 /** Status and configuration details for a native OS integration. */

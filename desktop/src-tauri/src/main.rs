@@ -68,6 +68,7 @@ use tauri::Manager;
 
 use reconcile::{
     ExitCleanupContext, SharedAutoCheckHandle, SharedHostExec, SharedIdeBridge, SharedMcpOs,
+    SharedOauth,
 };
 
 pub(crate) use host_path::recovered_host_path;
@@ -141,6 +142,9 @@ const MAIN_WINDOW_LABEL: &str = "main";
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Stop flag for the `host_exec` watchdog (set during exit cleanup).
+static OAUTH_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 static HOST_EXEC_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -165,11 +169,16 @@ fn start_session_inner(
     compose_arc: ComposeLock,
     session_arc: SharedChatSession,
     host_exec_arc: SharedHostExec,
+    oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     // Spawn host_exec before the container check — the hub needs port/auth-token files (ADR-054).
     let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, project);
-    if host_exec_just_started {
+    // Spawn oauth before the container check — compose injects WORKER_OAUTH_URL +
+    // per-service bearer mount into OAuth-consuming workers (ADR-060). No-op if
+    // no integration with `uses_oauth_refresh = true` is enabled.
+    let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
+    if host_exec_just_started || oauth_just_started {
         host_exec_cmd::recreate_project_containers_if_running(project);
     }
 
@@ -220,12 +229,14 @@ async fn start_chat(
     state: tauri::State<'_, SharedChatSession>,
     compose_lock: tauri::State<'_, ComposeLock>,
     host_exec: tauri::State<'_, SharedHostExec>,
+    oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
     log::info!("start_chat: project={project}");
     let session_arc = state.inner().clone();
     let compose_arc = compose_lock.inner().clone();
     let host_exec_arc = host_exec.inner().clone();
+    let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
@@ -233,6 +244,7 @@ async fn start_chat(
             compose_arc,
             session_arc,
             host_exec_arc,
+            oauth_arc,
             app_handle,
         )
     })
@@ -359,6 +371,7 @@ async fn resume_conversation(
     state: tauri::State<'_, SharedChatSession>,
     compose_lock: tauri::State<'_, ComposeLock>,
     host_exec: tauri::State<'_, SharedHostExec>,
+    oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
     history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
@@ -366,6 +379,7 @@ async fn resume_conversation(
     let session_arc = state.inner().clone();
     let compose_arc = compose_lock.inner().clone();
     let host_exec_arc = host_exec.inner().clone();
+    let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
@@ -373,6 +387,7 @@ async fn resume_conversation(
             compose_arc,
             session_arc,
             host_exec_arc,
+            oauth_arc,
             app_handle,
         )
     })
@@ -1076,6 +1091,124 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
     }
 }
 
+// (`is_service_enabled` lives on `ResolvedIntegrationsConfig` in
+// `speedwave-runtime::config` — used here and in the CLI's
+// `maybe_spawn_oauth_worker` so the match arms stay in one place.)
+
+/// Spawn the per-project `oauth` worker on demand. No-op if no project
+/// integration with `uses_oauth_refresh = true` is enabled, or if the worker
+/// is already running. Returns true if a new worker was started this call.
+pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bool {
+    let mut map = match oauth_arc.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!("ensure_oauth_running: map mutex poisoned: {e}");
+            return false;
+        }
+    };
+    if map.contains_key(project) {
+        return false;
+    }
+
+    // Check if any OAuth-consuming integration is enabled for this project.
+    let user_config = match config::load_user_config() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("ensure_oauth_running: cannot load user config: {e}");
+            return false;
+        }
+    };
+    let project_dir = match user_config.find_project(project) {
+        Some(p) => std::path::PathBuf::from(&p.dir),
+        None => {
+            log::warn!("ensure_oauth_running: unknown project '{project}'");
+            return false;
+        }
+    };
+    let resolved = config::resolve_integrations(&project_dir, &user_config, project);
+
+    // List of enabled OAuth-consuming integrations (drives bearer-map).
+    let oauth_consumers: Vec<&'static str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .filter(|d| {
+            d.uses_oauth_refresh && resolved.is_service_enabled(d.config_key).unwrap_or(false)
+        })
+        .map(|d| d.config_key)
+        .collect();
+    if oauth_consumers.is_empty() {
+        log::debug!(
+            "ensure_oauth_running: no oauth-consuming integration enabled for '{project}' — not spawning"
+        );
+        return false;
+    }
+
+    let script = match speedwave_runtime::build::resolve_oauth_script() {
+        Some(s) => s.to_string_lossy().to_string(),
+        None => {
+            log::warn!(
+                "ensure_oauth_running: oauth worker script not found — \
+                 OAuth refresh will be unavailable for '{project}'"
+            );
+            return false;
+        }
+    };
+    match speedwave_runtime::oauth_process::OauthProcess::spawn_in(
+        project,
+        &script,
+        speedwave_runtime::consts::data_dir(),
+        &oauth_consumers,
+    ) {
+        Ok(proc) => {
+            log::info!("oauth[{project}]: started (port {})", proc.port());
+            map.insert(project.to_string(), proc);
+            drop(map);
+            OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+            true
+        }
+        Err(e) => {
+            log::error!("oauth[{project}]: spawn failed: {e}");
+            false
+        }
+    }
+}
+
+/// Per-project `oauth` watchdog — 30s checks, mirrors host_exec.
+fn start_oauth_watchdog(oauth_arc: SharedOauth) {
+    std::thread::spawn(move || {
+        use std::time::Duration;
+        const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+        loop {
+            std::thread::sleep(CHECK_INTERVAL);
+            if OAUTH_WATCHDOG_STOP.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut map = match oauth_arc.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    log::error!("oauth watchdog: map mutex poisoned: {e}");
+                    break;
+                }
+            };
+            if map.is_empty() {
+                continue;
+            }
+            let names: Vec<String> = map.keys().cloned().collect();
+            for name in names {
+                let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
+                if alive {
+                    continue;
+                }
+                if let Some(proc) = map.get_mut(&name) {
+                    log::warn!("oauth watchdog: worker for '{name}' unhealthy — respawning");
+                    if let Err(e) = proc.respawn() {
+                        log::error!("oauth watchdog: respawn for '{name}' failed: {e}");
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Per-project `host_exec` watchdog — 30s checks, mirrors `start_mcp_os_watchdog`.
 fn start_host_exec_watchdog(host_exec: SharedHostExec) {
     std::thread::spawn(move || {
@@ -1234,11 +1367,12 @@ fn main() {
     let transcript_forwarders: transcription_cmd::ForwardersHandle =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
-    // Shared state: IDE Bridge, mcp-os, per-project host_exec workers,
-    // auto-check handle. (Tray menu state is a managed `TrayMenuState`, below.)
+    // Shared state: IDE Bridge, mcp-os, per-project host_exec workers, per-project
+    // oauth workers, auto-check handle. (Tray menu state is a managed `TrayMenuState`, below.)
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let host_exec: SharedHostExec = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
 
     let tray_available = Arc::new(AtomicBool::new(false));
@@ -1250,6 +1384,7 @@ fn main() {
         ide_bridge: ide_bridge.clone(),
         mcp_os: mcp_os.clone(),
         host_exec: host_exec.clone(),
+        oauth: oauth.clone(),
         auto_check_handle: auto_check_handle.clone(),
     };
     let cleanup_ctx_window = cleanup_ctx.clone();
@@ -1356,6 +1491,7 @@ fn main() {
         .manage(ide_bridge.clone())
         .manage(mcp_os.clone())
         .manage(host_exec.clone())
+        .manage(oauth.clone())
         .manage(queue_service.clone())
         .manage(msg_store_registry.clone())
         .manage(transcript_store.clone())
@@ -1419,6 +1555,16 @@ fn main() {
             std::thread::spawn(host_path::init_recovered_host_path);
 
             if setup_started {
+                // Run one-shot OAuth state migration (ADR-060 / PR3) before any
+                // worker spawns. Migrates legacy SharePoint credentials from
+                // `tokens/<project>/sharepoint/` to `oauth/<project>/sharepoint.json`
+                // so the oauth worker sees the new layout when it first runs.
+                let migrated =
+                    speedwave_runtime::migration_oauth::run_oauth_migration_at_startup();
+                if migrated > 0 {
+                    log::info!("oauth migration: {migrated} project(s) migrated to new layout");
+                }
+
                 // Start IDE Bridge
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
 
@@ -1462,8 +1608,10 @@ fn main() {
                 // simply respawns any that die.
                 HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
                 start_host_exec_watchdog(host_exec.clone());
+                OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+                start_oauth_watchdog(oauth.clone());
             } else {
-                log::info!("setup not started, deferring IDE Bridge / mcp-os / host_exec / link_cli until setup completes");
+                log::info!("setup not started, deferring IDE Bridge / mcp-os / host_exec / oauth / link_cli until setup completes");
             }
 
             // Start background auto-update check (store handle for cancellation)

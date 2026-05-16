@@ -256,6 +256,27 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     (deleteCredentials)="deleteCredentials($event)"
                   />
                 } @else {
+                  @if (
+                    svc.service === 'sharepoint' && svc.oauth_action_required === 'scope_mismatch'
+                  ) {
+                    <div
+                      class="m-3 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+                      data-testid="integrations-oauth-reauth-banner"
+                    >
+                      <p class="text-[var(--ink)]">
+                        SharePoint authorisation is incomplete. Re-authorise to grant the scopes
+                        required by the current Speedwave release.
+                      </p>
+                      <button
+                        type="button"
+                        class="pill accent mt-2 hover:bg-[var(--accent-soft)]"
+                        data-testid="integrations-oauth-reauth-button"
+                        (click)="handleStartOAuth({ svc: svc, credentials: svc.current_values })"
+                      >
+                        Re-authorise SharePoint
+                      </button>
+                    </div>
+                  }
                   <app-service-card
                     [svc]="svc"
                     [expanded]="true"

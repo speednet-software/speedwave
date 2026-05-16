@@ -130,6 +130,42 @@ describe('tool-discovery', () => {
       expect(tools).toEqual([]);
     });
 
+    it('resolves WORKER_*_URL for hyphenated slug via deriveWorkerEnv normalization', async () => {
+      // PR0 fix: a plugin slug like `my-plugin` must look up `WORKER_MY_PLUGIN_URL`
+      // (the form compose injects), not the broken `WORKER_MY-PLUGIN_URL`.
+      process.env.WORKER_MY_PLUGIN_URL = 'http://mcp-my-plugin:4040';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'do_thing',
+          description: 'Do a thing',
+          inputSchema: { type: 'object', properties: {} },
+          annotations: { readOnlyHint: false, destructiveHint: false },
+          keywords: ['thing'],
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+
+      const tools = await discoverServiceTools('my-plugin');
+      expect(tools).toHaveLength(1);
+      expect(tools[0].name).toBe('do_thing');
+
+      delete process.env.WORKER_MY_PLUGIN_URL;
+    });
+
+    it('warns with normalized env name when hyphenated slug has no URL', async () => {
+      delete process.env.WORKER_MY_PLUGIN_URL;
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const tools = await discoverServiceTools('my-plugin');
+
+      expect(tools).toEqual([]);
+      const calls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(calls.some((m) => m.includes('WORKER_MY_PLUGIN_URL'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
     it('returns empty array when worker URL fails SSRF validation', async () => {
       // A URL that does not match the mcp-* container hostname pattern or the allowlist
       // is rejected by validateWorkerUrl → discoverServiceTools returns []

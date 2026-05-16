@@ -111,13 +111,6 @@ const MOCK_INTEGRATIONS = {
           placeholder: '',
           oauth_flow: false,
         },
-        {
-          key: 'base_path',
-          label: 'Base Path',
-          field_type: 'text',
-          placeholder: '',
-          oauth_flow: false,
-        },
       ],
       current_values: {},
       mappings: undefined,
@@ -1289,7 +1282,7 @@ describe('IntegrationsComponent', () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.handleSaveCredentials({
         svc: component.services[2], // sharepoint
-        credentials: { client_id: 'uuid', tenant_id: 'common', site_id: 'site', base_path: '/' },
+        credentials: { client_id: 'uuid', tenant_id: 'common', site_id: 'site' },
         mappings: null,
       });
       expect(invokeSpy).toHaveBeenCalledWith('set_integration_enabled', {
@@ -1303,7 +1296,7 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
 
       const afterOAuth = cloneMockIntegrations();
-      // sharepoint still NOT configured (site_id/base_path missing)
+      // sharepoint still NOT configured (site_id missing)
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {
           case 'list_projects':
@@ -1784,6 +1777,93 @@ describe('IntegrationsComponent', () => {
       expect(mockLogger.warn).toHaveBeenCalledWith(
         expect.stringContaining('tccutil reset Calendar pl.speedwave.desktop.calendar')
       );
+    });
+  });
+
+  // FIX-P1-4: re-consent banner when oauth_action_required === 'scope_mismatch'
+  describe('SharePoint re-authorisation banner', () => {
+    beforeEach(async () => {
+      await component.ngOnInit();
+    });
+
+    it('renders the banner when sharepoint is expanded and reports scope_mismatch', async () => {
+      const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
+      sharepointSvc.configured = true;
+      sharepointSvc.oauth_action_required = 'scope_mismatch';
+
+      component.toggleExpand('sharepoint');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      const banner = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-oauth-reauth-banner"]'
+      );
+      expect(banner).toBeTruthy();
+      const button = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-oauth-reauth-button"]'
+      );
+      expect(button).toBeTruthy();
+    });
+
+    it('does NOT render the banner when oauth_action_required is undefined', async () => {
+      const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
+      sharepointSvc.configured = true;
+      sharepointSvc.oauth_action_required = undefined;
+
+      component.toggleExpand('sharepoint');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="integrations-oauth-reauth-banner"]')
+      ).toBeFalsy();
+    });
+
+    it('does NOT render the banner for non-sharepoint services even with the flag set', async () => {
+      const gitlabSvc = component.services.find((s) => s.service === 'gitlab')!;
+      gitlabSvc.configured = true;
+      // Defense in depth — backend never sets this for non-sharepoint, but the
+      // template gate must enforce it independently.
+      (gitlabSvc as { oauth_action_required?: string }).oauth_action_required = 'scope_mismatch';
+
+      component.toggleExpand('gitlab');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="integrations-oauth-reauth-banner"]')
+      ).toBeFalsy();
+    });
+
+    it('clicking the re-authorise button invokes handleStartOAuth with the stored current_values', async () => {
+      const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
+      sharepointSvc.configured = true;
+      sharepointSvc.oauth_action_required = 'scope_mismatch';
+      sharepointSvc.current_values = {
+        client_id: 'stored-client',
+        tenant_id: 'stored-tenant',
+      };
+
+      const handleStartOAuthSpy = vi.spyOn(component, 'handleStartOAuth').mockResolvedValue();
+
+      component.toggleExpand('sharepoint');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      const button = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-oauth-reauth-button"]'
+      ) as HTMLButtonElement | null;
+      expect(button).toBeTruthy();
+      button!.click();
+
+      expect(handleStartOAuthSpy).toHaveBeenCalledWith({
+        svc: sharepointSvc,
+        credentials: { client_id: 'stored-client', tenant_id: 'stored-tenant' },
+      });
     });
   });
 });

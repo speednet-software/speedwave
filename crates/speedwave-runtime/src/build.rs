@@ -276,6 +276,24 @@ fn resolve_host_exec_script_with_home(home: Option<PathBuf>) -> Option<std::path
     )
 }
 
+/// Resolves the `oauth` worker `index.js` (bundle → CARGO source → marker).
+/// Mirrors [`resolve_mcp_os_script`]; ADR-060.
+pub fn resolve_oauth_script() -> Option<std::path::PathBuf> {
+    let dev = repo_dev_path("mcp-servers/oauth/dist/index.js");
+    resolve_worker_script_inner(
+        "oauth",
+        &["oauth", "oauth", "dist", "index.js"],
+        crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
+        dev,
+    )
+}
+
+#[cfg(test)]
+fn resolve_oauth_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
+    let dev = repo_dev_path("mcp-servers/oauth/dist/index.js");
+    resolve_worker_script_inner("oauth", &["oauth", "oauth", "dist", "index.js"], home, dev)
+}
+
 /// Build a `<repo-root>/<rel>` path for the dev-tree fallback. `None` when out of tree.
 fn repo_dev_path(rel: &str) -> Option<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

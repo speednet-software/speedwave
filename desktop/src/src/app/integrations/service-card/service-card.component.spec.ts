@@ -119,14 +119,6 @@ function makeSharepointSvc(): IntegrationStatusEntry {
         oauth_flow: false,
         optional: false,
       },
-      {
-        key: 'base_path',
-        label: 'Base Path',
-        field_type: 'text',
-        placeholder: 'Projects/my-project',
-        oauth_flow: false,
-        optional: false,
-      },
     ],
     current_values: {},
     mappings: undefined,
@@ -416,7 +408,6 @@ describe('ServiceCardComponent', () => {
       expect(el.querySelector('#sharepoint-client_id')).not.toBeNull();
       expect(el.querySelector('#sharepoint-tenant_id')).not.toBeNull();
       expect(el.querySelector('#sharepoint-site_id')).not.toBeNull();
-      expect(el.querySelector('#sharepoint-base_path')).not.toBeNull();
     });
 
     it('marks all visible SharePoint inputs as required', () => {
@@ -424,7 +415,7 @@ describe('ServiceCardComponent', () => {
       fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const inputs = fixture.nativeElement.querySelectorAll('[data-testid="auth-field-input"]');
-      expect(inputs.length).toBe(4); // client_id, tenant_id, site_id, base_path
+      expect(inputs.length).toBe(3); // client_id, tenant_id, site_id
       for (const input of inputs) {
         expect(input.required).toBe(true);
       }

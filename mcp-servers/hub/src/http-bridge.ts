@@ -20,6 +20,7 @@ import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
 import { getAuthToken } from './auth-tokens.js';
 import { getAllServiceNames } from './service-list.js';
 import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, validateWorkerUrl } from '@speedwave/mcp-shared';
+import { deriveWorkerEnv } from './worker-env.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -31,7 +32,7 @@ import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, validateWorkerUrl } from '@speed
  * @param service - service name (e.g. 'slack', 'gitlab')
  */
 function getWorkerUrl(service: string): string | undefined {
-  const url = process.env[`WORKER_${service.toUpperCase()}_URL`] || undefined;
+  const url = process.env[deriveWorkerEnv(service)] || undefined;
   if (!url) return undefined;
 
   if (!validateWorkerUrl(url)) {

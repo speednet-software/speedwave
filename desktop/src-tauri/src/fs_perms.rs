@@ -8,7 +8,8 @@
 /// - Unix: `chmod 600`
 /// - Windows: DACL with a single GENERIC_ALL ACE for the current user
 ///
-/// Returns `Ok(())` on success, or an error string on failure.
+/// Returns `Ok(())` on success, or an error string on failure. **Windows ACL
+/// failure is propagated as `Err`** (previously swallowed) — see PR1 / ADR-060.
 pub fn set_owner_only(path: &std::path::Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -19,7 +20,7 @@ pub fn set_owner_only(path: &std::path::Path) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        set_windows_acl_owner_only(path);
+        set_windows_acl_owner_only(path)?;
     }
 
     Ok(())
@@ -131,10 +132,12 @@ mod tests {
 }
 
 /// Restrict a file to the current user only via Windows ACL.
-/// Best-effort — logs a warning on failure but does not propagate errors.
+/// **Returns `Err` on any Win32 failure** — the caller must treat the file as
+/// world-readable and remove/quarantine it. Previously logged a warning and
+/// returned silently, leaving secrets exposed. Fixed in PR1.
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn set_windows_acl_owner_only(path: &std::path::Path) {
+fn set_windows_acl_owner_only(path: &std::path::Path) -> Result<(), String> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_ALL};
     use windows_sys::Win32::Security::Authorization::{
@@ -150,8 +153,7 @@ fn set_windows_acl_owner_only(path: &std::path::Path) {
     unsafe {
         let mut token_handle = std::mem::zeroed();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
-            log::warn!("OpenProcessToken failed, cannot set ACL");
-            return;
+            return Err("OpenProcessToken failed".to_string());
         }
         let mut buf = vec![0u8; 256];
         let mut returned = 0u32;
@@ -164,8 +166,7 @@ fn set_windows_acl_owner_only(path: &std::path::Path) {
         ) == 0
         {
             CloseHandle(token_handle);
-            log::warn!("GetTokenInformation failed, cannot set ACL");
-            return;
+            return Err("GetTokenInformation failed".to_string());
         }
         let user = &*(buf.as_ptr() as *const TOKEN_USER);
         let mut ea = EXPLICIT_ACCESS_W {
@@ -181,25 +182,29 @@ fn set_windows_acl_owner_only(path: &std::path::Path) {
             },
         };
         let mut new_acl: *mut ACL = std::ptr::null_mut();
-        if SetEntriesInAclW(1, &mut ea, std::ptr::null_mut(), &mut new_acl) == 0 {
-            let wide_path: Vec<u16> = path
-                .to_string_lossy()
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            SetNamedSecurityInfoW(
-                wide_path.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                new_acl,
-                std::ptr::null_mut(),
-            );
-            LocalFree(new_acl.cast());
-        } else {
-            log::warn!("SetEntriesInAclW failed, cannot set ACL");
+        if SetEntriesInAclW(1, &mut ea, std::ptr::null_mut(), &mut new_acl) != 0 {
+            CloseHandle(token_handle);
+            return Err("SetEntriesInAclW failed".to_string());
         }
+        let wide_path: Vec<u16> = path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let rc = SetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            new_acl,
+            std::ptr::null_mut(),
+        );
+        LocalFree(new_acl.cast());
         CloseHandle(token_handle);
+        if rc != 0 {
+            return Err(format!("SetNamedSecurityInfoW failed: rc={rc}"));
+        }
+        Ok(())
     }
 }

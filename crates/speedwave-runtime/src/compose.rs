@@ -176,6 +176,11 @@ pub fn render_compose(
     // Inject host_exec WORKER URL + token if the worker is running (ADR-054). No-op otherwise.
     yaml = apply_host_exec_config(&yaml, project_name)?;
 
+    // Inject oauth worker URL + per-service bearer mount into OAuth-consuming worker
+    // containers (today: mcp-sharepoint). No-op if the oauth worker is not running
+    // for this project (ADR-060). Hub is NOT touched — the oauth worker is internal.
+    yaml = apply_oauth_config(&yaml, project_name)?;
+
     // Inject per-worker Bearer auth tokens (SEC-035)
     yaml = apply_worker_auth_tokens(&yaml, project_name, integrations)?;
 
@@ -1026,6 +1031,92 @@ fn apply_host_exec_config_with_paths(
     )
 }
 
+/// Inject `WORKER_OAUTH_URL` + per-service bearer mount into each OAuth-consuming
+/// worker container if the oauth worker is up for this project. The consumer
+/// list is derived from `McpServiceDescriptor::uses_oauth_refresh` — adding a
+/// new OAuth-using integration is a one-line flag flip on its descriptor (ADR-060
+/// §"Compose injection"). Hub is not touched — the oauth worker is internal.
+///
+/// Per-service bearer: each consumer gets its own bearer at
+/// `/secrets/oauth-auth-token-<config_key>:ro`. The bearer values come from
+/// `<oauth-state-dir>/.bearer-map.json` (bearer → service).
+fn apply_oauth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
+    let state_dir = crate::oauth_process::oauth_project_dir(consts::data_dir(), project);
+    let port_path = state_dir.join(consts::OAUTH_PORT_FILE);
+    let bearer_map_path = state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
+    apply_oauth_config_with_paths(yaml, &state_dir, &port_path, &bearer_map_path)
+}
+
+/// Test-only entry point — same logic, explicit paths.
+fn apply_oauth_config_with_paths(
+    yaml: &str,
+    state_dir: &std::path::Path,
+    port_path: &std::path::Path,
+    bearer_map_path: &std::path::Path,
+) -> anyhow::Result<String> {
+    let port = match read_worker_port_file(port_path, "oauth") {
+        Some(p) => p,
+        None => return Ok(yaml.to_string()),
+    };
+    let bearer_map = match read_oauth_bearer_map(bearer_map_path) {
+        Some(m) => m,
+        None => return Ok(yaml.to_string()),
+    };
+    if bearer_map.is_empty() {
+        return Ok(yaml.to_string());
+    }
+    let url = worker_gateway_url(port);
+
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+
+    // service_id (slug) → bearer value
+    let mut consumers: std::collections::BTreeMap<&str, String> = Default::default();
+    for (bearer, service) in &bearer_map {
+        consumers.insert(service.as_str(), bearer.clone());
+    }
+
+    // Iterate built-in descriptors and inject for those that opted in.
+    // SSOT: `McpServiceDescriptor::uses_oauth_refresh` (one flag flip per
+    // integration, no hardcoded list here).
+    for descriptor in consts::TOGGLEABLE_MCP_SERVICES.iter() {
+        if !descriptor.uses_oauth_refresh {
+            continue;
+        }
+        let service_id = descriptor.config_key;
+        let compose_service = descriptor.compose_name;
+        let Some(bearer) = consumers.get(service_id) else {
+            continue;
+        };
+        let bearer_file = state_dir.join(format!("bearer-{service_id}"));
+        if !bearer_file.exists() {
+            // Write per-service bearer file lazily on first compose render
+            // (chmod 0o600 via the SSOT helper from PR1).
+            if let Err(e) = crate::fs_perms::write_restricted_file(&bearer_file, bearer) {
+                log::warn!("oauth: failed to write per-service bearer for '{service_id}': {e}");
+                continue;
+            }
+        }
+        inject_env_into(&mut doc, compose_service, "WORKER_OAUTH_URL", &url);
+        let mount = format!(
+            "{}:/secrets/oauth-auth-token-{service_id}:ro",
+            to_engine_path(&bearer_file)?
+        );
+        add_service_volume(&mut doc, compose_service, &mount);
+    }
+
+    Ok(serde_yaml_ng::to_string(&doc)?)
+}
+
+/// Read the oauth bearer-map JSON (bearer → service). Returns `None` on any IO
+/// or parse error (treats as "oauth worker not yet provisioned for this project").
+fn read_oauth_bearer_map(
+    path: &std::path::Path,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&content).ok()?;
+    Some(map)
+}
+
 /// Inject `<env_var>=<gateway-url>` + mount `<token_path>:/secrets/<secret_name>:ro` into the
 /// hub iff token+port files are readable. No-op (returns unchanged YAML) when files absent —
 /// any read failure is treated as not running (avoids TOCTOU vs runtime respawn).
@@ -1209,13 +1300,20 @@ fn walk_reject_symlinks(dir: &Path) -> anyhow::Result<()> {
 
 /// Injects a WORKER_*_URL environment variable into the mcp-hub service.
 fn inject_worker_env(doc: &mut serde_yaml_ng::Value, env_name: &str, url: &str) {
+    inject_env_into(doc, "mcp-hub", env_name, url)
+}
+
+/// Inject `<env_name>=<value>` into an arbitrary service's `environment` sequence.
+/// No-op if the service or its `environment` sequence is absent — same TOCTOU-friendly
+/// posture as `inject_worker_env`.
+fn inject_env_into(doc: &mut serde_yaml_ng::Value, service: &str, env_name: &str, value: &str) {
     if let Some(services) = doc.get_mut("services") {
-        if let Some(hub) = services.get_mut("mcp-hub") {
-            if let Some(environment) = hub.get_mut("environment") {
+        if let Some(svc) = services.get_mut(service) {
+            if let Some(environment) = svc.get_mut("environment") {
                 if let Some(env_seq) = environment.as_sequence_mut() {
                     env_seq.push(serde_yaml_ng::Value::String(format!(
                         "{}={}",
-                        env_name, url
+                        env_name, value
                     )));
                 }
             }
@@ -1238,15 +1336,19 @@ fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
 
 /// Adds a volume mount to the mcp-hub service.
 fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
+    add_service_volume(doc, "mcp-hub", mount)
+}
+
+/// Adds a volume mount to an arbitrary service. No-op if the service is absent.
+fn add_service_volume(doc: &mut serde_yaml_ng::Value, service: &str, mount: &str) {
     if let Some(services) = doc.get_mut("services") {
-        if let Some(hub) = services.get_mut("mcp-hub") {
-            if let Some(volumes) = hub.get_mut("volumes") {
+        if let Some(svc) = services.get_mut(service) {
+            if let Some(volumes) = svc.get_mut("volumes") {
                 if let Some(vol_seq) = volumes.as_sequence_mut() {
                     vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
                 }
             } else {
-                // Hub has no volumes key yet — create it
-                hub["volumes"] =
+                svc["volumes"] =
                     serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(
                         mount.to_string(),
                     )]);
@@ -1432,9 +1534,6 @@ pub enum SecurityRule {
     #[strum(to_string = "SHAREPOINT_TOKEN_PATH_MISMATCH")]
     #[strum(props(description = "SharePoint token path matches expected"))]
     SharepointTokenPathMismatch,
-    #[strum(to_string = "SHAREPOINT_TOKEN_MOUNT_MODE")]
-    #[strum(props(description = "SharePoint token mount mode is :rw"))]
-    SharepointTokenMountMode,
     #[strum(to_string = "SHAREPOINT_WORKSPACE_PATH_MISMATCH")]
     #[strum(props(description = "SharePoint workspace path matches expected"))]
     SharepointWorkspacePathMismatch,
@@ -1462,12 +1561,16 @@ pub enum SecurityRule {
 
 impl SecurityRule {
     /// Returns `true` for SharePoint-specific rules.
+    ///
+    /// Note: there is no `SharepointTokenMountMode` after ADR-060/PR3.
+    /// SharePoint mounts `/tokens:ro` like every other built-in worker; a `:rw`
+    /// regression is caught by `PluginTokenMountMode` (re-used for built-ins)
+    /// via the shared `validate_service_volume_mounts` machinery.
     pub fn is_sharepoint(self) -> bool {
         matches!(
             self,
             Self::SharepointVolumeLongForm
                 | Self::SharepointTokenPathMismatch
-                | Self::SharepointTokenMountMode
                 | Self::SharepointWorkspacePathMismatch
                 | Self::SharepointWorkspaceMountMode
                 | Self::SharepointNoExtraVolumes
@@ -2095,6 +2198,8 @@ impl SecurityCheck {
                 expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
+                // Plugins do not currently use the host-side oauth worker.
+                extra_allowed_ro_targets: &[],
                 rules: VolumeCheckRules::PLUGIN,
             };
             let (base_violations, _) = validate_service_volume_mounts(service, &params);
@@ -2118,11 +2223,17 @@ impl SecurityCheck {
             None => return Vec::new(), // SharePoint not in compose (disabled)
         };
 
+        // ADR-060: SharePoint may additionally mount its per-service oauth bearer.
+        // After PR3 this list will expand and `expected_token_mode` will drop to "ro".
+        let extra_allowed = vec!["/secrets/oauth-auth-token-sharepoint".to_string()];
         let params = VolumeCheckParams {
             container_name: name,
             expected_tokens_path: format!("{}/sharepoint", expected_paths.tokens_engine_dir()),
             expected_workspace_path: expected_paths.project_engine_path(),
-            expected_token_mode: "rw",
+            // ADR-060 / PR3: SharePoint is now :ro like every other worker.
+            // OAuth token refresh moved to the host-side `oauth` worker.
+            expected_token_mode: "ro",
+            extra_allowed_ro_targets: &extra_allowed,
             rules: VolumeCheckRules::SHAREPOINT,
         };
         let (violations, _) = validate_service_volume_mounts(service, &params);
@@ -2363,18 +2474,23 @@ impl VolumeCheckRules {
         token_path_mismatch: SecurityRule::SharepointTokenPathMismatch,
         token_path_mismatch_rem:
             "SharePoint token mount must use the project-specific tokens directory.",
-        token_mount_mode: SecurityRule::SharepointTokenMountMode,
-        token_mount_mode_msg: "SharePoint token mount must be :rw (OAuth refresh)",
-        token_mount_mode_rem: "SharePoint requires :rw token mount for OAuth token refresh.",
+        // ADR-060/PR3: SharePoint is no longer a special case — `/tokens:ro`
+        // is the universal rule. The dedicated `SharepointTokenMountMode`
+        // variant was removed; we reuse the generic `PluginTokenMountMode`.
+        token_mount_mode: SecurityRule::PluginTokenMountMode,
+        token_mount_mode_msg: "SharePoint token mount must be :ro (ADR-060)",
+        token_mount_mode_rem: "SharePoint refresh moved to the host-side `oauth` worker; \
+             /tokens must be :ro like every other worker.",
         workspace_path_mismatch: SecurityRule::SharepointWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::SharepointWorkspaceMountMode,
         workspace_mount_mode_msg: "SharePoint workspace mount must be :rw",
         no_extra_volumes: SecurityRule::SharepointNoExtraVolumes,
         no_extra_volumes_msg_prefix: "SharePoint service has unauthorized volume mount:",
-        no_extra_volumes_rem: "SharePoint may only mount /tokens and /workspace.",
+        no_extra_volumes_rem:
+            "SharePoint may mount /tokens, /workspace, and the per-service oauth bearer.",
         missing_tokens: SecurityRule::SharepointMissingTokensMount,
         missing_tokens_msg: "SharePoint service is missing required /tokens mount",
-        missing_tokens_rem: "SharePoint must mount /tokens:rw.",
+        missing_tokens_rem: "SharePoint must mount /tokens:ro.",
         missing_workspace: SecurityRule::SharepointMissingWorkspaceMount,
         missing_workspace_msg: "SharePoint service is missing required /workspace mount",
         missing_workspace_rem: "SharePoint must mount /workspace:rw.",
@@ -2388,6 +2504,11 @@ struct VolumeCheckParams<'a> {
     expected_workspace_path: &'a str,
     /// Expected token mount mode: "ro" or "rw"
     expected_token_mode: &'a str,
+    /// Additional read-only mount targets that are permitted on this service.
+    /// Used by OAuth-consuming workers (ADR-060) to permit their per-service bearer
+    /// mount at `/secrets/oauth-auth-token-<service>:ro`. Each entry is matched as
+    /// an exact `target` path; the mount must be `:ro` to pass.
+    extra_allowed_ro_targets: &'a [String],
     rules: VolumeCheckRules,
 }
 
@@ -2465,6 +2586,26 @@ fn validate_service_volume_mounts(
                         remediation: "Change the workspace volume mount to :rw.",
                     });
                 }
+            } else if let Some(extra) = params
+                .extra_allowed_ro_targets
+                .iter()
+                .find_map(|t| extract_volume_for_target(vol_str, t).map(|hp_mode| (t, hp_mode)))
+            {
+                // Permitted ADR-060 OAuth bearer mount (or future analogous mounts)
+                // — must be :ro. host path is opaque (per-project, dynamic).
+                let (_target, (_host_path, mode)) = extra;
+                let actual = mode.as_deref().unwrap_or("ro");
+                if actual != "ro" {
+                    violations.push(SecurityViolation {
+                        container: params.container_name.to_string(),
+                        rule: params.rules.no_extra_volumes,
+                        message: format!(
+                            "{} {} (must be :ro)",
+                            params.rules.no_extra_volumes_msg_prefix, vol_str
+                        ),
+                        remediation: params.rules.no_extra_volumes_rem,
+                    });
+                }
             } else {
                 violations.push(SecurityViolation {
                     container: params.container_name.to_string(),
@@ -2521,7 +2662,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 32;
+    const SECURITY_RULE_COUNT: usize = 31;
 
     fn default_flags() -> Vec<String> {
         crate::defaults::DEFAULT_FLAGS
@@ -5143,6 +5284,289 @@ services:
         assert_eq!(host_exec_gateway_url(1), mcp_os_gateway_url(1));
     }
 
+    // -- oauth compose wiring (ADR-060) --------------------------------------
+
+    /// Compose fixture with a mcp-sharepoint service that has the standard
+    /// volumes + environment. Used to verify `apply_oauth_config` injects
+    /// WORKER_OAUTH_URL + per-service bearer mount into mcp-sharepoint ONLY.
+    const VALID_COMPOSE_WITH_SHAREPOINT: &str = r#"
+version: "3"
+services:
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+    environment:
+      - PORT=4000
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    environment:
+      - PORT=3000
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+"#;
+
+    /// Compose fixture with multiple non-OAuth workers next to SharePoint.
+    /// Used by the negative-injection test (plan §PR2:259) to assert that
+    /// `apply_oauth_config` does NOT touch services other than SharePoint.
+    const VALID_COMPOSE_WITH_MULTIPLE_WORKERS: &str = r#"
+version: "3"
+services:
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+    environment:
+      - PORT=4000
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    environment:
+      - PORT=3000
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    environment:
+      - PORT=3001
+    volumes:
+      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/project:/workspace:rw
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    environment:
+      - PORT=3002
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /test/project:/workspace:rw
+"#;
+
+    #[test]
+    fn test_oauth_config_skipped_when_port_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &tmp.path().join("no-port"),
+            &tmp.path().join(".bearer-map.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE_WITH_SHAREPOINT,
+            "yaml unchanged when oauth worker is not running"
+        );
+    }
+
+    #[test]
+    fn test_oauth_config_skipped_when_bearer_map_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49300").unwrap();
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &port_path,
+            &tmp.path().join("no-bearer-map.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE_WITH_SHAREPOINT,
+            "yaml unchanged when bearer-map is missing"
+        );
+    }
+
+    #[test]
+    fn test_oauth_config_skipped_when_bearer_map_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49300").unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, "{}").unwrap();
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &port_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE_WITH_SHAREPOINT,
+            "yaml unchanged when no consumer bearers are provisioned"
+        );
+    }
+
+    #[test]
+    fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49301").unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-sp-uuid": "sharepoint"}"#).unwrap();
+
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &port_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let services = doc.get("services").unwrap();
+
+        // mcp-sharepoint gets WORKER_OAUTH_URL + per-service bearer mount.
+        let sp_env = service_env(&doc, "mcp-sharepoint");
+        let oauth_url = find_env_value(&sp_env, "WORKER_OAUTH_URL=")
+            .expect("WORKER_OAUTH_URL must be injected into mcp-sharepoint");
+        assert!(
+            oauth_url.ends_with(":49301"),
+            "URL must use port: {oauth_url}"
+        );
+        assert!(!oauth_url.contains("0.0.0.0"));
+
+        // Per-service bearer mount on sharepoint
+        let sp_vols: Vec<String> = services
+            .get("mcp-sharepoint")
+            .and_then(|s| s.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            sp_vols
+                .iter()
+                .any(|v| v.contains(":/secrets/oauth-auth-token-sharepoint:ro")),
+            "per-service oauth bearer must be mounted into mcp-sharepoint, got: {sp_vols:?}"
+        );
+
+        // mcp-hub gets NOTHING about oauth.
+        let hub_env = get_hub_env_seq(&doc);
+        assert!(
+            find_env_value(&hub_env, "WORKER_OAUTH_URL=").is_none(),
+            "WORKER_OAUTH_URL must NOT be injected into mcp-hub"
+        );
+        let hub_vols: Vec<String> = services
+            .get("mcp-hub")
+            .and_then(|s| s.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !hub_vols.iter().any(|v| v.contains("oauth-auth-token")),
+            "oauth bearer must NOT be mounted into mcp-hub, got: {hub_vols:?}"
+        );
+    }
+
+    #[test]
+    fn test_oauth_config_writes_per_service_bearer_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49301").unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-x": "sharepoint"}"#).unwrap();
+
+        apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &port_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+
+        let bearer_file = tmp.path().join("bearer-sharepoint");
+        assert!(
+            bearer_file.exists(),
+            "per-service bearer file must be written"
+        );
+        let content = std::fs::read_to_string(&bearer_file).unwrap();
+        assert_eq!(content, "bearer-x");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&bearer_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "bearer file must be chmod 600");
+        }
+    }
+
+    /// Negative-injection test (plan §PR2:259):
+    /// `apply_oauth_config` must NOT touch services other than SharePoint.
+    /// Without this fixture (slack + redmine alongside sharepoint), the
+    /// happy-path test only proves "hub is untouched" — a regression that
+    /// blanket-injects WORKER_OAUTH_URL into every worker would still pass.
+    #[test]
+    fn test_oauth_config_does_not_inject_into_slack_or_redmine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49301").unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
+
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_MULTIPLE_WORKERS,
+            tmp.path(),
+            &port_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+
+        // SharePoint receives the injection (sanity — same as the happy-path test).
+        let sp_env = service_env(&doc, "mcp-sharepoint");
+        assert!(
+            find_env_value(&sp_env, "WORKER_OAUTH_URL=").is_some(),
+            "WORKER_OAUTH_URL must be injected into mcp-sharepoint"
+        );
+
+        // Non-OAuth workers MUST be untouched — neither env nor mount.
+        for non_oauth_service in &["mcp-slack", "mcp-redmine", "mcp-hub"] {
+            let env = service_env(&doc, non_oauth_service);
+            assert!(
+                find_env_value(&env, "WORKER_OAUTH_URL=").is_none(),
+                "{non_oauth_service}: WORKER_OAUTH_URL must NOT be injected, env={env:?}"
+            );
+
+            let vols: Vec<String> = doc
+                .get("services")
+                .and_then(|s| s.get(non_oauth_service))
+                .and_then(|s| s.get("volumes"))
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert!(
+                !vols.iter().any(|v| v.contains("oauth-auth-token")),
+                "{non_oauth_service}: oauth bearer must NOT be mounted, vols={vols:?}"
+            );
+        }
+    }
+
+    /// Helper: read environment sequence for a given compose service name.
+    fn service_env(doc: &serde_yaml_ng::Value, service_name: &str) -> Vec<String> {
+        doc.get("services")
+            .and_then(|s| s.get(service_name))
+            .and_then(|s| s.get("environment"))
+            .and_then(|e| e.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn test_read_host_exec_port() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6866,6 +7290,151 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_correct_mounts_pass() {
+        // ADR-060 / PR3: SharePoint tokens mount is :ro (refresh is delegated to
+        // the host-side `oauth` worker). The legacy :rw mount is now a violation
+        // — see `test_security_check_sharepoint_rw_now_violates`.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let sp_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule.is_sharepoint())
+            .collect();
+        assert!(
+            sp_violations.is_empty(),
+            "Correct SharePoint mounts should not trigger violations, got: {:?}",
+            sp_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_with_oauth_bearer_mount_passes() {
+        // After ADR-060, SharePoint additionally mounts its per-service oauth
+        // bearer at `/secrets/oauth-auth-token-sharepoint:ro`. Verify the
+        // SharepointNoExtraVolumes allowlist accepts it.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/.speedwave/oauth/test/bearer-sharepoint:/secrets/oauth-auth-token-sharepoint:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let sp_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule.is_sharepoint())
+            .collect();
+        assert!(
+            sp_violations.is_empty(),
+            "post-ADR-060 SharePoint compose (with oauth bearer mount) must pass: {:?}",
+            sp_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_oauth_bearer_must_be_ro() {
+        // ADR-060 / extra_allowed_ro_targets logic: oauth bearer mount must be :ro.
+        // A `:rw` mount on that path should fail SharepointNoExtraVolumes.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/x:/secrets/oauth-auth-token-sharepoint:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SharepointNoExtraVolumes),
+            "oauth bearer mount with :rw must violate SharepointNoExtraVolumes"
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_unrecognised_secret_mount_rejected() {
+        // A `/secrets/` mount with a path that is NOT in extra_allowed_ro_targets
+        // (e.g. an attempt to mount another service's bearer) must be rejected.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/x:/secrets/oauth-auth-token-evil:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SharepointNoExtraVolumes),
+            "non-allowlisted /secrets/ mount must violate SharepointNoExtraVolumes"
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_rw_now_violates() {
+        // Verifies that the legacy :rw mount (ADR-009) is rejected after the
+        // ADR-060 migration: SharePoint no longer needs to write to /tokens.
         let yaml = format!(
             r#"
 version: "3"
@@ -6887,14 +7456,15 @@ services:
         );
         let paths = test_expected_paths();
         let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
-        let sp_violations: Vec<_> = violations
-            .iter()
-            .filter(|v| v.rule.is_sharepoint())
-            .collect();
+        // ADR-060/PR3 removed `SharepointTokenMountMode`; the universal
+        // `PluginTokenMountMode` rule (re-used for built-in workers) is now
+        // what catches a SharePoint `:rw` regression.
         assert!(
-            sp_violations.is_empty(),
-            "Correct SharePoint mounts should not trigger violations, got: {:?}",
-            sp_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode),
+            "legacy :rw mount must now violate PluginTokenMountMode \
+             (the generic mount-mode rule reused for built-in workers)"
         );
     }
 
@@ -6914,7 +7484,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
 "#,
             user = container_user()
         );
@@ -6944,7 +7514,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
       - /wrong/path:/workspace:rw
 "#,
             user = container_user()
@@ -6975,7 +7545,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
       - /test/project:/workspace:ro
 "#,
             user = container_user()
@@ -7203,7 +7773,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /home/user/.speedwave/tokens/test/sharepoint:/tokens:ro
       - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
@@ -8088,7 +8658,7 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
       - /test/project:/workspace:rw
       - /etc/passwd:/etc/passwd:ro
 "#,
@@ -8523,6 +9093,84 @@ services:
                 .count(),
             2,
             "Expected 2 violations: snapshots/testproj dir + snapshot file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_oauth_tree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        // World-readable oauth/<project> dir + oauth.json — both must be
+        // flagged. Pre-PR1-6 the entire oauth tree was outside SecurityCheck's
+        // path collector, so a world-readable refresh token would slip by.
+        let oauth_dir = data_dir.join("oauth");
+        std::fs::create_dir_all(oauth_dir.join("testproj")).unwrap();
+        std::fs::set_permissions(&oauth_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            oauth_dir.join("testproj"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let oauth_json = oauth_dir.join("testproj").join("sharepoint.json");
+        std::fs::write(&oauth_json, "{}").unwrap();
+        std::fs::set_permissions(&oauth_json, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let audit = oauth_dir.join("testproj").join("audit.log");
+        std::fs::write(&audit, "x").unwrap();
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        let file_violations = violations
+            .iter()
+            .filter(|v| v.rule == SecurityRule::FileSecurityViolation)
+            .count();
+        assert_eq!(
+            file_violations, 4,
+            "Expected 4 violations (oauth/, oauth/testproj/, sharepoint.json, audit.log); got: {violations:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_oauth_tree_passes_when_correct() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        let oauth_dir = data_dir.join("oauth");
+        std::fs::create_dir_all(oauth_dir.join("testproj")).unwrap();
+        std::fs::set_permissions(&oauth_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            oauth_dir.join("testproj"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+
+        // Cover every file kind we expect under oauth/<project>/.
+        for name in &[
+            "sharepoint.json",
+            ".bearer-map.json",
+            "bearer-sharepoint",
+            "auth-token",
+            "port",
+            "pid",
+            "audit.log",
+            "audit.log.1",
+        ] {
+            let p = oauth_dir.join("testproj").join(name);
+            std::fs::write(&p, "x").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations.is_empty(),
+            "No violations expected for correctly-permed oauth tree; got: {violations:?}"
         );
     }
 

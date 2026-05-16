@@ -66,6 +66,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-057](ADR-057-lazy-build-of-enabled-worker-images.md)              | Lazy Build of Enabled Worker Container Images                                            | Accepted              |
 | [ADR-058](ADR-058-beta-features-toggle.md)                             | Beta Features Toggle in the Tray Menu                                                    | Accepted              |
 | [ADR-059](ADR-059-drop-linux-support.md)                               | Drop Linux Support — Windows and macOS Only                                              | Accepted              |
+| [ADR-060](ADR-060-host-side-oauth-refresh-worker.md)                   | Host-Side OAuth Refresh Worker (`oauth`)                                                 | Accepted              |
 
 ## Creating a New ADR
 

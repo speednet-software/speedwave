@@ -529,7 +529,15 @@ fn write_lock_file_static(path: &PathBuf, auth: &Arc<Mutex<AuthState>>) -> anyho
     {
         std::fs::write(path, &content)?;
         #[cfg(windows)]
-        let _ = crate::fs_perms::set_owner_only(path);
+        if let Err(e) = crate::fs_perms::set_owner_only(path) {
+            // ACL failure on a lock file that contains the IDE Bridge authToken
+            // would leave it world-readable. Remove the file and surface the error.
+            let _ = std::fs::remove_file(path);
+            return Err(anyhow::anyhow!(
+                "set_owner_only failed for {}: {e}",
+                path.display()
+            ));
+        }
     }
 
     Ok(())

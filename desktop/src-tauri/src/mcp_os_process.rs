@@ -4,6 +4,7 @@ use std::process::{Child, Command};
 use std::thread::JoinHandle;
 
 use speedwave_runtime::consts;
+use speedwave_runtime::fs_perms::write_restricted_file;
 
 /// Manages the mcp-os TypeScript worker as a child process.
 ///
@@ -497,66 +498,7 @@ fn drain_and_read_port(
     }
 }
 
-/// Write content to file with chmod 600 (Unix) to prevent other users from reading it.
-fn write_restricted_file(path: &PathBuf, content: &str) -> anyhow::Result<()> {
-    if path.is_dir() {
-        log::warn!(
-            "write_restricted_file: removing unexpected directory at {}",
-            path.display()
-        );
-        std::fs::remove_dir_all(path)?;
-    }
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-    }
-    #[cfg(windows)]
-    {
-        std::fs::write(path, content)?;
-        // Restrict to current user only via Windows ACLs.
-        // icacls /inheritance:r removes inherited ACEs, then /grant:r adds
-        // full-control for the current user only — equivalent of chmod 600.
-        let status = speedwave_runtime::binary::system_command("icacls")
-            .args([
-                path.as_os_str(),
-                "/inheritance:r".as_ref(),
-                "/grant:r".as_ref(),
-            ])
-            .arg(format!(
-                "{}:(F)",
-                std::env::var("USERNAME").unwrap_or_default()
-            ))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => log::warn!(
-                "icacls failed (exit {}): {} may have overly permissive ACLs",
-                s,
-                path.display()
-            ),
-            Err(e) => log::warn!(
-                "failed to run icacls on {}: {} — file may have overly permissive ACLs",
-                path.display(),
-                e
-            ),
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        compile_error!("write_restricted_file: unsupported platform — add file permission logic for this target");
-    }
-    Ok(())
-}
+// Restricted file write — see `speedwave_runtime::fs_perms::write_restricted_file` (SSOT extracted in PR1).
 
 // ---------------------------------------------------------------------------
 // Test-only accessors — gated behind cfg(test) so clippy reports dead code
@@ -716,25 +658,6 @@ srv.listen(0, '127.0.0.1', () => {
         assert!(result.is_err(), "Should timeout on silent child");
         child.kill().ok();
         child.wait().ok();
-    }
-
-    #[test]
-    fn test_write_restricted_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("test-file");
-
-        write_restricted_file(&path, "test-content").unwrap();
-
-        assert!(path.exists());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "test-content");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "File should be chmod 600");
-        }
     }
 
     #[cfg(unix)]
@@ -1489,19 +1412,6 @@ srv.listen(0, '127.0.0.1', () => {
             proc.stop().unwrap();
         }
         // node not available — skip
-    }
-
-    #[test]
-    fn test_write_restricted_file_overwrites_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("token-as-dir");
-        std::fs::create_dir(&path).unwrap();
-        assert!(path.is_dir());
-
-        write_restricted_file(&path, "my-token").unwrap();
-
-        assert!(path.is_file());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "my-token");
     }
 
     #[test]

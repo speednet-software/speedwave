@@ -734,9 +734,19 @@ fn main() -> anyhow::Result<()> {
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
 
+    // Run one-shot OAuth state migration (ADR-060 / PR3) before spawning the
+    // oauth worker. Idempotent — no-op if no project has the legacy layout.
+    let migrated = speedwave_runtime::migration_oauth::run_oauth_migration_at_startup();
+    if migrated > 0 {
+        log::info!("oauth migration: {migrated} project(s) migrated to new layout");
+    }
+
     // Spawn host_exec BEFORE render_compose — hub needs port/auth-token files (ADR-054).
     let _host_exec_worker =
         maybe_spawn_host_exec_worker(&project_name, &project_dir, &integrations);
+
+    // Spawn oauth BEFORE render_compose — apply_oauth_config reads port + bearer-map (ADR-060).
+    let _oauth_worker = maybe_spawn_oauth_worker(&project_name, &integrations);
 
     let compose_yml = compose::render_compose(
         &project_name,
@@ -918,6 +928,52 @@ fn maybe_spawn_host_exec_worker(
         }
         Err(e) => {
             log::warn!("host_exec[{project_name}]: spawn failed: {e}");
+            None
+        }
+    }
+}
+
+/// Spawn per-project `oauth` worker if any OAuth-consuming integration is enabled.
+/// Best-effort: failures are logged and `None` returned (ADR-060).
+fn maybe_spawn_oauth_worker(
+    project_name: &str,
+    integrations: &config::ResolvedIntegrationsConfig,
+) -> Option<speedwave_runtime::oauth_process::OauthProcess> {
+    use speedwave_runtime::oauth_process::OauthProcess;
+
+    // List of enabled OAuth-consuming integrations (drives bearer-map).
+    // `is_service_enabled` is the SSOT match on `ResolvedIntegrationsConfig`
+    // (`speedwave_runtime::config`) — reused by Desktop's `ensure_oauth_running`.
+    let oauth_consumers: Vec<&'static str> = consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .filter(|d| {
+            d.uses_oauth_refresh
+                && integrations
+                    .is_service_enabled(d.config_key)
+                    .unwrap_or(false)
+        })
+        .map(|d| d.config_key)
+        .collect();
+    if oauth_consumers.is_empty() {
+        return None;
+    }
+
+    let script = match speedwave_runtime::build::resolve_oauth_script() {
+        Some(s) => s.to_string_lossy().to_string(),
+        None => {
+            log::warn!(
+                "oauth[{project_name}]: worker script not found — OAuth refresh unavailable"
+            );
+            return None;
+        }
+    };
+    match OauthProcess::spawn_in(project_name, &script, consts::data_dir(), &oauth_consumers) {
+        Ok(proc) => {
+            log::info!("oauth[{project_name}]: started (port {})", proc.port());
+            Some(proc)
+        }
+        Err(e) => {
+            log::warn!("oauth[{project_name}]: spawn failed: {e}");
             None
         }
     }

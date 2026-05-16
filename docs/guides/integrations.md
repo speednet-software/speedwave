@@ -85,16 +85,16 @@ Mail and Notes tools use AppleScript-based automation and have different paramet
 
 Each MCP integration requires specific credentials to function. Fields marked as optional do not block the "Configured" status — the integration works without them.
 
-| Integration | Required Fields                                                 | Optional Fields                                                        |
-| ----------- | --------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| Slack       | `bot_token`, `user_token`                                       | —                                                                      |
-| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                                      |
-| GitLab      | `token`, `host_url`                                             | —                                                                      |
-| GitHub      | `token`                                                         | —                                                                      |
-| Atlassian   | `site_url`, `email`, `api_token`                                | `jira_project_keys`, `confluence_space_keys` (allowlists; empty = all) |
-| Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project)                   |
-| Office      | _(none — no credentials required)_                              | —                                                                      |
-| Playwright  | _(none — no credentials required)_                              | —                                                                      |
+| Integration | Required Fields                                    | Optional Fields                                                        |
+| ----------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
+| Slack       | `bot_token`, `user_token`                          | —                                                                      |
+| SharePoint  | `client_id`, `tenant_id`, `site_id` + OAuth tokens | —                                                                      |
+| GitLab      | `token`, `host_url`                                | —                                                                      |
+| GitHub      | `token`                                            | —                                                                      |
+| Atlassian   | `site_url`, `email`, `api_token`                   | `jira_project_keys`, `confluence_space_keys` (allowlists; empty = all) |
+| Redmine     | `api_key`, `host_url`                              | `project_id` (scope operations to a default project)                   |
+| Office      | _(none — no credentials required)_                 | —                                                                      |
+| Playwright  | _(none — no credentials required)_                 | —                                                                      |
 
 ### Enabling an integration — first build on demand
 
@@ -183,6 +183,31 @@ Inside a worker, Speedwave's convention is: use the service's official SDK (or a
 
 33 tools. Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
 Confluence: `listSpaces`, `getSpace`, `searchPages`, `getPage`, `getPageByTitle`, `createPage`, `updatePage`, `getPageChildren`, `addPageComment`, `getPageComments`, `addPageLabels`, `getPageLabels`, `listAttachments`.
+
+### SharePoint — Files and Pages
+
+SharePoint integration combines two Microsoft Graph surfaces: a SharePoint document library (files) and SharePoint Pages (the modern wiki / site content). The worker runs in a hardened container with `/tokens:ro` (per ADR-060) and refresh tokens are kept on the host inside the `oauth` worker — see the OAuth flow below.
+
+**Configuration.** The Desktop integration form collects `client_id`, `tenant_id`, `site_id`. The OAuth device-code flow runs once at setup and writes:
+
+- `~/.speedwave/tokens/<project>/sharepoint/` (mounted into the worker as `/tokens:ro`): `access_token`, `site_id`.
+- `~/.speedwave/oauth/<project>/sharepoint.json` (host-only, NOT mounted into the worker): `clientId`, `tenantId`, `refreshToken`, `scopes`, `grantedScopes`, `expiresAt`, `lastRefreshAt`.
+
+**Scopes.** SharePoint requests `Sites.Manage.All Files.ReadWrite.All User.Read offline_access`. `Sites.Manage.All` is the broadest of the three site scopes Microsoft offers (covers `Sites.ReadWrite.All` and `Sites.Read.All`); it is required for `createList` (PR5) and is requested up-front so a single consent dialog covers all SharePoint operations. `Sites.Manage.All` typically requires tenant admin consent in Azure AD; users in tenants without admin consent will be prompted to request it during the device-code flow.
+
+**Tool surface.** 26 tools total:
+
+- Files (5): `listFileIds`, `getFileFull`, `downloadFile`, `uploadFile`, `getCurrentUser`.
+- Pages (8, PR4): `listPages`, `getPage`, `createPage`, `updatePage`, `addWebPart`, `updateWebPart`, `removeWebPart`, `publishPage`.
+- Lists / items / columns / deletion (13, PR5): `listLists`, `getList`, `createList`, `updateList`, `deleteList`, `addListColumn`, `removeListColumn`, `listItems`, `getItem`, `createItem`, `updateItem`, `deleteItem`, `deletePage`.
+
+**Site policy by omission.** None of the page / list / item / column tools accept a `site_id` parameter. The worker uses the `site_id` it reads from `/tokens/site_id` at startup, so the model has no way to target another site — security by design, not by validation. A regression test (`PAGE_TOOL_SCHEMAS` / `LIST_TOOL_SCHEMAS`) asserts no schema introduces a `site_id` field.
+
+**Column types** in `addListColumn` are restricted to the six Microsoft Graph types covered by PR5: `text`, `number`, `boolean`, `dateTime`, `choice`, `lookup`. Other types (calculated, geolocation, term) are out of scope.
+
+**Web part types** in `addWebPart` / `updateWebPart` are restricted to `text`, `image`, `link` in PR4. Other Microsoft Graph web part types (highlighted content, events, news, etc.) are not exposed.
+
+**OAuth refresh flow.** When the worker's access token returns 401, it calls `oauth.refresh()` on the host-side `oauth` worker (see [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)). The oauth worker reads `refreshToken` from `oauth.json`, calls Microsoft's `/oauth2/v2.0/token` endpoint, writes the new `access_token` to `/tokens/access_token`, and the SharePoint worker re-reads it. The SharePoint container never sees the refresh token. If Microsoft returns `scope_mismatch` (e.g. after a scope bump or admin policy change), the failure surfaces as an `OAUTH_SCOPE_MISMATCH` error that the Desktop UI uses to trigger re-consent.
 
 ### Office — Documents
 

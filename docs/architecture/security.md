@@ -210,18 +210,17 @@ See [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md) for the f
 
 ### SharePoint Volume Rules
 
-Same checks as plugin volumes, applied to the built-in SharePoint service. SharePoint uses `:rw` token mount for OAuth refresh (see [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)).
+Same checks as plugin volumes, applied to the built-in SharePoint service. As of [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md) SharePoint mounts `/tokens:ro` like every other worker; OAuth refresh moved to the host-side `oauth` worker. The token-mount-mode check is the generic `PLUGIN_TOKEN_MOUNT_MODE` (re-used for built-in workers) — there is no dedicated SharePoint variant any more.
 
-| Rule                                 | What it checks                        |
-| ------------------------------------ | ------------------------------------- |
-| `SHAREPOINT_VOLUME_LONG_FORM`        | Short-form volumes only               |
-| `SHAREPOINT_TOKEN_PATH_MISMATCH`     | Token mount path matches expected     |
-| `SHAREPOINT_TOKEN_MOUNT_MODE`        | Token mount mode is `:rw`             |
-| `SHAREPOINT_WORKSPACE_PATH_MISMATCH` | Workspace mount path matches expected |
-| `SHAREPOINT_WORKSPACE_MOUNT_MODE`    | Workspace mount mode is `:rw`         |
-| `SHAREPOINT_NO_EXTRA_VOLUMES`        | No extra volumes                      |
-| `SHAREPOINT_MISSING_TOKENS_MOUNT`    | Token mount present                   |
-| `SHAREPOINT_MISSING_WORKSPACE_MOUNT` | Workspace mount present               |
+| Rule                                 | What it checks                                                             |
+| ------------------------------------ | -------------------------------------------------------------------------- |
+| `SHAREPOINT_VOLUME_LONG_FORM`        | Short-form volumes only                                                    |
+| `SHAREPOINT_TOKEN_PATH_MISMATCH`     | Token mount path matches expected                                          |
+| `SHAREPOINT_WORKSPACE_PATH_MISMATCH` | Workspace mount path matches expected                                      |
+| `SHAREPOINT_WORKSPACE_MOUNT_MODE`    | Workspace mount mode is `:rw`                                              |
+| `SHAREPOINT_NO_EXTRA_VOLUMES`        | Allowlisted extras only: `/tokens`, `/workspace`, per-service oauth bearer |
+| `SHAREPOINT_MISSING_TOKENS_MOUNT`    | Token mount present                                                        |
+| `SHAREPOINT_MISSING_WORKSPACE_MOUNT` | Workspace mount present                                                    |
 
 ### Host File Security Rules
 

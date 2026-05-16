@@ -17,6 +17,7 @@ import type { ToolMetadata } from './hub-types.js';
 import { getAuthToken } from './auth-tokens.js';
 import { validateWorkerUrl } from '@speedwave/mcp-shared';
 import { parseResponse, buildWorkerHeaders } from './http-bridge.js';
+import { deriveWorkerEnv } from './worker-env.js';
 
 /**
  * Convert snake_case tool name to camelCase method name.
@@ -146,9 +147,10 @@ export async function fetchAllTools(
  * @returns Array of Tool definitions from the worker, or empty array on failure
  */
 export async function discoverServiceTools(service: string): Promise<Tool[]> {
-  const url = process.env[`WORKER_${service.toUpperCase()}_URL`];
+  const envKey = deriveWorkerEnv(service);
+  const url = process.env[envKey];
   if (!url) {
-    console.warn(`${ts()} [tool-discovery] No WORKER_${service.toUpperCase()}_URL configured`);
+    console.warn(`${ts()} [tool-discovery] No ${envKey} configured`);
     return [];
   }
 

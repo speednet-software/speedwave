@@ -70,6 +70,27 @@ pub const HOST_EXEC_META_TOOLS: &[&str] = &[
     "awk", "gawk", "mawk", "nawk",
 ];
 
+/// Subdirectory under the data dir holding per-project `oauth` worker state.
+/// SSOT — do not hard-code `"oauth"` at call sites. See ADR-060.
+pub const OAUTH_SUBDIR: &str = "oauth";
+/// Per-project bearer-token → service map (`0o600`). Lets the oauth worker
+/// derive `service` from the incoming bearer instead of trusting a model-controlled param.
+pub const OAUTH_BEARER_MAP_FILE: &str = ".bearer-map.json";
+/// Per-project worker supervisor's own auth-token (used by the supervisor for handshakes/diagnostics).
+pub const OAUTH_AUTH_TOKEN_FILE: &str = "auth-token";
+/// Per-project worker listening port file.
+pub const OAUTH_PORT_FILE: &str = "port";
+/// Per-project worker PID file — used for stale-process cleanup.
+pub const OAUTH_PID_FILE: &str = "pid";
+/// Per-project audit log; refresh / forget events are appended here (no token contents).
+pub const OAUTH_LOG_FILE: &str = "audit.log";
+/// Mode for the per-project oauth state directory (owner-only).
+pub const OAUTH_PROJECT_DIR_MODE: u32 = 0o700;
+/// Min seconds between successful refresh attempts per service when the
+/// current access token is still valid. Slows down a compromised-caller
+/// refresh-in-a-loop attack; cannot stop it (ADR-060 §"Threat model").
+pub const OAUTH_REFRESH_RATE_LIMIT_SECONDS: u64 = 1800;
+
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
@@ -276,6 +297,28 @@ pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 // watchdog fires, otherwise the watchdog kills the process mid-stop.
 const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);
 
+/// Where an auth/credential field is physically stored on disk (plan §PR3:290-299).
+///
+/// Before ADR-060/PR3 every field lived in `~/.speedwave/tokens/<project>/<service>/`.
+/// PR3 split SharePoint's OAuth state off-mount so a SharePoint container compromise
+/// no longer leaks `refresh_token`. `FieldStorage` is the explicit per-field tag
+/// that drives `save_integration_credentials`, `is_service_configured`, and
+/// `delete_integration_credentials` instead of branching on `service == "sharepoint"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldStorage {
+    /// Individual file under `~/.speedwave/tokens/<project>/<service>/<key>`,
+    /// mounted as `/tokens/<key>` (read-only since ADR-060) into the worker
+    /// container.
+    WorkerMountedToken,
+    /// Stored inside the per-service `config.json` (Redmine's `host_url`,
+    /// `project_id`), still mounted into the worker as part of `/tokens`.
+    WorkerMountedConfig,
+    /// Stored in `~/.speedwave/oauth/<project>/<service>.json` (ADR-060) and
+    /// NEVER mounted into the worker container. Only the host-side `oauth`
+    /// worker reads it.
+    OAuthState,
+}
+
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
     /// Field key used as filename in the tokens directory (e.g. "bot_token").
@@ -290,7 +333,9 @@ pub struct McpAuthFieldDescriptor {
     pub is_secret: bool,
     /// Whether this field is stored inside a `config.json` file rather than
     /// as an individual credential file. Used by Redmine's `host_url`
-    /// and `project_id` fields.
+    /// and `project_id` fields. Equivalent to `storage ==
+    /// FieldStorage::WorkerMountedConfig` and kept for backwards-compat
+    /// with existing callsites; new code should branch on `storage`.
     pub stored_in_config_json: bool,
     /// Whether this field is obtained via an OAuth flow rather than manual entry.
     /// Fields with `oauth_flow: true` are hidden from the credential form and
@@ -300,10 +345,23 @@ pub struct McpAuthFieldDescriptor {
     /// Optional fields are shown in the UI but do not block the
     /// "Configured" status when left empty.
     pub optional: bool,
+    /// Physical storage tier (plan §PR3:290-299). Drives storage routing for
+    /// `save_integration_credentials`, `is_service_configured`, and
+    /// `delete_integration_credentials` in the Desktop crate.
+    pub storage: FieldStorage,
 }
 
 /// OAuth scopes requested during the SharePoint Device Code Flow.
-pub const SHAREPOINT_OAUTH_SCOPES: &str = "https://graph.microsoft.com/Sites.Read.All \
+///
+/// `Sites.Manage.All` covers `Sites.ReadWrite.All` and `Sites.Read.All` and is
+/// required by Microsoft Graph `createList` (delegated permissions)[^create-list].
+/// It typically requires tenant admin consent — the Speedflow app must be
+/// admin-consented in the Azure AD tenant before users can grant it via the
+/// device-code flow. See `docs/guides/integrations.md` for the admin-consent
+/// prerequisite.
+///
+/// [^create-list]: <https://learn.microsoft.com/en-us/graph/api/list-create?view=graph-rest-1.0&tabs=http#permissions>
+pub const SHAREPOINT_OAUTH_SCOPES: &str = "https://graph.microsoft.com/Sites.Manage.All \
      https://graph.microsoft.com/Files.ReadWrite.All \
      https://graph.microsoft.com/User.Read offline_access";
 
@@ -322,14 +380,27 @@ pub struct McpServiceDescriptor {
     /// Auth/credential fields for this service.
     pub auth_fields: &'static [McpAuthFieldDescriptor],
     /// Credential file names allowed for this service (superset of auth field keys,
-    /// may include extra files like "config.json").
+    /// may include extra files like "config.json"). After ADR-060/PR3 this is the
+    /// list of files that LIVE under `~/.speedwave/tokens/<project>/<service>/`
+    /// and are mounted into the worker. SharePoint's OAuth-state-only fields
+    /// (refresh_token, client_id, tenant_id) are NOT here — they live in
+    /// `oauth/<project>/<service>.json` and are described by `oauth_state_fields`.
     pub credential_files: &'static [&'static str],
+    /// `Some(_)` for OAuth-using services: the field names that live in
+    /// `oauth/<project>/<service>.json` (NOT mounted into the worker). `None`
+    /// for services without OAuth state. Plan §PR3:290-299.
+    pub oauth_state_fields: Option<&'static [&'static str]>,
     /// Optional UI badge label (e.g. "BETA", "NEW"). `None` = no badge.
     pub badge: Option<&'static str>,
     /// True if this worker runs on its own egress-less network `{NETWORK_NAME}_{config_key}`
     /// (e.g. `office`) rather than only the shared project network. When such a service is
     /// disabled, its dedicated network and the hub's attachment to it are removed from compose.
     pub egress_less: bool,
+    /// True if this worker consumes the host-side `oauth` worker (ADR-060) to refresh
+    /// access tokens. When set, compose injects `WORKER_OAUTH_URL` + a per-service bearer
+    /// mount at `/secrets/oauth-auth-token-<config_key>:ro` into this worker's container.
+    /// SSOT — adding a new OAuth-using integration = flipping this bit on its descriptor.
+    pub uses_oauth_refresh: bool,
 }
 
 /// Toggleable MCP services — Single Source of Truth for service metadata.
@@ -351,6 +422,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
             },
             McpAuthFieldDescriptor {
                 key: "user_token",
@@ -361,11 +433,14 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
             },
         ],
         credential_files: &["bot_token", "user_token"],
+        oauth_state_fields: None,
         badge: None,
         egress_less: false,
+        uses_oauth_refresh: false,
     },
     McpServiceDescriptor {
         config_key: "sharepoint",
@@ -383,6 +458,9 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: true,
                 optional: false,
+                // Mounted into the worker — refreshed by the host-side `oauth`
+                // worker (ADR-060) and read by the SharePoint client at runtime.
+                storage: FieldStorage::WorkerMountedToken,
             },
             McpAuthFieldDescriptor {
                 key: "refresh_token",
@@ -393,6 +471,10 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: true,
                 optional: false,
+                // Off-mount (ADR-060 §"Threat model"): a SharePoint container
+                // compromise cannot exfiltrate the refresh_token because it is
+                // not in `/tokens`.
+                storage: FieldStorage::OAuthState,
             },
             McpAuthFieldDescriptor {
                 key: "client_id",
@@ -403,6 +485,10 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                // Application credentials (client_id, tenant_id) live in
+                // `oauth/<project>/sharepoint.json` together with the refresh
+                // token; only the host-side `oauth` worker reads them.
+                storage: FieldStorage::OAuthState,
             },
             McpAuthFieldDescriptor {
                 key: "tenant_id",
@@ -413,6 +499,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::OAuthState,
             },
             McpAuthFieldDescriptor {
                 key: "site_id",
@@ -423,28 +510,30 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
-            },
-            McpAuthFieldDescriptor {
-                key: "base_path",
-                label: "Base Path",
-                field_type: "text",
-                placeholder: "Projects/my-project",
-                is_secret: false,
-                stored_in_config_json: false,
-                oauth_flow: false,
-                optional: false,
+                // Site policy by omission (ADR-060): the worker reads its
+                // stored site_id and Graph tools accept no `site_id` parameter.
+                storage: FieldStorage::WorkerMountedToken,
             },
         ],
-        credential_files: &[
-            "access_token",
+        // Plan §PR3:290-299: only files PHYSICALLY mounted into the worker.
+        // refresh_token / client_id / tenant_id moved off-mount to
+        // `oauth/<project>/sharepoint.json` — see `oauth_state_fields` below.
+        credential_files: &["access_token", "site_id"],
+        oauth_state_fields: Some(&[
+            // SSOT for the fields stored in `oauth/<project>/sharepoint.json`.
+            // `scopes` / `grantedScopes` / `expiresAt` / `lastRefreshAt` are
+            // managed exclusively by the oauth worker (not in `auth_fields`).
             "refresh_token",
             "client_id",
             "tenant_id",
-            "site_id",
-            "base_path",
-        ],
+            "scopes",
+            "grantedScopes",
+            "expiresAt",
+            "lastRefreshAt",
+        ]),
         badge: None,
         egress_less: false,
+        uses_oauth_refresh: true,
     },
     McpServiceDescriptor {
         config_key: "redmine",
@@ -462,6 +551,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: true,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedConfig,
             },
             McpAuthFieldDescriptor {
                 key: "api_key",
@@ -472,6 +562,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
             },
             McpAuthFieldDescriptor {
                 key: "project_id",
@@ -482,6 +573,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: true,
                 oauth_flow: false,
                 optional: true,
+                storage: FieldStorage::WorkerMountedConfig,
             },
         ],
         credential_files: &[
@@ -491,8 +583,10 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "project_id",
             "project_name",
         ],
+        oauth_state_fields: None,
         badge: None,
         egress_less: false,
+        uses_oauth_refresh: false,
     },
     McpServiceDescriptor {
         config_key: "gitlab",
@@ -510,6 +604,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
             },
             McpAuthFieldDescriptor {
                 key: "token",
@@ -520,11 +615,14 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
             },
         ],
         credential_files: &["token", "host_url"],
+        oauth_state_fields: None,
         badge: None,
         egress_less: false,
+        uses_oauth_refresh: false,
     },
     McpServiceDescriptor {
         config_key: "github",
@@ -541,10 +639,13 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             stored_in_config_json: false,
             oauth_flow: false,
             optional: false,
+            storage: FieldStorage::WorkerMountedToken,
         }],
         credential_files: &["token"],
+        oauth_state_fields: None,
         badge: None,
         egress_less: false,
+        uses_oauth_refresh: false,
     },
     McpServiceDescriptor {
         config_key: "atlassian",
@@ -562,6 +663,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
             },
             McpAuthFieldDescriptor {
                 key: "email",
@@ -572,6 +674,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
             },
             McpAuthFieldDescriptor {
                 key: "api_token",
@@ -582,6 +685,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
             },
             McpAuthFieldDescriptor {
                 key: "jira_project_keys",
@@ -592,6 +696,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: true,
+                storage: FieldStorage::WorkerMountedToken,
             },
             McpAuthFieldDescriptor {
                 key: "confluence_space_keys",
@@ -602,6 +707,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: true,
+                storage: FieldStorage::WorkerMountedToken,
             },
         ],
         credential_files: &[
@@ -611,8 +717,10 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "jira_project_keys",
             "confluence_space_keys",
         ],
+        oauth_state_fields: None,
         badge: None,
         egress_less: false,
+        uses_oauth_refresh: false,
     },
     McpServiceDescriptor {
         config_key: "office",
@@ -623,8 +731,10 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         // A pure file processor — no service credentials. Operates on /workspace files only.
         auth_fields: &[],
         credential_files: &[],
+        oauth_state_fields: None,
         badge: Some("BETA"),
         egress_less: true,
+        uses_oauth_refresh: false,
     },
     McpServiceDescriptor {
         config_key: "playwright",
@@ -635,8 +745,10 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         // Playwright has no credentials — it scrapes public URLs only.
         auth_fields: &[],
         credential_files: &[],
+        oauth_state_fields: None,
         badge: Some("BETA"),
         egress_less: false,
+        uses_oauth_refresh: false,
     },
 ];
 
@@ -719,10 +831,10 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
 ///
 /// `host_exec` is here even though it has no compose service — it is a
 /// host-side worker (like `os`/`mcp-os`) reached via `WORKER_HOST_EXEC_URL`
-/// on the hub (ADR-054). It is the first multi-word entry; the hub builds the
-/// worker env var as `WORKER_${id.toUpperCase()}_URL` and treats `_`
-/// literally, so `host_exec` → `WORKER_HOST_EXEC_URL` (a hyphen would give the
-/// broken `WORKER_HOST-EXEC_URL`).
+/// on the hub (ADR-054). Both Rust (`plugin::derive_worker_env`) and
+/// TypeScript (`mcp-servers/hub/src/worker-env.ts::deriveWorkerEnv`) normalize
+/// hyphens in the slug to underscores in the env var name, so slugs like
+/// `my-plugin` resolve to `WORKER_MY_PLUGIN_URL`.
 pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "slack",
     "sharepoint",
@@ -734,6 +846,11 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "playwright",
     "os",
     "host_exec",
+    // Host-side OAuth refresh worker (ADR-060). Reserved so plugins cannot
+    // shadow it. The oauth worker is NEVER enumerated to Claude — it is not
+    // in ENABLED_SERVICES and the hub has no bearer for it. The reservation
+    // exists purely to prevent slug collisions in plugin manifests.
+    "oauth",
 ];
 
 /// Environment variable names that plugins are forbidden from setting via
@@ -1080,7 +1197,9 @@ mod tests {
     fn test_auth_fields_count_per_service() {
         let expected: &[(&str, usize)] = &[
             ("slack", 2),
-            ("sharepoint", 6),
+            // 5 = access_token, refresh_token, client_id, tenant_id, site_id
+            // (base_path was dropped — site_id alone scopes the worker)
+            ("sharepoint", 5),
             ("redmine", 3),
             ("gitlab", 2),
             ("github", 1),
@@ -1148,15 +1267,45 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_field_keys_subset_of_credential_files() {
+    fn test_auth_field_keys_subset_of_credential_files_or_oauth_state() {
+        // Plan §PR3:290-299: every UI field must land in exactly one of the
+        // two physical storage tiers — `credential_files` (mounted into the
+        // worker) or `oauth_state_fields` (off-mount, in `oauth/<project>/
+        // <service>.json`). The split is what makes the SharePoint refresh
+        // token off-mount.
         for svc in TOGGLEABLE_MCP_SERVICES {
             for field in svc.auth_fields {
+                let in_creds = svc.credential_files.contains(&field.key);
+                let in_oauth = svc
+                    .oauth_state_fields
+                    .map(|f| f.contains(&field.key))
+                    .unwrap_or(false);
                 assert!(
-                    svc.credential_files.contains(&field.key),
-                    "auth field '{}' for service '{}' not in credential_files",
+                    in_creds || in_oauth,
+                    "auth field '{}' for service '{}' is in neither credential_files \
+                     {:?} nor oauth_state_fields {:?}",
                     field.key,
-                    svc.config_key
+                    svc.config_key,
+                    svc.credential_files,
+                    svc.oauth_state_fields,
                 );
+                // The FieldStorage tag must agree with the SSOT lists.
+                match field.storage {
+                    FieldStorage::WorkerMountedToken | FieldStorage::WorkerMountedConfig => {
+                        assert!(
+                            in_creds,
+                            "service '{}': field '{}' tagged worker-mounted but missing from credential_files",
+                            svc.config_key, field.key
+                        );
+                    }
+                    FieldStorage::OAuthState => {
+                        assert!(
+                            in_oauth,
+                            "service '{}': field '{}' tagged OAuthState but missing from oauth_state_fields",
+                            svc.config_key, field.key
+                        );
+                    }
+                }
             }
         }
     }
@@ -1291,26 +1440,41 @@ mod tests {
 
     #[test]
     fn test_sharepoint_oauth_scopes_contains_required_scopes() {
-        assert!(SHAREPOINT_OAUTH_SCOPES.contains("Sites.Read.All"));
+        assert!(
+            SHAREPOINT_OAUTH_SCOPES.contains("Sites.Manage.All"),
+            "Sites.Manage.All is required by createList per Microsoft Graph delegated permissions"
+        );
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("Files.ReadWrite.All"));
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("offline_access"));
+        // Sanity: the legacy narrower scope should NOT be requested as a separate
+        // entry — Sites.Manage.All implicitly covers Sites.ReadWrite.All / Sites.Read.All.
+        assert!(
+            !SHAREPOINT_OAUTH_SCOPES.contains("Sites.Read.All"),
+            "Sites.Read.All is a subset of Sites.Manage.All — do not list both"
+        );
     }
 
-    /// `credential_files` must be a superset of `auth_fields[*].key`: the UI
-    /// collects values for the auth fields and the credential-file list is what
-    /// `save_integration_credentials` (Desktop) is allowed to write/read. A
-    /// field whose key isn't a permitted credential file would be silently
-    /// dropped on save.
+    /// Every `auth_fields[*].key` must live in `credential_files` OR
+    /// `oauth_state_fields` (plan §PR3:290-299). The UI collects values for
+    /// all auth fields; the storage tier is decided by `FieldStorage`. A field
+    /// that landed in neither list would be silently dropped on save.
     #[test]
-    fn test_credential_files_superset_of_auth_fields() {
+    fn test_auth_field_key_has_a_storage_tier() {
         for svc in TOGGLEABLE_MCP_SERVICES {
             for field in svc.auth_fields {
+                let in_creds = svc.credential_files.contains(&field.key);
+                let in_oauth = svc
+                    .oauth_state_fields
+                    .map(|f| f.contains(&field.key))
+                    .unwrap_or(false);
                 assert!(
-                    svc.credential_files.contains(&field.key),
-                    "service '{}': auth field '{}' is not in credential_files {:?}",
+                    in_creds || in_oauth,
+                    "service '{}': auth field '{}' has no storage tier \
+                     (neither credential_files {:?} nor oauth_state_fields {:?})",
                     svc.config_key,
                     field.key,
                     svc.credential_files,
+                    svc.oauth_state_fields,
                 );
             }
         }

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# bundle-build-context.sh — Copies container build context, mcp-os, and the
-# host_exec worker into desktop/src-tauri/ for Tauri resource bundling.
+# bundle-build-context.sh — Copies container build context, mcp-os, host_exec,
+# and the oauth worker into desktop/src-tauri/ for Tauri resource bundling.
 #
 # Defines which MCP services are bundled into the Tauri app resource directory.
 # NOTE: Container image definitions live in crates/speedwave-runtime/src/build.rs (IMAGES constant).
 #       The IMAGES list and MCP_SERVICES list must stay aligned for overlapping services.
-#       host_exec and os are NOT in IMAGES (they are host processes, not containers) —
-#       they are bundled as mcp-os/ and host_exec/ here, and listed in
+#       host_exec, os, and oauth are NOT in IMAGES (they are host processes, not containers) —
+#       they are bundled as mcp-os/, host_exec/, and oauth/ here, and listed in
 #       crates/speedwave-runtime/src/bundle.rs::COMMON_BUNDLED_ASSETS.
 # Called from: Makefile (dev target), CI workflows (desktop-build, desktop-release).
 #
 # Usage:
-#   scripts/bundle-build-context.sh        # default: copies pre-built mcp-os / host_exec dist
-#   scripts/bundle-build-context.sh --ci   # CI mode: builds mcp-os + host_exec from source first
+#   scripts/bundle-build-context.sh        # default: copies pre-built mcp-os / host_exec / oauth dist
+#   scripts/bundle-build-context.sh --ci   # CI mode: builds mcp-os + host_exec + oauth from source first
 
 set -euo pipefail
 
@@ -20,7 +20,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$REPO_ROOT/desktop/src-tauri"
 
 # Clean destination to prevent stale files from previous runs
-rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/host_exec"
+rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/host_exec" "$DEST/oauth"
 
 # -- Build context (containers + MCP server sources) --------------------------
 
@@ -61,14 +61,15 @@ for svc in $MCP_SERVICES; do
   done
 done
 
-# -- mcp-os + host_exec (host-side TypeScript workers) -----------------------
+# -- mcp-os + host_exec + oauth (host-side TypeScript workers) ---------------
 
 if [[ "${1:-}" == "--ci" ]]; then
   # CI mode: build from clean checkout (no pre-built dist/) and install production-only deps
   (cd "$REPO_ROOT/mcp-servers" && npm ci \
     && npm run build --workspace=shared \
     && npm run build --workspace=os \
-    && npm run build --workspace=host_exec)
+    && npm run build --workspace=host_exec \
+    && npm run build --workspace=oauth)
 fi
 
 # stage_host_worker <worker-dir-name> <bundle-dir-name>
@@ -94,3 +95,4 @@ stage_host_worker() {
 
 stage_host_worker os mcp-os
 stage_host_worker host_exec host_exec
+stage_host_worker oauth oauth
