@@ -60,6 +60,22 @@ describe('refreshMicrosoftToken', () => {
     }
   });
 
+  it('returns network error when fetch is aborted (30s timeout)', async () => {
+    // AbortController fires after 30s on a hung Microsoft token endpoint —
+    // surfaces as the same `network` error path. Explicit test so the
+    // timeout contract is not lost in a future refactor.
+    const abortError = Object.assign(new Error('The operation was aborted.'), {
+      name: 'AbortError',
+    });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(abortError));
+    const result = await refreshMicrosoftToken(baseReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('network');
+      expect(result.error.message).toContain('aborted');
+    }
+  });
+
   it('returns malformed when the response is not JSON', async () => {
     vi.stubGlobal(
       'fetch',

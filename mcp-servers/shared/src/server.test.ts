@@ -1378,6 +1378,110 @@ describe('server', () => {
         ).toThrow('auth.token must be a non-empty string');
       });
 
+      // ADR-060 per-service bearer: auth.callerTokens lets the oauth worker
+      // map bearer → caller identity. The constructor rejects malformed maps
+      // so a corrupt bearer file cannot land an unauth caller silently.
+      it('rejects empty bearer key in auth.callerTokens', () => {
+        expect(() =>
+          createMCPServer({
+            name: 'auth-test',
+            version: '1.0.0',
+            port: 3000,
+            auth: { token: 'primary', callerTokens: { '': 'sharepoint' } },
+          })
+        ).toThrow(/empty bearer for caller 'sharepoint'/);
+      });
+
+      it('rejects whitespace-only bearer in auth.callerTokens', () => {
+        expect(() =>
+          createMCPServer({
+            name: 'auth-test',
+            version: '1.0.0',
+            port: 3000,
+            auth: { token: 'primary', callerTokens: { '   ': 'sharepoint' } },
+          })
+        ).toThrow(/empty bearer/);
+      });
+
+      it('rejects empty caller id in auth.callerTokens', () => {
+        expect(() =>
+          createMCPServer({
+            name: 'auth-test',
+            version: '1.0.0',
+            port: 3000,
+            auth: { token: 'primary', callerTokens: { 'bearer-a': '' } },
+          })
+        ).toThrow(/empty caller id/);
+      });
+
+      it('rejects whitespace-only caller id in auth.callerTokens', () => {
+        expect(() =>
+          createMCPServer({
+            name: 'auth-test',
+            version: '1.0.0',
+            port: 3000,
+            auth: { token: 'primary', callerTokens: { 'bearer-a': '   ' } },
+          })
+        ).toThrow(/empty caller id/);
+      });
+
+      it('accepts callerToken and sets res.locals.caller to its mapped id', () => {
+        const server = createMCPServer({
+          name: 'auth-test',
+          version: '1.0.0',
+          port: 3000,
+          auth: {
+            token: 'primary',
+            callerTokens: {
+              'bearer-sharepoint': 'sharepoint',
+              'bearer-other': 'other-consumer',
+            },
+          },
+        });
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const layers = (server.app as any).router.stack;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
+
+        const req = createMockRequest({}, { authorization: 'Bearer bearer-sharepoint' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (req as any).path = '/';
+        const res = createMockResponse();
+        const next = vi.fn();
+        authLayer.handle(req, res, next);
+        expect(next).toHaveBeenCalled();
+        expect(res.status).not.toHaveBeenCalled();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((res as any).locals.caller).toBe('sharepoint');
+      });
+
+      it('rejects request with bearer that matches no caller and no primary', () => {
+        const server = createMCPServer({
+          name: 'auth-test',
+          version: '1.0.0',
+          port: 3000,
+          auth: {
+            token: 'primary',
+            callerTokens: { 'bearer-sharepoint': 'sharepoint' },
+          },
+        });
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const layers = (server.app as any).router.stack;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
+
+        const req = createMockRequest({}, { authorization: 'Bearer not-a-known-bearer' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (req as any).path = '/';
+        const res = createMockResponse();
+        const next = vi.fn();
+        authLayer.handle(req, res, next);
+        expect(next).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(401);
+      });
+
       it('allows unauthenticated requests to custom public paths', () => {
         const server = createMCPServer({
           name: 'auth-test',
