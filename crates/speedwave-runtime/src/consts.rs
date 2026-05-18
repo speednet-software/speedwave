@@ -791,6 +791,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             oauth_flow: false,
             optional: true,
             storage: FieldStorage::WorkerMountedToken,
+            hint: None,
         }],
         credential_files: &["api_key"],
         oauth_state_fields: None,
