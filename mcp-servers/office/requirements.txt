@@ -6,5 +6,5 @@ openpyxl==3.1.5
 python-pptx==1.0.2
 pypdf==6.10.2
 matplotlib==3.10.0
-weasyprint==63.1
+weasyprint==68.0
 numpy==2.2.2
