@@ -2516,6 +2516,63 @@ describe('SharePointClient', () => {
       warnSpy.mockRestore();
     });
 
+    it('passes an AbortSignal to the cold-start fetch (timeout guard against hangs)', async () => {
+      // Pre-fix the cold-start fetch had no timeout — a hung Graph response
+      // would block initializeSharePointClient indefinitely and starve the
+      // hub's discovery retry budget. The signal proves the AbortController
+      // is wired up; the actual timeout behavior is exercised by the
+      // dedicated "aborts and returns transient" test below.
+      const fetchMock = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: 'contoso.sharepoint.com,site-guid,web-guid' }),
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('https://graph.microsoft.com/v1.0/sites/'),
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+    });
+
+    it('returns transient/timeout when the cold-start fetch aborts', async () => {
+      const fetchMock = vi.fn().mockImplementation(() => {
+        const e = new Error('The operation was aborted');
+        e.name = 'AbortError';
+        return Promise.reject(e);
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({
+        ok: false,
+        reason: 'transient',
+        detail: expect.stringMatching(/timed out after \d+ms/),
+      });
+    });
+
+    it('also guards the post-401-refresh retry with an AbortSignal', async () => {
+      // After a 401 → refresh, the retry must carry the same timeout — pre-fix
+      // only the initial fetch had one.
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: 'contoso.sharepoint.com,site,web' }),
+        });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      mockOauthRefresh.mockResolvedValueOnce({ expiresIn: 3600, grantedScopes: [] });
+      mockLoadToken.mockResolvedValueOnce('fresh-after-refresh');
+
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'stale-tok', {
+        refreshOn401: true,
+      });
+
+      expect(result).toMatchObject({ ok: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0][1]).toMatchObject({ signal: expect.any(AbortSignal) });
+      expect(fetchMock.mock.calls[1][1]).toMatchObject({ signal: expect.any(AbortSignal) });
+    });
+
     it('does not retry on 401 when refreshOn401:false is passed', async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: false,

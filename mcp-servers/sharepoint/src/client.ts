@@ -948,10 +948,23 @@ export async function resolveCompositeSiteId(
   }
   const refreshOn401 = opts.refreshOn401 !== false;
   const tokensDir = opts.tokensDir ?? '/tokens';
+  // Cold-start hang here blocks initializeSharePointClient indefinitely, which
+  // in turn blocks the hub's discovery retry budget. Apply the same per-request
+  // timeout the steady-state path uses (callGraphAPI's TIMEOUTS.API_CALL_MS).
+  const siteLookupWithTimeout = async (bearer: string): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.API_CALL_MS);
+    try {
+      return await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}`, {
+        headers: { Authorization: `Bearer ${bearer}` },
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
   try {
-    let response = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    let response = await siteLookupWithTimeout(accessToken);
     if (response.status === 401 && refreshOn401) {
       // Stale `access_token` on cold start — delegate refresh to the host-side
       // oauth worker, then re-read /tokens/access_token and retry once. This
@@ -961,9 +974,7 @@ export async function resolveCompositeSiteId(
         await oauthRefreshAccessToken({ service: 'sharepoint' });
         const fresh = await loadToken(path.join(tokensDir, 'access_token'));
         if (fresh) {
-          response = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}`, {
-            headers: { Authorization: `Bearer ${fresh}` },
-          });
+          response = await siteLookupWithTimeout(fresh);
         }
       } catch (err) {
         // Refresh itself failed (scope mismatch, network, …) — fall through
@@ -995,6 +1006,13 @@ export async function resolveCompositeSiteId(
     }
     return { ok: true, compositeId: id };
   } catch (e) {
+    if (e instanceof Error && e.name === 'AbortError') {
+      return {
+        ok: false,
+        reason: 'transient',
+        detail: `Graph site lookup timed out after ${TIMEOUTS.API_CALL_MS}ms`,
+      };
+    }
     return {
       ok: false,
       reason: 'network',
