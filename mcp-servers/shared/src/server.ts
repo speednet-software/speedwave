@@ -407,8 +407,8 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
 // Internal Helpers
 //═══════════════════════════════════════════════════════════════════════════════
 
-// Constant-time bearer-token compare: HMAC equalises lengths for timingSafeEqual.
-// Not a password hash — tokens are already high-entropy (CodeQL js/insufficient-password-hash dismissed).
+// Constant-time bearer-token compare via double-HMAC — equalises lengths for timingSafeEqual.
+// Not a password hash: bearer tokens are already high-entropy, so Argon2/bcrypt buys nothing.
 function safeTokenCompare(provided: string, expected: string): boolean {
   const hmac = (data: string) => createHmac('sha256', expected).update(data).digest();
   return timingSafeEqual(hmac(provided), hmac(expected));
