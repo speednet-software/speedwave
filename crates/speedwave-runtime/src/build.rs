@@ -288,12 +288,6 @@ pub fn resolve_oauth_script() -> Option<std::path::PathBuf> {
     )
 }
 
-#[cfg(test)]
-fn resolve_oauth_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
-    let dev = repo_dev_path("mcp-servers/oauth/dist/index.js");
-    resolve_worker_script_inner("oauth", &["oauth", "oauth", "dist", "index.js"], home, dev)
-}
-
 /// Build a `<repo-root>/<rel>` path for the dev-tree fallback. `None` when out of tree.
 fn repo_dev_path(rel: &str) -> Option<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

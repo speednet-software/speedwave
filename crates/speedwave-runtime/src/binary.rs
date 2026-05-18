@@ -164,8 +164,9 @@ pub fn command(cmd: &str) -> Command {
 /// Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
 /// For interactive TTY commands, use raw `Command::new()` instead.
 pub fn system_command(program: &str) -> Command {
-    #[allow(unused_mut)] // mut needed on Windows for creation_flags()
-    let mut command = Command::new(program);
+    let command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    let mut command = command;
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;

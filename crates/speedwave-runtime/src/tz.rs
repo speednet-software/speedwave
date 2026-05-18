@@ -1,5 +1,6 @@
 //! Host timezone detection: returns an IANA name for the `TZ` env var injected into every container service.
 
+#[cfg(any(unix, test))]
 use std::path::Path;
 
 /// Returns the host IANA timezone name (e.g. `"Europe/Warsaw"`); warns and returns `"Etc/UTC"` on failure.
@@ -100,6 +101,7 @@ pub(crate) fn windows_to_iana(id: &str) -> Option<&'static str> {
 }
 
 /// Extracts IANA name from a `zoneinfo/...` symlink target (macOS layout).
+#[cfg(any(unix, test))]
 fn extract_zoneinfo_suffix(target: &Path) -> Option<String> {
     let s = target.to_str()?;
     let needle = "zoneinfo/";
@@ -113,6 +115,7 @@ fn extract_zoneinfo_suffix(target: &Path) -> Option<String> {
 }
 
 /// IANA-shape validator: 1–3 segments of `[A-Za-z0-9_+-]`; rejects empty, leading-colon, traversal, absolute.
+#[cfg(any(unix, test))]
 fn is_valid_iana_name(s: &str) -> bool {
     if s.is_empty() {
         return false;

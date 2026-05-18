@@ -1,9 +1,11 @@
 //! Recovers the user's login-shell `PATH` once at startup for `host_exec` (ADR-054 §PATH).
 
 use std::sync::OnceLock;
+#[cfg(not(windows))]
 use std::time::Duration;
 
 /// How long to wait for `$SHELL -ilc 'printf %s "$PATH"'` before falling back.
+#[cfg(not(windows))]
 const SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Cached recovered `PATH`. Populated by [`init_recovered_host_path`] at
