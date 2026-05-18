@@ -144,7 +144,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - **NEVER use `#[allow(dead_code)]`** — dead code must be removed, not silenced. If a field/method is only used in tests, gate it behind `#[cfg(test)]`. If a struct field is required by serde but not read, prefix it with `_` and add `#[serde(rename = "original_name")]`.
 - **NEVER use `#[allow(...)]` to suppress lint warnings** — fix the underlying issue instead. No `#[allow(missing_docs)]`, no `#[allow(clippy::unwrap_used)]`, no blanket `#![allow(...)]` at crate level. The only exception is `#[allow(clippy::unwrap_used, clippy::expect_used)]` on `#[cfg(test)] mod tests` blocks, where panicking on test failure is intentional.
 - **Every code change must include tests** in the same commit — covering happy paths, edge cases, error paths, and state transitions (see `.claude/rules/git-workflow.md` for details)
-- **SharePoint `:rw` token mount** — only exception to the `:ro` token mount rule (OAuth refresh, ADR-009). All MCP workers also mount `/workspace:rw` for file access
+- **Token isolation:** `/tokens` is `:ro` for all workers.
 - **Container user:** runs as UID 1000:1000 on all supported platforms (macOS Lima, Windows WSL2). Linux as a host platform was dropped — see ADR-059.
 - **Documentation is a delivery requirement** — same as tests. New feature -> update guide. Decision -> write ADR.
 
