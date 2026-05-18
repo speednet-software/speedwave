@@ -532,8 +532,11 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 // stored site_id and Graph tools accept no `site_id` parameter.
                 storage: FieldStorage::WorkerMountedToken,
                 hint: Some(
-                    "Mind both colons: one after the hostname (`:/`) \
-                     and one at the end (`:`).",
+                    "Path form: \"acme.sharepoint.com:/sites/Marketing:\" (mind both colons: \
+                     one after the hostname (`:/`) and one at the end (`:`)). \
+                     Or composite form: \"acme.sharepoint.com,{site-guid},{web-guid}\" \
+                     (GET /sites/{hostname}:/sites/{path} in Graph Explorer, copy the response `id`). \
+                     NOT a SharePoint URL.",
                 ),
             },
         ],
