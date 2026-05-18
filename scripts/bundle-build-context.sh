@@ -38,7 +38,7 @@ cp "$REPO_ROOT/mcp-servers/tsconfig.base.json" "$DEST/build-context/mcp-servers/
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
-MCP_SERVICES="shared hub slack sharepoint redmine gitlab github atlassian office playwright"
+MCP_SERVICES="shared hub slack sharepoint redmine gitlab github atlassian office playwright context7"
 
 for svc in $MCP_SERVICES; do
   svc_src="$REPO_ROOT/mcp-servers/$svc"

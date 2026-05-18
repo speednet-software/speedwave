@@ -14,6 +14,7 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 | Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`      |
 | Office      | Word/Excel/PPT/PDF | `speedwave_<project>_mcp_office`     | N/A (no credentials)                          |
 | Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                          |
+| Context7    | Library docs       | `speedwave_<project>_mcp_context7`   | `~/.speedwave/tokens/<project>/context7/` (optional) |
 | OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                            |
 | Host Exec   | Project toolchain  | host-exec (per-project host process) | N/A (whitelist in `~/.speedwave/config.json`) |
 
@@ -284,6 +285,38 @@ Container hardening is otherwise identical to every other MCP worker: `cap_drop:
 - **Tracing** — `browser_start_tracing`, `browser_start_video`, `browser_stop_tracing` (gated behind `--caps devtools` when explicitly enabled).
 
 Refer to the [upstream README](https://github.com/microsoft/playwright-mcp) for the full list and parameter schemas.
+
+### Context7 — Library Documentation
+
+[Context7](https://context7.com) (project of Upstash) hosts an index of ~50k libraries with current code snippets and exposes a REST API. The Speedwave worker calls `https://context7.com/api/v2/*` directly — no MCP-in-MCP layer.
+
+#### Anonymous mode vs API key
+
+The integration works **without an API key** (anonymous tier, per-IP rate limit). For higher limits, paste a free key from [context7.com/dashboard](https://context7.com/dashboard) into the API Key field in Settings → Integrations → Context7. The badge "Anonymous" disappears once a key is set.
+
+Removing the key returns to anonymous mode — the toggle stays enabled (unlike other integrations, which auto-disable when credentials are deleted).
+
+#### Tool surface
+
+| Tool                 | Parameters                            | Description                                                        |
+| -------------------- | ------------------------------------- | ------------------------------------------------------------------ |
+| `resolve_library_id` | `libraryName`, `query`                | Resolve a name (e.g. "react") to a Context7 ID (e.g. `/facebook/react`). Returns top 10 matches with `trustScore` and version list. |
+| `query_docs`         | `libraryId`, `query`, `tokens?`       | Fetch documentation snippets for a known ID. `tokens` defaults to 5000, clamped to `[500, 15000]` to bound context-window usage. |
+
+The Hub exposes both tools through `execute_code` (preferred) — e.g. `await context7.resolve_library_id({libraryName: "react", query: "useState"})`.
+
+#### Example prompts
+
+- *"Implement Next.js middleware that checks JWT in cookies. use context7"*
+- *"How do I configure Spring Boot JWT filter authentication? use context7"*
+
+#### Skill
+
+Speedwave ships `context7/SKILL.md` (in `containers/claude-resources/skills/`) that teaches Claude to prefer Context7 over training data for library, framework, API, CLI, and cloud-service questions. The skill runs the standard `resolve_library_id` → `query_docs` workflow.
+
+#### Network and security
+
+The Context7 worker makes outbound HTTPS to `context7.com/api/v2/*` only. See [security.md](../architecture/security.md#third-party-services) for the data-flow disclosure (queries, library names, optional API key, client headers, IP).
 
 ## MCP Hub Architecture
 
