@@ -217,26 +217,23 @@ pub(crate) fn collect_security_paths(
     (dirs, files)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     fn secure_mkdir(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(path).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
-    #[cfg(unix)]
     fn get_mode(path: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     /// Creates a fully populated data dir tree for testing.
-    #[cfg(unix)]
     fn create_test_tree(data_dir: &std::path::Path, correct_perms: bool) {
         let dir_mode = if correct_perms { 0o700 } else { 0o755 };
         let file_mode = if correct_perms { 0o600 } else { 0o644 };
@@ -291,7 +288,6 @@ mod tests {
 
     // ── collect_security_paths ─────────────────────────────────────────
 
-    #[cfg(unix)]
     #[test]
     fn test_collect_security_paths_returns_correct_paths() {
         let tmp = tempfile::tempdir().unwrap();
@@ -357,7 +353,6 @@ mod tests {
 
     // ── ensure_data_dir_permissions_in ─────────────────────────────────
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_correct_permissions_noop() {
         use std::os::unix::fs::MetadataExt as _;
@@ -383,7 +378,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_fixes_wrong_permissions() {
         use std::os::unix::fs::MetadataExt as _;
@@ -434,7 +428,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_missing_paths_ok() {
         let tmp = tempfile::tempdir().unwrap();
@@ -442,7 +435,6 @@ mod tests {
         ensure_data_dir_permissions_in(tmp.path(), "proj").unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_skips_symlinks_at_top_level() {
         let tmp = tempfile::tempdir().unwrap();
@@ -463,7 +455,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_skips_symlinks_inside_token_dir() {
         use std::os::unix::fs::PermissionsExt;
@@ -505,7 +496,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_does_not_fix_uid_mismatch() {
         use std::os::unix::fs::MetadataExt as _;
@@ -535,7 +525,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_roundtrip_fixes_then_check_passes() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt};

@@ -8346,10 +8346,10 @@ networks:
         )
         .unwrap();
 
-        let token_path = tmp.path().join("slack-auth-token");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let token_path = tmp.path().join("slack-auth-token");
             let mode = std::fs::metadata(&token_path).unwrap().permissions().mode();
             assert_eq!(
                 mode & 0o777,
