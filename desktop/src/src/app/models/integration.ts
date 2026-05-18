@@ -6,6 +6,8 @@ export interface AuthField {
   placeholder: string;
   oauth_flow: boolean;
   optional: boolean;
+  /** Optional help text rendered under the input. */
+  hint?: string;
 }
 
 /** Status and configuration details for a container-based MCP integration. */

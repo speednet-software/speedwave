@@ -349,6 +349,8 @@ pub struct McpAuthFieldDescriptor {
     /// `save_integration_credentials`, `is_service_configured`, and
     /// `delete_integration_credentials` in the Desktop crate.
     pub storage: FieldStorage,
+    /// Optional help text rendered under the input. `None` = no hint.
+    pub hint: Option<&'static str>,
 }
 
 /// OAuth scopes requested during the SharePoint Device Code Flow.
@@ -423,6 +425,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "user_token",
@@ -434,6 +437,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
         ],
         credential_files: &["bot_token", "user_token"],
@@ -461,6 +465,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 // Mounted into the worker — refreshed by the host-side `oauth`
                 // worker (ADR-060) and read by the SharePoint client at runtime.
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "refresh_token",
@@ -475,6 +480,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 // compromise cannot exfiltrate the refresh_token because it is
                 // not in `/tokens`.
                 storage: FieldStorage::OAuthState,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "client_id",
@@ -489,6 +495,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 // `oauth/<project>/sharepoint.json` together with the refresh
                 // token; only the host-side `oauth` worker reads them.
                 storage: FieldStorage::OAuthState,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "tenant_id",
@@ -500,12 +507,14 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::OAuthState,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "site_id",
                 label: "Site ID",
                 field_type: "text",
-                placeholder: "site-id",
+                // Graph site id (composite or path form) — not a SharePoint URL.
+                placeholder: "{tenant}.sharepoint.com,{site-guid},{web-guid}",
                 is_secret: false,
                 stored_in_config_json: false,
                 oauth_flow: false,
@@ -513,6 +522,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 // Site policy by omission (ADR-060): the worker reads its
                 // stored site_id and Graph tools accept no `site_id` parameter.
                 storage: FieldStorage::WorkerMountedToken,
+                hint: Some("Paste a Graph site id, NOT a SharePoint URL. Composite form: \"{hostname},{site-guid},{web-guid}\" or path form: \"{hostname}:/sites/{path}:\". To get the composite id, GET /sites/{hostname}:/sites/{path} in Graph Explorer and copy the response `id`."),
             },
         ],
         // Plan §PR3:290-299: only files PHYSICALLY mounted into the worker.
@@ -552,6 +562,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::WorkerMountedConfig,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "api_key",
@@ -563,6 +574,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "project_id",
@@ -574,6 +586,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: true,
                 storage: FieldStorage::WorkerMountedConfig,
+                hint: None,
             },
         ],
         credential_files: &[
@@ -605,6 +618,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "token",
@@ -616,6 +630,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
         ],
         credential_files: &["token", "host_url"],
@@ -640,6 +655,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             oauth_flow: false,
             optional: false,
             storage: FieldStorage::WorkerMountedToken,
+            hint: None,
         }],
         credential_files: &["token"],
         oauth_state_fields: None,
@@ -664,6 +680,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "email",
@@ -675,6 +692,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "api_token",
@@ -686,6 +704,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: false,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "jira_project_keys",
@@ -697,6 +716,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: true,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "confluence_space_keys",
@@ -708,6 +728,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 oauth_flow: false,
                 optional: true,
                 storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
         ],
         credential_files: &[

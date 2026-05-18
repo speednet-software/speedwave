@@ -822,6 +822,45 @@ export class SharePointClient {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * Reject anything that isn't a Graph site id. Fail-closed: no URL normalization
+ * in the worker — the token mount sits at a trust boundary and a parser bug
+ * could send the bearer to a wrong tenant. Accept only the two Graph-native
+ * forms (composite, path) and let setup-time tooling produce them.
+ * @param siteId - raw value loaded from `/tokens/site_id`
+ * @returns user-facing error message, or `null` when the value is acceptable
+ */
+export function validateGraphSiteId(siteId: string): string | null {
+  const guidance =
+    'Use either composite form "{hostname},{site-guid},{web-guid}" or path form "{hostname}:/sites/{path}:".';
+  const quoted = JSON.stringify(siteId);
+  if (siteId.length === 0) {
+    return `SharePoint site_id is empty. ${guidance}`;
+  }
+  if (/^https?:\/\//i.test(siteId)) {
+    return `SharePoint site_id must be a Graph site id, not a URL (got ${quoted}). ${guidance}`;
+  }
+  if (/\s/.test(siteId)) {
+    return `SharePoint site_id contains whitespace (got ${quoted}). ${guidance}`;
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(siteId)) {
+    return `SharePoint site_id contains control characters. ${guidance}`;
+  }
+  if (siteId.includes('?') || siteId.includes('#')) {
+    return `SharePoint site_id must not contain query (?) or fragment (#) characters (got ${quoted}). ${guidance}`;
+  }
+  if (siteId.includes('..')) {
+    return `SharePoint site_id must not contain "..". ${guidance}`;
+  }
+  // Block non-ASCII (IDN homographs, RTL overrides) — Graph site ids are ASCII.
+  // eslint-disable-next-line no-control-regex
+  if (/[^\x00-\x7f]/.test(siteId)) {
+    return `SharePoint site_id must be ASCII only (got ${quoted}). ${guidance}`;
+  }
+  return null;
+}
+
+/**
  * IMPORTANT: Returns null (not throws) when tokens are missing or invalid.
  * This enables "graceful degradation" - server starts even without config:
  * - User can run `speedwave up` without configuring all integrations
@@ -853,6 +892,12 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       );
       // Graceful degradation: log warning, return null, let server start
       // DO NOT throw here - see JSDoc above for rationale
+      return null;
+    }
+
+    const siteIdError = validateGraphSiteId(siteId);
+    if (siteIdError) {
+      console.warn(`${ts()} ${withSetupGuidance(siteIdError)}`);
       return null;
     }
 
