@@ -26,7 +26,10 @@ const SERVER_VERSION = '1.0.0';
 function resolvePort(): number {
   const port = Number.parseInt(process.env.PORT || '0', 10);
   if (Number.isNaN(port) || port < 0 || port > 65535) {
-    console.error(`${ts()} oauth FATAL: invalid PORT value: ${process.env.PORT}`);
+    // Do not echo env-var value — operator could put any string there (CodeQL js/clear-text-logging).
+    console.error(
+      `${ts()} oauth FATAL: PORT must be a valid port number 0–65535 (got an invalid value)`
+    );
     process.exit(1);
   }
   return port;
@@ -64,11 +67,7 @@ async function main(): Promise<void> {
     rateLimitOverride !== undefined &&
     (Number.isNaN(rateLimitSeconds!) || rateLimitSeconds! < 0)
   ) {
-    // Do NOT echo the offending value back: even though this is a numeric
-    // configuration name, an operator could put any string into the env var
-    // (incl. a paste of an unrelated secret), and CodeQL's taint-tracker
-    // correctly flags an unconditional log of `process.env.*` as a leak
-    // surface. The variable name in the message is enough to diagnose.
+    // Do not echo env-var value — operator could put any string there (CodeQL js/clear-text-logging).
     console.error(
       `${ts()} oauth FATAL: OAUTH_REFRESH_RATE_LIMIT_SECONDS must be a non-negative integer (got an invalid value)`
     );

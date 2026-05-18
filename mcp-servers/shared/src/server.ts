@@ -407,32 +407,8 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
 // Internal Helpers
 //═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Constant-time bearer-token comparison via double-HMAC.
- *
- * **NOT a password hashing function.** CodeQL's `js/insufficient-password-hash`
- * heuristic flags any `createHmac` that operates on a function argument named
- * suggestively (or a value flowing from a token-shaped source). The flag is a
- * false positive here:
- *
- * - Bearer tokens are **already** high-entropy random secrets (UUIDs, 256-bit
- *   random base64), not user-chosen passwords. There is nothing to "stretch" —
- *   the threat model that motivates Argon2/bcrypt/scrypt (offline dictionary
- *   attack on a low-entropy secret) does not apply.
- * - The function exists to compare two byte strings in constant time even
- *   when their lengths differ. Node's `timingSafeEqual` only accepts equal-
- *   length buffers (a length mismatch raises and leaks length via the
- *   exception path). HMAC-SHA256 keyed by `expected` equalises lengths and
- *   keeps the comparison constant-time — the OWASP-recommended pattern.
- * - Using Argon2/bcrypt here would add ~100ms per request to a hot auth path
- *   (DoS surface) **without** changing the security posture, since the
- *   secret is already high-entropy.
- *
- * If you change this function, keep these invariants: keyed HMAC over both
- * sides, then `timingSafeEqual` on the digests.
- * @param provided - the token presented by the caller (untrusted)
- * @param expected - the configured token to compare against (also used as HMAC key)
- */
+// Constant-time bearer-token compare: HMAC equalises lengths for timingSafeEqual.
+// Not a password hash — tokens are already high-entropy (CodeQL js/insufficient-password-hash dismissed).
 function safeTokenCompare(provided: string, expected: string): boolean {
   const hmac = (data: string) => createHmac('sha256', expected).update(data).digest();
   return timingSafeEqual(hmac(provided), hmac(expected));
