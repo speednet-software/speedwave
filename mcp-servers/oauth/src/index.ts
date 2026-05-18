@@ -26,7 +26,10 @@ const SERVER_VERSION = '1.0.0';
 function resolvePort(): number {
   const port = Number.parseInt(process.env.PORT || '0', 10);
   if (Number.isNaN(port) || port < 0 || port > 65535) {
-    console.error(`${ts()} oauth FATAL: invalid PORT value: ${process.env.PORT}`);
+    // Do not echo env-var value — operator could put any string there (CodeQL js/clear-text-logging).
+    console.error(
+      `${ts()} oauth FATAL: PORT must be a valid port number 0–65535 (got an invalid value)`
+    );
     process.exit(1);
   }
   return port;
@@ -64,8 +67,9 @@ async function main(): Promise<void> {
     rateLimitOverride !== undefined &&
     (Number.isNaN(rateLimitSeconds!) || rateLimitSeconds! < 0)
   ) {
+    // Do not echo env-var value — operator could put any string there (CodeQL js/clear-text-logging).
     console.error(
-      `${ts()} oauth FATAL: invalid OAUTH_REFRESH_RATE_LIMIT_SECONDS: ${rateLimitOverride}`
+      `${ts()} oauth FATAL: OAUTH_REFRESH_RATE_LIMIT_SECONDS must be a non-negative integer (got an invalid value)`
     );
     process.exit(1);
   }
