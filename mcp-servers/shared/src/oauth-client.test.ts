@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { refreshAccessToken, OAuthScopeMismatchError, OAuthRefreshError } from './oauth-client.js';
+import {
+  refreshAccessToken,
+  OAuthScopeMismatchError,
+  OAuthRefreshError,
+  readJwtExp,
+  accessTokenExpiresWithin,
+} from './oauth-client.js';
 
 describe('refreshAccessToken', () => {
   let dir: string;
@@ -358,14 +364,124 @@ describe('refreshAccessToken', () => {
     ).rejects.toMatchObject({ name: 'OAuthRefreshError', code: 'worker_unreachable' });
   });
 
-  it('worker_unreachable error includes the worker URL and a recovery hint', async () => {
+  it('worker_unreachable message contains a recovery hint but NOT the worker URL', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
-    await expect(
-      refreshAccessToken({
+    try {
+      await refreshAccessToken({
         service: 'sharepoint',
         bearerPath,
         fetchImpl: fetchImpl as unknown as typeof fetch,
-      })
-    ).rejects.toThrow(/cannot reach oauth worker at .*Restart the project/);
+      });
+      throw new Error('should have thrown');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      expect(msg).toMatch(/cannot reach oauth worker/);
+      expect(msg).toMatch(/Restart the project/);
+      // Worker URL must not leak into user-facing message (info disclosure).
+      expect(msg).not.toContain('oauth.worker:4040');
+      expect(msg).not.toContain('http://');
+    }
+  });
+
+  it('OAuthRefreshError carries httpStatus on the unauthorized path', async () => {
+    // First call returns 401, second succeeds — the retry path branches on httpStatus.
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 401, ok: false })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => mcpJsonResult({ expiresIn: 3600, grantedScopes: ['x'] }),
+      });
+    const result = await refreshAccessToken({
+      service: 'sharepoint',
+      bearerPath,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(result).toMatchObject({ expiresIn: 3600 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('readJwtExp', () => {
+  function jwt(payload: Record<string, unknown>): string {
+    const b64url = (s: string) =>
+      Buffer.from(s, 'utf8')
+        .toString('base64')
+        .replace(/=/g, '')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
+    return `${b64url('{"alg":"HS256"}')}.${b64url(JSON.stringify(payload))}.sig`;
+  }
+
+  it('returns the exp claim as a number', () => {
+    expect(readJwtExp(jwt({ exp: 1779000000 }))).toBe(1779000000);
+  });
+
+  it('returns null for non-JWT plain strings', () => {
+    expect(readJwtExp('test-access-token')).toBeNull();
+  });
+
+  it('returns null when the JWT has no exp claim', () => {
+    expect(readJwtExp(jwt({ sub: 'user' }))).toBeNull();
+  });
+
+  it('returns null when the JWT exp is not a number', () => {
+    expect(readJwtExp(jwt({ exp: 'soon' }))).toBeNull();
+  });
+
+  it('returns null when the payload is not valid base64', () => {
+    expect(readJwtExp('header.@@@.sig')).toBeNull();
+  });
+
+  it('returns null when payload is valid base64 but not JSON', () => {
+    // base64url of "valid" is "dmFsaWQ"
+    expect(readJwtExp('header.dmFsaWQ.sig')).toBeNull();
+  });
+
+  it('returns null for empty string', () => {
+    expect(readJwtExp('')).toBeNull();
+  });
+});
+
+describe('accessTokenExpiresWithin', () => {
+  function jwt(exp: number): string {
+    const b64url = (s: string) =>
+      Buffer.from(s, 'utf8')
+        .toString('base64')
+        .replace(/=/g, '')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
+    return `${b64url('{"alg":"HS256"}')}.${b64url(JSON.stringify({ exp }))}.sig`;
+  }
+
+  const NOW_MS = 1_779_000_000_000;
+  const NOW_S = NOW_MS / 1000;
+
+  it('true when token expires inside the window', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S + 30), 120, NOW_MS)).toBe(true);
+  });
+
+  it('true when token is already expired', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S - 60), 120, NOW_MS)).toBe(true);
+  });
+
+  it('false when token expires beyond the window', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S + 600), 120, NOW_MS)).toBe(false);
+  });
+
+  it('false exactly at the window boundary (strict <)', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S + 120), 120, NOW_MS)).toBe(false);
+  });
+
+  it('seconds=0 true for already-expired token', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S - 1), 0, NOW_MS)).toBe(true);
+  });
+
+  it('seconds=0 false for future token', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S + 1), 0, NOW_MS)).toBe(false);
+  });
+
+  it('false for unparseable tokens (legacy/test strings)', () => {
+    expect(accessTokenExpiresWithin('test-access-token', 120, NOW_MS)).toBe(false);
   });
 });

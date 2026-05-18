@@ -7,6 +7,8 @@
  * ADR-060.
  */
 
+import { TIMEOUTS } from '@speedwave/mcp-shared';
+
 /** Inputs for the Microsoft v2 refresh-token POST. */
 export interface MicrosoftTokenRequest {
   clientId: string;
@@ -50,12 +52,10 @@ export async function refreshMicrosoftToken(
     scope: req.scopes.join(' '),
   });
 
-  // 30s upper bound on the Microsoft token endpoint round-trip. A hang
-  // here would block every SharePoint tool call (refresh fires on 401),
-  // so we abort rather than wait indefinitely. The connection-pool kept-
-  // alive default is much shorter; this is purely a stall guard.
+  // Upper bound on the Microsoft token endpoint round-trip — a hang here
+  // would block every SharePoint tool call (refresh fires on 401).
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30_000);
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOKEN_REFRESH_MS);
   let response: Response;
   try {
     response = await fetch(url, {

@@ -112,5 +112,12 @@ export type { RetryOptions } from './retry.js';
 export { writeRestrictedSecret } from './restricted-write.js';
 
 // Worker → oauth worker client (ADR-060)
-export { refreshAccessToken, OAuthScopeMismatchError, OAuthRefreshError } from './oauth-client.js';
-export type { OAuthRefreshOptions } from './oauth-client.js';
+export {
+  refreshAccessToken,
+  OAuthScopeMismatchError,
+  OAuthRefreshError,
+  readJwtExp,
+  accessTokenExpiresWithin,
+  PROACTIVE_REFRESH_SECONDS,
+} from './oauth-client.js';
+export type { OAuthRefreshOptions, OAuthRefreshCode } from './oauth-client.js';

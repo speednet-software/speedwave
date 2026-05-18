@@ -47,6 +47,16 @@ pub const HOST_EXEC_LOG_FILE: &str = "log";
 
 /// Per-command timeout (7 min, fits under the hub's 600s long timeout).
 pub const HOST_EXEC_TIMEOUT_MS: u64 = 420_000;
+
+/// TCP connection probe timeout used by host-process liveness checks
+/// (oauth_process, host_exec_process). SSOT for both modules — see ADR-060.
+pub const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+/// Number of TCP probe attempts for liveness checks where a respawn is expensive
+/// (oauth, where every respawn rotates the ephemeral port and recreates every
+/// consumer container). Single-shot probes elsewhere are not affected.
+pub const PORT_PROBE_ATTEMPTS: u8 = 3;
+/// Backoff between TCP probe attempts.
+pub const PORT_PROBE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
 /// Per-stream stdout/stderr tail-cap.
 pub const HOST_EXEC_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Per-stream line cap, applied alongside the byte cap.

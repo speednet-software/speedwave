@@ -1172,6 +1172,59 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     }
 }
 
+/// Decide which oauth workers in the map are unhealthy, respawn them, and
+/// return the names of those that should have their consumer containers
+/// recreated. Extracted from `start_oauth_watchdog` for unit-testability.
+fn sweep_oauth_workers<P>(
+    workers: &mut std::collections::HashMap<String, P>,
+    log_prefix: &str,
+) -> Vec<String>
+where
+    P: WatchdogWorker,
+{
+    if workers.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<String> = workers.keys().cloned().collect();
+    let mut respawned = Vec::new();
+    for name in names {
+        let alive = workers.get(&name).map(|p| p.is_alive()).unwrap_or(false);
+        if alive {
+            continue;
+        }
+        if let Some(proc) = workers.get_mut(&name) {
+            log::warn!("{log_prefix}: worker for '{name}' unhealthy — respawning");
+            match proc.respawn() {
+                Ok(port) => {
+                    log::info!("{log_prefix}: respawned '{name}' (port {port})");
+                    respawned.push(name);
+                }
+                Err(e) => {
+                    log::error!("{log_prefix}: respawn for '{name}' failed: {e}");
+                }
+            }
+        }
+    }
+    respawned
+}
+
+/// Trait abstracting the watchdog's view of a managed worker.
+/// Implemented by `OauthProcess` / `HostExecProcess` in production and by a
+/// fake in tests so the sweep loop can be exercised without spawning subprocesses.
+pub(crate) trait WatchdogWorker {
+    fn is_alive(&self) -> bool;
+    fn respawn(&mut self) -> anyhow::Result<u16>;
+}
+
+impl WatchdogWorker for speedwave_runtime::oauth_process::OauthProcess {
+    fn is_alive(&self) -> bool {
+        speedwave_runtime::oauth_process::OauthProcess::is_alive(self)
+    }
+    fn respawn(&mut self) -> anyhow::Result<u16> {
+        speedwave_runtime::oauth_process::OauthProcess::respawn(self)
+    }
+}
+
 /// Per-project `oauth` watchdog — 30s checks, mirrors host_exec.
 fn start_oauth_watchdog(oauth_arc: SharedOauth) {
     std::thread::spawn(move || {
@@ -1192,34 +1245,18 @@ fn start_oauth_watchdog(oauth_arc: SharedOauth) {
                         break;
                     }
                 };
-                if map.is_empty() {
-                    continue;
-                }
-                let names: Vec<String> = map.keys().cloned().collect();
-                let mut respawned = Vec::new();
-                for name in names {
-                    let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
-                    if alive {
-                        continue;
-                    }
-                    if let Some(proc) = map.get_mut(&name) {
-                        log::warn!("oauth watchdog: worker for '{name}' unhealthy — respawning");
-                        match proc.respawn() {
-                            Ok(port) => {
-                                log::info!("oauth watchdog: respawned '{name}' (port {port})");
-                                respawned.push(name);
-                            }
-                            Err(e) => {
-                                log::error!("oauth watchdog: respawn for '{name}' failed: {e}");
-                            }
-                        }
-                    }
-                }
-                respawned
+                sweep_oauth_workers(&mut map, "oauth watchdog")
             };
             // Lock released — recreate containers so OAuth consumers pick up the new port.
+            // Catch panics so a single bad project doesn't kill the watchdog thread silently.
             for name in respawned {
-                host_exec_cmd::recreate_project_containers_if_running(&name);
+                let n = name.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    host_exec_cmd::recreate_project_containers_if_running(&n);
+                }));
+                if let Err(e) = result {
+                    log::error!("oauth watchdog: recreate panicked for '{name}': {e:?}");
+                }
             }
         }
         log::info!("oauth watchdog: stopped");
@@ -1274,8 +1311,15 @@ fn start_host_exec_watchdog(host_exec: SharedHostExec) {
                 respawned
             };
             // Lock released — recreate hub containers so they see the new port.
+            // Catch panics so a single bad project doesn't kill the watchdog thread silently.
             for name in respawned {
-                host_exec_cmd::recreate_project_containers_if_running(&name);
+                let n = name.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    host_exec_cmd::recreate_project_containers_if_running(&n);
+                }));
+                if let Err(e) = result {
+                    log::error!("host_exec watchdog: recreate panicked for '{name}': {e:?}");
+                }
             }
         }
         log::info!("host_exec watchdog: stopped");
@@ -2129,6 +2173,96 @@ mod tests {
             1,
             "exactly one bullet for one failure"
         );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // sweep_oauth_workers — covers the watchdog selection logic without
+    // spawning real subprocesses. The fake implements WatchdogWorker.
+    // ────────────────────────────────────────────────────────────────────
+
+    struct FakeWorker {
+        alive: bool,
+        respawn_result: Result<u16, String>,
+        respawn_calls: std::cell::Cell<u32>,
+    }
+    impl FakeWorker {
+        fn new(alive: bool, respawn_result: Result<u16, String>) -> Self {
+            Self {
+                alive,
+                respawn_result,
+                respawn_calls: std::cell::Cell::new(0),
+            }
+        }
+    }
+    impl WatchdogWorker for FakeWorker {
+        fn is_alive(&self) -> bool {
+            self.alive
+        }
+        fn respawn(&mut self) -> anyhow::Result<u16> {
+            self.respawn_calls.set(self.respawn_calls.get() + 1);
+            // After a successful respawn the fake reports alive=true so a
+            // re-sweep wouldn't pick it again (matches real OauthProcess behaviour).
+            match &self.respawn_result {
+                Ok(p) => {
+                    self.alive = true;
+                    Ok(*p)
+                }
+                Err(e) => Err(anyhow::anyhow!(e.clone())),
+            }
+        }
+    }
+
+    #[test]
+    fn sweep_oauth_workers_empty_map_returns_empty() {
+        let mut map: std::collections::HashMap<String, FakeWorker> = Default::default();
+        assert!(sweep_oauth_workers(&mut map, "test").is_empty());
+    }
+
+    #[test]
+    fn sweep_oauth_workers_skips_alive_workers() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("p".to_string(), FakeWorker::new(true, Ok(9999)));
+        let respawned = sweep_oauth_workers(&mut map, "test");
+        assert!(respawned.is_empty(), "alive worker must not be respawned");
+        assert_eq!(map["p"].respawn_calls.get(), 0);
+    }
+
+    #[test]
+    fn sweep_oauth_workers_collects_all_unhealthy_in_one_pass() {
+        // Bug class: a break-early regression would skip the second project.
+        let mut map = std::collections::HashMap::new();
+        map.insert("a".to_string(), FakeWorker::new(false, Ok(1111)));
+        map.insert("b".to_string(), FakeWorker::new(false, Ok(2222)));
+        let mut respawned = sweep_oauth_workers(&mut map, "test");
+        respawned.sort();
+        assert_eq!(respawned, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn sweep_oauth_workers_failed_respawn_excluded_from_respawned() {
+        // Bug class: caller would recreate containers for a project whose
+        // worker actually didn't come back up — wasted compose churn.
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "bad".to_string(),
+            FakeWorker::new(false, Err("spawn failed".into())),
+        );
+        map.insert("good".to_string(), FakeWorker::new(false, Ok(3333)));
+        let respawned = sweep_oauth_workers(&mut map, "test");
+        assert_eq!(respawned, vec!["good".to_string()]);
+        // The failed worker WAS attempted (so we don't silently skip retries).
+        assert_eq!(map["bad"].respawn_calls.get(), 1);
+    }
+
+    #[test]
+    fn sweep_oauth_workers_mixed_alive_and_dead() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("alive".to_string(), FakeWorker::new(true, Ok(0)));
+        map.insert("dead".to_string(), FakeWorker::new(false, Ok(4444)));
+        let respawned = sweep_oauth_workers(&mut map, "test");
+        assert_eq!(respawned, vec!["dead".to_string()]);
+        assert_eq!(map["alive"].respawn_calls.get(), 0);
+        assert_eq!(map["dead"].respawn_calls.get(), 1);
     }
 
     /// Extracts the body of a function from source code by matching `{`/`}`

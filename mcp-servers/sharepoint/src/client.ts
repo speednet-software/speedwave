@@ -16,6 +16,8 @@ import {
   withSetupGuidance,
   refreshAccessToken as oauthRefreshAccessToken,
   OAuthScopeMismatchError,
+  accessTokenExpiresWithin,
+  PROACTIVE_REFRESH_SECONDS,
 } from '@speedwave/mcp-shared';
 import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
@@ -147,51 +149,6 @@ function debugLog(message: string, data?: unknown): void {
       console.log(`${ts()} ${message}`);
     }
   }
-}
-
-/**
- * Refresh `expires_at - PROACTIVE_REFRESH_SECONDS` before the token expires.
- * Avoids the 401→refresh→retry round-trip and the race window where the host
- * oauth watchdog has just respawned the worker.
- */
-const PROACTIVE_REFRESH_SECONDS = 120;
-
-/**
- * Read the `exp` claim from a Microsoft Graph access token (JWT). Returns
- * `null` for malformed/non-JWT tokens; callers treat that as "do not refresh
- * proactively" so legacy or test tokens keep working via the 401 path.
- * @param token - JWT access token
- */
-export function readJwtExp(token: string): number | null {
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-  try {
-    // base64url decode the payload
-    const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const json = Buffer.from(padded, 'base64').toString('utf8');
-    const payload = JSON.parse(json) as { exp?: unknown };
-    return typeof payload.exp === 'number' ? payload.exp : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * True when the access token's `exp` claim is within `seconds` of now (or in
- * the past). Returns `false` for tokens we can't parse — those go through the
- * reactive 401 path.
- * @param token - JWT access token
- * @param seconds - refresh window
- * @param nowMs - injectable clock for tests
- */
-export function accessTokenExpiresWithin(
-  token: string,
-  seconds: number,
-  nowMs: number = Date.now()
-): boolean {
-  const exp = readJwtExp(token);
-  if (exp === null) return false;
-  return exp * 1000 - nowMs < seconds * 1000;
 }
 
 /**
@@ -381,25 +338,32 @@ export class SharePointClient {
   }
 
   /**
-   * Call Graph API with automatic token refresh
-   * Automatically retries with refreshed token on 401 responses
-   * @param {string} url - Graph API endpoint URL
-   * @param {RequestInit} [options={}] - Fetch request options
-   * @returns {Promise<Response>} API response
-   * @throws {Error} If request times out
-   * @private
+   * Call Graph API with automatic token refresh.
+   * @param url - Graph API endpoint URL
+   * @param options - fetch options
+   * @returns API response (caller checks `response.ok`)
+   * @throws {Error} on request timeout
+   * @throws {OAuthScopeMismatchError} when proactive refresh detects scope mismatch
    */
   private async callGraphAPI(url: string, options: RequestInit = {}): Promise<Response> {
-    // Proactive refresh: avoid the 401→refresh→retry round-trip and the race
-    // window where the oauth watchdog has just respawned the worker.
+    // See PROACTIVE_REFRESH_SECONDS for rationale.
     if (accessTokenExpiresWithin(this.config.accessToken, PROACTIVE_REFRESH_SECONDS)) {
-      const tokenBeforeRefresh = this.config.accessToken;
+      const tokenBeforeProactive = this.config.accessToken;
       const release = await this.refreshMutex.acquire();
       try {
-        // Another caller may have refreshed while we waited for the mutex.
-        if (this.config.accessToken === tokenBeforeRefresh) {
+        if (this.config.accessToken === tokenBeforeProactive) {
           await this.refreshAccessToken();
         }
+      } catch (e) {
+        // Proactive refresh is an optimization; fall through to the reactive
+        // 401 path with the existing token if it fails. Scope mismatch is the
+        // exception — it cannot be fixed by retrying, so propagate.
+        if (e instanceof OAuthScopeMismatchError) {
+          throw e;
+        }
+        console.warn(
+          `${ts()} SharePoint: proactive refresh failed, falling back to existing token: ${e instanceof Error ? e.message : String(e)}`
+        );
       } finally {
         release();
       }
@@ -420,13 +384,12 @@ export class SharePointClient {
       if (response.status === 401) {
         clearTimeout(timeoutId);
 
-        // Save token before acquiring mutex - for double-check locking
-        const tokenBeforeRefresh = this.config.accessToken;
+        const tokenBefore401 = this.config.accessToken;
         const release = await this.refreshMutex.acquire();
 
         try {
           // Double-check: another thread may have already refreshed the token
-          if (tokenBeforeRefresh !== this.config.accessToken) {
+          if (tokenBefore401 !== this.config.accessToken) {
             // Token was refreshed by another thread - retry with the new token
             const retryController = new AbortController();
             const retryTimeoutId = setTimeout(() => retryController.abort(), TIMEOUTS.API_CALL_MS);
