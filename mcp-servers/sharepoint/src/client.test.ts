@@ -5,7 +5,12 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { withSetupGuidance } from '@speedwave/mcp-shared';
-import { SharePointClient, initializeSharePointClient, SharePointConfig } from './client.js';
+import {
+  SharePointClient,
+  initializeSharePointClient,
+  SharePointConfig,
+  validateGraphSiteId,
+} from './client.js';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
 import { pipeline } from 'stream/promises';
@@ -1821,6 +1826,146 @@ describe('SharePointClient', () => {
 
       const result = await initializeSharePointClient();
       expect(result).not.toBeNull();
+    });
+
+    it('should return null when site_id is a SharePoint URL', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'https://contoso.sharepoint.com/sites/Speedwave';
+        return '';
+      });
+
+      const result = await initializeSharePointClient();
+      expect(result).toBeNull();
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringContaining('site_id must be a Graph site id, not a URL')
+      );
+    });
+
+    it('should return null when site_id contains whitespace', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'contoso.sharepoint.com, guid, guid';
+        return '';
+      });
+
+      const result = await initializeSharePointClient();
+      expect(result).toBeNull();
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringContaining('site_id contains whitespace')
+      );
+    });
+
+    it('should return null when site_id contains ".." traversal segment', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/../Other:';
+        return '';
+      });
+
+      const result = await initializeSharePointClient();
+      expect(result).toBeNull();
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('"..".'));
+    });
+
+    it('should accept composite-form site_id', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id'))
+          return 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222';
+        return '';
+      });
+
+      const result = await initializeSharePointClient();
+      expect(result).not.toBeNull();
+    });
+
+    it('should accept path-form site_id', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/Speedwave:';
+        return '';
+      });
+
+      const result = await initializeSharePointClient();
+      expect(result).not.toBeNull();
+    });
+  });
+
+  describe('validateGraphSiteId', () => {
+    it('accepts composite form', () => {
+      expect(
+        validateGraphSiteId(
+          'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
+        )
+      ).toBeNull();
+    });
+
+    it('accepts path form', () => {
+      expect(validateGraphSiteId('contoso.sharepoint.com:/sites/Speedwave:')).toBeNull();
+    });
+
+    it('rejects https URL', () => {
+      const err = validateGraphSiteId('https://contoso.sharepoint.com/sites/Speedwave');
+      expect(err).toContain('must be a Graph site id, not a URL');
+      expect(err).toContain('composite');
+      expect(err).toContain('path form');
+    });
+
+    it('rejects http URL', () => {
+      const err = validateGraphSiteId('http://contoso.sharepoint.com/sites/Speedwave');
+      expect(err).toContain('must be a Graph site id, not a URL');
+    });
+
+    it('rejects mixed-case scheme', () => {
+      const err = validateGraphSiteId('HTTPS://contoso.sharepoint.com/sites/Speedwave');
+      expect(err).toContain('must be a Graph site id, not a URL');
+    });
+
+    it('rejects value with whitespace', () => {
+      const err = validateGraphSiteId('contoso.sharepoint.com, guid, guid');
+      expect(err).toContain('whitespace');
+    });
+
+    it('rejects value with tab character', () => {
+      const err = validateGraphSiteId('contoso.sharepoint.com\t,guid,guid');
+      expect(err).toContain('whitespace');
+    });
+
+    it('rejects empty string', () => {
+      const err = validateGraphSiteId('');
+      expect(err).toContain('empty');
+    });
+
+    it('rejects control characters', () => {
+      const err = validateGraphSiteId('contoso.sharepoint.com\x01:/sites/X:');
+      expect(err).toContain('control characters');
+    });
+
+    it('rejects query string', () => {
+      const err = validateGraphSiteId('contoso.sharepoint.com:/sites/X:?leak=1');
+      expect(err).toContain('query');
+    });
+
+    it('rejects fragment', () => {
+      const err = validateGraphSiteId('contoso.sharepoint.com:/sites/X:#frag');
+      expect(err).toContain('fragment');
+    });
+
+    it('rejects path traversal segment', () => {
+      const err = validateGraphSiteId('contoso.sharepoint.com:/sites/../Other:');
+      expect(err).toContain('"..".');
+    });
+
+    it('rejects non-ASCII (IDN homograph)', () => {
+      // Cyrillic 'е' (U+0435) in place of ASCII 'e' in "speednet"
+      const err = validateGraphSiteId('speednеtpl.sharepoint.com:/sites/X:');
+      expect(err).toContain('ASCII');
+    });
+
+    it('rejects RTL override character', () => {
+      const err = validateGraphSiteId('acme.sharepoint.com‮:/sites/X:');
+      expect(err).toContain('ASCII');
     });
   });
 });

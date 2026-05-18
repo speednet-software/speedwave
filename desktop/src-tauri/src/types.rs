@@ -72,6 +72,8 @@ pub(crate) struct AuthField {
     pub(crate) placeholder: String,
     pub(crate) oauth_flow: bool,
     pub(crate) optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hint: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -164,6 +166,7 @@ pub(crate) fn get_auth_fields(service: &str) -> Vec<AuthField> {
                     placeholder: f.placeholder.to_string(),
                     oauth_flow: f.oauth_flow,
                     optional: f.optional,
+                    hint: f.hint.map(|s| s.to_string()),
                 })
                 .collect()
         })

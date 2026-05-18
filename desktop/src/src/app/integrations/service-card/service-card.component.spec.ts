@@ -115,9 +115,10 @@ function makeSharepointSvc(): IntegrationStatusEntry {
         key: 'site_id',
         label: 'Site ID',
         field_type: 'text',
-        placeholder: 'site-id',
+        placeholder: '{tenant}.sharepoint.com,{site-guid},{web-guid}',
         oauth_flow: false,
         optional: false,
+        hint: 'Paste a Graph site id, NOT a SharePoint URL.',
       },
     ],
     current_values: {},
@@ -440,6 +441,25 @@ describe('ServiceCardComponent', () => {
       fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="oauth-section"]')).toBeNull();
+    });
+
+    it('renders hint under field when AuthField.hint is set', () => {
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.detectChanges();
+      const hint = fixture.nativeElement.querySelector('[data-testid="auth-field-hint"]');
+      expect(hint).not.toBeNull();
+      expect(hint.textContent).toContain('Graph site id');
+      // aria-describedby wires the input to the hint for screen readers
+      const input: HTMLInputElement = fixture.nativeElement.querySelector('#sharepoint-site_id');
+      expect(input.getAttribute('aria-describedby')).toBe('sharepoint-site_id-hint');
+    });
+
+    it('does not render hint when AuthField.hint is undefined', () => {
+      fixture.componentRef.setInput('svc', makeGitlabSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="auth-field-hint"]')).toBeNull();
     });
   });
 

@@ -194,6 +194,8 @@ SharePoint integration combines two Microsoft Graph surfaces: a SharePoint docum
 - `~/.speedwave/tokens/<project>/sharepoint/` (mounted into the worker as `/tokens:ro`): `access_token`, `site_id`.
 - `~/.speedwave/oauth/<project>/sharepoint.json` (host-only, NOT mounted into the worker): `clientId`, `tenantId`, `refreshToken`, `scopes`, `grantedScopes`, `expiresAt`, `lastRefreshAt`.
 
+**Site ID format.** `site_id` must be a Graph site id — either composite form (`{hostname},{site-guid},{web-guid}`) or path form (`{hostname}:/sites/{path}:`). A raw SharePoint URL (`https://{tenant}.sharepoint.com/sites/{name}`) is rejected at worker startup with a guidance message; the worker reports `configured: false` until a valid value is provided. To find the composite id, call `GET /sites/{hostname}:/sites/{sitePath}` in Graph Explorer and copy the `id` field from the response. Validation is fail-closed (no URL normalization in the worker) to keep the token mount at a clear trust boundary.
+
 **Scopes.** SharePoint requests `Sites.Manage.All Files.ReadWrite.All User.Read offline_access`. `Sites.Manage.All` is the broadest of the three site scopes Microsoft offers (covers `Sites.ReadWrite.All` and `Sites.Read.All`); it is required for `createList` (PR5) and is requested up-front so a single consent dialog covers all SharePoint operations. `Sites.Manage.All` typically requires tenant admin consent in Azure AD; users in tenants without admin consent will be prompted to request it during the device-code flow.
 
 **Tool surface.** 26 tools total:
