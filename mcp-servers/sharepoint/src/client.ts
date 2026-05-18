@@ -897,11 +897,15 @@ export type ResolveResult =
  * validator would otherwise interpolate user-controlled data into a URL.
  * @param siteId - site id loaded from `/tokens/site_id` (any accepted form)
  * @param accessToken - bearer token used for the lookup
+ * @param opts - cold-start refresh tuning
+ * @param opts.tokensDir - tokens mount path (default `/tokens`); only read when refreshing
+ * @param opts.refreshOn401 - retry once after `oauthRefreshAccessToken` when the lookup returns 401 (default true). Set false in unit tests that don't mock the refresh worker.
  * @returns the composite id (or untouched value if already composite), or a typed error
  */
 export async function resolveCompositeSiteId(
   siteId: string,
-  accessToken: string
+  accessToken: string,
+  opts: { tokensDir?: string; refreshOn401?: boolean } = {}
 ): Promise<ResolveResult> {
   const validationError = validateGraphSiteId(siteId);
   if (validationError) {
@@ -919,10 +923,33 @@ export async function resolveCompositeSiteId(
   if (!siteId.includes(':')) {
     return { ok: true, compositeId: siteId };
   }
+  const refreshOn401 = opts.refreshOn401 !== false;
+  const tokensDir = opts.tokensDir ?? '/tokens';
   try {
-    const response = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}`, {
+    let response = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
+    if (response.status === 401 && refreshOn401) {
+      // Stale `access_token` on cold start — delegate refresh to the host-side
+      // oauth worker, then re-read /tokens/access_token and retry once. This
+      // mirrors `SharePointClient.callGraphAPI`'s 401 path but is needed here
+      // because the client isn't constructed yet at this point.
+      try {
+        await oauthRefreshAccessToken({ service: 'sharepoint' });
+        const fresh = await loadToken(path.join(tokensDir, 'access_token'));
+        if (fresh) {
+          response = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}`, {
+            headers: { Authorization: `Bearer ${fresh}` },
+          });
+        }
+      } catch (err) {
+        // Refresh itself failed (scope mismatch, network, …) — fall through
+        // to the standard 401 → not_found / transient branch below.
+        console.warn(
+          `${ts()} SharePoint site lookup: token refresh failed during init — ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
     if (!response.ok) {
       const detail = `Graph lookup of "${siteId}" failed: ${response.status} ${response.statusText}`;
       const reason = response.status >= 500 || response.status === 429 ? 'transient' : 'not_found';
@@ -1033,7 +1060,14 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       return null;
     }
 
-    const resolution = await resolveCompositeSiteId(siteId, accessToken);
+    const resolution = await resolveCompositeSiteId(siteId, accessToken, {
+      tokensDir,
+      refreshOn401: true,
+    });
+    // If a refresh-on-401 happened during resolve, the access_token on disk
+    // may now be newer than the one we loaded earlier. Re-read so the client
+    // boots with the freshest credentials.
+    const freshAccessToken = (await loadToken(path.join(tokensDir, 'access_token'))) || accessToken;
     if (!resolution.ok) {
       // Surface the typed reason so a 429 isn't confused with a typo, and a
       // transient error nudges the user to retry rather than re-do setup.
@@ -1061,7 +1095,7 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       // Always store the composite id so every Graph endpoint receives the
       // universally-accepted form, regardless of what the user typed.
       siteId: resolution.compositeId,
-      accessToken,
+      accessToken: freshAccessToken,
       // refreshToken is no longer in this container's mount (ADR-060).
       // The host-side oauth worker holds it.
       refreshToken: '',

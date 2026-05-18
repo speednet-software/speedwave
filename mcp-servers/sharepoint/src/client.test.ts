@@ -2100,6 +2100,61 @@ describe('SharePointClient', () => {
       }
     });
 
+    it('retries with refreshed access_token on initial 401', async () => {
+      // Cold-start scenario: /tokens/access_token is stale because the worker
+      // restarted long after the last activity. Without the refresh path,
+      // resolveCompositeSiteId would fail permanently — sharepoint container
+      // crashes with "401 Unauthorized" and never recovers (verified live).
+      const fetchMock = vi
+        .fn()
+        // First call returns 401 with the stale bearer.
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 401,
+          statusText: 'Unauthorized',
+        })
+        // Refresh succeeds → /tokens/access_token has a fresh bearer.
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: 'contoso.sharepoint.com,site-guid,web-guid' }),
+        });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      mockOauthRefresh.mockResolvedValueOnce({
+        expiresIn: 3600,
+        grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
+      });
+      mockLoadToken.mockResolvedValueOnce('a-fresh');
+
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'a-stale', {
+        tokensDir: '/test/tokens',
+      });
+      expect(result).toEqual({
+        ok: true,
+        compositeId: 'contoso.sharepoint.com,site-guid,web-guid',
+      });
+      // Refresh path: first fetch with stale token, then refresh, then retry
+      // with the fresh bearer.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1][1]).toMatchObject({
+        headers: { Authorization: 'Bearer a-fresh' },
+      });
+    });
+
+    it('does not retry on 401 when refreshOn401:false is passed', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok', {
+        refreshOn401: false,
+      });
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(mockOauthRefresh).not.toHaveBeenCalled();
+    });
+
     it('rejects URL site_id without making a network call (defence in depth)', async () => {
       const spy = vi.fn();
       global.fetch = spy as unknown as typeof fetch;
