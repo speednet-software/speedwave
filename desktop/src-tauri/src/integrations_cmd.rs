@@ -263,9 +263,12 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
 
         // Optional-only services (e.g. context7): badge from descriptor only when
         // no key is set — once configured, drop the badge to mirror configured state.
-        let all_optional = !svc_desc.auth_fields.is_empty()
-            && svc_desc.auth_fields.iter().all(|f| f.optional);
-        let badge = if all_optional && configured && has_any_credential_file(&svc_token_dir, svc_desc.credential_files) {
+        let all_optional =
+            !svc_desc.auth_fields.is_empty() && svc_desc.auth_fields.iter().all(|f| f.optional);
+        let badge = if all_optional
+            && configured
+            && has_any_credential_file(&svc_token_dir, svc_desc.credential_files)
+        {
             None
         } else {
             svc_desc.badge.map(|b| b.to_string())

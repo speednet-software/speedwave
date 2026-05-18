@@ -470,6 +470,26 @@ describe('Table-of-contents helpers', () => {
     expect(injectHeadingAnchors(input, headings)).toBe(input);
   });
 
+  it('injectHeadingAnchors leaves empty headings (no visible text) untouched', () => {
+    // Empty headings are extracted as 0-result, so we feed them with no
+    // matching heading and verify they survive verbatim — the renderer must
+    // not invent ids for non-content blocks.
+    const input = '<h1>Real</h1><h2>   </h2><h2><img alt=""/></h2>';
+    const out = injectHeadingAnchors(input, [{ level: 1, anchor: 'real', text: 'Real' }]);
+    expect(out).toContain('<h2>   </h2>');
+    expect(out).toContain('<h2><img alt=""/></h2>');
+    expect(out).toContain('<h1 id="real">Real</h1>');
+  });
+
+  it('injectHeadingAnchors leaves headings past the supplied anchor list untouched', () => {
+    // Source HTML has 3 real headings but caller supplied only 1 anchor;
+    // the trailing headings must remain unchanged rather than crash or
+    // receive a stray id.
+    const input = '<h1>One</h1><h2>Two</h2><h2>Three</h2>';
+    const out = injectHeadingAnchors(input, [{ level: 1, anchor: 'one', text: 'One' }]);
+    expect(out).toBe('<h1 id="one">One</h1><h2>Two</h2><h2>Three</h2>');
+  });
+
   it('slugifyHeading produces kebab-case ASCII', () => {
     expect(slugifyHeading('Hello World')).toBe('hello-world');
     // NFKD decomposes a + combining acute; bare `Ł`/`ł` are not decomposable

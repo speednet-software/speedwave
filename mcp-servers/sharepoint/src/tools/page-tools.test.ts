@@ -643,6 +643,110 @@ describe('page-tools handlers — happy paths', () => {
     expect((parseContent(result) as { code: string }).code).toBe('INVALID_INPUT');
     expect(getDriveItem).not.toHaveBeenCalled();
   });
+
+  it('addImageWebPart returns COLUMN_OUT_OF_RANGE when the column index does not exist', async () => {
+    // Authors hit this when they invoke addImageWebPart against a layout that
+    // only has one column but pass columnIndex: 1. Without the typed code the
+    // model would retry with random indexes, wasting Graph calls.
+    const driveItem = {
+      id: 'item-1',
+      webUrl: 'https://example/hero.jpg',
+      image: { width: 100, height: 100 },
+      sharepointIds: { siteId: 's', webId: 'w', listId: 'l', listItemUniqueId: 'u' },
+    };
+    const localGraph = vi.fn().mockResolvedValueOnce({
+      id: 'p1',
+      canvasLayout: {
+        horizontalSections: [{ id: 'sec-1', columns: [{ id: 'col-1', webparts: [] }] }],
+      },
+    });
+    const c = createMockClient(localGraph as unknown as Parameters<typeof createMockClient>[0], {
+      getDriveItemForSharePointPath: vi.fn().mockResolvedValue(driveItem),
+    });
+    const tools = createPageTools(c);
+    const tool = tools.find((t) => t.tool.name === 'addImageWebPart')!;
+    const result = await tool.handler({
+      pageId: 'p1',
+      sectionIndex: 0,
+      columnIndex: 5, // out of range — section has 1 column
+      sharepointPath: 'X/y.jpg',
+    });
+    expect(result.isError).toBe(true);
+    const err = parseContent(result) as { code: string; message: string };
+    expect(err.code).toBe('COLUMN_OUT_OF_RANGE');
+    expect(err.message).toMatch(/columnIndex 5 not present \(section has 1\)/);
+  });
+
+  it('addImageWebPart rejects out-of-range section/column indexes before any Graph call', async () => {
+    // The handler validates index bounds against MAX_SECTION / MAX_COLUMN
+    // BEFORE issuing the driveItem lookup, so a typo (sectionIndex: 999)
+    // does not waste a Graph round-trip or surface a confusing
+    // SECTION_OUT_OF_RANGE that callers would interpret as "no such section".
+    const getDriveItem = vi.fn();
+    const c = createMockClient(undefined, { getDriveItemForSharePointPath: getDriveItem });
+    const tools = createPageTools(c);
+    const tool = tools.find((t) => t.tool.name === 'addImageWebPart')!;
+
+    for (const params of [
+      { sectionIndex: 999, columnIndex: 0 },
+      { sectionIndex: 0, columnIndex: 999 },
+    ]) {
+      const result = await tool.handler({
+        pageId: 'p1',
+        sharepointPath: 'X/y.jpg',
+        ...params,
+      });
+      expect(result.isError).toBe(true);
+      expect((parseContent(result) as { code: string }).code).toBe('INVALID_INDEX');
+    }
+    expect(getDriveItem).not.toHaveBeenCalled();
+  });
+
+  it('addImageWebPart returns NOT_FOUND when the page does not exist', async () => {
+    const driveItem = {
+      id: 'i',
+      webUrl: 'https://example/x.jpg',
+      image: { width: 1, height: 1 },
+      sharepointIds: { siteId: 's', webId: 'w', listId: 'l', listItemUniqueId: 'u' },
+    };
+    const localGraph = vi.fn().mockResolvedValueOnce(undefined); // getPage returns undefined
+    const c = createMockClient(localGraph as unknown as Parameters<typeof createMockClient>[0], {
+      getDriveItemForSharePointPath: vi.fn().mockResolvedValue(driveItem),
+    });
+    const tools = createPageTools(c);
+    const tool = tools.find((t) => t.tool.name === 'addImageWebPart')!;
+    const result = await tool.handler({
+      pageId: 'missing',
+      sectionIndex: 0,
+      columnIndex: 0,
+      sharepointPath: 'X/y.jpg',
+    });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('NOT_FOUND');
+  });
+
+  it('addImageWebPart wraps unexpected driveItem-lookup errors as ADD_IMAGE_WEBPART_FAILED', async () => {
+    // getDriveItemForSharePointPath can throw from inside callGraphAPI (token
+    // refresh blew up, Graph hiccup, JSON parse failure on retry). All of
+    // those have to surface with a stable error code so the model knows to
+    // retry the tool call rather than treat it as a validation error.
+    const getDriveItem = vi.fn().mockRejectedValue(new Error('Graph 503 Service Unavailable'));
+    const c = createMockClient(undefined, {
+      getDriveItemForSharePointPath: getDriveItem,
+    });
+    const tools = createPageTools(c);
+    const tool = tools.find((t) => t.tool.name === 'addImageWebPart')!;
+    const result = await tool.handler({
+      pageId: 'p1',
+      sectionIndex: 0,
+      columnIndex: 0,
+      sharepointPath: 'X/y.jpg',
+    });
+    expect(result.isError).toBe(true);
+    const err = parseContent(result) as { code: string; message: string };
+    expect(err.code).toBe('ADD_IMAGE_WEBPART_FAILED');
+    expect(err.message).toMatch(/Graph 503 Service Unavailable/);
+  });
 });
 
 describe('page-tools handlers — error paths', () => {

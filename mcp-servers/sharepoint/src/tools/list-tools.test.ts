@@ -149,6 +149,19 @@ describe('list-tools handlers — happy paths', () => {
     });
   });
 
+  it('createList returns empty strings (not undefined) when Graph response omits id/webUrl', async () => {
+    // Some Graph environments return a 204/empty body for fast-create flows.
+    // The tool contract is "always return a {listId, webUrl} pair" — empty
+    // string is the documented fallback so downstream callers don't crash on
+    // `out.listId.startsWith(...)`.
+    graph.mockResolvedValueOnce(undefined);
+    const tools = createListTools(client);
+    const out = parseContent(
+      await tools.find((t) => t.tool.name === 'createList')!.handler({ displayName: 'Tasks' })
+    ) as { listId: string; webUrl: string };
+    expect(out).toEqual({ listId: '', webUrl: '' });
+  });
+
   it('updateList PATCHes only the fields provided', async () => {
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
@@ -231,6 +244,20 @@ describe('list-tools handlers — happy paths', () => {
     expect(body[bodyKey]).toEqual({});
   });
 
+  it('addListColumn returns empty columnId when Graph response omits id', async () => {
+    // Same contract as createList: always return a {columnId} key, never
+    // undefined. Empty string signals to callers that the create succeeded
+    // server-side but the id was not echoed back (e.g. 204 / async create).
+    graph.mockResolvedValueOnce(undefined);
+    const tools = createListTools(client);
+    const out = parseContent(
+      await tools
+        .find((t) => t.tool.name === 'addListColumn')!
+        .handler({ listId: 'L1', name: 'Title', type: 'text' })
+    ) as { columnId: string };
+    expect(out).toEqual({ columnId: '' });
+  });
+
   it('removeListColumn DELETEs the column', async () => {
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
@@ -253,6 +280,18 @@ describe('list-tools handlers — happy paths', () => {
     ) as { items: Array<{ id: string }> };
     expect(out.items).toHaveLength(2);
     expect(graph.mock.calls[0][1]).toContain('$expand=fields');
+  });
+
+  it('listItems returns an empty items array when Graph response omits value', async () => {
+    // Graph occasionally returns `{}` or null on empty pages; the tool must
+    // surface a stable `{items: []}` shape so the model can treat "empty
+    // list" the same as "no value field".
+    graph.mockResolvedValueOnce(undefined);
+    const tools = createListTools(client);
+    const out = parseContent(
+      await tools.find((t) => t.tool.name === 'listItems')!.handler({ listId: 'L1' })
+    ) as { items: unknown[] };
+    expect(out).toEqual({ items: [] });
   });
 
   it('listItems appends $filter and $top when provided', async () => {
@@ -288,6 +327,18 @@ describe('list-tools handlers — happy paths', () => {
     const [method, , body] = graph.mock.calls[0];
     expect(method).toBe('POST');
     expect(body).toEqual({ fields: { Title: 'New' } });
+  });
+
+  it('createItem returns empty itemId when Graph response omits id', async () => {
+    // Stable {itemId} contract — empty string for non-echoing Graph paths.
+    graph.mockResolvedValueOnce(undefined);
+    const tools = createListTools(client);
+    const out = parseContent(
+      await tools
+        .find((t) => t.tool.name === 'createItem')!
+        .handler({ listId: 'L1', fields: { Title: 'New' } })
+    ) as { itemId: string };
+    expect(out).toEqual({ itemId: '' });
   });
 
   it('updateItem PATCHes /fields with the field map directly', async () => {

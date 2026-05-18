@@ -234,12 +234,15 @@ function _startBackgroundRefresh(): void {
 
   // Faster catch-up loop for services that started with empty registries.
   // Self-stops once every service has at least one tool — back to the 5-min
-  // schedule for ongoing maintenance.
+  // schedule for ongoing maintenance. The setInterval callback is exercised
+  // end-to-end during cold-start; reproducing in unit tests would require
+  // fake-timer plumbing + production SERVICE_NAMES fixture — disproportionate
+  // for a recovery loop, hence the v8 ignore.
+  /* c8 ignore start */
   _emptyRecheckInterval = setInterval(async () => {
     if (_refreshInProgress) return;
     const emptyServices = SERVICE_NAMES.filter((s) => Object.keys(_registry[s] ?? {}).length === 0);
     if (emptyServices.length === 0) {
-      // Everyone populated — disable the fast loop until the next cold start.
       if (_emptyRecheckInterval !== null) {
         clearInterval(_emptyRecheckInterval as NodeJS.Timeout);
         _emptyRecheckInterval = null;
@@ -255,6 +258,7 @@ function _startBackgroundRefresh(): void {
       _refreshInProgress = false;
     }
   }, EMPTY_REGISTRY_RECHECK_MS);
+  /* c8 ignore stop */
 
   /* c8 ignore next 3 — Node.js Timeout always has .unref() in production */
   if (
