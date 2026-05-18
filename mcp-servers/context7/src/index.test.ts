@@ -21,21 +21,16 @@ describe('context7 worker healthcheck', () => {
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     try {
-      const fakeClient = { initialised: true };
-      let healthCheck: (() => Promise<void>) | undefined;
       const server = createMCPServer({
         name: 'context7-test',
         version: '0.0.0',
         port: 0,
         auth: { token: 'test-token' },
-        healthCheck: async () => {
-          if (!fakeClient) {
-            throw new Error('Context7 client not initialised');
-          }
-        },
+        // No healthCheck callback — local readiness only. Mirrors the
+        // production worker (`src/index.ts`): an external probe here
+        // would burn anonymous quota.
+        healthCheck: async () => {},
       });
-      // Pull the configured healthCheck out of the server options indirectly
-      // by hitting `/health` against the live server.
       const actualPort = await server.start();
       const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
         import('node:http').then(({ request }) => {
@@ -56,7 +51,6 @@ describe('context7 worker healthcheck', () => {
           req.end();
         });
       });
-      void healthCheck;
       expect(response.status).toBe(200);
       // fetchSpy must NOT have been called even once.
       expect(fetchSpy).not.toHaveBeenCalled();

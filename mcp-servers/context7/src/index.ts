@@ -31,12 +31,11 @@ async function loadOptionalApiKey(): Promise<string | undefined> {
     const key = await loadToken(apiKeyPath);
     return key.length > 0 ? key : undefined;
   } catch (e) {
-    // `loadToken` wraps ENOENT with its own message, but the original errno
-    // is preserved as `cause` (set by `fs.readFile`). Prefer the code check
-    // so this still works if the shared library ever rewords the message.
+    // `loadToken` re-throws with `{ cause: originalErrnoException }`, so
+    // the fs errno is reachable as `e.cause.code` — anything other than
+    // ENOENT (EACCES, EISDIR, …) propagates so real misconfigs surface.
     const cause = (e as { cause?: NodeJS.ErrnoException }).cause;
-    const code = cause?.code ?? (e as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || /Token file not found/.test((e as Error).message)) {
+    if (cause?.code === 'ENOENT') {
       return undefined;
     }
     throw e;
