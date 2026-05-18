@@ -11,14 +11,29 @@
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.sh"
 DEST="$BATS_TEST_DIRNAME/../../desktop/src-tauri"
 
+# macOS EDR products (Bitdefender, Microsoft Defender) open freshly-written
+# files for real-time scanning. `bundle-build-context.sh` writes ~100MB into
+# $DEST/build-context within a second; a follow-up `rm -rf` racing the
+# scanner's open fd surfaces as `Directory not empty`. Retry with a short
+# backoff so the scanner has time to release the fd.
+rm_with_retry() {
+    local target="$1"
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        rm -rf "$target" 2>/dev/null && return 0
+        sleep 0.2
+    done
+    rm -rf "$target"
+}
+
 setup() {
-    rm -rf "$DEST/build-context"
-    rm -rf "$DEST/mcp-os"
+    rm_with_retry "$DEST/build-context"
+    rm_with_retry "$DEST/mcp-os"
 }
 
 teardown() {
-    rm -rf "$DEST/build-context"
-    rm -rf "$DEST/mcp-os"
+    rm_with_retry "$DEST/build-context"
+    rm_with_retry "$DEST/mcp-os"
 }
 
 @test "bundle script exists and is executable" {
