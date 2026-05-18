@@ -771,6 +771,33 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         egress_less: false,
         uses_oauth_refresh: false,
     },
+    McpServiceDescriptor {
+        config_key: "context7",
+        compose_name: "mcp-context7",
+        worker_env: "WORKER_CONTEXT7_URL",
+        display_name: "Context7",
+        description: "Up-to-date library documentation (React, Spring, Django, …)",
+        // `api_key` is OPTIONAL: anonymous mode works (per-IP rate limit ~200/day,
+        // see docs/architecture/security.md). The Tauri layer overrides the badge
+        // dynamically — present when the file is empty/absent, absent when the key
+        // is set. Default here is the unconfigured display.
+        auth_fields: &[McpAuthFieldDescriptor {
+            key: "api_key",
+            label: "API Key (optional — higher rate limits)",
+            field_type: "password",
+            placeholder: "ctx7sk_…",
+            is_secret: true,
+            stored_in_config_json: false,
+            oauth_flow: false,
+            optional: true,
+            storage: FieldStorage::WorkerMountedToken,
+        }],
+        credential_files: &["api_key"],
+        oauth_state_fields: None,
+        badge: Some("Anonymous"),
+        egress_less: false,
+        uses_oauth_refresh: false,
+    },
 ];
 
 /// Descriptor for a toggleable OS integration service (macOS only).
@@ -845,6 +872,7 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-atlassian",
     "mcp-office",
     "mcp-playwright",
+    "mcp-context7",
 ];
 
 /// Built-in service IDs (logical names, not compose names).
@@ -865,6 +893,7 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "atlassian",
     "office",
     "playwright",
+    "context7",
     "os",
     "host_exec",
     // Host-side OAuth refresh worker (ADR-060). Reserved so plugins cannot
@@ -1146,7 +1175,7 @@ mod tests {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
         // Explicit field enumeration — update this when adding/removing MCP fields.
         // Using a const to force a compile-time reminder when struct changes.
-        const EXPECTED_MCP_FIELDS: usize = 8; // slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright
+        const EXPECTED_MCP_FIELDS: usize = 9; // slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7
         let _ = (
             resolved.slack,
             resolved.sharepoint,
@@ -1156,6 +1185,7 @@ mod tests {
             resolved.atlassian,
             resolved.office,
             resolved.playwright,
+            resolved.context7,
         );
         assert_eq!(
             TOGGLEABLE_MCP_SERVICES.len(),
@@ -1227,6 +1257,7 @@ mod tests {
             ("atlassian", 5),
             ("office", 0),
             ("playwright", 0),
+            ("context7", 1),
         ];
         for &(key, count) in expected {
             let svc =
@@ -1433,6 +1464,8 @@ mod tests {
                 "atlassian",
                 vec!["jira_project_keys", "confluence_space_keys"],
             ),
+            // Context7 works in anonymous mode; api_key is the only field and it is optional.
+            ("context7", vec!["api_key"]),
         ]
         .into_iter()
         .collect();
@@ -1839,14 +1872,22 @@ mod tests {
 
     #[test]
     fn test_credential_services_have_no_badge() {
+        // Exception: services whose only credentials are all optional may carry
+        // an informational badge ("Anonymous") that the Tauri layer overrides
+        // dynamically once a key is set. See context7's descriptor.
         for svc in TOGGLEABLE_MCP_SERVICES {
-            if !svc.auth_fields.is_empty() {
-                assert_eq!(
-                    svc.badge, None,
-                    "service '{}' with credentials should not have a badge",
-                    svc.config_key
-                );
+            if svc.auth_fields.is_empty() {
+                continue;
             }
+            let all_optional = svc.auth_fields.iter().all(|f| f.optional);
+            if all_optional {
+                continue;
+            }
+            assert_eq!(
+                svc.badge, None,
+                "service '{}' with required credentials should not have a badge",
+                svc.config_key
+            );
         }
     }
 

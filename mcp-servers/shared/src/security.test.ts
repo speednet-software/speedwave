@@ -547,9 +547,11 @@ describe('security', () => {
       const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
       vi.spyOn(fs, 'readFile').mockRejectedValue(err);
 
-      await expect(loadToken('/tokens/missing/token')).rejects.toThrow(
-        'Token file not found: /tokens/missing/token'
-      );
+      const caught = await loadToken('/tokens/missing/token').catch((e: Error) => e);
+      expect(caught.message).toBe('Token file not found: /tokens/missing/token');
+      // Cause-forwarding regression guard: mcp-context7's loadOptionalApiKey
+      // relies on `e.cause.code === 'ENOENT'` to fall back to anonymous mode.
+      expect((caught.cause as NodeJS.ErrnoException).code).toBe('ENOENT');
     });
 
     it('throws with EACCES message when permission is denied', async () => {
@@ -557,9 +559,9 @@ describe('security', () => {
       const err = Object.assign(new Error('EACCES'), { code: 'EACCES' });
       vi.spyOn(fs, 'readFile').mockRejectedValue(err);
 
-      await expect(loadToken('/tokens/protected/token')).rejects.toThrow(
-        'Permission denied reading token file: /tokens/protected/token'
-      );
+      const caught = await loadToken('/tokens/protected/token').catch((e: Error) => e);
+      expect(caught.message).toBe('Permission denied reading token file: /tokens/protected/token');
+      expect((caught.cause as NodeJS.ErrnoException).code).toBe('EACCES');
     });
 
     it('throws with EISDIR message when path is a directory', async () => {
@@ -567,9 +569,9 @@ describe('security', () => {
       const err = Object.assign(new Error('EISDIR'), { code: 'EISDIR' });
       vi.spyOn(fs, 'readFile').mockRejectedValue(err);
 
-      await expect(loadToken('/tokens/dir/')).rejects.toThrow(
-        'Token path is a directory, not a file: /tokens/dir/'
-      );
+      const caught = await loadToken('/tokens/dir/').catch((e: Error) => e);
+      expect(caught.message).toBe('Token path is a directory, not a file: /tokens/dir/');
+      expect((caught.cause as NodeJS.ErrnoException).code).toBe('EISDIR');
     });
 
     it('throws generic message for unknown error codes (e.g. EIO)', async () => {
@@ -577,9 +579,11 @@ describe('security', () => {
       const err = Object.assign(new Error('Input/output error'), { code: 'EIO' });
       vi.spyOn(fs, 'readFile').mockRejectedValue(err);
 
-      await expect(loadToken('/tokens/broken/token')).rejects.toThrow(
+      const caught = await loadToken('/tokens/broken/token').catch((e: Error) => e);
+      expect(caught.message).toBe(
         'Failed to read token file: /tokens/broken/token (Input/output error)'
       );
+      expect((caught.cause as NodeJS.ErrnoException).code).toBe('EIO');
     });
 
     it('throws generic message for non-Error thrown values', async () => {

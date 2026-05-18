@@ -8,7 +8,7 @@ The following security principles are inherited from Speedwave v1 and are **non-
 
 - **Claude container isolation** — no tokens, no container socket, container user UID 1000:1000 (containerd runs inside a VM on both macOS and Windows, so no user-namespace remapping is needed; see [ADR-059](../adr/ADR-059-drop-linux-support.md))
 - **OWASP container hardening** — `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
-- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. All MCP workers also mount the project directory at `/workspace:rw` for file operations.
+- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. The `sharepoint` and `office` workers additionally mount the project directory at `/workspace:rw` because their tools read/write project files; other workers (slack, gitlab, github, redmine, atlassian, playwright) have no `/workspace` access.
 - **Hub has zero tokens** — compromise of the hub exposes nothing
 - **Kernel-level isolation** — Lima VM (macOS) / WSL2 (Windows) provides an additional isolation layer on top of container isolation
 - **Resource limits** — CPU + memory caps per container
@@ -44,7 +44,7 @@ Each MCP worker container mounts **only its own** service credentials:
 - GitLab worker sees only GitLab tokens
 - Hub has **zero** token mounts — it routes requests to workers via HTTP
 
-**Exception:** SharePoint uses `:rw` mount for OAuth token refresh (see [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)).
+**`/tokens` is `:ro` for all workers.** OAuth refresh moved to the host-side `oauth` worker which writes the refreshed `access_token` to the same per-project tokens directory — the worker only ever reads it (see [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)).
 
 Anthropic OAuth credentials are managed entirely by Claude Code inside the `CLAUDE_HOME` bind-mount (`~/.speedwave/claude-home/<project>/.claude/.credentials.json`); Speedwave does not touch them. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the login-flow rationale.
 
@@ -201,7 +201,7 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 `validate_manifest` (`crates/speedwave-runtime/src/plugin.rs`) is run both at install time and at every load-side path (compose render, image build). Beyond the basic slug/version/format checks it enforces:
 
 - **`extra_env` reserved keys** — a plugin must not inject env vars that Speedwave reserves (`PORT`, auto-injected) or that are dynamic-linker / language-runtime / shell-environment hijack vectors (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is `consts::RESERVED_ENV_KEYS` (SSOT — see CLAUDE.md), matched case-insensitively. The same list also rejects a [Host Exec](#host-exec--deliberate-scoped-weakening) recipe's `env` keys; alongside it, `consts::HOST_EXEC_SHELL_LAUNCHERS` (banned `exec` basenames — shell/eval launchers) and `consts::HOST_EXEC_META_TOOLS` (interpreters/package-script runners that may not take a bare-`{param}` argument) are sibling SSOT lists consumed by `host_exec::validate_host_exec_config` — edit `consts.rs`, not the validators.
-- **`token_mount: read_write`** — rejected unconditionally for plugins. `:rw` is reserved for built-in services (currently SharePoint only, for OAuth refresh — [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)). Built-in service slugs are blocked earlier in the function, so any plugin reaching this check is by definition unauthorised.
+- **`token_mount: read_write`** — rejected unconditionally for plugins. No built-in service currently uses `:rw` for tokens — [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md) moved SharePoint OAuth refresh to the host-side `oauth` worker. Built-in service slugs are blocked earlier in the function, so any plugin reaching this check is by definition unauthorised.
 - **`mem_limit` / `cpu_limit`** — parsed numerically and bounded by `PLUGIN_MEM_LIMIT_MAX_MIB` / `PLUGIN_CPU_LIMIT_MAX`. An explicit `0` (Docker's "no limit") is rejected so a plugin cannot bypass the cap.
 - **Slug collision** — a slug whose derived compose name (`mcp-<slug>`) or whose bare form matches a built-in service is rejected, so a plugin cannot shadow `mcp-hub`, `claude`, etc. via a silent YAML-mapping overwrite.
 - **`settings_schema`** — must be a JSON object ≤ 64 KiB. Full Draft-7 validation of saved settings happens desktop-side in `plugin_save_settings` (the runtime crate has no JSON-Schema dependency).
@@ -277,6 +277,28 @@ Both OS prereq failures and `SecurityCheck` compose violations block the applica
 **Windows uninstall cleanup (ADR-048):** The NSIS uninstaller offers an opt-in `MessageBox` that, when accepted, performs `wsl --unregister Speedwave` and `RMDir /r $PROFILE\.speedwave` on the host. The default for unattended (`/S`) uninstalls is to preserve data (`/SD IDNO`). If `SPEEDWAVE_DATA_DIR` is set (ADR-031), the data-dir removal is skipped and the user is instructed to remove that path manually; only the WSL distro is unregistered.
 
 Additionally, `check_os_warnings()` provides non-blocking diagnostic warnings (e.g. nested virtualization detected) logged via `log::warn!` during system checks. These warnings do not block container operations but appear in `speedwave check` output and Desktop log files.
+
+## Third-party services
+
+Some MCP workers reach external SaaS endpoints from inside their container. The `claude` container itself never makes outbound HTTP — every third-party hop is mediated by a worker with a narrow scope and an audited data flow.
+
+### Context7 (library documentation)
+
+The `mcp-context7` worker calls `https://context7.com/api/v2/*` (Upstash) to resolve library names to IDs and fetch documentation snippets.
+
+**Data sent to Upstash on every call:**
+
+- Query string (the natural-language question the user typed)
+- `libraryName` / `libraryId` (e.g. `"react"` / `/facebook/react`)
+- Optional API key (`ctx7sk_…`) when configured — sent in `Authorization: Bearer`
+- `User-Agent: Speedwave-Context7/<version>` and standard HTTP headers
+- Source IP (the worker's egress IP — Upstash documents that IPs are stored encrypted)
+
+**Per Context7's documented data use, queries may be retained and used for benchmarking and reranking, including by third-party LLMs.** Anything sensitive in the user's question crosses a trust boundary — the same way it would if Claude itself called the API.
+
+**Anonymous mode (no key):** ~200 requests per day per source IP (from the `ratelimit-limit` response header). For a multi-user host on one corporate NAT this is shared across all users; if it runs out, Upstash returns 429 with a `ratelimit-reset` Unix timestamp. There is no SLA and no DPA in anonymous mode — for compliance-sensitive deployments, each developer should generate a free key at [context7.com/dashboard](https://context7.com/dashboard).
+
+**Container constraints (identical to other workers):** `cap_drop: ALL`, `no-new-privileges`, `read_only`, `tmpfs /tmp:noexec,nosuid`, 128 MiB memory cap. The `api_key` file is mounted `:ro`. Redirects from Context7 are explicitly NOT followed (undici v7 default + `mapErrorStatus` rejects 3xx). HTTP body is capped at 5 MiB by `readBodyLimited` in `client.ts` (drains the stream with a byte counter and aborts cleanly before the 128 MiB container cap would OOM-kill the worker). Timeouts cap time independently: 30 s headers + 30 s body via undici options.
 
 ## Redmine API Proxy Commands
 
