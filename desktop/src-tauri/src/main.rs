@@ -1254,8 +1254,9 @@ fn start_oauth_watchdog(oauth_arc: SharedOauth) {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     host_exec_cmd::recreate_project_containers_if_running(&n);
                 }));
-                if let Err(e) = result {
-                    log::error!("oauth watchdog: recreate panicked for '{name}': {e:?}");
+                if let Err(payload) = result {
+                    let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*payload);
+                    log::error!("oauth watchdog: recreate panicked for '{name}': {msg}");
                 }
             }
         }
@@ -1317,8 +1318,9 @@ fn start_host_exec_watchdog(host_exec: SharedHostExec) {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     host_exec_cmd::recreate_project_containers_if_running(&n);
                 }));
-                if let Err(e) = result {
-                    log::error!("host_exec watchdog: recreate panicked for '{name}': {e:?}");
+                if let Err(payload) = result {
+                    let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*payload);
+                    log::error!("host_exec watchdog: recreate panicked for '{name}': {msg}");
                 }
             }
         }

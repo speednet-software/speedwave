@@ -109,6 +109,27 @@ pub fn sanitize(input: &str) -> String {
     result
 }
 
+/// Extract a safe string from a `catch_unwind` panic payload.
+///
+/// A `Box<dyn Any + Send>` carries whatever value `panic!` produced — usually
+/// a `String` or `&str`, but in principle anything. We only surface the
+/// `String`/`&str` cases (the common ones for `panic!("…")` / `unwrap_failed`)
+/// and pass them through `sanitize()`. Anything else collapses to
+/// `"unknown panic payload"` so a misbehaving panic value can't leak local
+/// variables into logs via `{:?}` debug format.
+///
+/// This is the helper to use whenever you log a panic — `log::error!("…{e:?}")`
+/// would trip the `rust/cleartext-logging` CodeQL rule because the payload
+/// type is `dyn Any` and the data flow analyzer cannot prove safety.
+pub fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    let raw = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied())
+        .unwrap_or("unknown panic payload");
+    sanitize(raw)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -966,5 +987,49 @@ mod tests {
             output, input,
             "False positive: xoxz- is not a valid Slack prefix and should not be redacted"
         );
+    }
+
+    // ── panic_payload_to_string ──────────────────────────────────────────
+
+    #[test]
+    fn panic_payload_string_owned() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("panicked at boundary".to_string());
+        assert_eq!(panic_payload_to_string(&*payload), "panicked at boundary");
+    }
+
+    #[test]
+    fn panic_payload_static_str() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("static panic message");
+        assert_eq!(panic_payload_to_string(&*payload), "static panic message");
+    }
+
+    #[test]
+    fn panic_payload_unknown_type_collapses_to_placeholder() {
+        // A panic that produced an arbitrary struct (rare but legal). We must
+        // NOT leak its Debug representation — collapse to a placeholder so a
+        // misbehaving panic value can't smuggle local-variable contents into
+        // logs and trip the cleartext-logging rule.
+        #[derive(Debug)]
+        struct SecretCarrier {
+            #[allow(dead_code)]
+            token: String,
+        }
+        let payload: Box<dyn std::any::Any + Send> = Box::new(SecretCarrier {
+            token: "ghp_supersecret".to_string(),
+        });
+        let out = panic_payload_to_string(&*payload);
+        assert_eq!(out, "unknown panic payload");
+        assert!(!out.contains("ghp_supersecret"));
+    }
+
+    #[test]
+    fn panic_payload_string_is_sanitized() {
+        // If a panic message happens to carry a token-shaped substring, the
+        // sanitizer redacts it the same way log lines are redacted.
+        let payload: Box<dyn std::any::Any + Send> =
+            Box::new("crashed with token xoxb-1234567890-leak".to_string());
+        let out = panic_payload_to_string(&*payload);
+        assert!(out.contains("***REDACTED_SLACK_TOKEN***"), "got: {out}");
+        assert!(!out.contains("xoxb-1234567890-leak"));
     }
 }
