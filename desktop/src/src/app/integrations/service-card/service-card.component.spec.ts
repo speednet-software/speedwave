@@ -115,10 +115,10 @@ function makeSharepointSvc(): IntegrationStatusEntry {
         key: 'site_id',
         label: 'Site ID',
         field_type: 'text',
-        placeholder: '{tenant}.sharepoint.com,{site-guid},{web-guid}',
+        placeholder: 'acme.sharepoint.com:/sites/Marketing:',
         oauth_flow: false,
         optional: false,
-        hint: 'Paste a Graph site id, NOT a SharePoint URL.',
+        hint: 'Mind both colons: one after the hostname and one at the end.',
       },
     ],
     current_values: {},
@@ -449,7 +449,7 @@ describe('ServiceCardComponent', () => {
       fixture.detectChanges();
       const hint = fixture.nativeElement.querySelector('[data-testid="auth-field-hint"]');
       expect(hint).not.toBeNull();
-      expect(hint.textContent).toContain('Graph site id');
+      expect(hint.textContent).toContain('both colons');
       // aria-describedby wires the input to the hint for screen readers
       const input: HTMLInputElement = fixture.nativeElement.querySelector('#sharepoint-site_id');
       expect(input.getAttribute('aria-describedby')).toBe('sharepoint-site_id-hint');

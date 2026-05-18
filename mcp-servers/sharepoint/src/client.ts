@@ -106,6 +106,29 @@ export interface DriveItemMetadata {
   eTag?: string;
 }
 
+/**
+ * Projection of `driveItem` used by image web part composition. Holds the
+ * exact fields SharePoint requires for the picker validator to accept the
+ * payload on "Save & Close": `sharepointIds` (siteId/webId/listId/
+ * listItemUniqueId) + `image` (width/height).
+ */
+export interface DriveItemForImage {
+  id: string;
+  name: string;
+  webUrl?: string;
+  size?: number;
+  image?: { width?: number; height?: number };
+  sharepointIds: {
+    siteId: string;
+    webId: string;
+    listId: string;
+    listItemId?: string;
+    listItemUniqueId: string;
+    tenantId?: string;
+    siteUrl?: string;
+  };
+}
+
 //═══════════════════════════════════════════════════════════════════════════════
 // Client Class
 //═══════════════════════════════════════════════════════════════════════════════
@@ -643,6 +666,39 @@ export class SharePointClient {
   }
 
   /**
+   * Fetch a driveItem by its path under the site's default drive. Used by
+   * page tools that need `sharepointIds` (siteId/webId/listId/listItemUniqueId)
+   * + image dimensions to compose an image web part body — SharePoint's UI
+   * "Save & Close" reconciliation drops external image URLs that lack these
+   * ids, so the worker must pin every image to a real Site Assets / Documents
+   * file before pushing the web part.
+   * @param sharepointPath - path relative to the drive root (e.g. "speedwave-hero.jpg")
+   * @returns driveItem id, sharepointIds, image dimensions, webUrl, name
+   * @throws {Error} If path is invalid or the driveItem is not found
+   */
+  async getDriveItemForSharePointPath(sharepointPath: string): Promise<DriveItemForImage> {
+    if (!this.pathValidator.validatePath(sharepointPath)) {
+      throw new Error('Invalid sharepoint_path (security check failed)');
+    }
+    const url =
+      `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(sharepointPath)}` +
+      `?$select=id,name,webUrl,size,image,sharepointIds`;
+    const response = await this.callGraphAPI(url);
+    if (!response.ok) {
+      const errorData = (await response.json()) as { error?: { message?: string } };
+      throw new Error(
+        errorData.error?.message ||
+          `driveItem lookup failed: ${response.status} ${response.statusText}`
+      );
+    }
+    const data = (await response.json()) as DriveItemForImage;
+    if (!data.id || !data.sharepointIds) {
+      throw new Error('driveItem response missing id or sharepointIds');
+    }
+    return data;
+  }
+
+  /**
    * Download file from SharePoint to local path using streaming
    * @param {string} sharepointPath - SharePoint path relative to the site's drive root
    * @param {string} localPath - Local destination path (must be within /workspace)
@@ -821,6 +877,82 @@ export class SharePointClient {
 // Factory & Initialization
 //═══════════════════════════════════════════════════════════════════════════════
 
+/** Outcome of `resolveCompositeSiteId` — successful id or a typed error. */
+export type ResolveResult =
+  | { ok: true; compositeId: string }
+  | { ok: false; reason: 'validation' | 'transient' | 'not_found' | 'network'; detail: string };
+
+/**
+ * Resolve a path-form site id (`{hostname}:/sites/{path}:`) to its composite
+ * id (`{hostname},{site-guid},{web-guid}`). Composite is accepted by every
+ * Graph endpoint; path-form has documented support for `/sites/{path}` and
+ * `/sites/{path}:/drive` but surfaces as 400 on some sub-endpoints (notably
+ * `/drive/root/children`). One authorised lookup at startup sidesteps the
+ * whole class of bugs and adds no new trust surface — the token is already
+ * present in `/tokens`.
+ *
+ * Defence in depth: the function re-validates `siteId` through
+ * `validateGraphSiteId` even though `initializeSharePointClient` already
+ * does so. The helper is exported, so a future caller that forgets the
+ * validator would otherwise interpolate user-controlled data into a URL.
+ * @param siteId - site id loaded from `/tokens/site_id` (any accepted form)
+ * @param accessToken - bearer token used for the lookup
+ * @returns the composite id (or untouched value if already composite), or a typed error
+ */
+export async function resolveCompositeSiteId(
+  siteId: string,
+  accessToken: string
+): Promise<ResolveResult> {
+  const validationError = validateGraphSiteId(siteId);
+  if (validationError) {
+    return { ok: false, reason: 'validation', detail: validationError };
+  }
+  // Composite ids never contain `:` (they use `,` as separator). If a value
+  // both has a comma AND a colon it's malformed — refuse to interpolate it.
+  if (siteId.includes(',') && siteId.includes(':')) {
+    return {
+      ok: false,
+      reason: 'validation',
+      detail: 'site_id mixes composite (",") and path-form (":") separators',
+    };
+  }
+  if (!siteId.includes(':')) {
+    return { ok: true, compositeId: siteId };
+  }
+  try {
+    const response = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!response.ok) {
+      const detail = `Graph lookup of "${siteId}" failed: ${response.status} ${response.statusText}`;
+      const reason = response.status >= 500 || response.status === 429 ? 'transient' : 'not_found';
+      return { ok: false, reason, detail };
+    }
+    const data = (await response.json()) as unknown;
+    const id =
+      data &&
+      typeof data === 'object' &&
+      'id' in data &&
+      typeof (data as { id: unknown }).id === 'string'
+        ? (data as { id: string }).id
+        : null;
+    if (!id) {
+      return {
+        ok: false,
+        reason: 'not_found',
+        detail: 'Graph site lookup response did not contain a string `id` field',
+      };
+    }
+    return { ok: true, compositeId: id };
+  } catch (e) {
+    return {
+      ok: false,
+      reason: 'network',
+      detail: `Graph site lookup network error: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
+
 /**
  * Reject anything that isn't a Graph site id. Fail-closed: no URL normalization
  * in the worker — the token mount sits at a trust boundary and a parser bug
@@ -901,6 +1033,22 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       return null;
     }
 
+    const resolution = await resolveCompositeSiteId(siteId, accessToken);
+    if (!resolution.ok) {
+      // Surface the typed reason so a 429 isn't confused with a typo, and a
+      // transient error nudges the user to retry rather than re-do setup.
+      const hint =
+        resolution.reason === 'transient'
+          ? `${resolution.detail}. Microsoft Graph reported a transient failure — retry the worker startup or wait a moment.`
+          : resolution.reason === 'network'
+            ? `${resolution.detail}. The worker could not reach Microsoft Graph.`
+            : `${resolution.detail}. Check that the value matches an existing site in the tenant.`;
+      // info-level for the first attempt so a transient/restart doesn't spam
+      // the logs; setup-guidance hint is the user-actionable message.
+      console.info(`${ts()} ${withSetupGuidance(hint)}`);
+      return null;
+    }
+
     console.log(`${ts()} ✅ SharePoint tokens loaded from /tokens/`);
 
     const config: SharePointConfig = {
@@ -910,7 +1058,9 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       // refactor; the worker code path that read them has been removed.
       clientId: '',
       tenantId: '',
-      siteId,
+      // Always store the composite id so every Graph endpoint receives the
+      // universally-accepted form, regardless of what the user typed.
+      siteId: resolution.compositeId,
       accessToken,
       // refreshToken is no longer in this container's mount (ADR-060).
       // The host-side oauth worker holds it.

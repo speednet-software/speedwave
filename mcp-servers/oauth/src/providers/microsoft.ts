@@ -126,9 +126,15 @@ export async function refreshMicrosoftToken(
     typeof grantedScope === 'string' && grantedScope.trim() ? grantedScope.trim().split(/\s+/) : [];
 
   // Scope mismatch (granted ⊊ requested) — Microsoft returns 200 in this case.
-  const missing = req.scopes.filter(
-    (s) => !grantedScopes.some((g) => g.toLowerCase() === s.toLowerCase())
-  );
+  // Exception: `offline_access` is an OIDC scope, not an API permission. Even
+  // when granted (and a `refresh_token` is returned), Microsoft does NOT echo
+  // it back in the `scope` field of the token response. Treat its presence in
+  // `req.scopes` as satisfied iff the response carries a refresh_token on the
+  // initial exchange, or — for refresh calls — implicitly (we got here at all).
+  const missing = req.scopes.filter((s) => {
+    if (s.toLowerCase() === 'offline_access') return false;
+    return !grantedScopes.some((g) => g.toLowerCase() === s.toLowerCase());
+  });
   if (missing.length > 0) {
     return {
       ok: false,

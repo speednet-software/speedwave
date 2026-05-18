@@ -21,17 +21,24 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolsCallResult } from '@speedwave/mcp-shared';
 import { SharePointClient } from '../client.js';
 import { createPageTools, PAGE_TOOL_SCHEMAS, type SitePage } from './page-tools.js';
+import {
+  buildTextWebPartBody,
+  buildStandardWebPartBody,
+  STANDARD_WEBPART_TYPES,
+} from '../graph/pages-client.js';
 
 const MOCK_SITE_ID = 'speednet.sharepoint.com,abc,def';
 
 /** Create a SharePointClient stub with controllable graphRequest. */
 function createMockClient(
   graphRequestImpl: (method: string, url: string, body?: unknown) => Promise<unknown> = async () =>
-    undefined
+    undefined,
+  extras: Partial<Record<keyof SharePointClient, unknown>> = {}
 ): SharePointClient {
   return {
     getSiteId: () => MOCK_SITE_ID,
     graphRequest: vi.fn(graphRequestImpl),
+    ...extras,
   } as unknown as SharePointClient;
 }
 
@@ -46,11 +53,11 @@ function parseContent(result: ToolsCallResult): unknown {
 }
 
 describe('page-tools metadata', () => {
-  it('exposes exactly 8 tools', () => {
-    expect(PAGE_TOOL_SCHEMAS).toHaveLength(8);
+  it('exposes exactly 10 tools', () => {
+    expect(PAGE_TOOL_SCHEMAS).toHaveLength(10);
   });
 
-  it('all 8 tool names match the PR4 contract', () => {
+  it('all 10 tool names match the contract', () => {
     const names = PAGE_TOOL_SCHEMAS.map((t) => t.name);
     expect(names).toEqual([
       'listPages',
@@ -61,6 +68,8 @@ describe('page-tools metadata', () => {
       'updateWebPart',
       'removeWebPart',
       'publishPage',
+      'generateTableOfContents',
+      'addImageWebPart',
     ]);
   });
 
@@ -98,18 +107,26 @@ describe('page-tools metadata', () => {
     }
   });
 
-  it('addWebPart input requires innerHtml (text-only MVP)', () => {
+  it('addWebPart exposes both text and standard web part inputs', () => {
     const tool = PAGE_TOOL_SCHEMAS.find((t) => t.name === 'addWebPart')!;
     const schema = tool.inputSchema as {
       properties: Record<string, unknown>;
       required?: string[];
     };
     expect(Object.keys(schema.properties)).toEqual(
-      expect.arrayContaining(['pageId', 'sectionIndex', 'columnIndex', 'innerHtml'])
+      expect.arrayContaining([
+        'pageId',
+        'sectionIndex',
+        'columnIndex',
+        'innerHtml',
+        'webPartType',
+        'data',
+      ])
     );
-    expect(schema.required).toContain('innerHtml');
-    // MVP rejects image/link until standardWebPart support lands.
-    expect(Object.keys(schema.properties)).not.toContain('webPart');
+    // innerHtml / webPartType are mutually exclusive — both opt-in, handler enforces exactly-one.
+    expect(schema.required).not.toContain('innerHtml');
+    expect(schema.required).not.toContain('webPartType');
+    expect(schema.required).toEqual(['pageId', 'sectionIndex', 'columnIndex']);
   });
 
   it('updateWebPart input requires innerHtml (text-only MVP)', () => {
@@ -215,6 +232,89 @@ describe('page-tools handlers — happy paths', () => {
     expect(body).toEqual({ canvasLayout: layout });
   });
 
+  it('updatePage PATCHes metadata-only updates without canvasLayout', async () => {
+    graph.mockResolvedValueOnce(undefined);
+    const tools = createPageTools(client);
+    const updatePage = tools.find((t) => t.tool.name === 'updatePage')!;
+    const out = parseContent(
+      await updatePage.handler({
+        pageId: 'p1',
+        title: 'New title',
+        description: 'New description',
+        showComments: false,
+        showRecommendedPages: true,
+        thumbnailWebUrl: 'https://contoso.sharepoint.com/_layouts/SitePages/thumb.png',
+      })
+    );
+    expect(out).toEqual({});
+    const [method, url, body] = graph.mock.calls[0];
+    expect(method).toBe('PATCH');
+    expect(url).toBe(`/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage`);
+    expect(body).toEqual({
+      title: 'New title',
+      description: 'New description',
+      showComments: false,
+      showRecommendedPages: true,
+      thumbnailWebUrl: 'https://contoso.sharepoint.com/_layouts/SitePages/thumb.png',
+    });
+  });
+
+  it('updatePage wraps titleArea with the Graph @odata.type discriminator', async () => {
+    graph.mockResolvedValueOnce(undefined);
+    const tools = createPageTools(client);
+    const updatePage = tools.find((t) => t.tool.name === 'updatePage')!;
+    await updatePage.handler({
+      pageId: 'p1',
+      titleArea: {
+        imageWebUrl: 'https://contoso.sharepoint.com/_layouts/SitePages/hero.jpg',
+        layout: 'imageAndTitle',
+        textAlignment: 'center',
+        showAuthor: false,
+      },
+    });
+    const [, , body] = graph.mock.calls[0];
+    expect(body).toEqual({
+      titleArea: {
+        '@odata.type': '#microsoft.graph.titleArea',
+        imageWebUrl: 'https://contoso.sharepoint.com/_layouts/SitePages/hero.jpg',
+        layout: 'imageAndTitle',
+        textAlignment: 'center',
+        showAuthor: false,
+      },
+    });
+  });
+
+  it('updatePage accepts both metadata and canvasLayout in one call', async () => {
+    graph.mockResolvedValueOnce(undefined);
+    const tools = createPageTools(client);
+    const updatePage = tools.find((t) => t.tool.name === 'updatePage')!;
+    const layout = {
+      horizontalSections: [{ id: 'sec1', columns: [{ id: 'col1', webparts: [] }] }],
+    };
+    await updatePage.handler({ pageId: 'p1', title: 'X', canvasLayout: layout });
+    const [, , body] = graph.mock.calls[0];
+    expect(body).toEqual({ title: 'X', canvasLayout: layout });
+  });
+
+  it('updatePage promotes a page to news via promotionKind', async () => {
+    graph.mockResolvedValueOnce(undefined);
+    const tools = createPageTools(client);
+    const updatePage = tools.find((t) => t.tool.name === 'updatePage')!;
+    await updatePage.handler({ pageId: 'p1', promotionKind: 'newsPost' });
+    const [, , body] = graph.mock.calls[0];
+    expect(body).toEqual({ promotionKind: 'newsPost' });
+  });
+
+  it('updatePage rejects calls that only carry pageId', async () => {
+    const tools = createPageTools(client);
+    const updatePage = tools.find((t) => t.tool.name === 'updatePage')!;
+    const result = await updatePage.handler({ pageId: 'p1' });
+    expect(result.isError).toBe(true);
+    const parsed = parseContent(result) as { code: string };
+    expect(parsed.code).toBe('UPDATE_PAGE_NO_FIELDS');
+    expect(graph).not.toHaveBeenCalled();
+  });
+
   it('addWebPart resolves section/column index to Graph ids and POSTs a textWebPart', async () => {
     graph
       .mockResolvedValueOnce({
@@ -247,10 +347,76 @@ describe('page-tools handlers — happy paths', () => {
       `/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage` +
         `/canvasLayout/horizontalSections/sec-id-1/columns/col-id-1/webparts`
     );
-    expect(postBody).toEqual({
-      '@odata.type': '#microsoft.graph.textWebPart',
-      innerHtml: '<p>Hi</p>',
+    expect(postBody).toEqual(buildTextWebPartBody('<p>Hi</p>'));
+  });
+
+  it('addWebPart POSTs a standardWebPart envelope when webPartType is given', async () => {
+    graph
+      .mockResolvedValueOnce({
+        id: 'p1',
+        canvasLayout: {
+          horizontalSections: [{ id: 'sec-id-1', columns: [{ id: 'col-id-1', webparts: [] }] }],
+        },
+      })
+      .mockResolvedValueOnce({ id: 'wp-image' });
+    const tools = createPageTools(client);
+    const addWebPart = tools.find((t) => t.tool.name === 'addWebPart')!;
+    const out = parseContent(
+      await addWebPart.handler({
+        pageId: 'p1',
+        sectionIndex: 0,
+        columnIndex: 0,
+        webPartType: 'image',
+        data: { title: 'Hero' },
+      })
+    ) as { webPartId: string };
+    expect(out.webPartId).toBe('wp-image');
+    const [, , body] = graph.mock.calls[1];
+    expect(body).toEqual(buildStandardWebPartBody(STANDARD_WEBPART_TYPES.image, { title: 'Hero' }));
+  });
+
+  it('addWebPart rejects when both innerHtml and webPartType are supplied', async () => {
+    const tools = createPageTools(client);
+    const addWebPart = tools.find((t) => t.tool.name === 'addWebPart')!;
+    const result = await addWebPart.handler({
+      pageId: 'p1',
+      sectionIndex: 0,
+      columnIndex: 0,
+      innerHtml: '<p>x</p>',
+      webPartType: 'image',
     });
+    expect(result.isError).toBe(true);
+    const parsed = parseContent(result) as { code: string };
+    expect(parsed.code).toBe('INVALID_INPUT');
+    expect(graph).not.toHaveBeenCalled();
+  });
+
+  it('addWebPart rejects when neither innerHtml nor webPartType are supplied', async () => {
+    const tools = createPageTools(client);
+    const addWebPart = tools.find((t) => t.tool.name === 'addWebPart')!;
+    const result = await addWebPart.handler({
+      pageId: 'p1',
+      sectionIndex: 0,
+      columnIndex: 0,
+    });
+    expect(result.isError).toBe(true);
+    const parsed = parseContent(result) as { code: string };
+    expect(parsed.code).toBe('INVALID_INPUT');
+    expect(graph).not.toHaveBeenCalled();
+  });
+
+  it('addWebPart rejects unknown webPartType', async () => {
+    const tools = createPageTools(client);
+    const addWebPart = tools.find((t) => t.tool.name === 'addWebPart')!;
+    const result = await addWebPart.handler({
+      pageId: 'p1',
+      sectionIndex: 0,
+      columnIndex: 0,
+      webPartType: 'bogus' as unknown as keyof typeof STANDARD_WEBPART_TYPES,
+    });
+    expect(result.isError).toBe(true);
+    const parsed = parseContent(result) as { code: string };
+    expect(parsed.code).toBe('INVALID_INPUT');
   });
 
   it('addWebPart errors with SECTION_OUT_OF_RANGE when sectionIndex points past the layout', async () => {
@@ -352,17 +518,11 @@ describe('page-tools handlers — happy paths', () => {
     expect(graph.mock.calls).toHaveLength(1);
     const [method, url, body] = graph.mock.calls[0];
     expect(method).toBe('PATCH');
-    expect(url).toBe(
-      `/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage` +
-        `/canvasLayout/horizontalSections/columns/webparts/wp-x`
-    );
-    expect(body).toEqual({
-      '@odata.type': '#microsoft.graph.textWebPart',
-      innerHtml: '<p>new</p>',
-    });
+    expect(url).toBe(`/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage/webParts/wp-x`);
+    expect(body).toEqual(buildTextWebPartBody('<p>new</p>'));
   });
 
-  it('removeWebPart DELETEs at the dedicated Graph endpoint', async () => {
+  it('removeWebPart DELETEs at the documented `/webParts/{id}` endpoint', async () => {
     graph.mockResolvedValueOnce(undefined);
     const tools = createPageTools(client);
     const removeWebPart = tools.find((t) => t.tool.name === 'removeWebPart')!;
@@ -370,10 +530,7 @@ describe('page-tools handlers — happy paths', () => {
     expect(graph.mock.calls).toHaveLength(1);
     const [method, url] = graph.mock.calls[0];
     expect(method).toBe('DELETE');
-    expect(url).toBe(
-      `/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage` +
-        `/canvasLayout/horizontalSections/columns/webparts/wp-1`
-    );
+    expect(url).toBe(`/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage/webParts/wp-1`);
   });
 
   it('publishPage POSTs to the publish endpoint', async () => {
@@ -386,6 +543,105 @@ describe('page-tools handlers — happy paths', () => {
       'POST',
       `/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage/publish`
     );
+  });
+
+  it('addImageWebPart pins payload to a driveItem (sharepointIds + image dims)', async () => {
+    const driveItem = {
+      id: 'item-1',
+      name: 'hero.jpg',
+      webUrl: 'https://contoso.sharepoint.com/sites/x/Shared%20Documents/hero.jpg',
+      image: { width: 1920, height: 1080 },
+      sharepointIds: {
+        siteId: 'site-guid',
+        webId: 'web-guid',
+        listId: 'list-guid',
+        listItemUniqueId: 'item-unique-guid',
+      },
+    };
+    const getDriveItem = vi.fn().mockResolvedValue(driveItem);
+    const localGraph = vi
+      .fn()
+      // 1) getPage
+      .mockResolvedValueOnce({
+        id: 'p1',
+        canvasLayout: {
+          horizontalSections: [{ id: 'sec-1', columns: [{ id: 'col-1', webparts: [] }] }],
+        },
+      })
+      // 2) addStandardWebPart
+      .mockResolvedValueOnce({ id: 'wp-image' });
+    const c = createMockClient(localGraph as unknown as Parameters<typeof createMockClient>[0], {
+      getDriveItemForSharePointPath: getDriveItem,
+    });
+    const tools = createPageTools(c);
+    const tool = tools.find((t) => t.tool.name === 'addImageWebPart')!;
+    const out = parseContent(
+      await tool.handler({
+        pageId: 'p1',
+        sectionIndex: 0,
+        columnIndex: 0,
+        sharepointPath: 'Shared Documents/hero.jpg',
+        altText: 'Hero',
+      })
+    ) as { webPartId: string };
+    expect(out.webPartId).toBe('wp-image');
+    expect(getDriveItem).toHaveBeenCalledWith('Shared Documents/hero.jpg');
+
+    const [, , body] = localGraph.mock.calls[1];
+    // Body must embed the driveItem ids — those are what SharePoint's UI
+    // image-picker reconciliation checks on Save & Close.
+    const properties = (
+      body as { webPartProperties?: unknown; data?: { properties: Record<string, unknown> } }
+    ).data?.properties;
+    expect(properties).toMatchObject({
+      siteid: 'site-guid',
+      webid: 'web-guid',
+      listid: 'list-guid',
+      uniqueid: 'item-unique-guid',
+      imgWidth: 1920,
+      imgHeight: 1080,
+      altText: 'Hero',
+      imageSourceType: 2,
+    });
+  });
+
+  it('addImageWebPart rejects when driveItem has no webUrl', async () => {
+    const getDriveItem = vi.fn().mockResolvedValue({
+      id: 'item-1',
+      name: 'hero.jpg',
+      sharepointIds: { siteId: 's', webId: 'w', listId: 'l', listItemUniqueId: 'u' },
+    });
+    const c = createMockClient(undefined, {
+      getDriveItemForSharePointPath: getDriveItem,
+    });
+    const tools = createPageTools(c);
+    const tool = tools.find((t) => t.tool.name === 'addImageWebPart')!;
+    const result = await tool.handler({
+      pageId: 'p1',
+      sectionIndex: 0,
+      columnIndex: 0,
+      sharepointPath: 'X/y.jpg',
+    });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('DRIVE_ITEM_NO_URL');
+  });
+
+  it('addImageWebPart validates empty sharepointPath without touching Graph', async () => {
+    const getDriveItem = vi.fn();
+    const c = createMockClient(undefined, {
+      getDriveItemForSharePointPath: getDriveItem,
+    });
+    const tools = createPageTools(c);
+    const tool = tools.find((t) => t.tool.name === 'addImageWebPart')!;
+    const result = await tool.handler({
+      pageId: 'p1',
+      sectionIndex: 0,
+      columnIndex: 0,
+      sharepointPath: '',
+    });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('INVALID_INPUT');
+    expect(getDriveItem).not.toHaveBeenCalled();
   });
 });
 
@@ -656,5 +912,139 @@ describe('page-tools handlers — error paths', () => {
       const parsed = parseContent(result) as { code: string };
       expect(parsed.code).toBe('NOT_CONFIGURED');
     }
+  });
+
+  it('generateTableOfContents injects id attributes on source headings and posts a ToC web part', async () => {
+    const graph = vi
+      .fn()
+      // GET page
+      .mockResolvedValueOnce({
+        id: 'p1',
+        canvasLayout: {
+          horizontalSections: [
+            {
+              id: 'sec-id-1',
+              columns: [
+                {
+                  id: 'col-id-1',
+                  webparts: [{ id: 'wp1', innerHtml: '<h1>Intro</h1><h2>Setup</h2>' }],
+                },
+                {
+                  id: 'col-id-2',
+                  webparts: [{ id: 'wp2', innerHtml: '<h2>Outcome</h2>' }],
+                },
+              ],
+            },
+          ],
+        },
+      })
+      // PATCH wp1 (inject ids), PATCH wp2 (inject id), POST ToC
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ id: 'wp-toc' });
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    const toc = tools.find((t) => t.tool.name === 'generateTableOfContents')!;
+    const out = parseContent(
+      await toc.handler({
+        pageId: 'p1',
+        sectionIndex: 0,
+        columnIndex: 0,
+        title: 'Contents',
+      })
+    ) as { webPartId: string; headingCount: number; anchorsInjected: number };
+
+    expect(out.webPartId).toBe('wp-toc');
+    expect(out.headingCount).toBe(3);
+    expect(out.anchorsInjected).toBe(2); // both source web parts got PATCHed
+
+    // PATCH wp1 rewrites both h1 and h2 with id="…"
+    const [m1, u1, b1] = graph.mock.calls[1];
+    expect(m1).toBe('PATCH');
+    expect(u1).toContain('/webParts/wp1');
+    const wp1Html = (b1 as { webPartProperties: { data: { content: { formattedValue: string } } } })
+      .webPartProperties.data.content.formattedValue;
+    expect(wp1Html).toBe('<h1 id="intro">Intro</h1><h2 id="setup">Setup</h2>');
+
+    // PATCH wp2 rewrites the single h2.
+    const [m2, u2, b2] = graph.mock.calls[2];
+    expect(m2).toBe('PATCH');
+    expect(u2).toContain('/webParts/wp2');
+    const wp2Html = (b2 as { webPartProperties: { data: { content: { formattedValue: string } } } })
+      .webPartProperties.data.content.formattedValue;
+    expect(wp2Html).toBe('<h2 id="outcome">Outcome</h2>');
+
+    // POST ToC carries the rendered nested list.
+    const [m3, , b3] = graph.mock.calls[3];
+    expect(m3).toBe('POST');
+    const tocHtml = (b3 as { webPartProperties: { data: { content: { formattedValue: string } } } })
+      .webPartProperties.data.content.formattedValue;
+    expect(tocHtml).toContain('<h2>Contents</h2>');
+    expect(tocHtml).toContain('#intro');
+    expect(tocHtml).toContain('#setup');
+    expect(tocHtml).toContain('#outcome');
+  });
+
+  it('generateTableOfContents skips PATCH when all source headings already have ids', async () => {
+    const graph = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: 'p1',
+        canvasLayout: {
+          horizontalSections: [
+            {
+              id: 'sec-id-1',
+              columns: [
+                {
+                  id: 'col-id-1',
+                  webparts: [{ id: 'wp1', innerHtml: '<h2 id="ready">Ready</h2>' }],
+                },
+              ],
+            },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({ id: 'wp-toc' });
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    const toc = tools.find((t) => t.tool.name === 'generateTableOfContents')!;
+    const out = parseContent(
+      await toc.handler({ pageId: 'p1', sectionIndex: 0, columnIndex: 0 })
+    ) as { headingCount: number; anchorsInjected: number };
+    expect(out.headingCount).toBe(1);
+    expect(out.anchorsInjected).toBe(0);
+    // GET + POST only — no PATCH.
+    expect(graph.mock.calls).toHaveLength(2);
+  });
+
+  it('generateTableOfContents errors NO_HEADINGS when the page has none', async () => {
+    const graph = vi.fn().mockResolvedValueOnce({
+      id: 'p1',
+      canvasLayout: {
+        horizontalSections: [{ id: 'sec-id-1', columns: [{ id: 'col-id-1', webparts: [] }] }],
+      },
+    });
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    const toc = tools.find((t) => t.tool.name === 'generateTableOfContents')!;
+    const result = await toc.handler({ pageId: 'p1', sectionIndex: 0, columnIndex: 0 });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('NO_HEADINGS');
+  });
+
+  it('generateTableOfContents validates minLevel/maxLevel bounds', async () => {
+    const graph = vi.fn();
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createPageTools(client);
+    const toc = tools.find((t) => t.tool.name === 'generateTableOfContents')!;
+    const result = await toc.handler({
+      pageId: 'p1',
+      sectionIndex: 0,
+      columnIndex: 0,
+      minLevel: 4,
+      maxLevel: 2,
+    });
+    expect(result.isError).toBe(true);
+    expect((parseContent(result) as { code: string }).code).toBe('INVALID_INPUT');
   });
 });

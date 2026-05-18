@@ -513,8 +513,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 key: "site_id",
                 label: "Site ID",
                 field_type: "text",
-                // Graph site id (composite or path form) — not a SharePoint URL.
-                placeholder: "{tenant}.sharepoint.com,{site-guid},{web-guid}",
+                placeholder: "acme.sharepoint.com:/sites/Marketing:",
                 is_secret: false,
                 stored_in_config_json: false,
                 oauth_flow: false,
@@ -522,7 +521,10 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 // Site policy by omission (ADR-060): the worker reads its
                 // stored site_id and Graph tools accept no `site_id` parameter.
                 storage: FieldStorage::WorkerMountedToken,
-                hint: Some("Paste a Graph site id, NOT a SharePoint URL. Composite form: \"{hostname},{site-guid},{web-guid}\" or path form: \"{hostname}:/sites/{path}:\". To get the composite id, GET /sites/{hostname}:/sites/{path} in Graph Explorer and copy the response `id`."),
+                hint: Some(
+                    "Mind both colons: one after the hostname (`:/`) \
+                     and one at the end (`:`).",
+                ),
             },
         ],
         // Plan §PR3:290-299: only files PHYSICALLY mounted into the worker.

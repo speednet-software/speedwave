@@ -107,13 +107,13 @@ describe('SharePoint handler integration', () => {
       expect(names).toContain('updateItem');
       expect(names).toContain('deleteItem');
       expect(names).toContain('deletePage');
-      expect(tools.length).toBe(26);
+      expect(tools.length).toBe(28);
     });
 
     it('returns tool definitions even with null client', () => {
       const tools = createToolDefinitions(null);
 
-      expect(tools.length).toBe(26);
+      expect(tools.length).toBe(28);
       tools.forEach((t) => {
         expect(t.handler).toBeTypeOf('function');
       });

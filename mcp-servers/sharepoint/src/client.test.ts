@@ -10,6 +10,7 @@ import {
   initializeSharePointClient,
   SharePointConfig,
   validateGraphSiteId,
+  resolveCompositeSiteId,
 } from './client.js';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
@@ -1880,15 +1881,70 @@ describe('SharePointClient', () => {
       expect(result).not.toBeNull();
     });
 
-    it('should accept path-form site_id', async () => {
+    it('should accept path-form site_id and resolve it to composite via Graph lookup', async () => {
       mockLoadToken.mockImplementation(async (path: string) => {
         if (path.includes('access_token')) return 'test-access-token';
         if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/Speedwave:';
         return '';
       });
+      const fetchSpy = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+        }),
+      });
+      global.fetch = fetchSpy as unknown as typeof fetch;
 
       const result = await initializeSharePointClient();
       expect(result).not.toBeNull();
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:/sites/Speedwave:',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer test-access-token' }),
+        })
+      );
+      // Client stores the composite id, not the path-form the user typed.
+      expect(result?.getConfig().siteId).toBe(
+        'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
+      );
+    });
+
+    it('should return null when path-form site_id lookup fails (404)', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/Nonexistent:';
+        return '';
+      });
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+      }) as unknown as typeof fetch;
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+      const result = await initializeSharePointClient();
+      expect(result).toBeNull();
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('404'));
+      infoSpy.mockRestore();
+    });
+
+    it('should surface a "transient" hint when site lookup returns 429', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/X:';
+        return '';
+      });
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+      }) as unknown as typeof fetch;
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+      const result = await initializeSharePointClient();
+      expect(result).toBeNull();
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('transient'));
+      infoSpy.mockRestore();
     });
   });
 
@@ -1966,6 +2022,101 @@ describe('SharePointClient', () => {
     it('rejects RTL override character', () => {
       const err = validateGraphSiteId('acme.sharepoint.com‮:/sites/X:');
       expect(err).toContain('ASCII');
+    });
+  });
+
+  describe('resolveCompositeSiteId', () => {
+    it('passes composite-form site_id through unchanged (no lookup)', async () => {
+      const spy = vi.fn();
+      global.fetch = spy as unknown as typeof fetch;
+      const composite = 'contoso.sharepoint.com,guid1,guid2';
+      await expect(resolveCompositeSiteId(composite, 'tok')).resolves.toEqual({
+        ok: true,
+        compositeId: composite,
+      });
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('looks up path-form via Graph and returns the composite id', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: 'contoso.sharepoint.com,site-guid,web-guid' }),
+      }) as unknown as typeof fetch;
+      await expect(
+        resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok')
+      ).resolves.toEqual({
+        ok: true,
+        compositeId: 'contoso.sharepoint.com,site-guid,web-guid',
+      });
+    });
+
+    it('reports `not_found` reason on 4xx Graph responses', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+      }) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+      if (!result.ok) {
+        expect(result.detail).toContain('404');
+      }
+    });
+
+    it('reports `transient` reason on 429 / 5xx', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+      }) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'transient' });
+    });
+
+    it('reports `not_found` when Graph response lacks a string id', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({}),
+      }) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+    });
+
+    it('rejects non-string `id` field (defends against malformed Graph response)', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: 42 }),
+      }) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+    });
+
+    it('reports `network` reason on fetch rejection', async () => {
+      global.fetch = vi.fn().mockRejectedValue(new Error('boom')) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'network' });
+      if (!result.ok) {
+        expect(result.detail).toContain('boom');
+      }
+    });
+
+    it('rejects URL site_id without making a network call (defence in depth)', async () => {
+      const spy = vi.fn();
+      global.fetch = spy as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('https://contoso.sharepoint.com/sites/X', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'validation' });
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('rejects malformed site_id mixing composite (`,`) and path (`:`) separators', async () => {
+      const spy = vi.fn();
+      global.fetch = spy as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId(
+        'contoso.sharepoint.com:/sites/X,guid,guid',
+        'tok'
+      );
+      expect(result).toMatchObject({ ok: false, reason: 'validation' });
+      expect(spy).not.toHaveBeenCalled();
     });
   });
 });

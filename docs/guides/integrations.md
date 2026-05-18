@@ -4,19 +4,19 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 
 ## Available Integrations
 
-| Integration | Service            | Container                            | Token Path                                    |
-| ----------- | ------------------ | ------------------------------------ | --------------------------------------------- |
-| Slack       | Messaging          | `speedwave_<project>_mcp_slack`      | `~/.speedwave/tokens/<project>/slack/`        |
-| SharePoint  | Documents          | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/`   |
-| GitLab      | Code hosting       | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`       |
-| GitHub      | Code hosting       | `speedwave_<project>_mcp_github`     | `~/.speedwave/tokens/<project>/github/`       |
-| Atlassian   | Jira & Confluence  | `speedwave_<project>_mcp_atlassian`  | `~/.speedwave/tokens/<project>/atlassian/`    |
-| Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`      |
-| Office      | Word/Excel/PPT/PDF | `speedwave_<project>_mcp_office`     | N/A (no credentials)                          |
-| Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                          |
+| Integration | Service            | Container                            | Token Path                                           |
+| ----------- | ------------------ | ------------------------------------ | ---------------------------------------------------- |
+| Slack       | Messaging          | `speedwave_<project>_mcp_slack`      | `~/.speedwave/tokens/<project>/slack/`               |
+| SharePoint  | Documents          | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/`          |
+| GitLab      | Code hosting       | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`              |
+| GitHub      | Code hosting       | `speedwave_<project>_mcp_github`     | `~/.speedwave/tokens/<project>/github/`              |
+| Atlassian   | Jira & Confluence  | `speedwave_<project>_mcp_atlassian`  | `~/.speedwave/tokens/<project>/atlassian/`           |
+| Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`             |
+| Office      | Word/Excel/PPT/PDF | `speedwave_<project>_mcp_office`     | N/A (no credentials)                                 |
+| Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                                 |
 | Context7    | Library docs       | `speedwave_<project>_mcp_context7`   | `~/.speedwave/tokens/<project>/context7/` (optional) |
-| OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                            |
-| Host Exec   | Project toolchain  | host-exec (per-project host process) | N/A (whitelist in `~/.speedwave/config.json`) |
+| OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                                   |
+| Host Exec   | Project toolchain  | host-exec (per-project host process) | N/A (whitelist in `~/.speedwave/config.json`)        |
 
 OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the host — they access native APIs directly (EventKit on macOS, WinRT/MAPI on Windows).
 
@@ -194,7 +194,7 @@ SharePoint integration combines two Microsoft Graph surfaces: a SharePoint docum
 - `~/.speedwave/tokens/<project>/sharepoint/` (mounted into the worker as `/tokens:ro`): `access_token`, `site_id`.
 - `~/.speedwave/oauth/<project>/sharepoint.json` (host-only, NOT mounted into the worker): `clientId`, `tenantId`, `refreshToken`, `scopes`, `grantedScopes`, `expiresAt`, `lastRefreshAt`.
 
-**Site ID format.** `site_id` must be a Graph site id — either composite form (`{hostname},{site-guid},{web-guid}`) or path form (`{hostname}:/sites/{path}:`). A raw SharePoint URL (`https://{tenant}.sharepoint.com/sites/{name}`) is rejected at worker startup with a guidance message; the worker reports `configured: false` until a valid value is provided. To find the composite id, call `GET /sites/{hostname}:/sites/{sitePath}` in Graph Explorer and copy the `id` field from the response. Validation is fail-closed (no URL normalization in the worker) to keep the token mount at a clear trust boundary.
+**Site ID format.** `site_id` must be a Graph site id — either path form (e.g. `acme.sharepoint.com:/sites/Marketing:` — note both colons: one after the hostname and one at the end) or composite form (`{hostname},{site-guid},{web-guid}`, obtained by calling `GET /sites/{hostname}:/sites/{path}` in Graph Explorer and copying the `id` field). A raw SharePoint URL (`https://{tenant}.sharepoint.com/sites/{name}`) is rejected at worker startup with a guidance message; the worker reports `configured: false` until a valid value is provided. Validation is fail-closed (no URL normalization in the worker) to keep the token mount at a clear trust boundary.
 
 **Scopes.** SharePoint requests `Sites.Manage.All Files.ReadWrite.All User.Read offline_access`. `Sites.Manage.All` is the broadest of the three site scopes Microsoft offers (covers `Sites.ReadWrite.All` and `Sites.Read.All`); it is required for `createList` (PR5) and is requested up-front so a single consent dialog covers all SharePoint operations. `Sites.Manage.All` typically requires tenant admin consent in Azure AD; users in tenants without admin consent will be prompted to request it during the device-code flow.
 
@@ -208,7 +208,22 @@ SharePoint integration combines two Microsoft Graph surfaces: a SharePoint docum
 
 **Column types** in `addListColumn` are restricted to the six Microsoft Graph types covered by PR5: `text`, `number`, `boolean`, `dateTime`, `choice`, `lookup`. Other types (calculated, geolocation, term) are out of scope.
 
-**Web part types** in `addWebPart` / `updateWebPart` are restricted to `text`, `image`, `link` in PR4. Other Microsoft Graph web part types (highlighted content, events, news, etc.) are not exposed.
+**Web part types** in `addWebPart` cover the text web part (via `innerHtml`) and the 14 standard web parts Microsoft Graph documents: `bingMaps`, `button`, `callToAction`, `divider`, `documentEmbed`, `image`, `imageGallery`, `linkPreview`, `orgChart`, `people`, `quickLinks`, `spacer`, `youtubeEmbed`, `titleArea`. Per-type `data` shape is webPart-specific; Microsoft Graph documents the envelope but not the per-type `properties` schema — consult the SharePoint UI / SPFx docs / PnPjs examples for individual web-part payloads. `updateWebPart` is currently text-only (PATCH at `.../webparts/{id}` with `innerHtml`).
+
+**Home pages (`pageLayout: "home"`).** Microsoft Graph examples and request templates exclusively use `pageLayout: "article"`. Adding web parts to a `home` page via `POST .../webparts` surfaces as `400 Bad Request` even on freshly-created sections. This is a Graph limitation, not a Speedwave bug — for editable content, prefer creating an `article` page (the default for `createPage`). Two follow-ups specific to home pages, verified live:
+
+- `updatePage(canvasLayout)` on `Home.aspx` persists in Graph (eTag bumps, `versionId` increments, `lastModifiedDateTime` updates), but the page **stays in `draft` state** until `publishPage` is called. SharePoint serves the last-published version to most viewers, so users won't see the edits even though the API reports success. Always follow `updatePage` on a home page with `publishPage` (or instruct the caller to "Publish again" from the SharePoint banner).
+- `titleArea.imageWebUrl` is documented for `sitePage`, but the home layout renders its hero from `pageLayout: home`-specific templates; the `titleArea` image typically does not appear on home pages even when set successfully. Use `article` pages for hero images.
+
+**Section emphasis** in `canvasLayout.horizontalSections[].emphasis` accepts `none`, `neutral`, `soft`, `strong`, `unknownFutureValue` (Graph `sectionEmphasisType`). Apply via `updatePage` with the full `canvasLayout`. Section `layout` accepts `none`, `oneColumn`, `twoColumns`, `threeColumns`, `oneThirdLeftColumn`, `oneThirdRightColumn`, `fullWidth`, `unknownFutureValue`.
+
+**Navigation (Quick Launch, top nav, hub nav) is not exposed.** Microsoft Graph v1.0 and beta do not publish endpoints for SharePoint site navigation — those still live in the SharePoint REST API (`/_api/web/navigation/...`). Speedwave talks to Graph only (see ADR-060 site-policy invariant), so editing Quick Launch / top nav / hub nav has to be done in the SharePoint UI for now.
+
+**Image web parts.** Use `sharepoint.uploadFile` to push the source into the site's drive, then call `sharepoint.addImageWebPart({ pageId, sectionIndex, columnIndex, sharepointPath })` — the worker looks up the file's `sharepointIds` and `image` facet so the payload survives the SharePoint UI image-picker reconciliation on Save & Close. External image URLs sent to `addWebPart({ webPartType: "image", ... })` directly will be visible in the Edit view but dropped on UI Save (live-verified 2026-05).
+
+**canvasLayout round-trip.** When you `getPage` and re-`updatePage` the layout, strip UI-only fields that the SharePoint editor writes on Save but Graph PATCH rejects (e.g. `customContentDropSupport`). `pages-client.ts` exports `stripUiOnlyWebPartFields` for this and `patchPage` applies it automatically.
+
+**Footnotes are not natively supported.** SharePoint Modern Pages has no footnote feature (auto-numbering, `[^1]` ↔ `[^1]:` references). Verified: (a) none of the 14 standardWebPart types in Graph is a footnote/reference type; (b) Microsoft's "Use the Markdown web part" docs confirm the Markdown web part uses Marked.js but does NOT enable GFM footnotes; (c) the Markdown web part is itself not in the Graph-supported web-parts table, so it cannot be added through `addWebPart` either way. A third-party SPFx web part (`better-markdown-webpart`) supports GFM footnotes, but installing it requires tenant-wide SPFx package deployment (`.sppkg`) outside the Graph API surface. Workaround through Speedwave: emit manual `<sup>[N]</sup>` markers in text web parts plus a separate "Sources" section at the bottom of the page. `generateTableOfContents` produces clickable bookmark links — the same `id`-injection technique can be reused for manual footnote anchors.
 
 **OAuth refresh flow.** When the worker's access token returns 401, it calls `oauth.refresh()` on the host-side `oauth` worker (see [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)). The oauth worker reads `refreshToken` from `oauth.json`, calls Microsoft's `/oauth2/v2.0/token` endpoint, writes the new `access_token` to `/tokens/access_token`, and the SharePoint worker re-reads it. The SharePoint container never sees the refresh token. If Microsoft returns `scope_mismatch` (e.g. after a scope bump or admin policy change), the failure surfaces as an `OAUTH_SCOPE_MISMATCH` error that the Desktop UI uses to trigger re-consent.
 
@@ -300,17 +315,17 @@ Removing the key returns to anonymous mode — the toggle stays enabled (unlike 
 
 #### Tool surface
 
-| Tool                 | Parameters                            | Description                                                        |
-| -------------------- | ------------------------------------- | ------------------------------------------------------------------ |
-| `resolve_library_id` | `libraryName`, `query`                | Resolve a name (e.g. "react") to a Context7 ID (e.g. `/facebook/react`). Returns top 10 matches with `trustScore` and version list. |
-| `query_docs`         | `libraryId`, `query`, `tokens?`       | Fetch documentation snippets for a known ID. `tokens` defaults to 5000, clamped to `[500, 15000]` to bound context-window usage. |
+| Tool                 | Parameters                      | Description                                                                                                                         |
+| -------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `resolve_library_id` | `libraryName`, `query`          | Resolve a name (e.g. "react") to a Context7 ID (e.g. `/facebook/react`). Returns top 10 matches with `trustScore` and version list. |
+| `query_docs`         | `libraryId`, `query`, `tokens?` | Fetch documentation snippets for a known ID. `tokens` defaults to 5000, clamped to `[500, 15000]` to bound context-window usage.    |
 
 The Hub exposes both tools through `execute_code` (preferred) — e.g. `await context7.resolve_library_id({libraryName: "react", query: "useState"})`.
 
 #### Example prompts
 
-- *"Implement Next.js middleware that checks JWT in cookies. use context7"*
-- *"How do I configure Spring Boot JWT filter authentication? use context7"*
+- _"Implement Next.js middleware that checks JWT in cookies. use context7"_
+- _"How do I configure Spring Boot JWT filter authentication? use context7"_
 
 #### Skill
 
