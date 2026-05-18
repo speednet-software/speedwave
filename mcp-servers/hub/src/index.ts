@@ -75,7 +75,7 @@ const TOOLS: Tool[] = [
     description: `Search available MCP tools by keyword. Returns tool names, descriptions, and optionally full schemas.
 Use this to discover tools before executing code. Start with 'names_only' for efficiency.
 
-Built-in services: slack, sharepoint, redmine, gitlab, os. Plugin services (if enabled) are also searchable.
+Built-in services: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services (if enabled) are also searchable.
 
 Examples:
 - search_tools({ query: "slack", detail_level: "names_only" })
@@ -98,7 +98,7 @@ Examples:
         service: {
           type: 'string',
           description:
-            'Limit search to specific service. Built-in: slack, sharepoint, redmine, gitlab, os. Plugin services also accepted.',
+            'Limit search to specific service. Built-in: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services also accepted.',
         },
         include_deferred: {
           type: 'boolean',
@@ -150,6 +150,7 @@ Available globals:
 - slack: listChannelIds, getChannelMessages, sendChannel
 - sharepoint: listFileIds, getFileFull, downloadFile, uploadFile
 - os: listReminders, createReminder, listEvents, createEvent, listEmails, sendEmail, listNotes, createNote, ...
+- context7: resolve_library_id, query_docs (up-to-date library documentation)
 - batch(promises): Parallel execution with partial failure support
   ⚠️ Returns { results: T[], errors: [{index, error}] } - ALWAYS destructure!
   ✅ const { results } = await batch([...])

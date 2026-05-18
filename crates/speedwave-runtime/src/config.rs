@@ -122,6 +122,7 @@ pub struct IntegrationsConfig {
     pub atlassian: Option<IntegrationConfig>,
     pub office: Option<IntegrationConfig>,
     pub playwright: Option<IntegrationConfig>,
+    pub context7: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
     /// Per-project `host_exec` whitelist (ADR-054). User-config only.
     #[serde(default, rename = "hostExec", skip_serializing_if = "Option::is_none")]
@@ -143,6 +144,7 @@ impl IntegrationsConfig {
             "atlassian" => self.atlassian = Some(cfg),
             "office" => self.office = Some(cfg),
             "playwright" => self.playwright = Some(cfg),
+            "context7" => self.context7 = Some(cfg),
             _ => return false,
         }
         true
@@ -184,6 +186,7 @@ pub struct ResolvedIntegrationsConfig {
     pub atlassian: bool,
     pub office: bool,
     pub playwright: bool,
+    pub context7: bool,
     pub os_reminders: bool,
     pub os_calendar: bool,
     pub os_mail: bool,
@@ -210,6 +213,7 @@ impl ResolvedIntegrationsConfig {
             "atlassian" => Some(self.atlassian),
             "office" => Some(self.office),
             "playwright" => Some(self.playwright),
+            "context7" => Some(self.context7),
             _ => None,
         }
     }
@@ -471,6 +475,7 @@ fn apply_integrations_layer(
     apply_toggle(&mut result.atlassian, &layer.atlassian);
     apply_toggle(&mut result.office, &layer.office);
     apply_toggle(&mut result.playwright, &layer.playwright);
+    apply_toggle(&mut result.context7, &layer.context7);
     if let Some(ref os) = layer.os {
         apply_toggle(&mut result.os_reminders, &os.reminders);
         apply_toggle(&mut result.os_calendar, &os.calendar);
@@ -1423,6 +1428,7 @@ mod tests {
             atlassian: None,
             office: None,
             playwright: None,
+            context7: None,
             host_exec: None,
             os: Some(OsIntegrationsConfig {
                 reminders: Some(IntegrationConfig {
@@ -1481,6 +1487,7 @@ mod tests {
                     atlassian: None,
                     office: None,
                     playwright: None,
+                    context7: None,
                     host_exec: None,
                     os: None,
                     plugins: None,
@@ -1736,6 +1743,7 @@ mod tests {
                     atlassian: None,
                     office: None,
                     playwright: None,
+                    context7: None,
                     host_exec: None,
                     os: Some(OsIntegrationsConfig {
                         reminders: Some(IntegrationConfig {
@@ -1784,6 +1792,7 @@ mod tests {
                     atlassian: None,
                     office: None,
                     playwright: None,
+                    context7: None,
                     host_exec: None,
                     os: None,
                     plugins: None,
@@ -2076,6 +2085,7 @@ mod tests {
                     atlassian: None,
                     office: None,
                     playwright: None,
+                    context7: None,
                     host_exec: None,
                     os: None,
                     plugins: Some(HashMap::from([(

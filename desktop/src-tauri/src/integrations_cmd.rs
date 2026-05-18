@@ -81,6 +81,16 @@ fn redmine_config_json_fields() -> Vec<&'static str> {
 
 /// Reads and parses a service's config.json. Returns an empty JSON object
 /// on missing or unreadable files.
+/// True when any of `files` exists as a non-empty file under `svc_token_dir`.
+/// Used to drop the "Anonymous"-style badge once a key has been written.
+fn has_any_credential_file(svc_token_dir: &std::path::Path, files: &[&str]) -> bool {
+    files.iter().any(|name| {
+        std::fs::metadata(svc_token_dir.join(name))
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    })
+}
+
 fn read_service_config(svc_token_dir: &std::path::Path) -> serde_json::Value {
     let config_path = svc_token_dir.join("config.json");
     std::fs::read_to_string(&config_path)
@@ -251,6 +261,16 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             None
         };
 
+        // Optional-only services (e.g. context7): badge from descriptor only when
+        // no key is set — once configured, drop the badge to mirror configured state.
+        let all_optional = !svc_desc.auth_fields.is_empty()
+            && svc_desc.auth_fields.iter().all(|f| f.optional);
+        let badge = if all_optional && configured && has_any_credential_file(&svc_token_dir, svc_desc.credential_files) {
+            None
+        } else {
+            svc_desc.badge.map(|b| b.to_string())
+        };
+
         service_entries.push(IntegrationStatusEntry {
             service: svc.to_string(),
             enabled,
@@ -260,7 +280,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             auth_fields: auth_fields.clone(),
             current_values,
             mappings,
-            badge: svc_desc.badge.map(|b| b.to_string()),
+            badge,
             oauth_action_required,
         });
     }
@@ -1089,20 +1109,27 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
         }
     }
 
-    // Auto-disable the integration since credentials are now removed
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
-        if let Some(entry) = user_config.find_project_mut(&project) {
-            let integrations = entry.integrations.get_or_insert_with(Default::default);
-            let cfg = config::IntegrationConfig {
-                enabled: Some(false),
-            };
-            integrations.set_service(&service, cfg);
-            config::save_user_config(&user_config)?;
-        }
-        Ok(())
-    })
-    .map_err(|e| e.to_string())?;
+    // Optional-only services (e.g. context7) keep working in anonymous mode after
+    // credential removal — skip auto-disable so the toggle stays as the user left it.
+    let all_optional = svc_desc
+        .map(|d| !d.auth_fields.is_empty() && d.auth_fields.iter().all(|f| f.optional))
+        .unwrap_or(false);
+
+    if !all_optional {
+        config::with_config_lock(|| {
+            let mut user_config = config::load_user_config()?;
+            if let Some(entry) = user_config.find_project_mut(&project) {
+                let integrations = entry.integrations.get_or_insert_with(Default::default);
+                let cfg = config::IntegrationConfig {
+                    enabled: Some(false),
+                };
+                integrations.set_service(&service, cfg);
+                config::save_user_config(&user_config)?;
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }

@@ -278,6 +278,28 @@ Both OS prereq failures and `SecurityCheck` compose violations block the applica
 
 Additionally, `check_os_warnings()` provides non-blocking diagnostic warnings (e.g. nested virtualization detected) logged via `log::warn!` during system checks. These warnings do not block container operations but appear in `speedwave check` output and Desktop log files.
 
+## Third-party services
+
+Some MCP workers reach external SaaS endpoints from inside their container. The `claude` container itself never makes outbound HTTP — every third-party hop is mediated by a worker with a narrow scope and an audited data flow.
+
+### Context7 (library documentation)
+
+The `mcp-context7` worker calls `https://context7.com/api/v2/*` (Upstash) to resolve library names to IDs and fetch documentation snippets.
+
+**Data sent to Upstash on every call:**
+
+- Query string (the natural-language question the user typed)
+- `libraryName` / `libraryId` (e.g. `"react"` / `/facebook/react`)
+- Optional API key (`ctx7sk_…`) when configured — sent in `Authorization: Bearer`
+- `User-Agent: Speedwave-Context7/<version>` and standard HTTP headers
+- Source IP (the worker's egress IP — Upstash documents that IPs are stored encrypted)
+
+**Per Context7's documented data use, queries may be retained and used for benchmarking and reranking, including by third-party LLMs.** Anything sensitive in the user's question crosses a trust boundary — the same way it would if Claude itself called the API.
+
+**Anonymous mode (no key):** ~200 requests per day per source IP (from the `ratelimit-limit` response header). For a multi-user host on one corporate NAT this is shared across all users; if it runs out, Upstash returns 429 with a `ratelimit-reset` Unix timestamp. There is no SLA and no DPA in anonymous mode — for compliance-sensitive deployments, each developer should generate a free key at [context7.com/dashboard](https://context7.com/dashboard).
+
+**Container constraints (identical to other workers):** `cap_drop: ALL`, `no-new-privileges`, `read_only`, `tmpfs /tmp:noexec,nosuid`, 128 MiB memory cap. The `api_key` file is mounted `:ro`. Redirects from Context7 are explicitly NOT followed (undici v7 default + `mapErrorStatus` rejects 3xx). HTTP body is capped at 5 MiB by `readBodyLimited` in `client.ts` (drains the stream with a byte counter and aborts cleanly before the 128 MiB container cap would OOM-kill the worker). Timeouts cap time independently: 30 s headers + 30 s body via undici options.
+
 ## Redmine API Proxy Commands
 
 The Desktop app includes two Tauri commands that make HTTP requests to external Redmine instances during integration configuration: `validate_redmine_credentials` and `fetch_redmine_enumerations`. These run on the Desktop host process, not inside containers, because the MCP Redmine worker doesn't exist during configuration — the user hasn't saved credentials yet.

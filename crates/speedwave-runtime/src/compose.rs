@@ -108,6 +108,10 @@ pub fn render_compose(
         "${IMAGE_MCP_PLAYWRIGHT}",
         &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
     );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_CONTEXT7}",
+        &build::image_ref(build::IMAGE_MCP_CONTEXT7, &bundle_manifest.bundle_id),
+    );
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
@@ -2746,6 +2750,7 @@ services:
       - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
       - WORKER_OFFICE_URL=http://mcp-office:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
+      - WORKER_CONTEXT7_URL=http://mcp-context7:3000
     networks:
       - speedwave_test_network
       - speedwave_test_network_office
@@ -2798,6 +2803,24 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=1g
     shm_size: 2g
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
+  mcp-context7:
+    image: speedwave-mcp-context7:latest
+    container_name: speedwave_test_mcp_context7
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/context7:/tokens:ro
     environment:
       - PORT=3000
     networks:
@@ -3141,6 +3164,10 @@ services:
         )));
         assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_ATLASSIAN,
+            &manifest.bundle_id
+        )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_CONTEXT7,
             &manifest.bundle_id
         )));
 
@@ -6713,6 +6740,7 @@ services:
             atlassian: true,
             office: true,
             playwright: true,
+            context7: true,
             ..ResolvedIntegrationsConfig::default()
         };
         let result =
@@ -7739,6 +7767,7 @@ services:
       - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
       - WORKER_OFFICE_URL=http://mcp-office:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
+      - WORKER_CONTEXT7_URL=http://mcp-context7:3000
     networks:
       - speedwave_test_network
       - speedwave_test_network_office
@@ -7887,6 +7916,24 @@ services:
     networks:
       - speedwave_test_network
 
+  mcp-context7:
+    image: speedwave-mcp-context7:latest
+    container_name: speedwave_test_mcp_context7
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/context7:/tokens:ro
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
 networks:
   speedwave_test_network:
     driver: bridge
@@ -7905,6 +7952,7 @@ networks:
             atlassian: true,
             office: true,
             playwright: true,
+            context7: true,
             ..Default::default()
         }
     }
