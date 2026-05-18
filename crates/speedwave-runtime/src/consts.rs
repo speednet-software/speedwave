@@ -1983,4 +1983,25 @@ mod tests {
             );
         }
     }
+
+    // Guard: only the SharePoint `site_id` field carries a hint today. Adding
+    // a hint to another field is fine but should be a deliberate edit, not a
+    // silent regression — and dropping the site_id hint would break the UI fix.
+    #[test]
+    fn only_sharepoint_site_id_has_hint() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            for field in svc.auth_fields {
+                let expected_some = svc.config_key == "sharepoint" && field.key == "site_id";
+                assert_eq!(
+                    field.hint.is_some(),
+                    expected_some,
+                    "auth field {}.{}: hint={:?} but expected_some={}",
+                    svc.config_key,
+                    field.key,
+                    field.hint,
+                    expected_some
+                );
+            }
+        }
+    }
 }

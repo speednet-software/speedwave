@@ -1856,6 +1856,18 @@ describe('SharePointClient', () => {
       );
     });
 
+    it('should return null when site_id contains ".." traversal segment', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/../Other:';
+        return '';
+      });
+
+      const result = await initializeSharePointClient();
+      expect(result).toBeNull();
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('"..".'));
+    });
+
     it('should accept composite-form site_id', async () => {
       mockLoadToken.mockImplementation(async (path: string) => {
         if (path.includes('access_token')) return 'test-access-token';
