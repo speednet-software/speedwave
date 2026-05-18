@@ -329,11 +329,7 @@ describe('refreshAccessToken', () => {
     ).rejects.toMatchObject({ code: 'tool_error' });
   });
 
-  it('propagates AbortError when the loopback fetch is aborted (30s timeout)', async () => {
-    // The loopback POST to the host-side oauth worker has a 30s
-    // AbortController. If the worker hangs the AbortError must propagate
-    // unchanged so the caller's handler can surface it instead of waiting
-    // indefinitely.
+  it('wraps AbortError as OAuthRefreshError(timeout) when the loopback fetch is aborted (30s timeout)', async () => {
     const abortError = Object.assign(new Error('The operation was aborted.'), {
       name: 'AbortError',
     });
@@ -344,6 +340,32 @@ describe('refreshAccessToken', () => {
         bearerPath,
         fetchImpl: fetchImpl as unknown as typeof fetch,
       })
-    ).rejects.toMatchObject({ name: 'AbortError' });
+    ).rejects.toMatchObject({ name: 'OAuthRefreshError', code: 'timeout' });
+  });
+
+  it('wraps TCP refused as OAuthRefreshError(worker_unreachable)', async () => {
+    // undici/Node's fetch throws TypeError("fetch failed") when the host-side
+    // oauth worker port is dead (common when WORKER_OAUTH_URL points at a
+    // stale ephemeral port after a worker respawn).
+    const tcpError = new TypeError('fetch failed');
+    const fetchImpl = vi.fn().mockRejectedValue(tcpError);
+    await expect(
+      refreshAccessToken({
+        service: 'sharepoint',
+        bearerPath,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      })
+    ).rejects.toMatchObject({ name: 'OAuthRefreshError', code: 'worker_unreachable' });
+  });
+
+  it('worker_unreachable error includes the worker URL and a recovery hint', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    await expect(
+      refreshAccessToken({
+        service: 'sharepoint',
+        bearerPath,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      })
+    ).rejects.toThrow(/cannot reach oauth worker at .*Restart the project/);
   });
 });

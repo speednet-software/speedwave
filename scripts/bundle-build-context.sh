@@ -17,7 +17,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEST="$REPO_ROOT/desktop/src-tauri"
+# Default to the in-repo Tauri resource dir for production. Tests override via
+# BUNDLE_DEST so concurrent `make test` and `make dev` do not race on the same
+# files (see _tests/desktop/bundle-build-context.bats).
+DEST="${BUNDLE_DEST:-$REPO_ROOT/desktop/src-tauri}"
 
 # Clean destination to prevent stale files from previous runs
 rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/host_exec" "$DEST/oauth"

@@ -1182,30 +1182,47 @@ fn start_oauth_watchdog(oauth_arc: SharedOauth) {
             if OAUTH_WATCHDOG_STOP.load(Ordering::Relaxed) {
                 break;
             }
-            let mut map = match oauth_arc.lock() {
-                Ok(g) => g,
-                Err(e) => {
-                    log::error!("oauth watchdog: map mutex poisoned: {e}");
-                    break;
-                }
-            };
-            if map.is_empty() {
-                continue;
-            }
-            let names: Vec<String> = map.keys().cloned().collect();
-            for name in names {
-                let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
-                if alive {
+            // Respawn under the lock; defer container recreate until after we release it
+            // so OAuth-consuming workers see the new WORKER_OAUTH_URL.
+            let respawned: Vec<String> = {
+                let mut map = match oauth_arc.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        log::error!("oauth watchdog: map mutex poisoned: {e}");
+                        break;
+                    }
+                };
+                if map.is_empty() {
                     continue;
                 }
-                if let Some(proc) = map.get_mut(&name) {
-                    log::warn!("oauth watchdog: worker for '{name}' unhealthy — respawning");
-                    if let Err(e) = proc.respawn() {
-                        log::error!("oauth watchdog: respawn for '{name}' failed: {e}");
+                let names: Vec<String> = map.keys().cloned().collect();
+                let mut respawned = Vec::new();
+                for name in names {
+                    let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
+                    if alive {
+                        continue;
+                    }
+                    if let Some(proc) = map.get_mut(&name) {
+                        log::warn!("oauth watchdog: worker for '{name}' unhealthy — respawning");
+                        match proc.respawn() {
+                            Ok(port) => {
+                                log::info!("oauth watchdog: respawned '{name}' (port {port})");
+                                respawned.push(name);
+                            }
+                            Err(e) => {
+                                log::error!("oauth watchdog: respawn for '{name}' failed: {e}");
+                            }
+                        }
                     }
                 }
+                respawned
+            };
+            // Lock released — recreate containers so OAuth consumers pick up the new port.
+            for name in respawned {
+                host_exec_cmd::recreate_project_containers_if_running(&name);
             }
         }
+        log::info!("oauth watchdog: stopped");
     });
 }
 

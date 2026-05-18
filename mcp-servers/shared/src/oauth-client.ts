@@ -124,6 +124,21 @@ export async function refreshAccessToken(
         }),
         signal: controller.signal,
       });
+    } catch (err) {
+      // undici/Node's fetch throws TypeError("fetch failed") on TCP refused,
+      // DNS NXDOMAIN, etc. — give callers a typed error with a code they can
+      // surface to the user instead of the generic "fetch failed".
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new OAuthRefreshError(
+          'timeout',
+          `oauth worker did not respond within 30s at ${workerUrl}`
+        );
+      }
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new OAuthRefreshError(
+        'worker_unreachable',
+        `cannot reach oauth worker at ${workerUrl}: ${detail}. Restart the project from Speedwave Desktop to refresh WORKER_OAUTH_URL.`
+      );
     } finally {
       clearTimeout(timeoutId);
     }

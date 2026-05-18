@@ -150,6 +150,51 @@ function debugLog(message: string, data?: unknown): void {
 }
 
 /**
+ * Refresh `expires_at - PROACTIVE_REFRESH_SECONDS` before the token expires.
+ * Avoids the 401→refresh→retry round-trip and the race window where the host
+ * oauth watchdog has just respawned the worker.
+ */
+const PROACTIVE_REFRESH_SECONDS = 120;
+
+/**
+ * Read the `exp` claim from a Microsoft Graph access token (JWT). Returns
+ * `null` for malformed/non-JWT tokens; callers treat that as "do not refresh
+ * proactively" so legacy or test tokens keep working via the 401 path.
+ * @param token - JWT access token
+ */
+export function readJwtExp(token: string): number | null {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    // base64url decode the payload
+    const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = Buffer.from(padded, 'base64').toString('utf8');
+    const payload = JSON.parse(json) as { exp?: unknown };
+    return typeof payload.exp === 'number' ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when the access token's `exp` claim is within `seconds` of now (or in
+ * the past). Returns `false` for tokens we can't parse — those go through the
+ * reactive 401 path.
+ * @param token - JWT access token
+ * @param seconds - refresh window
+ * @param nowMs - injectable clock for tests
+ */
+export function accessTokenExpiresWithin(
+  token: string,
+  seconds: number,
+  nowMs: number = Date.now()
+): boolean {
+  const exp = readJwtExp(token);
+  if (exp === null) return false;
+  return exp * 1000 - nowMs < seconds * 1000;
+}
+
+/**
  * SharePoint/Microsoft Graph API client with automatic token refresh and error handling
  * Acts as a facade coordinating TokenManager and PathValidator modules
  * @class SharePointClient
@@ -345,6 +390,21 @@ export class SharePointClient {
    * @private
    */
   private async callGraphAPI(url: string, options: RequestInit = {}): Promise<Response> {
+    // Proactive refresh: avoid the 401→refresh→retry round-trip and the race
+    // window where the oauth watchdog has just respawned the worker.
+    if (accessTokenExpiresWithin(this.config.accessToken, PROACTIVE_REFRESH_SECONDS)) {
+      const tokenBeforeRefresh = this.config.accessToken;
+      const release = await this.refreshMutex.acquire();
+      try {
+        // Another caller may have refreshed while we waited for the mutex.
+        if (this.config.accessToken === tokenBeforeRefresh) {
+          await this.refreshAccessToken();
+        }
+      } finally {
+        release();
+      }
+    }
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.API_CALL_MS);
 

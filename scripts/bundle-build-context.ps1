@@ -11,7 +11,9 @@
 
 $ErrorActionPreference = 'Stop'
 
-$dest = 'desktop\src-tauri'
+# Default to the in-repo Tauri resource dir. Tests override via $env:BUNDLE_DEST
+# so concurrent test + dev runs do not race on the same files (mirrors the .sh).
+$dest = if ($env:BUNDLE_DEST) { $env:BUNDLE_DEST } else { 'desktop\src-tauri' }
 
 # Clean destination
 Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\host_exec","$dest\oauth" -ErrorAction SilentlyContinue

@@ -11,6 +11,8 @@ import {
   SharePointConfig,
   validateGraphSiteId,
   resolveCompositeSiteId,
+  readJwtExp,
+  accessTokenExpiresWithin,
 } from './client.js';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
@@ -406,6 +408,63 @@ describe('SharePointClient', () => {
       expect(mockOauthRefresh).toHaveBeenCalledWith(
         expect.objectContaining({ service: 'sharepoint' })
       );
+    });
+
+    it('proactively refreshes before fetch when JWT exp is near', async () => {
+      // Build a JWT that expires in 30s (< 120s window) so the proactive path triggers.
+      const b64 = (s: string) =>
+        Buffer.from(s, 'utf8')
+          .toString('base64')
+          .replace(/=/g, '')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_');
+      const nearExpiry = Math.floor(Date.now() / 1000) + 30;
+      const expiringJwt = `${b64('{"alg":"HS256"}')}.${b64(JSON.stringify({ exp: nearExpiry }))}.sig`;
+      const expiringClient = new SharePointClient(
+        { ...mockConfig, accessToken: expiringJwt },
+        mockTokensDir
+      );
+      mockLoadToken.mockResolvedValueOnce('post-proactive-refresh-token');
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await expiringClient.listFiles();
+
+      // Proactive path triggered the host-side oauth worker before any 401.
+      expect(mockOauthRefresh).toHaveBeenCalledWith(
+        expect.objectContaining({ service: 'sharepoint' })
+      );
+      // Only ONE fetch — no 401 round-trip, no retry.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // The single fetch used the refreshed token.
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: 'Bearer post-proactive-refresh-token',
+          }),
+        })
+      );
+    });
+
+    it('does NOT proactively refresh when JWT exp is far in the future', async () => {
+      const b64 = (s: string) =>
+        Buffer.from(s, 'utf8')
+          .toString('base64')
+          .replace(/=/g, '')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_');
+      const farExpiry = Math.floor(Date.now() / 1000) + 3600;
+      const freshJwt = `${b64('{"alg":"HS256"}')}.${b64(JSON.stringify({ exp: farExpiry }))}.sig`;
+      const freshClient = new SharePointClient(
+        { ...mockConfig, accessToken: freshJwt },
+        mockTokensDir
+      );
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await freshClient.listFiles();
+
+      expect(mockOauthRefresh).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('should use already-refreshed token when double-check detects another thread refreshed it', async () => {
@@ -2173,5 +2232,76 @@ describe('SharePointClient', () => {
       expect(result).toMatchObject({ ok: false, reason: 'validation' });
       expect(spy).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('readJwtExp', () => {
+  function jwt(payload: Record<string, unknown>): string {
+    const b64 = (s: string) =>
+      Buffer.from(s, 'utf8')
+        .toString('base64')
+        .replace(/=/g, '')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
+    return `${b64('{"alg":"HS256"}')}.${b64(JSON.stringify(payload))}.sig`;
+  }
+
+  it('returns the exp claim as a number', () => {
+    expect(readJwtExp(jwt({ exp: 1779000000 }))).toBe(1779000000);
+  });
+
+  it('returns null for non-JWT plain strings', () => {
+    expect(readJwtExp('test-access-token')).toBeNull();
+  });
+
+  it('returns null when the JWT has no exp claim', () => {
+    expect(readJwtExp(jwt({ sub: 'user' }))).toBeNull();
+  });
+
+  it('returns null when the JWT exp is not a number', () => {
+    expect(readJwtExp(jwt({ exp: 'soon' }))).toBeNull();
+  });
+
+  it('returns null when the payload is not valid base64', () => {
+    expect(readJwtExp('header.@@@.sig')).toBeNull();
+  });
+
+  it('returns null for empty string', () => {
+    expect(readJwtExp('')).toBeNull();
+  });
+});
+
+describe('accessTokenExpiresWithin', () => {
+  function jwt(exp: number): string {
+    const b64 = (s: string) =>
+      Buffer.from(s, 'utf8')
+        .toString('base64')
+        .replace(/=/g, '')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
+    return `${b64('{"alg":"HS256"}')}.${b64(JSON.stringify({ exp }))}.sig`;
+  }
+
+  const NOW_MS = 1_779_000_000_000;
+  const NOW_S = NOW_MS / 1000;
+
+  it('true when token expires inside the window', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S + 30), 120, NOW_MS)).toBe(true);
+  });
+
+  it('true when token is already expired', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S - 60), 120, NOW_MS)).toBe(true);
+  });
+
+  it('false when token expires beyond the window', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S + 600), 120, NOW_MS)).toBe(false);
+  });
+
+  it('false exactly at the window boundary (strict <)', () => {
+    expect(accessTokenExpiresWithin(jwt(NOW_S + 120), 120, NOW_MS)).toBe(false);
+  });
+
+  it('false for unparseable tokens (legacy/test strings)', () => {
+    expect(accessTokenExpiresWithin('test-access-token', 120, NOW_MS)).toBe(false);
   });
 });

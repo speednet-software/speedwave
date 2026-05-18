@@ -273,13 +273,24 @@ impl Drop for OauthProcess {
     }
 }
 
-/// Quick TCP liveness probe against `127.0.0.1:<port>`.
+/// TCP liveness probe against `127.0.0.1:<port>`. Retries twice on failure
+/// with a 200ms backoff — oauth respawn forces a recreate of every consumer
+/// container, so a transient probe failure (worker mid-refresh, accept loop
+/// briefly stalled) must NOT cascade into a respawn loop.
 pub fn is_oauth_alive(port: u16) -> bool {
     if port == 0 {
         return false;
     }
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    std::net::TcpStream::connect_timeout(&addr, PORT_PROBE_TIMEOUT).is_ok()
+    for attempt in 0..3 {
+        if std::net::TcpStream::connect_timeout(&addr, PORT_PROBE_TIMEOUT).is_ok() {
+            return true;
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+    false
 }
 
 /// Set owner-only permissions on the per-project state dir.
@@ -575,6 +586,27 @@ mod tests {
     fn is_oauth_alive_returns_false_for_closed_port() {
         // Port 1 is privileged and almost never listening
         assert!(!is_oauth_alive(1));
+    }
+
+    #[test]
+    fn is_oauth_alive_returns_true_when_listener_accepts() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(is_oauth_alive(port));
+    }
+
+    #[test]
+    fn is_oauth_alive_false_takes_at_least_two_retry_backoffs() {
+        // 3 attempts × 500ms timeout each + 2 × 200ms backoff. Failing-fast on
+        // port 1 (RST instead of timeout) so we measure only the backoff window.
+        let start = std::time::Instant::now();
+        assert!(!is_oauth_alive(1));
+        // At least 2 × 200ms backoff must have elapsed before giving up.
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(400),
+            "probe gave up too early: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
