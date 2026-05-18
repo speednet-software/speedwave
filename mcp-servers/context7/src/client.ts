@@ -13,6 +13,7 @@ import { request, Dispatcher } from 'undici';
 import {
   BASE_URL,
   MAX_OUTPUT_TOKENS,
+  MAX_RESPONSE_BYTES,
   MAX_SEARCH_RESULTS,
   MIN_OUTPUT_TOKENS,
   REQUEST_TIMEOUT_MS,
@@ -158,7 +159,7 @@ export class Context7Client {
    * @param url - Fully constructed URL
    */
   private async fetchText(url: string): Promise<Context7CallResult<string>> {
-    const { body, tier } = await this.fetchRaw(url, 'application/json, text/plain');
+    const { body, tier } = await this.fetchRaw(url, 'text/plain');
     return { data: body, tier };
   }
 
@@ -190,7 +191,7 @@ export class Context7Client {
           headersTimeout: REQUEST_TIMEOUT_MS,
         });
         const tier = headerToTier(response.headers['context7-quota-tier']);
-        const body = await response.body.text();
+        const body = await readBodyLimited(response.body, MAX_RESPONSE_BYTES, tier);
         const status = response.statusCode;
 
         if (status === 200) {
@@ -247,7 +248,7 @@ function mapErrorStatus(
 
   if (status === 202) {
     return new Context7Error(
-      'Library indexing in progress — retry in a moment',
+      'Library indexing in progress — call this tool again in a moment.',
       status,
       tier,
       false
@@ -376,4 +377,34 @@ export function clampTokens(tokens: number): number {
  */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Drain a response body to a string, throwing if it would exceed `maxBytes`.
+ *
+ * Undici's `.text()` has no byte ceiling — a 500 MB upstream response would
+ * be buffered in full, bounded only by the 128 MiB container cap (OOM kill,
+ * not a clean error). This iterates chunks with a running byte counter and
+ * aborts cleanly before memory pressure becomes a problem.
+ * @param body - Undici response body (AsyncIterable of Buffer chunks)
+ * @param maxBytes - Upper bound on total bytes
+ * @param tier - Quota tier to attach to the error
+ */
+async function readBodyLimited(
+  body: Dispatcher.ResponseData['body'],
+  maxBytes: number,
+  tier: QuotaTier
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of body) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) {
+      body.destroy();
+      throw new Context7Error(`Context7 response exceeded ${maxBytes} bytes`, 0, tier, false);
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks).toString('utf-8');
 }

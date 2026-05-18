@@ -326,6 +326,18 @@ describe('Context7Client misc', () => {
     expect(e.tier).toBe('anonymous');
     expect(e.retryable).toBe(false);
   });
+
+  it('aborts when response body exceeds MAX_RESPONSE_BYTES — OOM regression guard', async () => {
+    const { client, mock } = makeClient();
+    // 6 MiB of payload — over the 5 MiB cap. The mock streams it as one chunk;
+    // readBodyLimited must reject before buffering the whole thing.
+    const oversized = 'x'.repeat(6 * 1024 * 1024);
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(200, oversized, { headers: { 'content-type': 'application/json' } });
+
+    await expect(client.searchLibraries('react', 'q')).rejects.toThrow(/exceeded/);
+  });
 });
 
 describe('clampTokens', () => {

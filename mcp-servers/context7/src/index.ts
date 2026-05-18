@@ -31,8 +31,12 @@ async function loadOptionalApiKey(): Promise<string | undefined> {
     const key = await loadToken(apiKeyPath);
     return key.length > 0 ? key : undefined;
   } catch (e) {
-    const msg = (e as Error).message;
-    if (msg.includes('Token file not found')) {
+    // `loadToken` wraps ENOENT with its own message, but the original errno
+    // is preserved as `cause` (set by `fs.readFile`). Prefer the code check
+    // so this still works if the shared library ever rewords the message.
+    const cause = (e as { cause?: NodeJS.ErrnoException }).cause;
+    const code = cause?.code ?? (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || /Token file not found/.test((e as Error).message)) {
       return undefined;
     }
     throw e;
@@ -69,13 +73,9 @@ async function main(): Promise<void> {
     host: '0.0.0.0', // bind all interfaces — must be reachable from the container network
     tools,
     auth: { token: AUTH_TOKEN },
-    // Local readiness only — calling Context7 here would burn anonymous quota
-    // within hours (~2880 healthchecks/day per worker vs. 200/day per-IP limit).
-    healthCheck: async () => {
-      if (!context7Client) {
-        throw new Error('Context7 client not initialised');
-      }
-    },
+    // Local-readiness only: no `healthCheck` callback. Probing Context7 here
+    // would burn anonymous quota in hours (~2880 calls/day per worker vs.
+    // 200/day per source IP). `index.test.ts` guards against regressing this.
   });
 
   const actualPort = await server.start();

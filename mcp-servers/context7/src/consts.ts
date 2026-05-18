@@ -23,3 +23,6 @@ export const MAX_SEARCH_RESULTS = 10;
 
 /** Per-request timeout (ms) for Context7 HTTP calls. */
 export const REQUEST_TIMEOUT_MS = 30_000;
+
+/** Maximum response body size (bytes) — defence-in-depth against a runaway upstream. */
+export const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
