@@ -53,7 +53,7 @@ hound = { version = "3", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "stream"], optional = true }
 # Untar the sherpa-onnx diarization-model archives (`.tar.bz2`).
 tar = { version = "0.4", optional = true }
-bzip2 = { version = "0.4", optional = true }
+bzip2 = { version = "0.6", optional = true }
 # Whisper (transcription) — links libwhisper, built from whisper.cpp's vendored
 # submodule via cmake at build time (so CI needs `cmake`). The `metal` backend
 # is added on macOS only via the target-specific block below; CPU elsewhere.
