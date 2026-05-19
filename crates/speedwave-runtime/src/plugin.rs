@@ -54,13 +54,12 @@ pub struct PluginManifest {
     pub slug: String,
     pub version: String,
     pub description: String,
-    /// DEPRECATED — ignored by compose emitter since ADR-038.
-    ///
-    /// All workers (built-in and plugin) now listen on the same internal
-    /// port ([`consts::PORT_WORKER`]). Kept `Option<u16>` for backward
-    /// compatibility with already-signed plugin manifests; setting a non-zero
-    /// value merely emits a warning at compose render time.
-    #[serde(default)]
+    /// Ignored by the compose emitter — all workers listen on
+    /// [`consts::PORT_WORKER`] (ADR-038). Field kept `Option<u16>` so already-signed
+    /// plugin manifests still deserialize; a non-zero value emits a warning at
+    /// compose render time. `#[serde(skip_serializing)]` so new manifests don't
+    /// include it.
+    #[serde(default, skip_serializing)]
     pub port: Option<u16>,
     #[serde(default)]
     pub image_tag: Option<String>,
