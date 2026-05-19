@@ -53,7 +53,9 @@ fi
 if command -v shasum >/dev/null 2>&1; then
   ACTUAL="$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')"
 else
-  ACTUAL="$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')"
+  # MSYS2 sha256sum (Git Bash on windows-latest) prefixes the hash with `\`
+  # when the path contained backslashes — strip it so the compare matches.
+  ACTUAL="$(sha256sum "$ARCHIVE_PATH" | awk '{ sub(/^\\/, "", $1); print $1 }')"
 fi
 
 if [ "$EXPECTED" != "$ACTUAL" ]; then
