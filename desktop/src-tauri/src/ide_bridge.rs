@@ -1051,12 +1051,13 @@ async fn handle_with_stubs<S>(
 // Reaching a 127.0.0.1-only bind from the container works because the host
 // VM (Lima on macOS, WSL2 on Windows) installs a default forwarder from VM
 // gateway → host loopback. Lima registers a catch-all rule for non-privileged
-// ports on loopback when no explicit port forwards are configured (impl in
-// `pkg/hostagent/hostagent.go`). [^1] WSL2 reaches the host loopback through
-// the host gateway in both NAT and mirrored networking modes. [^2]
+// ports on loopback when no explicit port forwards are configured. [^1] [^2]
+// WSL2 reaches the host loopback through the host gateway in both NAT and
+// mirrored networking modes. [^3]
 //
 // [^1]: https://lima-vm.io/docs/config/port/
-// [^2]: https://learn.microsoft.com/en-us/windows/wsl/networking
+// [^2]: https://github.com/lima-vm/lima/blob/master/pkg/hostagent/hostagent.go
+// [^3]: https://learn.microsoft.com/en-us/windows/wsl/networking
 
 async fn run_websocket_on_tcp(
     std_listener: std::net::TcpListener,
