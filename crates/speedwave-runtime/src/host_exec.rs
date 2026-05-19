@@ -545,6 +545,20 @@ mod tests {
             "busybox",
             "toybox",
             "/bin/busybox",
+            // Windows interpreters — same threat surface (-Command / -c / script arg).
+            "powershell",
+            "powershell.exe",
+            "pwsh",
+            "PWSH.EXE",
+            "cmd",
+            "cmd.exe",
+            "CMD",
+            "cscript",
+            "wscript",
+            "mshta",
+            "wsl",
+            "wsl.exe",
+            r"C:\Windows\System32\powershell.exe",
         ] {
             let err = validate_host_exec_config(&cfg(vec![recipe("x", sh, &["-c", "{cmd}"])]))
                 .unwrap_err()
