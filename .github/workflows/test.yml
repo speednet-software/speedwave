@@ -72,7 +72,8 @@ jobs:
         working-directory: mcp-servers
         run: |
           (cd shared && npx tsc)
-          for ws in hub slack sharepoint redmine gitlab os; do
+          # `playwright` is a Container-built bridge worker — no TS sources, no tsconfig.
+          for ws in hub slack sharepoint redmine gitlab os atlassian context7 github host_exec oauth office; do
             echo "tsc --noEmit $ws"
             (cd "$ws" && npx tsc --noEmit)
           done

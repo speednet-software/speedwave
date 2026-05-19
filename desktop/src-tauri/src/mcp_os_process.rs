@@ -309,11 +309,13 @@ fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
     cmd.env("PATH", env.var("PATH").unwrap_or_default());
 
     // HOME is set on Unix (macOS/Linux) but typically not on Windows, where
-    // USERPROFILE is the equivalent. Setting HOME to an empty string on
-    // Windows would break Node.js path resolution (e.g. os.homedir()).
+    // USERPROFILE is the equivalent. Setting HOME to an empty string on Unix
+    // would break Node.js path resolution (e.g. os.homedir()).
     // USERPROFILE is already forwarded via WINDOWS_SYSTEM_ENV_VARS above.
     #[cfg(not(target_os = "windows"))]
-    cmd.env("HOME", env.var("HOME").unwrap_or_default());
+    if let Some(home) = env.var("HOME") {
+        cmd.env("HOME", home);
+    }
 
     // Production mode: forward resource directory so mcp-os resolves native
     // CLI binaries from the bundled .app/Contents/Resources/ layout instead
@@ -910,7 +912,9 @@ srv.listen(0, '127.0.0.1', () => {
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default());
         #[cfg(not(target_os = "windows"))]
-        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
         let result = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -1129,7 +1133,9 @@ process.stdout.write(JSON.stringify({ leaked }));
 
         cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
         #[cfg(not(target_os = "windows"))]
-        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
         let result = cmd
             .env("PORT", "0")
             .env("MCP_OS_AUTH_TOKEN", "test-token")
@@ -1583,7 +1589,7 @@ srv.listen(0, '127.0.0.1', () => {
     }
 
     #[test]
-    fn apply_child_env_defaults_path_and_home_to_empty_when_missing() {
+    fn apply_child_env_defaults_path_to_empty_when_missing_and_omits_home() {
         let mut cmd = Command::new("/bin/true");
         let env = FakeEnv(&[]);
 
@@ -1595,11 +1601,12 @@ srv.listen(0, '127.0.0.1', () => {
             Some(""),
             "PATH must always be set on the child, even if empty"
         );
+        // HOME="" makes Node.js os.homedir() return "" and breaks ~/.npm,
+        // ~/.cache, etc. — better to leave HOME unset than poison it.
         #[cfg(not(target_os = "windows"))]
-        assert_eq!(
-            captured.get("HOME").map(String::as_str),
-            Some(""),
-            "HOME must always be set on Unix children, even if empty"
+        assert!(
+            captured.get("HOME").is_none(),
+            "HOME must be omitted on Unix children when not set on the host"
         );
     }
 

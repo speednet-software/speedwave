@@ -64,9 +64,13 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
 fi
 echo "SHA256 verified (${ACTUAL})" >&2
 
-# Extract under OUT_ROOT — tarball top-level is ${EXTRACTED_TOP}/
+# Extract under OUT_ROOT — tarball top-level is ${EXTRACTED_TOP}/.
+# `cd $OUT_ROOT` + relative archive name keeps the drive-letter colon out of
+# tar's argv: MSYS2 tar (Git Bash on windows-latest) parses a `:` in a native
+# path like `D:\a\...` as `user@host:path` SSH form. The drive letter is fine
+# in the working directory, just not in the archive argument.
 rm -rf "${OUT_ROOT:?}/${EXTRACTED_TOP}"
-tar -xjf "$ARCHIVE_PATH" -C "$OUT_ROOT"
+(cd "$OUT_ROOT" && tar -xjf "$ARCHIVE")
 
 if [ ! -d "$LIB_DIR" ] || [ ! -f "${LIB_DIR}/sherpa-onnx-c-api.lib" ]; then
   echo "::error::extraction produced no lib/ with sherpa-onnx-c-api.lib at ${LIB_DIR}" >&2

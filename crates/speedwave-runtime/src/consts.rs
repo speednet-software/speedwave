@@ -68,9 +68,32 @@ pub const HOST_EXEC_PARAM_PATTERN_MAX_LEN: usize = 4096;
 
 /// Banned `exec` basenames (shell / eval launchers).
 /// SSOT; case-insensitive. See ADR-054 §"Hard ban on direct shell/eval launchers".
+/// Windows interpreters (`powershell`, `cmd`, `pwsh`, `cscript`, `wscript`,
+/// `mshta`, `wsl`) are banned alongside Unix shells: each accepts an inline
+/// command or script argument (`-Command`/`/c`/script path) that executes
+/// arbitrary code.
 pub const HOST_EXEC_SHELL_LAUNCHERS: &[&str] = &[
-    "bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "env", "xargs", "find", "ssh", "sshpass",
-    "busybox", "toybox",
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "eval",
+    "env",
+    "xargs",
+    "find",
+    "ssh",
+    "sshpass",
+    "busybox",
+    "toybox",
+    "powershell",
+    "cmd",
+    "pwsh",
+    "cscript",
+    "wscript",
+    "mshta",
+    "wsl",
 ];
 
 /// Meta-tools banned only with a *bare* `{param}` argv element.
