@@ -4619,9 +4619,9 @@ services:
 
     #[test]
     fn compose_template_claude_has_canonical_host_gateway_entry() {
-        // Static template guard — the `claude` service must list the canonical
-        // host gateway alias in extra_hosts. Other services receive it
-        // dynamically through `ensure_host_gateway_extra_host`.
+        // Static template guard — `claude` and `mcp-playwright` must list the
+        // canonical host gateway alias in extra_hosts (ADR-062). Other services
+        // receive it dynamically through `ensure_host_gateway_extra_host`.
         let expected = format!(r#"- "{}:${{HOST_GATEWAY}}""#, consts::HOST_GATEWAY_ALIAS);
         assert!(
             COMPOSE_TEMPLATE.lines().any(|l| l.trim() == expected),
@@ -4678,8 +4678,11 @@ services:
             .unwrap_or(COMPOSE_TEMPLATE.len());
         let pw_block = &COMPOSE_TEMPLATE[pw_start..next_service];
         let expected = format!(r#"- "{}:${{HOST_GATEWAY}}""#, consts::HOST_GATEWAY_ALIAS);
+        // Match an actual YAML list item, not the same string inside a comment.
+        // `lines().any(|l| l.trim() == expected)` rejects commented-out lines
+        // (they start with `#` after trim), unlike `contains()` on the whole block.
         assert!(
-            pw_block.contains(&expected),
+            pw_block.lines().any(|l| l.trim() == expected),
             "mcp-playwright section in compose.template.yml must declare extra_hosts '{expected}' (ADR-062)"
         );
     }
