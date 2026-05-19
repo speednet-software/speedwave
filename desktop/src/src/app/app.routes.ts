@@ -1,6 +1,7 @@
 import { Routes } from '@angular/router';
 import { setupCompleteGuard } from './guards/setup-complete.guard';
 import { setupNotCompleteGuard } from './guards/setup-not-complete.guard';
+import { betaEnabledGuard } from './guards/beta-enabled.guard';
 
 export const routes: Routes = [
   {
@@ -36,6 +37,14 @@ export const routes: Routes = [
         loadComponent: () =>
           import('./plugins/plugin-detail/plugin-detail.component').then(
             (m) => m.PluginDetailComponent
+          ),
+      },
+      {
+        path: 'meeting-transcription',
+        canActivate: [betaEnabledGuard],
+        loadComponent: () =>
+          import('./meeting-transcription/meeting-transcription.component').then(
+            (m) => m.MeetingTranscriptionComponent
           ),
       },
       {

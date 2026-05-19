@@ -1,5 +1,8 @@
 {
   "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
     "resources": {
       "lima/bin/limactl": "lima/bin/limactl",
       "lima/share/": "lima/share/",
@@ -8,11 +11,14 @@
       "build-context/mcp-servers/": "build-context/mcp-servers/",
       "nodejs/bin/node": "nodejs/bin/node",
       "mcp-os/": "mcp-os/",
+      "host_exec/": "host_exec/",
+      "oauth/": "oauth/",
       "cli/speedwave": "cli/speedwave",
       "reminders-cli": "reminders-cli",
       "calendar-cli": "calendar-cli",
       "mail-cli": "mail-cli",
-      "notes-cli": "notes-cli"
+      "notes-cli": "notes-cli",
+      "audio-capture-cli": "audio-capture-cli"
     }
   }
 }

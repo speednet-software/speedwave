@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # e2e-vm.sh — Orchestrates E2E testing across remote machines via SSH.
 #
-# Linux:   connects to a real machine via SSH (SPEEDWAVE_LINUX_HOST).
 # Windows: connects to a real machine via SSH (SPEEDWAVE_WINDOWS_HOST).
 # macOS:   connects to a real machine via SSH (SPEEDWAVE_MACOS_HOST).
 #
 # Flow per platform:
-#   1. Copy repo, build full release artifact (.deb / NSIS / .dmg)
+#   1. Copy repo, build full release artifact (NSIS / .dmg)
 #   2. Clean previous state (uninstall + rm user data)
 #   3. Install artifact, launch app, run E2E tests
 #
 # Usage:
 #   scripts/e2e-vm.sh                    # run on all platforms in parallel
-#   scripts/e2e-vm.sh ubuntu             # run on Ubuntu only (SSH)
 #   scripts/e2e-vm.sh windows            # run on Windows only (SSH)
 #   scripts/e2e-vm.sh macos              # run on macOS only (SSH)
 
@@ -35,13 +33,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/e2e-common.sh"
 
 # SSOT: exclude list for repo transfers to remote E2E machines.
-# All 3 transfer functions (linux_rsync_to, macos_rsync_to, windows_rsync_to)
-# reference this array. Each remote machine downloads its own platform assets.
+# Both transfer functions (macos_rsync_to, windows_rsync_to) reference this
+# array. Each remote machine downloads its own platform assets.
 E2E_RSYNC_EXCLUDES=(
     node_modules target dist .e2e-artifacts .git build-context
     .angular .build
     'desktop/src-tauri/lima'
-    'desktop/src-tauri/nerdctl-full'
     'desktop/src-tauri/nodejs'
     'desktop/src-tauri/wsl'
     'desktop/src-tauri/cli'
@@ -54,7 +51,6 @@ E2E_RSYNC_EXCLUDES=(
 )
 
 # Override SSH opts with keepalive for long-running test sessions.
-LINUX_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
 WINDOWS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $WINDOWS_SSH_PORT"
 MACOS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
 
@@ -68,29 +64,18 @@ HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # -- Auto-provisioning ---------------------------------------------------------
 # Check if remote machine has required tools; run setup if not.
 
-ensure_provisioned_linux() {
-    # Source ~/.cargo/env explicitly — cargo is installed by rustup-init under
-    # ~/.cargo/bin which is only on PATH for interactive/login shells. SSH
-    # commands here run as a non-interactive, non-login shell, so without
-    # sourcing the env we'd always see cargo as "missing" and re-run setup.
-    if linux_ssh '. "$HOME/.cargo/env" 2>/dev/null; command -v npm && command -v cargo' >/dev/null 2>&1; then
-        echo "[linux] Provisioning: OK (npm + cargo found)"
-        return
-    fi
-    echo "[linux] Provisioning: missing tools — running setup..."
-    "${SCRIPT_DIR}/e2e-vm-setup.sh" ubuntu
-}
-
 ensure_provisioned_windows() {
-    # Check that WSL2 distro exists and PowerShell can find node + cargo
+    # Check that WSL2 distro exists and PowerShell can find node + cargo +
+    # cmake + libclang.dll (LIBCLANG_PATH set by setup script; both required
+    # by whisper-rs-sys / bindgen — ADR-056 meeting transcription).
     local ok=1
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
-        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
+        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
-        echo "[windows] Provisioning: OK (WSL2 + node + cargo found)"
+        echo "[windows] Provisioning: OK (WSL2 + node + cargo + cmake + libclang found)"
         return
     fi
     echo "[windows] Provisioning: missing tools — running setup..."
@@ -98,90 +83,13 @@ ensure_provisioned_windows() {
 }
 
 ensure_provisioned_macos() {
-    if macos_ssh "command -v npm && command -v cargo" >/dev/null 2>&1; then
-        echo "[macos] Provisioning: OK (npm + cargo found)"
+    # cmake required by whisper-rs-sys (ADR-056 meeting transcription).
+    if macos_ssh "command -v npm && command -v cargo && command -v cmake" >/dev/null 2>&1; then
+        echo "[macos] Provisioning: OK (npm + cargo + cmake found)"
         return
     fi
     echo "[macos] Provisioning: missing tools — running setup..."
     "${SCRIPT_DIR}/e2e-vm-setup.sh" macos
-}
-
-# -- Helper functions: SSH (Linux) ---------------------------------------------
-
-# Copy files to the Linux machine via rsync-over-ssh.
-linux_rsync_to() {
-    local src="$1" dst="$2"
-    local -a exclude_args=()
-    for e in "${E2E_RSYNC_EXCLUDES[@]}"; do exclude_args+=(--exclude "$e"); done
-    # shellcheck disable=SC2086
-    rsync -az -e "ssh $LINUX_SSH_OPTS" --delete \
-        "${exclude_args[@]}" \
-        "$src" "${LINUX_HOST}:${dst}"
-}
-
-# Wait for SSH to become available (machine may have just booted).
-linux_wait_ssh() {
-    echo "[linux] Waiting for SSH on $LINUX_HOST..."
-    for i in $(seq 1 30); do
-        linux_ssh "echo ready" >/dev/null 2>&1 && { echo "[linux] SSH ready"; return 0; }
-        sleep 2
-    done
-    echo "[linux] ERROR: SSH not ready after 60s" >&2
-    return 1
-}
-
-# Clean previous Speedwave state — equivalent of snapshot restore.
-linux_clean_state() {
-    echo "[linux] Cleaning previous state..."
-    linux_ssh bash <<'CLEAN'
-set -euo pipefail
-# Kill the app first so it doesn't restart containers
-pkill -f speedwave-desktop 2>/dev/null || true
-pkill -f Xvfb 2>/dev/null || true
-# Stop and remove containers BEFORE removing ~/.speedwave (compose files live there)
-NERDCTL="/usr/lib/Speedwave/nerdctl-full/bin/nerdctl"
-if [ -x "$NERDCTL" ]; then
-    for compose_file in ~/.speedwave/compose/*/compose.yml; do
-        [ -f "$compose_file" ] || continue
-        project=$(basename "$(dirname "$compose_file")")
-        "$NERDCTL" compose -f "$compose_file" -p "$project" down 2>/dev/null || true
-    done
-    # Remove any leftover speedwave containers not covered by compose down
-    "$NERDCTL" ps -a --format '{{.Names}}' 2>/dev/null \
-        | grep '^speedwave_' \
-        | xargs -r "$NERDCTL" rm -f 2>/dev/null || true
-fi
-# Remove installed .deb if present
-sudo dpkg --remove speedwave 2>/dev/null || sudo dpkg --remove speedwave-desktop 2>/dev/null || true
-sudo DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>/dev/null || true
-# Stop rootless containerd + buildkit (installed as systemd --user services by setup wizard)
-systemctl --user stop buildkit 2>/dev/null || true
-systemctl --user disable buildkit 2>/dev/null || true
-systemctl --user stop containerd 2>/dev/null || true
-systemctl --user disable containerd 2>/dev/null || true
-# Reset failed state so a stale "failed" status from a prior run doesn't
-# propagate to the next run's ensure_ready check.
-systemctl --user reset-failed containerd buildkit 2>/dev/null || true
-# Remove user service files and state
-rm -f ~/.config/systemd/user/containerd.service ~/.config/systemd/user/buildkit.service 2>/dev/null || true
-systemctl --user daemon-reload 2>/dev/null || true
-# Kill rootlesskit process tree (both containerd and buildkit run inside
-# rootlesskit in rootless mode). Without this, stale processes hold locks
-# on snapshot directories, causing "failed to rename: file exists" errors
-# in the next test run.
-pkill -9 -f 'rootlesskit.*(containerd|buildkit)' 2>/dev/null || true
-sleep 1
-# Remove containerd rootless data (images, snapshots, state).
-# Use sudo because rootless buildkit snapshots contain files owned by mapped
-# subuids (not $USER), so plain rm -rf gets EPERM on nested overlayfs layers.
-sudo rm -rf ~/.local/share/containerd ~/.local/share/buildkit ~/.local/share/nerdctl 2>/dev/null || true
-rm -rf /run/user/$(id -u)/containerd-rootless 2>/dev/null || true
-# Remove Speedwave user data (config, compose files, setup markers)
-rm -rf ~/.speedwave 2>/dev/null || true
-# Remove previous build/test dirs
-rm -rf /tmp/speedwave-e2e /tmp/speedwave.deb /tmp/speedwave.log 2>/dev/null || true
-echo "Clean state ready"
-CLEAN
 }
 
 # -- Helper functions: SSH (Windows via native OpenSSH) ------------------------
@@ -465,168 +373,6 @@ echo "Clean state ready"
 CLEAN
 }
 
-# -- Platform: Linux (SSH) -----------------------------------------------------
-
-run_linux() {
-    linux_wait_ssh
-    ensure_provisioned_linux
-
-    # -- Phase 1: Build .deb package --------------------------------------------
-    # Copy the repo source to the Linux machine and produce a release .deb
-    # package — same as GitHub Actions CI.
-    echo "[linux] Phase 1: Building .deb package..."
-    echo "[linux] Syncing repo to remote..."
-    linux_ssh "rm -rf /tmp/speedwave-e2e" || true
-    linux_rsync_to "$HOST_REPO_DIR/" /tmp/speedwave-e2e/
-
-    linux_ssh bash <<'SCRIPT'
-set -euo pipefail
-cd /tmp/speedwave-e2e
-export PATH="$HOME/.cargo/bin:$PATH"
-# Limit cargo parallelism to half the CPU cores to avoid freezing the GUI desktop.
-# Full parallelism (22 threads on this machine) starves X11/Wayland compositor.
-TOTAL_CPUS=$(nproc 2>/dev/null || echo 8)
-export CARGO_BUILD_JOBS=$(( TOTAL_CPUS / 2 > 1 ? TOTAL_CPUS / 2 : 2 ))
-echo "── Using CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS (of $TOTAL_CPUS cores)"
-
-npm ci
-cd mcp-servers && npm ci && cd ..
-cd desktop/src && npm ci && cd ../..
-cd desktop/e2e && npm ci && cd ../..
-
-echo "── Building full release (.deb)..."
-make test-e2e-desktop-build
-
-echo "── Locating .deb artifact..."
-ls -la desktop/src-tauri/target/release/bundle/deb/*.deb
-
-echo "── Copying .deb to ~/Desktop/ for reuse across phases..."
-cp desktop/src-tauri/target/release/bundle/deb/*.deb ~/Desktop/speedwave.deb
-SCRIPT
-
-    # -- Phase 2: Install & test on clean system --------------------------------
-    # Clean previous state (equivalent of Parallels snapshot restore) — this
-    # removes the installed .deb, user data, and build artifacts. The machine
-    # is now a clean Ubuntu desktop, simulating a real user who just downloaded
-    # the .deb from GitHub Releases. ~/Desktop/speedwave.deb survives clean_state.
-    linux_clean_state
-
-    echo "[linux] Phase 2: Installing .deb and running E2E tests (clean system)..."
-    linux_ssh "cp ~/Desktop/speedwave.deb /tmp/speedwave.deb"
-
-    linux_ssh bash <<'SCRIPT'
-set -euo pipefail
-# Install .deb — this also installs the AppArmor profile and declares deps.
-# Use apt-get (stable CLI for scripts; apt prints "no stable CLI" warning).
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/speedwave.deb
-SCRIPT
-
-    # Copy E2E test suite — only wdio specs and deps, not the full repo
-    # shellcheck disable=SC2086
-    rsync -az -e "ssh $LINUX_SSH_OPTS" \
-        "$HOST_REPO_DIR/desktop/e2e/" "${LINUX_HOST}:/tmp/speedwave-e2e/"
-    linux_ssh "cd /tmp/speedwave-e2e && npm ci"
-
-    local exit_code=0
-    echo "[linux] Running E2E (first launch — clean system)..."
-    run_linux_e2e || exit_code=$?
-
-    if [ "$exit_code" -ne 0 ]; then
-        echo "[linux] FAILED on first launch (exit code: $exit_code)"
-        echo "[linux] .deb at: $LINUX_HOST:~/Desktop/speedwave.deb"
-        echo "[linux] Cleaning up..."
-        linux_clean_state
-        return "$exit_code"
-    fi
-
-    # -- Phase 3: Second launch (clean system again) -----------------------------
-    # Clean ALL state (same as Phase 2 prep) so the wizard runs from scratch.
-    # This verifies the app works correctly on a second fresh install — catching
-    # issues with leftover system-level state (systemd units, containerd data)
-    # that survive user-data removal.
-    echo "[linux] Phase 3: Running E2E again (second install — clean system)..."
-    linux_clean_state
-
-    echo "[linux] Reinstalling .deb..."
-    linux_ssh "cp ~/Desktop/speedwave.deb /tmp/speedwave.deb"
-    linux_ssh "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/speedwave.deb"
-
-    # Re-copy E2E test suite (linux_clean_state removed /tmp/speedwave-e2e)
-    # shellcheck disable=SC2086
-    rsync -az -e "ssh $LINUX_SSH_OPTS" \
-        "$HOST_REPO_DIR/desktop/e2e/" "${LINUX_HOST}:/tmp/speedwave-e2e/"
-    linux_ssh "cd /tmp/speedwave-e2e && npm ci"
-
-    run_linux_e2e || exit_code=$?
-
-    if [ "$exit_code" -eq 0 ]; then
-        echo "[linux] PASSED (both first and second install)"
-    else
-        echo "[linux] FAILED on second install (exit code: $exit_code)"
-    fi
-    echo "[linux] .deb at: $LINUX_HOST:~/Desktop/speedwave.deb"
-
-    # -- Cleanup: leave the machine clean after tests ----------------------------
-    echo "[linux] Cleaning up..."
-    linux_clean_state
-
-    return "$exit_code"
-}
-
-# Runs the Speedwave desktop app under Xvfb and executes wdio tests via SSH.
-# Expects the .deb to be installed and E2E suite to be in /tmp/speedwave-e2e.
-run_linux_e2e() {
-    linux_ssh bash <<'SCRIPT'
-set -euo pipefail
-
-# Kill any leftover Speedwave processes from previous runs
-pkill -f speedwave-desktop 2>/dev/null || true
-pkill -f Xvfb 2>/dev/null || true
-sleep 1
-
-# E2E tests create a project with this directory — it must exist.
-# Clean first to remove stale .speedwave.json from previous runs.
-rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
-mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
-
-# Ubuntu 24.04 defaults to Wayland — there may be no X server available.
-# Xvfb provides a virtual X11 framebuffer — no real display or Wayland needed.
-Xvfb :99 -screen 0 1280x720x24 &
-XVFB_PID=$!
-sleep 1
-
-export DISPLAY=:99
-
-/usr/bin/speedwave-desktop &
-APP_PID=$!
-
-cleanup() {
-    kill $APP_PID 2>/dev/null || true
-    pkill -f speedwave-desktop 2>/dev/null || true
-    kill $XVFB_PID 2>/dev/null || true
-    pkill -f Xvfb 2>/dev/null || true
-}
-trap cleanup EXIT
-
-for i in $(seq 1 15); do
-    curl -sf http://127.0.0.1:4445/status >/dev/null 2>&1 && break
-    sleep 1
-done
-
-export E2E_PROJECT_DIR=/tmp/speedwave-e2e-project
-export E2E_SECOND_PROJECT_DIR=/tmp/speedwave-e2e-project-2
-cd /tmp/speedwave-e2e && node_modules/.bin/wdio run wdio.conf.ts
-E2E_EXIT=$?
-
-cleanup
-trap - EXIT
-
-exit $E2E_EXIT
-SCRIPT
-}
-
-# -- Platform: Windows (SSH via native OpenSSH) --------------------------------
-
 run_windows() {
     windows_wait_ssh
     ensure_provisioned_windows
@@ -741,6 +487,15 @@ $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 $env:CARGO_TARGET_DIR = 'C:\cargo-build'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 Set-Location C:\speedwave-e2e
+
+# Windows CRT alignment: sherpa-onnx prebuilt MD-Release via SHERPA_ONNX_LIB_DIR
+# so the rest of the toolchain stays on /MD (default). Stage on C:\ so wslpath
+# returns a plain Windows path (not \\wsl.localhost\...) and the idempotency
+# guard survives between E2E runs. See ADR-061.
+$libDir = (wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'SHERPA_ONNX_FETCH_DIR=/mnt/c/sherpa-onnx-md /mnt/c/speedwave-e2e/scripts/lib/fetch-sherpa-onnx-md.sh').Trim()
+Assert-ExitCode
+$env:SHERPA_ONNX_LIB_DIR = (wsl.exe -d $WINDOWS_WSL_DISTRO -- wslpath -w "$libDir").Trim()
+Write-Host "SHERPA_ONNX_LIB_DIR = $env:SHERPA_ONNX_LIB_DIR"
 
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
 Set-Location desktop\src-tauri
@@ -1151,34 +906,6 @@ SCRIPT
     echo "[windows] Stop:  ssh $WINDOWS_SSH_OPTS $WINDOWS_HOST 'powershell.exe Stop-Process -Name speedwave-desktop -Force'"
 }
 
-preview_linux() {
-    linux_wait_ssh
-
-    # Require a pre-built .deb on the remote Desktop
-    linux_ssh "test -f ~/Desktop/speedwave.deb" || {
-        echo "No .deb at ~/Desktop/speedwave.deb — run Phase 1 first: scripts/e2e-vm.sh ubuntu"
-        return 1
-    }
-
-    linux_clean_state
-
-    echo "[linux] Installing .deb..."
-    linux_ssh "cp ~/Desktop/speedwave.deb /tmp/speedwave.deb"
-    linux_ssh "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/speedwave.deb"
-
-    # Launch with Xvfb (headless) — for manual testing, use VNC or connect
-    # to the machine's physical display instead.
-    linux_ssh bash <<'SCRIPT'
-export DISPLAY=:0
-nohup /usr/bin/speedwave-desktop >/tmp/speedwave.log 2>&1 &
-echo "Launched (PID $!)"
-SCRIPT
-
-    echo ""
-    echo "[linux] Speedwave is running on $LINUX_HOST."
-    echo "[linux] View logs:  ssh $LINUX_HOST tail -f /tmp/speedwave.log"
-    echo "[linux] Stop:       ssh $LINUX_HOST pkill speedwave-desktop"
-}
 
 preview_macos() {
     macos_wait_ssh
@@ -1214,12 +941,11 @@ SCRIPT
 TARGET="${1:-all}"
 
 case "$TARGET" in
-    ubuntu|linux)   run_linux ;;
     windows|win)    run_windows ;;
     macos|mac)      run_macos ;;
     all)
         PIDS=()
-        for fn in run_linux run_windows run_macos; do
+        for fn in run_windows run_macos; do
             $fn &
             PIDS+=($!)
         done
@@ -1237,12 +963,10 @@ case "$TARGET" in
         ;;
     preview-windows|preview-win)
         preview_windows ;;
-    preview-ubuntu|preview-linux)
-        preview_linux ;;
     preview-macos|preview-mac)
         preview_macos ;;
     *)
-        echo "Usage: $0 [ubuntu|windows|macos|all|preview-windows|preview-ubuntu|preview-macos]" >&2
+        echo "Usage: $0 [windows|macos|all|preview-windows|preview-macos]" >&2
         exit 1
         ;;
 esac

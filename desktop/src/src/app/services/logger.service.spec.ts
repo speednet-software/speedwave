@@ -66,4 +66,53 @@ describe('LoggerService', () => {
     expect(invokeSpy).toHaveBeenCalledTimes(1);
     expect(invokeSpy.mock.calls[0][1]).toMatchObject({ message: '' });
   });
+
+  // -- info / warn / debug levels --
+  // Each level forwards to the same `invoke('plugin:log|log', { message, level })`
+  // pipeline as `error` but with a different `level` integer. The plugin defines
+  // levels as Trace=1, Debug=2, Info=3, Warn=4, Error=5 (see @tauri-apps/plugin-log
+  // LogLevel enum). These tests pin the level integers so a future plugin
+  // version bump or accidental refactor (e.g. swapping info<>warn) is caught.
+
+  it('forwards info-level messages with level=3', async () => {
+    service.info('hello');
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    expect(invokeSpy.mock.calls[0][1]).toMatchObject({ message: 'hello', level: 3 });
+  });
+
+  it('forwards warn-level messages with level=4', async () => {
+    service.warn('careful');
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    expect(invokeSpy.mock.calls[0][1]).toMatchObject({ message: 'careful', level: 4 });
+  });
+
+  it('forwards debug-level messages with level=2', async () => {
+    service.debug('verbose');
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    expect(invokeSpy.mock.calls[0][1]).toMatchObject({ message: 'verbose', level: 2 });
+  });
+
+  it('swallows info/warn/debug failures the same way as error', async () => {
+    invokeSpy.mockRejectedValue(new Error('rust pipeline down'));
+
+    expect(() => service.info('x')).not.toThrow();
+    expect(() => service.warn('x')).not.toThrow();
+    expect(() => service.debug('x')).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+    // 3 calls, all failed at the invoke layer, none propagated to the caller.
+    expect(invokeSpy).toHaveBeenCalledTimes(3);
+  });
 });

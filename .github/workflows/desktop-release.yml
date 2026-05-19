@@ -135,9 +135,6 @@ jobs:
           - platform: macos-latest
             args: "--target x86_64-apple-darwin"
             arch_label: "macOS_Intel"
-          - platform: ubuntu-22.04
-            args: ""
-            arch_label: ""
           - platform: windows-latest
             args: ""
             arch_label: ""
@@ -148,17 +145,6 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
-
-      - name: Install Linux system dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libssl-dev
 
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -306,22 +292,18 @@ jobs:
         with:
           arch: ${{ contains(matrix.args, 'aarch64') && 'aarch64' || 'x86_64' }}
 
-      - name: Download nerdctl-full for bundling
-        if: matrix.platform == 'ubuntu-22.04'
-        uses: ./.github/actions/download-nerdctl-full
-        with:
-          arch: amd64
-
       - name: Download WSL resources for offline bundling
         if: matrix.platform == 'windows-latest'
         uses: ./.github/actions/download-wsl-resources
 
+      - name: Pre-fetch sherpa-onnx MD-Release prebuilt (Windows CRT alignment)
+        if: matrix.platform == 'windows-latest'
+        uses: ./.github/actions/download-sherpa-onnx
+
       - name: Download Node.js for bundling
         uses: ./.github/actions/download-nodejs
         with:
-          platform: ${{ contains(matrix.platform, 'macos') && 'darwin' || (matrix.platform == 'windows-latest' && 'win' || 'linux') }}
-          # NOTE: assumes all non-macOS-aarch64 builds are x64. If a Linux arm64 runner
-          # is ever added to the matrix, this must be updated to detect runner arch separately.
+          platform: ${{ contains(matrix.platform, 'macos') && 'darwin' || 'win' }}
           arch: ${{ (contains(matrix.platform, 'macos') && contains(matrix.args, 'aarch64')) && 'arm64' || 'x64' }}
 
       - name: Bundle build context and mcp-os
@@ -367,8 +349,6 @@ jobs:
         run: |
           if [ "$MATRIX_PLATFORM" = "windows-latest" ]; then
             scripts/verify-bundled-assets.sh windows
-          elif [ "$MATRIX_PLATFORM" = "ubuntu-22.04" ]; then
-            scripts/verify-bundled-assets.sh linux
           else
             scripts/verify-bundled-assets.sh macos
           fi
@@ -392,10 +372,6 @@ jobs:
           args: ${{ matrix.args }}
           assetNamePattern: ${{ matrix.arch_label != '' && format('[name]_[version]_{0}[setup][ext]', matrix.arch_label) || '' }}
 
-      - name: Install Linux packaging tools
-        if: matrix.platform == 'ubuntu-22.04'
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
-
   # ── CLI binary cross-compilation ─────────────────────────────────────────
   # Runs after publish-tauri so the GitHub release already exists
   cli:
@@ -409,9 +385,6 @@ jobs:
             archive: tar.gz
           - os: macos-latest
             target: x86_64-apple-darwin
-            archive: tar.gz
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
             archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc

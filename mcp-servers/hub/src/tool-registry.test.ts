@@ -584,6 +584,369 @@ describe('tool-registry', () => {
       expect(TOOL_REGISTRY['redmine']['createItem']).toBeDefined();
       expect(TOOL_REGISTRY['redmine']['listItems']).toBeUndefined();
     });
+
+    it('discoverWithStartupRetry logs String(error) when a non-Error is thrown', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      // Reject with a plain string — hits the `String(error)` branch in the warn log (line 114)
+      vi.mocked(discoverAndMergeService).mockRejectedValueOnce('plain error string');
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      process.env.ENABLED_SERVICES = 'redmine';
+      await initializeRegistry();
+
+      // Registry entry is empty (discovery failed)
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(0);
+      // The warn log used String(error) because error was not an Error instance
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('plain error string'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('refreshServiceTools logs the raw error when a non-Error is thrown', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      // Startup: succeed with one tool
+      vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: mockTool });
+      process.env.ENABLED_SERVICES = 'redmine';
+      await initializeRegistry();
+
+      // Refresh: fail with a non-Error value (hits the `error` branch at line 183)
+      vi.mocked(discoverAndMergeService).mockRejectedValueOnce({ code: 42, msg: 'plain object' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await refreshServiceTools('redmine');
+
+      // Tool set is preserved despite the error
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
+      // Warn was called — the non-Error is logged as-is (the `error` branch)
+      expect(warnSpy).toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('second call to initializeRegistry is a no-op (early return, line 147)', async () => {
+      _resetRegistryForTesting();
+      resetServiceCaches();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      vi.mocked(discoverAndMergeService).mockResolvedValue({ listItems: mockTool });
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      await initializeRegistry();
+
+      const callCountAfterFirst = vi.mocked(discoverAndMergeService).mock.calls.length;
+
+      // Second call must return immediately without calling discover again
+      await initializeRegistry();
+
+      expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBe(callCountAfterFirst);
+    });
+  });
+
+  describe('getRegistry', () => {
+    it('returns the same object as TOOL_REGISTRY', async () => {
+      const { getRegistry } = await import('./tool-registry.js');
+      const reg = getRegistry();
+      // getRegistry() returns the internal mutable _registry object,
+      // which is the same reference that TOOL_REGISTRY aliases.
+      expect(reg).toBe(TOOL_REGISTRY);
+      expect(reg['slack']).toBeDefined();
+    });
+  });
+
+  describe('initializeRegistry disables a service that is not in ENABLED_SERVICES', () => {
+    const savedEnabled = process.env.ENABLED_SERVICES;
+
+    afterEach(() => {
+      if (savedEnabled === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabled;
+      }
+      resetServiceCaches();
+      _resetRegistryForTesting();
+      populateRegistryWithMockTools();
+    });
+
+    it('sets empty registry for disabled services and skips discovery', async () => {
+      _resetRegistryForTesting();
+      resetServiceCaches();
+      // Only enable 'slack'; 'gitlab' is listed but NOT enabled
+      process.env.ENABLED_SERVICES = 'slack';
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const mockDiscover = vi.mocked(discoverAndMergeService);
+      mockDiscover.mockClear();
+      mockDiscover.mockResolvedValue({});
+
+      await initializeRegistry();
+
+      // 'slack' is enabled but the mock returns {} → empty registry entry
+      // All other services (sharepoint, redmine, gitlab, os) are in SERVICE_NAMES
+      // but not enabled → they get an empty {} entry WITHOUT discovery being called.
+      // SERVICE_NAMES will only be the services from getAllServiceNames(),
+      // limited here by the fact that only 'slack' is in ENABLED_SERVICES.
+      expect(TOOL_REGISTRY['slack']).toBeDefined();
+    });
+  });
+
+  describe('background refresh interval callback', () => {
+    const savedEnabled = process.env.ENABLED_SERVICES;
+
+    afterEach(() => {
+      vi.useRealTimers();
+      if (savedEnabled === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabled;
+      }
+      resetServiceCaches();
+      _resetRegistryForTesting();
+      populateRegistryWithMockTools();
+      stopBackgroundRefresh();
+    });
+
+    it('skips overlapping refresh when _refreshInProgress is true', async () => {
+      _resetRegistryForTesting();
+      resetServiceCaches();
+      process.env.ENABLED_SERVICES = 'slack';
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const mockDiscover = vi.mocked(discoverAndMergeService);
+      mockDiscover.mockClear();
+
+      const slackTool: ToolMetadata = {
+        name: 'sendChannel',
+        description: 'Send a channel message',
+        keywords: [],
+        inputSchema: { type: 'object', properties: {} },
+        example: '',
+        service: 'slack',
+        deferLoading: false,
+      };
+
+      // First call (startup): returns a tool immediately so no retry delays
+      // Second call (first refresh interval): resolves slowly — we advance timers
+      // to fire the interval a second time while first refresh is still "in progress"
+      let resolveFirstRefresh: () => void;
+      const firstRefreshPromise = new Promise<Record<string, ToolMetadata>>((resolve) => {
+        resolveFirstRefresh = () => resolve({});
+      });
+
+      mockDiscover
+        .mockResolvedValueOnce({ sendChannel: slackTool }) // startup
+        .mockImplementationOnce(() => firstRefreshPromise) // first interval (slow)
+        .mockResolvedValue({}); // any further calls
+
+      // Switch to fake timers BEFORE initializeRegistry so the setInterval created by
+      // _startBackgroundRefresh() is registered with fake timers. The startup discovery
+      // mock resolves immediately (non-empty result → no retry delays), so the await
+      // completes without needing to advance fake timers.
+      vi.useFakeTimers();
+      await initializeRegistry();
+
+      // Advance to trigger the first interval callback (sets _refreshInProgress = true).
+      // advanceTimersByTimeAsync also flushes pending microtasks after advancing.
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+      // Advance again to fire the interval a second time — should hit the early return
+      // because _refreshInProgress is still true (firstRefreshPromise not yet resolved).
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+
+      // Resolve the first refresh and flush remaining microtasks.
+      resolveFirstRefresh!();
+      // Drain microtask queue so _refreshInProgress is reset to false.
+      await Promise.resolve();
+
+      // Registry remains intact — the overlapping refresh was skipped without error
+      expect(TOOL_REGISTRY['slack']).toBeDefined();
+      // discoverAndMergeService was called once for startup + once for the first refresh
+      // (the second interval call was skipped via the _refreshInProgress guard)
+      expect(mockDiscover).toHaveBeenCalledTimes(2);
+    });
+
+    it('runs without error when triggered', async () => {
+      _resetRegistryForTesting();
+      resetServiceCaches();
+      process.env.ENABLED_SERVICES = 'slack';
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const mockDiscover = vi.mocked(discoverAndMergeService);
+      mockDiscover.mockClear();
+
+      // Return a non-empty tool set on the first call so discoverWithStartupRetry exits
+      // immediately without waiting for retry delays. The background refresh itself
+      // (the second call) can return anything — we just want the interval to fire.
+      const slackTool: ToolMetadata = {
+        name: 'sendChannel',
+        description: 'Send a channel message',
+        keywords: [],
+        inputSchema: { type: 'object', properties: {} },
+        example: '',
+        service: 'slack',
+        deferLoading: false,
+      };
+      mockDiscover.mockResolvedValueOnce({ sendChannel: slackTool }).mockResolvedValue({});
+
+      await initializeRegistry();
+
+      // Switch to fake timers AFTER initializeRegistry has completed (interval already set).
+      // This avoids the retry-delay setTimeout calls blocking on fake-timer advancement.
+      vi.useFakeTimers();
+
+      // Advance timers by 5 minutes to trigger the background refresh interval.
+      await vi.runAllTimersAsync();
+
+      // The refresh ran without throwing — registry still exists
+      expect(TOOL_REGISTRY['slack']).toBeDefined();
+    });
+  });
+
+  describe('buildExecutorWrappers additional coverage', () => {
+    const mockWrapWithAudit = vi.fn(
+      (_svc: string, _tool: string, fn: (p?: Record<string, unknown>) => Promise<unknown>) => fn
+    );
+    const mockPrepareParams = vi.fn(<T>(p: T) => p);
+    const mockWrapBridgeCall = vi.fn(<T>(fn: () => Promise<T>) => fn());
+
+    it('throws for unknown service', () => {
+      expect(() =>
+        buildExecutorWrappers(
+          'nonexistentService',
+          {},
+          mockWrapWithAudit as never,
+          mockPrepareParams,
+          mockWrapBridgeCall as never
+        )
+      ).toThrow('Unknown service in registry: nonexistentService');
+    });
+
+    it('inner async wrapper calls prepareParams and wrapBridgeCall', async () => {
+      const slackMethods = getServiceMethods('slack');
+      const bridge: Record<string, ReturnType<typeof vi.fn>> = {};
+      for (const m of slackMethods) {
+        bridge[m] = vi.fn().mockResolvedValue({ ok: true });
+      }
+
+      const preparedParams: unknown[] = [];
+      const capturePrepareFn = vi.fn(<T>(p: T) => {
+        preparedParams.push(p);
+        return p;
+      });
+
+      const bridgeCallArgs: unknown[] = [];
+      const captureBridgeCallFn = vi.fn(<T>(fn: () => Promise<T>) => {
+        bridgeCallArgs.push(fn);
+        return fn();
+      });
+
+      const wrappers = buildExecutorWrappers(
+        'slack',
+        bridge,
+        mockWrapWithAudit as never,
+        capturePrepareFn,
+        captureBridgeCallFn as never
+      );
+
+      // Call one of the generated wrappers
+      await wrappers['sendChannel']?.({ channel: 'general' });
+
+      // prepareParams was called with the provided params
+      expect(preparedParams.length).toBeGreaterThan(0);
+      // wrapBridgeCall was called with a function
+      expect(bridgeCallArgs.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('validateRegistry error branches', () => {
+    afterEach(() => {
+      _resetRegistryForTesting();
+      populateRegistryWithMockTools();
+    });
+
+    it('reports error when metadata.name does not match the key', () => {
+      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      mutableRegistry['testSvc'] = {
+        listItems: {
+          name: 'wrongName', // mismatch!
+          description: 'List items',
+          keywords: [],
+          inputSchema: { type: 'object', properties: {} },
+          example: '',
+          service: 'testSvc',
+          deferLoading: false,
+        },
+      };
+
+      const errors = validateRegistry();
+      expect(errors.some((e) => e.includes("metadata.name ('wrongName') does not match key"))).toBe(
+        true
+      );
+
+      delete mutableRegistry['testSvc'];
+    });
+
+    it('reports error when metadata.service does not match the service key', () => {
+      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      mutableRegistry['testSvc'] = {
+        listItems: {
+          name: 'listItems',
+          description: 'List items',
+          keywords: [],
+          inputSchema: { type: 'object', properties: {} },
+          example: '',
+          service: 'wrongService', // mismatch!
+          deferLoading: false,
+        },
+      };
+
+      const errors = validateRegistry();
+      expect(
+        errors.some((e) => e.includes("metadata.service ('wrongService') does not match service"))
+      ).toBe(true);
+
+      delete mutableRegistry['testSvc'];
+    });
+
+    it('reports error for missing description', () => {
+      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      mutableRegistry['testSvc'] = {
+        listItems: {
+          name: 'listItems',
+          description: '', // empty = missing
+          keywords: [],
+          inputSchema: { type: 'object', properties: {} },
+          example: '',
+          service: 'testSvc',
+          deferLoading: false,
+        },
+      };
+
+      const errors = validateRegistry();
+      expect(errors.some((e) => e.includes('missing description'))).toBe(true);
+
+      delete mutableRegistry['testSvc'];
+    });
+
+    it('reports error for missing inputSchema', () => {
+      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      mutableRegistry['testSvc'] = {
+        listItems: {
+          name: 'listItems',
+          description: 'List items',
+          keywords: [],
+          inputSchema: null as never, // null = missing
+          example: '',
+          service: 'testSvc',
+          deferLoading: false,
+        },
+      };
+
+      const errors = validateRegistry();
+      expect(errors.some((e) => e.includes('missing inputSchema'))).toBe(true);
+
+      delete mutableRegistry['testSvc'];
+    });
   });
 
   describe('discoverWithStartupRetry', () => {

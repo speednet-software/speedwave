@@ -1,6 +1,6 @@
 # Speedwave
 
-Security-first AI platform connecting Claude Code with external services (Slack, SharePoint, GitLab, Redmine, Mail, Calendar). Claude runs in a hardened, token-free container — all service credentials are isolated per-worker. Additional VM-level isolation on macOS (Lima) and Windows (WSL2); rootless user namespaces on Linux. Ships as a single installable app (.dmg, .exe, .deb) without Docker Desktop. Two interfaces: CLI (terminal) and Desktop (chat UI).
+Security-first AI platform connecting Claude Code with external services (Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar) plus a built-in Office documents worker (Word/Excel/PowerPoint/PDF read·write·convert·charts). Claude runs in a hardened, token-free container — all service credentials are isolated per-worker. VM-level isolation on macOS (Lima) and Windows (WSL2). Ships as a single installable app (.dmg, .exe) without Docker Desktop. Two interfaces: CLI (terminal) and Desktop (chat UI). Linux as a host platform was dropped (ADR-059).
 
 ## Key Architecture
 
@@ -8,10 +8,17 @@ Security-first AI platform connecting Claude Code with external services (Slack,
 - **SSOT: `mcp-servers/shared/`** — MCP protocol utilities shared by all servers
 - **SSOT: `containers/compose.template.yml`** — container definitions. `render_compose()` generates per-project files
 - **SSOT: `crates/speedwave-runtime/src/defaults.rs::ANTHROPIC_MODELS`** — Anthropic model catalog (id, family, context window, latest flag). Frontend reads it via the `list_anthropic_models` Tauri command and `AnthropicModelsService`. Bumping a model = editing one const; do NOT hard-code model strings in Angular.
+- **SSOT: `crates/speedwave-runtime/src/log_ts.rs::log_timestamp()`** — the one timestamp format for all Speedwave logs: RFC 3339, millis, **local time with a colon offset** (`2026-05-12T14:34:02.814+02:00`). TS counterpart `@speedwave/mcp-shared`'s `ts()` does the same (local offset, never bare `Z` — it reads the container's `TZ`, injected from the host by `tz::detect_host_timezone`). Adding a new logger = using one of these, never a hand-rolled format, never `toISOString()` for a log-line prefix. `crates/speedwave-runtime/src/log_file.rs` (the chmod-600 append/timestamped-line/rotation helpers) lives here too, shared by Desktop's claude-session log + the mcp-os drain + the host_exec drain.
 - **SSOT alignment:** `scripts/bundle-build-context.sh` IMAGES list must stay aligned with `crates/speedwave-runtime/src/build.rs` IMAGES constant
 - **SSOT alignment:** `scripts/sign-bundled-binaries.sh` SIGN_TARGETS must stay aligned with `desktop/src-tauri/tauri.macos.conf.json` bundle.resources — every bundled Mach-O must be signed, and binaries using restricted platform APIs need entitlements plists in `desktop/src-tauri/entitlements/`
+- **SSOT alignment:** `crates/speedwave-runtime/src/consts.rs::WSL_DISTRO_NAME` must stay aligned with the literal `"Speedwave"` in three other locations: (a) `desktop/src-tauri/windows/installer-hooks.nsh`, (b) `scripts/e2e-vm.sh`, (c) `docs/getting-started/installation.md`. Renaming the WSL distro = updating all four locations in the same commit.
+- **SSOT alignment:** `crates/speedwave-runtime/src/consts.rs::DATA_DIR` (`.speedwave`) must stay aligned with the literal `".speedwave"` in `desktop/src-tauri/windows/installer-hooks.nsh` (`RMDir /r "$PROFILE\.speedwave"`). Renaming the data dir = updating both in the same commit.
+- **SSOT alignment:** `crates/speedwave-runtime/src/tz.rs::detect_host_timezone()` (host TZ → `TZ` env injected into every service by `compose::inject_host_timezone`) must stay aligned with the `tzdata` package install in every container image: (a) `containers/Containerfile.claude` (apt), (b) `containers/mcp-servers/Containerfile.mcp-base` (apk), (c) `mcp-servers/hub/Containerfile` (apk), (d) every `mcp-servers/<service>/Dockerfile` (apk — `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`; apt — `office`, which is Debian-based for LibreOffice). Adding a new worker image = installing `tzdata` in the same commit; otherwise `TZ` resolves to a numeric offset and Claude Code limit timestamps stay wrong.
+- **SSOT alignment:** `crates/speedwave-runtime/src/consts.rs::RESERVED_ENV_KEYS` is the single list of env names plugins cannot inject via `extra_env` (`PORT` reserved by Speedwave + dynamic-linker / language-runtime / shell-environment hijack vectors — `LD_*`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PATH`, `HOME`, `IFS`, `BASH_ENV`, …). It is consumed by `plugin::validate_manifest` and documented in `docs/architecture/security.md`. Adding a new vector = editing `consts.rs` only; do not duplicate the list in `validate_manifest`.
+- **SSOT alignment:** Plugin Ed25519 signature is a **runtime invariant**, not just an install gate (see [ADR-051](docs/adr/ADR-051-plugin-signature-runtime-verification.md)). Every read of a plugin tree goes through `signing::verify_plugin_signature_cached`; mutable per-plugin state (currently `image_pending`) lives at `<data_dir>/plugin-state/<slug>/`, never inside the signed tree. Adding a new mutable per-plugin file = adding it under `plugin-state/`, not under `plugins/<slug>/`; otherwise it invalidates the digest of every freshly-installed plugin.
+- **SSOT alignment:** `.sherpa-onnx-version` is the single source of the sherpa-onnx version used by the Windows CRT-alignment prefetch (see [ADR-061](docs/adr/ADR-061-windows-crt-runtime-alignment.md)). It must stay aligned with: (a) `crates/speedwave-runtime/Cargo.toml` (the `sherpa-onnx = "=X.Y.Z"` exact pin), (b) the resolved version in **both** `Cargo.lock` files (root + `desktop/src-tauri/Cargo.lock` — checksums must match), (c) `scripts/lib/fetch-sherpa-onnx-md.sh` (computes the archive filename from the version file), (d) `.github/actions/download-sherpa-onnx/action.yml` (CI consumer), (e) `scripts/e2e-vm.sh` Step 4 (E2E consumer via `wsl bash`). Bumping sherpa = edit `.sherpa-onnx-version`, edit the `Cargo.toml` `=` pin, run `cargo update -p sherpa-onnx --precise <new>` in both workspaces, verify the MD-Release archive still exists upstream — all in one commit.
 - **Per-project isolation:** `~/.speedwave/tokens/<project>/<service>/` (read-only mount), `speedwave_<project>_network` (isolated network)
-- **ContainerRuntime trait:** `Box<dyn ContainerRuntime>` — implementations: `LimaRuntime`, `NerdctlRuntime`, `WslRuntime`
+- **ContainerRuntime trait:** `Box<dyn ContainerRuntime>` — implementations: `LimaRuntime` (macOS), `WslRuntime` (Windows)
 - **MCP Hub:** port 4000, the ONLY MCP server Claude sees. Hub has zero tokens.
 - **IDE Bridge:** writes `~/.speedwave/ide-bridge/<port>.lock` on host, mounted as `~/.claude/ide/` in container
 - **Config merge:** defaults -> repo `.speedwave.json` -> user `~/.speedwave/config.json` (highest priority). See ADR-011
@@ -37,12 +44,12 @@ make status         # quick health check
 
 Granular targets:
 
-- **Test:** `test-rust`, `test-cli`, `test-angular`, `test-mcp`, `test-os`, `test-swift`, `test-desktop`, `test-e2e`, `test-entrypoint`, `test-desktop-build`, `test-e2e-desktop`, `test-e2e-all`, `setup-e2e-vms`
-- **Build:** `build-runtime`, `build-cli`, `build-desktop`, `build-native-macos`, `build-os-cli`, `build-mcp`, `build-angular`, `build-tauri`
+- **Test:** `test-rust`, `test-cli`, `test-angular`, `test-mcp`, `test-os`, `test-swift`, `test-desktop`, `test-e2e`, `test-e2e-plugin-tamper-release`, `test-entrypoint`, `test-desktop-build`, `test-e2e-desktop`, `test-e2e-all`, `setup-e2e-vms`
+- **Build:** `build-runtime`, `build-cli`, `build-cli-release`, `build-desktop`, `build-native-macos`, `build-os-cli`, `build-mcp`, `build-angular`, `build-tauri`
 - **Check:** `check-clippy`, `check-desktop-clippy`, `check-fmt`, `check-mcp`, `check-mcp-lint`, `check-angular`, `check-angular-lint`
 - **Coverage:** `coverage-rust`, `coverage-mcp`, `coverage-angular`
 - **Audit:** `audit-rust`, `audit-mcp`, `audit-desktop`
-- **Download:** `download-lima`, `download-nodejs`, `download-nerdctl-full`, `download-wsl-resources` (+ `clean-*` variants)
+- **Download:** `download-lima`, `download-nodejs`, `download-wsl-resources` (+ `clean-*` variants)
 - **Other:** `lint`, `install-deps`, `install-hooks`, `clean`
 
 ## Git Workflow
@@ -75,23 +82,23 @@ Plugins live in a **separate repository** (`speedwave-plugins`, sibling to this 
 
 ### Contract between Speedwave and plugins
 
-| Contract element                   | SSOT location (this repo)                                                                              | Consumer (plugins repo)                                                 |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
-| **`plugin.json` manifest schema**  | `crates/speedwave-runtime/src/plugin.rs` → `PluginManifest` struct                                     | Every plugin's `plugin.json`                                            |
-| **Slug validation**                | `plugin.rs` → `validate_manifest()` regex `^[a-z][a-z0-9-]{0,63}$`                                     | Plugin slug values                                                      |
-| **Ed25519 signature**              | `crates/speedwave-runtime/src/signing.rs` → `verify_plugin_signature()`                                | `SIGNATURE` file in each plugin ZIP                                     |
-| **Built-in service ID blocklist**  | `crates/speedwave-runtime/src/consts.rs` → `BUILT_IN_SERVICE_IDS`                                      | Plugins must not use these slugs                                        |
-| **Compose injection**              | `crates/speedwave-runtime/src/compose.rs` → `apply_plugins()`, `generate_plugin_service()`             | Plugin `Containerfile`, `port`, `extra_env`, `mem_limit`, `token_mount` |
-| **Hub env var convention**         | `compose.rs` → `WORKER_<SLUG_UPPER>_URL` injection into hub                                            | Hub discovers plugin workers by this env var                            |
-| **Token mount path**               | `compose.rs` → mounts `~/.speedwave/tokens/<project>/<service_id>/` as `/tokens`                       | Plugin reads credentials from `/tokens/<key>`                           |
-| **Workspace mount path**           | `compose.rs` → mounts `{project_dir}` as `/workspace:rw`                                               | Plugin reads/writes files at `/workspace/`                              |
-| **Claude-resources directory**     | `entrypoint.sh` → symlinks `claude-resources/{skills,commands,agents,hooks}`                           | Plugin ships `claude-resources/` with skills/commands                   |
-| **`SPEEDWAVE_PLUGINS` env var**    | `compose.rs` → comma-separated enabled slugs in claude container                                       | `entrypoint.sh` iterates this list                                      |
-| **Settings schema (JSON Schema)**  | `plugin.rs` → `settings_schema` field, `plugin_cmd.rs` → `plugin_save_settings`/`plugin_load_settings` | Plugin defines `settings_schema` in manifest                            |
-| **Container security constraints** | `compose.rs` → `cap_drop: ALL`, `no-new-privileges`, `read_only`, resource limits                      | Plugins must work within these constraints                              |
-| **Tauri commands (Desktop UI)**    | `desktop/src-tauri/src/plugin_cmd.rs` → 8 commands                                                     | Frontend models in `desktop/src/src/app/models/plugin.ts`               |
-| **Frontend models**                | `desktop/src/src/app/models/plugin.ts` → `PluginStatusEntry`                                           | Must match Tauri command return types                                   |
-| **Line-ending policy**             | `.gitattributes` (root) — `* text=auto eol=lf`                                                         | Plugin repos must enforce LF for `*.sh` shipped in `Containerfile`s     |
+| Contract element                   | SSOT location (this repo)                                                                                                                                                                                                                   | Consumer (plugins repo)                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| **`plugin.json` manifest schema**  | `crates/speedwave-runtime/src/plugin.rs` → `PluginManifest` struct                                                                                                                                                                          | Every plugin's `plugin.json`                                            |
+| **Slug validation**                | `plugin.rs` → `validate_manifest()` regex `^[a-z][a-z0-9-]{0,63}$`                                                                                                                                                                          | Plugin slug values                                                      |
+| **Ed25519 signature**              | `crates/speedwave-runtime/src/signing.rs` → `verify_plugin_signature()`                                                                                                                                                                     | `SIGNATURE` file in each plugin ZIP                                     |
+| **Built-in service ID blocklist**  | `crates/speedwave-runtime/src/consts.rs` → `BUILT_IN_SERVICE_IDS`                                                                                                                                                                           | Plugins must not use these slugs                                        |
+| **Compose injection**              | `crates/speedwave-runtime/src/compose.rs` → `apply_plugins()`, `generate_plugin_service()`                                                                                                                                                  | Plugin `Containerfile`, `port`, `extra_env`, `mem_limit`, `token_mount` |
+| **Hub env var convention**         | `compose.rs` injects `WORKER_<SLUG_UPPER>_URL`; hyphens in slug normalize to underscores (e.g. `my-plugin` → `WORKER_MY_PLUGIN_URL`). Rust SSOT: `plugin::derive_worker_env`. TS SSOT: `mcp-servers/hub/src/worker-env.ts::deriveWorkerEnv` | Hub discovers plugin workers by this env var                            |
+| **Token mount path**               | `compose.rs` → mounts `~/.speedwave/tokens/<project>/<service_id>/` as `/tokens`                                                                                                                                                            | Plugin reads credentials from `/tokens/<key>`                           |
+| **Workspace mount path**           | `compose.rs` → mounts `{project_dir}` as `/workspace:rw`                                                                                                                                                                                    | Plugin reads/writes files at `/workspace/`                              |
+| **Claude-resources directory**     | `entrypoint.sh` → symlinks `claude-resources/{skills,commands,agents,hooks}`                                                                                                                                                                | Plugin ships `claude-resources/` with skills/commands                   |
+| **`SPEEDWAVE_PLUGINS` env var**    | `compose.rs` → comma-separated enabled slugs in claude container                                                                                                                                                                            | `entrypoint.sh` iterates this list                                      |
+| **Settings schema (JSON Schema)**  | `plugin.rs` → `settings_schema` field, `plugin_cmd.rs` → `plugin_save_settings`/`plugin_load_settings`                                                                                                                                      | Plugin defines `settings_schema` in manifest                            |
+| **Container security constraints** | `compose.rs` → `cap_drop: ALL`, `no-new-privileges`, `read_only`, resource limits                                                                                                                                                           | Plugins must work within these constraints                              |
+| **Tauri commands (Desktop UI)**    | `desktop/src-tauri/src/plugin_cmd.rs` → 8 commands                                                                                                                                                                                          | Frontend models in `desktop/src/src/app/models/plugin.ts`               |
+| **Frontend models**                | `desktop/src/src/app/models/plugin.ts` → `PluginStatusEntry`                                                                                                                                                                                | Must match Tauri command return types                                   |
+| **Line-ending policy**             | `.gitattributes` (root) — `* text=auto eol=lf`                                                                                                                                                                                              | Plugin repos must enforce LF for `*.sh` shipped in `Containerfile`s     |
 
 ### Breaking-change rule
 
@@ -123,7 +130,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - **KISS** — Speedwave is a thin orchestration layer. Prefer shelling out to existing tools over reimplementing. If >100 lines for something a CLI tool already does — stop.
 - **YAGNI** — build only what's needed now. No speculative features or "future extensibility".
 - **DRY** — `speedwave-runtime` = SSOT for container logic, `mcp-servers/shared/` = SSOT for MCP utilities. If same logic in two places — extract it.
-- **SOLID** — `Box<dyn ContainerRuntime>` with `LimaRuntime`/`NerdctlRuntime`/`WslRuntime`. New platform = new impl, zero changes to existing code.
+- **SOLID** — `Box<dyn ContainerRuntime>` with `LimaRuntime`/`WslRuntime`. New platform = new impl, zero changes to existing code.
 - **Boy Scout Rule** — leave code better than you found it. Fix bugs, typos, inconsistencies on sight.
 - **Rule of Three** — don't abstract until you see the same pattern three times.
 
@@ -138,8 +145,8 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - **NEVER use `#[allow(dead_code)]`** — dead code must be removed, not silenced. If a field/method is only used in tests, gate it behind `#[cfg(test)]`. If a struct field is required by serde but not read, prefix it with `_` and add `#[serde(rename = "original_name")]`.
 - **NEVER use `#[allow(...)]` to suppress lint warnings** — fix the underlying issue instead. No `#[allow(missing_docs)]`, no `#[allow(clippy::unwrap_used)]`, no blanket `#![allow(...)]` at crate level. The only exception is `#[allow(clippy::unwrap_used, clippy::expect_used)]` on `#[cfg(test)] mod tests` blocks, where panicking on test failure is intentional.
 - **Every code change must include tests** in the same commit — covering happy paths, edge cases, error paths, and state transitions (see `.claude/rules/git-workflow.md` for details)
-- **SharePoint `:rw` token mount** — only exception to the `:ro` token mount rule (OAuth refresh, ADR-009). All MCP workers also mount `/workspace:rw` for file access
-- **Linux rootless:** container runs as UID 0 in user namespace (ADR-026)
+- **Token isolation:** `/tokens` is `:ro` for all workers.
+- **Container user:** runs as UID 1000:1000 on all supported platforms (macOS Lima, Windows WSL2). Linux as a host platform was dropped — see ADR-059.
 - **Documentation is a delivery requirement** — same as tests. New feature -> update guide. Decision -> write ADR.
 
 ## References
@@ -147,7 +154,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - `docs/architecture/README.md` — system architecture overview
 - `docs/architecture/security.md` — security model and threat analysis
 - `docs/architecture/containers.md` — container topology and compose template
-- `docs/architecture/platform-matrix.md` — macOS, Linux, Windows specifics
+- `docs/architecture/platform-matrix.md` — macOS and Windows specifics
 - `docs/contributing/development-setup.md` — dev environment and build targets
 - `docs/contributing/testing.md` — test strategy, patterns, and coverage thresholds
 - `docs/guides/cli.md` — CLI subcommands and usage

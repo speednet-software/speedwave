@@ -120,18 +120,11 @@ fn is_lock_entry_alive(pid: u32, port: u16) -> bool {
 pub(crate) fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        #[cfg(target_os = "linux")]
-        {
-            std::path::Path::new(&format!("/proc/{}", pid)).exists()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
     #[cfg(windows)]
     {
@@ -247,13 +240,6 @@ impl HealthMonitor {
                 vm_type: "Lima".into(),
             }
         }
-        #[cfg(target_os = "linux")]
-        {
-            VmHealth {
-                running: true,
-                vm_type: "native".into(),
-            }
-        }
         #[cfg(target_os = "windows")]
         {
             VmHealth {
@@ -261,7 +247,7 @@ impl HealthMonitor {
                 vm_type: "WSL2".into(),
             }
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             VmHealth {
                 running: false,
@@ -478,11 +464,6 @@ mod tests {
         let vm = HealthMonitor::check_vm();
         #[cfg(target_os = "macos")]
         assert_eq!(vm.vm_type, "Lima");
-        #[cfg(target_os = "linux")]
-        {
-            assert_eq!(vm.vm_type, "native");
-            assert!(vm.running);
-        }
         #[cfg(target_os = "windows")]
         assert_eq!(vm.vm_type, "WSL2");
     }

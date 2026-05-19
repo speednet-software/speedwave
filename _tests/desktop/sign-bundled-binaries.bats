@@ -56,6 +56,7 @@ populate_targets() {
     write_mach_o "$SRC_TAURI/calendar-cli"
     write_mach_o "$SRC_TAURI/mail-cli"
     write_mach_o "$SRC_TAURI/notes-cli"
+    write_mach_o "$SRC_TAURI/audio-capture-cli"
     write_mach_o "$SRC_TAURI/lima/bin/limactl"
     write_mach_o "$SRC_TAURI/nodejs/bin/node"
     mkdir -p "$SRC_TAURI/entitlements"
@@ -65,6 +66,7 @@ populate_targets() {
     cp "$ent_src/calendars.plist" "$SRC_TAURI/entitlements/calendars.plist"
     cp "$ent_src/reminders.plist" "$SRC_TAURI/entitlements/reminders.plist"
     cp "$ent_src/apple-events.plist" "$SRC_TAURI/entitlements/apple-events.plist"
+    cp "$ent_src/audio-capture.plist" "$SRC_TAURI/entitlements/audio-capture.plist"
 }
 
 @test "sign-bundled-binaries script exists and is executable" {
@@ -187,6 +189,11 @@ for key in conf.get('bundle', {}).get('resources', {}):
     grep -qF 'reminders-cli:$SRC_TAURI/entitlements/reminders.plist' "$SCRIPT"
 }
 
+@test "audio-capture-cli has audio-input entitlement in SIGN_TARGETS" {
+    grep -qF 'audio-capture-cli:$AUDIO_CAPTURE_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'audio-capture-cli:$SRC_TAURI/entitlements/audio-capture.plist' "$SCRIPT"
+}
+
 @test "speedwave CLI has no entitlements in SIGN_TARGETS" {
     # speedwave is pure Rust — no restricted APIs, no entitlements needed.
     # The entry must end with ":" followed by end-of-value. Match the full
@@ -283,6 +290,41 @@ for path in glob.glob('$ent_dir/*.plist'):
 @test "apple-events.plist contains automation entitlement" {
     local plist="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/apple-events.plist"
     grep -qF 'com.apple.security.automation.apple-events' "$plist"
+}
+
+@test "verify_identifier function is defined for native CLI sub-identifier check" {
+    # Sub-identifier verification is what guarantees TCC.db rows are bound to
+    # `pl.speedwave.desktop.<svc>` and the recovery commands in
+    # docs/troubleshooting.md actually work. Without this, the codesign default
+    # identifier (`<svc>-cli`) would silently apply.
+    grep -qF 'verify_identifier()' "$SCRIPT"
+}
+
+@test "verify_identifier extracts codesign Identifier line and compares to expected" {
+    # Sanity that the function still uses `codesign -dvvv | grep Identifier=`
+    # — if Apple changes that flag, the test catches the drift before release.
+    grep -qF 'codesign -dvvv' "$SCRIPT"
+    grep -qF "grep -E '^Identifier='" "$SCRIPT"
+}
+
+@test "expected sub-identifier mapping covers all native CLIs" {
+    # SSOT-alignment with native/macos/shared/Sources/SharedCLI/Utilities.swift
+    # ::subBundleIdentifier(for:) (and, for audio-capture, that CLI's
+    # Resources/Info.plist) — these exact values must match, otherwise the Swift
+    # gate / embedded plist produces different tccutil hints than the codesign
+    # binding.
+    grep -qF 'pl.speedwave.desktop.calendar' "$SCRIPT"
+    grep -qF 'pl.speedwave.desktop.reminders' "$SCRIPT"
+    grep -qF 'pl.speedwave.desktop.mail' "$SCRIPT"
+    grep -qF 'pl.speedwave.desktop.notes' "$SCRIPT"
+    grep -qF 'pl.speedwave.desktop.audio-capture' "$SCRIPT"
+}
+
+@test "verify_identifier is invoked for each native CLI in sign loop" {
+    # The post-sign loop must call verify_identifier (not just sign_macho +
+    # verify_macho). If a future refactor drops the call, sub-identifier
+    # binding regressions slip through.
+    grep -qE 'verify_identifier "\$path"' "$SCRIPT"
 }
 
 @test "error message names the missing file and gives actionable hint" {

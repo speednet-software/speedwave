@@ -136,8 +136,8 @@ describe('Setup Wizard — Full Flow', function () {
     expect(['active', 'done']).toContain(firstStatus);
 
     // Each step row exposes a step-title sub-element; presence is enough,
-    // text varies with platform (e.g. macOS "Verify Lima / nerdctl" vs Linux
-    // "Verify nerdctl (rootless)") and would couple the test to copy.
+    // text varies with platform (macOS "Verify Lima / nerdctl" vs Windows
+    // "Verify system requirements") and would couple the test to copy.
     const firstTitle = await stepElements[0].$('[data-testid="step-title"]');
     await firstTitle.waitForExist({ timeout: 5_000 });
   });
@@ -148,8 +148,8 @@ describe('Setup Wizard — Full Flow', function () {
   });
 
   it('should complete start virtual machine (step 1)', async function () {
-    // 5 minutes — installs rootless containerd (Linux), creates Lima VM (macOS),
-    // or sets up WSL2 (Windows). May already be 'done' if runtime was Ready.
+    // 5 minutes — creates Lima VM (macOS) or sets up WSL2 (Windows).
+    // May already be 'done' if runtime was Ready.
     this.timeout(300_000);
     await assertStepDone(1, 240_000);
   });

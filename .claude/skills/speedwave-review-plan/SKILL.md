@@ -35,7 +35,7 @@ Beyond that block, complete these reads before analysis:
 
 2. **Read `docs/architecture/containers.md`** — container topology, compose template, resource limits, stale container recovery
 
-3. **Read `docs/architecture/platform-matrix.md`** — macOS/Linux/Windows differences that plans forget
+3. **Read `docs/architecture/platform-matrix.md`** — macOS and Windows differences that plans forget
 
 4. **Read `docs/contributing/testing.md`** — test strategy, coverage thresholds, E2E structure, test patterns
 
@@ -136,8 +136,6 @@ This is a line-by-line audit. Go through every section of CLAUDE.md and every fi
 
 - SharePoint `:rw` exception — only this exception, no new ones?
 
-- Linux rootless UID 0 accounted for (ADR-026)?
-
 - Documentation included as delivery requirement?
 
 **`.claude/rules/logging.md`:**
@@ -221,8 +219,6 @@ Check:
 
 - Does it respect OWASP container hardening (`cap_drop: ALL`, `no-new-privileges`, `read_only`, `tmpfs: /tmp:noexec,nosuid`)?
 
-- Does it handle the Linux rootless UID 0 case (ADR-026)? Plans that assume UID 1000 everywhere will break Linux.
-
 - Does it log, serialize, or display anything that could contain secrets? Check against `log_sanitizer.rs` rules.
 
 - Does the plan touch authentication flow? Verify both backend and frontend gates are preserved.
@@ -265,33 +261,33 @@ Check:
 
 **Severity: SSOT violation = HIGH. Creates silent drift that manifests as production bugs weeks later.**
 
-### 3. PLATFORM COVERAGE (macOS / Linux / Windows)
+### 3. PLATFORM COVERAGE (macOS / Windows)
 
-Plans that work on the developer's macOS laptop and break on Linux/Windows are the #1 source of release blockers.
+Plans that work on the developer's macOS laptop and break on Windows are the #1 source of release blockers.
 
 Check:
 
 - Does the plan assume a specific platform? Identify every platform-dependent assumption.
 
-- **Container user:** macOS/Windows = `1000:1000`, Linux = `0:0` (rootless user namespace, ADR-026). File permission logic, volume mounts, and `chown` calls must handle both.
+- **Container user:** always `1000:1000`. containerd runs inside a VM on both supported platforms (Lima on macOS, WSL2 on Windows), so no user-namespace remapping is needed.
 
-- **VM layer:** macOS = Lima + Apple VZ, Windows = WSL2 + Hyper-V, Linux = native nerdctl (no VM). Path translation differs: Lima uses `/tmp/lima/` prefix, WSL uses `\\wsl$\` or `/mnt/c/`.
+- **VM layer:** macOS = Lima + Apple VZ, Windows = WSL2 + Hyper-V. Path translation differs: Lima uses `/tmp/lima/` prefix, WSL uses `\\wsl$\` or `/mnt/c/`.
 
-- **mcp-os:** macOS = AppleScript + EventKit, Linux = CalDAV (EDS via zbus), Windows = WinRT + mapi-rs. Changes to mcp-os must account for all three.
+- **mcp-os:** macOS = AppleScript + EventKit, Windows = WinRT + mapi-rs. Changes to mcp-os must account for both.
 
-- **Installer:** .dmg (macOS), .deb (Linux, ADR-025), .exe NSIS (Windows). Does the plan affect any installer artifact?
+- **Installer:** .dmg (macOS), .exe NSIS (Windows). Does the plan affect either installer artifact?
 
-- **Filesystem:** macOS VirtioFS is case-insensitive by default, Linux ext4 is case-sensitive. Path comparisons must handle this.
+- **Filesystem:** the host (macOS APFS) is case-insensitive by default; the Linux containers running inside Lima or WSL2 use ext4 (case-sensitive). Path comparisons that cross the host/container boundary must handle the asymmetry.
 
 - **Host commands:** NEVER call host `limactl`, `nerdctl`, or `docker` directly. All operations through `speedwave-runtime` (`detect_runtime()`).
 
-- **OS prerequisites:** Does the plan add requirements? Check against `os_prereqs.rs` — Windows needs WSL2, Linux needs `newuidmap`, macOS has no prerequisites.
+- **OS prerequisites:** Does the plan add requirements? Check against `os_prereqs.rs` — Windows needs WSL2, macOS has no prerequisites.
 
-- **Desktop log paths:** `~/Library/Logs/` (macOS) vs `~/.local/share/.../logs/` (Linux). Plan must not assume one.
+- **Desktop log paths:** `~/Library/Logs/pl.speedwave.desktop/` (macOS) vs `%APPDATA%/pl.speedwave.desktop/` (Windows). Plan must not assume one.
 
 - **Build context:** `prepare_build_context()` handles path translation for VMs. Does the plan respect this?
 
-- **Resource limits:** Adaptive on macOS/Linux (formulas in `resources.rs`), fixed on Windows. Does the plan change memory/CPU assumptions?
+- **Resource limits:** Adaptive on both supported platforms via the formulas in `resources.rs` (macOS uses VM-memory − VM-overhead; Windows uses host-RAM − host-overhead). Does the plan change memory/CPU assumptions?
 
 - **macOS code signing:** If the plan adds or modifies a bundled binary, verify against the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary) — this is the single source of truth for SIGN_TARGETS, entitlements, `Info.plist` TCC keys, and ADR-037 updates.
 
@@ -375,7 +371,7 @@ Check:
 
 - If the plan modifies CI workflows (`.github/workflows/`) — does it account for all jobs (lint, test, desktop, audit, swift)?
 
-- If the plan modifies the `ContainerRuntime` trait — does every implementation (`LimaRuntime`, `NerdctlRuntime`, `WslRuntime`) need updating?
+- If the plan modifies the `ContainerRuntime` trait — does every implementation (`LimaRuntime`, `WslRuntime`) need updating?
 
 **Severity: Unanalyzed dependency = HIGH. Cascade failures are the hardest bugs to diagnose.**
 

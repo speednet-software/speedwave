@@ -1,6 +1,6 @@
 # ADR-026: Linux Rootless nerdctl — Per-Platform Container User
 
-> **Status:** Accepted
+> **Status:** Superseded by [ADR-059](ADR-059-drop-linux-support.md) — Linux is no longer supported. The `${CONTAINER_USER}` placeholder is kept in `compose.template.yml` and `compose::container_user()` always resolves to `"1000:1000"` on both remaining platforms (Lima on macOS, WSL2 on Windows).
 > **Date:** 2026-03-10
 
 ---

@@ -122,11 +122,15 @@ pub(crate) fn collect_security_paths(
         data_dir.join("secrets"),
         data_dir.join("snapshots"),
         data_dir.join("tokens"),
+        // ADR-060: per-project OAuth state dir; refreshToken / clientId live here,
+        // never inside the SharePoint container's mount. Must be 0o700.
+        data_dir.join(consts::OAUTH_SUBDIR),
         // Per-project directories
         data_dir.join("secrets").join(project),
         data_dir.join("snapshots").join(project),
         data_dir.join("ide-bridge"),
         data_dir.join("tokens").join(project),
+        data_dir.join(consts::OAUTH_SUBDIR).join(project),
     ];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
@@ -194,29 +198,42 @@ pub(crate) fn collect_security_paths(
         }
     }
 
+    // --- oauth/<project>/* (ADR-060 OAuth worker state) ---
+    // Every file under here must be 0o600: oauth.json (refreshToken, clientId,
+    // tenantId, grantedScopes), `.bearer-map.json` (consumer → service map),
+    // per-consumer `bearer-<service>` tokens, supervisor `auth-token`, `port`,
+    // `pid`, and the rotating `audit.log` / `audit.log.1`.
+    let oauth_project_dir = data_dir.join(consts::OAUTH_SUBDIR).join(project);
+    if let Ok(entries) = std::fs::read_dir(&oauth_project_dir) {
+        for entry in entries.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_file() {
+                    files.push(entry.path());
+                }
+            }
+        }
+    }
+
     (dirs, files)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     fn secure_mkdir(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(path).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
-    #[cfg(unix)]
     fn get_mode(path: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     /// Creates a fully populated data dir tree for testing.
-    #[cfg(unix)]
     fn create_test_tree(data_dir: &std::path::Path, correct_perms: bool) {
         let dir_mode = if correct_perms { 0o700 } else { 0o755 };
         let file_mode = if correct_perms { 0o600 } else { 0o644 };
@@ -232,8 +249,12 @@ mod tests {
             data_dir.join("tokens/proj"),
             data_dir.join("tokens/proj/slack"),
             data_dir.join("tokens/proj/gitlab"),
+            data_dir.join("tokens/proj/github"),
+            data_dir.join("tokens/proj/atlassian"),
             data_dir.join("tokens/proj/empty-service"),
             data_dir.join("ide-bridge"),
+            data_dir.join("oauth"),
+            data_dir.join("oauth/proj"),
         ];
         for dir in &dirs_to_create {
             std::fs::create_dir_all(dir).unwrap();
@@ -244,9 +265,20 @@ mod tests {
             data_dir.join("secrets/proj/worker-auth-token"),
             data_dir.join("tokens/proj/slack/token.txt"),
             data_dir.join("tokens/proj/gitlab/key.txt"),
+            data_dir.join("tokens/proj/github/key.txt"),
+            data_dir.join("tokens/proj/atlassian/api_token"),
             data_dir.join("snapshots/proj/snapshot.json"),
             data_dir.join("ide-bridge/1234.lock"),
             data_dir.join("bundle-state.json"),
+            // ADR-060 oauth worker state (PR2/PR3):
+            data_dir.join("oauth/proj/sharepoint.json"),
+            data_dir.join("oauth/proj/.bearer-map.json"),
+            data_dir.join("oauth/proj/bearer-sharepoint"),
+            data_dir.join("oauth/proj/auth-token"),
+            data_dir.join("oauth/proj/port"),
+            data_dir.join("oauth/proj/pid"),
+            data_dir.join("oauth/proj/audit.log"),
+            data_dir.join("oauth/proj/audit.log.1"),
         ];
         for file in &files_to_create {
             std::fs::write(file, "test").unwrap();
@@ -256,7 +288,6 @@ mod tests {
 
     // ── collect_security_paths ─────────────────────────────────────────
 
-    #[cfg(unix)]
     #[test]
     fn test_collect_security_paths_returns_correct_paths() {
         let tmp = tempfile::tempdir().unwrap();
@@ -268,10 +299,11 @@ mod tests {
 
         let (dirs, files) = collect_security_paths(data_dir, "proj");
 
-        // Expected dirs (10): secrets, secrets/proj, snapshots, snapshots/proj,
+        // Expected dirs (14): secrets, secrets/proj, snapshots, snapshots/proj,
         // tokens, tokens/proj, tokens/proj/slack, tokens/proj/gitlab,
-        // tokens/proj/empty-service, ide-bridge
-        assert_eq!(dirs.len(), 10, "expected 10 dirs, got: {dirs:?}");
+        // tokens/proj/github, tokens/proj/atlassian, tokens/proj/empty-service,
+        // ide-bridge, oauth, oauth/proj
+        assert_eq!(dirs.len(), 14, "expected 14 dirs, got: {dirs:?}");
         assert!(dirs.contains(&data_dir.join("secrets")));
         assert!(dirs.contains(&data_dir.join("secrets/proj")));
         assert!(dirs.contains(&data_dir.join("snapshots")));
@@ -280,19 +312,37 @@ mod tests {
         assert!(dirs.contains(&data_dir.join("tokens/proj")));
         assert!(dirs.contains(&data_dir.join("tokens/proj/slack")));
         assert!(dirs.contains(&data_dir.join("tokens/proj/gitlab")));
+        assert!(dirs.contains(&data_dir.join("tokens/proj/github")));
+        assert!(dirs.contains(&data_dir.join("tokens/proj/atlassian")));
         assert!(dirs.contains(&data_dir.join("tokens/proj/empty-service")));
         assert!(dirs.contains(&data_dir.join("ide-bridge")));
+        assert!(dirs.contains(&data_dir.join("oauth")));
+        assert!(dirs.contains(&data_dir.join("oauth/proj")));
 
-        // Expected files (6): secrets/proj/worker-auth-token,
-        // tokens/proj/slack/token.txt, tokens/proj/gitlab/key.txt,
-        // snapshots/proj/snapshot.json, ide-bridge/1234.lock, bundle-state.json
-        assert_eq!(files.len(), 6, "expected 6 files, got: {files:?}");
+        // Expected files (16): 8 legacy + 8 oauth files added in PR2/PR3 +
+        // FIX-P1-3 rotation:
+        //   secrets/proj/worker-auth-token, tokens/proj/{slack,gitlab,github}/...
+        //   tokens/proj/atlassian/api_token, snapshots/proj/snapshot.json,
+        //   ide-bridge/1234.lock, bundle-state.json,
+        //   oauth/proj/{sharepoint.json,.bearer-map.json,bearer-sharepoint,
+        //   auth-token,port,pid,audit.log,audit.log.1}
+        assert_eq!(files.len(), 16, "expected 16 files, got: {files:?}");
         assert!(files.contains(&data_dir.join("secrets/proj/worker-auth-token")));
         assert!(files.contains(&data_dir.join("tokens/proj/slack/token.txt")));
         assert!(files.contains(&data_dir.join("tokens/proj/gitlab/key.txt")));
+        assert!(files.contains(&data_dir.join("tokens/proj/github/key.txt")));
+        assert!(files.contains(&data_dir.join("tokens/proj/atlassian/api_token")));
         assert!(files.contains(&data_dir.join("snapshots/proj/snapshot.json")));
         assert!(files.contains(&data_dir.join("ide-bridge/1234.lock")));
         assert!(files.contains(&data_dir.join("bundle-state.json")));
+        assert!(files.contains(&data_dir.join("oauth/proj/sharepoint.json")));
+        assert!(files.contains(&data_dir.join("oauth/proj/.bearer-map.json")));
+        assert!(files.contains(&data_dir.join("oauth/proj/bearer-sharepoint")));
+        assert!(files.contains(&data_dir.join("oauth/proj/auth-token")));
+        assert!(files.contains(&data_dir.join("oauth/proj/port")));
+        assert!(files.contains(&data_dir.join("oauth/proj/pid")));
+        assert!(files.contains(&data_dir.join("oauth/proj/audit.log")));
+        assert!(files.contains(&data_dir.join("oauth/proj/audit.log.1")));
 
         // non-.lock file must NOT be included
         assert!(
@@ -303,7 +353,6 @@ mod tests {
 
     // ── ensure_data_dir_permissions_in ─────────────────────────────────
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_correct_permissions_noop() {
         use std::os::unix::fs::MetadataExt as _;
@@ -329,7 +378,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_fixes_wrong_permissions() {
         use std::os::unix::fs::MetadataExt as _;
@@ -347,6 +395,8 @@ mod tests {
         assert_eq!(get_mode(&data_dir.join("tokens/proj")), 0o700);
         assert_eq!(get_mode(&data_dir.join("tokens/proj/slack")), 0o700);
         assert_eq!(get_mode(&data_dir.join("tokens/proj/gitlab")), 0o700);
+        assert_eq!(get_mode(&data_dir.join("tokens/proj/github")), 0o700);
+        assert_eq!(get_mode(&data_dir.join("tokens/proj/atlassian")), 0o700);
         assert_eq!(get_mode(&data_dir.join("tokens/proj/empty-service")), 0o700);
         assert_eq!(get_mode(&data_dir.join("ide-bridge")), 0o700);
 
@@ -378,7 +428,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_missing_paths_ok() {
         let tmp = tempfile::tempdir().unwrap();
@@ -386,7 +435,6 @@ mod tests {
         ensure_data_dir_permissions_in(tmp.path(), "proj").unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_skips_symlinks_at_top_level() {
         let tmp = tempfile::tempdir().unwrap();
@@ -407,7 +455,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_skips_symlinks_inside_token_dir() {
         use std::os::unix::fs::PermissionsExt;
@@ -449,7 +496,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_does_not_fix_uid_mismatch() {
         use std::os::unix::fs::MetadataExt as _;
@@ -479,7 +525,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_ensure_roundtrip_fixes_then_check_passes() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt};

@@ -16,5 +16,9 @@
     <string>Speedwave needs to send Apple Events to automate Mail, Notes, and other apps via Claude Code.</string>
     <key>NSFileProviderDomainUsageDescription</key>
     <string>Speedwave needs access to your cloud storage files (OneDrive, iCloud Drive, Dropbox, Google Drive) to enable AI-powered editing in your workspace.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Speedwave records meeting audio from apps on this Mac so Claude can transcribe and summarize it. Audio is processed locally.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Speedwave records your microphone so your voice is included in meeting transcripts. Audio is processed locally.</string>
 </dict>
 </plist>

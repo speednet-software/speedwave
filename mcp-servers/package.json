@@ -15,7 +15,13 @@
     "sharepoint",
     "redmine",
     "gitlab",
-    "os"
+    "github",
+    "atlassian",
+    "office",
+    "context7",
+    "os",
+    "host_exec",
+    "oauth"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",

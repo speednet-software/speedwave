@@ -4,6 +4,7 @@ use std::process::{Child, Command};
 use std::thread::JoinHandle;
 
 use speedwave_runtime::consts;
+use speedwave_runtime::fs_perms::write_restricted_file;
 
 /// Manages the mcp-os TypeScript worker as a child process.
 ///
@@ -68,7 +69,7 @@ impl McpOsProcess {
         kill_stale_by_pid_file(&pid_path);
 
         // Truncate log file if it exceeds 2 MB to prevent unbounded growth
-        crate::log_file::truncate_if_oversized(&log_path, 2 * 1024 * 1024);
+        speedwave_runtime::log_file::truncate_if_oversized(&log_path, 2 * 1024 * 1024);
 
         // Write token file with restrictive permissions
         write_restricted_file(&token_path, &token)?;
@@ -308,11 +309,13 @@ fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
     cmd.env("PATH", env.var("PATH").unwrap_or_default());
 
     // HOME is set on Unix (macOS/Linux) but typically not on Windows, where
-    // USERPROFILE is the equivalent. Setting HOME to an empty string on
-    // Windows would break Node.js path resolution (e.g. os.homedir()).
+    // USERPROFILE is the equivalent. Setting HOME to an empty string on Unix
+    // would break Node.js path resolution (e.g. os.homedir()).
     // USERPROFILE is already forwarded via WINDOWS_SYSTEM_ENV_VARS above.
     #[cfg(not(target_os = "windows"))]
-    cmd.env("HOME", env.var("HOME").unwrap_or_default());
+    if let Some(home) = env.var("HOME") {
+        cmd.env("HOME", home);
+    }
 
     // Production mode: forward resource directory so mcp-os resolves native
     // CLI binaries from the bundled .app/Contents/Resources/ layout instead
@@ -432,13 +435,13 @@ fn drain_and_read_port(
     // Drain stderr — mcp-os writes warnings here via console.error/console.warn
     if let Some(stderr) = child.stderr.take() {
         let h = std::thread::spawn(move || {
-            let mut log_file = crate::log_file::open_log_file(&log_path_stderr);
+            let mut log_file = speedwave_runtime::log_file::open_log_file(&log_path_stderr);
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines() {
                 match line {
                     Ok(line) => {
                         log::warn!("mcp-os stderr: {line}");
-                        crate::log_file::write_log_line(&mut log_file, "STDERR", &line);
+                        speedwave_runtime::log_file::write_log_line(&mut log_file, "STDERR", &line);
                     }
                     Err(_) => break,
                 }
@@ -452,7 +455,7 @@ fn drain_and_read_port(
     let (tx, rx) = std::sync::mpsc::channel();
     let log_path_stdout = log_path.to_path_buf();
     let h = std::thread::spawn(move || {
-        let mut log_file = crate::log_file::open_log_file(&log_path_stdout);
+        let mut log_file = speedwave_runtime::log_file::open_log_file(&log_path_stdout);
         let reader = std::io::BufReader::new(stdout);
         let mut port_sent = false;
         for line in reader.lines() {
@@ -466,7 +469,11 @@ fn drain_and_read_port(
                                         anyhow::anyhow!("port {port} out of u16 range")
                                     }));
                                 port_sent = true;
-                                crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
+                                speedwave_runtime::log_file::write_log_line(
+                                    &mut log_file,
+                                    "STDOUT",
+                                    &line,
+                                );
                                 continue;
                             }
                         }
@@ -474,7 +481,7 @@ fn drain_and_read_port(
                     // After port is found, keep draining stdout so the pipe
                     // never fills up and the child never gets SIGPIPE.
                     log::debug!("mcp-os: {line}");
-                    crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
+                    speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &line);
                 }
                 Err(_) => break,
             }
@@ -493,66 +500,7 @@ fn drain_and_read_port(
     }
 }
 
-/// Write content to file with chmod 600 (Unix) to prevent other users from reading it.
-fn write_restricted_file(path: &PathBuf, content: &str) -> anyhow::Result<()> {
-    if path.is_dir() {
-        log::warn!(
-            "write_restricted_file: removing unexpected directory at {}",
-            path.display()
-        );
-        std::fs::remove_dir_all(path)?;
-    }
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-    }
-    #[cfg(windows)]
-    {
-        std::fs::write(path, content)?;
-        // Restrict to current user only via Windows ACLs.
-        // icacls /inheritance:r removes inherited ACEs, then /grant:r adds
-        // full-control for the current user only — equivalent of chmod 600.
-        let status = speedwave_runtime::binary::system_command("icacls")
-            .args([
-                path.as_os_str(),
-                "/inheritance:r".as_ref(),
-                "/grant:r".as_ref(),
-            ])
-            .arg(format!(
-                "{}:(F)",
-                std::env::var("USERNAME").unwrap_or_default()
-            ))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => log::warn!(
-                "icacls failed (exit {}): {} may have overly permissive ACLs",
-                s,
-                path.display()
-            ),
-            Err(e) => log::warn!(
-                "failed to run icacls on {}: {} — file may have overly permissive ACLs",
-                path.display(),
-                e
-            ),
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        compile_error!("write_restricted_file: unsupported platform — add file permission logic for this target");
-    }
-    Ok(())
-}
+// Restricted file write — see `speedwave_runtime::fs_perms::write_restricted_file` (SSOT extracted in PR1).
 
 // ---------------------------------------------------------------------------
 // Test-only accessors — gated behind cfg(test) so clippy reports dead code
@@ -712,25 +660,6 @@ srv.listen(0, '127.0.0.1', () => {
         assert!(result.is_err(), "Should timeout on silent child");
         child.kill().ok();
         child.wait().ok();
-    }
-
-    #[test]
-    fn test_write_restricted_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("test-file");
-
-        write_restricted_file(&path, "test-content").unwrap();
-
-        assert!(path.exists());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "test-content");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "File should be chmod 600");
-        }
     }
 
     #[cfg(unix)]
@@ -983,7 +912,9 @@ srv.listen(0, '127.0.0.1', () => {
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default());
         #[cfg(not(target_os = "windows"))]
-        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
         let result = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -1202,7 +1133,9 @@ process.stdout.write(JSON.stringify({ leaked }));
 
         cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
         #[cfg(not(target_os = "windows"))]
-        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
         let result = cmd
             .env("PORT", "0")
             .env("MCP_OS_AUTH_TOKEN", "test-token")
@@ -1488,19 +1421,6 @@ srv.listen(0, '127.0.0.1', () => {
     }
 
     #[test]
-    fn test_write_restricted_file_overwrites_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("token-as-dir");
-        std::fs::create_dir(&path).unwrap();
-        assert!(path.is_dir());
-
-        write_restricted_file(&path, "my-token").unwrap();
-
-        assert!(path.is_file());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "my-token");
-    }
-
-    #[test]
     fn test_stop_releases_log_file() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("sw-data");
@@ -1669,7 +1589,7 @@ srv.listen(0, '127.0.0.1', () => {
     }
 
     #[test]
-    fn apply_child_env_defaults_path_and_home_to_empty_when_missing() {
+    fn apply_child_env_defaults_path_to_empty_when_missing_and_omits_home() {
         let mut cmd = Command::new("/bin/true");
         let env = FakeEnv(&[]);
 
@@ -1681,11 +1601,12 @@ srv.listen(0, '127.0.0.1', () => {
             Some(""),
             "PATH must always be set on the child, even if empty"
         );
+        // HOME="" makes Node.js os.homedir() return "" and breaks ~/.npm,
+        // ~/.cache, etc. — better to leave HOME unset than poison it.
         #[cfg(not(target_os = "windows"))]
-        assert_eq!(
-            captured.get("HOME").map(String::as_str),
-            Some(""),
-            "HOME must always be set on Unix children, even if empty"
+        assert!(
+            captured.get("HOME").is_none(),
+            "HOME must be omitted on Unix children when not set on the host"
         );
     }
 

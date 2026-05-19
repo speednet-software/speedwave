@@ -34,7 +34,10 @@ Container memory limits are defined in `containers/compose.template.yml`. The Cl
 
 - **Claude container:** adaptive (`${CLAUDE_MEMORY}` — see scaling below)
 - **MCP Hub:** 512 MiB (fixed)
-- **MCP workers:** 128 MiB each (fixed), except `mcp-playwright` which uses 2048 MiB (`cpus: 2.0`) due to Chromium requirements
+- **MCP workers:** 128 MiB each (fixed), except:
+  - `mcp-github` — 256 MiB (Octokit composed with the throttling + retry plugins, plus `octokit.paginate` buffering full result sets, OOM-kills a 128 MiB cap on a busy repo)
+  - `mcp-office` — 1 GiB (`cpus: 1.0`); LibreOffice headless on a non-trivial document needs the headroom. Attached only to an `internal: true` compose network (no egress) — see ADR-055
+  - `mcp-playwright` — 2048 MiB (`cpus: 2.0`) due to Chromium requirements
 
 **Minimum requirement:** 8 GiB RAM. Speedwave warns at startup if the host has less than 8 GiB.
 
@@ -54,9 +57,13 @@ The Lima VM and Claude container memory scale based on host RAM. The VM never ta
 
 Formulas: VM = `(host_ram / 2).clamp(4, 32)`, Claude = `(vm_mem - 4).clamp(4, 28)`.
 
-### Adaptive scaling (Linux — native nerdctl)
+### Windows (WSL2)
 
-No VM layer. Claude container memory scales directly from host RAM with 6 GiB reserved for the OS and user applications:
+Claude container memory scales directly from host RAM with 6 GiB reserved for
+the OS and user applications. WSL2 shares host RAM dynamically rather than
+reserving a hard partition like Lima, so the formula bypasses the VM-memory
+step. Falls back to 10 g when RAM detection fails (`host_total_memory_gib()`
+returns 16 on failure → 16 − 6 = 10).
 
 | Host RAM | Claude container |
 | -------- | ---------------- |
@@ -64,10 +71,6 @@ No VM layer. Claude container memory scales directly from host RAM with 6 GiB re
 | 16 GiB   | 10 g             |
 | 32 GiB   | 26 g             |
 | 64 GiB   | 28 g (cap)       |
-
-### Windows (WSL2)
-
-Same adaptive formula as Linux. Falls back to 10 g when RAM detection fails (`host_total_memory_gib()` returns 16 on failure → 16 − 6 = 10).
 
 ### Migration
 
@@ -82,19 +85,32 @@ Existing projects receive the new Claude container memory limit on next containe
 - The `IMAGES` constant in `crates/speedwave-runtime/src/build.rs` must stay aligned with `scripts/bundle-build-context.sh`
 - All binary downloads in Containerfiles are **SHA256-verified** for supply chain security
 
+### Lazy build of enabled images (ADR-057)
+
+Builds are scoped to what the user actually runs:
+
+- `build::enabled_images(integrations)` returns `claude` + `mcp-hub` always, plus the worker image for each enabled built-in MCP integration. Plugin images go through `plugin::ensure_plugin_images(rt, enabled_plugin_service_ids)`.
+- The same per-project predicate (`is_service_enabled`) drives the hub's `ENABLED_SERVICES` env var — `compose::enabled_hub_service_ids` and `build::enabled_images` are the SSOT for "enabled". Build- and compose-filtering can't drift.
+- **Reconcile and setup build only the active project's enabled set.** On a fresh setup with no active project, only claude + mcp-hub are built.
+- **Enabling an integration in a running project triggers a single-image build on demand** (`integrations_cmd::ensure_project_images_built` → `build::build_missing_images`). The build is part of the existing "Restarting containers…" wait; on failure the just-enabled integration is rolled back to `enabled: false` and the prior containers keep running.
+- **Project switch runs the same lazy build for the destination project** before `compose_up`, so switching to a project whose integrations weren't yet built never fails with `no such image`. The build is part of the "Switching project…" wait.
+- `images_exist(rt, integrations)` checks only images that should exist for the given set, so disabled integrations don't force a phantom rebuild at reconcile time.
+- After each reconcile and every successful `restart_integration_containers`, `prune_orphan_current_bundle_images` force-removes worker tags that the **active project** no longer enables (`enabled_images(active)`). Per-project scope: switching to another project that needs the pruned image triggers a lazy build during the switch.
+- Pruning is unchanged: `prune_old_bundle_images` still `rmi`s every catalogue tag for the old bundle id; `rmi` of an absent tag is a no-op.
+
 ### Image pruning on update
 
 When the bundle ID changes (app version bump or build-context change), disk space is reclaimed in two steps **before** building the new image set:
 
-1. The previous bundle's 6 tagged images are removed via `nerdctl rmi`, reclaiming ~4–6 GiB.
+1. The previous bundle's tagged images (one per `build.rs::IMAGES` entry) are removed via `nerdctl rmi`, reclaiming several GiB.
 2. BuildKit build cache is pruned via `nerdctl builder prune --all --force`, reclaiming an additional ~5–15 GiB of transient layers from `--mount=type=cache` steps.
 
 This two-step cleanup ensures the Lima VM diffdisk (50 GiB cap) has sufficient space for the new build.
 
 Both update paths perform this pruning:
 
-- **Desktop** (`reconcile_bundle_update_inner` in `desktop/src-tauri/src/reconcile.rs`) — prunes before calling `build_all_images_for_bundle`
-- **CLI** (`update_containers` in `crates/speedwave-runtime/src/update.rs`) — prunes before calling `build_all_images`
+- **Desktop** (`reconcile_bundle_update_inner` in `desktop/src-tauri/src/reconcile.rs`) — prunes before calling `build_enabled_images` for the active project's enabled set
+- **CLI** (`update_containers` in `crates/speedwave-runtime/src/update.rs`) — prunes before calling `build_images_for_bundle` for the current project's enabled set
 
 The guard condition is: `applied_bundle_id` exists **and** differs from the new bundle ID. Fresh installs (no `applied_bundle_id`) and rebuilds without a version change produce no prune call.
 
@@ -113,6 +129,19 @@ The mcp-os process runs on the host (not in a container) and binds to a dynamic 
 5. Emits a `containers_reconciled` Tauri event to notify the frontend
 
 This ensures the MCP Hub always routes OS integration requests to the live mcp-os instance, even after process restarts.
+
+## Dynamic Port Reconciliation (oauth worker)
+
+The host-side `oauth` worker (ADR-060) follows the same pattern as `mcp-os`. It binds to a dynamic loopback port on startup; the watchdog respawns it on liveness failure, picking a fresh ephemeral port each time. OAuth-consuming workers (currently SharePoint) read this port from `WORKER_OAUTH_URL` baked into compose env.
+
+When the watchdog respawns the oauth worker it:
+
+1. Stops and re-runs `OauthProcess::spawn_in`, getting a new port.
+2. Adds the project to a `respawned` list (built under the worker map's mutex, then drained outside it).
+3. Calls `host_exec_cmd::recreate_project_containers_if_running` for each respawned project — wrapped in `std::panic::catch_unwind` so a single bad project does not silently kill the watchdog thread.
+4. `recreate_project_containers_if_running` regenerates the compose YAML via `render_compose()`, runs the security check, and recreates the project's containers — they pick up the new `WORKER_OAUTH_URL` in env.
+
+The `is_oauth_alive` TCP probe retries 3 × with a 200 ms backoff before declaring a worker dead, because every false-positive respawn cascades into a full container recreate of every OAuth consumer.
 
 ## Reconcile Guard (Image Readiness)
 
@@ -156,7 +185,7 @@ The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/
 
 ### Missing images (reconcile-time detection)
 
-At startup, `reconcile_bundle_update` verifies that all expected container images exist even when the bundle ID has not changed. If images are missing (e.g. containerd was reinstalled), the reconcile forces a full image rebuild before setting `IMAGES_READY = Ready`. This prevents `start_containers` from attempting `compose_up` with nonexistent images.
+At startup, `reconcile_bundle_update` verifies that the expected container images exist for the active project even when the bundle ID has not changed. If any of those images are missing (e.g. containerd was reinstalled), the reconcile forces a rebuild of the active project's enabled set before setting `IMAGES_READY = Ready`. Disabled-integration images are intentionally absent under lazy builds (ADR-057) and don't trigger a rebuild.
 
 ## VM Lifecycle on Exit
 
@@ -171,20 +200,16 @@ The Lima VM reserves ~9–32 GiB of RAM for the lifetime of the process — QEMU
 - **Cleanup is non-blocking:** All exit cleanup (VM stop, IDE Bridge, mcp-os) runs in a spawned background thread. The Tauri event loop is not blocked.
 - **Per-project `compose_down` is skipped on macOS:** the VM poweroff reaps every container in one shot; calling `compose_down` would add ~10 s per project of nerdctl's hard-coded graceful-stop timeout. The full macOS exit sequence is just `limactl stop --force` (hard Apple Virtualization Framework VM poweroff, typically under a second).
 
-### Linux (native nerdctl)
-
-There is no VM layer. Containers are stopped by `compose_down`. The containerd daemon continues as a systemd user service — this matches the Docker Desktop model where containerd is always available.
-
 ### Windows (WSL2)
 
-`stop_vm()` is a no-op for `WslRuntime`. Running `wsl --terminate Speedwave` would stop all processes in the WSL2 distro — including workloads unrelated to Speedwave. Windows manages WSL2 memory via the hypervisor; Speedwave does not control the distro lifecycle. Because `stop_vm()` is a no-op, containers are stopped via per-project `compose_down` on app exit (same path as Linux). Without it, containers would survive in the `Speedwave` distro until the next Windows boot or manual `wsl --shutdown`.
+`stop_vm()` is a no-op for `WslRuntime`. Running `wsl --terminate Speedwave` would stop all processes in the WSL2 distro — including workloads unrelated to Speedwave. Windows manages WSL2 memory via the hypervisor; Speedwave does not control the distro lifecycle. Because `stop_vm()` is a no-op, containers are stopped via per-project `compose_down` on app exit. Without it, containers would survive in the `Speedwave` distro until the next Windows boot or manual `wsl --shutdown`.
 
 ### Signal handling
 
 SIGTERM and SIGINT (and `SetConsoleCtrlHandler` on Windows) are handled by the `ctrlc` crate. The signal handler calls `run_exit_cleanup()`, which is guarded by `CLEANUP_ONCE` — the cleanup body runs exactly once across all three call sites:
 
 1. **Signal handler** (`ctrlc::set_handler`) — SIGTERM/SIGINT
-2. **`WindowEvent::Destroyed`** — main window destroyed (app closed without tray, or Linux without libappindicator)
+2. **`WindowEvent::Destroyed`** — main window destroyed (app closed without tray)
 3. **`RunEvent::ExitRequested`** — tray menu "Quit", macOS Cmd+Q / app-menu "Quit", or SIGTERM via the Tauri runtime (paths where the main window is hidden rather than destroyed)
 
 ## See Also

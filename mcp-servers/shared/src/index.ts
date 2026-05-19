@@ -51,6 +51,7 @@ export type {
   SSEEvent,
   // Tool types
   ToolHandler,
+  ToolHandlerContext,
   ToolDefinition,
   // Transport types
   ProcessRequestResult,
@@ -106,3 +107,17 @@ export { notConfiguredMessage, withSetupGuidance } from './errors.js';
 // Retry
 export { retryAsync } from './retry.js';
 export type { RetryOptions } from './retry.js';
+
+// Atomic owner-only file write (mirrors Rust crate::fs_perms::write_restricted_file)
+export { writeRestrictedSecret } from './restricted-write.js';
+
+// Worker → oauth worker client (ADR-060)
+export {
+  refreshAccessToken,
+  OAuthScopeMismatchError,
+  OAuthRefreshError,
+  readJwtExp,
+  accessTokenExpiresWithin,
+  PROACTIVE_REFRESH_SECONDS,
+} from './oauth-client.js';
+export type { OAuthRefreshOptions, OAuthRefreshCode } from './oauth-client.js';

@@ -76,7 +76,10 @@ pub struct ConversationTranscript {
 // ---------------------------------------------------------------------------
 
 fn claude_dot_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
-    data_dir.join("claude-home").join(project).join(".claude")
+    data_dir
+        .join(speedwave_runtime::consts::CLAUDE_HOME_SUBDIR)
+        .join(project)
+        .join(".claude")
 }
 
 fn sessions_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
@@ -786,7 +789,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp
             .path()
-            .join("claude-home")
+            .join(speedwave_runtime::consts::CLAUDE_HOME_SUBDIR)
             .join("acme")
             .join(".claude")
             .join("projects")
@@ -909,7 +912,7 @@ mod tests {
         // Create a non-standard workspace dir (not -workspace)
         let custom_ws = tmp
             .path()
-            .join("claude-home")
+            .join(speedwave_runtime::consts::CLAUDE_HOME_SUBDIR)
             .join("proj")
             .join(".claude")
             .join("projects")
@@ -930,7 +933,7 @@ mod tests {
         // Create a non-standard workspace dir with no .jsonl files
         let custom_ws = tmp
             .path()
-            .join("claude-home")
+            .join(speedwave_runtime::consts::CLAUDE_HOME_SUBDIR)
             .join("proj")
             .join(".claude")
             .join("projects")

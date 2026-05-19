@@ -4,19 +4,24 @@ import {
   Component,
   OnDestroy,
   OnInit,
+  effect,
   inject,
 } from '@angular/core';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { LoggerService } from '../services/logger.service';
+import { BetaService } from '../services/beta.service';
 import {
   DeviceCodeInfo,
   IntegrationsResponse,
   IntegrationStatusEntry,
   OAuthProgressEvent,
   OsIntegrationStatusEntry,
+  OsIntegrationValidation,
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
+import { HostExecConfigComponent } from './host-exec-config/host-exec-config.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 
@@ -43,7 +48,13 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
-  imports: [ServiceCardComponent, RedmineConfigComponent, IdeBridgeComponent, ProjectPillComponent],
+  imports: [
+    ServiceCardComponent,
+    RedmineConfigComponent,
+    HostExecConfigComponent,
+    IdeBridgeComponent,
+    ProjectPillComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -70,6 +81,38 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
             role="alert"
           >
             {{ error }}
+          </div>
+        }
+
+        @if (osIntegrationsAutoDisabled.length > 0) {
+          <div
+            class="mb-4 rounded ring-1 ring-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-amber-300 whitespace-pre-line"
+            data-testid="integrations-os-auto-disabled"
+            role="status"
+          >
+            <div class="font-medium mb-1">
+              OS integration{{ osIntegrationsAutoDisabled.length > 1 ? 's' : '' }} disabled
+            </div>
+            <div class="mb-2">
+              macOS does not currently grant Speedwave permission for the integration{{
+                osIntegrationsAutoDisabled.length > 1 ? 's' : ''
+              }}
+              below. Click the toggle to re-enable — you'll see a fresh permission prompt.
+            </div>
+            @for (entry of osIntegrationsAutoDisabled; track entry.service) {
+              <div class="mb-1">
+                <span class="mono uppercase tracking-wider">{{ entry.service }}</span
+                >: {{ entry.reason }}
+              </div>
+            }
+            <button
+              type="button"
+              class="mt-1 underline opacity-80 hover:opacity-100"
+              (click)="dismissOsIntegrationsAutoDisabled()"
+              data-testid="integrations-os-auto-disabled-dismiss"
+            >
+              Dismiss
+            </button>
           </div>
         }
 
@@ -213,6 +256,27 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     (deleteCredentials)="deleteCredentials($event)"
                   />
                 } @else {
+                  @if (
+                    svc.service === 'sharepoint' && svc.oauth_action_required === 'scope_mismatch'
+                  ) {
+                    <div
+                      class="m-3 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+                      data-testid="integrations-oauth-reauth-banner"
+                    >
+                      <p class="text-[var(--ink)]">
+                        SharePoint authorisation is incomplete. Re-authorise to grant the scopes
+                        required by the current Speedwave release.
+                      </p>
+                      <button
+                        type="button"
+                        class="pill accent mt-2 hover:bg-[var(--accent-soft)]"
+                        data-testid="integrations-oauth-reauth-button"
+                        (click)="handleStartOAuth({ svc: svc, credentials: svc.current_values })"
+                      >
+                        Re-authorise SharePoint
+                      </button>
+                    </div>
+                  }
                   <app-service-card
                     [svc]="svc"
                     [expanded]="true"
@@ -231,6 +295,12 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
               </div>
             }
           }
+        }
+
+        @if (betaEnabled()) {
+          <div class="mt-6" data-testid="integrations-host-exec-slot">
+            <app-host-exec-config />
+          </div>
         }
 
         <div class="mt-6" data-testid="integrations-ide-bridge-slot">
@@ -277,6 +347,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
   private static readonly HIDDEN_SERVICES = new Set(['slack']);
+  private static readonly BETA_ONLY_SERVICES = new Set(['office', 'github', 'atlassian']);
 
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
@@ -288,6 +359,24 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   error = '';
   /** Name of the currently active project. */
   activeProject: string | null = null;
+  /**
+   * OS integrations auto-disabled at startup because macOS TCC denies the
+   * permission they previously had. Populated by validate_os_integrations_on_startup
+   * — non-empty after upgrades that change the binary identity (e.g. embedded
+   * Info.plist + sub-identifier change), where the prior TCC.db row no longer
+   * matches. Each entry carries a recovery reason from composeErrorMessage
+   * (typically a `tccutil reset` command). User clicks the toggle again to
+   * trigger a fresh permission prompt.
+   */
+  osIntegrationsAutoDisabled: OsIntegrationValidation[] = [];
+  /**
+   * In-flight or completed validation promises keyed by project. Static so
+   *  that route navigation (component remount) does NOT re-spawn 4 native
+   *  CLIs every time the user opens /integrations. The cached promise lets
+   *  later mounts await the original validate when they need its outcome
+   *  (tests do; production fire-and-forgets).
+   */
+  private static validationByProject = new Map<string, Promise<void>>();
 
   /** OAuth state */
   oauthStatus: string | null = null;
@@ -301,12 +390,31 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+  private logger = inject(LoggerService);
+  private beta = inject(BetaService);
   private unsubProjectSettled: (() => void) | null = null;
+  private unsubStatusRefresher: (() => void) | null = null;
+
+  readonly betaEnabled = this.beta.enabled;
+
+  /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal beta-only services. */
+  constructor() {
+    effect(() => {
+      this.betaEnabled();
+      if (this.activeProject) void this.loadIntegrations();
+    });
+  }
 
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {
     await this.loadActiveProject();
+    // Render the integrations table immediately. Validation runs in the
+    // background (see runInitialOsValidation) and only once per project —
+    // re-entering the view, project-settled events, etc. must NOT re-spawn
+    // 4 native CLIs each time, the cost is 400ms-1.4s of CPU + Mail.app
+    // launch attempts.
     await this.loadIntegrations();
+    this.runInitialOsValidation();
     // Subscribe to settled (not just ready) so we also reload after
     // `auth_required` / `error` settle — the integrations table itself
     // does not require Claude auth, so users still need to see and toggle
@@ -318,6 +426,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       }
       await this.loadActiveProject();
       await this.loadIntegrations();
+    });
+    // After a failed restart (build/compose), backend may have rolled the
+    // just-enabled service back to disabled — refresh the rows to match.
+    this.unsubStatusRefresher = this.projectState.registerIntegrationStatusRefresher(() => {
+      void this.loadIntegrations();
     });
 
     this.tauri
@@ -360,6 +473,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       this.unsubProjectSettled();
       this.unsubProjectSettled = null;
     }
+    if (this.unsubStatusRefresher) {
+      this.unsubStatusRefresher();
+      this.unsubStatusRefresher = null;
+    }
     if (this.unlistenOAuth) {
       this.unlistenOAuth();
       this.unlistenOAuth = null;
@@ -372,6 +489,82 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  /**
+   * Runs OS validation once per project per session (cached as a static
+   * promise). Re-entering the view does not re-spawn 4 CLIs. Returns the
+   * cached promise so tests can await; production fires-and-forgets.
+   *
+   * NOTE: a stale entry persists for the lifetime of the app session. If the
+   * user changes a permission in System Settings mid-session and revisits
+   * /integrations, the banner will not refresh until next launch. Acceptable
+   * trade-off: the cost of re-spawning 4 native CLIs on every navigation
+   * (1.4s + Mail.app re-launch attempts) is much worse than this edge case.
+   */
+  runInitialOsValidation(): Promise<void> {
+    if (!this.activeProject) return Promise.resolve();
+    const project = this.activeProject;
+    const cached = IntegrationsComponent.validationByProject.get(project);
+    if (cached) return cached;
+    const inflight = this.validateOsIntegrations().then(async () => {
+      if (this.activeProject === project && this.osIntegrationsAutoDisabled.length > 0) {
+        await this.loadIntegrations();
+      }
+    });
+    IntegrationsComponent.validationByProject.set(project, inflight);
+    return inflight;
+  }
+
+  /**
+   * Spawns 4 native CLIs to verify that every OS integration enabled in
+   * config still has macOS TCC permission; auto-disables those that don't
+   * and populates `osIntegrationsAutoDisabled` so the banner can render.
+   */
+  async validateOsIntegrations(): Promise<void> {
+    if (!this.activeProject) {
+      this.logger.debug('[integrations] validateOsIntegrations skipped — no active project');
+      return;
+    }
+    this.logger.info(`[integrations] validateOsIntegrations start project=${this.activeProject}`);
+    try {
+      const result = await this.tauri.invoke<OsIntegrationValidation[]>(
+        'validate_os_integrations_on_startup',
+        { project: this.activeProject }
+      );
+      // Defensive: the Tauri command can return undefined in tests where the
+      // mock handler doesn't recognise the command name; coerce to [] so the
+      // template can safely call .length without an undefined-property error.
+      this.osIntegrationsAutoDisabled = Array.isArray(result) ? result : [];
+      if (this.osIntegrationsAutoDisabled.length === 0) {
+        this.logger.info('[integrations] validateOsIntegrations done — no auto-disabled services');
+      } else {
+        // Per-service warn so each line lands in the user-supplied logs ZIP separately
+        // (easier to grep / cite when triaging support tickets).
+        for (const entry of this.osIntegrationsAutoDisabled) {
+          this.logger.warn(
+            `[integrations] auto-disabled os.${entry.service} (was enabled, TCC denied) — reason: ${entry.reason}`
+          );
+        }
+        this.logger.info(
+          `[integrations] validateOsIntegrations done — auto-disabled ${this.osIntegrationsAutoDisabled.length} service(s): ${this.osIntegrationsAutoDisabled.map((v) => v.service).join(',')}`
+        );
+      }
+    } catch (e: unknown) {
+      // Non-fatal: validation failure should not block the integrations view.
+      // The user can still toggle services manually; failures will surface
+      // through the existing error path on click.
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error(`[integrations] validateOsIntegrations failed (non-fatal): ${msg}`);
+      this.osIntegrationsAutoDisabled = [];
+    }
+    this.cdr.markForCheck();
+  }
+
+  /** Dismisses the auto-disabled banner. Call after the user reads it. */
+  dismissOsIntegrationsAutoDisabled(): void {
+    this.osIntegrationsAutoDisabled = [];
+    this.cdr.markForCheck();
+  }
+
   /** Fetches integration status entries from the backend. */
   async loadIntegrations(): Promise<void> {
     if (!this.activeProject) return;
@@ -379,9 +572,12 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // Slack is not yet publicly available (#91)
+      // Slack hidden always (#91); BETA_ONLY_SERVICES hidden unless beta is on (ADR-058).
+      const betaOn = this.betaEnabled();
       this.services = response.services.filter(
-        (s) => !IntegrationsComponent.HIDDEN_SERVICES.has(s.service)
+        (s) =>
+          !IntegrationsComponent.HIDDEN_SERVICES.has(s.service) &&
+          (betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service))
       );
       this.osIntegrations = response.os;
     } catch (e: unknown) {
@@ -447,12 +643,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     svc.enabled = next;
     this.cdr.markForCheck();
     try {
-      await this.tauri.invoke('set_integration_enabled', {
-        project: this.activeProject,
-        service: svc.service,
-        enabled: next,
-      });
-      this.projectState.requestRestart();
+      await this.applyServiceToggle(svc, next);
     } catch (e: unknown) {
       svc.enabled = previous;
       this.error = e instanceof Error ? e.message : String(e);
@@ -622,18 +813,32 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   async toggleService(svc: IntegrationStatusEntry, event: Event): Promise<void> {
     const enabled = (event.target as HTMLInputElement).checked;
     try {
-      await this.tauri.invoke('set_integration_enabled', {
-        project: this.activeProject,
-        service: svc.service,
-        enabled,
-      });
-      svc.enabled = enabled;
-      this.projectState.requestRestart();
+      await this.applyServiceToggle(svc, enabled);
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
       (event.target as HTMLInputElement).checked = !enabled;
     }
     this.cdr.markForCheck();
+  }
+
+  /**
+   * SSOT for "user flipped an MCP service toggle".
+   * Persists the new value, marks `pendingJustEnabled` on enable so a failed
+   * restart can roll it back, and requests the container restart.
+   * @param svc - the integration being toggled.
+   * @param enabled - target enabled state.
+   */
+  private async applyServiceToggle(svc: IntegrationStatusEntry, enabled: boolean): Promise<void> {
+    await this.tauri.invoke('set_integration_enabled', {
+      project: this.activeProject,
+      service: svc.service,
+      enabled,
+    });
+    svc.enabled = enabled;
+    if (enabled) {
+      this.projectState.pendingJustEnabled = svc.service;
+    }
+    this.projectState.requestRestart();
   }
 
   /**
@@ -647,16 +852,31 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     const next = !previous;
     os.enabled = next;
     this.cdr.markForCheck();
+    this.logger.info(
+      `[integrations] os toggle clicked service=${os.service} previous=${previous} next=${next}`
+    );
     try {
       await this.tauri.invoke('set_os_integration_enabled', {
         project: this.activeProject,
         service: os.service,
         enabled: next,
       });
+      this.logger.info(`[integrations] os toggle persisted service=${os.service} enabled=${next}`);
+      // Drop the auto-disabled banner entry for this service — the toggle
+      // succeeded so the banner's "Mail.app is not running" text is stale.
+      if (this.osIntegrationsAutoDisabled.some((e) => e.service === os.service)) {
+        this.osIntegrationsAutoDisabled = this.osIntegrationsAutoDisabled.filter(
+          (e) => e.service !== os.service
+        );
+      }
       this.projectState.requestRestart();
     } catch (e: unknown) {
       os.enabled = previous;
-      this.error = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.warn(
+        `[integrations] os toggle failed service=${os.service} target=${next} reverted=${previous} reason=${msg}`
+      );
+      this.error = msg;
     }
     this.cdr.markForCheck();
   }

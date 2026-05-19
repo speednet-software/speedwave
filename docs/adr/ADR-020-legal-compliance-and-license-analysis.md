@@ -86,11 +86,11 @@ All three are **Apache 2.0** — fully permissive.[^6][^7][^8]
 - containerd / Docker, Inc. (2012–2015)
 - Docker/Moby components
 
-### nerdctl-full (Linux)
+### nerdctl-full (Windows WSL2)
 
-nerdctl is **Apache 2.0**.[^10] Same requirements as Lima + nerdctl + containerd above — attribution required, binary redistribution permitted, no source disclosure needed. nerdctl-full is bundled inside the .deb package (see ADR-003, ADR-021, and ADR-025).
+nerdctl is **Apache 2.0**.[^10] Same requirements as Lima + nerdctl + containerd above — attribution required, binary redistribution permitted, no source disclosure needed. nerdctl-full is bundled inside the Windows NSIS installer for use inside the Speedwave WSL2 distribution (see ADR-021).
 
-**crun note:** containerd defaults to runc (Apache 2.0) as its OCI runtime, so there is no GPL exposure from the bundled nerdctl-full. If the system has crun installed, containerd may use it as a subprocess — this is **not a licensing concern** for Speedwave: invoking a GPL binary as a subprocess does not trigger copyleft obligations.[^10a] This is analogous to any application calling `/usr/bin/bash` (GPL v3) — the caller is not a derivative work.
+**crun note:** containerd defaults to runc (Apache 2.0) as its OCI runtime, so there is no GPL exposure from the bundled nerdctl-full. If the host has crun installed inside its WSL2 distribution, containerd may use it as a subprocess — this is **not a licensing concern** for Speedwave: invoking a GPL binary as a subprocess does not trigger copyleft obligations.[^10a] This is analogous to any application calling `/usr/bin/bash` (GPL v3) — the caller is not a derivative work.
 
 ### WSL2 + windows-rs + mapi-rs (Windows)
 
@@ -152,7 +152,7 @@ Permitted for building and shipping Speedwave.[^19] The prohibition applies only
 
 - [ ] **Remove any assumption of bundling Claude Code** — update architecture to require user self-install
 - [ ] **Force `vmType: vz` in Lima config** — eliminates QEMU GPL issue (macOS 13.5+ only)
-- [x] ~~**Use `runc` explicitly on Linux**~~ — **resolved: not needed.** containerd defaults to runc (Apache 2.0) in the bundled nerdctl-full; no GPL OCI runtime is bundled or distributed. No copyleft risk.
+- [x] ~~**Use `runc` explicitly in the bundled nerdctl-full**~~ — **resolved: not needed.** containerd defaults to runc (Apache 2.0) in the bundled nerdctl-full; no GPL OCI runtime is bundled or distributed. No copyleft risk.
 - [ ] **Use MinGW toolchain for Windows builds** — avoids MSVC license ambiguity
 
 ### Before First Release
@@ -192,16 +192,16 @@ The `presale` MCP server (private business component) remains proprietary and is
 
 ## 6. Risk Summary
 
-| Risk                        | Severity  | Mitigation                                               |
-| --------------------------- | --------- | -------------------------------------------------------- |
-| Bundling Claude Code binary | 🔴 HIGH   | Require user self-install via npm                        |
-| OAuth credential routing    | 🔴 HIGH   | API key only; users authenticate directly with Anthropic |
-| QEMU GPL on macOS           | 🟡 MEDIUM | Force `vmType: vz`, require macOS 13.5+                  |
-| crun GPL on Linux           | 🟢 LOW    | Not bundled — subprocess invocation, no copyleft risk    |
-| MSVC license on Windows     | 🟡 MEDIUM | Use MinGW toolchain in GitHub Actions                    |
-| Missing attribution         | 🟡 MEDIUM | Create LICENSES/ directory before release                |
+| Risk                        | Severity  | Mitigation                                                          |
+| --------------------------- | --------- | ------------------------------------------------------------------- |
+| Bundling Claude Code binary | 🔴 HIGH   | Require user self-install via npm                                   |
+| OAuth credential routing    | 🔴 HIGH   | API key only; users authenticate directly with Anthropic            |
+| QEMU GPL on macOS           | 🟡 MEDIUM | Force `vmType: vz`, require macOS 13.5+                             |
+| crun GPL in container       | 🟢 LOW    | Not bundled — subprocess invocation, no copyleft risk               |
+| MSVC license on Windows     | 🟡 MEDIUM | Use MinGW toolchain in GitHub Actions                               |
+| Missing attribution         | 🟡 MEDIUM | Create LICENSES/ directory before release                           |
 | Apple VZ entitlement        | 🟢 LOW    | Embedded via codesign — self-serve, no Apple approval (see ADR-037) |
-| Anthropic ToS changes       | 🟡 MEDIUM | Monitor; no bundling = lower exposure                    |
+| Anthropic ToS changes       | 🟡 MEDIUM | Monitor; no bundling = lower exposure                               |
 
 ---
 

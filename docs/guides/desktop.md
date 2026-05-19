@@ -10,7 +10,7 @@ The desktop shell is a Tauri backend with an Angular frontend. It owns the setup
 
 The Desktop app bundles the `speedwave` CLI binary in its resources. On every startup (and during initial setup), the app copies the bundled CLI to the user's PATH:
 
-- **macOS / Linux:** `~/.local/bin/speedwave`
+- **macOS:** `~/.local/bin/speedwave`
 - **Windows:** `%USERPROFILE%\.speedwave\bin\speedwave.exe`
 
 This ensures the CLI and Desktop versions always stay in sync — a Desktop update automatically distributes the matching CLI. If the CLI binary is missing, the "Open Terminal" button in Settings shows an error banner instructing the user to restart the app.
@@ -31,7 +31,7 @@ After restart, the desktop backend compares the installed bundle against `~/.spe
 3. Recreate only the projects that were running before the update
 4. Emit `bundle_reconcile_status` so the UI can show progress or retry
 
-The same startup reconcile also runs after a manual app upgrade outside the desktop UI. On Linux `.deb`, the app update itself is still manual, but the next app launch still applies the new bundle to resources and containers automatically.
+The same startup reconcile also runs after a manual app upgrade outside the desktop UI.
 
 ## Bundle Identity
 
@@ -90,8 +90,6 @@ While Claude is responding, press **Esc** or click the red **Stop** button next 
 
 ## System Tray
 
-<!-- Content to be written: macOS/Windows click-toggle, Linux menu-only, libappindicator requirement -->
-
 ## Logs & system health
 
 The `/logs` route hosts a single page that combines container logs, host-side service logs, and a compact system-health status bar. It replaced the previous Settings → Diagnostics block and the standalone System Health view.
@@ -104,9 +102,34 @@ The `/logs` route hosts a single page that combines container logs, host-side se
 
 **Diagnostics export.** A button bundles the runtime log directory plus a compact summary into a ZIP. The path is shown in a modal with a copy-to-clipboard control; the file is opened in the host's file manager rather than auto-attached anywhere, so the user controls who sees it.
 
-**Log timestamps.** `nerdctl compose logs` and `wsl compose logs` now run with `--timestamps`, so every container log line carries an ISO date. The renderer also accepts the bracketed `[HH:MM:SS]` format emitted by some application loggers and prefixes it with the host's current date — note the day prefix is a hint when the container clock or timezone diverges from the host.
+**Log timestamps.** Every Speedwave-emitted log line carries one ISO-8601 timestamp in **local time with a colon offset** (`2026-05-12T14:34:02.814+02:00`) — Rust loggers via `speedwave-runtime`'s `log_ts::log_timestamp()`, MCP workers / the hub / plugins via `@speedwave/mcp-shared`'s `ts()` (which reads the container's `TZ`, propagated from the host by `tz::detect_host_timezone`). The `/logs` view **renders every timestamp in the host's local zone** regardless of how the source wrote it — so a worker's `+02:00` stamp and nerdctl's UTC `Z` stamp (compose-container lines additionally carry nerdctl's RFC-3339 prefix; `nerdctl compose logs` / `wsl compose logs` run with `--timestamps`) for the same instant appear identically; the raw value is in the `[title]` tooltip. A bare bracketed `[HH:MM:SS]` from external tooling is dated with the host's current day.
+
+## Meeting transcription
+
+A separate, **opt-in** Desktop integration that records system audio + microphone on the host, transcribes it locally with whisper.cpp, and assigns provisional speaker labels with sherpa-onnx. Lives on its own tab (⌘4) and is off by default.
+
+**Enabling.** Settings → Meeting transcription → toggle on. The toggle is a user-level preference (`~/.speedwave/config.json`) — repository `.speedwave.json` cannot enable it (privacy invariant from ADR-056). With the toggle off, the tab shows an empty-state that links back to Settings.
+
+**What runs locally vs. over the network.** Audio inference (Whisper transcription, sherpa diarization) runs locally — no audio leaves the machine for inference. Model downloads use the network (≈75 MiB for `small`, up to ≈2.9 GiB for `large-v3`, plus a few hundred MiB of diarization models). "Send to Claude" uploads the rendered transcript text to your configured LLM provider. The UI states this on every relevant surface.
+
+**Workflow.** Pick a language (Polish or English — never auto-detect; forced beats auto on Whisper) and an audio source → **Start recording**. The source picker defaults to **"Whole meeting (system audio + your microphone)"** — system loopback (what you hear: the other participants) and your mic, mixed into one stream; this is the headphones-on-a-call case. The other options are system-wide audio only, a specific app's audio (where the OS supports per-app capture), or just a microphone. The live transcript fills in with provisional `[Speaker N]` chips. **Stop** triggers a higher-quality offline pass: it loads the recorded WAV, re-transcribes the whole recording with `large-v3` (better cross-utterance context), re-diarizes the full audio, and swaps the result in — the speaker clusters may shift, so a chip you renamed is re-matched by temporal overlap. Then **Send to Claude** drops the transcript markdown into the active chat (a confirm dialog runs first — the markdown leaves the machine).
+
+**Models.** Downloaded on demand, SHA-256-verified, stored under `~/.speedwave/models/whisper/` and `~/.speedwave/models/diarization/`. The model manager shows which are present, how much disk they use, download progress, and lets you delete any. The live pass needs only `small` (CPU) or `large-v3-turbo` (Metal); `large-v3` is fetched lazily for the offline pass — if you only have `small`, the UI offers to download it or skip the offline pass and keep the live transcript.
+
+**Recordings & retention.** Each session stores `audio.wav` + `transcript.json` under `~/.speedwave/transcripts/<id>/` (0600). There is no auto-cleanup in v1 — the session list shows each recording's audio size and offers "discard audio" (keeps the transcript, frees disk, makes re-transcription impossible) and "delete transcript" (removes the whole directory). If audio was discarded, the offline pass can't run.
+
+**Permissions (macOS).** The first time you record, macOS prompts for **Microphone** access (via the public `AVCaptureDevice` API) and — when the source includes system audio — for **System Audio Recording** access. The system-audio prompt has no public trigger, so `audio-capture-cli` requests it via the private `TCCAccessRequest(kTCCServiceAudioCapture)` API (the same approach AudioCap / AudioTee use; it works on a notarized `.dmg`) — see ADR-056 decision 3. The bundled CLI carries `NSMicrophoneUsageDescription` / `NSAudioCaptureUsageDescription` for the prompt text. If you denied either, open System Settings → Privacy & Security → Microphone / System Audio Recording and re-enable Speedwave; to reset the prompts entirely run `tccutil reset Microphone pl.speedwave.desktop.audio-capture` (and `tccutil reset AudioCapture pl.speedwave.desktop.audio-capture`). If the system-audio recording is silent while audio is clearly playing, the permission is most likely off — the UI surfaces this and links to the Settings pane.
+
+**Per-OS requirements.** macOS 14.4+ (CoreAudio process taps). Windows 10 build 20348+ for per-app capture — older Windows 10 falls back to system-wide audio only (the source picker hides per-app options and a tooltip explains why).
+
+**Language support & limits.** The promise is "local best-effort live transcription + a higher-quality offline pass" — not perfect Polish. Public Polish WER benchmarks for `large-v3-turbo` are sparse, so the catalogue keeps `medium` as a middle ground; the offline pass with `large-v3` is as good as Whisper gets. Diarization is provisional, not a reliable speaker ID — live labels lag, crosstalk confuses them, and the offline pass can re-cluster.
+
+**Acceleration.** v1 ships CPU + Metal backends (the recording controls show "Acceleration: Metal" or "Acceleration: CPU only"). CUDA / Vulkan are explicitly out of scope for v1 — they need a separate CI toolchain and bundling strategy, tracked as follow-up.
+
+See [ADR-056](../adr/ADR-056-host-side-audio-transcription.md) for the full design and trade-offs.
 
 ## See Also
 
 - [ADR-005: Two Interfaces — CLI and Desktop](../adr/ADR-005-two-interfaces-cli-and-desktop.md)
 - [ADR-006: Chat UI via claude -p --stream-json](../adr/ADR-006-chat-ui-via-stream-json.md)
+- [ADR-056: Host-Side Audio Capture and Local Meeting Transcription](../adr/ADR-056-host-side-audio-transcription.md)

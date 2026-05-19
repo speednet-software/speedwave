@@ -129,13 +129,6 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
     grep -qF '"windows-x86_64-nsis"' "$VERIFY_SCRIPT"
 }
 
-@test "verify-release-assets.sh documents Linux auto-update exclusion" {
-    # Anti-removal guard: the inline comment explaining why Linux is excluded
-    # from asset verification must remain so future maintainers don't add Linux
-    # assets incorrectly. The semantic intent string is stable across refactors.
-    grep -qF "Linux is excluded: updater.rs disables auto-update" "$VERIFY_SCRIPT"
-}
-
 SIGN_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-bundled-binaries.sh"
 
 @test "SIGN_TARGETS uses REMINDERS_ENTITLEMENTS for reminders-cli (not CALENDARS)" {

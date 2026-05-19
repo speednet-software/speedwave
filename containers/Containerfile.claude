@@ -3,15 +3,14 @@
 # Multi-arch: linux/amd64 + linux/arm64 (Apple Silicon)
 FROM node:24-bookworm-slim
 
-# Security: container user is set per-platform via compose `user:` field.
-# macOS/Windows: "1000:1000" (unprivileged, containerd runs as root).
-# Linux rootless nerdctl: "0:0" (root in user namespace = host user UID;
-# UID 1000 maps to subuid ~101000, breaking bind-mount access).
+# Security: container user is set via compose `user:` field to "1000:1000"
+# (unprivileged; containerd runs as root inside the VM on both supported
+# platforms — Lima on macOS, WSL2 on Windows).
 # The base image has uid/gid 1000 ("node"). Rootless BuildKit cannot modify
 # /etc/passwd or /etc/group (overlayfs restrictions). We skip user renaming:
 # the container only needs a writable home at /home/speedwave.
-# See also: crates/speedwave-runtime/src/consts.rs (CONTAINER_USER_UNPRIVILEGED,
-# CONTAINER_USER_ROOTLESS) and compose.template.yml (user: "${CONTAINER_USER}").
+# See also: crates/speedwave-runtime/src/consts.rs::CONTAINER_USER_UNPRIVILEGED
+# and compose.template.yml (user: "${CONTAINER_USER}").
 ENV HOME=/home/speedwave
 RUN mkdir -p /home/speedwave && chown 1000:1000 /home/speedwave
 
@@ -26,6 +25,7 @@ RUN apt-get update -o Acquire::Retries=3 && \
         ca-certificates \
         curl \
         git \
+        tzdata \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
@@ -60,6 +60,17 @@ RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
     rm -rf /home/speedwave/.local/share/claude && \
     rm -f /home/speedwave/.local/bin/claude && \
     ln -sf /usr/local/bin/claude /home/speedwave/.local/bin/claude
+
+# OSC 52 clipboard wrappers — five symlinks redirect to one script emitting
+# the OSC 52 escape sequence. Claude Code's "press c to copy URL" probes for
+# pbcopy/xclip/xsel/wl-copy/clip.exe and pipes the URL through whichever it
+# finds. See ADR-052.
+COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh
+RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \
+    ln -s osc52-copy.sh /usr/local/bin/xclip && \
+    ln -s osc52-copy.sh /usr/local/bin/xsel && \
+    ln -s osc52-copy.sh /usr/local/bin/wl-copy && \
+    ln -s osc52-copy.sh /usr/local/bin/clip.exe
 
 # Copy entrypoint late to avoid busting the ~210MB Claude Code layer cache
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh

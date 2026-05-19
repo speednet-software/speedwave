@@ -5,15 +5,12 @@ use std::fmt;
 pub enum PrereqRule {
     /// Windows: WSL2 is not available or not functional.
     WslNotAvailable,
-    /// Linux: `newuidmap` binary not found (required for rootless containers).
-    UidmapMissing,
 }
 
 impl fmt::Display for PrereqRule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WslNotAvailable => f.write_str("WSL_NOT_AVAILABLE"),
-            Self::UidmapMissing => f.write_str("UIDMAP_MISSING"),
         }
     }
 }
@@ -36,7 +33,6 @@ impl fmt::Display for PrereqViolation {
 /// Returns an empty Vec if all prerequisites are met.
 ///
 /// - **Windows**: Verifies WSL2 is available via `wsl.exe --status` (10s timeout).
-/// - **Linux**: Verifies `newuidmap` exists (required for rootless user namespaces).
 /// - **macOS**: No OS prerequisites (Lima runtime is bundled).
 pub fn check_os_prereqs() -> Vec<PrereqViolation> {
     #[cfg(target_os = "windows")]
@@ -44,12 +40,7 @@ pub fn check_os_prereqs() -> Vec<PrereqViolation> {
         check_wsl()
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        check_uidmap()
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(not(target_os = "windows"))]
     {
         Vec::new()
     }
@@ -79,24 +70,6 @@ fn check_wsl() -> Vec<PrereqViolation> {
             rule: PrereqRule::WslNotAvailable,
             message: format!("WSL2 check failed: {e}"),
             remediation: consts::WSL_NOT_AVAILABLE_MSG,
-        }],
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn check_uidmap() -> Vec<PrereqViolation> {
-    use crate::consts;
-
-    let output = std::process::Command::new("sh")
-        .args(["-c", "command -v newuidmap"])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => Vec::new(),
-        _ => vec![PrereqViolation {
-            rule: PrereqRule::UidmapMissing,
-            message: "newuidmap not found on this system".to_string(),
-            remediation: consts::UIDMAP_MISSING_MSG,
         }],
     }
 }
@@ -214,11 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn test_prereq_rule_uidmap_missing_display() {
-        assert_eq!(PrereqRule::UidmapMissing.to_string(), "UIDMAP_MISSING");
-    }
-
-    #[test]
     fn test_prereq_violation_display() {
         let violation = PrereqViolation {
             rule: PrereqRule::WslNotAvailable,
@@ -241,31 +209,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn test_check_os_prereqs_linux_with_uidmap_present() {
-        // On CI and dev machines, newuidmap is typically installed.
-        // If this test fails, install: sudo apt install uidmap
-        let violations = check_os_prereqs();
-        assert!(
-            violations.is_empty(),
-            "Linux with newuidmap installed should have no prereq violations, got: {:?}",
-            violations
-        );
-    }
-
-    #[test]
     fn test_wsl_not_available_remediation_contains_dism() {
         assert!(
             consts::WSL_NOT_AVAILABLE_MSG.contains("dism.exe"),
             "WSL_NOT_AVAILABLE_MSG should contain dism.exe remediation"
-        );
-    }
-
-    #[test]
-    fn test_uidmap_missing_remediation_contains_install() {
-        assert!(
-            consts::UIDMAP_MISSING_MSG.contains("uidmap"),
-            "UIDMAP_MISSING_MSG should contain uidmap install instructions"
         );
     }
 
@@ -403,9 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn test_check_os_warnings_returns_empty_on_non_windows_with_sufficient_ram() {
-        // On macOS/Linux dev machines with ≥8 GiB RAM, check_os_warnings()
-        // returns empty (no nested-virt check, no low-memory warning).
+    fn test_check_os_warnings_returns_empty_on_macos_with_sufficient_ram() {
+        // On macOS dev machines with ≥8 GiB RAM, check_os_warnings() returns
+        // empty (no nested-virt check, no low-memory warning).
         #[cfg(not(target_os = "windows"))]
         {
             let host_ram = crate::resources::host_total_memory_gib();

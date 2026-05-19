@@ -41,34 +41,15 @@ import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
               {{ updateChecking ? 'checking...' : 'check now' }}
             </button>
             @if (updateResult === 'available') {
-              @if (isLinux) {
-                <button
-                  type="button"
-                  class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-                  data-testid="settings-download-update"
-                  (click)="openReleasesPage()"
-                >
-                  download v{{ updateAvailableVersion }}
-                </button>
-              } @else {
-                <button
-                  type="button"
-                  class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-                  data-testid="settings-install-update"
-                  (click)="installUpdate()"
-                  [disabled]="updateInstalling"
-                >
-                  {{ updateInstalling ? 'installing...' : 'install & restart' }}
-                </button>
-              }
-            }
-            @if (updateResult === 'managed-externally') {
-              <span
-                class="mono text-[11px] text-[var(--ink-mute)]"
-                data-testid="settings-update-managed-externally"
+              <button
+                type="button"
+                class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                data-testid="settings-install-update"
+                (click)="installUpdate()"
+                [disabled]="updateInstalling"
               >
-                run <code>sudo {{ managedManager }} upgrade speedwave</code>
-              </span>
+                {{ updateInstalling ? 'installing...' : 'install & restart' }}
+              </button>
             }
           </div>
         </div>
@@ -107,23 +88,19 @@ export class UpdateSectionComponent implements OnInit {
   updateAutoCheck = true;
   updateIntervalHours = UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
   updateChecking = false;
-  updateResult: 'none' | 'up-to-date' | 'available' | 'managed-externally' = 'none';
+  updateResult: 'none' | 'up-to-date' | 'available' = 'none';
   updateAvailableVersion = '';
-  /** Name of the package manager that owns this install (apt/dnf/...). */
-  managedManager = '';
   updateInstalling = false;
-  isLinux = false;
   updateInstallError = '';
   error = '';
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
 
-  /** Loads current version, update settings, and detects platform on init. */
+  /** Loads current version and update settings on init. */
   ngOnInit(): void {
     this.loadCurrentVersion();
     this.loadUpdateSettings();
-    this.detectPlatform();
   }
 
   /**
@@ -136,9 +113,6 @@ export class UpdateSectionComponent implements OnInit {
     if (this.updateResult === 'up-to-date') return '✓ up to date';
     if (this.updateResult === 'available') {
       return '⚠ update available: v' + this.updateAvailableVersion;
-    }
-    if (this.updateResult === 'managed-externally') {
-      return 'managed by your system package manager';
     }
     return 'tap "check now" to look for updates';
   }
@@ -213,10 +187,6 @@ export class UpdateSectionComponent implements OnInit {
           this.updateResult = 'available';
           this.updateAvailableVersion = outcome.version;
           break;
-        case 'managed_externally':
-          this.updateResult = 'managed-externally';
-          this.managedManager = outcome.manager;
-          break;
         case 'up_to_date':
           this.updateResult = 'up-to-date';
           setTimeout(() => {
@@ -248,27 +218,5 @@ export class UpdateSectionComponent implements OnInit {
     }
     this.updateInstalling = false;
     this.cdr.markForCheck();
-  }
-
-  /** Detects the current platform for platform-specific UI. */
-  private async detectPlatform(): Promise<void> {
-    try {
-      const platform = await this.tauri.invoke<string>('get_platform');
-      this.isLinux = platform === 'linux';
-      this.cdr.markForCheck();
-    } catch {
-      // Not running inside Tauri
-    }
-  }
-
-  /** Opens the GitHub Releases page for manual download (Linux .deb). */
-  async openReleasesPage(): Promise<void> {
-    try {
-      await this.tauri.invoke('open_url', {
-        url: 'https://github.com/speednet-software/speedwave/releases',
-      });
-    } catch {
-      // Fallback: not running inside Tauri
-    }
   }
 }

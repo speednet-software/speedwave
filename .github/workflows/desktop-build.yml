@@ -9,14 +9,17 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".node-version"
+      - ".sherpa-onnx-version"
       - ".github/actions/download-nodejs/**"
       - ".github/actions/download-wsl-resources/**"
+      - ".github/actions/download-sherpa-onnx/**"
       - "mcp-servers/package.json"
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
+      - "scripts/lib/fetch-sherpa-onnx-md.sh"
   push:
     branches: [main, dev]
     paths:
@@ -25,14 +28,17 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".node-version"
+      - ".sherpa-onnx-version"
       - ".github/actions/download-nodejs/**"
       - ".github/actions/download-wsl-resources/**"
+      - ".github/actions/download-sherpa-onnx/**"
       - "mcp-servers/package.json"
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
+      - "scripts/lib/fetch-sherpa-onnx-md.sh"
 
 permissions:
   contents: read
@@ -53,9 +59,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo 'matrix={"include":[{"platform":"ubuntu-22.04","args":"","rust-targets":""}]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"platform":"macos-latest","args":"--target aarch64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"}]}' >> "$GITHUB_OUTPUT"
           else
-            echo 'matrix={"include":[{"platform":"ubuntu-22.04","args":"","rust-targets":""},{"platform":"macos-latest","args":"--target aarch64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"platform":"macos-latest","args":"--target x86_64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"platform":"windows-latest","args":"","rust-targets":""}]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"platform":"macos-latest","args":"--target aarch64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"platform":"macos-latest","args":"--target x86_64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"platform":"windows-latest","args":"","rust-targets":""}]}' >> "$GITHUB_OUTPUT"
           fi
 
   build:
@@ -67,17 +73,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Install Linux system dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libssl-dev
 
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -112,22 +107,18 @@ jobs:
         with:
           arch: ${{ contains(matrix.args, 'aarch64') && 'aarch64' || 'x86_64' }}
 
-      - name: Download nerdctl-full for bundling
-        if: matrix.platform == 'ubuntu-22.04'
-        uses: ./.github/actions/download-nerdctl-full
-        with:
-          arch: amd64
-
       - name: Download WSL resources for offline bundling
         if: matrix.platform == 'windows-latest'
         uses: ./.github/actions/download-wsl-resources
 
+      - name: Pre-fetch sherpa-onnx MD-Release prebuilt (Windows CRT alignment)
+        if: matrix.platform == 'windows-latest'
+        uses: ./.github/actions/download-sherpa-onnx
+
       - name: Download Node.js for bundling
         uses: ./.github/actions/download-nodejs
         with:
-          platform: ${{ contains(matrix.platform, 'macos') && 'darwin' || (matrix.platform == 'windows-latest' && 'win' || 'linux') }}
-          # NOTE: assumes all non-macOS-aarch64 builds are x64. If a Linux arm64 runner
-          # is ever added to the matrix, this must be updated to detect runner arch separately.
+          platform: ${{ contains(matrix.platform, 'macos') && 'darwin' || 'win' }}
           arch: ${{ (contains(matrix.platform, 'macos') && contains(matrix.args, 'aarch64')) && 'arm64' || 'x64' }}
 
       - name: Bundle build context and mcp-os
@@ -173,8 +164,6 @@ jobs:
         run: |
           if [ "$MATRIX_PLATFORM" = "windows-latest" ]; then
             scripts/verify-bundled-assets.sh windows
-          elif [ "$MATRIX_PLATFORM" = "ubuntu-22.04" ]; then
-            scripts/verify-bundled-assets.sh linux
           else
             scripts/verify-bundled-assets.sh macos
           fi

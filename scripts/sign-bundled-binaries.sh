@@ -7,10 +7,9 @@
 # every Mach-O listed in tauri.macos.conf.json under bundle.resources that
 # ends up as an executable must be signed here, before tauri bundles them.
 #
-# macOS only. On Linux/Windows exits 0 — those platforms do not require
-# OS-level code signing today (Linux updater integrity is covered by Tauri's
-# Ed25519 signature). If Windows signing is added (issue #376), a separate
-# branch in this script will handle it.
+# macOS only. On Windows exits 0 — Windows does not require OS-level code
+# signing today. If Windows signing is added (issue #376), a separate branch
+# in this script will handle it.
 #
 # Required env when signing is active:
 #   APPLE_SIGNING_IDENTITY — "Developer ID Application: Name (TEAMID)"
@@ -36,6 +35,7 @@ VIRTUALIZATION_ENTITLEMENTS="$SRC_TAURI/entitlements/virtualization.plist"
 CALENDARS_ENTITLEMENTS="$SRC_TAURI/entitlements/calendars.plist"
 REMINDERS_ENTITLEMENTS="$SRC_TAURI/entitlements/reminders.plist"
 APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
+AUDIO_CAPTURE_ENTITLEMENTS="$SRC_TAURI/entitlements/audio-capture.plist"
 
 # Paths that tauri.macos.conf.json copies into .app/Contents/Resources/.
 # Source: desktop/src-tauri/tauri.macos.conf.json → bundle.resources.
@@ -46,13 +46,15 @@ APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 # Binaries using restricted platform APIs under Hardened Runtime must carry
 # entitlements plists to opt back in. See ADR-037 for the full inventory
 # (virtualization for limactl, Apple Events for mail/notes CLIs, calendars
-# for calendar-cli and reminders for reminders-cli, JIT for Node.js).
+# for calendar-cli and reminders for reminders-cli, audio-input for
+# audio-capture-cli per ADR-056, JIT for Node.js).
 SIGN_TARGETS=(
   "$SRC_TAURI/cli/speedwave:"
   "$SRC_TAURI/reminders-cli:$REMINDERS_ENTITLEMENTS"
   "$SRC_TAURI/calendar-cli:$CALENDARS_ENTITLEMENTS"
   "$SRC_TAURI/mail-cli:$APPLE_EVENTS_ENTITLEMENTS"
   "$SRC_TAURI/notes-cli:$APPLE_EVENTS_ENTITLEMENTS"
+  "$SRC_TAURI/audio-capture-cli:$AUDIO_CAPTURE_ENTITLEMENTS"
   "$SRC_TAURI/lima/bin/limactl:$VIRTUALIZATION_ENTITLEMENTS"
   "$SRC_TAURI/nodejs/bin/node:$NODE_ENTITLEMENTS"
 )
@@ -147,6 +149,46 @@ verify_macho() {
   echo "  verified: signature valid, $key_count entitlement(s) present"
 }
 
+# Verifies the signed Mach-O carries the expected sub-identifier (from the
+# binary's embedded `__TEXT,__info_plist` section). codesign reads the embedded
+# CFBundleIdentifier and stores it in the signature; this is what TCC.db indexes
+# permission rows by, so a mismatch means recovery commands like `tccutil reset
+# Calendar pl.speedwave.desktop.calendar` won't work for users.
+#
+# This function is invoked only for the native macOS CLIs (calendar-cli,
+# reminders-cli, mail-cli, notes-cli, audio-capture-cli) — other bundled
+# binaries either have no user-visible TCC binding (speedwave, node) or use a
+# fixed system identifier (limactl).
+verify_identifier() {
+  local path="$1"
+  local expected="$2"
+
+  local actual
+  actual="$(codesign -dvvv "$path" 2>&1 | grep -E '^Identifier=' | head -1 | cut -d'=' -f2)"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "ERROR: $path codesign Identifier='$actual', expected '$expected'" >&2
+    echo "  The embedded CFBundleIdentifier is wrong (or missing). Check that" >&2
+    echo "  native/macos/<svc>/Resources/Info.plist has CFBundleIdentifier=$expected" >&2
+    echo "  and that scripts/build-native-macos.sh ran the linker with" >&2
+    echo "  -sectcreate __TEXT __info_plist Resources/Info.plist." >&2
+    exit 1
+  fi
+  echo "  verified: identifier=$expected"
+}
+
+# Maps SRC_TAURI-relative basename to expected sub-identifier. Empty value
+# means no identifier check (e.g. speedwave, limactl, node).
+get_expected_identifier() {
+  case "$(basename "$1")" in
+    calendar-cli) echo "pl.speedwave.desktop.calendar" ;;
+    reminders-cli) echo "pl.speedwave.desktop.reminders" ;;
+    mail-cli) echo "pl.speedwave.desktop.mail" ;;
+    notes-cli) echo "pl.speedwave.desktop.notes" ;;
+    audio-capture-cli) echo "pl.speedwave.desktop.audio-capture" ;;
+    *) echo "" ;;
+  esac
+}
+
 echo "Signing bundled binaries with $APPLE_SIGNING_IDENTITY"
 
 for entry in "${SIGN_TARGETS[@]}"; do
@@ -154,6 +196,10 @@ for entry in "${SIGN_TARGETS[@]}"; do
   entitlements="${entry#*:}"
   sign_macho "$path" "$entitlements"
   verify_macho "$path" "$entitlements"
+  expected_id="$(get_expected_identifier "$path")"
+  if [[ -n "$expected_id" ]]; then
+    verify_identifier "$path" "$expected_id"
+  fi
 done
 
 echo "Bundled binaries signed successfully"

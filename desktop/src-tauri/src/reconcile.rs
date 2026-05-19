@@ -3,7 +3,10 @@
 use crate::ide_bridge;
 use crate::mcp_os_process;
 use crate::types::BundleReconcileStatus;
+use speedwave_runtime::host_exec_process::HostExecProcess;
+use speedwave_runtime::oauth_process::OauthProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -15,21 +18,48 @@ pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
 /// Shared handle for the mcp-os process.
 pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
 
+/// Per-project `host_exec` workers, keyed by project name (ADR-054).
+pub(crate) type SharedHostExec = Arc<Mutex<HashMap<String, HostExecProcess>>>;
+
+/// Per-project `oauth` workers, keyed by project name (ADR-060).
+pub(crate) type SharedOauth = Arc<Mutex<HashMap<String, OauthProcess>>>;
+
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
 
-/// The three shared-state Arcs required by every `run_exit_cleanup` call site.
-///
-/// Wrapping them in a struct eliminates the nine parallel Arc clones that would
-/// otherwise appear at each of the three call sites (signal handler,
-/// `WindowEvent::Destroyed`, `RunEvent::ExitRequested`). Clone the struct once
-/// per exit path instead of cloning each Arc individually.
+/// Shared Arcs needed by `run_exit_cleanup` — clone once per exit path.
 #[derive(Clone)]
 pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
     pub(crate) mcp_os: SharedMcpOs,
+    /// Per-project `host_exec` workers — stopped + files cleaned on exit.
+    pub(crate) host_exec: SharedHostExec,
+    /// Per-project `oauth` workers (ADR-060) — stopped + files cleaned on exit.
+    pub(crate) oauth: SharedOauth,
     pub(crate) auto_check_handle: SharedAutoCheckHandle,
 }
+
+/// Stop + remove a project's worker; cleans token/port/pid/config (keeps audit log).
+pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project: &str) {
+    let proc = match host_exec.lock() {
+        Ok(mut map) => map.remove(project),
+        Err(e) => {
+            log::warn!("teardown_host_exec_for_project: map mutex poisoned: {e}");
+            return;
+        }
+    };
+    if let Some(mut proc) = proc {
+        log::info!("host_exec[{project}]: tearing down worker");
+        if let Err(e) = proc.stop() {
+            log::warn!("host_exec[{project}]: stop error during teardown: {e}");
+        }
+        proc.cleanup_files();
+    }
+}
+
+// `teardown_oauth_for_project` intentionally omitted — added in PR3 when the
+// SharePoint reconciler needs to tear down the oauth worker on integration disable.
+// Until then, cleanup happens only on process exit via `run_exit_cleanup`.
 
 /// Reconcile phase: nothing running.
 const RECONCILE_IDLE: u8 = 0;
@@ -181,26 +211,12 @@ pub(crate) fn list_running_projects(
 }
 
 /// Restores one project: compose_down, render, compose_up_recreate.
-/// Extracted for testability — `restore_projects` calls this in production.
 fn restore_one_project(
     project: &str,
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
 ) -> Result<(), String> {
     let _ = rt.compose_down(project);
     crate::containers_cmd::render_and_save_compose(project, rt)?;
-    rt.compose_up_recreate(project)
-        .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))
-}
-
-/// Test seam — takes the renderer as a function pointer so tests can inject stubs.
-#[cfg(test)]
-fn restore_one_project_with_renderer(
-    project: &str,
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
-    render: fn(&str, &dyn speedwave_runtime::runtime::ContainerRuntime) -> Result<(), String>,
-) -> Result<(), String> {
-    let _ = rt.compose_down(project);
-    render(project, rt)?;
     rt.compose_up_recreate(project)
         .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))
 }
@@ -269,6 +285,23 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         bundle_changed,
     );
 
+    // Scope: active project only; project switch builds the rest on demand (ADR-057).
+    let user_config_for_active = config::load_user_config().unwrap_or_default();
+    let active_integrations = match user_config_for_active.active_project.as_deref() {
+        Some(name) => match user_config_for_active.find_project(name) {
+            Some(p) => config::resolve_integrations(
+                std::path::Path::new(&p.dir),
+                &user_config_for_active,
+                name,
+            ),
+            None => {
+                log::warn!("reconcile: active_project '{name}' not in config — building core only");
+                config::ResolvedIntegrationsConfig::default()
+            }
+        },
+        None => config::ResolvedIntegrationsConfig::default(),
+    };
+
     let rt = speedwave_runtime::runtime::detect_runtime();
 
     // Call ensure_ready() once and track whether it succeeded. This avoids a
@@ -281,7 +314,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
 
     // Even when bundle_id matches, verify images actually exist.
     // They may have been lost after containerd reinstall or VM recreation.
-    if !bundle_changed && runtime_ready && !build::images_exist(&*rt) {
+    if !bundle_changed && runtime_ready && !build::images_exist(&*rt, &active_integrations) {
         log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
         bundle_changed = true;
     }
@@ -374,7 +407,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // Here we escalate: restart engine → retry build. Safe because we are in the
         // pre-restore phase — no containers are running yet (see ContainerRuntime
         // trait docs for restart_container_engine).
-        match build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id) {
+        let enabled = build::enabled_images(&active_integrations);
+        match build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id) {
             Ok(_) => {}
             Err(e)
                 if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
@@ -386,13 +420,12 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                     log::error!("reconcile_bundle: {msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
-                build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id).map_err(
-                    |e| {
+                build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id)
+                    .map_err(|e| {
                         let msg = format!("Image rebuild failed after engine restart: {e}");
                         log::error!("reconcile_bundle: {msg}");
                         set_bundle_error(&mut state, msg)
-                    },
-                )?;
+                    })?;
             }
             Err(e) => {
                 let msg = format!("Image rebuild failed: {e}");
@@ -400,10 +433,16 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 return Err(set_bundle_error(&mut state, msg));
             }
         }
-        // Opportunistically rebuild any missing plugin images (best-effort, warn-only).
-        // If this fails, per-project enforcement in render_compose() still catches it.
-        if let Err(e) = plugin::ensure_all_plugin_images(rt.as_ref()) {
+        // Plugin images enabled in the active project (warn-only).
+        let enabled_plugins: Vec<&str> = active_integrations.enabled_plugin_service_ids();
+        if let Err(e) = plugin::ensure_plugin_images(rt.as_ref(), &enabled_plugins) {
             log::warn!("reconcile_bundle: failed to rebuild some plugin images: {e}");
+        }
+        // Drop tags from this bundle that no longer belong to enabled set (warn-only).
+        if let Err(e) =
+            build::prune_orphan_current_bundle_images(rt.as_ref(), &manifest.bundle_id, &enabled)
+        {
+            log::warn!("reconcile_bundle: orphan-tag prune failed: {e}");
         }
 
         state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
@@ -414,8 +453,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         log::info!("reconcile_bundle: all images built, waiters unblocked");
         emit_bundle_status(app_handle);
 
-        // After heavy image builds, containerd may be degraded (especially Linux
-        // rootless). Re-check readiness before querying running containers.
+        // After heavy image builds, containerd may be degraded. Re-check readiness
+        // before querying running containers.
         rt.ensure_ready().map_err(|e| {
             let msg = format!("Runtime not ready after image build: {e}");
             log::error!("reconcile_bundle: {msg}");
@@ -516,11 +555,7 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
                 set_image_readiness(ImageReadiness::Failed(e));
             }
             Err(panic_info) => {
-                let msg = panic_info
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-                    .or_else(|| panic_info.downcast_ref::<&str>().copied())
-                    .unwrap_or("unknown panic");
+                let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*panic_info);
                 log::error!("reconcile_bundle: panicked: {msg}");
                 set_image_readiness(ImageReadiness::Failed(format!("reconcile panicked: {msg}")));
             }
@@ -660,15 +695,14 @@ pub(crate) fn reconcile_compose_port(
 /// Stop containers for all projects. Best-effort — failures are logged
 /// but do not prevent remaining cleanup.
 ///
-/// Runs on platforms where container state outlives the runtime process:
-/// Linux (native containerd keeps running after app exit) and Windows
-/// (WSL2 distro is system-managed; `WslRuntime::stop_vm` inherits the
-/// no-op default from `ContainerRuntime` — see
-/// `crates/speedwave-runtime/src/runtime/mod.rs:142-149`). On macOS,
-/// `LimaRuntime::stop_vm` hard-powers the Apple Virtualization VM off
-/// via `limactl stop --force` and reaps containers with it, so this
-/// function is not called on macOS (compiled out by the cfg).
-#[cfg(not(target_os = "macos"))]
+/// Runs on Windows, where container state outlives the runtime process: the
+/// WSL2 distro is system-managed and `WslRuntime::stop_vm` inherits the no-op
+/// default from `ContainerRuntime` — see
+/// `crates/speedwave-runtime/src/runtime/mod.rs:142-149`. On macOS,
+/// `LimaRuntime::stop_vm` hard-powers the Apple Virtualization VM off via
+/// `limactl stop --force` and reaps containers with it, so this function is
+/// not called on macOS (compiled out by the cfg).
+#[cfg(target_os = "windows")]
 fn stop_all_containers(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     projects: &[config::ProjectUserEntry],
@@ -688,15 +722,12 @@ fn stop_all_containers(
 /// applicable). Extracted so tests can call it directly with a mock
 /// runtime.
 ///
-/// Platform split (macOS is the outlier; Linux and Windows share the same
-/// per-project loop):
+/// Platform split:
 ///
 /// - macOS (Lima): `limactl stop --force` poweroffs the VM. Every
 ///   container inside dies with the VM, so the per-project `compose_down`
 ///   loop is pure UX drag (each `compose down` waits up to ~10 s for
 ///   nerdctl's hard-coded graceful stop). Skipped.
-/// - Linux (native containerd): no VM. `compose_down` is the only thing
-///   that stops containers.
 /// - Windows (WSL2): `WslRuntime::stop_vm` is a no-op (Speedwave does not
 ///   own the WSL distro lifecycle), so without `compose_down` containers
 ///   would keep running in the `Speedwave` distro until next Windows boot
@@ -709,7 +740,7 @@ pub(crate) fn run_container_cleanup(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     projects: &[config::ProjectUserEntry],
 ) {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     stop_all_containers(rt, projects);
     #[cfg(target_os = "macos")]
     log::info!(
@@ -739,9 +770,13 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     }
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::HOST_EXEC_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let ide_bridge = ctx.ide_bridge.clone();
     let mcp_os = ctx.mcp_os.clone();
+    let host_exec = ctx.host_exec.clone();
+    let oauth = ctx.oauth.clone();
     let auto_check = ctx.auto_check_handle.clone();
 
     let handle = std::thread::spawn(move || {
@@ -779,6 +814,28 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
             }
             Err(e) => log::warn!("mcp-os cleanup skipped: mutex poisoned: {e}"),
         }
+        match host_exec.lock() {
+            Ok(mut map) => {
+                for (project, mut proc) in map.drain() {
+                    if let Err(e) = proc.stop() {
+                        log::warn!("host_exec[{project}] stop error: {e}");
+                    }
+                    proc.cleanup_files();
+                }
+            }
+            Err(e) => log::warn!("host_exec cleanup skipped: map mutex poisoned: {e}"),
+        }
+        match oauth.lock() {
+            Ok(mut map) => {
+                for (project, mut proc) in map.drain() {
+                    if let Err(e) = proc.stop() {
+                        log::warn!("oauth[{project}] stop error: {e}");
+                    }
+                    proc.cleanup_files();
+                }
+            }
+            Err(e) => log::warn!("oauth cleanup skipped: map mutex poisoned: {e}"),
+        }
         match auto_check.lock() {
             Ok(mut guard) => {
                 if let Some(handle) = guard.take() {
@@ -796,7 +853,6 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
 ///
 /// Platform conventions:
 /// - macOS: `<exe>/../../Resources` (inside .app bundle)
-/// - Linux: `<exe>/../lib/Speedwave` (.deb — Tauri convention)
 /// - Windows: `<exe>/resources` (NSIS installer)
 ///
 /// Returns `None` in dev mode (no bundle structure present).
@@ -806,16 +862,6 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
             .parent()
             .map(|p| vec![p.join("Resources")])
             .unwrap_or_default()
-    } else if cfg!(target_os = "linux") {
-        // .deb: resources at <exe>/../lib/<productName>/
-        let lib_path = exe_parent.parent().map(|p| p.join("lib").join("Speedwave"));
-        let mut paths = Vec::new();
-        if let Some(p) = lib_path {
-            paths.push(p);
-        }
-        // Fallback: <exe>/resources (dev builds / non-standard layouts)
-        paths.push(exe_parent.join("resources"));
-        paths
     } else {
         // Windows NSIS: resources are installed alongside the .exe (no subdirectory).
         // Fallback: <exe>/resources (dev builds / non-standard layouts).
@@ -849,10 +895,18 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    #[test]
+    fn teardown_host_exec_for_project_is_noop_when_absent() {
+        let map: SharedHostExec = SharedHostExec::default();
+        // No worker registered for "ghost" — must not panic.
+        teardown_host_exec_for_project(&map, "ghost");
+        assert!(map.lock().unwrap().is_empty());
+    }
+
     // stop_all_containers is compiled out on macOS (see its definition).
     // Its tests are gated to match, otherwise the `use super::stop_all_containers`
     // would fail to resolve on macOS.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     mod stop_all_containers_tests {
         use super::stop_all_containers;
         use speedwave_runtime::config::ProjectUserEntry;
@@ -1090,14 +1144,14 @@ mod tests {
             }
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         #[test]
-        fn full_cleanup_calls_in_order_non_macos() {
-            // Note: runs on any non-macOS target. Linux dev hosts + Ubuntu CI
-            // execute this test routinely. Windows dev hosts would too — but
-            // Windows CI (.github/workflows/desktop-build.yml) runs only
-            // `cargo build`, not `cargo test`. Enabling `cargo test` on the
-            // Windows matrix leg is tracked as a follow-up PR.
+        fn full_cleanup_calls_in_order_on_windows() {
+            // Note: runs on any non-macOS target. Windows dev hosts execute
+            // this test routinely, but Windows CI
+            // (.github/workflows/desktop-build.yml) runs only `cargo build`,
+            // not `cargo test`. Enabling `cargo test` on the Windows matrix
+            // leg is tracked as a follow-up PR.
             let (rt, calls) = TrackingRuntime::new();
             let projects = vec![project("alpha"), project("beta")];
             run_container_cleanup(&rt, &projects);
@@ -1396,78 +1450,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
-    mod resolve_resources_dir_tests {
-        use super::resolve_resources_dir;
-        use tempfile::TempDir;
-
-        fn mark_as_resources(dir: &std::path::Path) {
-            std::fs::create_dir_all(dir.join("cli")).unwrap();
-        }
-
-        #[test]
-        fn linux_deb_layout_resolves_lib_speedwave() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            mark_as_resources(&lib_dir);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(lib_dir));
-        }
-
-        #[test]
-        fn linux_dev_mode_returns_none() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn linux_fallback_to_resources_subdir() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(resources));
-        }
-
-        #[test]
-        fn linux_returns_none_when_lib_dir_empty() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            // lib dir exists but has no marker → should return None
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn linux_lib_speedwave_takes_priority_over_resources() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&lib_dir);
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(lib_dir));
-        }
-    }
-
     /// Structural test: verifies that `reconcile_bundle_update` in main.rs
     /// is gated behind `setup_started`. On a fresh install the Lima VM does
     /// not exist yet, so running reconcile would fail with "Runtime not
@@ -1608,6 +1590,8 @@ mod tests {
         let ctx = ExitCleanupContext {
             ide_bridge: SharedIdeBridge::default(),
             mcp_os: SharedMcpOs::default(),
+            host_exec: SharedHostExec::default(),
+            oauth: SharedOauth::default(),
             auto_check_handle: SharedAutoCheckHandle::default(),
         };
 
@@ -1683,10 +1667,9 @@ mod tests {
         );
     }
 
-    /// Structural test: verifies that `prune_old_bundle_images` is called BEFORE
-    /// `build_all_images_for_bundle` inside `reconcile_bundle_update_inner`.
-    /// Pruning before building ensures old images are cleaned up first — no data
-    /// loss possible since new images haven't been built yet at prune time.
+    /// Structural test: `prune_old_bundle_images` must run BEFORE the image build
+    /// in `reconcile_bundle_update_inner`. Pruning first ensures old images are
+    /// cleaned up before new ones land — no data loss since new images aren't built yet.
     #[test]
     fn reconcile_prunes_old_images_before_building_new_ones() {
         let source = include_str!("reconcile.rs");
@@ -1699,72 +1682,61 @@ mod tests {
             .find("prune_old_bundle_images")
             .expect("prune_old_bundle_images call must exist in reconcile_bundle_update_inner");
         let build_pos = inner_fn
-            .find("build_all_images_for_bundle")
-            .expect("build_all_images_for_bundle call must exist in reconcile_bundle_update_inner");
+            .find("build_images_for_bundle")
+            .expect("build_images_for_bundle call must exist in reconcile_bundle_update_inner");
 
         assert!(
             prune_pos < build_pos,
             "prune_old_bundle_images (at byte {prune_pos}) must appear before \
-             build_all_images_for_bundle (at byte {build_pos}) in \
-             reconcile_bundle_update_inner — pruning first ensures old images are \
-             removed before building new ones"
+             build_images_for_bundle (at byte {build_pos}) in reconcile_bundle_update_inner"
         );
     }
 
-    /// Structural test: verifies that `ensure_all_plugin_images` is called AFTER
-    /// `build_all_images_for_bundle` and BEFORE the `set_image_readiness(ImageReadiness::Ready)`
-    /// that follows it. Also verifies it uses warn-only error handling (not `?` propagation).
+    /// Structural test: `ensure_plugin_images` is called AFTER the built-in build
+    /// and BEFORE `set_image_readiness(Ready)`, with warn-only error handling.
     #[test]
-    fn test_ensure_all_plugin_images_after_core_build_before_ready() {
+    fn test_ensure_plugin_images_after_core_build_before_ready() {
         let source = include_str!("reconcile.rs");
         let inner_fn = source
             .split("fn reconcile_bundle_update_inner(")
             .nth(1)
             .expect("reconcile_bundle_update_inner function should exist");
 
-        // Verify ensure_all_plugin_images is present
         assert!(
-            inner_fn.contains("ensure_all_plugin_images"),
-            "reconcile_bundle_update_inner must call ensure_all_plugin_images"
+            inner_fn.contains("ensure_plugin_images"),
+            "reconcile_bundle_update_inner must call ensure_plugin_images"
         );
 
         let build_pos = inner_fn
-            .find("build_all_images_for_bundle")
-            .expect("build_all_images_for_bundle call must exist");
+            .find("build_images_for_bundle")
+            .expect("build_images_for_bundle call must exist");
         let plugin_pos = inner_fn
-            .find("ensure_all_plugin_images")
-            .expect("ensure_all_plugin_images call must exist");
+            .find("ensure_plugin_images")
+            .expect("ensure_plugin_images call must exist");
 
         assert!(
             build_pos < plugin_pos,
-            "ensure_all_plugin_images (offset {plugin_pos}) must appear after \
-             build_all_images_for_bundle (offset {build_pos})"
+            "ensure_plugin_images (offset {plugin_pos}) must appear after \
+             build_images_for_bundle (offset {build_pos})"
         );
 
-        // Find the set_image_readiness(ImageReadiness::Ready) that comes AFTER
-        // ensure_all_plugin_images (not any earlier occurrence in the function).
         let after_plugin = &inner_fn[plugin_pos..];
         let ready_pos_relative = after_plugin
             .find("set_image_readiness(ImageReadiness::Ready)")
-            .expect(
-                "set_image_readiness(Ready) must appear after ensure_all_plugin_images in \
-                 reconcile_bundle_update_inner",
-            );
+            .expect("set_image_readiness(Ready) must appear after ensure_plugin_images");
         let ready_pos = plugin_pos + ready_pos_relative;
 
         assert!(
             plugin_pos < ready_pos,
-            "ensure_all_plugin_images (offset {plugin_pos}) must appear before \
+            "ensure_plugin_images (offset {plugin_pos}) must appear before \
              set_image_readiness(Ready) (offset {ready_pos})"
         );
 
-        // Verify warn-only error handling: the call is inside an `if let Err` block
-        // with `log::warn!`, NOT a `?` propagation
+        // Warn-only handling: `if let Err` / `warn!`, not `?`.
         let plugin_context = &inner_fn[plugin_pos.saturating_sub(100)..plugin_pos + 200];
         assert!(
             plugin_context.contains("if let Err") || plugin_context.contains("warn!"),
-            "ensure_all_plugin_images must use warn-only error handling, not '?' propagation: \
-             context around call: {plugin_context}"
+            "ensure_plugin_images must use warn-only error handling: {plugin_context}"
         );
     }
 }

@@ -1661,7 +1661,7 @@ export class RedmineClient {
 /**
  * IMPORTANT: Returns null (not throws) when tokens are missing or invalid.
  * This enables "graceful degradation" - server starts even without config:
- * - User can run `speedwave up` without configuring all integrations
+ * - User can run `speedwave` (no subcommand) without configuring all integrations
  * - Healthcheck reports `configured: false` for unconfigured services
  * - Tools return clear "not configured" error when called
  *

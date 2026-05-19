@@ -8,11 +8,10 @@ The IDE Bridge uses a **unified TCP-based approach** across all platforms — it
 
 Each platform has a different isolation boundary between the container runtime and the host. However, all provide a gateway DNS name that resolves to the host from inside the VM/container:[^1]
 
-| Platform | Isolation               | Gateway DNS name              | How it works                                                                                          |
-| -------- | ----------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------- |
-| macOS    | Lima VM                 | `host.lima.internal`[^2]      | Lima's hostagent registers this DNS in gvproxy; resolves to host gateway IP                           |
-| Linux    | nerdctl (native, no VM) | `host.docker.internal`[^3]    | nerdctl / containerd adds this entry to `/etc/hosts` inside containers (Docker-compatible convention) |
-| Windows  | WSL2                    | `host.speedwave.internal`[^4] | `extra_hosts: host.speedwave.internal:host-gateway` in compose; nerdctl resolves to host IP           |
+| Platform | Isolation | Gateway DNS name              | How it works                                                                                |
+| -------- | --------- | ----------------------------- | ------------------------------------------------------------------------------------------- |
+| macOS    | Lima VM   | `host.lima.internal`[^2]      | Lima's hostagent registers this DNS in gvproxy; resolves to host gateway IP                 |
+| Windows  | WSL2      | `host.speedwave.internal`[^4] | `extra_hosts: host.speedwave.internal:host-gateway` in compose; nerdctl resolves to host IP |
 
 ## How It Works
 
@@ -26,7 +25,6 @@ Each platform has a different isolation boundary between the container runtime a
 ```
 Claude (in VM/container)
   → ws://host.lima.internal:<port>  (macOS)
-  → ws://host.docker.internal:<port>  (Linux)
   → ws://host.speedwave.internal:<port>  (Windows)
   → IDE Bridge on host (127.0.0.1:<port>)
   → proxies to real IDE (if connected)
@@ -72,8 +70,6 @@ The lock file is written by `IdeBridge::write_lock_file()` at `~/.speedwave/ide-
 [^1]: All three gateway mechanisms route container → host traffic without exposing the port to the LAN. See ADR-010 for the full network security model.
 
 [^2]: [Lima Network — user-mode networking (vzNAT, host.lima.internal)](https://lima-vm.io/docs/config/network/user/)
-
-[^3]: [nerdctl command reference — host.docker.internal](https://github.com/containerd/nerdctl/blob/main/docs/command-reference.md)
 
 [^4]: [nerdctl command reference — --add-host / host-gateway](https://github.com/containerd/nerdctl/blob/main/docs/command-reference.md)
 

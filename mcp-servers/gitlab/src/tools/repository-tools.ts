@@ -2,14 +2,7 @@
  * Repository Tools - 3 tools for GitLab repository operations
  */
 
-import {
-  Tool,
-  ToolDefinition,
-  jsonResult,
-  errorResult,
-  notConfiguredMessage,
-  READ_ONLY_ANNOTATIONS,
-} from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition, jsonResult, READ_ONLY_ANNOTATIONS } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -164,15 +157,6 @@ const getBlameTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createRepositoryTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: getTreeTool, handler: unconfigured },
-      { tool: getFileTool, handler: unconfigured },
-      { tool: getBlameTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: getTreeTool,

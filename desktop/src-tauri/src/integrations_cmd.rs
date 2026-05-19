@@ -8,6 +8,57 @@ use crate::types::{
     IntegrationsResponse, OsIntegrationStatusEntry,
 };
 use speedwave_runtime::config;
+use speedwave_runtime::log_sanitizer;
+use speedwave_runtime::plugin;
+
+/// For SharePoint only: returns `Some("scope_mismatch")` when the stored
+/// `grantedScopes` is a strict subset of the currently-required scopes (or
+/// empty, which is the migration sentinel ADR-060 writes). Returns `None`
+/// when there is no oauth.json yet (never configured) or when the granted
+/// scopes already cover the required set.
+///
+/// This lets the integrations page surface a "Re-authorize SharePoint" banner
+/// proactively instead of waiting for the first SharePoint tool call to fail
+/// with `OAUTH_SCOPE_MISMATCH`.
+fn detect_oauth_action_required(project: &str, service: &str) -> Option<String> {
+    if service != "sharepoint" {
+        return None;
+    }
+    let oauth_path = plugin::oauth_state_file(project, service);
+    let raw = std::fs::read_to_string(&oauth_path).ok()?;
+    let required = sharepoint_required_scopes();
+    detect_scope_mismatch(&raw, &required)
+}
+
+/// Pure helper for `detect_oauth_action_required` — given the raw `oauth.json`
+/// contents and the list of currently-required scopes, returns
+/// `Some("scope_mismatch")` if `grantedScopes` does not cover the required set.
+/// Extracted so unit tests don't have to round-trip through the filesystem and
+/// the `consts::data_dir()` `OnceLock` cache.
+fn detect_scope_mismatch(oauth_json_raw: &str, required: &[String]) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(oauth_json_raw).ok()?;
+    let granted: Vec<String> = json
+        .get("grantedScopes")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_lowercase()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if required.iter().all(|r| granted.contains(r)) {
+        None
+    } else {
+        Some("scope_mismatch".to_string())
+    }
+}
+
+fn sharepoint_required_scopes() -> Vec<String> {
+    speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES
+        .split_whitespace()
+        .map(|s| s.to_lowercase())
+        .collect()
+}
 
 /// Returns the field keys that Redmine stores in config.json (derived from SSOT in consts).
 fn redmine_config_json_fields() -> Vec<&'static str> {
@@ -30,6 +81,16 @@ fn redmine_config_json_fields() -> Vec<&'static str> {
 
 /// Reads and parses a service's config.json. Returns an empty JSON object
 /// on missing or unreadable files.
+/// True when any of `files` exists as a non-empty file under `svc_token_dir`.
+/// Used to drop the "Anonymous"-style badge once a key has been written.
+fn has_any_credential_file(svc_token_dir: &std::path::Path, files: &[&str]) -> bool {
+    files.iter().any(|name| {
+        std::fs::metadata(svc_token_dir.join(name))
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    })
+}
+
 fn read_service_config(svc_token_dir: &std::path::Path) -> serde_json::Value {
     let config_path = svc_token_dir.join("config.json");
     std::fs::read_to_string(&config_path)
@@ -110,15 +171,16 @@ fn save_redmine_credentials(
             config_obj[key] = serde_json::Value::String(value.clone());
         } else {
             let file_path = svc_dir.join(key);
-            std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
-            crate::fs_perms::set_owner_only(&file_path)?;
+            // Atomic O_CREAT|0o600 — close the TOCTOU window for credential files.
+            speedwave_runtime::fs_perms::write_restricted_file(&file_path, value)
+                .map_err(|e| e.to_string())?;
         }
     }
 
     if has_config_fields {
         let json = serde_json::to_string_pretty(&config_obj).map_err(|e| e.to_string())?;
-        std::fs::write(&config_path, &json).map_err(|e| e.to_string())?;
-        crate::fs_perms::set_owner_only(&config_path)?;
+        speedwave_runtime::fs_perms::write_restricted_file(&config_path, &json)
+            .map_err(|e| e.to_string())?;
     }
 
     Ok(())
@@ -193,6 +255,25 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             (values, None)
         };
 
+        let oauth_action_required = if configured {
+            detect_oauth_action_required(&project, svc)
+        } else {
+            None
+        };
+
+        // Optional-only services (e.g. context7): badge from descriptor only when
+        // no key is set — once configured, drop the badge to mirror configured state.
+        let all_optional =
+            !svc_desc.auth_fields.is_empty() && svc_desc.auth_fields.iter().all(|f| f.optional);
+        let badge = if all_optional
+            && configured
+            && has_any_credential_file(&svc_token_dir, svc_desc.credential_files)
+        {
+            None
+        } else {
+            svc_desc.badge.map(|b| b.to_string())
+        };
+
         service_entries.push(IntegrationStatusEntry {
             service: svc.to_string(),
             enabled,
@@ -202,7 +283,8 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             auth_fields: auth_fields.clone(),
             current_values,
             mappings,
-            badge: svc_desc.badge.map(|b| b.to_string()),
+            badge,
+            oauth_action_required,
         });
     }
 
@@ -250,19 +332,37 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         serde_json::json!({})
     };
 
+    // ADR-060: any service whose descriptor declares `oauth_state_fields` keeps
+    // those fields in `oauth/<project>/<service>.json` (off-mount). Today only
+    // SharePoint, but `svc_desc.oauth_state_fields.is_some()` is the SSOT so
+    // future OAuth-using services need no code change here.
+    let oauth_state_json: Option<serde_json::Value> = if svc_desc.oauth_state_fields.is_some() {
+        let path = speedwave_runtime::plugin::oauth_state_file(project, service);
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    } else {
+        None
+    };
+
     // Skip optional fields (e.g. Redmine project_id)
     svc_desc
         .auth_fields
         .iter()
         .filter(|f| !f.optional)
-        .all(|f| {
-            if f.stored_in_config_json {
-                config_json
-                    .get(f.key)
-                    .and_then(|v| v.as_str())
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false)
-            } else {
+        .all(|f| match f.storage {
+            speedwave_runtime::consts::FieldStorage::OAuthState => oauth_state_json
+                .as_ref()
+                .and_then(|j| j.get(snake_to_oauth_json_key(f.key)))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            speedwave_runtime::consts::FieldStorage::WorkerMountedConfig => config_json
+                .get(f.key)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            speedwave_runtime::consts::FieldStorage::WorkerMountedToken => {
                 let path = svc_token_dir.join(f.key);
                 std::fs::metadata(&path)
                     .map(|m| m.len() > 0)
@@ -271,7 +371,23 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         })
 }
 
+/// Map a descriptor's snake_case `key` to the camelCase property name used
+/// inside `oauth/<project>/<service>.json` (the Microsoft OAuth wire format).
+/// Centralised so the routing helper and `save_*_credentials` agree.
+fn snake_to_oauth_json_key(key: &str) -> &str {
+    match key {
+        "client_id" => "clientId",
+        "tenant_id" => "tenantId",
+        "refresh_token" => "refreshToken",
+        _ => key,
+    }
+}
+
 /// Testable core: takes an explicit `home` path so tests can inject a temp dir.
+/// Mirrors the routing logic of the production `is_service_configured`:
+/// `FieldStorage::OAuthState` fields are looked up in
+/// `<home>/.speedwave/oauth/<project>/<service>.json`, the rest in the
+/// worker-mounted `tokens/<project>/<service>/` dir.
 #[cfg(test)]
 fn is_service_configured_with_home(home: &std::path::Path, project: &str, service: &str) -> bool {
     let svc_desc = match speedwave_runtime::consts::find_mcp_service(service) {
@@ -283,11 +399,8 @@ fn is_service_configured_with_home(home: &std::path::Path, project: &str, servic
     if svc_desc.auth_fields.is_empty() {
         return true;
     }
-    let svc_token_dir = home
-        .join(speedwave_runtime::consts::DATA_DIR)
-        .join("tokens")
-        .join(project)
-        .join(service);
+    let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
+    let svc_token_dir = data_dir.join("tokens").join(project).join(service);
 
     let has_config_fields = svc_desc.auth_fields.iter().any(|f| f.stored_in_config_json);
     let config_json = if has_config_fields {
@@ -296,19 +409,36 @@ fn is_service_configured_with_home(home: &std::path::Path, project: &str, servic
         serde_json::json!({})
     };
 
+    let oauth_state_json: Option<serde_json::Value> = if svc_desc.oauth_state_fields.is_some() {
+        let path = data_dir
+            .join(speedwave_runtime::consts::OAUTH_SUBDIR)
+            .join(project)
+            .join(format!("{}.json", service));
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    } else {
+        None
+    };
+
     // Skip optional fields (e.g. Redmine project_id)
     svc_desc
         .auth_fields
         .iter()
         .filter(|f| !f.optional)
-        .all(|f| {
-            if f.stored_in_config_json {
-                config_json
-                    .get(f.key)
-                    .and_then(|v| v.as_str())
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false)
-            } else {
+        .all(|f| match f.storage {
+            speedwave_runtime::consts::FieldStorage::OAuthState => oauth_state_json
+                .as_ref()
+                .and_then(|j| j.get(snake_to_oauth_json_key(f.key)))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            speedwave_runtime::consts::FieldStorage::WorkerMountedConfig => config_json
+                .get(f.key)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            speedwave_runtime::consts::FieldStorage::WorkerMountedToken => {
                 let path = svc_token_dir.join(f.key);
                 std::fs::metadata(&path)
                     .map(|m| m.len() > 0)
@@ -431,27 +561,44 @@ fn parse_permission_output(stdout: &str) -> Result<(), String> {
 ///
 /// Pipe-buffer deadlock is not a risk: `check_permission` output is <200 bytes,
 /// well within the OS pipe buffer of 64KB. Stdout is read after child exits.
-fn check_os_permission(service: &str) -> Result<(), String> {
-    // Outer 60s budget intentionally outlives the inner Swift timeout (55s in
-    // performCheckPermission) so the child can emit a structured timeout payload
-    // before this guard kills it; otherwise the user only ever sees a generic
-    // "process killed" error.
-    check_os_permission_with_timeout(service, std::time::Duration::from_secs(60))
+fn check_os_permission(service: &str, launch_if_needed: bool) -> Result<(), String> {
+    check_os_permission_with_timeout(
+        service,
+        launch_if_needed,
+        std::time::Duration::from_secs(60),
+    )
 }
 
 /// Inner implementation with configurable timeout for testability.
+/// `launch_if_needed=true` (toggle click) lets the CLI auto-launch the target
+/// app if not running. `false` (startup validate) keeps the check passive so
+/// Speedwave never opens Mail/Notes uninvited at app boot.
 fn check_os_permission_with_timeout(
     service: &str,
+    launch_if_needed: bool,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
     let binary_path = resolve_native_cli_binary(service)?;
+    log::info!(
+        "check_os_permission: spawning {service}-cli check_permission launch={launch_if_needed} (binary={})",
+        binary_path.display()
+    );
+    let spawn_started = std::time::Instant::now();
 
-    let mut child = std::process::Command::new(&binary_path)
-        .arg("check_permission")
+    let mut cmd = std::process::Command::new(&binary_path);
+    cmd.arg("check_permission");
+    if launch_if_needed {
+        cmd.arg("--launch");
+    }
+    let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| {
+            log::error!(
+                "check_os_permission: spawn failed for {service}: {e} (binary={})",
+                binary_path.display()
+            );
             format!(
                 "Failed to run permission check for {service}: {e}. Binary: {}",
                 binary_path.display()
@@ -467,6 +614,10 @@ fn check_os_permission_with_timeout(
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    log::warn!(
+                        "check_os_permission: {service}-cli timed out after {}s",
+                        timeout.as_secs()
+                    );
                     return Err(format!(
                         "Permission check timed out after {}s. Try again.",
                         timeout.as_secs()
@@ -474,7 +625,10 @@ fn check_os_permission_with_timeout(
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            Err(e) => return Err(format!("Permission check failed: {e}")),
+            Err(e) => {
+                log::error!("check_os_permission: try_wait failed for {service}: {e}");
+                return Err(format!("Permission check failed: {e}"));
+            }
         }
     };
 
@@ -499,16 +653,42 @@ fn check_os_permission_with_timeout(
         })
         .unwrap_or_default();
 
+    let elapsed_ms = spawn_started.elapsed().as_millis();
+    log::debug!(
+        "check_os_permission: {service}-cli exited code={} elapsed_ms={elapsed_ms} stdout_len={} stderr_len={}",
+        status.code().unwrap_or(-1),
+        stdout.len(),
+        stderr.len()
+    );
+
+    // Always surface Swift CLI stderr to the log — it carries the per-CLI trace
+    // (AppleEvents OSStatus values, EventKit gate transitions) that's invaluable
+    // when diagnosing TCC silent rejects from a user-supplied logs ZIP.
+    if !stderr.trim().is_empty() {
+        for line in stderr.lines() {
+            log::info!("check_os_permission: {service}-cli stderr: {line}");
+        }
+    }
+
     if !status.success() {
         let detail = if stderr.trim().is_empty() {
             format!("exit code {}", status.code().unwrap_or(-1))
         } else {
             stderr.trim().to_string()
         };
+        log::warn!(
+            "check_os_permission: {service}-cli non-zero exit (code={}): {detail}",
+            status.code().unwrap_or(-1)
+        );
         return Err(format!("Permission check failed: {detail}"));
     }
 
-    parse_permission_output(&stdout)
+    let parse_result = parse_permission_output(&stdout);
+    match &parse_result {
+        Ok(()) => log::info!("check_os_permission: {service} GRANTED"),
+        Err(reason) => log::warn!("check_os_permission: {service} NOT GRANTED — {reason}"),
+    }
+    parse_result
 }
 
 #[tauri::command]
@@ -525,10 +705,15 @@ pub fn set_os_integration_enabled(
 
     // When enabling, check macOS permission first
     if enabled {
-        check_os_permission(&service)?;
+        if let Err(reason) = check_os_permission(&service, true) {
+            log::warn!(
+                "set_os_integration_enabled: rejecting enable for {service} (project={project}) — {reason}"
+            );
+            return Err(reason);
+        }
     }
 
-    config::with_config_lock(|| {
+    let result = config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
 
         let entry = user_config
@@ -547,7 +732,183 @@ pub fn set_os_integration_enabled(
 
         config::save_user_config(&user_config)
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(()) => log::info!(
+            "set_os_integration_enabled: persisted project={project} service={service} enabled={enabled}"
+        ),
+        Err(e) => log::error!(
+            "set_os_integration_enabled: persist failed project={project} service={service} enabled={enabled} — {e}"
+        ),
+    }
+    result
+}
+
+/// Result of validating one OS integration against the actual macOS TCC state.
+/// Returned per-service to the frontend so the UI can render a toast for each
+/// integration that was auto-disabled.
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
+pub struct OsIntegrationValidation {
+    pub service: String,
+    pub previous_enabled: bool,
+    pub new_enabled: bool,
+    pub reason: String,
+}
+
+/// Validates every OS integration configured for the active project against
+/// the live macOS TCC state. If `enabled=true` in config but `check_os_permission`
+/// returns an error (denied / silentReject / targetNotRunning), the integration
+/// is auto-disabled in config and a validation entry is returned so the UI can
+/// surface a toast.
+///
+/// This is the migration path for users upgrading across the embedded-Info.plist
+/// boundary: their existing TCC.db row was bound to `<svc>-cli` (the codesign
+/// default identifier), the new build's row is bound to `pl.speedwave.desktop.<svc>`.
+/// On first launch, every previously-granted integration looks "silentReject"
+/// because the new identifier has no TCC entry yet — auto-disabling the toggle
+/// keeps the user-facing state honest. The user then re-clicks the toggle, the
+/// system shows a fresh consent prompt, and TCC writes a row under the new
+/// identifier.
+///
+/// On non-macOS hosts, returns an empty Vec without error (OS integrations are
+/// macOS-only; nothing to validate).
+#[tauri::command]
+pub fn validate_os_integrations_on_startup(
+    project: String,
+) -> Result<Vec<OsIntegrationValidation>, String> {
+    if !cfg!(target_os = "macos") {
+        log::debug!(
+            "validate_os_integrations_on_startup: skipping on non-macOS host (project={project})"
+        );
+        return Ok(Vec::new());
+    }
+    check_project(&project)?;
+    log::info!("validate_os_integrations_on_startup: project={project} — start");
+
+    // SSOT: list of OS services to validate comes from speedwave_runtime::consts.
+    let os_services: Vec<&'static str> = speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES
+        .iter()
+        .map(|s| s.config_key)
+        .collect();
+
+    // Phase 1: short config_lock — snapshot enabled state per service.
+    // Holding the lock through ~400ms parallel CLI runs would block any
+    // concurrent toggle/restart from the UI; snapshot-then-unlock keeps the
+    // lock window in microseconds.
+    let prev_state: std::collections::HashMap<&'static str, bool> = config::with_config_lock(|| {
+        let user_config = config::load_user_config()?;
+        let entry = user_config
+            .find_project(&project)
+            .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+        let os_cfg = entry.integrations.as_ref().and_then(|i| i.os.as_ref());
+        Ok(os_services
+            .iter()
+            .map(|svc| {
+                let enabled = os_cfg
+                    .and_then(|os| os.get_service(svc))
+                    .and_then(|cfg| cfg.enabled)
+                    .unwrap_or(false);
+                (*svc, enabled)
+            })
+            .collect())
+    })
+    .map_err(|e: anyhow::Error| {
+        log::error!("validate_os_integrations_on_startup: config snapshot failure for project={project}: {e}");
+        e.to_string()
+    })?;
+
+    let to_check: Vec<&'static str> = os_services
+        .iter()
+        .filter(|svc| *prev_state.get(*svc).unwrap_or(&false))
+        .copied()
+        .collect();
+    let already_disabled = os_services.len() - to_check.len();
+    let checked = to_check.len();
+    for svc in &os_services {
+        if !*prev_state.get(svc).unwrap_or(&false) {
+            log::debug!(
+                "validate_os_integrations_on_startup: skipping {svc} (already disabled in config)"
+            );
+        }
+    }
+
+    // Phase 2: parallel CLI checks — each spawn-and-wait is ~200-400ms; 4
+    // sequential = ~1.4s. Parallel = bounded by the slowest CLI (~400ms).
+    // No config lock held here.
+    let handles: Vec<(&'static str, std::thread::JoinHandle<Result<(), String>>)> = to_check
+        .into_iter()
+        .map(|svc| {
+            log::info!(
+                "validate_os_integrations_on_startup: checking {svc} (currently enabled in config)"
+            );
+            let handle = std::thread::spawn(move || check_os_permission(svc, false));
+            (svc, handle)
+        })
+        .collect();
+
+    let mut validations: Vec<OsIntegrationValidation> = Vec::new();
+    let mut to_disable: Vec<&'static str> = Vec::new();
+    for (svc, handle) in handles {
+        let result = handle
+            .join()
+            .unwrap_or_else(|_| Err(format!("validate worker thread for {svc} panicked")));
+        match result {
+            Ok(()) => log::info!(
+                "validate_os_integrations_on_startup: {svc} VALID (TCC granted, keeping enabled)"
+            ),
+            Err(reason) => {
+                log::warn!(
+                    "validate_os_integrations_on_startup: auto-disabling {svc} (was enabled, TCC reports: {reason})"
+                );
+                to_disable.push(svc);
+                validations.push(OsIntegrationValidation {
+                    service: svc.to_string(),
+                    previous_enabled: true,
+                    new_enabled: false,
+                    reason,
+                });
+            }
+        }
+    }
+
+    // Phase 3: short config_lock — apply mutations only when there's something
+    // to write. Skipping the lock entirely on the no-op path keeps the happy
+    // case zero-contention.
+    if !to_disable.is_empty() {
+        config::with_config_lock(|| {
+            let mut user_config = config::load_user_config()?;
+            let entry = user_config
+                .find_project_mut(&project)
+                .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            let os = integrations.os.get_or_insert_with(Default::default);
+            for svc in &to_disable {
+                os.set_service(
+                    svc,
+                    config::IntegrationConfig {
+                        enabled: Some(false),
+                    },
+                );
+            }
+            config::save_user_config(&user_config)
+        })
+        .map_err(|e| {
+            log::error!(
+                "validate_os_integrations_on_startup: config persist failure for project={project}: {e}"
+            );
+            e.to_string()
+        })?;
+    }
+
+    log::info!(
+        "validate_os_integrations_on_startup: project={project} done — total_services={} checked={checked} skipped_already_disabled={already_disabled} auto_disabled={} services=[{}]",
+        os_services.len(),
+        validations.len(),
+        validations.iter().map(|v| v.service.as_str()).collect::<Vec<_>>().join(",")
+    );
+
+    Ok(validations)
 }
 
 #[tauri::command]
@@ -567,27 +928,109 @@ pub fn save_integration_credentials(
         .join(&service);
     std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
 
-    // Redmine stores some fields in config.json — dispatch to dedicated handler
+    // Redmine stores some fields in `config.json` rather than as individual
+    // files; route through its dedicated handler. The Redmine pattern is the
+    // only built-in service that uses `WorkerMountedConfig`, so a per-service
+    // dispatch is simpler than weaving config.json semantics into the generic
+    // routing below.
     if service == "redmine" {
         return save_redmine_credentials(&svc_dir, &credentials, allowed);
     }
 
-    // Generic handler: write each credential as an individual file
-    for (key, value) in &credentials {
-        if !allowed.contains(&key.as_str()) {
+    // Generic routing driven by `FieldStorage` (plan §PR3:290-299). Each UI
+    // field lands in the storage tier its descriptor declares — `OAuthState`
+    // fields are merged into `oauth/<project>/<service>.json`, everything
+    // else lands in the worker-mounted tokens dir. Adding a new OAuth-using
+    // service means flipping `storage` on its descriptor; no edit here.
+    save_with_field_storage(&project, &service, &svc_dir, &credentials)
+}
+
+/// Generic per-field routing of UI credentials by `FieldStorage` tier.
+/// Partitions `credentials` into the worker-mounted file set and the OAuth
+/// state JSON merge set, then writes both atomically with `0o600`.
+fn save_with_field_storage(
+    project: &str,
+    service: &str,
+    svc_dir: &std::path::Path,
+    credentials: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    use std::collections::HashMap;
+    let svc_desc = speedwave_runtime::consts::find_mcp_service(service)
+        .ok_or_else(|| format!("unknown service: {}", service))?;
+
+    let mut to_oauth_json: HashMap<&str, &str> = HashMap::new();
+    let mut to_tokens_dir: HashMap<&str, &str> = HashMap::new();
+    for (key, value) in credentials {
+        if !crate::types::is_allowed_field(service, key) {
             return Err(format!(
                 "field '{}' not allowed for service '{}'",
                 key, service
             ));
         }
         validate_credential_field(key, value)?;
-
-        let file_path = svc_dir.join(key);
-        std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
-        crate::fs_perms::set_owner_only(&file_path)?;
+        match crate::types::field_storage(service, key) {
+            Some(speedwave_runtime::consts::FieldStorage::OAuthState) => {
+                to_oauth_json.insert(key.as_str(), value.as_str());
+            }
+            _ => {
+                to_tokens_dir.insert(key.as_str(), value.as_str());
+            }
+        }
     }
 
+    for (key, value) in &to_tokens_dir {
+        let file_path = svc_dir.join(key);
+        speedwave_runtime::fs_perms::write_restricted_file(&file_path, value)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if !to_oauth_json.is_empty() {
+        if svc_desc.oauth_state_fields.is_none() {
+            return Err(format!(
+                "service '{}' has no oauth_state_fields but received OAuth-state values",
+                service
+            ));
+        }
+        merge_oauth_state_json(project, service, &to_oauth_json)?;
+    }
     Ok(())
+}
+
+/// Read-modify-write merge into `oauth/<project>/<service>.json`. Atomic write
+/// preserves owner-only perms (0o600 on Unix). Caller's UI fields use
+/// snake_case keys; we translate them to the camelCase Microsoft OAuth wire
+/// format via {@link snake_to_oauth_json_key}.
+fn merge_oauth_state_json(
+    project: &str,
+    service: &str,
+    fields: &std::collections::HashMap<&str, &str>,
+) -> Result<(), String> {
+    let path = speedwave_runtime::plugin::oauth_state_file(project, service);
+    let parent = path.parent().ok_or_else(|| "no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    let mut state: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({ "provider": "microsoft" })
+    };
+    let obj = state
+        .as_object_mut()
+        .ok_or_else(|| "oauth state must be a JSON object".to_string())?;
+    for (key, value) in fields {
+        obj.insert(
+            snake_to_oauth_json_key(key).to_string(),
+            serde_json::json!(value),
+        );
+    }
+    let body = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())? + "\n";
+    speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -631,8 +1074,8 @@ pub fn save_redmine_mappings(
     config_obj["mappings"] = serde_json::Value::Object(mappings.into_iter().collect());
 
     let json = serde_json::to_string_pretty(&config_obj).map_err(|e| e.to_string())?;
-    std::fs::write(&config_path, &json).map_err(|e| e.to_string())?;
-    crate::fs_perms::set_owner_only(&config_path)?;
+    speedwave_runtime::fs_perms::write_restricted_file(&config_path, &json)
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -656,26 +1099,136 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
         }
     }
 
-    // Auto-disable the integration since credentials are now removed
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
-        if let Some(entry) = user_config.find_project_mut(&project) {
-            let integrations = entry.integrations.get_or_insert_with(Default::default);
-            let cfg = config::IntegrationConfig {
-                enabled: Some(false),
-            };
-            integrations.set_service(&service, cfg);
-            config::save_user_config(&user_config)?;
+    // ADR-060: for any service whose descriptor declares `oauth_state_fields`,
+    // also remove the host-only `oauth/<project>/<service>.json`. It holds
+    // refreshToken / clientId / tenantId / grantedScopes / expiresAt /
+    // lastRefreshAt that are intentionally outside `allowed` (managed by the
+    // host-side `oauth` worker, not the UI form).
+    let svc_desc = speedwave_runtime::consts::find_mcp_service(&service);
+    if svc_desc.is_some_and(|d| d.oauth_state_fields.is_some()) {
+        let oauth_path = speedwave_runtime::plugin::oauth_state_file(&project, &service);
+        if oauth_path.exists() {
+            std::fs::remove_file(&oauth_path).map_err(|e| e.to_string())?;
         }
-        Ok(())
-    })
-    .map_err(|e| e.to_string())?;
+    }
+
+    // Optional-only services (e.g. context7) keep working in anonymous mode after
+    // credential removal — skip auto-disable so the toggle stays as the user left it.
+    let all_optional = svc_desc
+        .map(|d| !d.auth_fields.is_empty() && d.auth_fields.iter().all(|f| f.optional))
+        .unwrap_or(false);
+
+    if !all_optional {
+        config::with_config_lock(|| {
+            let mut user_config = config::load_user_config()?;
+            if let Some(entry) = user_config.find_project_mut(&project) {
+                let integrations = entry.integrations.get_or_insert_with(Default::default);
+                let cfg = config::IntegrationConfig {
+                    enabled: Some(false),
+                };
+                integrations.set_service(&service, cfg);
+                config::save_user_config(&user_config)?;
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }
 
+/// Builds missing worker images for `project`. Returns sanitized error on failure.
+pub fn ensure_project_images_built(
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    project: &str,
+) -> Result<(), String> {
+    let user_config = speedwave_runtime::config::load_user_config()
+        .map_err(|e| format!("failed to load user config: {e}"))?;
+    let dir = user_config
+        .require_project(project)
+        .map_err(|e| e.to_string())?
+        .dir
+        .clone();
+    let integrations = speedwave_runtime::config::resolve_integrations(
+        std::path::Path::new(&dir),
+        &user_config,
+        project,
+    );
+    let manifest = speedwave_runtime::bundle::load_current_bundle_manifest()
+        .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
+    let enabled = speedwave_runtime::build::enabled_images(&integrations);
+    speedwave_runtime::build::build_missing_images(rt, &enabled, &manifest.bundle_id)
+        .map(|_| ())
+        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))
+}
+
+/// Removes worker images that `project` no longer enables. Per-project scope
+/// (ADR-057): switching to a project that needs a pruned image triggers a
+/// lazy build. Warn-only — failure never blocks restart.
+fn prune_unused_worker_images(
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    project: &str,
+) {
+    let user_config = match speedwave_runtime::config::load_user_config() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("prune_unused_worker_images: load_user_config failed: {e}");
+            return;
+        }
+    };
+    let dir = match user_config.find_project(project) {
+        Some(p) => p.dir.clone(),
+        None => {
+            log::warn!("prune_unused_worker_images: project '{project}' not in config");
+            return;
+        }
+    };
+    let integrations = speedwave_runtime::config::resolve_integrations(
+        std::path::Path::new(&dir),
+        &user_config,
+        project,
+    );
+    let keep = speedwave_runtime::build::enabled_images(&integrations);
+    let manifest = match speedwave_runtime::bundle::load_current_bundle_manifest() {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("prune_unused_worker_images: load manifest failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) =
+        speedwave_runtime::build::prune_orphan_current_bundle_images(rt, &manifest.bundle_id, &keep)
+    {
+        log::warn!("prune_unused_worker_images failed: {e}");
+    }
+}
+
+/// Rolls a service back to `enabled: false`; called when on-demand build fails.
+fn rollback_integration_to_disabled(project: &str, service: &str) {
+    let result = config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let entry = user_config
+            .find_project_mut(project)
+            .ok_or_else(|| anyhow::anyhow!("project '{project}' not found"))?;
+        let integrations = entry.integrations.get_or_insert_with(Default::default);
+        let cfg = config::IntegrationConfig {
+            enabled: Some(false),
+        };
+        if !integrations.set_service(service, cfg) {
+            return Err(anyhow::anyhow!("unknown service: {service}"));
+        }
+        config::save_user_config(&user_config)
+    });
+    if let Err(e) = result {
+        log::warn!("rollback of '{service}' to disabled failed: {e}");
+    }
+}
+
 #[tauri::command]
-pub async fn restart_integration_containers(project: String) -> Result<(), String> {
+pub async fn restart_integration_containers(
+    project: String,
+    just_enabled: Option<String>,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         // Pre-flight: detect CloudStorage TCC denial before restarting containers.
@@ -686,21 +1239,25 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
                 )?;
             }
         }
-        log::info!("restart_integration_containers: project={project}");
+        log::info!(
+            "restart_integration_containers: project={project} just_enabled={just_enabled:?}"
+        );
         let rt = speedwave_runtime::runtime::detect_runtime();
+        rt.ensure_ready().map_err(|e| e.to_string())?;
 
         // Save snapshot of current compose.yml for rollback before any changes
         if let Err(e) = speedwave_runtime::update::save_snapshot(&project) {
             log::warn!("restart_integration_containers: save_snapshot failed, rollback will not work: {e}");
         }
 
-        // Rebuild images BEFORE stopping containers.
-        // If the build fails, containers keep running with the previous version.
-        // Docker/nerdctl layer caching makes no-op rebuilds fast (seconds).
-        if let Err(e) = speedwave_runtime::build::build_all_images(&*rt) {
-            log::error!("restart_integration_containers: image rebuild failed: {e}");
+        // Lazy build; rollback `just_enabled` on failure.
+        if let Err(sanitized) = ensure_project_images_built(&*rt, &project) {
+            log::error!("restart_integration_containers: image build failed: {sanitized}");
+            if let Some(svc) = just_enabled.as_deref() {
+                rollback_integration_to_disabled(&project, svc);
+            }
             return Err(format!(
-                "Image rebuild failed: {e}. Containers are still running with the previous version."
+                "Image build failed: {sanitized}. Containers are still running with the previous configuration."
             ));
         }
 
@@ -728,6 +1285,10 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
                 "Restart failed: {e}. Rolled back to previous configuration."
             ));
         }
+
+        // Drop worker images this project no longer enables (ADR-057 per-project
+        // scope; other projects rebuild lazily on switch). Warn-only.
+        prune_unused_worker_images(&*rt, &project);
 
         Ok(())
     })
@@ -759,7 +1320,16 @@ mod tests {
 
     #[test]
     fn set_service_all_known_keys() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab", "playwright"] {
+        for key in &[
+            "slack",
+            "sharepoint",
+            "redmine",
+            "gitlab",
+            "github",
+            "atlassian",
+            "office",
+            "playwright",
+        ] {
             let mut cfg = config::IntegrationsConfig::default();
             let ic = config::IntegrationConfig {
                 enabled: Some(true),
@@ -787,6 +1357,84 @@ mod tests {
         ));
     }
 
+    // -- detect_scope_mismatch tests (PR3 / FIX-P1-4 re-consent banner) --
+
+    #[test]
+    fn detect_scope_mismatch_returns_some_when_granted_is_empty() {
+        let raw = r#"{"provider":"microsoft","grantedScopes":[]}"#;
+        let required = vec!["sites.manage.all".to_string()];
+        assert_eq!(
+            detect_scope_mismatch(raw, &required),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_some_when_granted_is_strict_subset() {
+        let raw = r#"{"provider":"microsoft","grantedScopes":["user.read"]}"#;
+        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
+        assert_eq!(
+            detect_scope_mismatch(raw, &required),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_none_when_granted_covers_required() {
+        let raw = r#"{"provider":"microsoft","grantedScopes":["sites.manage.all","user.read","files.readwrite.all","offline_access"]}"#;
+        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
+        assert!(detect_scope_mismatch(raw, &required).is_none());
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_none_when_granted_matches_with_different_case() {
+        // grantedScopes typically come back in mixed case from Microsoft
+        // (e.g. `Sites.Manage.All`). The helper normalises both sides.
+        let raw = r#"{"provider":"microsoft","grantedScopes":["Sites.Manage.All","User.Read"]}"#;
+        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
+        assert!(detect_scope_mismatch(raw, &required).is_none());
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_none_on_malformed_json() {
+        // Best-effort — if oauth.json is corrupt we treat it as "no signal,
+        // don't surface a banner" (the next refresh will fail loudly).
+        let required = vec!["sites.manage.all".to_string()];
+        assert!(detect_scope_mismatch("not-json", &required).is_none());
+        assert!(detect_scope_mismatch("{}", &required).is_some());
+    }
+
+    #[test]
+    fn detect_scope_mismatch_treats_missing_grantedscopes_as_empty() {
+        let raw = r#"{"provider":"microsoft"}"#;
+        let required = vec!["sites.manage.all".to_string()];
+        assert_eq!(
+            detect_scope_mismatch(raw, &required),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_oauth_action_required_only_acts_on_sharepoint() {
+        // For non-sharepoint services we never even read the oauth.json — the
+        // fact that consts::data_dir() may be unrelated/empty must not matter.
+        assert!(detect_oauth_action_required("any-project", "slack").is_none());
+        assert!(detect_oauth_action_required("any-project", "redmine").is_none());
+        assert!(detect_oauth_action_required("any-project", "gitlab").is_none());
+    }
+
+    #[test]
+    fn sharepoint_required_scopes_matches_ssot_lowercased() {
+        let scopes = sharepoint_required_scopes();
+        let expected: Vec<String> = speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES
+            .split_whitespace()
+            .map(|s| s.to_lowercase())
+            .collect();
+        assert_eq!(scopes, expected);
+        // Sanity: PR3 bumped this to include Sites.Manage.All.
+        assert!(scopes.iter().any(|s| s.contains("sites.manage.all")));
+    }
+
     #[test]
     fn set_service_overwrite() {
         let mut cfg = config::IntegrationsConfig::default();
@@ -807,12 +1455,92 @@ mod tests {
 
     // -- OS integration platform guards --
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     #[test]
-    fn set_os_integration_enabled_rejects_on_non_macos() {
+    fn set_os_integration_enabled_rejects_on_windows() {
         let result = set_os_integration_enabled("test".into(), "reminders".into(), true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only available on macOS"));
+    }
+
+    // -- validate_os_integrations_on_startup --
+    //
+    // The full happy/error/state-transition path requires a temporary
+    // ~/.speedwave/ data dir and a mocked native CLI that returns scripted
+    // status JSON. That harness already exists for set_os_integration_enabled
+    // tests at the integration level (run via `make test-desktop`). The unit
+    // tests here cover the boundary behaviour reachable without spawning
+    // child processes.
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn validate_os_integrations_returns_empty_on_windows() {
+        // OS integrations are macOS-only — the validator must short-circuit
+        // with Ok([]) on Windows hosts so the Angular ngOnInit hook can call
+        // it unconditionally.
+        let result = validate_os_integrations_on_startup("test".into());
+        assert!(result.is_ok(), "expected Ok on non-macOS, got {result:?}");
+        assert_eq!(
+            result.unwrap(),
+            Vec::<OsIntegrationValidation>::new(),
+            "non-macOS host must return empty validation list, not auto-disable anything"
+        );
+    }
+
+    #[test]
+    fn os_integration_validation_serializes_to_camel_case_for_frontend() {
+        // The Tauri command return type is consumed by Angular as
+        // OsIntegrationValidation in models/integration.ts — the field names
+        // must serialize to snake_case (Rust default). If a future PR adds
+        // serde rename rules, this test catches the drift before frontend
+        // breaks at runtime.
+        let v = OsIntegrationValidation {
+            service: "calendar".to_string(),
+            previous_enabled: true,
+            new_enabled: false,
+            reason: "tccutil reset Calendar pl.speedwave.desktop.calendar".to_string(),
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains(r#""service":"calendar""#));
+        assert!(json.contains(r#""previous_enabled":true"#));
+        assert!(json.contains(r#""new_enabled":false"#));
+        assert!(json.contains(r#""reason":"tccutil reset Calendar pl.speedwave.desktop.calendar""#));
+    }
+
+    #[test]
+    fn os_integrations_config_get_service_covers_every_toggleable_service() {
+        // SSOT alignment: get_service must accept every config_key in
+        // TOGGLEABLE_OS_SERVICES. A new entry without a matching arm would
+        // make the validator silently skip the service.
+        use speedwave_runtime::config::{IntegrationConfig, OsIntegrationsConfig};
+        let mut cfg = OsIntegrationsConfig::default();
+        for svc in speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES {
+            assert!(
+                cfg.set_service(
+                    svc.config_key,
+                    IntegrationConfig {
+                        enabled: Some(true)
+                    }
+                ),
+                "set_service must accept '{}'",
+                svc.config_key
+            );
+            let got = cfg.get_service(svc.config_key);
+            assert!(
+                got.is_some(),
+                "get_service must round-trip '{}'",
+                svc.config_key
+            );
+            assert_eq!(got.and_then(|c| c.enabled), Some(true));
+        }
+    }
+
+    #[test]
+    fn os_integrations_config_get_service_rejects_unknown() {
+        use speedwave_runtime::config::OsIntegrationsConfig;
+        let cfg = OsIntegrationsConfig::default();
+        assert!(cfg.get_service("contacts").is_none());
+        assert!(cfg.get_service("").is_none());
     }
 
     // -- validate_credential_field tests --
@@ -963,18 +1691,38 @@ mod tests {
             .expect("restart_integration_containers function must exist");
         let fn_body = &source[fn_start..];
 
-        let build_pos = fn_body
-            .find("build::build_all_images")
-            .expect("build_all_images call must exist in restart_integration_containers");
+        let build_pos = fn_body.find("ensure_project_images_built").expect(
+            "ensure_project_images_built call must exist in restart_integration_containers",
+        );
         let down_pos = fn_body
             .find("compose_down")
             .expect("compose_down call must exist in restart_integration_containers");
 
         assert!(
             build_pos < down_pos,
-            "build_all_images (offset {}) must appear before compose_down (offset {}) in restart_integration_containers",
+            "ensure_project_images_built (offset {}) must appear before compose_down (offset {}) in restart_integration_containers",
             build_pos,
             down_pos
+        );
+    }
+
+    #[test]
+    fn restart_rolls_back_just_enabled_on_build_failure() {
+        // Structural: the build-failure branch must call the rollback helper
+        // with the `just_enabled` arg so the toggled-on row reverts in the UI.
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers function must exist");
+        let fn_body = &source[fn_start..];
+        // The Err arm of ensure_project_images_built must call rollback_integration_to_disabled.
+        let build_pos = fn_body
+            .find("ensure_project_images_built")
+            .expect("ensure_project_images_built must exist");
+        let err_block = &fn_body[build_pos..build_pos.saturating_add(800)];
+        assert!(
+            err_block.contains("rollback_integration_to_disabled"),
+            "build failure must call rollback_integration_to_disabled, context: {err_block}"
         );
     }
 
@@ -1012,7 +1760,7 @@ mod tests {
     #[test]
     fn is_service_configured_returns_false_when_only_secrets_exist() {
         // SharePoint: access_token + refresh_token exist (file-based secrets),
-        // but client_id/tenant_id/site_id/base_path are missing → false
+        // but client_id/tenant_id/site_id are missing → false
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
         std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
@@ -1026,19 +1774,27 @@ mod tests {
 
     #[test]
     fn is_service_configured_returns_true_when_all_fields_present() {
-        // SharePoint: all 6 auth_fields are file-based → all must exist as non-empty files
+        // SharePoint after base_path removal: access_token + site_id are
+        // worker-mounted; refresh_token / client_id / tenant_id live in
+        // oauth.json. is_service_configured_with_home checks the worker-mounted
+        // dir (we feed minimum), and the OAuthState fields via the JSON.
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
         std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
-        std::fs::write(svc_dir.join("refresh_token"), "ref").unwrap();
+        std::fs::write(svc_dir.join("site_id"), "my-site").unwrap();
+
+        let oauth_dir = tmp.path().join(".speedwave").join("oauth").join("proj");
+        std::fs::create_dir_all(&oauth_dir).unwrap();
         std::fs::write(
-            svc_dir.join("client_id"),
-            "550e8400-e29b-41d4-a716-446655440000",
+            oauth_dir.join("sharepoint.json"),
+            serde_json::json!({
+                "clientId": "550e8400-e29b-41d4-a716-446655440000",
+                "tenantId": "common",
+                "refreshToken": "ref",
+            })
+            .to_string(),
         )
         .unwrap();
-        std::fs::write(svc_dir.join("tenant_id"), "common").unwrap();
-        std::fs::write(svc_dir.join("site_id"), "my-site").unwrap();
-        std::fs::write(svc_dir.join("base_path"), "/Shared Documents").unwrap();
 
         assert!(
             is_service_configured_with_home(tmp.path(), "proj", "sharepoint"),
@@ -1215,13 +1971,79 @@ mod tests {
 
     #[test]
     fn parse_permission_output_denied_with_status_and_error() {
+        // Calendar uses sub-identifier `pl.speedwave.desktop.calendar` per
+        // SharedCLI/Utilities.swift::subBundleIdentifier — the `tccutil reset`
+        // command in the error string must use the sub-identifier so that
+        // recovery actually clears the right TCC.db row.
         let result = parse_permission_output(
-            r#"{"granted": false, "status": "denied", "error": "tccutil reset Calendar pl.speedwave.desktop"}"#,
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset Calendar pl.speedwave.desktop.calendar"}"#,
         );
         assert!(result.is_err());
+        let err = result.unwrap_err();
         assert!(
-            result.unwrap_err().contains("tccutil reset Calendar"),
-            "error message must contain tccutil reset Calendar"
+            err.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
+            "error must contain calendar sub-identifier in tccutil command, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_permission_output_reminders_uses_sub_identifier() {
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset Reminders pl.speedwave.desktop.reminders"}"#,
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("tccutil reset Reminders pl.speedwave.desktop.reminders"));
+    }
+
+    #[test]
+    fn parse_permission_output_mail_uses_apple_events_service() {
+        // Mail/Notes use kTCCServiceAppleEvents — `tccutil reset Mail` is wrong
+        // (no such TCC service exists). The Swift composeErrorMessage produces
+        // `tccutil reset AppleEvents pl.speedwave.desktop.mail` and the parser
+        // must surface this string verbatim.
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop.mail"}"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("tccutil reset AppleEvents pl.speedwave.desktop.mail"),
+            "Mail must use AppleEvents service in tccutil command, got: {err}"
+        );
+        assert!(
+            !err.contains("tccutil reset Mail "),
+            "Mail must NOT use 'tccutil reset Mail' (no such TCC service), got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_permission_output_notes_uses_apple_events_service() {
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop.notes"}"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("tccutil reset AppleEvents pl.speedwave.desktop.notes"));
+        assert!(!err.contains("tccutil reset Notes "));
+    }
+
+    #[test]
+    fn parse_permission_output_target_not_running_omits_tccutil() {
+        // .targetNotRunning (Mail/Notes app not running) is NOT a TCC issue —
+        // the error string must NOT recommend tccutil because resetting
+        // permission would not help. The Swift composeErrorMessage produces
+        // a "open Mail.app and try again" message instead.
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "targetNotRunning", "error": "Mail.app is not running. Open Mail.app and try again — this is not a permission problem."}"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Mail.app is not running"));
+        assert!(
+            !err.to_lowercase().contains("tccutil"),
+            "targetNotRunning must NOT recommend tccutil, got: {err}"
         );
     }
 
@@ -1335,7 +2157,7 @@ mod tests {
             speedwave_runtime::consts::BUNDLE_RESOURCES_ENV,
             "/nonexistent/path",
         );
-        let result = check_os_permission("reminders");
+        let result = check_os_permission("reminders", false);
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1357,7 +2179,7 @@ mod tests {
         std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission("reminders");
+        let result = check_os_permission("reminders", false);
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1378,7 +2200,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission("reminders");
+        let result = check_os_permission("reminders", false);
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("crash info"));
@@ -1395,7 +2217,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission("reminders");
+        let result = check_os_permission("reminders", false);
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to parse"));
@@ -1415,7 +2237,7 @@ mod tests {
 
         std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
         let result =
-            check_os_permission_with_timeout("reminders", std::time::Duration::from_secs(2));
+            check_os_permission_with_timeout("reminders", false, std::time::Duration::from_secs(2));
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         assert!(
@@ -1460,7 +2282,14 @@ mod tests {
 
     #[test]
     fn badge_none_for_credential_services() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab"] {
+        for key in &[
+            "slack",
+            "sharepoint",
+            "redmine",
+            "gitlab",
+            "github",
+            "atlassian",
+        ] {
             let svc_desc = speedwave_runtime::consts::find_mcp_service(key)
                 .unwrap_or_else(|| panic!("service '{}' must exist", key));
             assert_eq!(

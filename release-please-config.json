@@ -28,7 +28,11 @@
         "mcp-servers/sharepoint/package.json",
         "mcp-servers/redmine/package.json",
         "mcp-servers/gitlab/package.json",
+        "mcp-servers/github/package.json",
+        "mcp-servers/atlassian/package.json",
+        "mcp-servers/office/package.json",
         "mcp-servers/os/package.json",
+        "mcp-servers/host_exec/package.json",
         {
           "type": "toml",
           "path": "crates/speedwave-runtime/Cargo.toml",
@@ -43,6 +47,22 @@
           "type": "toml",
           "path": "desktop/src-tauri/Cargo.toml",
           "jsonpath": "$.package.version"
+        },
+        {
+          "type": "generic",
+          "path": "native/macos/calendar/Resources/Info.plist"
+        },
+        {
+          "type": "generic",
+          "path": "native/macos/reminders/Resources/Info.plist"
+        },
+        {
+          "type": "generic",
+          "path": "native/macos/mail/Resources/Info.plist"
+        },
+        {
+          "type": "generic",
+          "path": "native/macos/notes/Resources/Info.plist"
         }
       ]
     }

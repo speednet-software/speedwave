@@ -5,8 +5,8 @@ import SharedCLI
 // File-scope so tests can reach it via @testable import reminders_cli.
 struct EventStoreGate: PermissionGate {
     let store: EKEventStore
-    func authorizationStatus() -> EKAuthorizationStatus {
-        EKEventStore.authorizationStatus(for: .reminder)
+    func authorizationStatus() -> RawAuthorizationStatus {
+        mapEventKitStatusToRaw(EKEventStore.authorizationStatus(for: .reminder))
     }
     func requestAccess(completion: @escaping (Bool, Error?) -> Void) {
         if #available(macOS 14.0, *) {

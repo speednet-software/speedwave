@@ -467,7 +467,15 @@ pub async fn start_containers(
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    // `start_containers` is the last setup step that flips `is_setup_complete()`
+    // (the wizard order is runtime_ready → vm_ready → images_built →
+    // project_created → containers_started; cli_linked is independent). Rebuild
+    // the tray here so setup-gated items (the ADR-058 beta toggle) appear
+    // immediately after the wizard finishes.
+    crate::tray::refresh_tray_menu(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -529,6 +537,14 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         }
         log::info!("recreate_project_containers: project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
+        rt.ensure_ready().map_err(|e| e.to_string())?;
+
+        // Lazy build for the destination project (ADR-057).
+        if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&*rt, &project)
+        {
+            log::error!("recreate_project_containers: image build failed: {sanitized}");
+            return Err(format!("Image build failed: {sanitized}"));
+        }
 
         // Stop old containers (ignore errors — they may not be running)
         let _ = rt.compose_down(&project);
@@ -654,6 +670,18 @@ pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::Anthrop
     speedwave_runtime::defaults::ANTHROPIC_MODELS
 }
 
+/// Returns the display label of the Opus model that the dropdown's
+/// `(default)` option resolves to at runtime — used by the Settings UI to
+/// render an honest hint like *"Default — Opus 4.7 (switchable via /model)"*
+/// instead of the previous vague *"let Claude Code choose"* placeholder.
+///
+/// `None` when the SSOT has no `latest = true` Opus family — frontend then
+/// falls back to the generic placeholder.
+#[tauri::command]
+pub fn get_default_anthropic_model_label() -> Option<&'static str> {
+    speedwave_runtime::defaults::default_anthropic_family_label()
+}
+
 /// Applies LLM config to the active project in-memory. Extracted for
 /// testability and reused by `update_llm_config`.
 ///
@@ -702,6 +730,17 @@ fn apply_llm_config(
 
 #[tauri::command]
 pub fn update_llm_config(update: config::LlmConfig) -> Result<(), String> {
+    // Log non-sensitive fields up-front for diagnostics (provider/model never
+    // carry credentials). `base_url` is logged only AFTER the SSRF guard
+    // passes, and even then with userinfo / query / fragment stripped — so a
+    // user submitting `http://user:pass@host?token=...` never has the secret
+    // captured in the log buffer (see `.claude/rules/logging.md`).
+    log::info!(
+        "update_llm_config: provider={:?} model={:?} context_tokens={:?}",
+        update.provider,
+        update.model,
+        update.context_tokens
+    );
     // Local providers (ollama, lmstudio, llamacpp) cannot start a session
     // without a model — `compose::apply_llm_config` rejects the compose
     // render, which only surfaces when the user tries to run Claude.
@@ -742,15 +781,33 @@ pub fn update_llm_config(update: config::LlmConfig) -> Result<(), String> {
         // SSRF guard — same policy as LLM discovery probe. Blocks link-local,
         // metadata, IPv6-mapped bypasses, embedded credentials, query/fragment.
         // See ADR-041.
-        crate::llm_cmd::validate_llm_base_url(&normalized).map_err(|e| e.to_string())?;
+        let parsed =
+            crate::llm_cmd::validate_llm_base_url(&normalized).map_err(|e| e.to_string())?;
         // validate_base_url also rejects path components (http://host/path),
         // which validate_llm_base_url does not check.
         speedwave_runtime::compose::validate_base_url(&normalized).map_err(|e| e.to_string())?;
+        // Log the post-validation URL with userinfo / path / query / fragment
+        // stripped — only scheme+host[:port] survives. validate_llm_base_url
+        // already rejects userinfo, but keeping the log scrubbed independently
+        // satisfies the "log_sanitizer is a safety net, not a license" rule
+        // from .claude/rules/logging.md.
+        let port_str = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+        log::info!(
+            "update_llm_config: base_url={}://{}{port_str}",
+            parsed.scheme(),
+            parsed.host_str().unwrap_or("<no-host>"),
+        );
     }
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
+        let active = user_config.active_project.clone();
         apply_llm_config(&mut user_config, update)?;
-        config::save_user_config(&user_config)
+        config::save_user_config(&user_config)?;
+        log::info!(
+            "update_llm_config: persisted to active_project={:?}",
+            active
+        );
+        Ok(())
     })
     .map_err(|e| e.to_string())
 }
@@ -794,7 +851,9 @@ mod tests {
             ],
             active_project: Some("alpha".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -885,7 +944,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         // Use a non-local provider so the new local-provider+model guard
@@ -911,7 +972,9 @@ mod tests {
             }],
             active_project: Some("nonexistent".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         // Anthropic skips the local-provider+model guard so the project-not-
@@ -944,7 +1007,9 @@ mod tests {
             }],
             active_project: Some("proj".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         apply_llm_config(&mut cfg, llm("ollama", Some("llama3.3"), None)).unwrap();
@@ -1788,6 +1853,54 @@ mod tests {
         assert!(
             fn_body.contains("check_os_warnings"),
             "run_system_check must call check_os_warnings()"
+        );
+    }
+
+    /// Structural test: `start_containers()` is the last setup step that flips
+    /// `is_setup_complete()`. It must call `refresh_tray_menu` so the
+    /// setup-gated tray items (the ADR-058 beta toggle) appear immediately
+    /// after the wizard finishes — without a manual refresh.
+    #[test]
+    fn start_containers_refreshes_tray_after_setup_completes() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn start_containers(")
+            .expect("start_containers function must exist");
+        let fn_body = &source[fn_start..];
+        let next_fn = fn_body[1..]
+            .find("\npub ")
+            .map(|i| i + 1)
+            .unwrap_or(fn_body.len());
+        let fn_body = &fn_body[..next_fn];
+        assert!(
+            fn_body.contains("tray::refresh_tray_menu"),
+            "start_containers must call crate::tray::refresh_tray_menu so the \
+             ADR-058 beta toggle appears after the wizard's final step"
+        );
+    }
+
+    /// Structural test: `create_project()` must NOT call `refresh_tray_menu`.
+    /// It runs at step 4 of 5, before `containers_started = true` is
+    /// persisted, so `is_setup_complete()` would still return `false` and the
+    /// tray rebuild would drop the beta toggle anyway (the bug fixed in this
+    /// commit). The refresh belongs in `start_containers()` instead.
+    #[test]
+    fn create_project_does_not_refresh_tray_prematurely() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn create_project(")
+            .expect("create_project function must exist");
+        let fn_body = &source[fn_start..];
+        let next_fn = fn_body[1..]
+            .find("\npub ")
+            .map(|i| i + 1)
+            .unwrap_or(fn_body.len());
+        let fn_body = &fn_body[..next_fn];
+        assert!(
+            !fn_body.contains("tray::refresh_tray_menu"),
+            "create_project must not call refresh_tray_menu — at that point \
+             is_setup_complete() is still false (containers_started is set \
+             later by start_containers)"
         );
     }
 }

@@ -20,6 +20,7 @@ import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
 import { getAuthToken } from './auth-tokens.js';
 import { getAllServiceNames } from './service-list.js';
 import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, validateWorkerUrl } from '@speedwave/mcp-shared';
+import { deriveWorkerEnv } from './worker-env.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -31,7 +32,7 @@ import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, validateWorkerUrl } from '@speed
  * @param service - service name (e.g. 'slack', 'gitlab')
  */
 function getWorkerUrl(service: string): string | undefined {
-  const url = process.env[`WORKER_${service.toUpperCase()}_URL`] || undefined;
+  const url = process.env[deriveWorkerEnv(service)] || undefined;
   if (!url) return undefined;
 
   if (!validateWorkerUrl(url)) {
@@ -402,34 +403,31 @@ export async function isWorkerAvailable(service: string): Promise<boolean> {
     return cached.available;
   }
 
-  try {
-    const available = await checkWorkerHealth(service);
-    workerStatusCache.set(service, {
-      available,
-      lastCheck: now,
-      tools: [],
-    });
+  const available = await checkWorkerHealth(service);
+  workerStatusCache.set(service, {
+    available,
+    lastCheck: now,
+    tools: [],
+  });
 
-    return available;
-  } catch (error) {
-    const errorType = classifyHealthError(error);
-    console.warn(
-      `${ts()} [http-bridge] Worker health check failed for ${service} [${errorType}]:`,
-      error instanceof Error ? error.message : error
-    );
-    workerStatusCache.set(service, {
-      available: false,
-      lastCheck: now,
-      tools: [],
-    });
-    return false;
-  }
+  return available;
 }
 
 /** Max retries for startup health checks */
 export const STARTUP_HEALTH_RETRIES = 3;
 /** Delays between startup retries (exponential backoff: 1s, 2s, 4s) */
 export const STARTUP_RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
+
+/**
+ * Delays for tool-registry discovery retries. Wider than `STARTUP_RETRY_DELAYS_MS`
+ * because some workers do real I/O on first boot (SharePoint resolves site_id
+ * via Graph and may have to refresh an expired OAuth token, which routes
+ * through the host-side oauth worker — total cold-start can run 5–15 s).
+ * Hub's 7 s budget left those workers with an empty registry until the
+ * 5-minute background refresh, blocking the Claude session for that whole
+ * window. Total budget here: 1+2+4+8+15 = 30 s.
+ */
+export const DISCOVERY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
 /**
  * Check worker health at startup with retry + backoff.
@@ -613,6 +611,8 @@ async function ensureWorkerSession(
   authToken?: string
 ): Promise<string> {
   const cached = workerSessionCache.get(service);
+  /* c8 ignore next — guard for re-entrant callers; current call sites always
+   * call invalidateWorkerSession first so the cache is empty on entry */
   if (cached !== undefined) return cached;
 
   const sessionId = await performMcpInitialize(url, authToken);
@@ -874,16 +874,10 @@ export async function initializeAllBridges(): Promise<AllBridges> {
     `${ts()} \n📊 Workers available at startup: ${enabledCount}/${activeServices.length}`
   );
   for (const service of allServices) {
-    if (!enabledServices.has(service)) {
-      console.log(
-        `${ts()}    ${service.charAt(0).toUpperCase() + service.slice(1).padEnd(10)}: disabled`
-      );
-    } else {
-      const status = workerStatus[service] ? '✅' : '⏳ (will retry on use)';
-      console.log(
-        `${ts()}    ${service.charAt(0).toUpperCase() + service.slice(1).padEnd(10)}: ${status}`
-      );
-    }
+    const status = workerStatus[service] ? '✅' : '⏳ (will retry on use)';
+    console.log(
+      `${ts()}    ${service.charAt(0).toUpperCase() + service.slice(1).padEnd(10)}: ${status}`
+    );
   }
 
   return bridges;

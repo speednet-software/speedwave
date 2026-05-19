@@ -173,17 +173,6 @@ export class PathValidator {
       }
     }
 
-    // Additional security: check for path traversal in resolved path
-    if (resolved.includes('/../') || resolved.includes('/..')) {
-      console.warn(`${ts()} 🔒 Security: Local path validation blocked potential attack:`, {
-        attemptedPath: localPath,
-        resolvedPath: resolved,
-        attackType: 'path_traversal_in_resolved_path',
-        reason: 'Resolved path contains traversal sequence',
-      });
-      return false;
-    }
-
     return true;
   }
 }

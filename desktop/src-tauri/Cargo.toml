@@ -10,7 +10,7 @@ repository = "https://github.com/speednet-software/speedwave"
 homepage = "https://github.com/speednet-software/speedwave"
 
 [dependencies]
-speedwave-runtime = { path = "../../crates/speedwave-runtime" }
+speedwave-runtime = { path = "../../crates/speedwave-runtime", features = ["audio-transcription"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -20,10 +20,12 @@ uuid = { version = "1", features = ["v4"] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 log = "0.4"
 open = "5"
+tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 tauri-plugin-webdriver = { version = "0.2", optional = true }
 url = "2"
 tokio-tungstenite = "0.28"
@@ -38,6 +40,10 @@ ctrlc = { version = "3", features = ["termination"] }
 dashmap = "6"
 futures-core = "0.3"
 json-patch = "4"
+# JSON Schema validation for `plugin_save_settings` — refuses payloads
+# that don't match the plugin's manifest-declared `settings_schema`.
+# MIT-licensed; transitive deps already in the tree (regex, url, fancy-regex).
+jsonschema = { version = "0.46", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

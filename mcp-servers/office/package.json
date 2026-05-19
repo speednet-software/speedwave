@@ -1,0 +1,51 @@
+{
+  "name": "@speedwave/mcp-office",
+  "version": "0.10.0",
+  "description": "Speedwave MCP Office Worker - read/write/create/convert Word, Excel, PowerPoint, PDF; render charts",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:py": "python3 -m pytest scripts -q"
+  },
+  "keywords": [
+    "speedwave",
+    "mcp",
+    "office",
+    "docx",
+    "xlsx",
+    "pptx",
+    "pdf",
+    "markdown",
+    "worker"
+  ],
+  "author": "Speednet",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@speedwave/mcp-shared": "file:../shared",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.16.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^25.5.2",
+    "@vitest/coverage-v8": "^4.1.6",
+    "eslint": "^10.2.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-jsdoc": "^62.9.0",
+    "eslint-plugin-prettier": "^5.1.0",
+    "globals": "^17.3.0",
+    "prettier": "^3.2.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.58.1",
+    "vitest": "^4.0.16"
+  }
+}

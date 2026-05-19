@@ -31,10 +31,10 @@ CLAUDE.md lists every SSOT and SSOT-alignment pair — read it for the full surf
 ## SOLID (applied to this codebase)
 
 - **Single Responsibility** — `ContainerRuntime` only manages containers; `ide_bridge.rs` only handles IDE events; `setup_wizard.rs` only runs setup. Do not mix concerns.
-- **Open/Closed** — Adding a new platform = new `impl ContainerRuntime` (e.g., `NerdctlRuntime`), zero changes to existing code
-- **Liskov Substitution** — `LimaRuntime`, `NerdctlRuntime`, `WslRuntime` are interchangeable; callers use `Box<dyn ContainerRuntime>` exclusively
+- **Open/Closed** — Adding a new platform = new `impl ContainerRuntime` alongside `LimaRuntime` / `WslRuntime`, zero changes to existing code
+- **Liskov Substitution** — `LimaRuntime` (macOS) and `WslRuntime` (Windows) are interchangeable; callers use `Box<dyn ContainerRuntime>` exclusively
 - **Interface Segregation** — `ContainerRuntime` trait has only the methods callers actually need
-- **Dependency Inversion** — high-level modules (`speedwave-cli`, `desktop`) depend on the `ContainerRuntime` trait, not on Lima/nerdctl/WSL2 directly
+- **Dependency Inversion** — high-level modules (`speedwave-cli`, `desktop`) depend on the `ContainerRuntime` trait, not on Lima/WSL2 directly
 
 ## Rule of Three
 

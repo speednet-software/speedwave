@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>calendar-cli</string>
+	<key>CFBundleIdentifier</key>
+	<string>pl.speedwave.desktop.calendar</string>
+	<key>CFBundleName</key>
+	<string>calendar-cli</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.10.0</string> <!-- x-release-please-version -->
+	<key>CFBundleVersion</key>
+	<string>0.10.0</string> <!-- x-release-please-version -->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Speedwave needs full access to Calendar to view, create, and modify events via Claude Code.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Speedwave needs access to Calendar to view and create events via Claude Code.</string>
+</dict>
+</plist>

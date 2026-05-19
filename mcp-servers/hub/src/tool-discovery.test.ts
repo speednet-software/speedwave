@@ -130,6 +130,56 @@ describe('tool-discovery', () => {
       expect(tools).toEqual([]);
     });
 
+    it('resolves WORKER_*_URL for hyphenated slug via deriveWorkerEnv normalization', async () => {
+      // PR0 fix: a plugin slug like `my-plugin` must look up `WORKER_MY_PLUGIN_URL`
+      // (the form compose injects), not the broken `WORKER_MY-PLUGIN_URL`.
+      process.env.WORKER_MY_PLUGIN_URL = 'http://mcp-my-plugin:4040';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'do_thing',
+          description: 'Do a thing',
+          inputSchema: { type: 'object', properties: {} },
+          annotations: { readOnlyHint: false, destructiveHint: false },
+          keywords: ['thing'],
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+
+      const tools = await discoverServiceTools('my-plugin');
+      expect(tools).toHaveLength(1);
+      expect(tools[0].name).toBe('do_thing');
+
+      delete process.env.WORKER_MY_PLUGIN_URL;
+    });
+
+    it('warns with normalized env name when hyphenated slug has no URL', async () => {
+      delete process.env.WORKER_MY_PLUGIN_URL;
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const tools = await discoverServiceTools('my-plugin');
+
+      expect(tools).toEqual([]);
+      const calls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(calls.some((m) => m.includes('WORKER_MY_PLUGIN_URL'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('returns empty array when worker URL fails SSRF validation', async () => {
+      // A URL that does not match the mcp-* container hostname pattern or the allowlist
+      // is rejected by validateWorkerUrl → discoverServiceTools returns []
+      process.env.WORKER_SLACK_URL = 'http://192.168.1.100:3001/';
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const tools = await discoverServiceTools('slack');
+
+      expect(tools).toEqual([]);
+      const calls = errorSpy.mock.calls.map((c) => c.join(' '));
+      expect(calls.some((m) => m.includes('SSRF protection'))).toBe(true);
+      errorSpy.mockRestore();
+    });
+
     it('returns tools from worker on success', async () => {
       process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
 
@@ -447,6 +497,36 @@ describe('tool-discovery', () => {
       expect(result['sendChannel'].deferLoading).toBe(true);
     });
 
+    it('skips tools that fail validateMergeResult with a warning (line 283)', async () => {
+      process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
+
+      // A tool with an empty description will fail validateMergeResult
+      const mockTools: Tool[] = [
+        {
+          name: 'bad_tool',
+          description: '', // empty — fails validation
+          inputSchema: { type: 'object', properties: {} },
+        },
+        {
+          name: 'good_tool',
+          description: 'A valid tool',
+          inputSchema: { type: 'object', properties: {} },
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const result = await discoverAndMergeService('slack');
+
+      // bad_tool is skipped (validation error), good_tool is included
+      expect(result['badTool']).toBeUndefined();
+      expect(result['goodTool']).toBeDefined();
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes('Validation errors'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
     it('ignores invalid _meta types and applies defaults', async () => {
       process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
 
@@ -516,6 +596,22 @@ describe('tool-discovery', () => {
         service: 'gitlab',
       });
       expect(errors.some((e) => e.includes('service mismatch'))).toBe(true);
+    });
+
+    it('detects missing inputSchema', () => {
+      const errors = validateMergeResult('redmine', 'createIssue', {
+        ...validMetadata,
+        inputSchema: null as never,
+      });
+      expect(errors.some((e) => e.includes('missing inputSchema'))).toBe(true);
+    });
+
+    it('detects missing service', () => {
+      const errors = validateMergeResult('redmine', 'createIssue', {
+        ...validMetadata,
+        service: '' as never,
+      });
+      expect(errors.some((e) => e.includes('missing service'))).toBe(true);
     });
   });
 

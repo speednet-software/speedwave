@@ -1,0 +1,200 @@
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  OnInit,
+  inject,
+  output,
+  signal,
+} from '@angular/core';
+
+import { TranscriptionService } from '../../services/transcription.service';
+import type { TranscriptSession, TranscriptStatus } from '../../models/transcript';
+
+/**
+ * Short human label for a session status.
+ * @param s - the session's lifecycle status.
+ */
+function statusLabel(s: TranscriptStatus): string {
+  switch (s.state) {
+    case 'recording':
+      return 'recording';
+    case 'finalizing':
+      return `finalizing ${Math.round(s.progress * 100)}%`;
+    case 'done':
+      return 'done';
+    case 'failed':
+      return `failed: ${s.reason}`;
+  }
+}
+
+/**
+ * The recordings list (left pane of the Meeting transcription tab): open /
+ * delete, status badge, and "discard audio" per session (frees disk; makes
+ * re-transcription impossible). No auto-cleanup in v1 — the user manages it.
+ */
+@Component({
+  selector: 'app-session-list',
+  standalone: true,
+  imports: [],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <div data-testid="session-list">
+      <h2 class="mono mb-2 text-[11px] uppercase tracking-widest text-[var(--ink-mute)]">
+        Recordings ({{ sessions().length }})
+      </h2>
+      @if (error()) {
+        <p class="mb-2 text-[12px] text-red-300">{{ error() }}</p>
+      }
+      @if (sessions().length === 0) {
+        <p class="text-[12px] text-[var(--ink-mute)]">No recordings yet.</p>
+      }
+      <ul class="space-y-2">
+        @for (s of sessions(); track s.id) {
+          <li
+            class="rounded-md border border-[var(--line)] bg-[var(--bg-1)] p-2 text-[12px]"
+            [class.ring-1]="s.id === selectedId()"
+            [class.ring-[var(--accent)]]="s.id === selectedId()"
+          >
+            <button
+              type="button"
+              class="block w-full text-left"
+              [attr.data-testid]="'open-' + s.id"
+              (click)="open(s)"
+            >
+              <div class="font-medium text-[var(--ink)]">{{ s.created_at }}</div>
+              <div class="text-[10px] text-[var(--ink-mute)]">
+                {{ s.language }} · {{ label(s) }} · {{ s.live_segments.length }} segments
+              </div>
+            </button>
+            <div class="mt-1 flex items-center gap-2 text-[10px]">
+              <span class="text-[var(--ink-mute)]">{{ audioLabel(s) }}</span>
+              <span class="ml-auto flex gap-1">
+                @if (s.audio_path) {
+                  <button
+                    type="button"
+                    class="mono rounded border border-[var(--line-strong)] px-2 py-0.5 hover:bg-[var(--bg-2)]"
+                    [attr.data-testid]="'discard-' + s.id"
+                    (click)="discardAudio(s.id)"
+                  >
+                    discard audio
+                  </button>
+                }
+                <button
+                  type="button"
+                  class="mono rounded border border-red-500/40 px-2 py-0.5 text-red-300 hover:bg-red-500/10"
+                  [attr.data-testid]="'delete-' + s.id"
+                  (click)="remove(s.id)"
+                >
+                  delete
+                </button>
+              </span>
+            </div>
+          </li>
+        }
+      </ul>
+    </div>
+  `,
+})
+export class SessionListComponent implements OnInit {
+  /** Emits the session the user opened (the parent shows it in the right pane). */
+  readonly opened = output<TranscriptSession>();
+  /** Forwards errors to the parent banner. */
+  readonly errorOccurred = output<string>();
+
+  /** Recorded sessions on disk (newest first). */
+  readonly sessions = signal<TranscriptSession[]>([]);
+  /** Id of the session currently open in the right pane (for highlight). */
+  readonly selectedId = signal<string | null>(null);
+  /** Local error string. */
+  readonly error = signal('');
+
+  private readonly transcription = inject(TranscriptionService);
+  private readonly cdr = inject(ChangeDetectorRef);
+
+  /** Loads the session list on first paint. */
+  async ngOnInit(): Promise<void> {
+    await this.refresh();
+  }
+
+  /** Re-reads the session list from disk. */
+  async refresh(): Promise<void> {
+    try {
+      const list = await this.transcription.list();
+      // Newest first by created_at (RFC 3339 sorts lexicographically).
+      list.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+      this.sessions.set(list);
+      this.error.set('');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.error.set(msg);
+      this.errorOccurred.emit(msg);
+    }
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Marks a session as the open one (for the row highlight).
+   * @param id - session id, or `null` to clear.
+   */
+  markSelected(id: string | null): void {
+    this.selectedId.set(id);
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Opens a session in the right pane.
+   * @param s - the session.
+   */
+  open(s: TranscriptSession): void {
+    this.selectedId.set(s.id);
+    this.opened.emit(s);
+  }
+
+  /**
+   * Deletes a session directory (audio + transcript) and refreshes.
+   * @param id - the session id.
+   */
+  async remove(id: string): Promise<void> {
+    try {
+      await this.transcription.delete(id);
+      if (this.selectedId() === id) this.selectedId.set(null);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.error.set(msg);
+      this.errorOccurred.emit(msg);
+    }
+    await this.refresh();
+  }
+
+  /**
+   * Drops a session's recorded audio (the transcript stays) and refreshes.
+   * @param id - the session id.
+   */
+  async discardAudio(id: string): Promise<void> {
+    try {
+      await this.transcription.discardAudio(id);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.error.set(msg);
+      this.errorOccurred.emit(msg);
+    }
+    await this.refresh();
+  }
+
+  /**
+   * Status label for the list row.
+   * @param s - the session.
+   */
+  label(s: TranscriptSession): string {
+    return statusLabel(s.status);
+  }
+
+  /**
+   * Whether the session still has its recorded WAV.
+   * @param s - the session.
+   */
+  audioLabel(s: TranscriptSession): string {
+    return s.audio_path ? 'audio kept' : 'audio discarded';
+  }
+}

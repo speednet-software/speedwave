@@ -7,8 +7,6 @@ import {
   ToolDefinition,
   jsonResult,
   textResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
@@ -314,17 +312,6 @@ await gitlab.triggerPipeline({
  * @param client - GitLab client instance
  */
 export function createPipelineTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: listPipelineIdsTool, handler: unconfigured },
-      { tool: getPipelineFullTool, handler: unconfigured },
-      { tool: getJobLogTool, handler: unconfigured },
-      { tool: retryPipelineTool, handler: unconfigured },
-      { tool: triggerPipelineTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listPipelineIdsTool,

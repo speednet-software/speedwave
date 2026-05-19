@@ -1,0 +1,46 @@
+{
+  "name": "@speedwave/mcp-host-exec",
+  "version": "0.10.0",
+  "description": "Speedwave host_exec Worker — runs user-whitelisted project-toolchain commands on the host (ADR-054). Per-project; not a container.",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [
+    "speedwave",
+    "mcp",
+    "host-exec",
+    "worker",
+    "toolchain",
+    "build",
+    "test"
+  ],
+  "author": "Speednet",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@speedwave/mcp-shared": "file:../shared"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.16.0",
+    "@types/node": "^25.5.2",
+    "@vitest/coverage-v8": "^4.1.6",
+    "eslint": "^10.2.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-jsdoc": "^62.9.0",
+    "eslint-plugin-prettier": "^5.1.0",
+    "globals": "^17.3.0",
+    "prettier": "^3.2.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.58.1",
+    "vitest": "^4.0.16"
+  }
+}

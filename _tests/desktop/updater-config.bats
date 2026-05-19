@@ -164,13 +164,13 @@ PY
 
 # ── Test 5: bundle.targets contains all required targets ────────────────────
 
-@test "bundle.targets contains deb nsis msi app dmg (real file)" {
+@test "bundle.targets contains nsis msi app dmg (real file)" {
   run python3 - "$(conf_file)" <<'PY'
 import json, sys
 with open(sys.argv[1]) as f:
     c = json.load(f)
 targets = c.get("bundle", {}).get("targets", [])
-required = {"deb", "nsis", "msi", "app", "dmg"}
+required = {"nsis", "msi", "app", "dmg"}
 missing = required - set(targets)
 if missing:
     sys.exit(f"bundle.targets missing: {sorted(missing)}")
@@ -178,13 +178,13 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "bundle.targets contains deb nsis msi app dmg (fixture: missing dmg)" {
+@test "bundle.targets contains nsis msi app dmg (fixture: missing dmg)" {
   run python3 - "$FIXTURES/tauri.conf.missing-dmg.json" <<'PY'
 import json, sys
 with open(sys.argv[1]) as f:
     c = json.load(f)
 targets = c.get("bundle", {}).get("targets", [])
-required = {"deb", "nsis", "msi", "app", "dmg"}
+required = {"nsis", "msi", "app", "dmg"}
 missing = required - set(targets)
 if missing:
     sys.exit(f"bundle.targets missing: {sorted(missing)}")

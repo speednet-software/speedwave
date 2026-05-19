@@ -221,14 +221,10 @@ fn validate_slot(
         anyhow::bail!("invalid question index {question_idx} for tool_use_id: {tool_use_id}");
     }
     let slot = entry.answers.get(question_idx).ok_or_else(|| {
-        anyhow::anyhow!(
-            "answers/questions length mismatch for tool_use_id: {tool_use_id}"
-        )
+        anyhow::anyhow!("answers/questions length mismatch for tool_use_id: {tool_use_id}")
     })?;
     if slot.is_some() {
-        anyhow::bail!(
-            "question {question_idx} already answered for tool_use_id: {tool_use_id}"
-        );
+        anyhow::bail!("question {question_idx} already answered for tool_use_id: {tool_use_id}");
     }
     Ok(())
 }
@@ -1124,7 +1120,10 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<ser
                  cannot build a complete answers map (refer to log for count)"
             );
         }
-        answers.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        answers.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
     }
     updated_input["answers"] = serde_json::Value::Object(answers);
 
@@ -1370,9 +1369,9 @@ impl ChatSession {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            crate::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
-            let mut f = crate::log_file::open_log_file(&path);
-            crate::log_file::write_log_line(&mut f, "SESSION", "started");
+            speedwave_runtime::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
+            let mut f = speedwave_runtime::log_file::open_log_file(&path);
+            speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "started");
             Some(path)
         };
         self.session_log_path = session_log_path.clone();
@@ -1386,13 +1385,17 @@ impl ChatSession {
             let h = std::thread::spawn(move || {
                 let mut log_file = stderr_log_path
                     .as_deref()
-                    .and_then(crate::log_file::open_log_file);
+                    .and_then(speedwave_runtime::log_file::open_log_file);
                 let reader = BufReader::new(stderr);
                 for line in reader.lines() {
                     match line {
                         Ok(l) => {
                             log::debug!("{l}");
-                            crate::log_file::write_log_line(&mut log_file, "STDERR", &l);
+                            speedwave_runtime::log_file::write_log_line(
+                                &mut log_file,
+                                "STDERR",
+                                &l,
+                            );
                         }
                         Err(e) => {
                             log::warn!("stderr reader: I/O error: {e}");
@@ -1447,7 +1450,7 @@ impl ChatSession {
             }
             let mut log_file = stdout_log_path
                 .as_deref()
-                .and_then(crate::log_file::open_log_file);
+                .and_then(speedwave_runtime::log_file::open_log_file);
             let reader = BufReader::new(stdout);
             let mut got_result = false;
             for line in reader.lines() {
@@ -1463,7 +1466,7 @@ impl ChatSession {
                 let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(v) => v,
                     Err(_) => {
-                        crate::log_file::write_log_line(
+                        speedwave_runtime::log_file::write_log_line(
                             &mut log_file,
                             "STDOUT",
                             "[non-json stdout suppressed]",
@@ -1476,7 +1479,7 @@ impl ChatSession {
 
                 // 1. Check for control_request
                 if let Some(ctrl) = StreamParser::try_parse_control_request(&parsed) {
-                    crate::log_file::write_log_line(
+                    speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
                         "CONTROL",
                         &format!("request: {} ({})", ctrl.tool_name, ctrl.tool_use_id),
@@ -1570,7 +1573,11 @@ impl ChatSession {
                 // 2. Normal stream events
                 let (chunks, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
-                    crate::log_file::write_log_line(&mut log_file, entry.prefix, &entry.message);
+                    speedwave_runtime::log_file::write_log_line(
+                        &mut log_file,
+                        entry.prefix,
+                        &entry.message,
+                    );
                 }
                 // Track whether we received a terminal event so we can
                 // emit a fallback error on unexpected EOF.  Covers:
@@ -1686,10 +1693,7 @@ impl ChatSession {
         answer: &str,
     ) -> anyhow::Result<()> {
         if answer.len() > MAX_ASK_USER_ANSWER_LEN {
-            anyhow::bail!(
-                "answer too long (max {} bytes)",
-                MAX_ASK_USER_ANSWER_LEN
-            );
+            anyhow::bail!("answer too long (max {} bytes)", MAX_ASK_USER_ANSWER_LEN);
         }
 
         let child = self
@@ -1802,9 +1806,7 @@ impl ChatSession {
                 map.insert(tool_use_id.to_string(), to_insert);
             }
             Err(poison_err) => {
-                log::error!(
-                    "failed to restore pending request: mutex poisoned: {poison_err}"
-                );
+                log::error!("failed to restore pending request: mutex poisoned: {poison_err}");
             }
         }
     }
@@ -1921,8 +1923,8 @@ impl ChatSession {
         }
         // Log session end ONLY if session actually started
         if let Some(ref log_path) = self.session_log_path {
-            let mut f = crate::log_file::open_log_file(log_path);
-            crate::log_file::write_log_line(&mut f, "SESSION", "stopped");
+            let mut f = speedwave_runtime::log_file::open_log_file(log_path);
+            speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "stopped");
         }
         self.session_log_path = None;
         if let Ok(mut map) = self.pending_requests.lock() {
@@ -3467,7 +3469,11 @@ mod tests {
         );
     }
 
-    fn make_partial(req_id: &str, qs: &[(&str, &str)], answers: Vec<Option<String>>) -> PartialAnswers {
+    fn make_partial(
+        req_id: &str,
+        qs: &[(&str, &str)],
+        answers: Vec<Option<String>>,
+    ) -> PartialAnswers {
         let questions: Vec<AskUserQuestionItem> = qs
             .iter()
             .map(|(q, h)| AskUserQuestionItem {
@@ -3525,11 +3531,7 @@ mod tests {
 
     #[test]
     fn build_ask_user_response_multi_passes_through_multi_select_value() {
-        let partial = make_partial(
-            "req_multi",
-            &[("Pick", "h")],
-            vec![Some("A, B".into())],
-        );
+        let partial = make_partial("req_multi", &[("Pick", "h")], vec![Some("A, B".into())]);
         let resp = build_ask_user_response_multi(&partial).expect("must succeed");
         assert_eq!(
             resp["response"]["response"]["updatedInput"]["answers"]["Pick"],
@@ -3577,11 +3579,7 @@ mod tests {
         let mut s = ChatSession::new("test-project");
         s.pending_requests.lock().unwrap().insert(
             "tool-x".into(),
-            make_partial(
-                "r1",
-                &[("Q", "")],
-                vec![None],
-            ),
+            make_partial("r1", &[("Q", "")], vec![None]),
         );
         let err = s
             .submit_question_answer("tool-x", 0, "yes")
@@ -3715,12 +3713,7 @@ mod tests {
         let big = "x".repeat(20_000);
         let partial = make_partial(
             "req_oversize",
-            &[
-                ("Q0", "h"),
-                ("Q1", "h"),
-                ("Q2", "h"),
-                ("Q3", "h"),
-            ],
+            &[("Q0", "h"), ("Q1", "h"), ("Q2", "h"), ("Q3", "h")],
             vec![
                 Some(big.clone()),
                 Some(big.clone()),
@@ -3756,9 +3749,7 @@ mod tests {
         }
     }
 
-    fn unwrap_ask_chunk(
-        chunk: StreamChunk,
-    ) -> (String, Vec<AskUserQuestionItem>, usize) {
+    fn unwrap_ask_chunk(chunk: StreamChunk) -> (String, Vec<AskUserQuestionItem>, usize) {
         match chunk {
             StreamChunk::AskUserQuestion {
                 tool_id,
@@ -3942,7 +3933,9 @@ mod tests {
             projects: vec![],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let result = ChatSession::prepare_args("nonexistent", &user_config, None, None);
         assert!(result.is_err());
@@ -3965,7 +3958,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let result =
             ChatSession::prepare_args("test", &user_config, Some("../../../etc/passwd"), None);
@@ -3984,7 +3979,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let result = ChatSession::prepare_args(
             "test",
@@ -4007,7 +4004,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let result = ChatSession::prepare_args("myproject", &user_config, None, None);
         assert!(result.is_ok());
@@ -4028,7 +4027,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), None);
@@ -4051,7 +4052,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_me";

@@ -78,18 +78,42 @@ describe('SharePoint handler integration', () => {
       const tools = createToolDefinitions(client as unknown as SharePointClient);
 
       const names = tools.map((t) => t.tool.name);
+      // file/user tools (5)
       expect(names).toContain('listFileIds');
       expect(names).toContain('getFileFull');
       expect(names).toContain('downloadFile');
       expect(names).toContain('uploadFile');
       expect(names).toContain('getCurrentUser');
-      expect(tools.length).toBe(5);
+      // page tools (8, PR4)
+      expect(names).toContain('listPages');
+      expect(names).toContain('getPage');
+      expect(names).toContain('createPage');
+      expect(names).toContain('updatePage');
+      expect(names).toContain('addWebPart');
+      expect(names).toContain('updateWebPart');
+      expect(names).toContain('removeWebPart');
+      expect(names).toContain('publishPage');
+      // list / item / column / deletion tools (13, PR5)
+      expect(names).toContain('listLists');
+      expect(names).toContain('getList');
+      expect(names).toContain('createList');
+      expect(names).toContain('updateList');
+      expect(names).toContain('deleteList');
+      expect(names).toContain('addListColumn');
+      expect(names).toContain('removeListColumn');
+      expect(names).toContain('listItems');
+      expect(names).toContain('getItem');
+      expect(names).toContain('createItem');
+      expect(names).toContain('updateItem');
+      expect(names).toContain('deleteItem');
+      expect(names).toContain('deletePage');
+      expect(tools.length).toBe(28);
     });
 
     it('returns tool definitions even with null client', () => {
       const tools = createToolDefinitions(null);
 
-      expect(tools.length).toBe(5);
+      expect(tools.length).toBe(28);
       tools.forEach((t) => {
         expect(t.handler).toBeTypeOf('function');
       });

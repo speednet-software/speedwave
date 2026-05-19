@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::consts;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::AppHandle;
 use tauri_plugin_updater::UpdaterExt;
@@ -27,28 +27,8 @@ pub struct UpdateInfo {
     pub is_critical: bool,
 }
 
-/// How the running app was installed and who is responsible for updating it.
-///
-/// `Bundled` covers the standard macOS `.app` and Windows `Program Files` installs
-/// where Tauri's auto-updater can replace the binary. `SystemPackage` is the Linux
-/// case where a package manager (apt, dpkg, dnf, pacman) owns updates — Tauri's
-/// updater does not support `.deb`/`.rpm`, so any network check is wrong to run.
-/// `AppImage` is the Linux portable bundle that Tauri's updater *does* support.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InstallManagementKind {
-    /// Standard bundled install (macOS `.app`, Windows installer, Linux AppImage).
-    Bundled,
-    /// Linux install owned by a system package manager (apt/dpkg/dnf/pacman).
-    SystemPackage,
-    /// Linux AppImage running from a portable mount or user prefix.
-    AppImage,
-}
-
-/// Outcome of `check_for_update`. The `ManagedExternally` variant signals that
-/// the running install is owned by a system package manager and the app should
-/// not run any network update check — the user runs `apt upgrade speedwave`
-/// (or the equivalent for their distro) instead.
+/// Outcome of `check_for_update`. Both supported platforms (macOS .app,
+/// Windows installer) use Tauri's auto-updater directly.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UpdateCheckOutcome {
@@ -56,12 +36,6 @@ pub enum UpdateCheckOutcome {
     UpToDate,
     /// A newer release is available.
     UpdateAvailable(UpdateInfo),
-    /// Updates are managed by an external system package manager. No network
-    /// call was made.
-    ManagedExternally {
-        /// Best-effort guess at the package manager (`apt`, `dnf`, `pacman`, …).
-        manager: String,
-    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -139,91 +113,6 @@ fn save_update_settings_inner(settings: &UpdateSettings) -> Result<(), String> {
 // Install method detection
 // ---------------------------------------------------------------------------
 
-/// Inspect a path that the running executable lives at and decide whether the
-/// install is owned by a system package manager, is an AppImage, or is a
-/// regular bundled install. Pure function for testability — no I/O.
-///
-/// Heuristics (Linux only — non-Linux always returns `Bundled`):
-/// * `APPIMAGE` env var or `/tmp/.mount_*` prefix → `AppImage`
-/// * `/usr/`, `/opt/`, `/snap/`, `/var/lib/flatpak/`, `/nix/store/` → `SystemPackage`
-/// * anything else (e.g. `$HOME/Applications/`, `/tmp/dev-build/`) → `Bundled`
-pub fn detect_kind_for_path(exe_path: &Path, appimage_env: Option<&str>) -> InstallManagementKind {
-    if !cfg!(target_os = "linux") {
-        return InstallManagementKind::Bundled;
-    }
-
-    if appimage_env.is_some_and(|v| !v.is_empty()) {
-        return InstallManagementKind::AppImage;
-    }
-
-    let s = exe_path.to_string_lossy();
-
-    // AppImage runtime extracts to /tmp/.mount_<random>/ before exec.
-    if s.starts_with("/tmp/.mount_") {
-        return InstallManagementKind::AppImage;
-    }
-
-    const SYSTEM_PREFIXES: &[&str] = &[
-        "/usr/",
-        "/opt/",
-        "/snap/",
-        "/var/lib/flatpak/",
-        "/nix/store/",
-    ];
-    if SYSTEM_PREFIXES.iter().any(|p| s.starts_with(p)) {
-        return InstallManagementKind::SystemPackage;
-    }
-
-    InstallManagementKind::Bundled
-}
-
-/// Best-effort guess at the package manager that owns the running install.
-/// Returns the lowercased command name (`apt`, `dnf`, `pacman`, `zypper`),
-/// falling back to `"system package manager"` if no known manager is detected.
-pub fn detect_package_manager() -> String {
-    if !cfg!(target_os = "linux") {
-        return "system package manager".to_string();
-    }
-
-    // Probe common managers in order of popularity. We only check existence on
-    // PATH — we never invoke them here.
-    const MANAGERS: &[&str] = &["apt", "dnf", "pacman", "zypper", "dpkg"];
-    for m in MANAGERS {
-        if which_in_path(m).is_some() {
-            return (*m).to_string();
-        }
-    }
-    "system package manager".to_string()
-}
-
-/// Returns the kind for the currently running executable, falling back to
-/// `Bundled` if `current_exe()` fails (we'd rather attempt the updater than
-/// silently skip it on a non-Linux/unknown environment).
-pub fn install_management_kind() -> InstallManagementKind {
-    match std::env::current_exe() {
-        Ok(p) => {
-            let env = std::env::var("APPIMAGE").ok();
-            detect_kind_for_path(&p, env.as_deref())
-        }
-        Err(e) => {
-            log::warn!("current_exe() failed, assuming bundled install: {e}");
-            InstallManagementKind::Bundled
-        }
-    }
-}
-
-/// Minimal `which` — looks for `name` on `$PATH`. Returns `Some(path)` if found.
-fn which_in_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 // ---------------------------------------------------------------------------
 // Update check / install
 // ---------------------------------------------------------------------------
@@ -260,18 +149,6 @@ fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, Strin
 }
 
 pub async fn check_for_update(app: &AppHandle) -> Result<UpdateCheckOutcome, String> {
-    // If a system package manager owns this install, do not run the network
-    // check at all — Tauri's updater cannot replace `.deb`/`.rpm`/`pacman`
-    // packages, so a successful "no artifact for linux" branch would be
-    // logged as an ERROR for an entirely expected, non-error situation.
-    if install_management_kind() == InstallManagementKind::SystemPackage {
-        let manager = detect_package_manager();
-        log::info!(
-            "skipping update check — installed via system package manager (run '{manager} upgrade speedwave' to update)"
-        );
-        return Ok(UpdateCheckOutcome::ManagedExternally { manager });
-    }
-
     let updater = build_updater(app)?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
     match update {
@@ -286,39 +163,21 @@ pub async fn check_for_update(app: &AppHandle) -> Result<UpdateCheckOutcome, Str
 }
 
 pub async fn verify_update_installable(
-    #[cfg(not(target_os = "linux"))] app: &AppHandle,
-    #[cfg(target_os = "linux")] _app: &AppHandle,
+    app: &AppHandle,
     expected_version: &str,
 ) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    {
-        Err(format!(
-            "Auto-update is not available for .deb packages. \
-             Download v{expected_version} from GitHub Releases: \
-             https://github.com/speednet-software/speedwave/releases"
-        ))
+    let outcome = check_for_update(app).await?;
+    let update = match outcome {
+        UpdateCheckOutcome::UpdateAvailable(info) => info,
+        UpdateCheckOutcome::UpToDate => return Err("No update available".to_string()),
+    };
+    if update.version != expected_version {
+        return Err(format!(
+            "Version mismatch: expected {} but server returned {}. Please check for updates again.",
+            expected_version, update.version
+        ));
     }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let outcome = check_for_update(app).await?;
-        let update = match outcome {
-            UpdateCheckOutcome::UpdateAvailable(info) => info,
-            UpdateCheckOutcome::UpToDate => return Err("No update available".to_string()),
-            UpdateCheckOutcome::ManagedExternally { manager } => {
-                return Err(format!(
-                    "Updates are managed by '{manager}' — run the package manager to upgrade."
-                ));
-            }
-        };
-        if update.version != expected_version {
-            return Err(format!(
-                "Version mismatch: expected {} but server returned {}. Please check for updates again.",
-                expected_version, update.version
-            ));
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 pub async fn install_update(app: &AppHandle, expected_version: String) -> Result<(), String> {
@@ -337,57 +196,38 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
     }
     log::info!("installing version {installing_version}");
 
-    // On Linux, Tauri updater only supports AppImage. With .deb packaging,
-    // in-place update is not possible — direct the user to GitHub Releases.
-    #[cfg(target_os = "linux")]
-    {
-        // Suppress unused-variable warnings for `update` on Linux — it was
-        // already consumed for version verification above.
-        let _ = &update;
-        Err(format!(
-            "Auto-update is not available for .deb packages. \
-             Download v{expected_version} from GitHub Releases: \
-             https://github.com/speednet-software/speedwave/releases"
-        ))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let update_body = update.body.clone();
-        let mut downloaded: u64 = 0;
-        update
-            .download_and_install(
-                |chunk, _total| {
-                    downloaded += chunk as u64;
-                    log::debug!("downloaded {downloaded} bytes");
-                },
-                || {
-                    log::info!("download complete, installing");
-                },
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // Do not restart immediately from the auto-check flow — containers may be running.
-        // Emit an event so the frontend can handle it. Note: the Settings page
-        // "Install & Restart" intentionally uses force restart as an explicit user action.
-        use tauri::Emitter;
-        if let Err(e) = app.emit(
-            "update_installed",
-            &UpdateInfo {
-                version: installing_version.clone(),
-                body: update_body.clone(),
-                date: None,
-                is_critical: detect_critical(&update_body),
+    let update_body = update.body.clone();
+    let mut downloaded: u64 = 0;
+    update
+        .download_and_install(
+            |chunk, _total| {
+                downloaded += chunk as u64;
+                log::debug!("downloaded {downloaded} bytes");
             },
-        ) {
-            log::warn!("failed to emit update_installed event: {e}");
-        }
-        log::info!(
-            "installed version {installing_version}; waiting for frontend to confirm restart"
-        );
-        Ok(())
+            || {
+                log::info!("download complete, installing");
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Do not restart immediately from the auto-check flow — containers may be running.
+    // Emit an event so the frontend can handle it. Note: the Settings page
+    // "Install & Restart" intentionally uses force restart as an explicit user action.
+    use tauri::Emitter;
+    if let Err(e) = app.emit(
+        "update_installed",
+        &UpdateInfo {
+            version: installing_version.clone(),
+            body: update_body.clone(),
+            date: None,
+            is_critical: detect_critical(&update_body),
+        },
+    ) {
+        log::warn!("failed to emit update_installed event: {e}");
     }
+    log::info!("installed version {installing_version}; waiting for frontend to confirm restart");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -617,135 +457,6 @@ mod tests {
         assert_eq!(loaded.check_interval_hours, 48);
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn detect_kind_system_package_for_usr_bin() {
-        let p = Path::new("/usr/bin/speedwave-desktop");
-        assert_eq!(
-            detect_kind_for_path(p, None),
-            InstallManagementKind::SystemPackage
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn detect_kind_system_package_for_opt() {
-        let p = Path::new("/opt/speedwave/bin/speedwave-desktop");
-        assert_eq!(
-            detect_kind_for_path(p, None),
-            InstallManagementKind::SystemPackage
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn detect_kind_system_package_for_snap_flatpak_nix() {
-        for prefix in [
-            "/snap/speedwave/current/speedwave-desktop",
-            "/var/lib/flatpak/exports/bin/speedwave-desktop",
-            "/nix/store/abc123-speedwave/bin/speedwave-desktop",
-        ] {
-            assert_eq!(
-                detect_kind_for_path(Path::new(prefix), None),
-                InstallManagementKind::SystemPackage,
-                "expected SystemPackage for {prefix}"
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn detect_kind_appimage_via_mount_prefix() {
-        let p = Path::new("/tmp/.mount_xxxxxxx/speedwave-desktop");
-        assert_eq!(
-            detect_kind_for_path(p, None),
-            InstallManagementKind::AppImage
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn detect_kind_appimage_via_env_var_takes_precedence() {
-        // Even if the path looks like /usr/, an APPIMAGE env var means we are
-        // running through the AppImage runtime (it sometimes self-extracts to
-        // odd paths). Trust the env var.
-        let p = Path::new("/usr/local/bin/speedwave-desktop");
-        assert_eq!(
-            detect_kind_for_path(p, Some("/home/user/Apps/Speedwave.AppImage")),
-            InstallManagementKind::AppImage
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn detect_kind_appimage_env_var_empty_is_ignored() {
-        let p = Path::new("/usr/bin/speedwave-desktop");
-        assert_eq!(
-            detect_kind_for_path(p, Some("")),
-            InstallManagementKind::SystemPackage
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn detect_kind_bundled_for_home_install() {
-        let p = Path::new("/home/user/Applications/speedwave-desktop");
-        assert_eq!(
-            detect_kind_for_path(p, None),
-            InstallManagementKind::Bundled
-        );
-    }
-
-    #[test]
-    fn detect_kind_bundled_for_macos_app_bundle() {
-        // On non-Linux this always returns Bundled regardless of the path.
-        // On Linux a `.app` path doesn't match any system prefix and falls
-        // through to Bundled too — both branches converge here.
-        let p = Path::new("/Applications/Speedwave.app/Contents/MacOS/speedwave-desktop");
-        assert_eq!(
-            detect_kind_for_path(p, None),
-            InstallManagementKind::Bundled
-        );
-    }
-
-    #[test]
-    fn detect_kind_bundled_for_windows_program_files() {
-        // Same: non-Linux returns Bundled; Linux falls through (no prefix match).
-        let p = Path::new(r"C:\Program Files\Speedwave\speedwave-desktop.exe");
-        assert_eq!(
-            detect_kind_for_path(p, None),
-            InstallManagementKind::Bundled
-        );
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn detect_kind_non_linux_always_bundled() {
-        // Even if the path looks system-y, on macOS/Windows we never want to
-        // skip the updater — only Linux has the .deb gap.
-        for path in [
-            "/usr/bin/speedwave-desktop",
-            "/opt/speedwave/speedwave-desktop",
-            "/tmp/.mount_xxxxxxx/speedwave-desktop",
-        ] {
-            assert_eq!(
-                detect_kind_for_path(Path::new(path), None),
-                InstallManagementKind::Bundled,
-                "non-Linux must always be Bundled for {path}"
-            );
-        }
-    }
-
-    #[test]
-    fn update_check_outcome_serialises_managed_externally() {
-        let outcome = UpdateCheckOutcome::ManagedExternally {
-            manager: "apt".to_string(),
-        };
-        let json = serde_json::to_string(&outcome).unwrap();
-        assert!(json.contains("\"kind\":\"managed_externally\""));
-        assert!(json.contains("\"manager\":\"apt\""));
-    }
-
     #[test]
     fn update_check_outcome_serialises_up_to_date() {
         let json = serde_json::to_string(&UpdateCheckOutcome::UpToDate).unwrap();
@@ -767,57 +478,23 @@ mod tests {
 
     #[test]
     fn update_check_outcome_round_trip() {
-        let original = UpdateCheckOutcome::ManagedExternally {
-            manager: "dnf".to_string(),
-        };
+        let original = UpdateCheckOutcome::UpdateAvailable(UpdateInfo {
+            version: "9.9.9".to_string(),
+            body: None,
+            date: None,
+            is_critical: false,
+        });
         let json = serde_json::to_string(&original).unwrap();
         let back: UpdateCheckOutcome = serde_json::from_str(&json).unwrap();
         match back {
-            UpdateCheckOutcome::ManagedExternally { manager } => assert_eq!(manager, "dnf"),
-            _ => panic!("expected ManagedExternally"),
+            UpdateCheckOutcome::UpdateAvailable(info) => assert_eq!(info.version, "9.9.9"),
+            _ => panic!("expected UpdateAvailable"),
         }
-    }
-
-    #[test]
-    fn detect_package_manager_returns_non_empty_string() {
-        // We can't assert which manager is on PATH (varies per CI env), but we
-        // can assert it's never an empty string and always a printable name.
-        let m = detect_package_manager();
-        assert!(!m.is_empty());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn install_update_returns_error_on_linux() {
-        // On Linux with .deb, install_update should return an error message
-        // directing the user to GitHub Releases. We can't call the async function
-        // directly in a unit test without a Tauri AppHandle, but we verify the
-        // error message format is correct.
-        let version = "1.2.3";
-        let msg = format!(
-            "Auto-update is not available for .deb packages. \
-             Download v{version} from GitHub Releases: \
-             https://github.com/speednet-software/speedwave/releases"
-        );
-        assert!(msg.contains("1.2.3"));
-        assert!(msg.contains("GitHub Releases"));
     }
 }
 
 pub fn spawn_auto_check(app_handle: AppHandle) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        // If the install is owned by a system package manager, do not run the
-        // background loop at all. The user updates with `apt upgrade` (or the
-        // equivalent), and the network check would fail every cycle because
-        // Tauri's updater does not generate `.deb`/`.rpm` artifacts.
-        if install_management_kind() == InstallManagementKind::SystemPackage {
-            log::info!(
-                "auto-check loop disabled — installed via system package manager (use '{} upgrade speedwave' to update)",
-                detect_package_manager()
-            );
-            return;
-        }
-
         // Delay the first check to avoid a network call at startup.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
@@ -839,14 +516,6 @@ pub fn spawn_auto_check(app_handle: AppHandle) -> tauri::async_runtime::JoinHand
                 }
                 Ok(UpdateCheckOutcome::UpToDate) => {
                     log::info!("already up to date");
-                }
-                Ok(UpdateCheckOutcome::ManagedExternally { manager }) => {
-                    // Should not happen — we bailed out above — but handle
-                    // defensively in case the install path changes mid-session.
-                    log::info!(
-                        "auto-check skipped — install now reports as managed by '{manager}'"
-                    );
-                    return;
                 }
                 Err(e) => {
                     log::error!("check failed: {e}");

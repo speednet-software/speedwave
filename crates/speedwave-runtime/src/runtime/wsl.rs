@@ -51,6 +51,7 @@ pub struct WslRuntime {
     runner: Box<dyn CommandRunner>,
     retry_delay: std::time::Duration,
     restart_ready_delay: std::time::Duration,
+    distro_name: String,
 }
 
 impl Default for WslRuntime {
@@ -67,6 +68,7 @@ impl WslRuntime {
             restart_ready_delay: std::time::Duration::from_secs(
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
+            distro_name: consts::WSL_DISTRO_NAME.to_string(),
         }
     }
 
@@ -77,7 +79,22 @@ impl WslRuntime {
             restart_ready_delay: std::time::Duration::from_secs(
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
+            distro_name: consts::WSL_DISTRO_NAME.to_string(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_distro_name(name: String, runner: Box<dyn CommandRunner>) -> Self {
+        Self {
+            runner,
+            retry_delay: std::time::Duration::ZERO,
+            restart_ready_delay: std::time::Duration::ZERO,
+            distro_name: name,
+        }
+    }
+
+    fn distro(&self) -> &str {
+        &self.distro_name
     }
 
     /// Sets retry delay and restart ready delay to zero for tests to avoid sleeping.
@@ -218,12 +235,13 @@ fn wsl_compose_file_path(project: &str) -> anyhow::Result<String> {
 
 impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
+        let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
         self.runner.run(
             "wsl.exe",
             &[
                 "-d",
-                consts::WSL_DISTRO_NAME,
+                distro,
                 "--",
                 "nerdctl",
                 "compose",
@@ -240,6 +258,7 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
+        let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
         super::compose_down_and_cleanup(
             &*self.runner,
@@ -247,7 +266,7 @@ impl ContainerRuntime for WslRuntime {
             project,
             &[
                 "-d",
-                consts::WSL_DISTRO_NAME,
+                distro,
                 "--",
                 "nerdctl",
                 "compose",
@@ -258,17 +277,18 @@ impl ContainerRuntime for WslRuntime {
                 "down",
                 "--remove-orphans",
             ],
-            &["-d", consts::WSL_DISTRO_NAME, "--", "nerdctl"],
+            &["-d", distro, "--", "nerdctl"],
         )
     }
 
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>> {
+        let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
         let output = self.runner.run(
             "wsl.exe",
             &[
                 "-d",
-                consts::WSL_DISTRO_NAME,
+                distro,
                 "--",
                 "nerdctl",
                 "compose",
@@ -289,6 +309,7 @@ impl ContainerRuntime for WslRuntime {
         // executes it through bash inside the distro, so every token must be
         // POSIX-shell-quoted — see `super::shell_quote_argv`. Without this,
         // arguments containing `(`, `)`, `'`, etc. break remote bash.
+        let distro = self.distro();
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         let nerdctl_argv: Vec<&str> = [
             "nerdctl",
@@ -311,11 +332,12 @@ impl ContainerRuntime for WslRuntime {
         // Raw Command::new — intentionally bypasses binary::system_command() because
         // interactive TTY sessions need a console window on Windows.
         let mut command = Command::new("wsl.exe");
-        command.args(["-d", consts::WSL_DISTRO_NAME, "--", "sh", "-c", &remote_cmd]);
+        command.args(["-d", distro, "--", "sh", "-c", &remote_cmd]);
         command
     }
 
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command> {
+        let distro = self.distro();
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         let nerdctl_argv: Vec<&str> = ["nerdctl", "exec", "-i", "-e", path_env.as_str(), container]
             .iter()
@@ -325,18 +347,19 @@ impl ContainerRuntime for WslRuntime {
         let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
 
         let mut command = crate::binary::system_command("wsl.exe");
-        command.args(["-d", consts::WSL_DISTRO_NAME, "--", "sh", "-c", &remote_cmd]);
+        command.args(["-d", distro, "--", "sh", "-c", &remote_cmd]);
         Ok(command)
     }
 
     fn is_available(&self) -> bool {
+        let distro = self.distro();
         self.runner
             .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
             .map(|raw| {
                 let output = decode_wsl_output(&raw);
                 output
                     .lines()
-                    .any(|line| line.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME)
+                    .any(|line| line.trim().trim_matches('\0') == distro)
             })
             .unwrap_or(false)
     }
@@ -348,13 +371,14 @@ impl ContainerRuntime for WslRuntime {
         containerfile: &str,
         build_args: &[(&str, &str)],
     ) -> anyhow::Result<()> {
+        let distro = self.distro();
         let ba_strings: Vec<String> = build_args
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
         let mut args: Vec<&str> = vec![
             "-d",
-            consts::WSL_DISTRO_NAME,
+            distro,
             "--",
             "nerdctl",
             "build",
@@ -377,30 +401,25 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String> {
+        let distro = self.distro();
         let tail_str = tail.to_string();
         self.runner.run_with_stderr(
             "wsl.exe",
             &[
-                "-d",
-                consts::WSL_DISTRO_NAME,
-                "--",
-                "nerdctl",
-                "logs",
-                "--tail",
-                &tail_str,
-                container,
+                "-d", distro, "--", "nerdctl", "logs", "--tail", &tail_str, container,
             ],
         )
     }
 
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String> {
+        let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
         let tail_str = tail.to_string();
         self.runner.run_with_stderr(
             "wsl.exe",
             &[
                 "-d",
-                consts::WSL_DISTRO_NAME,
+                distro,
                 "--",
                 "nerdctl",
                 "compose",
@@ -417,12 +436,13 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
+        let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
         self.runner.run(
             "wsl.exe",
             &[
                 "-d",
-                consts::WSL_DISTRO_NAME,
+                distro,
                 "--",
                 "nerdctl",
                 "compose",
@@ -440,33 +460,19 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+        let distro = self.distro();
         let result = self.runner.run(
             "wsl.exe",
-            &[
-                "-d",
-                consts::WSL_DISTRO_NAME,
-                "--",
-                "nerdctl",
-                "image",
-                "inspect",
-                tag,
-            ],
+            &["-d", distro, "--", "nerdctl", "image", "inspect", tag],
         );
         Ok(result.is_ok())
     }
 
     fn system_prune(&self) -> anyhow::Result<()> {
+        let distro = self.distro();
         self.runner.run(
             "wsl.exe",
-            &[
-                "-d",
-                consts::WSL_DISTRO_NAME,
-                "--",
-                "nerdctl",
-                "system",
-                "prune",
-                "--force",
-            ],
+            &["-d", distro, "--", "nerdctl", "system", "prune", "--force"],
         )?;
         Ok(())
     }
@@ -475,7 +481,8 @@ impl ContainerRuntime for WslRuntime {
         if tags.is_empty() {
             return Ok(());
         }
-        let mut args = vec!["-d", consts::WSL_DISTRO_NAME, "--", "nerdctl", "rmi"];
+        let distro = self.distro();
+        let mut args = vec!["-d", distro, "--", "nerdctl", "rmi"];
         if force {
             args.push("--force");
         }
@@ -491,24 +498,18 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
+        let distro = self.distro();
         self.runner.run(
             "wsl.exe",
             &[
-                "-d",
-                consts::WSL_DISTRO_NAME,
-                "--",
-                "nerdctl",
-                "builder",
-                "prune",
-                "--all",
-                "--force",
+                "-d", distro, "--", "nerdctl", "builder", "prune", "--all", "--force",
             ],
         )?;
         Ok(())
     }
 
     fn restart_container_engine(&self) -> anyhow::Result<()> {
-        let distro = consts::WSL_DISTRO_NAME;
+        let distro = self.distro();
 
         log::info!("restarting containerd inside WSL2");
         self.runner.run(
@@ -569,6 +570,54 @@ impl ContainerRuntime for WslRuntime {
     fn ensure_ready(&self) -> anyhow::Result<()> {
         super::with_ensure_ready_lock(|| self.ensure_ready_inner())
     }
+
+    fn reset_vm(&self) -> anyhow::Result<()> {
+        use std::time::Duration;
+        let distro = self.distro();
+
+        // Use the canonical System32 path to avoid PATH-based binary substitution.
+        // CLAUDE.md security: host-side commands must not be resolvable via a
+        // user-controlled PATH entry.
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let wsl = format!("{system_root}\\System32\\wsl.exe");
+        let wsl = wsl.as_str();
+
+        // Best-effort terminate first so --unregister doesn't fight a running
+        // VM. run_with_timeout returns Err on non-zero exit (with stderr in the
+        // message) AND on timeout. Both are recoverable here: the worst case is
+        // that --unregister later succeeds anyway, or returns "no distribution".
+        if let Err(e) =
+            self.runner
+                .run_with_timeout(wsl, &["--terminate", distro], Duration::from_secs(10))
+        {
+            log::warn!("wsl --terminate {distro} failed (continuing): {e}");
+        }
+
+        match self
+            .runner
+            .run_with_timeout(wsl, &["--unregister", distro], Duration::from_secs(25))
+        {
+            Ok(()) => {
+                log::info!("WSL distro '{distro}' unregistered");
+                Ok(())
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let lower = msg.to_lowercase();
+                if lower.contains("there is no distribution with the supplied name")
+                    || lower.contains("wsl/service/wsl_e_distro_not_found")
+                    || lower.contains("no distribution")
+                {
+                    log::info!("WSL distro '{distro}' was not registered (already clean)");
+                    Ok(())
+                } else if lower.contains("timed out after") {
+                    Err(anyhow::anyhow!("wsl --unregister {distro} timed out"))
+                } else {
+                    Err(anyhow::anyhow!("wsl --unregister {distro} failed: {msg}"))
+                }
+            }
+        }
+    }
 }
 
 impl WslRuntime {
@@ -579,25 +628,26 @@ impl WslRuntime {
             anyhow::bail!("{v}");
         }
 
+        let distro = self.distro();
         let raw = self
             .runner
             .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
             .map_err(|_| {
                 anyhow::anyhow!(
                     "WSL2 distribution '{}' not found. Run Speedwave.app setup wizard to import it.",
-                    consts::WSL_DISTRO_NAME
+                    distro
                 )
             })?;
 
         let output = decode_wsl_output(&raw);
         let distro_exists = output
             .lines()
-            .any(|line| line.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+            .any(|line| line.trim().trim_matches('\0') == distro);
 
         if !distro_exists {
             anyhow::bail!(
                 "WSL2 distribution '{}' not found. Run Speedwave.app setup wizard to import it.",
-                consts::WSL_DISTRO_NAME
+                distro
             );
         }
 
@@ -605,7 +655,6 @@ impl WslRuntime {
         // After a WSL session closes, the VM may restart and systemd services
         // need time to come up. check_service() attempts `systemctl start` on
         // failure and retries up to WSL_SERVICE_CHECK_MAX_RETRIES times.
-        let distro = consts::WSL_DISTRO_NAME;
         self.check_service(distro, &["nerdctl", "info"], "containerd", "containerd")?;
         self.check_service(
             distro,
@@ -1428,18 +1477,19 @@ mod tests {
         );
     }
 
-    // ── SequentialMockRunner for retry tests ──────────────────────────────
+    // ── KeyedSequentialMockRunner for retry tests ─────────────────────────
+    // Unlike test_support::SequentialMockRunner (which dispatches in a single
+    // FIFO queue), this variant keys responses by "cmd args..." so that
+    // interleaved calls to distinct commands each pop from their own queue.
 
     use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
 
-    /// A mock runner that returns responses sequentially for the same command key.
-    /// Each call to `run()` pops the next response from the queue for that key.
-    struct SequentialMockRunner {
+    struct KeyedSequentialMockRunner {
         responses: HashMap<String, Mutex<VecDeque<anyhow::Result<String>>>>,
     }
 
-    impl SequentialMockRunner {
+    impl KeyedSequentialMockRunner {
         fn new() -> Self {
             Self {
                 responses: HashMap::new(),
@@ -1453,7 +1503,7 @@ mod tests {
         }
     }
 
-    impl CommandRunner for SequentialMockRunner {
+    impl CommandRunner for KeyedSequentialMockRunner {
         fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
             let key = format!("{} {}", cmd, args.join(" "));
             let queue = self
@@ -1478,7 +1528,7 @@ mod tests {
     #[test]
     fn test_ensure_ready_recovers_buildkit_after_retries() {
         // buildctl: fast-path fails, then 3 retry failures, then succeeds on 4th retry
-        let runner = SequentialMockRunner::new()
+        let runner = KeyedSequentialMockRunner::new()
             .with_responses(
                 "wsl.exe --list --quiet",
                 vec![Ok("Speedwave\n".to_string())],
@@ -1511,13 +1561,14 @@ mod tests {
             runner: Box::new(runner),
             retry_delay: std::time::Duration::ZERO,
             restart_ready_delay: std::time::Duration::ZERO,
+            distro_name: consts::WSL_DISTRO_NAME.to_string(),
         };
         assert!(rt.ensure_ready().is_ok());
     }
 
     #[test]
     fn test_ensure_ready_recovers_containerd_after_retries() {
-        let runner = SequentialMockRunner::new()
+        let runner = KeyedSequentialMockRunner::new()
             .with_responses(
                 "wsl.exe --list --quiet",
                 vec![Ok("Speedwave\n".to_string())],
@@ -1545,6 +1596,7 @@ mod tests {
             runner: Box::new(runner),
             retry_delay: std::time::Duration::ZERO,
             restart_ready_delay: std::time::Duration::ZERO,
+            distro_name: consts::WSL_DISTRO_NAME.to_string(),
         };
         assert!(rt.ensure_ready().is_ok());
     }
@@ -1562,7 +1614,7 @@ mod tests {
             buildctl_responses.push(Err(anyhow::anyhow!("still refused")));
         }
 
-        let runner = SequentialMockRunner::new()
+        let runner = KeyedSequentialMockRunner::new()
             .with_responses(
                 "wsl.exe --list --quiet",
                 vec![Ok("Speedwave\n".to_string())],
@@ -1584,6 +1636,7 @@ mod tests {
             runner: Box::new(runner),
             retry_delay: std::time::Duration::ZERO,
             restart_ready_delay: std::time::Duration::ZERO,
+            distro_name: consts::WSL_DISTRO_NAME.to_string(),
         };
         let result = rt.ensure_ready();
         assert!(result.is_err());
@@ -1692,5 +1745,178 @@ mod tests {
             result.unwrap_err().to_string().contains("not ready"),
             "should report not ready after retries"
         );
+    }
+
+    mod reset_vm_tests {
+        use super::*;
+        use crate::runtime::test_support::SequentialMockRunner;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // Thin Arc wrapper so tests can hold a shared reference to the mock
+        // while also passing ownership into the runtime.
+        struct ArcRunner(Arc<SequentialMockRunner>);
+        impl crate::runtime::CommandRunner for ArcRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                self.0.run(cmd, args)
+            }
+            fn run_with_timeout(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                timeout: Duration,
+            ) -> anyhow::Result<()> {
+                self.0.run_with_timeout(cmd, args, timeout)
+            }
+        }
+
+        #[test]
+        fn reset_vm_happy_path() {
+            let mock = SequentialMockRunner::new(vec![Ok("".into()), Ok("".into())]);
+            let rt = WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(mock));
+            assert!(rt.reset_vm().is_ok());
+        }
+
+        #[test]
+        fn reset_vm_call_sequence() {
+            let mock = Arc::new(SequentialMockRunner::new(vec![
+                Ok("".into()),
+                Ok("".into()),
+            ]));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.reset_vm().is_ok());
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            // cmd is the absolute System32 path; ends_with covers cross-platform tests
+            assert!(
+                calls[0].0.ends_with("wsl.exe"),
+                "expected wsl.exe path, got: {}",
+                calls[0].0
+            );
+            assert_eq!(calls[0].1, vec!["--terminate", "Speedwave-test"]);
+            assert_eq!(calls[0].2, Some(Duration::from_secs(10)));
+            assert!(
+                calls[1].0.ends_with("wsl.exe"),
+                "expected wsl.exe path, got: {}",
+                calls[1].0
+            );
+            assert_eq!(calls[1].1, vec!["--unregister", "Speedwave-test"]);
+            assert_eq!(calls[1].2, Some(Duration::from_secs(25)));
+        }
+
+        #[test]
+        fn reset_vm_distro_not_registered_legacy_message() {
+            let mock = SequentialMockRunner::new(vec![
+                Ok("".into()),
+                Err(anyhow::anyhow!(
+                    "wsl.exe failed with exit code Some(-1): There is no distribution with the supplied name."
+                )),
+            ]);
+            let rt = WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(mock));
+            assert!(rt.reset_vm().is_ok());
+        }
+
+        #[test]
+        fn reset_vm_distro_not_registered_modern_error_code() {
+            let mock = SequentialMockRunner::new(vec![
+                Ok("".into()),
+                Err(anyhow::anyhow!(
+                    "wsl.exe failed with exit code Some(1): Wsl/Service/WSL_E_DISTRO_NOT_FOUND"
+                )),
+            ]);
+            let rt = WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(mock));
+            assert!(rt.reset_vm().is_ok());
+        }
+
+        #[test]
+        fn reset_vm_distro_not_registered_case_variant() {
+            let mock = SequentialMockRunner::new(vec![
+                Ok("".into()),
+                Err(anyhow::anyhow!(
+                    "wsl.exe failed with exit code Some(1): ERROR: NO Distribution Found"
+                )),
+            ]);
+            let rt = WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(mock));
+            assert!(rt.reset_vm().is_ok());
+        }
+
+        #[test]
+        fn reset_vm_terminate_fails_unregister_succeeds() {
+            let mock = SequentialMockRunner::new(vec![
+                Err(anyhow::anyhow!("LxssManager not running")),
+                Ok("".into()),
+            ]);
+            let rt = WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(mock));
+            assert!(rt.reset_vm().is_ok());
+        }
+
+        #[test]
+        fn reset_vm_unregister_fails_unexpected_error() {
+            let mock = SequentialMockRunner::new(vec![
+                Ok("".into()),
+                Err(anyhow::anyhow!(
+                    "wsl.exe failed with exit code Some(1): Access is denied"
+                )),
+            ]);
+            let rt = WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(mock));
+            let err = rt.reset_vm().unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("wsl --unregister"),
+                "expected 'wsl --unregister' in: {msg}"
+            );
+            assert!(
+                msg.contains("Access is denied"),
+                "expected 'Access is denied' in: {msg}"
+            );
+            assert!(
+                msg.contains("Speedwave-test"),
+                "expected distro name 'Speedwave-test' in error: {msg}"
+            );
+        }
+
+        #[test]
+        fn reset_vm_unregister_times_out() {
+            let mock = SequentialMockRunner::new(vec![
+                Ok("".into()),
+                Err(anyhow::anyhow!("command 'wsl.exe' timed out after 25s")),
+            ]);
+            let rt = WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(mock));
+            let err = rt.reset_vm().unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("timed out"), "expected 'timed out' in: {msg}");
+            assert!(
+                msg.contains("Speedwave-test"),
+                "expected distro name 'Speedwave-test' in timeout error: {msg}"
+            );
+        }
+
+        #[test]
+        fn reset_vm_idempotent_second_call_returns_ok() {
+            let mock = Arc::new(SequentialMockRunner::new(vec![
+                Ok("".into()),
+                Ok("".into()),
+                Ok("".into()),
+                Err(anyhow::anyhow!(
+                    "There is no distribution with the supplied name"
+                )),
+            ]));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.reset_vm().is_ok(), "first call must return Ok");
+            assert!(
+                rt.reset_vm().is_ok(),
+                "second call (already clean) must return Ok"
+            );
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(calls.len(), 4);
+            assert_eq!(calls[0].1, vec!["--terminate", "Speedwave-test"]);
+            assert_eq!(calls[1].1, vec!["--unregister", "Speedwave-test"]);
+            assert_eq!(calls[2].1, vec!["--terminate", "Speedwave-test"]);
+            assert_eq!(calls[3].1, vec!["--unregister", "Speedwave-test"]);
+        }
     }
 }

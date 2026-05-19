@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# bundle-build-context.sh — Copies container build context and mcp-os into
-# desktop/src-tauri/ for Tauri resource bundling.
+# bundle-build-context.sh — Copies container build context, mcp-os, host_exec,
+# and the oauth worker into desktop/src-tauri/ for Tauri resource bundling.
 #
 # Defines which MCP services are bundled into the Tauri app resource directory.
 # NOTE: Container image definitions live in crates/speedwave-runtime/src/build.rs (IMAGES constant).
 #       The IMAGES list and MCP_SERVICES list must stay aligned for overlapping services.
+#       host_exec, os, and oauth are NOT in IMAGES (they are host processes, not containers) —
+#       they are bundled as mcp-os/, host_exec/, and oauth/ here, and listed in
+#       crates/speedwave-runtime/src/bundle.rs::COMMON_BUNDLED_ASSETS.
 # Called from: Makefile (dev target), CI workflows (desktop-build, desktop-release).
 #
 # Usage:
-#   scripts/bundle-build-context.sh        # default: copies pre-built mcp-os dist
-#   scripts/bundle-build-context.sh --ci   # CI mode: builds mcp-os from source first
+#   scripts/bundle-build-context.sh        # default: copies pre-built mcp-os / host_exec / oauth dist
+#   scripts/bundle-build-context.sh --ci   # CI mode: builds mcp-os + host_exec + oauth from source first
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEST="$REPO_ROOT/desktop/src-tauri"
+# Default to the in-repo Tauri resource dir for production. Tests override via
+# BUNDLE_DEST so concurrent `make test` and `make dev` do not race on the same
+# files (see _tests/desktop/bundle-build-context.bats).
+DEST="${BUNDLE_DEST:-$REPO_ROOT/desktop/src-tauri}"
 
 # Clean destination to prevent stale files from previous runs
-rm -rf "$DEST/build-context" "$DEST/mcp-os"
+rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/host_exec" "$DEST/oauth"
 
 # -- Build context (containers + MCP server sources) --------------------------
 
@@ -35,7 +41,7 @@ cp "$REPO_ROOT/mcp-servers/tsconfig.base.json" "$DEST/build-context/mcp-servers/
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
-MCP_SERVICES="shared hub slack sharepoint redmine gitlab playwright"
+MCP_SERVICES="shared hub slack sharepoint redmine gitlab github atlassian office playwright context7"
 
 for svc in $MCP_SERVICES; do
   svc_src="$REPO_ROOT/mcp-servers/$svc"
@@ -46,32 +52,50 @@ for svc in $MCP_SERVICES; do
   # Some services (e.g. playwright) have no own src/ — they wrap an upstream npm package.
   [ -d "$svc_src/src" ] && cp -r "$svc_src/src" "$svc_dest/"
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
+  # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
+  # Exclude test_*.py — pytest isn't in the runtime image and they're dead weight there.
+  if [ -d "$svc_src/scripts" ]; then
+    mkdir -p "$svc_dest/scripts"
+    find "$svc_src/scripts" -maxdepth 1 -type f ! -name 'test_*.py' -exec cp {} "$svc_dest/scripts/" \;
+  fi
+  [ -f "$svc_src/requirements.txt" ] && cp "$svc_src/requirements.txt" "$svc_dest/"
   for f in Dockerfile Containerfile; do
     [ -f "$svc_src/$f" ] && cp "$svc_src/$f" "$svc_dest/"
   done
 done
 
-# -- mcp-os (host-side TypeScript worker) -------------------------------------
+# -- mcp-os + host_exec + oauth (host-side TypeScript workers) ---------------
 
 if [[ "${1:-}" == "--ci" ]]; then
   # CI mode: build from clean checkout (no pre-built dist/) and install production-only deps
-  (cd "$REPO_ROOT/mcp-servers" && npm ci && npm run build --workspace=shared && npm run build --workspace=os)
+  (cd "$REPO_ROOT/mcp-servers" && npm ci \
+    && npm run build --workspace=shared \
+    && npm run build --workspace=os \
+    && npm run build --workspace=host_exec \
+    && npm run build --workspace=oauth)
 fi
 
-mkdir -p "$DEST/mcp-os/os" "$DEST/mcp-os/shared"
-cp -r "$REPO_ROOT/mcp-servers/os/dist" "$DEST/mcp-os/os/"
-cp -r "$REPO_ROOT/mcp-servers/shared/dist" "$DEST/mcp-os/shared/"
+# stage_host_worker <worker-dir-name> <bundle-dir-name>
+#   Stages mcp-servers/<worker-dir-name>/dist + the @speedwave/mcp-shared
+#   dependency tree into $DEST/<bundle-dir-name>/, mirroring how mcp-os has
+#   always been bundled. The bundle layout is <bundle-dir-name>/<worker>/dist
+#   plus <bundle-dir-name>/shared (so Node resolves @speedwave/mcp-shared from
+#   <worker>/dist/index.js). Tauri's resource bundler doesn't reliably preserve
+#   symlinks in .dmg/.deb/NSIS packages, hence the cp -r of the shared tree.
+stage_host_worker() {
+  local worker="$1" bundle="$2"
+  mkdir -p "$DEST/$bundle/$worker" "$DEST/$bundle/shared"
+  cp -r "$REPO_ROOT/mcp-servers/$worker/dist" "$DEST/$bundle/$worker/"
+  cp -r "$REPO_ROOT/mcp-servers/shared/dist" "$DEST/$bundle/shared/"
+  # Install production deps only. Cannot use the workspace-scoped
+  # package-lock.json directly — it has workspace-relative entries that don't
+  # resolve in isolation. Two-step: standalone lockfile, then deterministic npm ci.
+  cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/$bundle/shared/"
+  (cd "$DEST/$bundle/shared" && npm install --package-lock-only --ignore-scripts && npm ci --omit=dev --ignore-scripts)
+  mkdir -p "$DEST/$bundle/$worker/node_modules/@speedwave"
+  cp -r "$DEST/$bundle/shared" "$DEST/$bundle/$worker/node_modules/@speedwave/mcp-shared"
+}
 
-# Install production deps only. Cannot use the workspace-scoped
-# package-lock.json directly — it contains workspace-relative entries
-# (e.g. "shared/node_modules/vitest") that don't resolve in isolation.
-# Two-step approach: generate a standalone lockfile, then install from it
-# deterministically with npm ci.
-cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/mcp-os/shared/"
-(cd "$DEST/mcp-os/shared" && npm install --package-lock-only --ignore-scripts && npm ci --omit=dev --ignore-scripts)
-
-# Copy @speedwave/mcp-shared so Node.js resolves it from os/dist/index.js.
-# Uses cp -r instead of ln -s because Tauri's resource bundler does not
-# reliably preserve symlinks in .dmg/.deb/NSIS packages.
-mkdir -p "$DEST/mcp-os/os/node_modules/@speedwave"
-cp -r "$DEST/mcp-os/shared" "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared"
+stage_host_worker os mcp-os
+stage_host_worker host_exec host_exec
+stage_host_worker oauth oauth

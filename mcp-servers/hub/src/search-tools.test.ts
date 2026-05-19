@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { searchTools, getServiceTools, getToolMetadata } from './search-tools.js';
-import { resetServiceCaches } from './tool-registry.js';
+import { resetServiceCaches, TOOL_REGISTRY, _setServiceNamesForTesting } from './tool-registry.js';
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 
 describe('searchTools', () => {
@@ -304,6 +304,129 @@ describe('searchTools', () => {
         expect(typeof match.deferLoading).toBe('boolean');
       }
     });
+  });
+});
+
+describe('searchTools edge cases', () => {
+  const savedEnabledServices = process.env.ENABLED_SERVICES;
+
+  beforeEach(() => {
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+    resetServiceCaches();
+    process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
+  });
+
+  afterEach(() => {
+    if (savedEnabledServices === undefined) {
+      delete process.env.ENABLED_SERVICES;
+    } else {
+      process.env.ENABLED_SERVICES = savedEnabledServices;
+    }
+    resetServiceCaches();
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+  });
+
+  it('skips a service that has an empty tool list', async () => {
+    // Add an enabled service with zero tools — searchTools should skip it (line 84 continue)
+    // without returning any matches from it.
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, unknown>>;
+    mutableRegistry['emptysvc'] = {};
+    // Must also add to SERVICE_NAMES so the service appears in servicesToSearch
+    _setServiceNamesForTesting(['slack', 'sharepoint', 'redmine', 'gitlab', 'os', 'emptysvc']);
+    process.env.ENABLED_SERVICES = 'slack,emptysvc';
+    resetServiceCaches();
+
+    const result = await searchTools({ query: '*', detailLevel: 'names_only' });
+
+    // Only slack tools should appear, not emptysvc (emptysvc has no tools → continue branch hit)
+    expect(result.matches.every((m) => m.service !== 'emptysvc')).toBe(true);
+    expect(result.matches.some((m) => m.service === 'slack')).toBe(true);
+
+    delete mutableRegistry['emptysvc'];
+    _setServiceNamesForTesting(['slack', 'sharepoint', 'redmine', 'gitlab', 'os']);
+  });
+
+  it('matches a tool by keyword when name and description do not match', async () => {
+    // Insert a tool whose name/description don't contain 'xkeyword', but keywords does.
+    // This exercises the `keywords.some((k) => k.toLowerCase().includes(queryLower))` branch
+    // and the arrow-function body inside it.
+    const mutableRegistry = TOOL_REGISTRY as Record<
+      string,
+      Record<
+        string,
+        {
+          name: string;
+          description: string;
+          keywords: string[];
+          inputSchema: object;
+          example: string;
+          service: string;
+          deferLoading: boolean;
+        }
+      >
+    >;
+    mutableRegistry['slack']['keywordTool'] = {
+      name: 'keywordTool',
+      description: 'A tool without the special term in its description',
+      keywords: ['xkeyword', 'special-alias'],
+      inputSchema: { type: 'object', properties: {} },
+      example: '',
+      service: 'slack',
+      deferLoading: false,
+    };
+
+    const result = await searchTools({
+      query: 'xkeyword',
+      detailLevel: 'names_only',
+      service: 'slack',
+    });
+
+    // Should match via keywords even though 'xkeyword' is not in name or description
+    expect(result.matches.some((m) => m.tool === 'slack/keywordTool')).toBe(true);
+
+    delete mutableRegistry['slack']['keywordTool'];
+  });
+
+  it('uses true as deferLoading fallback when tool has deferLoading undefined', async () => {
+    // Insert a tool with deferLoading === undefined so the `?? true` branch is hit.
+    const mutableRegistry = TOOL_REGISTRY as Record<
+      string,
+      Record<
+        string,
+        {
+          name: string;
+          description: string;
+          keywords: string[];
+          inputSchema: object;
+          example: string;
+          service: string;
+          deferLoading?: boolean;
+        }
+      >
+    >;
+    mutableRegistry['slack']['undeferredTool'] = {
+      name: 'undeferredTool',
+      description: 'Tool with no deferLoading field',
+      keywords: [],
+      inputSchema: { type: 'object', properties: {} },
+      example: '',
+      service: 'slack',
+      // deferLoading intentionally omitted
+    };
+
+    const result = await searchTools({
+      query: 'undeferredTool',
+      detailLevel: 'names_only',
+      service: 'slack',
+    });
+
+    expect(result.matches.length).toBe(1);
+    // The `?? true` branch returns true when deferLoading is undefined
+    expect(result.matches[0].deferLoading).toBe(true);
+
+    delete mutableRegistry['slack']['undeferredTool'];
   });
 });
 

@@ -5,7 +5,6 @@ use std::process::Command;
 use std::sync::Mutex;
 
 pub mod lima;
-pub mod nerdctl;
 pub mod wsl;
 
 /// Serializes concurrent `ensure_ready()` calls across all runtime instances.
@@ -66,12 +65,12 @@ pub trait ContainerRuntime: Send + Sync {
     ) -> anyhow::Result<()>;
     /// Translates a host build-root path into one accessible by the container engine.
     ///
-    /// Default: identity (Linux nerdctl — paths are already native).
     /// Lima override: copies to `~/.speedwave/build-cache/` when outside `~` (VM only mounts `~`).
     /// WSL override: converts `C:\…` → `/mnt/c/…`.
     ///
-    /// **Implementors on VM/translation-layer platforms must override this.**
-    /// The default identity pass-through is only correct for native Linux nerdctl.
+    /// Both supported runtimes mediate via a VM, so the default identity pass-through
+    /// is never the right answer in production — it exists only so the trait stays
+    /// implementable in tests.
     fn prepare_build_context(
         &self,
         build_root: &std::path::Path,
@@ -87,33 +86,21 @@ pub trait ContainerRuntime: Send + Sync {
 
     /// Removes dangling images and build cache (not tagged images).
     ///
-    /// Used by `build_all_images` to recover from stale overlayfs snapshotter
+    /// Used by `build_images_for_bundle` to recover from stale overlayfs snapshotter
     /// state on containerd (containerd bug — "failed to rename:
     /// file exists" during layer extraction). Only removes dangling
     /// (untagged) images and build cache, so successfully-built tagged
     /// images survive a partial-build retry.
     ///
-    /// This bug affects all containerd overlayfs setups, including native
-    /// Linux (NerdctlRuntime), Lima VM (LimaRuntime), and WSL2 (WslRuntime).
-    /// All three current runtime implementations (`LimaRuntime`, `NerdctlRuntime`,
-    /// `WslRuntime`) override this method with `nerdctl system prune --force`.
+    /// This bug affects all containerd overlayfs setups, including Lima VM
+    /// (LimaRuntime) and WSL2 (WslRuntime). Both runtime implementations
+    /// override this method with `nerdctl system prune --force`.
     fn system_prune(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    /// Remove container images by their full tags.
-    ///
-    /// `force = false` is the safe default: nerdctl `rmi` refuses to remove
-    /// an image that is still referenced by a running container, the error
-    /// is logged at warn level, and cleanup is left to the next prune cycle
-    /// once the container is gone. Used by the bundle-update flow.
-    ///
-    /// `force = true` (`nerdctl rmi --force`) removes the image even when a
-    /// running container still references it. Used by the explicit-uninstall
-    /// path (`speedwave plugin remove …` / Desktop "$ uninstall plugin")
-    /// because the user has already declared their intent to drop the plugin
-    /// and waiting for a future prune leaves stale layer cache that defeats
-    /// the next reinstall.
+    /// Remove image tags. `force=true` = `rmi --force` (used by
+    /// `prune_old_bundle_images` and plugin-uninstall).
     fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
         let _ = (tags, force);
         log::debug!("remove_images: not implemented for this runtime, skipping");
@@ -151,12 +138,26 @@ pub trait ContainerRuntime: Send + Sync {
 
     /// Stops the underlying VM (e.g. Lima on macOS) to free reserved RAM.
     ///
-    /// Default is a no-op — Linux (native nerdctl) and Windows (WSL2) have no
-    /// VM layer that Speedwave owns. Only `LimaRuntime` overrides this.
+    /// Default is a no-op. Windows (WSL2) has a distro managed by Speedwave, but
+    /// stopping it mid-session is not meaningful — use `reset_vm()` for destructive
+    /// teardown instead. Only `LimaRuntime` overrides this method.
     ///
     /// Callers MUST treat errors as non-fatal: log them and continue. Exit
     /// cleanup must never block app termination on a VM stop failure.
     fn stop_vm(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Tears down the underlying VM/distro destructively (e.g.
+    /// `wsl --unregister` on Windows). Default is a no-op; only
+    /// `WslRuntime` overrides — for `LimaRuntime`, factory-reset
+    /// destroys the VM directly via `limactl stop` + `delete --force`,
+    /// not through this method.
+    ///
+    /// Callers MUST treat errors as non-fatal: log and continue, because
+    /// factory-reset's primary remediation (data-dir wipe) must still
+    /// proceed if VM removal fails.
+    fn reset_vm(&self) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -710,16 +711,12 @@ pub fn detect_runtime() -> Box<dyn ContainerRuntime> {
     {
         Box::new(lima::LimaRuntime::new())
     }
-    #[cfg(target_os = "linux")]
-    {
-        Box::new(nerdctl::NerdctlRuntime::new())
-    }
     #[cfg(target_os = "windows")]
     {
         Box::new(wsl::WslRuntime::new())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    compile_error!("Speedwave requires macOS, Linux, or Windows");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    compile_error!("Speedwave requires macOS or Windows");
 }
 
 #[cfg(test)]
@@ -791,6 +788,53 @@ pub(crate) mod test_support {
         ) -> anyhow::Result<()> {
             self.run(cmd, args)?;
             Ok(())
+        }
+    }
+
+    pub struct SequentialMockRunner {
+        pub responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<String>>>,
+        pub calls: std::sync::Mutex<Vec<(String, Vec<String>, Option<std::time::Duration>)>>,
+    }
+
+    impl SequentialMockRunner {
+        pub fn new(responses: Vec<anyhow::Result<String>>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses.into_iter().collect()),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn next_response(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            timeout: Option<std::time::Duration>,
+        ) -> anyhow::Result<String> {
+            self.calls.lock().unwrap().push((
+                cmd.to_string(),
+                args.iter().map(|a| a.to_string()).collect(),
+                timeout,
+            ));
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err(anyhow::anyhow!("SequentialMockRunner: no more responses")))
+        }
+    }
+
+    impl CommandRunner for SequentialMockRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            self.next_response(cmd, args, None)
+        }
+
+        fn run_with_timeout(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            timeout: std::time::Duration,
+        ) -> anyhow::Result<()> {
+            self.next_response(cmd, args, Some(timeout)).map(|_| ())
         }
     }
 }

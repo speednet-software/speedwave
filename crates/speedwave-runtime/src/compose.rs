@@ -4,14 +4,15 @@ use crate::defaults;
 use crate::plugin::{self, PluginManifest};
 use crate::runtime::ContainerRuntime;
 use crate::{build, bundle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use strum::EnumProperty;
 
 /// Converts a host path to the path seen by the container engine.
 ///
 /// On Windows, nerdctl runs inside WSL2 so host paths must be translated
-/// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS and Linux the
-/// container engine runs on the host so paths are returned unchanged.
+/// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS, Lima mounts the
+/// host home directory at the same path inside the VM, so paths are
+/// returned unchanged.
 pub(crate) fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
     #[cfg(target_os = "windows")]
     {
@@ -48,7 +49,7 @@ pub fn render_compose(
     crate::validation::validate_project_name(project_name)?;
     let data_dir = consts::data_dir();
     let tokens_dir = resolve_tokens_dir(project_name);
-    let claude_home = data_dir.join("claude-home").join(project_name);
+    let claude_home = crate::claude_home::claude_home_dir(data_dir, project_name);
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
@@ -92,8 +93,24 @@ pub fn render_compose(
         &build::image_ref(build::IMAGE_MCP_GITLAB, &bundle_manifest.bundle_id),
     );
     yaml = yaml.replace(
+        "${IMAGE_MCP_GITHUB}",
+        &build::image_ref(build::IMAGE_MCP_GITHUB, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_ATLASSIAN}",
+        &build::image_ref(build::IMAGE_MCP_ATLASSIAN, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_OFFICE}",
+        &build::image_ref(build::IMAGE_MCP_OFFICE, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
         "${IMAGE_MCP_PLAYWRIGHT}",
         &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_CONTEXT7}",
+        &build::image_ref(build::IMAGE_MCP_CONTEXT7, &bundle_manifest.bundle_id),
     );
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
@@ -139,6 +156,10 @@ pub fn render_compose(
         &tokens_dir,
     )?;
 
+    // Propagate host timezone into every service; must run after plugin injection.
+    let host_tz = crate::tz::detect_host_timezone();
+    yaml = inject_host_timezone(&yaml, &host_tz)?;
+
     // Inject Anthropic API key from secrets if configured.
     // Skipped when a local LLM provider is active — the dummy
     // ANTHROPIC_AUTH_TOKEN=sk-no-key-required is all Claude Code needs, and
@@ -156,11 +177,19 @@ pub fn render_compose(
     // Inject mcp-os config into hub if auth token exists
     yaml = apply_mcp_os_config(&yaml)?;
 
+    // Inject host_exec WORKER URL + token if the worker is running (ADR-054). No-op otherwise.
+    yaml = apply_host_exec_config(&yaml, project_name)?;
+
+    // Inject oauth worker URL + per-service bearer mount into OAuth-consuming worker
+    // containers (today: mcp-sharepoint). No-op if the oauth worker is not running
+    // for this project (ADR-060). Hub is NOT touched — the oauth worker is internal.
+    yaml = apply_oauth_config(&yaml, project_name)?;
+
     // Inject per-worker Bearer auth tokens (SEC-035)
     yaml = apply_worker_auth_tokens(&yaml, project_name, integrations)?;
 
     // Filter services based on integrations config
-    yaml = apply_integrations_filter(&yaml, integrations)?;
+    yaml = apply_integrations_filter(&yaml, integrations, &network_name)?;
 
     Ok(yaml)
 }
@@ -267,6 +296,56 @@ fn inject_claude_env(
         .map_err(|e| anyhow::anyhow!("inject_claude_env: failed to serialize compose YAML: {e}"))
 }
 
+/// Appends `TZ=<tz>` to every service's `environment` sequence; idempotent, never overwrites an existing `TZ`.
+fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)
+        .map_err(|e| anyhow::anyhow!("inject_host_timezone: failed to parse compose YAML: {e}"))?;
+
+    if let Some(services) = doc.get_mut("services").and_then(|s| s.as_mapping_mut()) {
+        for (_, service) in services.iter_mut() {
+            let Some(service_map) = service.as_mapping_mut() else {
+                continue;
+            };
+            let env_key = serde_yaml_ng::Value::String("environment".to_string());
+            let env_seq = match service_map.get_mut(&env_key) {
+                Some(existing) => match existing.as_sequence_mut() {
+                    Some(seq) => seq,
+                    // compose.template.yml uses sequence form uniformly; mapping form is intentionally skipped.
+                    None => {
+                        log::warn!(
+                            "inject_host_timezone: service 'environment' is not a sequence \
+                             (got {:?}) — TZ not injected",
+                            existing
+                        );
+                        continue;
+                    }
+                },
+                None => {
+                    service_map.insert(env_key.clone(), serde_yaml_ng::Value::Sequence(vec![]));
+                    let Some(inserted) = service_map
+                        .get_mut(&env_key)
+                        .and_then(|v| v.as_sequence_mut())
+                    else {
+                        continue;
+                    };
+                    inserted
+                }
+            };
+
+            let already_set = env_seq.iter().any(|v| {
+                v.as_str()
+                    .is_some_and(|s| s.split('=').next() == Some("TZ"))
+            });
+            if !already_set {
+                env_seq.push(serde_yaml_ng::Value::String(format!("TZ={}", tz)));
+            }
+        }
+    }
+
+    serde_yaml_ng::to_string(&doc)
+        .map_err(|e| anyhow::anyhow!("inject_host_timezone: failed to serialize compose YAML: {e}"))
+}
+
 fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
     match provider {
@@ -363,10 +442,11 @@ pub fn strip_trailing_v1(url: &str) -> String {
 /// Returns the default base URL for a known local model provider.
 /// Used by the frontend to show a placeholder without duplicating the URL logic.
 pub fn default_base_url(provider: &str) -> Option<String> {
+    let host = consts::DOCKER_HOST;
     match provider {
-        "ollama" => Some("http://host.docker.internal:11434".to_string()),
-        "lmstudio" => Some("http://host.docker.internal:1234".to_string()),
-        "llamacpp" => Some("http://host.docker.internal:8080".to_string()),
+        "ollama" => Some(format!("http://{host}:11434")),
+        "lmstudio" => Some(format!("http://{host}:1234")),
+        "llamacpp" => Some(format!("http://{host}:8080")),
         _ => None,
     }
 }
@@ -423,6 +503,15 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 /// - Injects WORKER_<PLUGIN>_URL into mcp-hub environment
 /// - Adds plugin resource volume mounts to claude container
 /// - Sets SPEEDWAVE_PLUGINS env var in claude container
+///
+/// Loads plugins via [`plugin::list_verified_plugins`], which fails the
+/// compose render if any installed plugin has a missing/invalid signature
+/// or a directory/manifest slug mismatch — a missing fail-closed loader
+/// here would let an attacker who tampered with one plugin still get the
+/// rest of the compose to render and run. Manifests are re-validated at
+/// render time so a post-install tamper that only changed the manifest
+/// (not enough to change the digest, e.g. a different field semantic)
+/// would still be caught by the same code that gates install.
 fn apply_plugins(
     yaml: &str,
     project_name: &str,
@@ -431,7 +520,33 @@ fn apply_plugins(
     network_name: &str,
     tokens_dir: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let plugins = plugin::list_installed_plugins()?;
+    let plugins = plugin::list_verified_plugins()?;
+    apply_plugins_from_verified(
+        yaml,
+        project_name,
+        project_dir,
+        integrations,
+        network_name,
+        tokens_dir,
+        &plugins,
+    )
+}
+
+/// Test-friendly variant of [`apply_plugins`] — accepts a pre-built
+/// list of `VerifiedPlugin` instead of consulting the on-disk
+/// `~/.speedwave/plugins/`. Production callers go through
+/// `apply_plugins`; tests inject crafted scenarios (forged manifest,
+/// dangling `claude-resources` symlink, slug collision) without
+/// touching the user's real data dir.
+fn apply_plugins_from_verified(
+    yaml: &str,
+    project_name: &str,
+    project_dir: &str,
+    integrations: &ResolvedIntegrationsConfig,
+    network_name: &str,
+    tokens_dir: &std::path::Path,
+    plugins: &[plugin::VerifiedPlugin],
+) -> anyhow::Result<String> {
     if plugins.is_empty() {
         return Ok(yaml.to_string());
     }
@@ -439,9 +554,19 @@ fn apply_plugins(
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
     let mut plugin_slugs: Vec<String> = Vec::new();
 
-    for manifest in &plugins {
+    for vp in plugins {
+        let manifest = &vp.manifest;
+        let plugin_dir = vp.dir.as_path();
         let slug = &manifest.slug;
         let service_id = manifest.service_id.as_deref();
+
+        // Re-validate the manifest at render time. The signature already
+        // covers the manifest bytes, but re-running validate_manifest gives
+        // us a single rendering of the post-install rules (built-in slug
+        // collision, reserved env keys, mem/cpu caps) — useful when
+        // validate_manifest grows new rules and we don't want any installed
+        // plugin to silently survive a stricter ruleset.
+        plugin::validate_manifest(manifest, plugin_dir)?;
 
         // Check if plugin is enabled (by service_id for MCP plugins, by slug otherwise)
         let plugin_key = service_id.unwrap_or(slug);
@@ -460,12 +585,21 @@ fn apply_plugins(
                 tokens_dir,
                 project_dir,
             )?;
-            // Insert into doc["services"]["mcp-<service_id>"]
+            // Insert into doc["services"]["mcp-<service_id>"]. Refuse to
+            // overwrite a built-in service already present in the YAML —
+            // validate_manifest blocks the obvious "slug: hub" case at
+            // install, but a future change there should not silently
+            // re-open the door here. serde_yaml_ng's mapping insert
+            // overwrites on key collision; we want a hard failure instead.
+            let compose_name = plugin::derive_compose_name(sid);
             if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
-                services.insert(
-                    serde_yaml_ng::Value::String(plugin::derive_compose_name(sid)),
-                    service_value,
-                );
+                let key = serde_yaml_ng::Value::String(compose_name.clone());
+                if services.contains_key(&key) {
+                    anyhow::bail!(
+                        "plugin '{slug}' would overwrite existing compose service '{compose_name}'"
+                    );
+                }
+                services.insert(key, service_value);
             }
             // Inject WORKER_*_URL into hub. All workers share PORT_WORKER —
             // each container has its own network namespace, so port reuse is
@@ -490,17 +624,20 @@ fn apply_plugins(
             inject_worker_env(&mut doc, &worker_env, &url);
         }
 
-        // Mount claude-resources to claude container
-        if let Ok(plugins_base) = plugin::plugins_base_dir() {
-            let plugin_resources = plugins_base.join(slug).join("claude-resources");
-            if plugin_resources.exists() {
-                let mount = format!(
-                    "{}:/speedwave/plugins/{}:ro",
-                    to_engine_path(&plugin_resources)?,
-                    slug
-                );
-                add_claude_volume(&mut doc, &mount);
-            }
+        // Mount claude-resources to claude container. The resources dir
+        // must be a *real* directory inside the verified plugin tree —
+        // a symlink (or anything that escapes the tree under canonicalize)
+        // would let an attacker bind-mount /etc into the claude container.
+        let plugin_resources = vp.dir.join("claude-resources");
+        if plugin_resources.exists() {
+            ensure_resources_dir_safe(plugin_dir, &plugin_resources)
+                .map_err(|e| anyhow::anyhow!("plugin '{slug}': claude-resources unsafe: {e}"))?;
+            let mount = format!(
+                "{}:/speedwave/plugins/{}:ro",
+                to_engine_path(&plugin_resources)?,
+                slug
+            );
+            add_claude_volume(&mut doc, &mount);
         }
     }
 
@@ -512,11 +649,24 @@ fn apply_plugins(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Reads the Anthropic API key from the secrets directory and injects it
-/// into the claude service environment. If no key file exists, returns
-/// the YAML unchanged.
+/// Injects the Anthropic API key (legacy credential) into the `claude`
+/// service environment when one is stored at
+/// `secrets/<project>/anthropic_api_key`. OAuth credentials are managed by
+/// Claude Code itself inside the `CLAUDE_HOME` bind-mount — Speedwave never
+/// reads or writes them. On the host they live at
+/// `<data_dir>/claude-home/<project>/.claude/.credentials.json`. See ADR-052.
 pub fn apply_auth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
-    let key_path = consts::data_dir()
+    apply_auth_config_in(yaml, project, consts::data_dir())
+}
+
+/// Testable variant: resolves the legacy API key path under an explicit
+/// data directory.
+pub(crate) fn apply_auth_config_in(
+    yaml: &str,
+    project: &str,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<String> {
+    let key_path = data_dir
         .join("secrets")
         .join(project)
         .join("anthropic_api_key");
@@ -710,18 +860,45 @@ fn apply_worker_auth_tokens_with_dir(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
+/// Service IDs enabled by `integrations`, as the hub's `ENABLED_SERVICES` expects:
+/// built-in MCP config keys (`slack`, ...), `os` when any OS sub-integration is on,
+/// `host_exec` when enabled (host-side, no image — ADR-054), and enabled plugin
+/// service IDs. Excludes the always-on `claude` / `mcp-hub`.
+/// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`; `build::enabled_images`
+/// uses the same per-service predicate (`is_service_enabled`) on the `IMAGES` list.
+pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec<String> {
+    let mut ids: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .filter(|svc| integrations.is_service_enabled(svc.config_key) == Some(true))
+        .map(|svc| svc.config_key.to_string())
+        .collect();
+    if integrations.any_os_enabled() {
+        ids.push("os".to_string());
+    }
+    if integrations.host_exec {
+        ids.push("host_exec".to_string());
+    }
+    ids.extend(
+        integrations
+            .enabled_plugin_service_ids()
+            .into_iter()
+            .map(String::from),
+    );
+    ids
+}
+
 /// Filters compose services based on integrations config.
 /// - Removes disabled MCP service containers from the `services` map
 /// - Removes corresponding WORKER_*_URL from hub environment
-/// - Injects ENABLED_SERVICES env var into hub (comma-separated)
+/// - Injects ENABLED_SERVICES env var into hub (comma-separated) — see [`enabled_hub_service_ids`]
 /// - Injects DISABLED_OS_SERVICES env var into hub if any OS sub-integrations are disabled
 fn apply_integrations_filter(
     yaml: &str,
     integrations: &ResolvedIntegrationsConfig,
+    network_name: &str,
 ) -> anyhow::Result<String> {
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
 
-    // Determine which services are enabled using the TOGGLEABLE_MCP_SERVICES constant
     let service_enabled = |key: &str| -> bool {
         integrations.is_service_enabled(key).unwrap_or_else(|| {
             log::warn!(
@@ -732,37 +909,38 @@ fn apply_integrations_filter(
         })
     };
 
-    let mut enabled_names: Vec<&str> = Vec::new();
-
+    // Drop disabled MCP worker containers + their hub env vars.
     for svc in consts::TOGGLEABLE_MCP_SERVICES {
-        let (config_key, compose_name, worker_env) =
-            (svc.config_key, svc.compose_name, svc.worker_env);
-        if service_enabled(config_key) {
-            enabled_names.push(config_key);
-        } else {
-            // Remove the service container from compose
-            if let Some(services) = doc.get_mut("services") {
-                if let Some(services_map) = services.as_mapping_mut() {
-                    services_map.remove(serde_yaml_ng::Value::String(compose_name.to_string()));
-                }
+        if service_enabled(svc.config_key) {
+            continue;
+        }
+        if let Some(services) = doc.get_mut("services") {
+            if let Some(services_map) = services.as_mapping_mut() {
+                services_map.remove(serde_yaml_ng::Value::String(svc.compose_name.to_string()));
             }
-            // Remove WORKER_*_URL from hub environment
-            remove_hub_env_var(&mut doc, worker_env);
+        }
+        remove_hub_env_var(&mut doc, svc.worker_env);
+        // An egress-less worker (e.g. office, ADR-055) has its own internal network
+        // `{NETWORK_NAME}_{config_key}`; when it is disabled, drop that network and the
+        // hub's attachment to it so the rendered compose has no dangling internal network.
+        if svc.egress_less {
+            let net = format!("{network_name}_{}", svc.config_key);
+            if let Some(map) = doc.get_mut("networks").and_then(|n| n.as_mapping_mut()) {
+                map.remove(serde_yaml_ng::Value::String(net.clone()));
+            }
+            if let Some(nets) = doc
+                .get_mut("services")
+                .and_then(|s| s.get_mut("mcp-hub"))
+                .and_then(|h| h.get_mut("networks"))
+                .and_then(|n| n.as_sequence_mut())
+            {
+                nets.retain(|n| n.as_str() != Some(net.as_str()));
+            }
         }
     }
 
-    // OS service is conditionally present — only added when at least one OS category is enabled
-    if integrations.any_os_enabled() {
-        enabled_names.push("os");
-    }
-
-    // Include enabled plugin service_ids
-    for sid in integrations.enabled_plugin_service_ids() {
-        enabled_names.push(sid);
-    }
-
-    // Inject ENABLED_SERVICES into hub
-    let enabled_csv = enabled_names.join(",");
+    // Inject ENABLED_SERVICES into hub (same predicate as build::enabled_images).
+    let enabled_csv = enabled_hub_service_ids(integrations).join(",");
     log::debug!("integrations filter: enabled_services={}", enabled_csv);
     inject_worker_env(&mut doc, "ENABLED_SERVICES", &enabled_csv);
 
@@ -817,101 +995,225 @@ fn apply_mcp_os_config(yaml: &str) -> anyhow::Result<String> {
     apply_mcp_os_config_with_path(yaml, &token_path, &port_path)
 }
 
-/// Testable version: accepts explicit paths instead of reading $HOME.
+/// Test-only alias preserved so existing fixtures keep working.
 fn apply_mcp_os_config_with_path(
     yaml: &str,
     token_path: &std::path::Path,
     port_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    // Single read attempt: don't pre-check `is_file()` before `read_to_string`.
-    // The desktop process respawns mcp-os and rewrites these files at runtime,
-    // so a TOCTOU between exists-check and read can bubble up `os error 2`
-    // and abort `render_compose`. Treat any read failure the same as the
-    // file being absent — mcp-os is simply not configured for this run —
-    // but log non-NotFound errors so permission/disk problems remain visible.
+    apply_worker_config(
+        yaml,
+        "mcp-os",
+        token_path,
+        port_path,
+        "WORKER_OS_URL",
+        "os-auth-token",
+    )
+}
+
+/// Injects `WORKER_HOST_EXEC_URL` + bearer-token mount into the hub if the worker is up.
+fn apply_host_exec_config(yaml: &str, project: &str) -> anyhow::Result<String> {
+    let state_dir = crate::host_exec::host_exec_project_dir(consts::data_dir(), project);
+    let token_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
+    let port_path = state_dir.join(consts::HOST_EXEC_PORT_FILE);
+    apply_host_exec_config_with_paths(yaml, &token_path, &port_path)
+}
+
+/// Test-only alias preserved so existing fixtures keep working.
+fn apply_host_exec_config_with_paths(
+    yaml: &str,
+    token_path: &std::path::Path,
+    port_path: &std::path::Path,
+) -> anyhow::Result<String> {
+    apply_worker_config(
+        yaml,
+        "host_exec",
+        token_path,
+        port_path,
+        "WORKER_HOST_EXEC_URL",
+        "host_exec-auth-token",
+    )
+}
+
+/// Inject `WORKER_OAUTH_URL` + per-service bearer mount into each OAuth-consuming
+/// worker container if the oauth worker is up for this project. The consumer
+/// list is derived from `McpServiceDescriptor::uses_oauth_refresh` — adding a
+/// new OAuth-using integration is a one-line flag flip on its descriptor (ADR-060
+/// §"Compose injection"). Hub is not touched — the oauth worker is internal.
+///
+/// Per-service bearer: each consumer gets its own bearer at
+/// `/secrets/oauth-auth-token-<config_key>:ro`. The bearer values come from
+/// `<oauth-state-dir>/.bearer-map.json` (bearer → service).
+fn apply_oauth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
+    let state_dir = crate::oauth_process::oauth_project_dir(consts::data_dir(), project);
+    let port_path = state_dir.join(consts::OAUTH_PORT_FILE);
+    let bearer_map_path = state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
+    apply_oauth_config_with_paths(yaml, &state_dir, &port_path, &bearer_map_path)
+}
+
+/// Test-only entry point — same logic, explicit paths.
+fn apply_oauth_config_with_paths(
+    yaml: &str,
+    state_dir: &std::path::Path,
+    port_path: &std::path::Path,
+    bearer_map_path: &std::path::Path,
+) -> anyhow::Result<String> {
+    let port = match read_worker_port_file(port_path, "oauth") {
+        Some(p) => p,
+        None => return Ok(yaml.to_string()),
+    };
+    let bearer_map = match read_oauth_bearer_map(bearer_map_path) {
+        Some(m) => m,
+        None => return Ok(yaml.to_string()),
+    };
+    if bearer_map.is_empty() {
+        return Ok(yaml.to_string());
+    }
+    let url = worker_gateway_url(port);
+
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+
+    // service_id (slug) → bearer value
+    let mut consumers: std::collections::BTreeMap<&str, String> = Default::default();
+    for (bearer, service) in &bearer_map {
+        consumers.insert(service.as_str(), bearer.clone());
+    }
+
+    // Iterate built-in descriptors and inject for those that opted in.
+    // SSOT: `McpServiceDescriptor::uses_oauth_refresh` (one flag flip per
+    // integration, no hardcoded list here).
+    for descriptor in consts::TOGGLEABLE_MCP_SERVICES.iter() {
+        if !descriptor.uses_oauth_refresh {
+            continue;
+        }
+        let service_id = descriptor.config_key;
+        let compose_service = descriptor.compose_name;
+        let Some(bearer) = consumers.get(service_id) else {
+            continue;
+        };
+        let bearer_file = state_dir.join(format!("bearer-{service_id}"));
+        if !bearer_file.exists() {
+            // Write per-service bearer file lazily on first compose render
+            // (chmod 0o600 via the SSOT helper from PR1).
+            if let Err(e) = crate::fs_perms::write_restricted_file(&bearer_file, bearer) {
+                log::warn!("oauth: failed to write per-service bearer for '{service_id}': {e}");
+                continue;
+            }
+        }
+        inject_env_into(&mut doc, compose_service, "WORKER_OAUTH_URL", &url);
+        let mount = format!(
+            "{}:/secrets/oauth-auth-token-{service_id}:ro",
+            to_engine_path(&bearer_file)?
+        );
+        add_service_volume(&mut doc, compose_service, &mount);
+    }
+
+    Ok(serde_yaml_ng::to_string(&doc)?)
+}
+
+/// Read the oauth bearer-map JSON (bearer → service). Returns `None` on any IO
+/// or parse error (treats as "oauth worker not yet provisioned for this project").
+fn read_oauth_bearer_map(
+    path: &std::path::Path,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&content).ok()?;
+    Some(map)
+}
+
+/// Inject `<env_var>=<gateway-url>` + mount `<token_path>:/secrets/<secret_name>:ro` into the
+/// hub iff token+port files are readable. No-op (returns unchanged YAML) when files absent —
+/// any read failure is treated as not running (avoids TOCTOU vs runtime respawn).
+fn apply_worker_config(
+    yaml: &str,
+    label: &str,
+    token_path: &std::path::Path,
+    port_path: &std::path::Path,
+    env_var: &str,
+    secret_name: &str,
+) -> anyhow::Result<String> {
     let token = match std::fs::read_to_string(token_path) {
         Ok(s) => s.trim().to_string(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(yaml.to_string());
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(yaml.to_string()),
         Err(e) => {
-            log::debug!("mcp-os token read failed ({e}); treating as not configured");
+            log::debug!("{label} token read failed ({e}); treating as not running");
             return Ok(yaml.to_string());
         }
     };
     if token.is_empty() {
         return Ok(yaml.to_string());
     }
-
-    let port = match read_mcp_os_port(port_path) {
+    let port = match read_worker_port_file(port_path, label) {
         Some(p) => p,
-        None => {
-            // Port file missing — mcp-os not running, skip OS config
-            return Ok(yaml.to_string());
-        }
+        None => return Ok(yaml.to_string()),
     };
-    let worker_os_url = mcp_os_gateway_url(port);
+    let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-    inject_worker_env(&mut doc, "WORKER_OS_URL", &worker_os_url);
+    inject_worker_env(&mut doc, env_var, &url);
     add_hub_volume(
         &mut doc,
-        &format!("{}:/secrets/os-auth-token:ro", to_engine_path(token_path)?),
+        &format!("{}:/secrets/{secret_name}:ro", to_engine_path(token_path)?),
     );
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Read the mcp-os port from the port file written by McpOsProcess.
-/// Returns `None` if the file is missing or contains invalid data.
-fn read_mcp_os_port(port_path: &std::path::Path) -> Option<u16> {
-    let content = match std::fs::read_to_string(port_path) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
+/// Read a worker's `port` file. `None` when missing or unparseable; warns on invalid content.
+fn read_worker_port_file(port_path: &std::path::Path, label: &str) -> Option<u16> {
+    let content = std::fs::read_to_string(port_path).ok()?;
     match content.trim().parse::<u16>() {
         Ok(p) => Some(p),
         Err(e) => {
-            log::warn!("invalid mcp-os port file content '{}': {e}", content.trim());
+            log::warn!(
+                "invalid {label} port file content '{}': {e}",
+                content.trim()
+            );
             None
         }
     }
 }
 
-/// Returns the URL where the mcp-os worker listens, as seen from inside a container.
-fn mcp_os_gateway_url(port: u16) -> String {
+/// Test-only alias — implementation is `read_worker_port_file`.
+#[cfg(test)]
+fn read_host_exec_port(port_path: &std::path::Path) -> Option<u16> {
+    read_worker_port_file(port_path, "host_exec")
+}
+
+/// URL where a host-side worker listens, as seen from inside a container.
+fn worker_gateway_url(port: u16) -> String {
     #[cfg(target_os = "macos")]
     {
-        // host.lima.internal is set in /etc/hosts by Lima — stable regardless of IP changes
         format!("http://host.lima.internal:{port}")
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "windows")]
     {
-        // nerdctl rootless: host.docker.internal via extra_hosts
-        format!("http://host.docker.internal:{port}")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        // Windows / fallback
         format!("http://host.containers.internal:{port}")
     }
+}
+
+/// Test-only alias — implementation is `worker_gateway_url`.
+#[cfg(test)]
+fn mcp_os_gateway_url(port: u16) -> String {
+    worker_gateway_url(port)
+}
+
+/// Test-only alias — implementation is `worker_gateway_url`.
+#[cfg(test)]
+fn host_exec_gateway_url(port: u16) -> String {
+    worker_gateway_url(port)
 }
 
 /// Returns the host IP/hostname reachable from inside the container/VM.
 /// Used for `extra_hosts` entries and constructing wsUrls in lock files.
 ///
 /// macOS: Lima vzNAT always assigns 192.168.5.2 to the macOS host — static, not DHCP.
-/// Linux: nerdctl rootless uses 10.0.2.2 for the host gateway (slirp4netns).
 /// Windows: nerdctl in WSL2 uses 192.168.65.1.
 pub fn host_gateway_ip() -> &'static str {
     #[cfg(target_os = "macos")]
     {
         consts::LIMA_VZ_HOST_IP // "192.168.5.2"
     }
-    #[cfg(target_os = "linux")]
-    {
-        consts::NERDCTL_LINUX_HOST_IP // "10.0.2.2"
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
     {
         consts::WSL_HOST_IP // "192.168.65.1"
     }
@@ -919,19 +1221,12 @@ pub fn host_gateway_ip() -> &'static str {
 
 /// Returns the UID:GID to set as `user:` in compose services.
 ///
-/// Linux (rootless nerdctl): "0:0" — UID 0 in user namespace maps to host user UID.
-///   UID 1000 would map to subuid range (~101000), breaking bind-mount access.
-/// macOS (Lima) / Windows (WSL2): "1000:1000" — containerd runs as root,
-///   so UID 1000 maps directly to UID 1000. Unprivileged user as defense-in-depth.
+/// Both supported platforms (macOS via Lima, Windows via WSL2) run containerd
+/// as root inside a VM, so UID 1000 maps directly to UID 1000 inside the
+/// container — no user-namespace remapping. We always use the unprivileged
+/// user as defense-in-depth.
 pub fn container_user() -> &'static str {
-    #[cfg(target_os = "linux")]
-    {
-        consts::CONTAINER_USER_ROOTLESS // "0:0"
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        consts::CONTAINER_USER_UNPRIVILEGED // "1000:1000"
-    }
+    consts::CONTAINER_USER_UNPRIVILEGED // "1000:1000"
 }
 
 /// Returns the hostname Claude Code should use for IDE WebSocket connections.
@@ -946,25 +1241,83 @@ fn ide_host_override() -> &'static str {
     {
         consts::LIMA_HOST // "host.lima.internal"
     }
-    #[cfg(target_os = "linux")]
-    {
-        consts::NERDCTL_LINUX_HOST // "host.docker.internal"
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
     {
         consts::WSL_HOST // "host.speedwave.internal"
     }
 }
 
+/// Verifies that a plugin's `claude-resources` directory and every entry
+/// underneath it is a real, non-symlink path inside the canonicalised
+/// plugin directory. Bind-mounting `claude-resources` into the claude
+/// container makes every file beneath it readable from inside; without
+/// this check, an attacker could:
+///
+///   - replace `claude-resources` itself with a symlink to `/etc`, so
+///     the container sees host configuration files at
+///     `/speedwave/plugins/<slug>/`, or
+///
+///   - drop `claude-resources/skills/foo.md → ~/.ssh/id_rsa` so the
+///     mount surfaces user secrets one level deeper.
+///
+/// The plugin signing model has no notion of legitimate symlinks, so
+/// any encountered symlink is fatal — same invariant as
+/// `compute_plugin_digest` in `signing.rs`.
+fn ensure_resources_dir_safe(plugin_dir: &Path, resources: &Path) -> anyhow::Result<()> {
+    use std::fs;
+    let resources_meta = fs::symlink_metadata(resources)?;
+    if resources_meta.file_type().is_symlink() {
+        anyhow::bail!("claude-resources is a symlink: {}", resources.display());
+    }
+    if !resources_meta.is_dir() {
+        anyhow::bail!(
+            "claude-resources is not a directory: {}",
+            resources.display()
+        );
+    }
+    let canonical_plugin = plugin_dir.canonicalize()?;
+    let canonical_resources = resources.canonicalize()?;
+    if !canonical_resources.starts_with(&canonical_plugin) {
+        anyhow::bail!(
+            "claude-resources canonicalises outside plugin dir: {} -> {}",
+            resources.display(),
+            canonical_resources.display()
+        );
+    }
+    walk_reject_symlinks(resources)
+}
+
+fn walk_reject_symlinks(dir: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = std::fs::symlink_metadata(&path)?.file_type();
+        if ft.is_symlink() {
+            anyhow::bail!("claude-resources contains symlink: {}", path.display());
+        }
+        if ft.is_dir() {
+            walk_reject_symlinks(&path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Injects a WORKER_*_URL environment variable into the mcp-hub service.
 fn inject_worker_env(doc: &mut serde_yaml_ng::Value, env_name: &str, url: &str) {
+    inject_env_into(doc, "mcp-hub", env_name, url)
+}
+
+/// Inject `<env_name>=<value>` into an arbitrary service's `environment` sequence.
+/// No-op if the service or its `environment` sequence is absent — same TOCTOU-friendly
+/// posture as `inject_worker_env`.
+fn inject_env_into(doc: &mut serde_yaml_ng::Value, service: &str, env_name: &str, value: &str) {
     if let Some(services) = doc.get_mut("services") {
-        if let Some(hub) = services.get_mut("mcp-hub") {
-            if let Some(environment) = hub.get_mut("environment") {
+        if let Some(svc) = services.get_mut(service) {
+            if let Some(environment) = svc.get_mut("environment") {
                 if let Some(env_seq) = environment.as_sequence_mut() {
                     env_seq.push(serde_yaml_ng::Value::String(format!(
                         "{}={}",
-                        env_name, url
+                        env_name, value
                     )));
                 }
             }
@@ -987,15 +1340,19 @@ fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
 
 /// Adds a volume mount to the mcp-hub service.
 fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
+    add_service_volume(doc, "mcp-hub", mount)
+}
+
+/// Adds a volume mount to an arbitrary service. No-op if the service is absent.
+fn add_service_volume(doc: &mut serde_yaml_ng::Value, service: &str, mount: &str) {
     if let Some(services) = doc.get_mut("services") {
-        if let Some(hub) = services.get_mut("mcp-hub") {
-            if let Some(volumes) = hub.get_mut("volumes") {
+        if let Some(svc) = services.get_mut(service) {
+            if let Some(volumes) = svc.get_mut("volumes") {
                 if let Some(vol_seq) = volumes.as_sequence_mut() {
                     vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
                 }
             } else {
-                // Hub has no volumes key yet — create it
-                hub["volumes"] =
+                svc["volumes"] =
                     serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(
                         mount.to_string(),
                     )]);
@@ -1181,9 +1538,6 @@ pub enum SecurityRule {
     #[strum(to_string = "SHAREPOINT_TOKEN_PATH_MISMATCH")]
     #[strum(props(description = "SharePoint token path matches expected"))]
     SharepointTokenPathMismatch,
-    #[strum(to_string = "SHAREPOINT_TOKEN_MOUNT_MODE")]
-    #[strum(props(description = "SharePoint token mount mode is :rw"))]
-    SharepointTokenMountMode,
     #[strum(to_string = "SHAREPOINT_WORKSPACE_PATH_MISMATCH")]
     #[strum(props(description = "SharePoint workspace path matches expected"))]
     SharepointWorkspacePathMismatch,
@@ -1211,12 +1565,16 @@ pub enum SecurityRule {
 
 impl SecurityRule {
     /// Returns `true` for SharePoint-specific rules.
+    ///
+    /// Note: there is no `SharepointTokenMountMode` after ADR-060/PR3.
+    /// SharePoint mounts `/tokens:ro` like every other built-in worker; a `:rw`
+    /// regression is caught by `PluginTokenMountMode` (re-used for built-ins)
+    /// via the shared `validate_service_volume_mounts` machinery.
     pub fn is_sharepoint(self) -> bool {
         matches!(
             self,
             Self::SharepointVolumeLongForm
                 | Self::SharepointTokenPathMismatch
-                | Self::SharepointTokenMountMode
                 | Self::SharepointWorkspacePathMismatch
                 | Self::SharepointWorkspaceMountMode
                 | Self::SharepointNoExtraVolumes
@@ -1486,6 +1844,7 @@ impl SecurityCheck {
                 let allowed = [
                     "ANTHROPIC_AUTH_TOKEN",
                     "ANTHROPIC_API_KEY",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
                     "DISABLE_AUTOUPDATER",
                 ];
 
@@ -1843,6 +2202,8 @@ impl SecurityCheck {
                 expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
+                // Plugins do not currently use the host-side oauth worker.
+                extra_allowed_ro_targets: &[],
                 rules: VolumeCheckRules::PLUGIN,
             };
             let (base_violations, _) = validate_service_volume_mounts(service, &params);
@@ -1866,11 +2227,17 @@ impl SecurityCheck {
             None => return Vec::new(), // SharePoint not in compose (disabled)
         };
 
+        // ADR-060: SharePoint may additionally mount its per-service oauth bearer.
+        // After PR3 this list will expand and `expected_token_mode` will drop to "ro".
+        let extra_allowed = vec!["/secrets/oauth-auth-token-sharepoint".to_string()];
         let params = VolumeCheckParams {
             container_name: name,
             expected_tokens_path: format!("{}/sharepoint", expected_paths.tokens_engine_dir()),
             expected_workspace_path: expected_paths.project_engine_path(),
-            expected_token_mode: "rw",
+            // ADR-060 / PR3: SharePoint is now :ro like every other worker.
+            // OAuth token refresh moved to the host-side `oauth` worker.
+            expected_token_mode: "ro",
+            extra_allowed_ro_targets: &extra_allowed,
             rules: VolumeCheckRules::SHAREPOINT,
         };
         let (violations, _) = validate_service_volume_mounts(service, &params);
@@ -2111,18 +2478,23 @@ impl VolumeCheckRules {
         token_path_mismatch: SecurityRule::SharepointTokenPathMismatch,
         token_path_mismatch_rem:
             "SharePoint token mount must use the project-specific tokens directory.",
-        token_mount_mode: SecurityRule::SharepointTokenMountMode,
-        token_mount_mode_msg: "SharePoint token mount must be :rw (OAuth refresh)",
-        token_mount_mode_rem: "SharePoint requires :rw token mount for OAuth token refresh.",
+        // ADR-060/PR3: SharePoint is no longer a special case — `/tokens:ro`
+        // is the universal rule. The dedicated `SharepointTokenMountMode`
+        // variant was removed; we reuse the generic `PluginTokenMountMode`.
+        token_mount_mode: SecurityRule::PluginTokenMountMode,
+        token_mount_mode_msg: "SharePoint token mount must be :ro (ADR-060)",
+        token_mount_mode_rem: "SharePoint refresh moved to the host-side `oauth` worker; \
+             /tokens must be :ro like every other worker.",
         workspace_path_mismatch: SecurityRule::SharepointWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::SharepointWorkspaceMountMode,
         workspace_mount_mode_msg: "SharePoint workspace mount must be :rw",
         no_extra_volumes: SecurityRule::SharepointNoExtraVolumes,
         no_extra_volumes_msg_prefix: "SharePoint service has unauthorized volume mount:",
-        no_extra_volumes_rem: "SharePoint may only mount /tokens and /workspace.",
+        no_extra_volumes_rem:
+            "SharePoint may mount /tokens, /workspace, and the per-service oauth bearer.",
         missing_tokens: SecurityRule::SharepointMissingTokensMount,
         missing_tokens_msg: "SharePoint service is missing required /tokens mount",
-        missing_tokens_rem: "SharePoint must mount /tokens:rw.",
+        missing_tokens_rem: "SharePoint must mount /tokens:ro.",
         missing_workspace: SecurityRule::SharepointMissingWorkspaceMount,
         missing_workspace_msg: "SharePoint service is missing required /workspace mount",
         missing_workspace_rem: "SharePoint must mount /workspace:rw.",
@@ -2136,6 +2508,11 @@ struct VolumeCheckParams<'a> {
     expected_workspace_path: &'a str,
     /// Expected token mount mode: "ro" or "rw"
     expected_token_mode: &'a str,
+    /// Additional read-only mount targets that are permitted on this service.
+    /// Used by OAuth-consuming workers (ADR-060) to permit their per-service bearer
+    /// mount at `/secrets/oauth-auth-token-<service>:ro`. Each entry is matched as
+    /// an exact `target` path; the mount must be `:ro` to pass.
+    extra_allowed_ro_targets: &'a [String],
     rules: VolumeCheckRules,
 }
 
@@ -2213,6 +2590,26 @@ fn validate_service_volume_mounts(
                         remediation: "Change the workspace volume mount to :rw.",
                     });
                 }
+            } else if let Some(extra) = params
+                .extra_allowed_ro_targets
+                .iter()
+                .find_map(|t| extract_volume_for_target(vol_str, t).map(|hp_mode| (t, hp_mode)))
+            {
+                // Permitted ADR-060 OAuth bearer mount (or future analogous mounts)
+                // — must be :ro. host path is opaque (per-project, dynamic).
+                let (_target, (_host_path, mode)) = extra;
+                let actual = mode.as_deref().unwrap_or("ro");
+                if actual != "ro" {
+                    violations.push(SecurityViolation {
+                        container: params.container_name.to_string(),
+                        rule: params.rules.no_extra_volumes,
+                        message: format!(
+                            "{} {} (must be :ro)",
+                            params.rules.no_extra_volumes_msg_prefix, vol_str
+                        ),
+                        remediation: params.rules.no_extra_volumes_rem,
+                    });
+                }
             } else {
                 violations.push(SecurityViolation {
                     container: params.container_name.to_string(),
@@ -2269,7 +2666,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 32;
+    const SECURITY_RULE_COUNT: usize = 31;
 
     fn default_flags() -> Vec<String> {
         crate::defaults::DEFAULT_FLAGS
@@ -2297,9 +2694,10 @@ mod tests {
             .map(|s| s[prefix.len()..].to_string())
     }
 
-    /// Returns VALID_COMPOSE with hardcoded user values replaced by the
-    /// platform-correct value from `container_user()`. This ensures tests
-    /// pass on all platforms (Linux uses "0:0", macOS/Windows use "1000:1000").
+    /// Returns VALID_COMPOSE with hardcoded user values replaced by the value
+    /// from `container_user()` ("1000:1000" on both supported platforms).
+    /// Kept as a helper so the existing fixture string stays the SSOT for the
+    /// rest of the compose shape.
     fn valid_compose_yaml() -> String {
         VALID_COMPOSE.replace(
             "user: \"1000:1000\"",
@@ -2348,24 +2746,50 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
+      - WORKER_GITHUB_URL=http://mcp-github:3000
+      - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
+      - WORKER_OFFICE_URL=http://mcp-office:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
+      - WORKER_CONTEXT7_URL=http://mcp-context7:3000
     networks:
       - speedwave_test_network
+      - speedwave_test_network_office
 
   mcp-slack:
     image: speedwave-mcp-slack:latest
     container_name: speedwave_test_mcp_slack
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
     environment:
       - PORT=3000
     networks:
       - speedwave_test_network
+
+  mcp-office:
+    image: speedwave-mcp-office:latest
+    container_name: speedwave_test_mcp_office
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    volumes:
+      - /home/user/projects/test:/workspace:rw
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network_office
 
   mcp-playwright:
     image: speedwave-mcp-playwright:latest
@@ -2384,9 +2808,30 @@ services:
     networks:
       - speedwave_test_network
 
+  mcp-context7:
+    image: speedwave-mcp-context7:latest
+    container_name: speedwave_test_mcp_context7
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/context7:/tokens:ro
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
 networks:
   speedwave_test_network:
     driver: bridge
+  speedwave_test_network_office:
+    driver: bridge
+    internal: true
 "#;
 
     #[test]
@@ -2713,6 +3158,18 @@ services:
             build::IMAGE_MCP_GITLAB,
             &manifest.bundle_id
         )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_GITHUB,
+            &manifest.bundle_id
+        )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_ATLASSIAN,
+            &manifest.bundle_id
+        )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_CONTEXT7,
+            &manifest.bundle_id
+        )));
 
         assert!(!yaml.contains("image: speedwave-claude:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-hub:latest"));
@@ -2720,6 +3177,8 @@ services:
         assert!(!yaml.contains("image: speedwave-mcp-sharepoint:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-redmine:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-gitlab:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-github:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-atlassian:latest"));
     }
 
     #[test]
@@ -2808,6 +3267,64 @@ services:
             env.iter().any(|v| v.as_str() == Some(port_line.as_str())),
             "mcp-playwright must set PORT={}",
             crate::consts::PORT_WORKER
+        );
+    }
+
+    /// mcp-office has no credentials — the generated compose must not mount any `/tokens`
+    /// volume, must mount `/workspace:rw`, and must be attached only to its egress-less
+    /// `{NETWORK_NAME}_office` network (ADR-055).
+    #[test]
+    fn test_render_compose_office_no_token_mount_workspace_rw_office_network_only() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            office: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let svc = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-office"))
+            .expect("mcp-office must be present when office is enabled");
+
+        let volumes = svc
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .expect("mcp-office must declare /workspace:rw");
+        let vol_strs: Vec<&str> = volumes.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            !vol_strs.iter().any(|v| v.contains("/tokens")),
+            "mcp-office must not mount any /tokens volume; got: {vol_strs:?}"
+        );
+        assert!(
+            vol_strs.iter().any(|v| v.ends_with(":/workspace:rw")),
+            "mcp-office must mount the project workspace at /workspace:rw; got: {vol_strs:?}"
+        );
+
+        let nets: Vec<&str> = svc
+            .get("networks")
+            .and_then(|n| n.as_sequence())
+            .map(|s| s.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            nets.len(),
+            1,
+            "mcp-office must be on exactly one (egress-less) network; got: {nets:?}"
+        );
+        assert!(
+            nets[0].ends_with("_office"),
+            "mcp-office's only network must be the egress-less *_office network; got: {nets:?}"
         );
     }
 
@@ -2918,6 +3435,158 @@ services:
         );
     }
 
+    /// mcp-github must render with the standard worker hardening AND its non-standard
+    /// 256m memory cap (Octokit + `octokit.paginate` need more headroom than the 128m
+    /// other API workers use — see the comment in compose.template.yml). Also verifies
+    /// the read-only, project-scoped `/tokens` mount and `PORT=PORT_WORKER`.
+    #[test]
+    fn test_render_compose_github_service_present() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            github: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let gh = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-github"))
+            .expect("mcp-github service must be present when enabled");
+
+        assert!(
+            gh.get("read_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "mcp-github must set read_only: true"
+        );
+        let cap_drop = gh
+            .get("cap_drop")
+            .and_then(|v| v.as_sequence())
+            .expect("cap_drop must be present");
+        assert!(cap_drop.iter().any(|c| c.as_str() == Some("ALL")));
+        let sec_opt = gh
+            .get("security_opt")
+            .and_then(|v| v.as_sequence())
+            .expect("security_opt must be present");
+        assert!(sec_opt
+            .iter()
+            .any(|s| s.as_str() == Some("no-new-privileges:true")));
+
+        // Non-standard, load-bearing memory cap.
+        assert_eq!(
+            gh.get("deploy")
+                .and_then(|d| d.get("resources"))
+                .and_then(|r| r.get("limits"))
+                .and_then(|l| l.get("memory"))
+                .and_then(|m| m.as_str()),
+            Some("256m"),
+            "mcp-github must keep its 256m memory limit (Octokit footprint)"
+        );
+
+        // Token mount: only its own service dir, read-only, under the project's tokens path.
+        let volumes = gh
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .expect("mcp-github must mount its token dir");
+        assert!(
+            volumes.iter().filter_map(|v| v.as_str()).any(|v| {
+                v.ends_with("/test-project/github:/tokens:ro") || v.ends_with("github:/tokens:ro")
+            }),
+            "mcp-github must mount github tokens read-only; got: {volumes:?}"
+        );
+        // It must NOT mount anyone else's tokens or /workspace.
+        let gh_block = serde_yaml_ng::to_string(gh).unwrap();
+        assert!(
+            !gh_block.contains("/workspace"),
+            "mcp-github must not mount /workspace"
+        );
+        assert!(
+            !gh_block.contains("slack:/tokens") && !gh_block.contains("gitlab:/tokens"),
+            "mcp-github must mount only its own tokens; got block:\n{gh_block}"
+        );
+
+        let env = gh
+            .get("environment")
+            .and_then(|e| e.as_sequence())
+            .expect("environment must be present");
+        let port_line = format!("PORT={}", crate::consts::PORT_WORKER);
+        assert!(
+            env.iter().any(|v| v.as_str() == Some(port_line.as_str())),
+            "mcp-github must set PORT={}",
+            crate::consts::PORT_WORKER
+        );
+    }
+
+    /// Hub must know where to reach the GitHub worker — `WORKER_GITHUB_URL` injected
+    /// from the compose template, pointing at `:PORT_WORKER`.
+    #[test]
+    fn test_github_worker_url_in_hub_env() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            github: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let hub_env = get_hub_env_seq(&doc);
+        let expected = format!(
+            "WORKER_GITHUB_URL=http://mcp-github:{}",
+            crate::consts::PORT_WORKER
+        );
+        assert!(
+            hub_env.iter().any(|s| s == &expected),
+            "hub must have '{expected}' in environment; got: {hub_env:?}"
+        );
+    }
+
+    /// Disabling the GitHub toggle must remove both the `mcp-github` service block
+    /// and the `WORKER_GITHUB_URL` hub env entry.
+    #[test]
+    fn test_apply_integrations_filter_disables_github() {
+        let mut integrations = ResolvedIntegrationsConfig::default();
+        integrations.github = false;
+
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+
+        let services = doc.get("services").and_then(|s| s.as_mapping()).unwrap();
+        assert!(
+            !services.contains_key(&serde_yaml_ng::Value::String("mcp-github".into())),
+            "mcp-github must be removed when disabled"
+        );
+        let hub_env = get_hub_env_seq(&doc);
+        assert!(
+            !hub_env.iter().any(|s| s.starts_with("WORKER_GITHUB_URL=")),
+            "WORKER_GITHUB_URL must be removed from hub env when github disabled; got: {hub_env:?}"
+        );
+    }
+
     /// Disabling the Playwright toggle must remove both the service block and
     /// the WORKER_PLAYWRIGHT_URL hub env entry.
     #[test]
@@ -2925,7 +3594,9 @@ services:
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations.playwright = false;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
         let services = doc.get("services").and_then(|s| s.as_mapping()).unwrap();
@@ -3063,11 +3734,13 @@ services:
         for entry in get_hub_env_seq(&serde_yaml_ng::from_str(&yaml).unwrap()) {
             if let Some((key, value)) = entry.split_once('=') {
                 if key.starts_with("WORKER_") && key.ends_with("_URL") {
-                    // WORKER_OS_URL is a host-side gateway (host.lima.internal
-                    // / host.docker.internal) with a dynamically assigned
-                    // mcp-os port — not a containerized worker. ADR-038
-                    // applies only to in-cluster workers.
-                    if key == "WORKER_OS_URL" {
+                    // WORKER_OS_URL and WORKER_HOST_EXEC_URL are host-side
+                    // gateways (host.lima.internal / host.docker.internal /
+                    // host.containers.internal) with dynamically assigned ports
+                    // — the workers run on the host, not in the compose network.
+                    // ADR-038's "every WORKER_*_URL points at :PORT_WORKER" rule
+                    // applies only to in-cluster (containerized) workers.
+                    if key == "WORKER_OS_URL" || key == "WORKER_HOST_EXEC_URL" {
                         continue;
                     }
                     assert!(
@@ -4411,12 +5084,12 @@ services:
                 "macOS: containers reach mcp-os via host.lima.internal"
             );
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(target_os = "windows")]
         {
             assert_eq!(
                 url,
-                format!("http://host.docker.internal:{port}"),
-                "Linux: containers reach mcp-os via nerdctl rootless DNS name"
+                format!("http://host.containers.internal:{port}"),
+                "Windows: containers reach mcp-os via WSL2 host alias"
             );
         }
         // URL must never contain 0.0.0.0 — that's the bind address, not a routable address
@@ -4507,6 +5180,509 @@ services:
             .iter()
             .any(|v| v.as_str().is_some_and(|s| s.contains("MCP_OS_")));
         assert!(!has_mcp_os, "MCP_OS_* must NOT be in claude container env");
+    }
+
+    // -- host_exec compose wiring (ADR-054) ----------------------------------
+
+    #[test]
+    fn test_host_exec_config_skipped_when_no_token_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = apply_host_exec_config_with_paths(
+            VALID_COMPOSE,
+            &tmp.path().join("no-such-token"),
+            &tmp.path().join("port"),
+        )
+        .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE,
+            "yaml unchanged when the host_exec token file is absent (worker not running)"
+        );
+    }
+
+    #[test]
+    fn test_host_exec_config_skipped_when_token_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp.path().join("auth-token");
+        std::fs::write(&token_path, "   \n").unwrap();
+        let result =
+            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &tmp.path().join("port"))
+                .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE,
+            "yaml unchanged when the token is empty/whitespace"
+        );
+    }
+
+    #[test]
+    fn test_host_exec_config_skipped_when_port_missing_or_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp.path().join("auth-token");
+        std::fs::write(&token_path, "tok-abc").unwrap();
+        // port file absent
+        let r1 = apply_host_exec_config_with_paths(
+            VALID_COMPOSE,
+            &token_path,
+            &tmp.path().join("no-port"),
+        )
+        .unwrap();
+        assert!(
+            !r1.contains("WORKER_HOST_EXEC_URL"),
+            "no port file → no injection"
+        );
+        // port file present but garbage
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "not-a-port").unwrap();
+        let r2 = apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &port_path).unwrap();
+        assert!(
+            !r2.contains("WORKER_HOST_EXEC_URL"),
+            "invalid port → no injection"
+        );
+    }
+
+    #[test]
+    fn test_host_exec_config_injects_url_and_mounts_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp.path().join("auth-token");
+        let port_path = tmp.path().join("port");
+        std::fs::write(&token_path, "host-exec-uuid-token").unwrap();
+        std::fs::write(&port_path, "49215").unwrap();
+
+        let result =
+            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &port_path).unwrap();
+
+        // WORKER_HOST_EXEC_URL injected into mcp-hub with the dynamic port and a
+        // host-gateway hostname (never 0.0.0.0).
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let hub_env = get_hub_env_seq(&doc);
+        let url = find_env_value(&hub_env, "WORKER_HOST_EXEC_URL=")
+            .expect("WORKER_HOST_EXEC_URL must be injected into mcp-hub");
+        assert!(
+            url.ends_with(":49215"),
+            "URL must use the port file's port: {url}"
+        );
+        assert!(
+            !url.contains("0.0.0.0"),
+            "URL must not be the bind address: {url}"
+        );
+
+        // The token is bind-mounted into the hub as a file (never an env var),
+        // at `/secrets/host_exec-auth-token` (underscore — matching the service
+        // id, which is how the hub's `auth-tokens.ts` derives the path).
+        let expected_mount = format!("{}:/secrets/host_exec-auth-token:ro", token_path.display());
+        assert!(
+            result.contains(&expected_mount),
+            "token must be mounted into the hub.\nexpected: {expected_mount}\ngot:\n{result}"
+        );
+        // And NEVER as an env var on either the hub or claude.
+        assert!(
+            !hub_env.iter().any(|e| e.contains("HOST_EXEC_AUTH_TOKEN")),
+            "the host_exec token must not be an env var on the hub"
+        );
+        let claude_env: Vec<String> = doc
+            .get("services")
+            .and_then(|s| s.get("claude"))
+            .and_then(|c| c.get("environment"))
+            .and_then(|e| e.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !claude_env.iter().any(|e| e.contains("HOST_EXEC")),
+            "no HOST_EXEC* on the claude container — it only sees the hub"
+        );
+    }
+
+    #[test]
+    fn test_host_exec_gateway_url_uses_host_gateway_not_bind_addr() {
+        let url = host_exec_gateway_url(49215);
+        assert!(url.ends_with(":49215"));
+        assert!(
+            !url.contains("0.0.0.0"),
+            "must be a routable host-gateway address, not the bind addr"
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(url, "http://host.lima.internal:49215");
+        #[cfg(target_os = "windows")]
+        assert_eq!(url, "http://host.containers.internal:49215");
+        // Same alias scheme as mcp-os — only the port differs.
+        assert_eq!(host_exec_gateway_url(1), mcp_os_gateway_url(1));
+    }
+
+    // -- oauth compose wiring (ADR-060) --------------------------------------
+
+    /// Compose fixture with a mcp-sharepoint service that has the standard
+    /// volumes + environment. Used to verify `apply_oauth_config` injects
+    /// WORKER_OAUTH_URL + per-service bearer mount into mcp-sharepoint ONLY.
+    const VALID_COMPOSE_WITH_SHAREPOINT: &str = r#"
+version: "3"
+services:
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+    environment:
+      - PORT=4000
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    environment:
+      - PORT=3000
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+"#;
+
+    /// Compose fixture with multiple non-OAuth workers next to SharePoint.
+    /// Used by the negative-injection test (plan §PR2:259) to assert that
+    /// `apply_oauth_config` does NOT touch services other than SharePoint.
+    const VALID_COMPOSE_WITH_MULTIPLE_WORKERS: &str = r#"
+version: "3"
+services:
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+    environment:
+      - PORT=4000
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    environment:
+      - PORT=3000
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    environment:
+      - PORT=3001
+    volumes:
+      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/project:/workspace:rw
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    environment:
+      - PORT=3002
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /test/project:/workspace:rw
+"#;
+
+    #[test]
+    fn test_oauth_config_skipped_when_port_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &tmp.path().join("no-port"),
+            &tmp.path().join(".bearer-map.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE_WITH_SHAREPOINT,
+            "yaml unchanged when oauth worker is not running"
+        );
+    }
+
+    #[test]
+    fn test_oauth_config_skipped_when_bearer_map_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49300").unwrap();
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &port_path,
+            &tmp.path().join("no-bearer-map.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE_WITH_SHAREPOINT,
+            "yaml unchanged when bearer-map is missing"
+        );
+    }
+
+    #[test]
+    fn test_oauth_config_skipped_when_bearer_map_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49300").unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, "{}").unwrap();
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &port_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE_WITH_SHAREPOINT,
+            "yaml unchanged when no consumer bearers are provisioned"
+        );
+    }
+
+    #[test]
+    fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49301").unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-sp-uuid": "sharepoint"}"#).unwrap();
+
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &port_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let services = doc.get("services").unwrap();
+
+        // mcp-sharepoint gets WORKER_OAUTH_URL + per-service bearer mount.
+        let sp_env = service_env(&doc, "mcp-sharepoint");
+        let oauth_url = find_env_value(&sp_env, "WORKER_OAUTH_URL=")
+            .expect("WORKER_OAUTH_URL must be injected into mcp-sharepoint");
+        assert!(
+            oauth_url.ends_with(":49301"),
+            "URL must use port: {oauth_url}"
+        );
+        assert!(!oauth_url.contains("0.0.0.0"));
+
+        // Per-service bearer mount on sharepoint
+        let sp_vols: Vec<String> = services
+            .get("mcp-sharepoint")
+            .and_then(|s| s.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            sp_vols
+                .iter()
+                .any(|v| v.contains(":/secrets/oauth-auth-token-sharepoint:ro")),
+            "per-service oauth bearer must be mounted into mcp-sharepoint, got: {sp_vols:?}"
+        );
+
+        // mcp-hub gets NOTHING about oauth.
+        let hub_env = get_hub_env_seq(&doc);
+        assert!(
+            find_env_value(&hub_env, "WORKER_OAUTH_URL=").is_none(),
+            "WORKER_OAUTH_URL must NOT be injected into mcp-hub"
+        );
+        let hub_vols: Vec<String> = services
+            .get("mcp-hub")
+            .and_then(|s| s.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !hub_vols.iter().any(|v| v.contains("oauth-auth-token")),
+            "oauth bearer must NOT be mounted into mcp-hub, got: {hub_vols:?}"
+        );
+    }
+
+    #[test]
+    fn test_oauth_config_writes_per_service_bearer_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49301").unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-x": "sharepoint"}"#).unwrap();
+
+        apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &port_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+
+        let bearer_file = tmp.path().join("bearer-sharepoint");
+        assert!(
+            bearer_file.exists(),
+            "per-service bearer file must be written"
+        );
+        let content = std::fs::read_to_string(&bearer_file).unwrap();
+        assert_eq!(content, "bearer-x");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&bearer_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "bearer file must be chmod 600");
+        }
+    }
+
+    /// Negative-injection test (plan §PR2:259):
+    /// `apply_oauth_config` must NOT touch services other than SharePoint.
+    /// Without this fixture (slack + redmine alongside sharepoint), the
+    /// happy-path test only proves "hub is untouched" — a regression that
+    /// blanket-injects WORKER_OAUTH_URL into every worker would still pass.
+    #[test]
+    fn test_oauth_config_does_not_inject_into_slack_or_redmine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "49301").unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
+
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_MULTIPLE_WORKERS,
+            tmp.path(),
+            &port_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+
+        // SharePoint receives the injection (sanity — same as the happy-path test).
+        let sp_env = service_env(&doc, "mcp-sharepoint");
+        assert!(
+            find_env_value(&sp_env, "WORKER_OAUTH_URL=").is_some(),
+            "WORKER_OAUTH_URL must be injected into mcp-sharepoint"
+        );
+
+        // Non-OAuth workers MUST be untouched — neither env nor mount.
+        for non_oauth_service in &["mcp-slack", "mcp-redmine", "mcp-hub"] {
+            let env = service_env(&doc, non_oauth_service);
+            assert!(
+                find_env_value(&env, "WORKER_OAUTH_URL=").is_none(),
+                "{non_oauth_service}: WORKER_OAUTH_URL must NOT be injected, env={env:?}"
+            );
+
+            let vols: Vec<String> = doc
+                .get("services")
+                .and_then(|s| s.get(non_oauth_service))
+                .and_then(|s| s.get("volumes"))
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert!(
+                !vols.iter().any(|v| v.contains("oauth-auth-token")),
+                "{non_oauth_service}: oauth bearer must NOT be mounted, vols={vols:?}"
+            );
+        }
+    }
+
+    /// Helper: read environment sequence for a given compose service name.
+    fn service_env(doc: &serde_yaml_ng::Value, service_name: &str) -> Vec<String> {
+        doc.get("services")
+            .and_then(|s| s.get(service_name))
+            .and_then(|s| s.get("environment"))
+            .and_then(|e| e.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_read_host_exec_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("port");
+        std::fs::write(&p, "  49215\n").unwrap();
+        assert_eq!(read_host_exec_port(&p), Some(49215));
+        std::fs::write(&p, "nope").unwrap();
+        assert_eq!(read_host_exec_port(&p), None);
+        assert_eq!(read_host_exec_port(&tmp.path().join("missing")), None);
+        // 0 / out-of-range
+        std::fs::write(&p, "0").unwrap();
+        assert_eq!(read_host_exec_port(&p), Some(0)); // a worker never picks 0; parsing is lenient
+        std::fs::write(&p, "70000").unwrap();
+        assert_eq!(read_host_exec_port(&p), None, "out of u16 range");
+    }
+
+    #[test]
+    fn test_apply_integrations_filter_enabled_services_includes_host_exec_when_on() {
+        let mut integrations = ResolvedIntegrationsConfig::default();
+        integrations.host_exec = true;
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+        let enabled = find_env_value(&get_hub_env_seq(&doc), "ENABLED_SERVICES=")
+            .expect("ENABLED_SERVICES must be injected");
+        assert!(
+            enabled.split(',').any(|s| s == "host_exec"),
+            "ENABLED_SERVICES must contain host_exec when the project has it enabled: {enabled}"
+        );
+    }
+
+    #[test]
+    fn test_apply_integrations_filter_omits_host_exec_when_off() {
+        // host_exec disabled (the default) — must NOT appear in ENABLED_SERVICES,
+        // and there is no compose service to remove (host_exec has none).
+        let integrations = ResolvedIntegrationsConfig::default();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+        let enabled =
+            find_env_value(&get_hub_env_seq(&doc), "ENABLED_SERVICES=").unwrap_or_default();
+        assert!(
+            !enabled.split(',').any(|s| s == "host_exec"),
+            "ENABLED_SERVICES must not contain host_exec when disabled: {enabled}"
+        );
+    }
+
+    #[test]
+    fn test_render_compose_enables_host_exec_in_hub_when_project_has_it() {
+        // End-to-end: render_compose with host_exec enabled puts it in
+        // ENABLED_SERVICES. (WORKER_HOST_EXEC_URL is NOT injected here because
+        // no worker is running in a test — that's correct: the hub still knows
+        // to expect host_exec; apply_host_exec_config fills the URL once the
+        // Desktop side has spawned the worker and recreated the hub container.)
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let mut integrations = all_enabled_integrations();
+        integrations.host_exec = true;
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let enabled = find_env_value(&get_hub_env_seq(&doc), "ENABLED_SERVICES=")
+            .expect("ENABLED_SERVICES must be present");
+        assert!(
+            enabled.split(',').any(|s| s == "host_exec"),
+            "render_compose should list host_exec in ENABLED_SERVICES when enabled: {enabled}"
+        );
+        // No host_exec compose service (it's a host process).
+        assert!(
+            doc.get("services")
+                .and_then(|s| s.get("mcp-host_exec"))
+                .is_none()
+                && doc
+                    .get("services")
+                    .and_then(|s| s.get("host_exec"))
+                    .is_none(),
+            "host_exec must not be a compose service"
+        );
     }
 
     #[test]
@@ -4717,12 +5893,12 @@ services:
     }
 
     #[test]
-    fn test_container_user_returns_platform_value() {
-        let user = container_user();
-        #[cfg(target_os = "linux")]
-        assert_eq!(user, "0:0", "Linux rootless must use 0:0");
-        #[cfg(not(target_os = "linux"))]
-        assert_eq!(user, "1000:1000", "macOS/Windows must use 1000:1000");
+    fn test_container_user_returns_unprivileged_value() {
+        assert_eq!(
+            container_user(),
+            "1000:1000",
+            "macOS/Windows must use 1000:1000"
+        );
     }
 
     #[test]
@@ -4844,8 +6020,8 @@ services:
         );
         #[cfg(target_os = "macos")]
         assert_eq!(host, consts::LIMA_HOST);
-        #[cfg(target_os = "linux")]
-        assert_eq!(host, consts::NERDCTL_LINUX_HOST);
+        #[cfg(target_os = "windows")]
+        assert_eq!(host, consts::WSL_HOST);
     }
 
     #[test]
@@ -5127,7 +6303,8 @@ services:
         integrations.slack = false;
 
         let yaml = serde_yaml_ng::to_string(&doc).unwrap();
-        let filtered = apply_integrations_filter(&yaml, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
 
         let filtered_doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let filtered_services = filtered_doc.get("services").unwrap().as_mapping().unwrap();
@@ -5144,7 +6321,9 @@ services:
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations.gitlab = false;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
         // Check hub environment does not contain WORKER_GITLAB_URL
@@ -5174,7 +6353,9 @@ services:
         integrations.gitlab = true;
         integrations.os_calendar = true;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
         let enabled_var =
@@ -5188,10 +6369,39 @@ services:
     }
 
     #[test]
+    fn test_enabled_hub_service_ids() {
+        let default_ids = enabled_hub_service_ids(&ResolvedIntegrationsConfig::default());
+        assert!(default_ids.is_empty());
+        assert!(!default_ids.contains(&"host_exec".to_string()));
+
+        let mut cfg = ResolvedIntegrationsConfig {
+            slack: true,
+            gitlab: true,
+            os_calendar: true,
+            host_exec: true,
+            ..ResolvedIntegrationsConfig::default()
+        };
+        cfg.plugins.insert("presale".to_string(), true);
+        cfg.plugins.insert("disabled-one".to_string(), false);
+        let ids = enabled_hub_service_ids(&cfg);
+        assert!(ids.contains(&"slack".to_string()));
+        assert!(ids.contains(&"gitlab".to_string()));
+        assert!(ids.contains(&"os".to_string()));
+        assert!(ids.contains(&"host_exec".to_string()));
+        assert!(ids.contains(&"presale".to_string()));
+        assert!(!ids.contains(&"redmine".to_string()));
+        assert!(!ids.contains(&"disabled-one".to_string()));
+        assert!(!ids.contains(&"claude".to_string()));
+        assert!(!ids.contains(&"mcp-hub".to_string()));
+    }
+
+    #[test]
     fn test_integrations_filter_all_disabled_keeps_claude_and_hub() {
         let integrations = ResolvedIntegrationsConfig::default();
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
@@ -5208,7 +6418,9 @@ services:
         integrations.os_notes = true;
         // reminders and mail remain false (default)
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
         let disabled_os_var = find_env_value(&env, "DISABLED_OS_SERVICES=")
@@ -5228,7 +6440,9 @@ services:
         integrations.os_mail = true;
         integrations.os_notes = true;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
 
@@ -5236,6 +6450,74 @@ services:
             find_env_value(&env, "DISABLED_OS_SERVICES=").is_none(),
             "DISABLED_OS_SERVICES should not be present when all OS integrations enabled"
         );
+    }
+
+    #[test]
+    fn test_integrations_filter_office_enabled_keeps_service_and_office_network() {
+        let mut integrations = all_enabled_integrations();
+        integrations.office = true;
+        let filtered = apply_integrations_filter(
+            VALID_COMPOSE_ALL_WORKERS,
+            &integrations,
+            "speedwave_test_network",
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-office".into())));
+        let office_nets: Vec<&str> = services
+            .get(serde_yaml_ng::Value::String("mcp-office".into()))
+            .and_then(|s| s.get("networks"))
+            .and_then(|n| n.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(office_nets, vec!["speedwave_test_network_office"]);
+        let hub_nets: Vec<&str> = services
+            .get(serde_yaml_ng::Value::String("mcp-hub".into()))
+            .and_then(|s| s.get("networks"))
+            .and_then(|n| n.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(hub_nets.contains(&"speedwave_test_network"));
+        assert!(hub_nets.contains(&"speedwave_test_network_office"));
+        assert!(doc
+            .get("networks")
+            .and_then(|n| n.get("speedwave_test_network_office"))
+            .is_some());
+        let env = get_hub_env_seq(&doc);
+        assert!(env.iter().any(|e| e.starts_with("WORKER_OFFICE_URL=")));
+    }
+
+    #[test]
+    fn test_integrations_filter_office_disabled_removes_service_and_office_network() {
+        let mut integrations = all_enabled_integrations();
+        integrations.office = false;
+        let filtered = apply_integrations_filter(
+            VALID_COMPOSE_ALL_WORKERS,
+            &integrations,
+            "speedwave_test_network",
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(!services.contains_key(&serde_yaml_ng::Value::String("mcp-office".into())));
+        assert!(doc
+            .get("networks")
+            .and_then(|n| n.get("speedwave_test_network_office"))
+            .is_none());
+        let hub_nets: Vec<&str> = services
+            .get(serde_yaml_ng::Value::String("mcp-hub".into()))
+            .and_then(|s| s.get("networks"))
+            .and_then(|n| n.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(hub_nets, vec!["speedwave_test_network"]);
+        let env = get_hub_env_seq(&doc);
+        assert!(!env.iter().any(|e| e.starts_with("WORKER_OFFICE_URL=")));
+        let enabled = find_env_value(&env, "ENABLED_SERVICES=").unwrap_or_default();
+        assert!(!enabled.split(',').any(|s| s == "office"));
     }
 
     #[test]
@@ -5248,6 +6530,7 @@ services:
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations.sharepoint = true;
         integrations.gitlab = true;
+        integrations.github = true;
         integrations.os_calendar = true;
         // slack, redmine remain disabled (default)
         // os_reminders, os_mail, os_notes remain disabled (default)
@@ -5282,6 +6565,7 @@ services:
         // Enabled services should be present
         assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-sharepoint".into())));
         assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-gitlab".into())));
+        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-github".into())));
 
         // ENABLED_SERVICES should be in hub env
         let env = get_hub_env_seq(&doc);
@@ -5299,6 +6583,10 @@ services:
         assert!(
             enabled_str.contains("gitlab"),
             "ENABLED_SERVICES should contain 'gitlab'"
+        );
+        assert!(
+            enabled_str.contains("github"),
+            "ENABLED_SERVICES should contain 'github'"
         );
         assert!(
             enabled_str.contains("os"),
@@ -5319,7 +6607,9 @@ services:
     fn test_all_disabled_removes_all_mcp_services() {
         let integrations = ResolvedIntegrationsConfig::default(); // all false
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
@@ -5367,7 +6657,8 @@ services:
     fn test_all_disabled_passes_security_check() {
         let integrations = ResolvedIntegrationsConfig::default(); // all false
         let yaml = valid_compose_yaml();
-        let filtered = apply_integrations_filter(&yaml, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &filtered,
@@ -5391,7 +6682,9 @@ services:
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations.slack = true;
 
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let filtered =
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+                .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
@@ -5443,7 +6736,11 @@ services:
             sharepoint: true,
             redmine: true,
             gitlab: true,
+            github: true,
+            atlassian: true,
+            office: true,
             playwright: true,
+            context7: true,
             ..ResolvedIntegrationsConfig::default()
         };
         let result =
@@ -6021,6 +7318,151 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_correct_mounts_pass() {
+        // ADR-060 / PR3: SharePoint tokens mount is :ro (refresh is delegated to
+        // the host-side `oauth` worker). The legacy :rw mount is now a violation
+        // — see `test_security_check_sharepoint_rw_now_violates`.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let sp_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule.is_sharepoint())
+            .collect();
+        assert!(
+            sp_violations.is_empty(),
+            "Correct SharePoint mounts should not trigger violations, got: {:?}",
+            sp_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_with_oauth_bearer_mount_passes() {
+        // After ADR-060, SharePoint additionally mounts its per-service oauth
+        // bearer at `/secrets/oauth-auth-token-sharepoint:ro`. Verify the
+        // SharepointNoExtraVolumes allowlist accepts it.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/.speedwave/oauth/test/bearer-sharepoint:/secrets/oauth-auth-token-sharepoint:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let sp_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule.is_sharepoint())
+            .collect();
+        assert!(
+            sp_violations.is_empty(),
+            "post-ADR-060 SharePoint compose (with oauth bearer mount) must pass: {:?}",
+            sp_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_oauth_bearer_must_be_ro() {
+        // ADR-060 / extra_allowed_ro_targets logic: oauth bearer mount must be :ro.
+        // A `:rw` mount on that path should fail SharepointNoExtraVolumes.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/x:/secrets/oauth-auth-token-sharepoint:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SharepointNoExtraVolumes),
+            "oauth bearer mount with :rw must violate SharepointNoExtraVolumes"
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_unrecognised_secret_mount_rejected() {
+        // A `/secrets/` mount with a path that is NOT in extra_allowed_ro_targets
+        // (e.g. an attempt to mount another service's bearer) must be rejected.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/x:/secrets/oauth-auth-token-evil:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SharepointNoExtraVolumes),
+            "non-allowlisted /secrets/ mount must violate SharepointNoExtraVolumes"
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_rw_now_violates() {
+        // Verifies that the legacy :rw mount (ADR-009) is rejected after the
+        // ADR-060 migration: SharePoint no longer needs to write to /tokens.
         let yaml = format!(
             r#"
 version: "3"
@@ -6042,14 +7484,15 @@ services:
         );
         let paths = test_expected_paths();
         let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
-        let sp_violations: Vec<_> = violations
-            .iter()
-            .filter(|v| v.rule.is_sharepoint())
-            .collect();
+        // ADR-060/PR3 removed `SharepointTokenMountMode`; the universal
+        // `PluginTokenMountMode` rule (re-used for built-in workers) is now
+        // what catches a SharePoint `:rw` regression.
         assert!(
-            sp_violations.is_empty(),
-            "Correct SharePoint mounts should not trigger violations, got: {:?}",
-            sp_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode),
+            "legacy :rw mount must now violate PluginTokenMountMode \
+             (the generic mount-mode rule reused for built-in workers)"
         );
     }
 
@@ -6069,7 +7512,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
 "#,
             user = container_user()
         );
@@ -6099,7 +7542,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
       - /wrong/path:/workspace:rw
 "#,
             user = container_user()
@@ -6130,7 +7573,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
       - /test/project:/workspace:ro
 "#,
             user = container_user()
@@ -6278,7 +7721,7 @@ services:
 
     // ─── Worker auth token tests (SEC-035) ────────────────────────────────────
 
-    /// Compose YAML with all 4 toggleable workers for auth token tests.
+    /// Compose YAML with all 5 toggleable workers for auth token tests.
     const VALID_COMPOSE_ALL_WORKERS: &str = r#"
 version: "3"
 services:
@@ -6320,18 +7763,26 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
+      - WORKER_GITHUB_URL=http://mcp-github:3000
+      - WORKER_ATLASSIAN_URL=http://mcp-atlassian:3000
+      - WORKER_OFFICE_URL=http://mcp-office:3000
       - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
+      - WORKER_CONTEXT7_URL=http://mcp-context7:3000
     networks:
       - speedwave_test_network
+      - speedwave_test_network_office
 
   mcp-slack:
     image: speedwave-mcp-slack:latest
     container_name: speedwave_test_mcp_slack
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
     environment:
@@ -6342,13 +7793,16 @@ services:
   mcp-sharepoint:
     image: speedwave-mcp-sharepoint:latest
     container_name: speedwave_test_mcp_sharepoint
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /home/user/.speedwave/tokens/test/sharepoint:/tokens:ro
       - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
@@ -6358,11 +7812,14 @@ services:
   mcp-redmine:
     image: speedwave-mcp-redmine:latest
     container_name: speedwave_test_mcp_redmine
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/redmine:/tokens:ro
     environment:
@@ -6373,17 +7830,74 @@ services:
   mcp-gitlab:
     image: speedwave-mcp-gitlab:latest
     container_name: speedwave_test_mcp_gitlab
+    read_only: true
     user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/gitlab:/tokens:ro
     environment:
       - PORT=3000
     networks:
       - speedwave_test_network
+
+  mcp-github:
+    image: speedwave-mcp-github:latest
+    container_name: speedwave_test_mcp_github
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/github:/tokens:ro
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    container_name: speedwave_test_mcp_atlassian
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/atlassian:/tokens:ro
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
+  mcp-office:
+    image: speedwave-mcp-office:latest
+    container_name: speedwave_test_mcp_office
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    volumes:
+      - /home/user/projects/test:/workspace:rw
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network_office
 
   mcp-playwright:
     image: speedwave-mcp-playwright:latest
@@ -6402,9 +7916,30 @@ services:
     networks:
       - speedwave_test_network
 
+  mcp-context7:
+    image: speedwave-mcp-context7:latest
+    container_name: speedwave_test_mcp_context7
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/context7:/tokens:ro
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
 networks:
   speedwave_test_network:
     driver: bridge
+  speedwave_test_network_office:
+    driver: bridge
+    internal: true
 "#;
 
     fn all_enabled_integrations() -> ResolvedIntegrationsConfig {
@@ -6413,7 +7948,11 @@ networks:
             sharepoint: true,
             redmine: true,
             gitlab: true,
+            github: true,
+            atlassian: true,
+            office: true,
             playwright: true,
+            context7: true,
             ..Default::default()
         }
     }
@@ -6478,6 +8017,7 @@ networks:
             sharepoint: false,
             redmine: false,
             gitlab: false,
+            github: false,
             ..Default::default()
         };
 
@@ -6806,10 +8346,10 @@ networks:
         )
         .unwrap();
 
-        let token_path = tmp.path().join("slack-auth-token");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let token_path = tmp.path().join("slack-auth-token");
             let mode = std::fs::metadata(&token_path).unwrap().permissions().mode();
             assert_eq!(
                 mode & 0o777,
@@ -7166,7 +8706,7 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
       - /test/project:/workspace:rw
       - /etc/passwd:/etc/passwd:ro
 "#,
@@ -7606,6 +9146,84 @@ services:
 
     #[cfg(unix)]
     #[test]
+    fn test_file_security_oauth_tree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        // World-readable oauth/<project> dir + oauth.json — both must be
+        // flagged. Pre-PR1-6 the entire oauth tree was outside SecurityCheck's
+        // path collector, so a world-readable refresh token would slip by.
+        let oauth_dir = data_dir.join("oauth");
+        std::fs::create_dir_all(oauth_dir.join("testproj")).unwrap();
+        std::fs::set_permissions(&oauth_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            oauth_dir.join("testproj"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let oauth_json = oauth_dir.join("testproj").join("sharepoint.json");
+        std::fs::write(&oauth_json, "{}").unwrap();
+        std::fs::set_permissions(&oauth_json, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let audit = oauth_dir.join("testproj").join("audit.log");
+        std::fs::write(&audit, "x").unwrap();
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        let file_violations = violations
+            .iter()
+            .filter(|v| v.rule == SecurityRule::FileSecurityViolation)
+            .count();
+        assert_eq!(
+            file_violations, 4,
+            "Expected 4 violations (oauth/, oauth/testproj/, sharepoint.json, audit.log); got: {violations:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_oauth_tree_passes_when_correct() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        let oauth_dir = data_dir.join("oauth");
+        std::fs::create_dir_all(oauth_dir.join("testproj")).unwrap();
+        std::fs::set_permissions(&oauth_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            oauth_dir.join("testproj"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+
+        // Cover every file kind we expect under oauth/<project>/.
+        for name in &[
+            "sharepoint.json",
+            ".bearer-map.json",
+            "bearer-sharepoint",
+            "auth-token",
+            "port",
+            "pid",
+            "audit.log",
+            "audit.log.1",
+        ] {
+            let p = oauth_dir.join("testproj").join(name);
+            std::fs::write(&p, "x").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations.is_empty(),
+            "No violations expected for correctly-permed oauth tree; got: {violations:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_file_security_tokens_only_no_secrets() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -7724,5 +9342,492 @@ services:
             fn_body[ensure_pos..].contains("enabled_plugin_service_ids"),
             "ensure_plugin_images call must use enabled_plugin_service_ids for project scoping"
         );
+    }
+
+    // ---- inject_host_timezone -----------------------------------------------
+
+    #[test]
+    fn test_inject_host_timezone_adds_tz_to_every_service() {
+        let yaml = "services:\n  \
+                    claude:\n    environment:\n      - PORT=3000\n  \
+                    mcp-hub:\n    environment:\n      - PORT=4000\n  \
+                    mcp-slack:\n    environment:\n      - PORT=5000\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        for service_name in ["claude", "mcp-hub", "mcp-slack"] {
+            let env = doc
+                .get("services")
+                .and_then(|s| s.get(service_name))
+                .and_then(|s| s.get("environment"))
+                .and_then(|e| e.as_sequence())
+                .unwrap_or_else(|| panic!("missing environment sequence for {}", service_name));
+            assert!(
+                env.iter().any(|v| v.as_str() == Some("TZ=Europe/Warsaw")),
+                "service {} missing TZ entry; got {:?}",
+                service_name,
+                env
+            );
+        }
+    }
+
+    #[test]
+    fn test_inject_host_timezone_idempotent() {
+        let yaml = "services:\n  claude:\n    environment:\n      - PORT=3000\n";
+        let once = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        let twice = inject_host_timezone(&once, "Europe/Warsaw").unwrap();
+        let count = twice.matches("TZ=Europe/Warsaw").count();
+        assert_eq!(count, 1, "TZ entry duplicated; got:\n{}", twice);
+    }
+
+    #[test]
+    fn test_inject_host_timezone_does_not_overwrite_existing() {
+        let yaml = "services:\n  claude:\n    environment:\n      - TZ=America/New_York\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        assert!(
+            result.contains("TZ=America/New_York"),
+            "existing TZ value clobbered; got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("TZ=Europe/Warsaw"),
+            "duplicate TZ entry added; got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_inject_host_timezone_preserves_existing_env() {
+        let yaml = "services:\n  claude:\n    environment:\n      - PORT=3000\n      - DEBUG=1\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        assert!(result.contains("PORT=3000"));
+        assert!(result.contains("DEBUG=1"));
+        assert!(result.contains("TZ=Europe/Warsaw"));
+    }
+
+    #[test]
+    fn test_inject_host_timezone_creates_environment_when_missing() {
+        let yaml = "services:\n  claude:\n    image: foo\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env = doc
+            .get("services")
+            .and_then(|s| s.get("claude"))
+            .and_then(|c| c.get("environment"))
+            .and_then(|e| e.as_sequence())
+            .expect("environment sequence should be created");
+        assert!(env.iter().any(|v| v.as_str() == Some("TZ=Europe/Warsaw")));
+    }
+
+    #[test]
+    fn test_inject_host_timezone_handles_no_services_key() {
+        let yaml = "version: '3'\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw");
+        assert!(
+            result.is_ok(),
+            "should not error on compose without services"
+        );
+    }
+
+    #[test]
+    fn test_inject_host_timezone_propagates_parse_error() {
+        let bad = "this is: not: yaml: : :";
+        let result = inject_host_timezone(bad, "Europe/Warsaw");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("failed to parse compose YAML"),
+            "expected parse error message, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_render_compose_propagates_tz_to_all_services() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let services = doc
+            .get("services")
+            .and_then(|s| s.as_mapping())
+            .expect("services mapping");
+        assert!(!services.is_empty(), "expected at least one service");
+        for (name, service) in services {
+            let service_name = name.as_str().unwrap_or("<non-string>");
+            let env = service
+                .get("environment")
+                .and_then(|e| e.as_sequence())
+                .unwrap_or_else(|| panic!("service {} has no environment sequence", service_name));
+            assert!(
+                env.iter()
+                    .any(|v| { v.as_str().is_some_and(|s| s.starts_with("TZ=")) }),
+                "service {} missing TZ env entry; got {:?}",
+                service_name,
+                env
+            );
+        }
+    }
+
+    // ── apply_auth_config: OAuth + API key + precedence ────────────────────
+
+    /// Minimal compose YAML with just the claude service so apply_auth_config
+    /// can write into the environment sequence without dragging the whole
+    /// template into the test fixture.
+    fn auth_test_yaml() -> &'static str {
+        r#"
+services:
+  claude:
+    image: speedwave-claude:latest
+    environment:
+      - CLAUDE_VERSION=1.0.3
+"#
+    }
+
+    fn write_api_key_in(data_dir: &std::path::Path, project: &str, key: &str) {
+        let dir = data_dir.join("secrets").join(project);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("anthropic_api_key"), key).unwrap();
+    }
+
+    #[test]
+    fn apply_auth_config_in_api_key_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_api_key_in(tmp.path(), "test", "sk-ant-api-1234");
+
+        let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
+        let has_api_key = result.contains("ANTHROPIC_API_KEY=sk-ant-api-1234");
+        assert!(has_api_key, "API key must be injected when stored");
+    }
+
+    #[test]
+    fn apply_auth_config_in_neither_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
+        let has_api_key = result.contains("ANTHROPIC_API_KEY=");
+        assert!(!has_api_key);
+    }
+
+    #[test]
+    fn apply_auth_config_in_empty_api_key_returns_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_api_key_in(tmp.path(), "test", "");
+        let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
+        let has_api_key = result.contains("ANTHROPIC_API_KEY=");
+        assert!(!has_api_key);
+    }
+
+    // ── SecurityCheck regression: CLAUDE_CODE_OAUTH_TOKEN allowlisted ──────
+
+    #[test]
+    fn test_security_check_oauth_token_allowed() {
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-aaaaaaaaaaaaaaaaaaaa
+"#;
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
+            "CLAUDE_CODE_OAUTH_TOKEN must be allowlisted in claude container; got {:?}",
+            violations
+        );
+    }
+
+    #[test]
+    fn test_security_check_other_token_still_blocked() {
+        // Defence-in-depth: allowlist must NOT widen to arbitrary *_TOKEN.
+        // MCP_OS_AUTH_TOKEN must remain forbidden in claude container.
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - MCP_OS_AUTH_TOKEN=secret-uuid
+"#;
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
+            "MCP_OS_AUTH_TOKEN must still trigger NoTokensClaude violation"
+        );
+    }
+
+    #[test]
+    fn test_ensure_resources_dir_safe_accepts_real_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        let resources = plugin.join("claude-resources");
+        std::fs::create_dir_all(resources.join("skills")).unwrap();
+        std::fs::write(resources.join("skills").join("ok.md"), b"hi").unwrap();
+        super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect("real directory tree must be accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_resources_dir_safe_rejects_root_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        std::fs::create_dir_all(&plugin).unwrap();
+        // Symlink the entire claude-resources dir to /etc — without this
+        // check, the bind-mount would surface /etc inside the claude
+        // container as /speedwave/plugins/<slug>/.
+        let resources = plugin.join("claude-resources");
+        std::os::unix::fs::symlink("/etc", &resources).unwrap();
+
+        let err = super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect_err("symlinked claude-resources must be rejected");
+        assert!(err.to_string().contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_resources_dir_safe_rejects_nested_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        let resources = plugin.join("claude-resources");
+        let skills = resources.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        // Real symlink deep in the tree — also fatal because the bind
+        // mount surfaces every entry, including nested ones.
+        std::os::unix::fs::symlink("/etc/passwd", skills.join("evil.md")).unwrap();
+
+        let err = super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect_err("nested symlink in claude-resources must be rejected");
+        assert!(err.to_string().contains("symlink"));
+    }
+
+    /// `claude-resources/` must be a real directory on disk, not a
+    /// regular file dressed up as the resources root. Without this,
+    /// `add_claude_volume` would still emit a bind-mount entry whose
+    /// host source is a single file — and depending on the engine
+    /// either fails opaquely at start, or surfaces the file in place
+    /// of a directory inside the container.
+    #[test]
+    fn test_ensure_resources_dir_safe_rejects_non_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let resources = plugin.join("claude-resources");
+        std::fs::write(&resources, b"not a dir").unwrap();
+
+        let err = super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect_err("non-directory claude-resources must be rejected");
+        assert!(err.to_string().contains("not a directory"));
+    }
+
+    // ── apply_plugins_from_verified — render-time invariants ─────────
+
+    /// Builds a minimal valid YAML doc for `apply_plugins_from_verified`
+    /// to mutate. The shape mirrors `compose.template.yml` enough that
+    /// the renderer can find `services.claude` and `services.mcp-hub`.
+    fn fixture_compose_yaml() -> &'static str {
+        r#"
+services:
+  claude:
+    image: speedwave-claude:test
+    environment: []
+    volumes: []
+  mcp-hub:
+    image: speedwave-mcp-hub:test
+    environment: []
+"#
+    }
+
+    fn fixture_integrations_with_enabled(slug: &str) -> ResolvedIntegrationsConfig {
+        let mut cfg = ResolvedIntegrationsConfig::default();
+        cfg.plugins.insert(slug.to_string(), true);
+        cfg
+    }
+
+    fn fixture_verified_plugin(
+        slug: &str,
+        service_id: Option<&str>,
+        plugin_dir: &Path,
+        mem_limit: Option<&str>,
+    ) -> plugin::VerifiedPlugin {
+        // MCP plugins (service_id present) require a Containerfile per
+        // validate_manifest. Stub one in the fixture dir so apply_plugins
+        // re-validation passes the existence check and proceeds to the
+        // render-time invariants we actually want to test.
+        if service_id.is_some() {
+            std::fs::create_dir_all(plugin_dir).ok();
+            std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").ok();
+        }
+        let manifest = plugin::PluginManifest {
+            name: slug.into(),
+            service_id: service_id.map(String::from),
+            slug: slug.into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: mem_limit.map(String::from),
+            cpu_limit: None,
+            requires_integrations: vec![],
+        };
+        plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
+    }
+
+    /// `apply_plugins` re-runs `validate_manifest` so a manifest whose
+    /// fields would now fail the (potentially stricter) ruleset is
+    /// rejected at render time, not silently rendered. We can't
+    /// hand-craft a "post-install rule violation" without breaking
+    /// other tests, so we verify the call chain by passing a
+    /// manifest with a value that would fail the cap (`mem_limit`
+    /// above PLUGIN_MEM_LIMIT_MAX_MIB).
+    #[test]
+    fn test_apply_plugins_revalidates_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("evil");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // 999g is far above the 16 GiB cap. Re-validation must reject.
+        let vp = fixture_verified_plugin("evil", Some("evil"), &plugin_dir, Some("999g"));
+        let result = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            "test-project",
+            "/tmp/test",
+            &fixture_integrations_with_enabled("evil"),
+            "test-net",
+            tmp.path(),
+            &[vp],
+        );
+        let err = result.expect_err("oversized mem_limit must be rejected at render");
+        assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    /// `apply_plugins` MUST reject a plugin whose derived compose name
+    /// would overwrite an existing `services.<name>` entry. Without
+    /// this check, `serde_yaml_ng`'s mapping insert silently replaces
+    /// the built-in entry — defeating the hub's zero-token guarantee.
+    /// The slug-collision rule in `validate_manifest` already blocks
+    /// the obvious "slug: hub" case at install, so the render-time
+    /// check is defence in depth — but a regression in either layer
+    /// is invisible without a test that pins the contract.
+    #[test]
+    fn test_apply_plugins_rejects_compose_name_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("decoy");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // We can't construct a manifest with `slug: "hub"` —
+        // `validate_manifest` rejects it. Instead, hand-build YAML
+        // that already contains the service name a plugin would
+        // produce, and pass a plugin whose service_id derives that
+        // name. Pre-populating `services.mcp-decoy` simulates the
+        // race where two render passes try to claim the same name.
+        let yaml = r#"
+services:
+  claude:
+    image: speedwave-claude:test
+    environment: []
+    volumes: []
+  mcp-hub:
+    image: speedwave-mcp-hub:test
+    environment: []
+  mcp-decoy:
+    image: pre-existing:test
+"#;
+        let cfg = fixture_integrations_with_enabled("decoy");
+        let vp = fixture_verified_plugin("decoy", Some("decoy"), &plugin_dir, None);
+        let err = super::apply_plugins_from_verified(
+            yaml,
+            "test-project",
+            "/tmp/test",
+            &cfg,
+            "test-net",
+            tmp.path(),
+            &[vp],
+        )
+        .expect_err("collision must abort the render");
+        assert!(
+            err.to_string().contains("would overwrite"),
+            "expected collision rejection, got: {err}"
+        );
+    }
+
+    /// Sanity: a verified plugin not blocked by validate_manifest and
+    /// not colliding renders successfully. Pins the happy path so a
+    /// regression that always returns Err (e.g. someone tightening
+    /// validate_manifest in a way that breaks all in-tree manifests)
+    /// is caught here rather than at the user's first launch.
+    #[test]
+    fn test_apply_plugins_renders_enabled_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("ok-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let cfg = fixture_integrations_with_enabled("ok-plugin");
+        let vp = fixture_verified_plugin("ok-plugin", Some("ok-plugin"), &plugin_dir, None);
+        let yaml = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            "test-project",
+            "/tmp/test",
+            &cfg,
+            "test-net",
+            tmp.path(),
+            &[vp],
+        )
+        .expect("happy path must render");
+        assert!(
+            yaml.contains("mcp-ok-plugin"),
+            "rendered YAML must contain plugin service"
+        );
+        assert!(yaml.contains("SPEEDWAVE_PLUGINS=ok-plugin"));
+    }
+
+    /// If the canonical resolution of `claude-resources` escapes the
+    /// canonical plugin tree, the helper bails. We can't trivially
+    /// build such a path without symlinks (which `walk_reject_symlinks`
+    /// already catches), but we can at least pin the invariant by
+    /// verifying that a deeply-nested real directory tree IS accepted
+    /// — regression test for "I broke the canonicalize check by
+    /// being too strict".
+    #[test]
+    fn test_ensure_resources_dir_safe_accepts_deep_nesting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        let deep = plugin.join("claude-resources/skills/sub/deeper");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("ok.md"), b"hi").unwrap();
+        super::ensure_resources_dir_safe(&plugin, &plugin.join("claude-resources"))
+            .expect("deep real-directory tree must be accepted");
     }
 }

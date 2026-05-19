@@ -89,4 +89,40 @@ describe('MCP SharePoint Server', () => {
 
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
+
+  it('calls process.exit(1) when MCP_SHAREPOINT_AUTH_TOKEN is absent', async () => {
+    // Remove the auth token env var to exercise the lines 30-34 guard
+    process.env = { ...process.env };
+    delete process.env.MCP_SHAREPOINT_AUTH_TOKEN;
+
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => {}) as unknown as typeof process.exit);
+
+    await import('./index.js');
+    await flushPromises();
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('MCP_SHAREPOINT_AUTH_TOKEN is required')
+    );
+  });
+
+  it('calls process.exit(1) on unexpected error thrown by main()', async () => {
+    // retryAsync throws an unexpected error → main().catch fires (lines 77-78)
+    retryAsyncMock.mockRejectedValue(new Error('Unexpected crash'));
+
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => {}) as unknown as typeof process.exit);
+
+    await import('./index.js');
+    await flushPromises();
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Fatal error'),
+      expect.any(Error)
+    );
+  });
 });

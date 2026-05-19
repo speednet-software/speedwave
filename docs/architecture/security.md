@@ -6,9 +6,9 @@ Security is a core obsession in Speedwave. Every architectural decision preserve
 
 The following security principles are inherited from Speedwave v1 and are **non-negotiable**:
 
-- **Claude container isolation** — no tokens, no container socket, per-platform container user (UID 1000 on macOS/Windows, UID 0 in Linux rootless user namespace — see [ADR-026](../adr/ADR-026-linux-rootless-container-user.md))
+- **Claude container isolation** — no tokens, no container socket, container user UID 1000:1000 (containerd runs inside a VM on both macOS and Windows, so no user-namespace remapping is needed; see [ADR-059](../adr/ADR-059-drop-linux-support.md))
 - **OWASP container hardening** — `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
-- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. All MCP workers also mount the project directory at `/workspace:rw` for file operations.
+- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. The `sharepoint` and `office` workers additionally mount the project directory at `/workspace:rw` because their tools read/write project files; other workers (slack, gitlab, github, redmine, atlassian, playwright) have no `/workspace` access.
 - **Hub has zero tokens** — compromise of the hub exposes nothing
 - **Kernel-level isolation** — Lima VM (macOS) / WSL2 (Windows) provides an additional isolation layer on top of container isolation
 - **Resource limits** — CPU + memory caps per container
@@ -25,6 +25,13 @@ All containers follow OWASP container hardening guidelines:
 - `tmpfs: /tmp:noexec,nosuid` — temporary filesystem with restricted execution
 - Resource limits: CPU and memory caps defined per container in `compose.template.yml`
 
+**The `claude` container's `$HOME` is writable by design.** `${CLAUDE_HOME}` is bind-mounted at `/home/speedwave` as `:rw` because Claude Code self-installs there (`entrypoint.sh` writes `~/.local/bin`, `~/.bashrc`, `~/.claude/*`, `~/.claude.json` — Anthropic All-Rights-Reserved, can't be bundled — see [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md)), and `${PROJECT_DIR}` is mounted at `/workspace:rw` because Claude edits code. Consequences:
+
+- A toolchain Claude installs into `$HOME` (e.g. a JDK tarball — `apt`/`sudo` fail in the hardened container, but `curl … | tar -x` into `$HOME` works) **persists per-project** (it's in `claude-home/<project>/`), is **uncontrolled** (whatever a `curl | bash` pulls), but is **confined to the container** plus the Lima / WSL2 / rootless layer — it does not reach the host. It is also re-installed on a fresh project / data-dir reset, and it grows `claude-home/<project>/` unboundedly. It is **not** a substitute for **Host Exec** (no Docker; pollutes `claude-home`; ephemeral).
+- Because `/workspace` is `:rw`, a prompt-injected Claude doesn't need a malicious repo from outside — it can write a malicious `build.gradle` / `package.json` script _itself_ and then (if Host Exec is enabled and a whitelisted recipe runs that toolchain) have it executed on the host. `cwdSub` confinement is cosmetic against this; the real mitigation is the trust decision to enable Host Exec at all and the whitelist the user chose at enable time — there is no per-call confirmation (see [Host Exec → deliberate, scoped weakening](#host-exec--deliberate-scoped-weakening) below).
+
+Neither the IDE Bridge lock dir (`${IDE_LOCK_DIR}` → `~/.claude/ide/`, mounted `:ro`) nor the clipboard bridge gives the container any further writable host path or a way to make the host execute something.
+
 ## Token Isolation
 
 Each MCP worker container mounts **only its own** service credentials:
@@ -37,7 +44,15 @@ Each MCP worker container mounts **only its own** service credentials:
 - GitLab worker sees only GitLab tokens
 - Hub has **zero** token mounts — it routes requests to workers via HTTP
 
-**Exception:** SharePoint uses `:rw` mount for OAuth token refresh (see [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)).
+**`/tokens` is `:ro` for all workers.** OAuth refresh moved to the host-side `oauth` worker which writes the refreshed `access_token` to the same per-project tokens directory — the worker only ever reads it (see [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)).
+
+Anthropic OAuth credentials are managed entirely by Claude Code inside the `CLAUDE_HOME` bind-mount (`~/.speedwave/claude-home/<project>/.claude/.credentials.json`); Speedwave does not touch them. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the login-flow rationale.
+
+### Clipboard wrappers (OSC 52)
+
+The `claude` image bakes `/usr/local/bin/{pbcopy,xclip,xsel,wl-copy,clip.exe}` as five symlinks to one shell script (`osc52-copy.sh`) that base64-encodes stdin and writes an [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Operating-System-Commands) sequence to `/dev/tty`. Compatible host terminals interpret it as a clipboard write request — incompatible terminals ignore it.
+
+The wrapper is **write-only by design**: it never reads the host clipboard (OSC 52 query/paste would require a terminal-side response handshake and would leak host clipboard contents into the container). It touches only its own stdin and `/dev/tty`, runs as the unprivileged container user, and adds no new mounts. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
 
 ## Threat Model
 
@@ -46,6 +61,47 @@ When implementing any feature, ask these questions:
 1. **Does this require relaxing any of the above principles?** If yes — find a different approach.
 2. **Does this add a new attack surface?** Document it and mitigate it.
 3. **Does this require mounting host filesystem into a container?** Minimize scope, use `:ro` wherever possible.
+
+### Local attacker with home-directory write access
+
+Speedwave's threat model includes a non-privileged process running as the same user — a malicious npm `postinstall` script, a browser exploit, or any locally-executed code that can write under `~/`. The container hardening above stops a _compromised container_ from escaping; it does not stop a _host_ process from rewriting the files Speedwave reads.
+
+`~/.speedwave/plugins/<slug>/` is writable by the user, so any path that reads from it is in this attacker's reach. Plugin Ed25519 signatures are therefore enforced as a **runtime invariant**, not just an install gate (see [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md)):
+
+- Every read of a plugin tree (compose render, image build, claude-resources mount, UI listing) goes through `signing::verify_plugin_signature_cached` — the cache is keyed by canonical path AND content digest, so any byte change to any file forces a fresh Ed25519 check.
+- Mutable per-plugin state lives at `~/.speedwave/plugin-state/<slug>/`, not under `plugins/<slug>/`, so writing the `image_pending` marker does not invalidate the digest.
+- `plugin::compute_plugin_digest` rejects symlinks. Without this, an attacker dropping `claude-resources/skills/foo.md → /etc/passwd` could fold arbitrary host content into the digest of an otherwise-innocent tree.
+- Install is atomic: lock + staging dir on the same filesystem + `rename` swap + cleanup, so a concurrent install or a crash mid-replace cannot leave a half-A/half-B Frankenstein.
+- Startup runs `plugin::audit_all` — the Desktop blocks with a recovery dialog (Tauri 2 `tauri-plugin-dialog`) on any failure; the CLI exits 2. Recovery commands (`plugin remove`, `plugin install`, `plugin list`, `init`) skip the audit so users can always reach the recovery path.
+
+`~/.speedwave/tokens/<project>/<service_id>/<key>` is mode 0600 by `set_owner_only` and lives outside the plugin tree, so token files are not part of the plugin signature surface — but they are also write-protected against unprivileged tampering by filesystem ACLs.
+
+### Host Exec — deliberate, scoped weakening
+
+**Host Exec** (`host_exec`, [ADR-054](../adr/ADR-054-host-exec-worker.md)) is the one place Speedwave deliberately and explicitly relaxes the container-isolation model: it runs a user-defined whitelist of project-toolchain commands (`./gradlew test`, `npm run build`, `docker compose up`, …) **on the host machine, with the user's privileges, in the project folder**, behind the per-project MCP hub. It exists because Claude — running in the hardened, token-free `claude` container — otherwise cannot build/test/lint the project or drive the host's Docker; users were already filling that gap insecurely by hand (an LLM-generated agent on `0.0.0.0` with a token committed to the repo). Host Exec is the safe-as-possible version of that capability, not a removal of the boundary.
+
+**Mitigations (what keeps it as narrow as it can be):**
+
+- **Off by default; the whitelist is empty.** A project with `host_exec` disabled — or enabled with no recipes — lets Claude run nothing. Enabling it requires confirming a **blocking danger modal** in the Desktop UI that spells out the consequences — **and that click is the consent**: there is no per-call confirmation; once enabled, Claude runs any whitelisted recipe (with any param values matching the recipe's regexes) without further prompting, and the audit log is the after-the-fact record (see [ADR-054 §"No per-call confirmation"](../adr/ADR-054-host-exec-worker.md)). Claude Code in the container runs `--dangerously-skip-permissions`, so a per-call prompt would have to be a parallel mechanism (and wouldn't cover the `speedwave` CLI either); the honest model is "deliberate enable + whitelist + per-recipe regex params + the ban lists + the audit log", not per-call human-in-the-loop. If you want a recipe to require your attention each time, don't whitelist it.
+- **User-local config only.** The whitelist lives in `~/.speedwave/config.json` (`integrations.hostExec`). The repo `.speedwave.json` layer **ignores `host_exec` entirely** — an executable command whitelist is a security-class field, like the LLM `provider`/`base_url` (`config::apply_integrations_layer`'s `from_repo` gate). A hostile repo cannot grant itself execution.
+- **Fixed command names + regex-constrained params; an amber warning for the dangerous ones.** Claude calls a recipe by name and supplies only the declared parameters; it never composes a command string. The Desktop add/edit dialog shows an amber inline warning when a recipe matches `host_exec::is_container_lifecycle_recipe` (`exec` basename ∈ {`docker`,`docker-compose`,`podman`} with `up`/`down`/`exec`/`rm`/`prune` in `args` — effectively `docker run` with whatever mounts/privileges a Claude-editable compose file declares, ≈ host root) or the broader state-changing heuristic (DB clients, migrations) — but neither is blocking; enabling `host_exec` is the per-project consent.
+- **Fixed commands, not free-form strings.** `exec` + a fixed `args` list; `{name}` parameter tokens substitute into fixed positions and each substitution is **one** argv element, never re-split. Validation (`host_exec::validate_host_exec_config`) rejects an `exec` whose basename is a **shell/eval launcher** (`bash sh zsh … busybox toybox` — `consts::HOST_EXEC_SHELL_LAUNCHERS`), and rejects a **bare `{param}`** as the whole element after a meta-tool (`node python make npm … awk` — `consts::HOST_EXEC_META_TOOLS`); a literal sub-command (`npm run build`, `make test`) is fine. `shell: false`, always; no `-c`/eval option. **Both lists are by basename and not exhaustive** — a renamed interpreter or another interpreter taking a Claude-controlled program string as a non-bare-param arg (`sed -e '{prog}'`, `git -c core.pager={x}`) is not caught; documented residual.
+- **`127.0.0.1`-only worker; per-(project, app-session) bearer.** Each project gets its own worker process on a dynamic loopback port; the hub→worker auth token (`~/.speedwave/host-exec/<project>/auth-token`, mode 0600, bind-mounted into the hub as `/secrets/host_exec-auth-token:ro`) is a fresh UUIDv4 minted per app session and never appears in the repo. Two projects' workers share nothing.
+- **Recipe child env is a strict allowlist.** Spawned recipes get only `PATH` (the recovered login-shell PATH, not Finder's stub), `HOME`/`USERPROFILE`, `TMPDIR`/`TMP`/`TEMP`, `LANG`/`LC_*`, `JAVA_HOME`, `DOCKER_HOST`, the platform minimum, **plus the recipe's own literal `env` map** — never `HOST_EXEC_AUTH_TOKEN`/`HOST_EXEC_CONFIG_PATH`/`PORT`. Recipe `env` keys that are reserved (`RESERVED_ENV_KEYS`) are rejected.
+- **Config file 0600; host log 0600; log redacts `env` values.** The per-project worker snapshot (`~/.speedwave/host-exec/<project>/config.json`) and the audit log (`~/.speedwave/host-exec/<project>/log`) are both `0600` (the spawner pre-creates the log before launching the worker, and the worker's `appendFile` also asserts `0600`). The snapshot may hold a recipe's `env` literals (possibly secrets — the UI warns against that). The log records the full argv, cwd, exit code, status, duration — **it is the only after-the-fact record (there is no per-call confirmation)**; it **redacts recipe `env` values** (keys only) but logs the **argv verbatim** — so a recipe whose `args` substitute a `{param}` logs whatever value Claude supplied, which may be sensitive (e.g. a credential in a `psql -c '{sql}'` query).
+- **Bounded execution; process-tree kill.** A per-command timeout (≈7 min) kills the **whole process group** (`kill(-pid, SIGKILL)` on Unix / `taskkill /T /F /PID` on Windows) so a runaway Gradle daemon / `docker compose` child can't outlive the call. Per-stream output caps (tail kept, ANSI stripped) bound what comes back.
+- **Fail-closed on whitelist change.** The worker re-reads its config snapshot per tool call, so a removed/disabled recipe stops working immediately regardless of hub-cache state; a whitelist edit also respawns the worker and recreates the project's hub container so the tool set re-discovers.
+
+**Residual risk (documented and accepted — see [ADR-054 §Negative](../adr/ADR-054-host-exec-worker.md)):**
+
+- **A whitelist with build/test means repo code runs on the host.** `npm run`, `make`, `gradle`, `docker compose` all execute repo-controlled code — often via `/bin/sh` themselves. The `shell:false` + launcher/meta-tool bans are **defense-in-depth, not a guarantee**: they close `{"exec":"bash","args":["-c","{cmd}"]}` and "run whatever Claude types through `npm`", not "no repo code ever runs". The ban lists are by **basename** and not exhaustive, so `./node_modules/.bin/node …`, a renamed interpreter, `sed -e '{prog}'`, `git -c core.pager={x}` etc. are not caught.
+- **A `docker compose up` recipe is host root.** It runs `docker-compose.yml`, which Claude can rewrite (`/workspace:rw`) to add `privileged: true` + `volumes: ["/:/host:rw"]` — full host takeover from a "build" recipe. Strictly worse than a `gradlew test` recipe (which runs as the user, no privilege escalation). The UI warns when you add such a recipe; beyond that there is no per-call gate (it's all gated behind the enable consent) — a user who whitelists it has accepted that a recipe can host-root them.
+- **Claude can write the repo then run it.** `/workspace` is `:rw` (Claude edits code), so a prompt-injected Claude can author a malicious `build.gradle`/`package.json`/`docker-compose.yml` and then run a whitelisted recipe over it. `cwdSub` confinement doesn't help. The mitigation is the trust decision to enable Host Exec at all and the whitelist the user chose — **prompt injection is mitigated, not eliminated.**
+- **A recipe child has no cgroup / ulimit.** Unlike the `claude` container's CPU/mem caps, a recipe child is a plain host process; for the up-to-7-min window before the timeout it can consume all CPU/RAM/PIDs (same as the user running the command in a terminal). Accepted residual.
+- **An absolute-path `exec` is a user-chosen footgun.** The editor flags an absolute `exec` ("make sure it's the one you mean"), but a user can choose it.
+- **No per-call confirmation, by design.** This is an accepted property, not a residual to fix — enabling Host Exec is the consent for the whole project's whitelist; if you want a recipe gated each time, don't whitelist it (run it yourself), or split it so the dangerous part isn't a recipe.
+
+In short: treat any enabled Host Exec recipe as "this repository's code, on my machine, with my privileges, runnable by Claude without a prompt" — because that is exactly what it is. Enable it only for repositories you trust, and only whitelist commands you're OK with Claude running unattended.
 
 ### Security Boundaries
 
@@ -120,9 +176,9 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 
 ### Container User Rule
 
-| Rule             | Scope          | What it checks                                                                                                                                                                                  |
-| ---------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CONTAINER_USER` | All containers | `user:` field matches the platform-expected value from `container_user()` (UID 1000 on macOS/Windows, UID 0 on Linux rootless — see [ADR-026](../adr/ADR-026-linux-rootless-container-user.md)) |
+| Rule             | Scope          | What it checks                                                                     |
+| ---------------- | -------------- | ---------------------------------------------------------------------------------- |
+| `CONTAINER_USER` | All containers | `user:` field matches `container_user()` (UID 1000:1000 on both macOS and Windows) |
 
 ### Plugin Security Rules
 
@@ -140,20 +196,31 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 | `PLUGIN_MISSING_TOKENS_MOUNT`    | Plugin services | `/tokens` mount is present                                                      |
 | `PLUGIN_MISSING_WORKSPACE_MOUNT` | Plugin services | `/workspace` mount is present                                                   |
 
+### Plugin Manifest Validation
+
+`validate_manifest` (`crates/speedwave-runtime/src/plugin.rs`) is run both at install time and at every load-side path (compose render, image build). Beyond the basic slug/version/format checks it enforces:
+
+- **`extra_env` reserved keys** — a plugin must not inject env vars that Speedwave reserves (`PORT`, auto-injected) or that are dynamic-linker / language-runtime / shell-environment hijack vectors (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is `consts::RESERVED_ENV_KEYS` (SSOT — see CLAUDE.md), matched case-insensitively. The same list also rejects a [Host Exec](#host-exec--deliberate-scoped-weakening) recipe's `env` keys; alongside it, `consts::HOST_EXEC_SHELL_LAUNCHERS` (banned `exec` basenames — shell/eval launchers) and `consts::HOST_EXEC_META_TOOLS` (interpreters/package-script runners that may not take a bare-`{param}` argument) are sibling SSOT lists consumed by `host_exec::validate_host_exec_config` — edit `consts.rs`, not the validators.
+- **`token_mount: read_write`** — rejected unconditionally for plugins. No built-in service currently uses `:rw` for tokens — [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md) moved SharePoint OAuth refresh to the host-side `oauth` worker. Built-in service slugs are blocked earlier in the function, so any plugin reaching this check is by definition unauthorised.
+- **`mem_limit` / `cpu_limit`** — parsed numerically and bounded by `PLUGIN_MEM_LIMIT_MAX_MIB` / `PLUGIN_CPU_LIMIT_MAX`. An explicit `0` (Docker's "no limit") is rejected so a plugin cannot bypass the cap.
+- **Slug collision** — a slug whose derived compose name (`mcp-<slug>`) or whose bare form matches a built-in service is rejected, so a plugin cannot shadow `mcp-hub`, `claude`, etc. via a silent YAML-mapping overwrite.
+- **`settings_schema`** — must be a JSON object ≤ 64 KiB. Full Draft-7 validation of saved settings happens desktop-side in `plugin_save_settings` (the runtime crate has no JSON-Schema dependency).
+
+See [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md) for the full rationale and the runtime-invariant model.
+
 ### SharePoint Volume Rules
 
-Same checks as plugin volumes, applied to the built-in SharePoint service. SharePoint uses `:rw` token mount for OAuth refresh (see [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)).
+Same checks as plugin volumes, applied to the built-in SharePoint service. As of [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md) SharePoint mounts `/tokens:ro` like every other worker; OAuth refresh moved to the host-side `oauth` worker. The token-mount-mode check is the generic `PLUGIN_TOKEN_MOUNT_MODE` (re-used for built-in workers) — there is no dedicated SharePoint variant any more.
 
-| Rule                                 | What it checks                        |
-| ------------------------------------ | ------------------------------------- |
-| `SHAREPOINT_VOLUME_LONG_FORM`        | Short-form volumes only               |
-| `SHAREPOINT_TOKEN_PATH_MISMATCH`     | Token mount path matches expected     |
-| `SHAREPOINT_TOKEN_MOUNT_MODE`        | Token mount mode is `:rw`             |
-| `SHAREPOINT_WORKSPACE_PATH_MISMATCH` | Workspace mount path matches expected |
-| `SHAREPOINT_WORKSPACE_MOUNT_MODE`    | Workspace mount mode is `:rw`         |
-| `SHAREPOINT_NO_EXTRA_VOLUMES`        | No extra volumes                      |
-| `SHAREPOINT_MISSING_TOKENS_MOUNT`    | Token mount present                   |
-| `SHAREPOINT_MISSING_WORKSPACE_MOUNT` | Workspace mount present               |
+| Rule                                 | What it checks                                                             |
+| ------------------------------------ | -------------------------------------------------------------------------- |
+| `SHAREPOINT_VOLUME_LONG_FORM`        | Short-form volumes only                                                    |
+| `SHAREPOINT_TOKEN_PATH_MISMATCH`     | Token mount path matches expected                                          |
+| `SHAREPOINT_WORKSPACE_PATH_MISMATCH` | Workspace mount path matches expected                                      |
+| `SHAREPOINT_WORKSPACE_MOUNT_MODE`    | Workspace mount mode is `:rw`                                              |
+| `SHAREPOINT_NO_EXTRA_VOLUMES`        | Allowlisted extras only: `/tokens`, `/workspace`, per-service oauth bearer |
+| `SHAREPOINT_MISSING_TOKENS_MOUNT`    | Token mount present                                                        |
+| `SHAREPOINT_MISSING_WORKSPACE_MOUNT` | Workspace mount present                                                    |
 
 ### Host File Security Rules
 
@@ -165,16 +232,19 @@ Same checks as plugin volumes, applied to the built-in SharePoint service. Share
 
 Sensitive directories must be `0o700` (owner rwx only):
 
-- `~/.speedwave/secrets/<project>/` — worker auth tokens
+- `~/.speedwave/secrets/<project>/` — worker auth tokens (including the Host Exec hub→worker bearer)
 - `~/.speedwave/snapshots/<project>/` — compose rollback snapshots
 - `~/.speedwave/ide-bridge/` — IDE bridge lock files
 - `~/.speedwave/tokens/<project>/` — token parent directory
 - `~/.speedwave/tokens/<project>/<service>/` — per-service token directories
+- `~/.speedwave/host-exec/<project>/` — per-project Host Exec worker state (config snapshot, PID, port, log)
 
 Sensitive files must be `0o600` (owner rw only):
 
 - `~/.speedwave/secrets/<project>/*` — service auth tokens. Reads of these files reject symbolic links — `is_symlink()` is checked before `is_file()` to defeat host-write attackers planting a symlink to a substitute UUID.
 - `~/.speedwave/tokens/<project>/<service>/*` — plugin credentials
+- `~/.speedwave/host-exec/<project>/auth-token` — the Host Exec hub→worker bearer (a fresh UUIDv4 per app session; bind-mounted into the hub container as `/secrets/host_exec-auth-token:ro`)
+- `~/.speedwave/host-exec/<project>/config.json` — Host Exec recipe whitelist snapshot the worker reads (may contain a recipe's `env` literals; `host_exec_save_settings` writes it `0o600` via `write_host_exec_config_snapshot`)
 - `~/.speedwave/snapshots/<project>/*.json` — compose snapshots
 - `~/.speedwave/ide-bridge/*.lock` — IDE bridge auth tokens
 - `~/.speedwave/bundle-state.json` — bundle reconciliation state
@@ -198,14 +268,37 @@ Because the full project directory is mounted as `/workspace:rw`, the `path-vali
 `os_prereqs::check_os_prereqs()` validates host-level requirements before any container operations:
 
 - **Windows**: Verifies WSL2 is available via `wsl.exe --status` (10s timeout). If missing, reports actionable remediation (DISM commands or Windows Features GUI).
-- **Linux**: Verifies `newuidmap` is installed (required for rootless user namespaces).
 - **macOS**: No OS prerequisites — Lima runtime is bundled by Speedwave.
 
 These checks run at multiple points: setup wizard (before VM init), container start (blocking overlay in Desktop, exit in CLI), and update/rollback. Violations produce `PrereqViolation` structs with remediation text, following the same pattern as `SecurityCheck` violations.
 
 Both OS prereq failures and `SecurityCheck` compose violations block the application — containers never start if either check fails.
 
+**Windows uninstall cleanup (ADR-048):** The NSIS uninstaller offers an opt-in `MessageBox` that, when accepted, performs `wsl --unregister Speedwave` and `RMDir /r $PROFILE\.speedwave` on the host. The default for unattended (`/S`) uninstalls is to preserve data (`/SD IDNO`). If `SPEEDWAVE_DATA_DIR` is set (ADR-031), the data-dir removal is skipped and the user is instructed to remove that path manually; only the WSL distro is unregistered.
+
 Additionally, `check_os_warnings()` provides non-blocking diagnostic warnings (e.g. nested virtualization detected) logged via `log::warn!` during system checks. These warnings do not block container operations but appear in `speedwave check` output and Desktop log files.
+
+## Third-party services
+
+Some MCP workers reach external SaaS endpoints from inside their container. The `claude` container itself never makes outbound HTTP — every third-party hop is mediated by a worker with a narrow scope and an audited data flow.
+
+### Context7 (library documentation)
+
+The `mcp-context7` worker calls `https://context7.com/api/v2/*` (Upstash) to resolve library names to IDs and fetch documentation snippets.
+
+**Data sent to Upstash on every call:**
+
+- Query string (the natural-language question the user typed)
+- `libraryName` / `libraryId` (e.g. `"react"` / `/facebook/react`)
+- Optional API key (`ctx7sk_…`) when configured — sent in `Authorization: Bearer`
+- `User-Agent: Speedwave-Context7/<version>` and standard HTTP headers
+- Source IP (the worker's egress IP — Upstash documents that IPs are stored encrypted)
+
+**Per Context7's documented data use, queries may be retained and used for benchmarking and reranking, including by third-party LLMs.** Anything sensitive in the user's question crosses a trust boundary — the same way it would if Claude itself called the API.
+
+**Anonymous mode (no key):** ~200 requests per day per source IP (from the `ratelimit-limit` response header). For a multi-user host on one corporate NAT this is shared across all users; if it runs out, Upstash returns 429 with a `ratelimit-reset` Unix timestamp. There is no SLA and no DPA in anonymous mode — for compliance-sensitive deployments, each developer should generate a free key at [context7.com/dashboard](https://context7.com/dashboard).
+
+**Container constraints (identical to other workers):** `cap_drop: ALL`, `no-new-privileges`, `read_only`, `tmpfs /tmp:noexec,nosuid`, 128 MiB memory cap. The `api_key` file is mounted `:ro`. Redirects from Context7 are explicitly NOT followed (undici v7 default + `mapErrorStatus` rejects 3xx). HTTP body is capped at 5 MiB by `readBodyLimited` in `client.ts` (drains the stream with a byte counter and aborts cleanly before the 128 MiB container cap would OOM-kill the worker). Timeouts cap time independently: 30 s headers + 30 s body via undici options.
 
 ## Redmine API Proxy Commands
 
@@ -258,6 +351,16 @@ The Desktop app includes a Tauri command `discover_llm_models` that probes a loc
 
 **SecurityCheck scope:** Same as Redmine — these commands run on the Desktop host process, outside SecurityCheck's compose validation scope. SSRF protection is implemented directly in the command handlers.
 
+## Host-Side Audio Capture (Meeting Transcription)
+
+Meeting transcription runs **on the Desktop host** — the Claude container has no audio access (a v1 invariant), so this is a separate threat surface, like the LLM-discovery and Redmine commands. The full design and rationale is [ADR-056](adr/ADR-056-host-side-audio-transcription.md); the security-relevant points:
+
+- **Opt-in, off by default, no repo override.** The feature is gated behind a top-level user-config flag (`~/.speedwave/config.json`). Repository `.speedwave.json` **cannot** enable it (privacy invariant — a repo must not be able to turn on the user's microphone). With the flag off, no capture code runs.
+- **Capture surface.** When enabled, the app can record the host's system-audio loopback (what the user hears — the other call participants) and the microphone, mixed into one stream (the "Whole meeting" default). Each platform uses its OS primitive: macOS CoreAudio process taps via the bundled `audio-capture-cli` (14.4+), and Windows WASAPI loopback via `cpal`. The bundled macOS CLI is a signed Mach-O (`pl.speedwave.desktop.audio-capture`, embedded `Info.plist`) — see _Binary Authenticity_ below.
+- **OS permission prompts.** The microphone prompt fires via the public `AVCaptureDevice.requestAccess` API. The **system-audio** ("System Audio Recording") prompt has _no public trigger_ on macOS, so `audio-capture-cli` requests it via the private `TCCAccessRequest(kTCCServiceAudioCapture)` API (the AudioCap / AudioTee approach; works on a notarized `.dmg`, not an App Store app). This is the one private-platform-API dependency in the codebase; it is `dlopen`/`dlsym`-guarded — if a future macOS removes the symbol the CLI exits "permission unavailable" and the UI deep-links the user to System Settings, rather than crashing — and isolated to one commented function (the precedent for a guarded private call is `desktop/src-tauri/src/fs_perms.rs`). ADR-056 decision 3 records this; the public alternative (ScreenCaptureKit audio) was rejected for needing the heavyweight Screen Recording permission and having macOS 15 audio-only defects.
+- **Files on disk.** Recordings and transcripts live under `~/.speedwave/transcripts/<id>/` (`audio.wav` + `transcript.json`, `0600`). Models live under `~/.speedwave/models/{whisper,diarization}/` (`0700` dirs, `0600` files), SHA-256-verified on download. There is no auto-retention in v1 — the user deletes recordings manually (the UI also offers "discard audio, keep transcript").
+- **"Local" is true only for inference.** Whisper transcription and sherpa diarization run locally — no audio leaves the machine for inference. **Model downloads use the network** (HTTPS to Hugging Face / GitHub via the model-store's redirect-allowlist + streaming hash — same hardening posture as elsewhere; see ADR-056 decision 9). **"Send to Claude"** uploads the rendered transcript _text_ to the user's configured LLM provider (with a confirm dialog). The UI states both on every relevant surface.
+
 ## Authentication Gate
 
 Claude Code must be authenticated (OAuth or API key) before the app allows
@@ -269,16 +372,35 @@ chat access. Enforced at two layers:
   prompts for interactive login on stdin while the frontend waits for
   stream-json on stdout.
 
-- **Frontend (`ProjectStateService`):** After containers are running, calls
-  `get_auth_status`. If neither OAuth nor API key is configured, sets status to
-  `auth_required` — an overlay displays a CLI command (`get_auth_command`) for
-  the user to copy into their own terminal to complete OAuth login. The command
-  is displayed as text only (never executed by the app), eliminating shell
-  injection risk. When the Desktop app's data directory differs from the
-  default (`~/.speedwave`), the command includes an
-  `export SPEEDWAVE_DATA_DIR=...` prefix. The value comes from the Desktop
-  app's own data directory, which is determined at process start and never
-  re-read from the terminal session's environment.
+- **Frontend (`ProjectStateService` / `AuthTerminalComponent`):** After
+  containers are running, calls `get_auth_status`. If neither OAuth nor API key
+  is configured, the auth overlay offers two ways to log in:
+  - **Primary — "Open terminal and log in" (`start_oauth_login`).** Spawns the
+    host's terminal application (iTerm2 → Apple Terminal on macOS; PowerShell on
+    Windows) running `speedwave login`,
+    so the user types `/login` at Claude Code's prompt. The command string
+    handed to the terminal is built by `build_auth_command_for_platform` (same
+    renderer as the copy-paste fallback), and every component that flows into it
+    is constrained: the project name passes `validate_project_name` and is
+    shell/PowerShell-quoted; the macOS AppleScript path additionally rejects
+    control characters and only accepts a `$SHELL` that is a plain absolute path
+    (otherwise falls back to `/bin/zsh`). Speedwave never performs OAuth itself
+    and never sees the token — Claude Code owns the credential lifecycle.
+  - **Fallback — copy-paste command (`get_auth_command`).** The same command
+    string, shown as text for the user to run in any terminal of their choice.
+    When the Desktop app's data directory differs from the default
+    (`~/.speedwave`), the command includes an `export SPEEDWAVE_DATA_DIR=...`
+    prefix (PowerShell: `$env:SPEEDWAVE_DATA_DIR = '...'`). The value comes from
+    the Desktop app's own data directory, determined at process start and never
+    re-read from the terminal session's environment.
+
+  A complementary host-side helper, the **clipboard bridge** (`clipboard_bridge.rs`),
+  watches `<data_dir>/claude-home/<project>/.clipboard-bridge` — a file written
+  by the in-container `osc52-copy.sh` wrapper — and copies new content to the
+  host clipboard (deduplicated, capped at 64 KB, opened with a single
+  size-limited read so a container cannot swap in a huge payload between a
+  size check and the read). This makes Claude Code's "press `c` to copy the
+  auth URL" work even in terminals that ignore OSC 52 (e.g. Apple Terminal).
 
 ## Binary Authenticity
 
@@ -318,6 +440,8 @@ Treat the Apple Developer ID as the primary secret. The Tauri key is a defense-i
 ## See Also
 
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)
-- [ADR-026: Linux Rootless nerdctl — Per-Platform Container User](../adr/ADR-026-linux-rootless-container-user.md)
+- [ADR-059: Drop Linux Support](../adr/ADR-059-drop-linux-support.md)
 - [ADR-037: Code Signing and Bundled Binary Signing](../adr/ADR-037-code-signing-and-bundled-binary-signing.md)
+- [ADR-051: Plugin Signature Runtime Verification](../adr/ADR-051-plugin-signature-runtime-verification.md)
+- [ADR-054: Host Exec — Host-Side Per-Project Toolchain Worker](../adr/ADR-054-host-exec-worker.md)
 - [Release Signing Guide](../contributing/release-signing.md)

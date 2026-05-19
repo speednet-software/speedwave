@@ -470,13 +470,30 @@ export interface SSEEvent {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * Optional per-call context passed to tool handlers. Currently carries the
+ * authenticated caller id resolved from the request bearer token (set by the
+ * shared `bearerAuth` middleware via `auth.callerTokens`). Tools that need to
+ * derive identity from the bearer (e.g. the `oauth` worker per ADR-060) read
+ * `context.caller`; tools that don't care can ignore it.
+ */
+export interface ToolHandlerContext {
+  /** Caller id, '' for primary supervisor token, '' if auth is unset. */
+  caller: string;
+}
+
+/**
  * Function signature for implementing a tool's execution logic.
- * Receives validated parameters and returns formatted result.
+ * Receives validated parameters and an optional context (caller info) and
+ * returns the formatted result.
  * @callback ToolHandler
  * @param {Record<string, unknown>} params - Tool parameters (validated against inputSchema)
+ * @param {ToolHandlerContext} [context] - Optional per-call context
  * @returns {Promise<ToolsCallResult>} Tool execution result
  */
-export type ToolHandler = (params: Record<string, unknown>) => Promise<ToolsCallResult>;
+export type ToolHandler = (
+  params: Record<string, unknown>,
+  context?: ToolHandlerContext
+) => Promise<ToolsCallResult>;
 
 /**
  * Complete tool definition combining schema and implementation.

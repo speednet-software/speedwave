@@ -32,9 +32,9 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
-        build-native-macos build-os-cli bundle-native-assets verify-bundled-assets \
-        test-rust test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
-        test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
+        build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
+        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
+        test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
@@ -42,7 +42,6 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
-        download-nerdctl-full clean-nerdctl-full \
         download-wsl-resources clean-wsl-resources
 
 # ── Developer setup (run once after cloning) ─────────────────────────────────
@@ -195,27 +194,37 @@ build-runtime:
 build-cli:
 	cargo build -p speedwave-cli
 
+# Release-profile build of the CLI, used as a dependency of `build-tauri`
+# so the bundled CLI shipped inside the .app/.exe/.dmg is a release
+# binary. With a debug binary, the `SPEEDWAVE_ALLOW_UNSIGNED` bypass in
+# `signing::unsigned_bypass_active` would still be live in shipped
+# artifacts (it is `cfg(debug_assertions)`-gated, which only flips off
+# in the release profile). Keep `build-cli` (debug) untouched so
+# `make dev` and ad-hoc developer runs are not slowed down.
+build-cli-release:
+	cargo build -p speedwave-cli --release
+
 build-desktop:
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli build-angular build-mcp build-os-cli download-nodejs
+build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@scripts/bundle-build-context.sh
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
+	@$(MAKE) bundle-static-licenses
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
-	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
-	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
+	cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && cargo tauri build
 	@echo "\n✅ Tauri production bundle built"
 
-# ── Native OS CLI builds (macOS: Swift, Linux/Windows: Rust — planned) ───────
+# ── Native OS CLI builds (macOS: Swift, Windows: Rust — planned) ─────────────
 
 build-native-macos:
 	@if [ "$$(uname)" != "Darwin" ]; then \
@@ -226,6 +235,7 @@ build-native-macos:
 		cd $(CURDIR)/native/macos/calendar && swift build -c release && \
 		cd $(CURDIR)/native/macos/mail && swift build -c release && \
 		cd $(CURDIR)/native/macos/notes && swift build -c release && \
+		cd $(CURDIR)/native/macos/audio-capture && swift build -c release && \
 		echo "✅ macOS native CLI binaries built"; \
 	fi
 
@@ -235,7 +245,7 @@ test-swift:
 	@if [ "$$(uname)" != "Darwin" ]; then \
 		echo "⬚  Skipping Swift tests (not macOS)"; \
 	else \
-		for pkg in shared reminders calendar mail notes; do \
+		for pkg in shared reminders calendar mail notes audio-capture; do \
 			echo "Testing $$pkg..." && \
 			(cd $(CURDIR)/native/macos/$$pkg && swift test) || exit 1; \
 		done && \
@@ -245,14 +255,22 @@ test-swift:
 bundle-native-assets:
 	@scripts/bundle-native-assets.sh
 
+# Copy the static third-party licenses we keep in-repo (whisper.cpp, sherpa-onnx,
+# onnxruntime, cpal, transcription model weights — ADR-056) into the bundled
+# THIRD-PARTY-LICENSES/ dir, alongside the lima/nodejs/nerdctl licenses the
+# download-* targets fetch there. The static dir is VCS-tracked; the bundled
+# dir is generated.
+bundle-static-licenses:
+	@mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
+	@cp desktop/src-tauri/licenses-static/* desktop/src-tauri/THIRD-PARTY-LICENSES/
+	@echo "✅ Static third-party licenses copied into THIRD-PARTY-LICENSES/"
+
 verify-bundled-assets:
 ifeq ($(OS),Windows_NT)
 	@scripts/verify-bundled-assets.sh windows
 else
 	@if [ "$$(uname)" = "Darwin" ]; then \
 		scripts/verify-bundled-assets.sh macos; \
-	elif [ "$$(uname)" = "Linux" ]; then \
-		scripts/verify-bundled-assets.sh linux; \
 	else \
 		echo "Unsupported host for bundled asset verification"; \
 		exit 1; \
@@ -277,7 +295,23 @@ test-rust:
 	@# Parallel cargo-test threads race on those paths and surface `os error 2`
 	@# from `render_compose`. Run serially to keep the suite deterministic.
 	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime -p speedwave-cli -- --test-threads=1
+	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
+	@# is off by default — the CLI never enables it — so the default run above
+	@# doesn't compile the `transcription` module. Test it explicitly here.
+	$(MAKE) test-transcription
 	@echo "✅ Rust tests passed"
+
+test-transcription:
+	@echo "🧪 Testing speedwave-runtime with the audio-transcription feature..."
+	@# Only the `transcription` module is gated behind this feature (see
+	@# `src/lib.rs` — `#[cfg(feature = "audio-transcription")] pub mod transcription;`).
+	@# The rest of the crate (compose, plugin, build, …) is identical with or
+	@# without the feature and is already exercised by `test-rust`. Without the
+	@# `transcription::` filter, cargo re-runs the whole suite a second time
+	@# (~100 compose tests at ~5s each under `--test-threads=1`), which alone
+	@# blows past the 15-minute CI job budget.
+	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime --features audio-transcription transcription:: -- --test-threads=1
+	@echo "✅ audio-transcription tests passed"
 
 test-cli:
 	@echo "🧪 Testing CLI..."
@@ -286,7 +320,6 @@ test-cli:
 
 test-desktop: build-cli build-angular build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -s desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
@@ -317,6 +350,20 @@ test-mcp: build-mcp
 test-os: build-mcp
 	cd mcp-servers/os && npx vitest run
 	@echo "✅ OS MCP server tests passed"
+
+# pytest for the office worker's Python support-scripts. Builds a throwaway venv from
+# mcp-servers/office/requirements.txt (+ pytest). Heavy (matplotlib/numpy) — not part of
+# `make test`; run it explicitly, or rely on the office image build to exercise the scripts.
+# Tests that need a real matplotlib render self-skip on too-new Python interpreters.
+test-mcp-office-py:
+	@PY=$$(command -v python3.12 || command -v python3.11 || command -v python3); \
+	echo "  building office Python test venv ($$PY)..."; \
+	rm -rf .office-test-venv && "$$PY" -m venv .office-test-venv; \
+	.office-test-venv/bin/pip install -q --upgrade pip; \
+	.office-test-venv/bin/pip install -q -r mcp-servers/office/requirements.txt pytest; \
+	.office-test-venv/bin/python -m pytest mcp-servers/office/scripts -q; \
+	rm -rf .office-test-venv
+	@echo "✅ Office Python script tests passed"
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
@@ -351,13 +398,23 @@ coverage-html: build-mcp
 
 test-e2e: build-cli
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	SPEEDWAVE_BIN=./target/debug/speedwave-cli bats _tests/e2e/speedwave.bats
+	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/speedwave.bats
+	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/plugin-tamper.bats
+	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/host-exec.bats
+
+# Plugin tamper / signature-bypass E2E. Runs against the *release* CLI
+# so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be
+# compiled out — see ADR-051 ("Build hygiene").
+test-e2e-plugin-tamper-release: build-cli-release
+	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	SPEEDWAVE_BIN=./target/release/speedwave bats _tests/e2e/plugin-tamper.bats
 
 test-entrypoint:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	bats _tests/entrypoint/entrypoint.bats
 	bats _tests/entrypoint/install-claude.bats
 	bats _tests/entrypoint/statusline.bats
+	bats _tests/entrypoint/osc52-copy.bats
 	@echo "✅ Entrypoint tests passed"
 
 test-ci:
@@ -400,7 +457,6 @@ test-release-gate:
 # Used by e2e-vm.sh (build as root, test as desktop user with display access).
 test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -s desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
@@ -435,17 +491,12 @@ E2E_BINARY = desktop/src-tauri/target/release/speedwave-desktop
 #
 # State directories per platform:
 #   macOS:  ~/.speedwave/, ~/Library/Caches/lima/
-#   Linux:  ~/.speedwave/, ~/.local/share/{containerd,buildkit,nerdctl}/,
-#           ~/.config/systemd/user/containerd.service
 #   Windows: not supported for local E2E (use scripts/e2e-vm.sh windows)
 _e2e-run:
 	@echo "── Killing any existing Speedwave instances..."
 	@pkill -f speedwave-desktop 2>/dev/null || true
 	@pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 	@pkill -9 -f limactl 2>/dev/null || true
-	@if [ "$$(uname)" = "Linux" ]; then \
-		systemctl --user stop containerd 2>/dev/null || true; \
-	fi
 	@sleep 1
 	@rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 	@mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
@@ -459,34 +510,15 @@ _e2e-run:
 	backup_dir "$$SPEEDWAVE_DATA_DIR" "$$E2E_BAK"; \
 	if [ "$$(uname)" = "Darwin" ]; then \
 		backup_dir "$$HOME/Library/Caches/lima" "$$HOME/Library/Caches/lima.e2e-bak"; \
-	elif [ "$$(uname)" = "Linux" ]; then \
-		backup_dir "$$HOME/.local/share/containerd" "$$HOME/.local/share/containerd.e2e-bak"; \
-		backup_dir "$$HOME/.local/share/buildkit" "$$HOME/.local/share/buildkit.e2e-bak"; \
-		backup_dir "$$HOME/.local/share/nerdctl" "$$HOME/.local/share/nerdctl.e2e-bak"; \
-		if [ -f "$$HOME/.config/systemd/user/containerd.service" ]; then \
-			mv "$$HOME/.config/systemd/user/containerd.service" "$$HOME/.config/systemd/user/containerd.service.e2e-bak"; \
-		fi; \
 	fi; \
 	restore_state() { \
 		pkill -f speedwave-desktop 2>/dev/null || true; \
 		pkill -f 'mcp-os.*index.js' 2>/dev/null || true; \
 		pkill -9 -f limactl 2>/dev/null || true; \
-		if [ "$$(uname)" = "Linux" ]; then \
-			systemctl --user stop containerd 2>/dev/null || true; \
-		fi; \
 		sleep 1; \
 		restore_dir "$$SPEEDWAVE_DATA_DIR" "$$E2E_BAK"; \
 		if [ "$$(uname)" = "Darwin" ]; then \
 			restore_dir "$$HOME/Library/Caches/lima" "$$HOME/Library/Caches/lima.e2e-bak"; \
-		elif [ "$$(uname)" = "Linux" ]; then \
-			restore_dir "$$HOME/.local/share/containerd" "$$HOME/.local/share/containerd.e2e-bak"; \
-			restore_dir "$$HOME/.local/share/buildkit" "$$HOME/.local/share/buildkit.e2e-bak"; \
-			restore_dir "$$HOME/.local/share/nerdctl" "$$HOME/.local/share/nerdctl.e2e-bak"; \
-			if [ -f "$$HOME/.config/systemd/user/containerd.service.e2e-bak" ]; then \
-				mv "$$HOME/.config/systemd/user/containerd.service.e2e-bak" "$$HOME/.config/systemd/user/containerd.service"; \
-			fi; \
-			systemctl --user daemon-reload 2>/dev/null || true; \
-			systemctl --user start containerd 2>/dev/null || true; \
 		fi; \
 	}; \
 	$(E2E_BINARY) & APP_PID=$$!; \
@@ -503,9 +535,6 @@ _e2e-run:
 _e2e-macos:
 	@scripts/e2e-vm.sh macos
 
-_e2e-linux:
-	@scripts/e2e-vm.sh ubuntu
-
 _e2e-windows:
 	@scripts/e2e-vm.sh windows
 
@@ -521,6 +550,9 @@ setup-e2e-vms:
 
 check-clippy:
 	cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+	@# The `audio-transcription` feature is off by default, so the line above
+	@# doesn't lint the `transcription` module — clippy it explicitly too.
+	cargo clippy -p speedwave-runtime --features audio-transcription -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
@@ -532,7 +564,7 @@ check-desktop-clippy: build-angular build-mcp
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && npx tsc
-	@for ws in shared hub slack sharepoint redmine gitlab os; do \
+	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os host_exec oauth; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && npx tsc --noEmit) || exit 1; \
 	done
@@ -645,7 +677,6 @@ download-nodejs:
 	esac; \
 	case "$$(uname -s)" in \
 		Darwin) NODE_PLATFORM="darwin" ;; \
-		Linux) NODE_PLATFORM="linux" ;; \
 		*) echo "Unsupported OS: $$(uname -s)"; exit 1 ;; \
 	esac; \
 	TARBALL="node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH.tar.gz"; \
@@ -674,48 +705,13 @@ download-nodejs:
 clean-nodejs:
 	rm -rf desktop/src-tauri/nodejs
 
-# ── nerdctl-full bundling (Linux Desktop .deb only) ──────────────────────────
+# ── Windows offline bundle resources (WSL2 nerdctl-full + Ubuntu rootfs) ─────
 
 NERDCTL_FULL_VERSION     := $(shell grep -A1 '^pub const NERDCTL_FULL_VERSION' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 NERDCTL_FULL_SHA256_AMD64 := $(shell grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 WSL_ROOTFS_URL_AMD64     := $(shell grep -A1 '^pub const WSL_ROOTFS_URL_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 WSL_ROOTFS_SHA256_AMD64  := $(shell grep -A1 '^pub const WSL_ROOTFS_SHA256_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 
-download-nerdctl-full:
-	@echo "Downloading nerdctl-full $(NERDCTL_FULL_VERSION)..."
-	@rm -rf desktop/src-tauri/nerdctl-full
-	@mkdir -p desktop/src-tauri/nerdctl-full desktop/src-tauri/THIRD-PARTY-LICENSES
-	@ARCH=$$(uname -m); \
-	case "$$ARCH" in \
-		x86_64|amd64) NERDCTL_ARCH="amd64" ;; \
-		aarch64|arm64) NERDCTL_ARCH="arm64" ;; \
-		*) echo "Unsupported architecture: $$ARCH"; exit 1 ;; \
-	esac; \
-	TARBALL="nerdctl-full-$(NERDCTL_FULL_VERSION)-linux-$$NERDCTL_ARCH.tar.gz"; \
-	URL="https://github.com/containerd/nerdctl/releases/download/v$(NERDCTL_FULL_VERSION)/$$TARBALL"; \
-	SUMS_URL="https://github.com/containerd/nerdctl/releases/download/v$(NERDCTL_FULL_VERSION)/SHA256SUMS"; \
-	echo "  Downloading $$URL"; \
-	curl -fsSL "$$URL" -o "/tmp/$$TARBALL" && \
-	curl -fsSL "$$SUMS_URL" -o /tmp/nerdctl-SHA256SUMS && \
-	echo "  Verifying SHA256 checksum..." && \
-	EXPECTED=$$(grep "$$TARBALL" /tmp/nerdctl-SHA256SUMS | awk '{print $$1}') && \
-	ACTUAL=$$( (sha256sum "/tmp/$$TARBALL" 2>/dev/null || shasum -a 256 "/tmp/$$TARBALL") | awk '{print $$1}') && \
-	if [ "$$EXPECTED" != "$$ACTUAL" ]; then \
-		echo "CHECKSUM MISMATCH! Expected $$EXPECTED, got $$ACTUAL"; exit 1; \
-	fi && \
-	echo "  Checksum OK" && \
-	tar -xzf "/tmp/$$TARBALL" -C desktop/src-tauri/nerdctl-full/ && \
-	rm -f "/tmp/$$TARBALL" /tmp/nerdctl-SHA256SUMS
-	@cp desktop/src-tauri/nerdctl-full/share/doc/nerdctl-full/LICENSE \
-		desktop/src-tauri/THIRD-PARTY-LICENSES/nerdctl-full-LICENSE 2>/dev/null || \
-	cp desktop/src-tauri/nerdctl-full/share/doc/nerdctl/LICENSE \
-		desktop/src-tauri/THIRD-PARTY-LICENSES/nerdctl-full-LICENSE 2>/dev/null || true
-	@echo "  ✅ nerdctl-full $(NERDCTL_FULL_VERSION) ready"
-
-clean-nerdctl-full:
-	rm -rf desktop/src-tauri/nerdctl-full
-
-# ── Windows offline bundle resources (WSL2 nerdctl-full + Ubuntu rootfs) ─────
 # Downloads the nerdctl-full tarball and Ubuntu rootfs for bundling inside the
 # Windows NSIS installer. Run `make download-wsl-resources` before `make build-tauri`
 # on Windows, or in CI for windows-latest builds.
@@ -743,7 +739,6 @@ clean-wsl-resources:
 dev: build-cli build-os-cli build-mcp download-nodejs
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@echo "Preparing build context..."
 	@scripts/bundle-build-context.sh

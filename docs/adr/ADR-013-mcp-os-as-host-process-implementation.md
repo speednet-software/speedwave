@@ -6,10 +6,9 @@ mcp-os runs on the host (inside the Speedwave Desktop app), not in a container.
 
 ## Rationale
 
-D-Bus (Linux), WinRT/MAPI (Windows), and AppleScript/EventKit (macOS) are host-level APIs that are inaccessible from inside an isolated container:
+WinRT/MAPI (Windows) and AppleScript/EventKit (macOS) are host-level APIs that are inaccessible from inside an isolated container:
 
 - **macOS:** AppleScript and EventKit require direct access to macOS system services (Reminders, Calendar, Mail, Notes). These are gated by TCC (Transparency, Consent, and Control)[^22] and only available to the host process that received user permission via `Info.plist` declarations.
-- **Linux:** D-Bus is a host IPC bus. Mounting `/var/run/dbus/system_bus_socket` into a container would violate the principle of minimal host exposure and expand the attack surface. EDS (Evolution Data Server) is accessed via D-Bus.[^26]
 - **Windows:** WinRT APIs[^13] and MAPI COM[^14] are host-only. They require the calling process to run in the user's desktop session.
 
 Mounting host sockets into containers would break the security model established in ADR-009. Running mcp-os on the host is the only correct approach.
@@ -34,5 +33,3 @@ mcp-os binds to `127.0.0.1:4007` on all platforms (the default in the shared MCP
 [^14]: [microsoft/mapi-rs - Rust bindings for Outlook MAPI](https://github.com/microsoft/mapi-rs)
 
 [^22]: [macOS TCC - Transparency Consent and Control](https://developer.apple.com/documentation/bundleresources/information-property-list/nscalendarsusagedescription)
-
-[^26]: [zbus - D-Bus library for Rust](https://docs.rs/zbus)

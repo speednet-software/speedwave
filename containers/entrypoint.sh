@@ -136,6 +136,43 @@ cat > "${HOME}/.claude/mcp-config.json" << EOF
 }
 EOF
 
+# Pre-create .claude.json so Claude Code skips the onboarding flow on start.
+# Without this, Claude treats the session as a fresh install and re-prompts
+# for login even when ~/.claude/.credentials.json exists.
+# See: https://github.com/tfvchow/field-notes-public/issues/10
+if [ ! -f "${HOME}/.claude.json" ]; then
+    cat > "${HOME}/.claude.json" << 'EOF'
+{
+  "hasCompletedOnboarding": true,
+  "installMethod": "native"
+}
+EOF
+fi
+
+
+# Wait for MCP hub to accept connections before Claude starts. Without this,
+# the first claude session hits `ConnectionRefused` on http://mcp-hub:4000
+# during compose-up race (claude container ready before hub), and runs with
+# zero tools — listFiles, search_tools, sharepoint.* all unavailable until
+# user opens a fresh chat. Hub typically responds within a second; bail
+# after ~30s so a broken hub doesn't lock the container forever.
+# Set `SPEEDWAVE_SKIP_HUB_WAIT=1` in tests or single-container runs.
+if [ -z "${SPEEDWAVE_SKIP_HUB_WAIT:-}" ]; then
+    wait_for_hub() {
+        local host="mcp-hub" port="${MCP_HUB_PORT}" attempts=30
+        while [ "${attempts}" -gt 0 ]; do
+            if (echo > "/dev/tcp/${host}/${port}") 2>/dev/null; then
+                return 0
+            fi
+            attempts=$((attempts - 1))
+            sleep 1
+        done
+        echo "WARNING: MCP hub at ${host}:${port} did not respond within 30s — Claude will start without tools." >&2
+        return 1
+    }
+    wait_for_hub || true
+fi
+
 # Health check marker
 touch /tmp/claude-ready
 

@@ -14,7 +14,7 @@ import {
 import { RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
-import { SystemHealthService } from '../services/system-health.service';
+import { HEALTH_REFRESH_INTERVAL_MS, SystemHealthService } from '../services/system-health.service';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 import { TooltipDirective } from '../shared/tooltip.directive';
@@ -52,13 +52,19 @@ export const LEVEL_CHIPS: readonly LogLevel[] = ['all', 'debug', 'info', 'warn',
 const FORCED_LOG_LEVEL = 'trace';
 
 const COMPOSE_RE = /^([\w.-]+)\s*\|\s*(.*)$/;
-const BRACKETED_TIME_RE = /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s*(.*)$/;
-const ISO_TIME_RE = /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s+(.*)$/;
-/** ISO date+time at the start of a stamped log line (e.g. `2026-04-28T12:34:56.123Z`). */
-const FORMAT_TIME_ISO_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/;
-/** Bare `HH:MM:SS` prefix used by some compose log lines. Date is filled in from the host clock. */
+// `[HH:MM:SS]` or `[<ISO>]`; ISO is `mcp-shared`'s `ts()`.
+const BRACKETED_TIME_RE =
+  /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\]\s*(.*)$/;
+// ISO 8601 prefix (UTC, millis, or local-offset) — SSOT format: `log_ts::log_timestamp()` / `mcp-shared`'s `ts()`.
+const ISO_TIME_RE =
+  /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/;
+/** A parseable ISO date+time prefix — `formatTime` parses it and re-renders in the host's local zone. */
+const FORMAT_TIME_ISO_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/;
+/** Bare `HH:MM:SS` (no day, no zone) from external tooling — dated with today's date as a hint. */
 const FORMAT_TIME_HMS_RE = /^(\d{2}:\d{2}:\d{2})/;
 const LEVEL_RE = /^(DEBUG|INFO|WARN|WARNING|ERROR|TRACE)\s+(.*)$/i;
+/** Drain prefix the Rust `log_file` writer puts on captured stdout/stderr lines — pure noise in the message. */
+const DRAIN_PREFIX_RE = /^(?:STDOUT|STDERR): (.*)$/;
 const CONTAINER_PREFIX_RE = /^speedwave_[^_]+_([^_]+)(?:_\d+)?$/;
 const TRAILING_INDEX_RE = /_\d+$/;
 
@@ -75,13 +81,27 @@ export function parseLogLine(raw: string): LogLine {
   const source = composeMatch ? stripContainerPrefix(composeMatch[1]) : 'log';
   const rest = composeMatch ? composeMatch[2] : trimmed;
 
-  const timeMatch = BRACKETED_TIME_RE.exec(rest) ?? ISO_TIME_RE.exec(rest);
-  const time = timeMatch ? timeMatch[1] : '';
-  const afterTime = timeMatch ? timeMatch[2] : rest;
+  // Head: nerdctl `--timestamps`, Rust drain, or `[<ISO>]`.
+  let time = '';
+  let afterTime = rest;
+  const headMatch = BRACKETED_TIME_RE.exec(rest) ?? ISO_TIME_RE.exec(rest);
+  if (headMatch) {
+    time = headMatch[1];
+    afterTime = headMatch[2];
+  }
+  // Drop the `STDOUT: `/`STDERR: ` drain marker (capture noise only).
+  const drainMatch = DRAIN_PREFIX_RE.exec(afterTime);
+  let cleaned = drainMatch ? drainMatch[1] : afterTime;
+  // Inline `[<ISO>]` from the worker's `ts()` — promote to time if absent, else strip.
+  const inlineMatch = BRACKETED_TIME_RE.exec(cleaned);
+  if (inlineMatch) {
+    if (!time) time = inlineMatch[1];
+    cleaned = inlineMatch[2];
+  }
 
-  const levelMatch = LEVEL_RE.exec(afterTime);
+  const levelMatch = LEVEL_RE.exec(cleaned);
   const level: LogLevel = levelMatch ? normalizeLevel(levelMatch[1]) : 'info';
-  const message = levelMatch ? levelMatch[2] : afterTime;
+  const message = levelMatch ? levelMatch[2] : cleaned;
 
   return { time, source, level, message };
 }
@@ -106,6 +126,22 @@ function stripContainerPrefix(container: string): string {
   const match = CONTAINER_PREFIX_RE.exec(container);
   if (match) return match[1];
   return container.replace(TRAILING_INDEX_RE, '');
+}
+
+/**
+ * Interleave per-source blocks into one chronological stream.
+ * Lines without a parseable time inherit the previous line's instant.
+ * @param lines - Parsed log lines in backend (block) order.
+ */
+export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
+  let lastKey = 0;
+  const keyed = lines.map((line) => {
+    const t = line.time ? Date.parse(line.time) : NaN;
+    if (!Number.isNaN(t)) lastKey = t;
+    return { line, key: lastKey };
+  });
+  // `Array.prototype.sort` is stable (ES2019+) — equal keys keep input order.
+  return keyed.sort((a, b) => a.key - b.key).map((k) => k.line);
 }
 
 /**
@@ -664,6 +700,12 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   private readonly tauri = inject(TauriService);
   private readonly injector = inject(Injector);
   private unsubProjectSettled: (() => void) | null = null;
+  /** Live-tail poll handle — re-fetches the log buffer on the health cadence. */
+  private logsTimer: ReturnType<typeof setInterval> | null = null;
+  /** Guard: a silent poll skips when the previous fetch hasn't returned yet. */
+  private refreshInFlight = false;
+  /** Last raw response — silent polls bail out when the buffer is byte-identical. */
+  private lastRaw = '';
 
   /**
    * Kicks off the initial log fetch + health refresh + polling. Re-runs the
@@ -680,27 +722,26 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     // Await so the initial snapshot is committed before view tests assert
     // on it.
     await this.systemHealth.ensurePolling();
+    // Live-tail: silent refresh on the health cadence; sticky-scroll if at bottom.
+    this.logsTimer = setInterval(() => void this.refresh(true), HEALTH_REFRESH_INTERVAL_MS);
     this.unsubProjectSettled = this.projectState.onProjectSettled(() => {
       void this.refresh();
     });
   }
 
-  /** Cancels the project-settled subscription (health polling lives in the service). */
+  /** Cancels the project-settled subscription and the live-tail poll. */
   ngOnDestroy(): void {
     if (this.unsubProjectSettled) {
       this.unsubProjectSettled();
       this.unsubProjectSettled = null;
     }
+    if (this.logsTimer) {
+      clearInterval(this.logsTimer);
+      this.logsTimer = null;
+    }
   }
 
-  /**
-   * Pin the log surface to the bottom after Angular commits the freshly
-   * rendered rows to the DOM. `afterNextRender({ write })` is the official
-   * post-render hook (Angular 16+) and runs in the browser only, after the
-   * commit — so `scrollHeight` reflects the final layout, unlike
-   * `ngAfterViewChecked` + `requestAnimationFrame` which fired before the
-   * `@for` block had finished extending the document.
-   */
+  /** Pin the log surface to the bottom after Angular commits new rows. */
   private scrollToBottom(): void {
     afterNextRender(
       {
@@ -713,41 +754,60 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     );
   }
 
-  /** Re-fetch the tail of compose logs and re-parse into typed lines. */
-  protected async refresh(): Promise<void> {
+  /** True when the log scroll region is at (or within ~50px of) the bottom. */
+  private isAtBottom(): boolean {
+    const el = this.logScroll?.nativeElement;
+    if (!el) return true; // no element yet → behave like a fresh tail
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+  }
+
+  /**
+   * Re-fetch + re-parse the merged buffer. `silent`: no spinner; sticky scroll only.
+   * @param silent - True for the background poll.
+   */
+  protected async refresh(silent = false): Promise<void> {
+    // Skip silent ticks while a fetch is in flight — slow nerdctl shouldn't fan out.
+    if (silent && this.refreshInFlight) return;
     const project = this.projectState.activeProject;
     if (!project) {
-      // While the shell still boots the project lifecycle the active project
-      // is transiently null — surface a quiet loading state instead of an
-      // error banner, the onProjectSettled callback re-runs this fetch as
-      // soon as the project is ready.
+      // Project transiently null during shell boot — quiet loading, no banner.
       if (this.projectState.status === 'loading') {
-        this.loading.set(true);
+        if (!silent) this.loading.set(true);
         this.error.set('');
-      } else {
+      } else if (!silent) {
         this.loading.set(false);
         this.error.set('No active project');
       }
       return;
     }
-    this.loading.set(true);
+    const stickToBottom = silent ? this.isAtBottom() : true;
+    if (!silent) this.loading.set(true);
+    this.refreshInFlight = true;
     try {
-      const raw = await this.tauri.invoke<string>('get_compose_logs', {
+      // `get_all_logs` merges host-side logs + `compose logs`. `<source> | …` prefix
+      // is recognised by `parseLogLine` (COMPOSE_RE) — new sources auto-appear.
+      const raw = await this.tauri.invoke<string>('get_all_logs', {
         project,
         tail: LOGS_TAIL_LINES,
       });
-      const parsed = raw
-        .split(/\r?\n/)
-        .filter((l) => l.length > 0)
-        .map(parseLogLine);
-      this.lines.set(parsed);
       this.error.set('');
-      this.scrollToBottom();
+      // Skip the re-parse + signal write when the buffer is byte-identical (idle system).
+      if (silent && raw === this.lastRaw) return;
+      this.lastRaw = raw;
+      const parsed = sortLogLinesByTime(
+        raw
+          .split(/\r?\n/)
+          .filter((l) => l.length > 0)
+          .map(parseLogLine)
+      );
+      this.lines.set(parsed);
+      if (stickToBottom) this.scrollToBottom();
       this.reconcileSourceFilter(parsed);
     } catch (e: unknown) {
       this.error.set(e instanceof Error ? e.message : String(e));
     } finally {
-      this.loading.set(false);
+      this.refreshInFlight = false;
+      if (!silent) this.loading.set(false);
     }
   }
 
@@ -811,29 +871,26 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Format a parsed timestamp for display.
-   *
-   * - ISO stamps from `nerdctl compose logs --timestamps`
-   *   (e.g. `2026-04-28T11:32:56.123456Z`) are shortened to
-   *   `YYYY-MM-DD HH:MM:SS`.
-   * - Bracketed `HH:MM:SS[.ms]` stamps emitted by the application inside
-   *   the container are prefixed with today's date so the column always
-   *   carries a day — without this, two consecutive entries logged on
-   *   different days are indistinguishable. The fallback is a best-effort
-   *   approximation: we use the host's current date, which is correct for
-   *   the tail-N most recent entries we display, but the day prefix is
-   *   only a hint when the container clock or timezone diverges from the
-   *   host (for example, a containerised process logging in UTC while the
-   *   host shows local time).
-   *
-   * The original raw value is always exposed through `[title]` so the
-   * approximation is recoverable on hover.
+   * Render a parsed timestamp for the time column — always in the host's
+   * local timezone (`YYYY-MM-DD HH:MM:SS`), whatever offset the source wrote:
+   * an ISO stamp with `Z`/`±HH:MM` (nerdctl `--timestamps` is UTC; Speedwave
+   * loggers carry an offset) is parsed and re-rendered locally; a bare
+   * `HH:MM:SS[.ms]` (external tooling, no day/zone) is dated with today and
+   * kept as-is. The raw value stays in `[title]` on hover.
    * @param raw - the parsed `time` field from a log line
    */
   protected formatTime(raw: string): string {
     if (!raw) return '';
-    const isoMatch = FORMAT_TIME_ISO_RE.exec(raw);
-    if (isoMatch) return `${isoMatch[1]} ${isoMatch[2]}`;
+    if (FORMAT_TIME_ISO_RE.test(raw)) {
+      const d = new Date(raw);
+      if (!Number.isNaN(d.getTime())) {
+        const p2 = (n: number) => String(n).padStart(2, '0');
+        return (
+          `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+          `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+        );
+      }
+    }
     const hmsMatch = FORMAT_TIME_HMS_RE.exec(raw);
     if (hmsMatch) return `${this.todayIso()} ${hmsMatch[1]}`;
     return raw;

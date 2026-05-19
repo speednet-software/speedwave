@@ -2,7 +2,7 @@
 
 **Security-first AI platform that connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with your external services — without exposing a single credential to the AI.**
 
-Speedwave wraps Claude Code in hardened, token-free containers and routes all service access through isolated MCP workers. Each worker sees only its own credentials, the AI sees none. Ships as a single installable app (.dmg / .exe / .deb) — no Docker Desktop required.
+Speedwave wraps Claude Code in hardened, token-free containers and routes all service access through isolated MCP workers. Each worker sees only its own credentials, the AI sees none. Ships as a single installable app (.dmg / .exe) — no Docker Desktop required.
 
 ## Security Model
 
@@ -13,7 +13,7 @@ Speedwave treats security as a non-negotiable architectural constraint, not an a
 | **Token-free AI container**    | Claude runs with zero credentials — it cannot access any service directly                |
 | **Per-worker token isolation** | Each MCP worker mounts only its own service credentials (read-only)                      |
 | **OWASP container hardening**  | `cap_drop: ALL`, `no-new-privileges`, read-only filesystem, restricted tmpfs             |
-| **Kernel-level isolation**     | Lima VM (macOS), WSL2 (Windows), rootless user namespaces (Linux)                        |
+| **Kernel-level isolation**     | Lima VM (macOS), WSL2 (Windows)                                                          |
 | **Zero-token hub**             | The MCP Hub routes requests but holds no credentials — compromise exposes nothing        |
 | **Network isolation**          | Per-project container networks prevent cross-project access                              |
 | **PII tokenization**           | Sensitive data is replaced with opaque tokens before reaching the AI model               |
@@ -40,9 +40,9 @@ This means Claude's context window stays clean regardless of how many integratio
 ## Key Features
 
 - **Two interfaces** — Desktop app (chat UI with project management) and CLI (`speedwave` terminal command)
-- **Built-in integrations** — Slack, SharePoint, GitLab, Redmine, Mail, Calendar, Reminders, Notes
+- **Built-in integrations** — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar, Reminders, Notes, plus an Office documents worker (Word/Excel/PowerPoint/PDF)
 - **Plugin system** — extend with custom MCP services via Ed25519-signed plugins
-- **Cross-platform** — macOS, Linux, Windows with platform-native OS integrations
+- **Cross-platform** — macOS and Windows with platform-native OS integrations
 - **Zero-install dependencies** — Lima, nerdctl, and containerd are bundled; no system-wide Docker or container runtime needed
 - **IDE bridge** — connects Claude Code with your editor for seamless development
 
@@ -61,7 +61,7 @@ graph TB
         HUB[MCP Hub]
         subgraph Workers[" Workers "]
             direction LR
-            SLACK[Slack] ~~~ GITLAB[GitLab] ~~~ SP[SharePoint] ~~~ REDMINE[Redmine]
+            SLACK[Slack] ~~~ GITLAB[GitLab] ~~~ GITHUB[GitHub] ~~~ ATLASSIAN[Atlassian] ~~~ SP[SharePoint] ~~~ REDMINE[Redmine]
         end
     end
 
@@ -96,7 +96,6 @@ graph TB
 | Platform | VM / Runtime                | Installer | OS Integrations       |
 | -------- | --------------------------- | --------- | --------------------- |
 | macOS    | Lima + Apple Virtualization | `.dmg`    | EventKit, AppleScript |
-| Linux    | Rootless nerdctl (native)   | `.deb`    | CalDAV, zbus          |
 | Windows  | WSL2 + Hyper-V              | `.exe`    | WinRT, MAPI (Outlook) |
 
 → [Platform details](docs/architecture/platform-matrix.md)

@@ -1,0 +1,349 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtemp, rm, mkdir, readFile, chmod, writeFile, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { ToolHandlerContext, ToolsCallResult } from '@speedwave/mcp-shared';
+import { buildTools, type ToolDeps } from './tools.js';
+import type { OAuthState } from './oauth-state.js';
+
+function getTextResult(r: ToolsCallResult): string {
+  const block = r.content?.[0];
+  return block && block.type === 'text' ? (block.text ?? '') : '';
+}
+
+describe('oauth tools', () => {
+  let stateDir: string;
+  let tokensBase: string;
+  let auditLogPath: string;
+  let deps: ToolDeps;
+  let now: number;
+  let refreshCalls: Array<Record<string, unknown>>;
+  let refreshResult: Awaited<ReturnType<NonNullable<ToolDeps['doRefresh']>>>;
+
+  const sharepointState: OAuthState = {
+    provider: 'microsoft',
+    clientId: '11111111-1111-1111-1111-111111111111',
+    tenantId: 'common',
+    scopes: ['https://graph.microsoft.com/Sites.Manage.All', 'offline_access'],
+    grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All', 'offline_access'],
+    refreshToken: 'old-refresh',
+    expiresAt: new Date(0).toISOString(),
+    lastRefreshAt: new Date(0).toISOString(),
+  };
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), 'oauth-state-'));
+    tokensBase = await mkdtemp(join(tmpdir(), 'oauth-tokens-'));
+    if (process.platform !== 'win32') {
+      await chmod(stateDir, 0o700);
+    }
+    auditLogPath = join(stateDir, 'audit.log');
+    now = Date.parse('2026-05-15T12:00:00Z');
+    refreshCalls = [];
+    refreshResult = {
+      ok: true,
+      value: {
+        accessToken: 'new-access-token',
+        refreshToken: 'new-refresh',
+        expiresIn: 3600,
+        grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All', 'offline_access'],
+      },
+    };
+    // pre-create per-service tokens dir for SharePoint
+    await mkdir(join(tokensBase, 'test-project', 'sharepoint'), {
+      recursive: true,
+      mode: 0o700,
+    });
+
+    deps = {
+      stateDir,
+      project: 'test-project',
+      auditLogPath,
+      accessTokenPathFor: (svc) => join(tokensBase, 'test-project', svc, 'access_token'),
+      now: () => now,
+      doRefresh: async (req) => {
+        refreshCalls.push({ ...req });
+        return refreshResult;
+      },
+    };
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(tokensBase, { recursive: true, force: true });
+  });
+
+  async function seedState(state: OAuthState, service = 'sharepoint'): Promise<void> {
+    const path = join(stateDir, `${service}.json`);
+    await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+    await chmod(path, 0o600);
+  }
+
+  async function seedBearerMap(map: Record<string, string>): Promise<void> {
+    const path = join(stateDir, '.bearer-map.json');
+    await writeFile(path, JSON.stringify(map), { mode: 0o600 });
+  }
+
+  async function readAuditLog(): Promise<string> {
+    try {
+      return await readFile(auditLogPath, 'utf8');
+    } catch {
+      return '';
+    }
+  }
+
+  const ctxFor = (caller: string): ToolHandlerContext => ({ caller });
+
+  describe('metadata', () => {
+    it('exposes refresh and forget tools without service param', () => {
+      const tools = buildTools(deps);
+      expect(tools.map((t) => t.tool.name)).toEqual(['refresh', 'forget']);
+      for (const t of tools) {
+        const schema = t.tool.inputSchema as { properties: Record<string, unknown> };
+        expect(Object.keys(schema.properties)).toEqual([]);
+      }
+    });
+  });
+
+  describe('refresh', () => {
+    it('rejects unauthenticated callers (empty caller)', async () => {
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, ctxFor(''));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('unauthorized');
+    });
+
+    it('rejects when ctx is missing entirely', async () => {
+      // `ctx?.caller` defaults to '' when ctx itself is undefined — covers
+      // the `?? ''` branch in resolveCaller (tools.ts:79).
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, undefined);
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('unauthorized');
+    });
+
+    it('falls back to Date.now / refreshMicrosoftToken when overrides absent', async () => {
+      // Covers the `deps.now ?? Date.now` and `deps.doRefresh ?? ...` fallback
+      // lines in tools.ts:102-103. We do NOT actually call Microsoft — fetch
+      // is mocked to fail, but the branch coverage we care about (the `??`
+      // fallback selection) is already executed by then.
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response('', { status: 500 }));
+      try {
+        const tools = buildTools({
+          stateDir: deps.stateDir,
+          project: deps.project,
+          auditLogPath: deps.auditLogPath,
+          accessTokenPathFor: deps.accessTokenPathFor,
+          // `now` and `doRefresh` deliberately omitted to exercise the fallback.
+        });
+        const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+        // The call may error (rate-limit / unhealthy mock) but the assertion
+        // is just that the handler reached `fetch`, proving the doRefresh
+        // fallback was selected.
+        await refresh.handler({}, ctxFor('sharepoint'));
+        expect(fetchSpy).toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('rejects callers not in bearer-map', async () => {
+      await seedBearerMap({ 'bearer-x': 'unknown-service' });
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, ctxFor('not-configured'));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('unauthorized');
+    });
+
+    it('returns no_state when caller has no oauth.json', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('no_state');
+      expect(await readAuditLog()).toContain('outcome=error:no_state');
+    });
+
+    it('refreshes successfully and writes access token + audit log', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+
+      expect(result.isError).toBeFalsy();
+      const payload = JSON.parse(getTextResult(result)) as {
+        expiresIn: number;
+        grantedScopes: string[];
+      };
+      expect(payload.expiresIn).toBe(3600);
+      expect(payload.grantedScopes).toContain('offline_access');
+
+      // refresh called with stored refreshToken
+      expect(refreshCalls).toHaveLength(1);
+      expect(refreshCalls[0]).toMatchObject({
+        clientId: sharepointState.clientId,
+        tenantId: sharepointState.tenantId,
+        refreshToken: 'old-refresh',
+      });
+
+      // access token written
+      const access = await readFile(
+        join(tokensBase, 'test-project', 'sharepoint', 'access_token'),
+        'utf8'
+      );
+      expect(access).toBe('new-access-token');
+
+      // oauth.json updated with rotated refresh + new expires
+      const newState = JSON.parse(
+        await readFile(join(stateDir, 'sharepoint.json'), 'utf8')
+      ) as OAuthState;
+      expect(newState.refreshToken).toBe('new-refresh');
+      expect(Date.parse(newState.expiresAt)).toBe(now + 3600 * 1000);
+      expect(Date.parse(newState.lastRefreshAt)).toBe(now);
+
+      // audit log appended
+      expect(await readAuditLog()).toContain('action=refresh outcome=ok');
+    });
+
+    it('keeps old refresh token when Microsoft does not rotate', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      refreshResult = {
+        ok: true,
+        value: {
+          accessToken: 'new-access',
+          refreshToken: undefined,
+          expiresIn: 3600,
+          grantedScopes: sharepointState.scopes,
+        },
+      };
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+
+      await refresh.handler({}, ctxFor('sharepoint'));
+      const newState = JSON.parse(
+        await readFile(join(stateDir, 'sharepoint.json'), 'utf8')
+      ) as OAuthState;
+      expect(newState.refreshToken).toBe('old-refresh');
+    });
+
+    it('refuses when access token still valid AND within rate-limit window', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      // last refresh 10 minutes ago, access valid for 50 more minutes → rate-limit
+      await seedState({
+        ...sharepointState,
+        expiresAt: new Date(now + 50 * 60 * 1000).toISOString(),
+        lastRefreshAt: new Date(now - 10 * 60 * 1000).toISOString(),
+      });
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('rate_limited');
+      expect(refreshCalls).toHaveLength(0);
+      expect(await readAuditLog()).toContain('outcome=error:rate_limited');
+    });
+
+    it('allows refresh when access token expired even within rate-limit window', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState({
+        ...sharepointState,
+        expiresAt: new Date(now - 1000).toISOString(),
+        lastRefreshAt: new Date(now - 60 * 1000).toISOString(),
+      });
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBeFalsy();
+      expect(refreshCalls).toHaveLength(1);
+    });
+
+    it('surfaces scope_mismatch from the provider', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      refreshResult = {
+        ok: false,
+        error: { code: 'scope_mismatch', message: 'not granted: Sites.Manage.All' },
+      };
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('scope_mismatch');
+      expect(await readAuditLog()).toContain('outcome=error:scope_mismatch');
+    });
+
+    it('surfaces network errors and does not mutate state', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      refreshResult = {
+        ok: false,
+        error: { code: 'network', message: 'fetch failed' },
+      };
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('network');
+      // state untouched
+      const newState = JSON.parse(
+        await readFile(join(stateDir, 'sharepoint.json'), 'utf8')
+      ) as OAuthState;
+      expect(newState).toEqual(sharepointState);
+    });
+  });
+
+  describe('forget', () => {
+    it('deletes oauth.json and access_token; appends audit log', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      await writeFile(
+        join(tokensBase, 'test-project', 'sharepoint', 'access_token'),
+        'some-access'
+      );
+      const tools = buildTools(deps);
+      const forget = tools.find((t) => t.tool.name === 'forget')!;
+
+      const result = await forget.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBeFalsy();
+
+      await expect(stat(join(stateDir, 'sharepoint.json'))).rejects.toThrow();
+      await expect(
+        stat(join(tokensBase, 'test-project', 'sharepoint', 'access_token'))
+      ).rejects.toThrow();
+      expect(await readAuditLog()).toContain('action=forget outcome=ok');
+    });
+
+    it('rejects unauthorized callers and does not touch state', async () => {
+      await seedState(sharepointState);
+      const tools = buildTools(deps);
+      const forget = tools.find((t) => t.tool.name === 'forget')!;
+      const result = await forget.handler({}, ctxFor(''));
+      expect(result.isError).toBe(true);
+      const stillThere = await readFile(join(stateDir, 'sharepoint.json'), 'utf8');
+      expect(JSON.parse(stillThere)).toEqual(sharepointState);
+    });
+
+    it('is idempotent on already-forgotten service', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      const tools = buildTools(deps);
+      const forget = tools.find((t) => t.tool.name === 'forget')!;
+      const result1 = await forget.handler({}, ctxFor('sharepoint'));
+      const result2 = await forget.handler({}, ctxFor('sharepoint'));
+      expect(result1.isError).toBeFalsy();
+      expect(result2.isError).toBeFalsy();
+    });
+  });
+});

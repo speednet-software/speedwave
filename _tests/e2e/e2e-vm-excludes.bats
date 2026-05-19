@@ -8,12 +8,6 @@ SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
     grep -q '^E2E_RSYNC_EXCLUDES=' "$SCRIPT"
 }
 
-@test "linux_rsync_to references E2E_RSYNC_EXCLUDES" {
-    local body
-    body="$(sed -n '/^linux_rsync_to()/,/^}/p' "$SCRIPT")"
-    echo "$body" | grep -q 'E2E_RSYNC_EXCLUDES'
-}
-
 @test "macos_rsync_to references E2E_RSYNC_EXCLUDES" {
     local body
     body="$(sed -n '/^macos_rsync_to()/,/^}/p' "$SCRIPT")"
@@ -36,7 +30,7 @@ SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
 @test "shared excludes contain desktop/src-tauri bundled asset dirs" {
     local excludes
     excludes="$(sed -n '/^E2E_RSYNC_EXCLUDES=(/,/)/p' "$SCRIPT")"
-    for asset in lima nerdctl-full nodejs wsl cli mcp-os THIRD-PARTY-LICENSES; do
+    for asset in lima nodejs wsl cli mcp-os THIRD-PARTY-LICENSES; do
         echo "$excludes" | grep -q "desktop/src-tauri/${asset}" || {
             echo "missing desktop/src-tauri/${asset}"; return 1
         }

@@ -35,6 +35,7 @@ const MOCK_PLUGINS = {
       token_mount: 'ro',
       settings_schema: MOCK_SCHEMA,
       requires_integrations: ['sharepoint'],
+      verification_status: 'verified',
     },
   ],
 };
@@ -54,6 +55,7 @@ const MOCK_PLUGINS_NO_SP = {
       token_mount: 'ro',
       settings_schema: null,
       requires_integrations: [],
+      verification_status: 'verified',
     },
   ],
 };

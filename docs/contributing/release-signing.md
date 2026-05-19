@@ -266,6 +266,77 @@ If the certificate private key leaks (stolen laptop, accidental git commit, comp
 
 There is no Apple-side "revocation list" notification — Speednet must detect leaks through its own monitoring (scanning git history, credential store access logs, code review).
 
+## Embedded Info.plist invariant for native macOS CLIs
+
+Every native macOS CLI (`calendar-cli`, `reminders-cli`, `mail-cli`,
+`notes-cli`) **must** carry an embedded `__TEXT,__info_plist` Mach-O section
+with the right sub-identifier (`pl.speedwave.desktop.<service>`) and
+TCC usage description. Without this section, EventKit / AppleEvents APIs
+silently reject permission requests on macOS 14+ and TCC indexes the
+permission row under the wrong identifier (the codesign default
+`<svc>-cli`), preventing recovery via the `tccutil reset` commands in
+`docs/troubleshooting.md`. See [ADR-049](../adr/ADR-049-tcc-sub-identifiers-and-applevents-gate.md)
+for the full rationale.
+
+The build script (`scripts/build-native-macos.sh`) stamps `tauri.conf.json`'s
+version into each `Resources/Info.plist` before `swift build`. The Swift
+linker embeds the file via `linkerSettings.unsafeFlags` with
+`-sectcreate __TEXT __info_plist Resources/Info.plist` declared in each
+`Package.swift`. The signing script (`scripts/sign-bundled-binaries.sh`)
+calls `verify_identifier` after signing to assert
+`codesign -dvvv` reports the expected sub-identifier — this is the
+SSOT-alignment guarantee between the source `Info.plist`, the embedded
+section, and the codesign output.
+
+### Manual verification after a release build
+
+```bash
+# 1. Confirm every CLI carries the embedded section
+for svc in calendar reminders mail notes; do
+  bin="native/macos/$svc/.build/apple/Products/Release/$svc-cli"
+  echo "=== $svc ==="
+  otool -s __TEXT __info_plist "$bin" | head -3
+done
+
+# 2. Confirm CFBundleIdentifier matches the sub-identifier scheme
+for svc in calendar reminders mail notes; do
+  bin="native/macos/$svc/.build/apple/Products/Release/$svc-cli"
+  thin=$(mktemp)
+  lipo -thin arm64 "$bin" -output "$thin"
+  segedit "$thin" -extract __TEXT __info_plist /tmp/sw-${svc}.plist
+  bid=$(plutil -extract CFBundleIdentifier raw /tmp/sw-${svc}.plist)
+  echo "$svc: $bid"
+  [ "$bid" = "pl.speedwave.desktop.$svc" ] || echo "  MISMATCH"
+  rm "$thin"
+done
+
+# 3. After signing, codesign Identifier must match
+for svc in calendar reminders mail notes; do
+  signed="<bundle-path>/Contents/Resources/$svc-cli"
+  codesign -dvvv "$signed" 2>&1 | grep "^Identifier="
+done
+```
+
+### Adding a new native macOS CLI
+
+If a future PR adds a fifth CLI (e.g. `contacts-cli`):
+
+1. Create `native/macos/contacts/Resources/Info.plist` with
+   `CFBundleIdentifier=pl.speedwave.desktop.contacts` and the relevant
+   `NS<...>UsageDescription` key.
+2. Add `linkerSettings.unsafeFlags` with `-sectcreate ... Resources/Info.plist`
+   to `native/macos/contacts/Package.swift`.
+3. Update `SharedCLI/Utilities.swift::PermissionEntity`,
+   `subBundleIdentifier(for:)`, and `tccServiceName(for:)`.
+4. Update `scripts/sign-bundled-binaries.sh::SIGN_TARGETS` and the
+   `get_expected_identifier` mapping.
+5. Update `desktop/src-tauri/tauri.macos.conf.json::bundle.resources`.
+6. Update `crates/speedwave-runtime/src/consts.rs::TOGGLEABLE_OS_SERVICES`.
+7. The bats test `_tests/desktop/native-cli-info-plist.bats` automatically
+   picks up the new service via the `SERVICES` array — bump it there too.
+
+The bats SSOT-alignment tests catch any of these steps if you forget them.
+
 ## Troubleshooting
 
 ### `security find-identity -v -p codesigning` shows 0 identities

@@ -1,0 +1,10 @@
+# Python support-script dependencies for the office worker — installed into /opt/office-venv.
+# Pin versions; bump via `make audit`. (markitdown/pdftotext/pandoc/soffice come from apt, not here.)
+markitdown[docx,pptx,xlsx,pdf]==0.1.5
+python-docx==1.2.0
+openpyxl==3.1.5
+python-pptx==1.0.2
+pypdf==6.10.2
+matplotlib==3.10.0
+weasyprint==68.0
+numpy==2.2.2

@@ -404,8 +404,7 @@ pub(crate) fn handle_jsonrpc_message(
 // CLAUDE_CODE_IDE_HOST_OVERRIDE env var tells Claude the gateway DNS name.
 //
 // macOS:   Claude → ws://host.lima.internal:<port> → Lima gvproxy → host
-// Linux:   Claude → ws://host.docker.internal:<port> → nerdctl → host
-// Windows: Claude → ws://host.speedwave.internal:<port> → nerdctl → host
+// Windows: Claude → ws://host.speedwave.internal:<port> → WSL2 → host
 //
 // Lock file at ~/.speedwave/ide-bridge/<port>.lock is mounted as
 // /home/speedwave/.claude/ide/<port>.lock in the container (:ro).
@@ -530,7 +529,15 @@ fn write_lock_file_static(path: &PathBuf, auth: &Arc<Mutex<AuthState>>) -> anyho
     {
         std::fs::write(path, &content)?;
         #[cfg(windows)]
-        let _ = crate::fs_perms::set_owner_only(path);
+        if let Err(e) = crate::fs_perms::set_owner_only(path) {
+            // ACL failure on a lock file that contains the IDE Bridge authToken
+            // would leave it world-readable. Remove the file and surface the error.
+            let _ = std::fs::remove_file(path);
+            return Err(anyhow::anyhow!(
+                "set_owner_only failed for {}: {e}",
+                path.display()
+            ));
+        }
     }
 
     Ok(())
@@ -1037,7 +1044,6 @@ async fn handle_with_stubs<S>(
 // The Bridge listens on 127.0.0.1. Containers reach the host via DNS names
 // that route to loopback:
 //   macOS   → host.lima.internal
-//   Linux   → host.docker.internal
 //   Windows → host.speedwave.internal
 
 async fn run_websocket_on_tcp(

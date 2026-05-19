@@ -6,8 +6,6 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -197,16 +195,6 @@ const createMrNoteTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createMrNotesTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
-  if (!client) {
-    return [
-      { tool: listMrCommitsTool, handler: unconfigured },
-      { tool: listMrPipelinesTool, handler: unconfigured },
-      { tool: listMrNotesTool, handler: unconfigured },
-      { tool: createMrNoteTool, handler: unconfigured },
-    ];
-  }
-
   return [
     {
       tool: listMrCommitsTool,

@@ -3,6 +3,13 @@
 **Status:** Accepted
 **Date:** 2026-05-04
 
+> **Update (ADR-051):** the deferred-build marker referred to below as
+> `~/.speedwave/plugins/<slug>/.image_pending` now lives at
+> `~/.speedwave/plugin-state/<slug>/image_pending` — a sibling of
+> `plugins/`, outside the signed plugin tree, so writing it never changes
+> a plugin's content digest. The lifecycle (host-side create/remove,
+> retry on next launch) is unchanged.
+
 ## Context
 
 Issue [#400](https://github.com/speednet-software/speedwave/issues/400) reports that plugin installation in the Desktop UI shows no visible feedback during the multi-minute work it performs. The previous implementation registered `install_plugin` as a synchronous Tauri command and ran the entire flow — Ed25519 signature verification, ZIP extraction, manifest validation, container image build via `nerdctl build`, and on-disk side-effects — in one blocking call. On macOS, where Tauri runs on the main thread, the user sees the system spinning beachball for 2-5 minutes when installing a heavy plugin with multi-GB build dependencies (e.g. ML libraries) and only learns about a build error after the freeze ends.
@@ -72,8 +79,7 @@ The `error` field is always passed through `speedwave_runtime::log_sanitizer::sa
 `spawn_blocking` is not cancellable from the host side. If the user closes the Plugins view or quits the app mid-install, behaviour is platform-specific:
 
 - **macOS Lima:** on app quit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm>` (where `<vm>` is derived from `SPEEDWAVE_DATA_DIR` per [ADR-031](ADR-031-data-dir-env-var-for-instance-isolation.md)[^4]) which poweroffs the VM, killing any in-VM `nerdctl build` immediately. The `.image_pending` marker on the host survives. On the next launch, `ensure_all_plugin_images` retries the build silently.
-- **Linux native nerdctl:** the build process is a child of the desktop process. After the desktop process exits, the child is reparented to `systemd-user`/`init` (Linux has no equivalent of `prctl(PR_SET_PDEATHSIG)`[^3] for the inverse case — and `PR_SET_PDEATHSIG` itself is Linux-only). The container runs as UID 0 in a user namespace per [ADR-026](ADR-026-linux-rootless-container-user.md)[^5], so the host-written `.image_pending` marker is owned by the desktop user and remains writable across the reparent. The build continues in the background; `.image_pending` is removed on success or remains on failure.
-- **Windows WSL2:** `wsl.exe -- nerdctl build` is a child of the desktop process; when the desktop exits, the host pipe breaks, but the in-WSL `nerdctl` may continue. Recovery is the same as Linux: `.image_pending` retry on next launch.
+- **Windows WSL2:** `wsl.exe -- nerdctl build` is a child of the desktop process; when the desktop exits, the host pipe breaks, but the in-WSL `nerdctl` may continue. The host-written `.image_pending` marker survives across the desktop exit; on the next launch, `ensure_all_plugin_images` retries the build silently.
 
 Explicit `kill_on_drop` of the in-flight child via a stored `Child` handle is left for follow-up; see "Out of scope".
 

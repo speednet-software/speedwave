@@ -10,6 +10,7 @@
 mod auth;
 mod auth_commands;
 mod chat;
+mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
@@ -18,15 +19,23 @@ mod fs_perms;
 mod git_cmd;
 mod health;
 mod history;
+mod host_exec_cmd;
+mod host_path;
 mod http_util;
 mod ide_bridge;
 mod integrations_cmd;
 mod llm_cmd;
-mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
 mod oauth_cmd;
+mod oauth_login_cmd;
 mod patch_emitter;
+// `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
+// which is Windows-only (gnome-terminal / xterm spawning was removed with the
+// Linux backend in ADR-059). Gating the module declaration keeps clippy quiet
+// on macOS without needing per-fn `#[cfg(target_os = "windows")]`.
+#[cfg(target_os = "windows")]
+mod path_util;
 mod plugin_cmd;
 mod queue_cmd;
 mod reconcile;
@@ -36,8 +45,10 @@ mod setup_wizard;
 mod slash_cmd;
 mod subscribe_cmd;
 mod system_settings_cmd;
+mod transcription_cmd;
 mod tray;
 mod types;
+mod ui_prefs_cmd;
 mod update_commands;
 mod updater;
 mod url_validation;
@@ -55,7 +66,13 @@ use std::sync::{Arc, Mutex};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
-use reconcile::{ExitCleanupContext, SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs};
+use reconcile::{
+    ExitCleanupContext, SharedAutoCheckHandle, SharedHostExec, SharedIdeBridge, SharedMcpOs,
+    SharedOauth,
+};
+
+pub(crate) use host_path::recovered_host_path;
+use speedwave_runtime::host_exec_process::{write_host_exec_config_snapshot, HostExecProcess};
 
 /// Joins a cleanup thread handle with a watchdog that force-exits after
 /// `EXIT_CLEANUP_TIMEOUT_SECS`. If the cleanup thread panics, exits with
@@ -113,9 +130,6 @@ pub(crate) fn stash_cleanup_handle(
     }
 }
 
-/// Tracks the latest available update version for the system tray menu.
-type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
-
 /// Serialises compose operations across `start_chat`, `resume_conversation`,
 /// and `reconcile_compose_port` to prevent concurrent `compose_up` /
 /// `compose_up_recreate` calls during container restart.
@@ -126,6 +140,13 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
 /// to prevent the watchdog from respawning mcp-os during shutdown.
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop flag for the `host_exec` watchdog (set during exit cleanup).
+static OAUTH_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+static HOST_EXEC_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Chat commands
@@ -147,8 +168,20 @@ fn start_session_inner(
     resume_session_id: Option<&str>,
     compose_arc: ComposeLock,
     session_arc: SharedChatSession,
+    host_exec_arc: SharedHostExec,
+    oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    // Spawn host_exec before the container check — the hub needs port/auth-token files (ADR-054).
+    let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, project);
+    // Spawn oauth before the container check — compose injects WORKER_OAUTH_URL +
+    // per-service bearer mount into OAuth-consuming workers (ADR-060). No-op if
+    // no integration with `uses_oauth_refresh = true` is enabled.
+    let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
+    if host_exec_just_started || oauth_just_started {
+        host_exec_cmd::recreate_project_containers_if_running(project);
+    }
+
     // Pre-flight: verify Claude is authenticated.  `check_claude_auth`
     // also calls `ensure_exec_healthy`, so containers are guaranteed
     // healthy after this returns.  The compose lock serialises this with
@@ -195,13 +228,25 @@ async fn start_chat(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
     compose_lock: tauri::State<'_, ComposeLock>,
+    host_exec: tauri::State<'_, SharedHostExec>,
+    oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
     log::info!("start_chat: project={project}");
     let session_arc = state.inner().clone();
     let compose_arc = compose_lock.inner().clone();
+    let host_exec_arc = host_exec.inner().clone();
+    let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
-        start_session_inner(&project, None, compose_arc, session_arc, app_handle)
+        start_session_inner(
+            &project,
+            None,
+            compose_arc,
+            session_arc,
+            host_exec_arc,
+            oauth_arc,
+            app_handle,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -325,18 +370,24 @@ async fn resume_conversation(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
     compose_lock: tauri::State<'_, ComposeLock>,
+    host_exec: tauri::State<'_, SharedHostExec>,
+    oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
     history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
     log::info!("resume_conversation: project={project}");
     let session_arc = state.inner().clone();
     let compose_arc = compose_lock.inner().clone();
+    let host_exec_arc = host_exec.inner().clone();
+    let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
             Some(&session_id),
             compose_arc,
             session_arc,
+            host_exec_arc,
+            oauth_arc,
             app_handle,
         )
     })
@@ -382,6 +433,7 @@ async fn switch_project(
     name: String,
     app: tauri::AppHandle,
     chat_state: tauri::State<'_, SharedChatSession>,
+    host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
     use containers_cmd::{switch_project_core, teardown_and_restore, teardown_only, SwitchResult};
 
@@ -397,6 +449,13 @@ async fn switch_project(
         Ok(prev)
     })
     .map_err(|e| e.to_string())?;
+
+    // Tear down the previous project's `host_exec` worker (best-effort).
+    if let Some(ref prev) = previous {
+        if prev != &name {
+            reconcile::teardown_host_exec_for_project(host_exec.inner(), prev);
+        }
+    }
 
     use tauri::Emitter;
     let _ = app.emit(
@@ -417,8 +476,11 @@ async fn switch_project(
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, rt| {
             check_project(proj)?;
+            // Lazy build for the destination project (ADR-057).
+            if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
+                return Err(format!("Image build failed: {sanitized}"));
+            }
             // compose_down(prev) already handled by switch_project_core step 2.
-            // Here we only render the new compose and start containers.
             containers_cmd::render_and_save_compose(proj, rt)?;
             rt.compose_up_recreate(proj).map_err(|e| e.to_string())
         })
@@ -767,7 +829,6 @@ fn get_selected_ide() -> Result<Option<speedwave_runtime::config::SelectedIde>, 
 
 use diagnostics::export_diagnostics;
 use logging_cmd::{cleanup_old_logs, get_log_level, parse_log_level, set_log_level};
-#[cfg(not(target_os = "linux"))]
 use window::should_debounce;
 use window::{hide_main_window, should_prevent_close, should_run_cleanup, show_main_window};
 
@@ -940,6 +1001,373 @@ fn ensure_mcp_os_running(
     }
 }
 
+/// Spawn the project's `host_exec` worker if enabled and not running.
+/// Writes the chmod-600 config snapshot first. Returns `true` on fresh spawn.
+pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str) -> bool {
+    let mut map = match host_exec.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!("ensure_host_exec_running: map mutex poisoned: {e}");
+            return false;
+        }
+    };
+    if let Some(proc) = map.get(project) {
+        if proc.is_alive() {
+            return false; // already running and healthy
+        }
+        // A dead-but-still-mapped worker — drop it; we'll respawn below.
+        log::warn!("host_exec[{project}]: stale worker in the map — replacing");
+        if let Some(mut dead) = map.remove(project) {
+            let _ = dead.stop();
+            dead.cleanup_files();
+        }
+    }
+
+    // Resolve project dir + config (user-config only).
+    let user_config = match config::load_user_config() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("ensure_host_exec_running: cannot load user config: {e}");
+            return false;
+        }
+    };
+    let project_dir = match user_config.find_project(project) {
+        Some(p) => std::path::PathBuf::from(&p.dir),
+        None => {
+            log::warn!("ensure_host_exec_running: unknown project '{project}'");
+            return false;
+        }
+    };
+    let resolved = config::resolve_integrations(&project_dir, &user_config, project);
+    if !resolved.host_exec {
+        log::debug!("ensure_host_exec_running: host_exec disabled for '{project}' — not spawning");
+        return false;
+    }
+
+    // Write chmod-600 config snapshot (may hold env-value secrets, ADR-054).
+    let state_dir = speedwave_runtime::host_exec::host_exec_project_dir(
+        speedwave_runtime::consts::data_dir(),
+        project,
+    );
+    if let Err(e) = std::fs::create_dir_all(&state_dir) {
+        log::warn!("ensure_host_exec_running: cannot create state dir for '{project}': {e}");
+        return false;
+    }
+    let snapshot = config::host_exec_config_snapshot(&project_dir, &resolved.host_exec_commands);
+    let config_path = state_dir.join(speedwave_runtime::consts::HOST_EXEC_CONFIG_FILE);
+    if let Err(e) = write_host_exec_config_snapshot(&config_path, &snapshot) {
+        log::warn!("ensure_host_exec_running: cannot write config snapshot for '{project}': {e}");
+        return false;
+    }
+
+    let script = match speedwave_runtime::build::resolve_host_exec_script() {
+        Some(s) => s.to_string_lossy().to_string(),
+        None => {
+            log::warn!(
+                "ensure_host_exec_running: host_exec worker script not found — \
+                 host_exec will be unavailable for '{project}'"
+            );
+            return false;
+        }
+    };
+    match HostExecProcess::spawn_in(
+        project,
+        &project_dir,
+        &script,
+        recovered_host_path(),
+        speedwave_runtime::consts::data_dir(),
+    ) {
+        Ok(proc) => {
+            log::info!("host_exec[{project}]: started (port {})", proc.port());
+            map.insert(project.to_string(), proc);
+            drop(map); // release before touching the watchdog flag
+            HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+            true
+        }
+        Err(e) => {
+            log::error!("host_exec[{project}]: spawn failed: {e}");
+            false
+        }
+    }
+}
+
+// (`is_service_enabled` lives on `ResolvedIntegrationsConfig` in
+// `speedwave-runtime::config` — used here and in the CLI's
+// `maybe_spawn_oauth_worker` so the match arms stay in one place.)
+
+/// Spawn the per-project `oauth` worker on demand. No-op if no project
+/// integration with `uses_oauth_refresh = true` is enabled, or if the worker
+/// is already running. Returns true if a new worker was started this call.
+pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bool {
+    let mut map = match oauth_arc.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!("ensure_oauth_running: map mutex poisoned: {e}");
+            return false;
+        }
+    };
+    if map.contains_key(project) {
+        return false;
+    }
+
+    // Check if any OAuth-consuming integration is enabled for this project.
+    let user_config = match config::load_user_config() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("ensure_oauth_running: cannot load user config: {e}");
+            return false;
+        }
+    };
+    let project_dir = match user_config.find_project(project) {
+        Some(p) => std::path::PathBuf::from(&p.dir),
+        None => {
+            log::warn!("ensure_oauth_running: unknown project '{project}'");
+            return false;
+        }
+    };
+    let resolved = config::resolve_integrations(&project_dir, &user_config, project);
+
+    // List of enabled OAuth-consuming integrations (drives bearer-map).
+    let oauth_consumers: Vec<&'static str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .filter(|d| {
+            d.uses_oauth_refresh && resolved.is_service_enabled(d.config_key).unwrap_or(false)
+        })
+        .map(|d| d.config_key)
+        .collect();
+    if oauth_consumers.is_empty() {
+        log::debug!(
+            "ensure_oauth_running: no oauth-consuming integration enabled for '{project}' — not spawning"
+        );
+        return false;
+    }
+
+    let script = match speedwave_runtime::build::resolve_oauth_script() {
+        Some(s) => s.to_string_lossy().to_string(),
+        None => {
+            log::warn!(
+                "ensure_oauth_running: oauth worker script not found — \
+                 OAuth refresh will be unavailable for '{project}'"
+            );
+            return false;
+        }
+    };
+    match speedwave_runtime::oauth_process::OauthProcess::spawn_in(
+        project,
+        &script,
+        speedwave_runtime::consts::data_dir(),
+        &oauth_consumers,
+    ) {
+        Ok(proc) => {
+            log::info!("oauth[{project}]: started (port {})", proc.port());
+            map.insert(project.to_string(), proc);
+            drop(map);
+            OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+            true
+        }
+        Err(e) => {
+            log::error!("oauth[{project}]: spawn failed: {e}");
+            false
+        }
+    }
+}
+
+/// Decide which oauth workers in the map are unhealthy, respawn them, and
+/// return the names of those that should have their consumer containers
+/// recreated. Extracted from `start_oauth_watchdog` for unit-testability.
+fn sweep_oauth_workers<P>(
+    workers: &mut std::collections::HashMap<String, P>,
+    log_prefix: &str,
+) -> Vec<String>
+where
+    P: WatchdogWorker,
+{
+    if workers.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<String> = workers.keys().cloned().collect();
+    let mut respawned = Vec::new();
+    for name in names {
+        let alive = workers.get(&name).map(|p| p.is_alive()).unwrap_or(false);
+        if alive {
+            continue;
+        }
+        if let Some(proc) = workers.get_mut(&name) {
+            log::warn!("{log_prefix}: worker for '{name}' unhealthy — respawning");
+            match proc.respawn() {
+                Ok(port) => {
+                    log::info!("{log_prefix}: respawned '{name}' (port {port})");
+                    respawned.push(name);
+                }
+                Err(e) => {
+                    log::error!("{log_prefix}: respawn for '{name}' failed: {e}");
+                }
+            }
+        }
+    }
+    respawned
+}
+
+/// Trait abstracting the watchdog's view of a managed worker.
+/// Implemented by `OauthProcess` / `HostExecProcess` in production and by a
+/// fake in tests so the sweep loop can be exercised without spawning subprocesses.
+pub(crate) trait WatchdogWorker {
+    fn is_alive(&self) -> bool;
+    fn respawn(&mut self) -> anyhow::Result<u16>;
+}
+
+impl WatchdogWorker for speedwave_runtime::oauth_process::OauthProcess {
+    fn is_alive(&self) -> bool {
+        speedwave_runtime::oauth_process::OauthProcess::is_alive(self)
+    }
+    fn respawn(&mut self) -> anyhow::Result<u16> {
+        speedwave_runtime::oauth_process::OauthProcess::respawn(self)
+    }
+}
+
+/// Per-project `oauth` watchdog — 30s checks, mirrors host_exec.
+fn start_oauth_watchdog(oauth_arc: SharedOauth) {
+    std::thread::spawn(move || {
+        use std::time::Duration;
+        const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+        loop {
+            std::thread::sleep(CHECK_INTERVAL);
+            if OAUTH_WATCHDOG_STOP.load(Ordering::Relaxed) {
+                break;
+            }
+            // Respawn under the lock; defer container recreate until after we release it
+            // so OAuth-consuming workers see the new WORKER_OAUTH_URL.
+            let respawned: Vec<String> = {
+                let mut map = match oauth_arc.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        log::error!("oauth watchdog: map mutex poisoned: {e}");
+                        break;
+                    }
+                };
+                sweep_oauth_workers(&mut map, "oauth watchdog")
+            };
+            // Lock released — recreate containers so OAuth consumers pick up the new port.
+            // Catch panics so a single bad project doesn't kill the watchdog thread silently.
+            for name in respawned {
+                let n = name.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    host_exec_cmd::recreate_project_containers_if_running(&n);
+                }));
+                if let Err(payload) = result {
+                    let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*payload);
+                    log::error!("oauth watchdog: recreate panicked for '{name}': {msg}");
+                }
+            }
+        }
+        log::info!("oauth watchdog: stopped");
+    });
+}
+
+/// Per-project `host_exec` watchdog — 30s checks, mirrors `start_mcp_os_watchdog`.
+fn start_host_exec_watchdog(host_exec: SharedHostExec) {
+    std::thread::spawn(move || {
+        use std::time::Duration;
+        const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+        loop {
+            std::thread::sleep(CHECK_INTERVAL);
+            if HOST_EXEC_WATCHDOG_STOP.load(Ordering::Relaxed) {
+                break;
+            }
+            // Respawn under the lock; defer container recreate until after we release it.
+            let respawned: Vec<String> = {
+                let mut map = match host_exec.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        log::error!("host_exec watchdog: map mutex poisoned: {e}");
+                        break;
+                    }
+                };
+                if map.is_empty() {
+                    continue; // a project may enable host_exec later
+                }
+                // Collect names first so we don't hold an iterator while mutating.
+                let names: Vec<String> = map.keys().cloned().collect();
+                let mut respawned = Vec::new();
+                for name in names {
+                    let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
+                    if alive {
+                        continue;
+                    }
+                    if let Some(proc) = map.get_mut(&name) {
+                        log::warn!(
+                            "host_exec watchdog: worker for '{name}' unhealthy — respawning"
+                        );
+                        match proc.respawn() {
+                            Ok(port) => {
+                                log::info!("host_exec watchdog: respawned '{name}' (port {port})");
+                                respawned.push(name);
+                            }
+                            Err(e) => {
+                                log::error!("host_exec watchdog: respawn of '{name}' failed: {e}")
+                            }
+                        }
+                    }
+                }
+                respawned
+            };
+            // Lock released — recreate hub containers so they see the new port.
+            // Catch panics so a single bad project doesn't kill the watchdog thread silently.
+            for name in respawned {
+                let n = name.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    host_exec_cmd::recreate_project_containers_if_running(&n);
+                }));
+                if let Err(payload) = result {
+                    let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*payload);
+                    log::error!("host_exec watchdog: recreate panicked for '{name}': {msg}");
+                }
+            }
+        }
+        log::info!("host_exec watchdog: stopped");
+    });
+}
+
+/// Shows the audit-failure dialog and terminates the process. Returns
+/// only via `process::exit`. Caller has already logged the body.
+fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> ! {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    let _ = app
+        .dialog()
+        .message(body)
+        .title("Plugin verification failed")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
+    std::process::exit(1);
+}
+
+/// Formats the per-plugin failures from `plugin::audit_all` into a
+/// user-actionable dialog message. Tells the user what failed and how
+/// to recover via CLI/manual cleanup — Settings UI is unreachable
+/// while the audit fails.
+fn format_audit_failure_message(failures: &[(String, String)]) -> String {
+    let mut body = String::from(
+        "Speedwave detected one or more plugins that no longer match their\n\
+         original signed contents. For your safety, the app cannot start until\n\
+         the affected plugins are removed or reinstalled.\n\n\
+         Affected plugins:\n",
+    );
+    for (slug, reason) in failures {
+        body.push_str(&format!("  • {slug}: {reason}\n"));
+    }
+    body.push_str(
+        "\nHow to recover:\n\
+         1. Open Terminal and run `speedwave plugin remove <slug>` for each\n\
+            affected plugin (CLI commands always work even when this dialog\n\
+            blocks the UI).\n\
+         2. Reinstall a fresh signed plugin via `speedwave plugin install\n\
+            <path/to/plugin.zip>`.\n\n\
+         Alternatively, manually delete the affected plugin directory under\n\
+         `~/.speedwave/plugins/<slug>/` and restart Speedwave.",
+    );
+    body
+}
+
 // ---------------------------------------------------------------------------
 // Application entry point
 // ---------------------------------------------------------------------------
@@ -990,28 +1418,47 @@ fn main() {
     let compose_lock: ComposeLock = Arc::new(Mutex::new(()));
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
+    // Meeting-transcription stores (ADR-056). Active sessions live in memory;
+    // both stores walk the disk lazily on first access. `transcript_drivers`
+    // maps an in-flight recording to its stop signal.
+    let transcript_store: transcription_cmd::TranscriptStoreHandle =
+        Arc::new(speedwave_runtime::transcription::TranscriptStore::new());
+    let model_store: transcription_cmd::ModelStoreHandle =
+        Arc::new(speedwave_runtime::transcription::ModelStore::new());
+    let transcript_drivers: transcription_cmd::DriversHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let transcript_forwarders: transcription_cmd::ForwardersHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
-    // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
+    // Shared state: IDE Bridge, mcp-os, per-project host_exec workers, per-project
+    // oauth workers, auto-check handle. (Tray menu state is a managed `TrayMenuState`, below.)
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
+    let host_exec: SharedHostExec = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
-    let update_version: SharedUpdateVersion = Arc::new(Mutex::new(None));
 
     let tray_available = Arc::new(AtomicBool::new(false));
-    #[cfg_attr(target_os = "linux", allow(unused_variables))]
     let tray_available_setup = tray_available.clone();
     let tray_available_close = tray_available.clone();
 
-    // Bundle the three shared-state Arcs into a single context struct so each
-    // exit path only needs one clone instead of three parallel Arc clones.
+    // One context struct → one clone per exit path instead of N parallel Arc clones.
     let cleanup_ctx = ExitCleanupContext {
         ide_bridge: ide_bridge.clone(),
         mcp_os: mcp_os.clone(),
+        host_exec: host_exec.clone(),
+        oauth: oauth.clone(),
         auto_check_handle: auto_check_handle.clone(),
     };
     let cleanup_ctx_window = cleanup_ctx.clone();
     let cleanup_ctx_runevent = cleanup_ctx.clone();
-    let update_version_setup = update_version.clone();
+
+    // Seed tray state from persisted user-config so the beta-features
+    // checkbox reflects the previous session's choice on startup.
+    let initial_beta_enabled = config::load_user_config()
+        .map(|c| c.beta_enabled())
+        .unwrap_or(false);
+    let tray_state = tray::TrayMenuState::new(initial_beta_enabled);
 
     // Register SIGTERM/SIGINT handler so process signals trigger the same
     // cleanup as graceful window close. The CLEANUP_ONCE guard in
@@ -1063,16 +1510,13 @@ fn main() {
     builder
         .plugin({
             use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
-            // Note: no timezone_strategy() here — the custom `.format(...)`
-            // below takes over and uses `chrono::Local::now()` directly, so
-            // the plugin's TimezoneStrategy would be dead config.
+            // No timezone_strategy — custom `.format(...)` below uses `log_ts` SSOT.
             tauri_plugin_log::Builder::new()
                 .targets([
                     Target::new(TargetKind::Stdout),
                     Target::new(TargetKind::LogDir {
                         file_name: Some("speedwave-desktop".into()),
                     }),
-                    Target::new(TargetKind::Webview),
                 ])
                 .level(log::LevelFilter::Trace)
                 .level_for("hyper", log::LevelFilter::Warn)
@@ -1083,13 +1527,8 @@ fn main() {
                 .format(move |callback, message, record| {
                     let sanitized =
                         speedwave_runtime::log_sanitizer::sanitize(&format!("{message}"));
-                    // ISO8601 local-time timestamp with millisecond precision.
-                    // Shipped in every log line so post-mortem timing analysis
-                    // (e.g. shutdown-sequence profiling) does not need a
-                    // separate overlay. `%.3f` keeps the millis in the
-                    // fractional-seconds slot; `%z` is the numeric UTC offset
-                    // from chrono::Local::now(), which reads the system timezone.
-                    let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z");
+                    // SSOT log timestamp (see `speedwave_runtime::log_ts`).
+                    let ts = speedwave_runtime::log_ts::log_timestamp();
                     callback.finish(format_args!(
                         "{ts} [{level}][{target}] {sanitized}",
                         level = record.level(),
@@ -1098,6 +1537,7 @@ fn main() {
                 })
                 .build()
         })
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -1113,8 +1553,15 @@ fn main() {
         .manage(compose_lock.clone())
         .manage(ide_bridge.clone())
         .manage(mcp_os.clone())
+        .manage(host_exec.clone())
+        .manage(oauth.clone())
         .manage(queue_service.clone())
         .manage(msg_store_registry.clone())
+        .manage(transcript_store.clone())
+        .manage(model_store.clone())
+        .manage(transcript_drivers.clone())
+        .manage(transcript_forwarders.clone())
+        .manage(tray_state)
         .setup(move |app| {
             // Restore persisted log level (default: Info)
             let initial_level = config::load_user_config()
@@ -1123,6 +1570,34 @@ fn main() {
                 .and_then(|l| parse_log_level(&l))
                 .unwrap_or(log::LevelFilter::Info);
             log::set_max_level(initial_level);
+
+            clipboard_bridge::spawn(app.handle().clone());
+
+            // Hard-fail on tampered plugins. `plugin::audit_all` re-verifies
+            // every plugin under `~/.speedwave/plugins/`; failures are
+            // collected and shown to the user in one dialog. Recovery
+            // path is the CLI (`speedwave plugin remove <slug>`) or
+            // manual deletion — Settings UI is behind this gate.
+            //
+            // Hard-fail semantics: the dialog shows the user every failed
+            // plugin synchronously, then the process exits. Returning
+            // `Ok(())` from `setup` would let Tauri continue starting
+            // the webview and registering command handlers — a tampered
+            // plugin would still be inert (`#[tauri::command]` callers
+            // go through the verified-only command gates), but the
+            // command surface would be live for unrelated calls. We
+            // refuse to bring the rest of the app online at all: the
+            // dialog is shown via the OS-native blocking path and the
+            // process exits the moment the user dismisses it.
+            if let Err(failures) = speedwave_runtime::plugin::audit_all() {
+                let body = format_audit_failure_message(&failures);
+                log::error!("plugin audit failed:\n{}", body);
+                // Diverges (`-> !`) — `process::exit` is the last call.
+                // No `Ok(())` / `Err(...)` follows because Tauri must
+                // not bring up the webview / command surface for a
+                // tampered plugin set.
+                show_audit_failure_dialog_and_exit(app.handle(), body);
+            }
 
             // Clean up old rotated log files (max 10 kept)
             cleanup_old_logs(10);
@@ -1135,7 +1610,24 @@ fn main() {
                 }
             });
 
+            // Recover the user's login-shell PATH once, on a background thread
+            // so a slow shell rc doesn't delay `setup()`. The `host_exec`
+            // worker (and its recipes) need this — a GUI-launched app has only
+            // a stunted PATH. Idempotent; `recovered_host_path()` returns the
+            // cached value (or computes it lazily) afterwards. ADR-054 §PATH.
+            std::thread::spawn(host_path::init_recovered_host_path);
+
             if setup_started {
+                // Run one-shot OAuth state migration (ADR-060 / PR3) before any
+                // worker spawns. Migrates legacy SharePoint credentials from
+                // `tokens/<project>/sharepoint/` to `oauth/<project>/sharepoint.json`
+                // so the oauth worker sees the new layout when it first runs.
+                let migrated =
+                    speedwave_runtime::migration_oauth::run_oauth_migration_at_startup();
+                if migrated > 0 {
+                    log::info!("oauth migration: {migrated} project(s) migrated to new layout");
+                }
+
                 // Start IDE Bridge
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
 
@@ -1171,8 +1663,18 @@ fn main() {
                     app.handle().clone(),
                     compose_lock.clone(),
                 );
+
+                // Start the per-project host_exec watchdog. No worker is
+                // spawned here — host_exec is per-project and spawned on
+                // demand (ensure_host_exec_running), e.g. when a chat starts
+                // for a project that has it enabled (ADR-054). The watchdog
+                // simply respawns any that die.
+                HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+                start_host_exec_watchdog(host_exec.clone());
+                OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
+                start_oauth_watchdog(oauth.clone());
             } else {
-                log::info!("setup not started, deferring IDE Bridge / mcp-os / link_cli until setup completes");
+                log::info!("setup not started, deferring IDE Bridge / mcp-os / host_exec / oauth / link_cli until setup completes");
             }
 
             // Start background auto-update check (store handle for cancellation)
@@ -1197,12 +1699,16 @@ fn main() {
                 reconcile::reconcile_bundle_update(app.handle());
             }
 
-            // Build system tray.
-            let tray_menu = tray::build_tray_menu(app.handle(), &None)?;
-            let update_version_tray = update_version_setup.clone();
+            // Build system tray from the managed `TrayMenuState`.
+            use tauri::Manager;
+            let tray_menu = tray::build_tray_menu(
+                app.handle(),
+                None,
+                app.state::<tray::TrayMenuState>().beta_enabled(),
+                setup_wizard::is_setup_complete(),
+            )?;
             let tray_icon = tray::load_tray_icon()?;
 
-            #[cfg_attr(target_os = "linux", allow(unused_mut))]
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon)
                 .icon_as_template(true)
@@ -1228,13 +1734,6 @@ fn main() {
                                 Ok(updater::UpdateCheckOutcome::UpToDate) => {
                                     log::info!("tray: already up to date");
                                 }
-                                Ok(updater::UpdateCheckOutcome::ManagedExternally {
-                                    manager,
-                                }) => {
-                                    log::info!(
-                                        "tray: updates managed by '{manager}' — no network check"
-                                    );
-                                }
                                 Err(e) => {
                                     log::error!("tray: check failed: {e}");
                                 }
@@ -1242,22 +1741,12 @@ fn main() {
                         });
                     }
                     "install_update" => {
-                        #[cfg(not(target_os = "linux"))]
+                        let app_for_state = app.clone();
                         let app_clone = app.clone();
-                        let uv = update_version_tray.clone();
                         tauri::async_runtime::spawn(async move {
-                            let version = uv.lock().ok().and_then(|g| g.clone());
+                            let version =
+                                app_for_state.state::<tray::TrayMenuState>().update_version();
                             if let Some(expected) = version {
-                                #[cfg(target_os = "linux")]
-                                let result = {
-                                    let _ = expected;
-                                    open::that(
-                                        "https://github.com/speednet-software/speedwave/releases",
-                                    )
-                                    .map_err(|e| e.to_string())
-                                };
-
-                                #[cfg(not(target_os = "linux"))]
                                 let result = update_commands::install_update_and_reconcile(
                                     app_clone.clone(),
                                     expected,
@@ -1277,6 +1766,18 @@ fn main() {
                             }
                         });
                     }
+                    "toggle_beta" => {
+                        let app_clone = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let current =
+                                app_clone.state::<tray::TrayMenuState>().beta_enabled();
+                            if let Err(e) =
+                                ui_prefs_cmd::apply_beta_toggle_inner(&app_clone, !current).await
+                            {
+                                log::error!("tray: beta toggle failed: {e}");
+                            }
+                        });
+                    }
                     "quit" => {
                         app.exit(0);
                     }
@@ -1286,9 +1787,6 @@ fn main() {
                 });
 
             // macOS/Windows: left-click on tray icon toggles window visibility.
-            // Linux: TrayIconEvent::Click is unsupported — users rely on the
-            // right-click menu "Open Speedwave" instead.
-            #[cfg(not(target_os = "linux"))]
             {
                 use std::sync::atomic::AtomicU64;
                 // Debounce: ignore clicks within 500ms of the previous one
@@ -1351,12 +1849,6 @@ fn main() {
             match tray_builder.build(app) {
                 Ok(_tray) => {
                     log::info!("tray: system tray created");
-                    // Linux: do not set tray_available — build() can return Ok
-                    // even when the icon is invisible (GNOME without AppIndicator
-                    // extension). Closing the window must always exit on Linux.
-                    // The tray menu (Open/Quit) still works when the icon is
-                    // visible.
-                    #[cfg(not(target_os = "linux"))]
                     tray_available_setup.store(true, Ordering::Relaxed);
                 }
                 Err(e) => {
@@ -1366,20 +1858,17 @@ fn main() {
                 }
             }
 
-            // Listen for update_available events (from auto-check) to update tray menu
-            let update_version_listener = update_version_setup.clone();
+            // Listen for update_available events (from auto-check) to update tray menu.
             let app_handle_listener = app.handle().clone();
             use tauri::Listener;
             app.listen(
                 "update_available",
                 move |event| match serde_json::from_str::<updater::UpdateInfo>(event.payload()) {
                     Ok(info) => {
-                        let version = info.version;
-                        match update_version_listener.lock() {
-                            Ok(mut guard) => *guard = Some(version.clone()),
-                            Err(e) => log::warn!("update version mutex poisoned: {e}"),
-                        }
-                        tray::refresh_tray_menu(&app_handle_listener, &Some(version));
+                        app_handle_listener
+                            .state::<tray::TrayMenuState>()
+                            .set_update_version(Some(info.version));
+                        tray::refresh_tray_menu(&app_handle_listener);
                     }
                     Err(e) => {
                         log::warn!("tray: failed to deserialize update_available payload: {e}");
@@ -1409,12 +1898,14 @@ fn main() {
             containers_cmd::get_llm_config,
             containers_cmd::get_default_base_url,
             containers_cmd::list_anthropic_models,
+            containers_cmd::get_default_anthropic_model_label,
             containers_cmd::update_llm_config,
             llm_cmd::discover_llm_models,
             // Authentication
             auth_commands::save_api_key,
             auth_commands::delete_api_key,
             auth_commands::get_auth_status,
+            oauth_login_cmd::start_oauth_login,
             // URL opener
             url_validation::open_url,
             // Platform
@@ -1432,6 +1923,25 @@ fn main() {
             queue_cmd::peek_queued_message,
             // JSON-Patch stream protocol (ADR-042/043)
             subscribe_cmd::subscribe_session,
+            // Meeting transcription (ADR-056)
+            transcription_cmd::transcription_enabled,
+            transcription_cmd::set_transcription_enabled,
+            transcription_cmd::get_transcription_config,
+            transcription_cmd::set_transcription_config,
+            transcription_cmd::transcription_capabilities,
+            transcription_cmd::list_audio_sources,
+            transcription_cmd::start_transcription,
+            transcription_cmd::stop_transcription,
+            transcription_cmd::subscribe_transcript,
+            transcription_cmd::list_transcripts,
+            transcription_cmd::get_transcript,
+            transcription_cmd::delete_transcript,
+            transcription_cmd::discard_transcript_audio,
+            transcription_cmd::relabel_speaker,
+            transcription_cmd::get_transcript_markdown,
+            transcription_cmd::list_transcription_models,
+            transcription_cmd::download_transcription_model,
+            transcription_cmd::delete_transcription_model,
             // Chat history
             list_conversations,
             get_conversation,
@@ -1447,7 +1957,9 @@ fn main() {
             container_logs_cmd::get_container_logs,
             container_logs_cmd::get_compose_logs,
             container_logs_cmd::get_mcp_os_logs,
+            container_logs_cmd::get_host_exec_logs,
             container_logs_cmd::get_claude_session_logs,
+            container_logs_cmd::get_all_logs,
             // IDE Bridge
             list_available_ides,
             select_ide,
@@ -1468,12 +1980,16 @@ fn main() {
             // Logging
             set_log_level,
             get_log_level,
+            // UI preferences (ADR-058)
+            ui_prefs_cmd::get_beta_enabled,
+            ui_prefs_cmd::set_beta_enabled,
             // Diagnostics
             export_diagnostics,
             // Integrations
             integrations_cmd::get_integrations,
             integrations_cmd::set_integration_enabled,
             integrations_cmd::set_os_integration_enabled,
+            integrations_cmd::validate_os_integrations_on_startup,
             integrations_cmd::save_integration_credentials,
             integrations_cmd::save_redmine_mappings,
             integrations_cmd::delete_integration_credentials,
@@ -1485,6 +2001,15 @@ fn main() {
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,
+            // host_exec (ADR-054): Integrations-tab settings commands
+            // (status / toggle / edit the whitelist / resolve an executable for
+            // the "browse…" picker). No per-call confirmation — enabling
+            // host_exec is the consent.
+            host_exec_cmd::get_host_exec,
+            host_exec_cmd::set_host_exec_enabled,
+            host_exec_cmd::host_exec_save_settings,
+            host_exec_cmd::host_exec_load_settings,
+            host_exec_cmd::host_exec_resolve_executable,
             // Plugins
             plugin_cmd::get_plugins,
             plugin_cmd::peek_plugin_manifest,
@@ -1503,6 +2028,10 @@ fn main() {
             // CloudStorage TCC
             system_settings_cmd::open_files_folders_pane,
             cloudstorage_cmd::detect_cloudstorage_path,
+            // Meeting-transcription TCC (ADR-056) — deep-links to the macOS
+            // Microphone / Audio Recording privacy panes for permission recovery.
+            system_settings_cmd::open_microphone_pane,
+            system_settings_cmd::open_audio_capture_pane,
         ])
         .on_window_event(move |window, event| {
             match event {
@@ -1553,12 +2082,11 @@ fn main() {
                 // limactl stop thread while the window is still visible —
                 // WindowServer then draws the beachball.
                 //
-                // Safe on Linux and Windows too: on those platforms the
-                // window is typically already being destroyed when
-                // ExitRequested fires (tray-less setups), making this a
-                // harmless no-op. Do NOT gate this to macOS — a
-                // `#[cfg(target_os = "macos")]` guard would re-introduce the
-                // beachball if macOS ever reorders event delivery, and
+                // Safe on Windows too: the window is typically already being
+                // destroyed when ExitRequested fires (tray-less setups),
+                // making this a harmless no-op. Do NOT gate this to macOS —
+                // a `#[cfg(target_os = "macos")]` guard would re-introduce
+                // the beachball if macOS ever reorders event delivery, and
                 // removing it costs nothing elsewhere.
                 hide_main_window(app_handle);
                 if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_runevent) {
@@ -1615,6 +2143,129 @@ fn main() {
 mod tests {
     use super::*;
     use config::{ProjectUserEntry, SpeedwaveUserConfig};
+
+    #[test]
+    fn format_audit_failure_message_lists_every_failure_and_recovery_steps() {
+        let failures = vec![
+            (
+                "acme-tools".to_string(),
+                "SIGNATURE file not present".to_string(),
+            ),
+            (
+                "widget".to_string(),
+                "Ed25519 verification failed".to_string(),
+            ),
+        ];
+        let msg = format_audit_failure_message(&failures);
+        // Every affected slug appears, with its reason.
+        assert!(msg.contains("acme-tools: SIGNATURE file not present"));
+        assert!(msg.contains("widget: Ed25519 verification failed"));
+        // Recovery instructions point at the CLI (Settings is unreachable here).
+        assert!(msg.contains("speedwave plugin remove"));
+        assert!(msg.contains("speedwave plugin install"));
+        assert!(msg.contains("~/.speedwave/plugins/"));
+    }
+
+    #[test]
+    fn format_audit_failure_message_handles_single_failure() {
+        let msg = format_audit_failure_message(&[("solo".to_string(), "tampered".to_string())]);
+        assert!(msg.contains("solo: tampered"));
+        assert_eq!(
+            msg.matches('•').count(),
+            1,
+            "exactly one bullet for one failure"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // sweep_oauth_workers — covers the watchdog selection logic without
+    // spawning real subprocesses. The fake implements WatchdogWorker.
+    // ────────────────────────────────────────────────────────────────────
+
+    struct FakeWorker {
+        alive: bool,
+        respawn_result: Result<u16, String>,
+        respawn_calls: std::cell::Cell<u32>,
+    }
+    impl FakeWorker {
+        fn new(alive: bool, respawn_result: Result<u16, String>) -> Self {
+            Self {
+                alive,
+                respawn_result,
+                respawn_calls: std::cell::Cell::new(0),
+            }
+        }
+    }
+    impl WatchdogWorker for FakeWorker {
+        fn is_alive(&self) -> bool {
+            self.alive
+        }
+        fn respawn(&mut self) -> anyhow::Result<u16> {
+            self.respawn_calls.set(self.respawn_calls.get() + 1);
+            // After a successful respawn the fake reports alive=true so a
+            // re-sweep wouldn't pick it again (matches real OauthProcess behaviour).
+            match &self.respawn_result {
+                Ok(p) => {
+                    self.alive = true;
+                    Ok(*p)
+                }
+                Err(e) => Err(anyhow::anyhow!(e.clone())),
+            }
+        }
+    }
+
+    #[test]
+    fn sweep_oauth_workers_empty_map_returns_empty() {
+        let mut map: std::collections::HashMap<String, FakeWorker> = Default::default();
+        assert!(sweep_oauth_workers(&mut map, "test").is_empty());
+    }
+
+    #[test]
+    fn sweep_oauth_workers_skips_alive_workers() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("p".to_string(), FakeWorker::new(true, Ok(9999)));
+        let respawned = sweep_oauth_workers(&mut map, "test");
+        assert!(respawned.is_empty(), "alive worker must not be respawned");
+        assert_eq!(map["p"].respawn_calls.get(), 0);
+    }
+
+    #[test]
+    fn sweep_oauth_workers_collects_all_unhealthy_in_one_pass() {
+        // Bug class: a break-early regression would skip the second project.
+        let mut map = std::collections::HashMap::new();
+        map.insert("a".to_string(), FakeWorker::new(false, Ok(1111)));
+        map.insert("b".to_string(), FakeWorker::new(false, Ok(2222)));
+        let mut respawned = sweep_oauth_workers(&mut map, "test");
+        respawned.sort();
+        assert_eq!(respawned, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn sweep_oauth_workers_failed_respawn_excluded_from_respawned() {
+        // Bug class: caller would recreate containers for a project whose
+        // worker actually didn't come back up — wasted compose churn.
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "bad".to_string(),
+            FakeWorker::new(false, Err("spawn failed".into())),
+        );
+        map.insert("good".to_string(), FakeWorker::new(false, Ok(3333)));
+        let respawned = sweep_oauth_workers(&mut map, "test");
+        assert_eq!(respawned, vec!["good".to_string()]);
+        // The failed worker WAS attempted (so we don't silently skip retries).
+        assert_eq!(map["bad"].respawn_calls.get(), 1);
+    }
+
+    #[test]
+    fn sweep_oauth_workers_mixed_alive_and_dead() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("alive".to_string(), FakeWorker::new(true, Ok(0)));
+        map.insert("dead".to_string(), FakeWorker::new(false, Ok(4444)));
+        let respawned = sweep_oauth_workers(&mut map, "test");
+        assert_eq!(respawned, vec!["dead".to_string()]);
+        assert_eq!(map["alive"].respawn_calls.get(), 0);
+        assert_eq!(map["dead"].respawn_calls.get(), 1);
+    }
 
     /// Extracts the body of a function from source code by matching `{`/`}`
     /// counting braces.  Used by structural tests to assert on function contents.
@@ -1901,7 +2552,9 @@ mod tests {
             ],
             active_project: Some("alpha".to_string()),
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         }
     }
 
@@ -1971,7 +2624,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
+            transcription: None,
             log_level: None,
+            ui: None,
         };
 
         let result = apply_switch_project(&mut cfg, "only");

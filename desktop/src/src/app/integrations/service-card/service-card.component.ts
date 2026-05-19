@@ -110,8 +110,20 @@ export interface SaveCredentialsEvent {
                     (input)="onFieldInput(field.key, $event)"
                     class="mono w-full rounded ring-1 ring-[var(--line)] bg-[var(--bg-2)] px-2 py-1.5 text-[12px] text-[var(--ink)] focus:outline-none focus:ring-[var(--accent-dim)]"
                     data-testid="auth-field-input"
+                    [attr.aria-describedby]="
+                      field.hint ? svc().service + '-' + field.key + '-hint' : null
+                    "
                     [required]="!field.optional"
                   />
+                  @if (field.hint) {
+                    <p
+                      [id]="svc().service + '-' + field.key + '-hint'"
+                      class="mono mt-1 text-[11px] leading-snug text-[var(--ink-dim)]"
+                      data-testid="auth-field-hint"
+                    >
+                      {{ field.hint }}
+                    </p>
+                  }
                 </div>
               }
             }

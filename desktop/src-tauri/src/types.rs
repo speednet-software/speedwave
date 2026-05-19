@@ -60,6 +60,7 @@ pub(crate) struct LlmConfigResponse {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AuthStatusResponse {
     pub(crate) api_key_configured: bool,
+    /// True when `claude auth status` inside the running container succeeds.
     pub(crate) oauth_authenticated: bool,
 }
 
@@ -71,6 +72,8 @@ pub(crate) struct AuthField {
     pub(crate) placeholder: String,
     pub(crate) oauth_flow: bool,
     pub(crate) optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hint: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -84,6 +87,13 @@ pub(crate) struct IntegrationStatusEntry {
     pub(crate) current_values: std::collections::HashMap<String, String>,
     pub(crate) mappings: Option<std::collections::HashMap<String, serde_json::Value>>,
     pub(crate) badge: Option<String>,
+    /// Reason the integration needs the user's attention even though it is
+    /// configured. Currently only SharePoint sets this — when the stored
+    /// `grantedScopes` is a strict subset of the currently-required
+    /// `SHAREPOINT_OAUTH_SCOPES` (typically after migration, ADR-060), the UI
+    /// surfaces a "Re-authorize" banner so the next refresh doesn't quietly
+    /// fail with `scope_mismatch`. `None` = no action required.
+    pub(crate) oauth_action_required: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -108,6 +118,35 @@ pub(crate) fn get_allowed_fields(service: &str) -> Option<&'static [&'static str
     speedwave_runtime::consts::find_mcp_service(service).map(|svc| svc.credential_files)
 }
 
+/// Returns the field's physical storage tier (plan §PR3:290-299).
+/// `None` when the field is not declared in the service's `auth_fields`.
+pub(crate) fn field_storage(
+    service: &str,
+    key: &str,
+) -> Option<speedwave_runtime::consts::FieldStorage> {
+    speedwave_runtime::consts::find_mcp_service(service).and_then(|svc| {
+        svc.auth_fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.storage)
+    })
+}
+
+/// `true` if `key` is allowed on `service`, considering both storage tiers
+/// (worker-mounted credential files + OAuth state fields). Used by save paths
+/// to accept UI form fields whose physical home is `oauth/<project>/<service>.json`.
+pub(crate) fn is_allowed_field(service: &str, key: &str) -> bool {
+    let Some(svc) = speedwave_runtime::consts::find_mcp_service(service) else {
+        return false;
+    };
+    if svc.credential_files.contains(&key) {
+        return true;
+    }
+    svc.oauth_state_fields
+        .map(|fs| fs.contains(&key))
+        .unwrap_or(false)
+}
+
 pub(crate) fn is_secret_field(key: &str) -> bool {
     speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
         .iter()
@@ -127,6 +166,7 @@ pub(crate) fn get_auth_fields(service: &str) -> Vec<AuthField> {
                     placeholder: f.placeholder.to_string(),
                     oauth_flow: f.oauth_flow,
                     optional: f.optional,
+                    hint: f.hint.map(|s| s.to_string()),
                 })
                 .collect()
         })
@@ -168,6 +208,8 @@ mod tests {
         assert!(get_allowed_fields("sharepoint").is_some());
         assert!(get_allowed_fields("redmine").is_some());
         assert!(get_allowed_fields("gitlab").is_some());
+        assert!(get_allowed_fields("github").is_some());
+        assert!(get_allowed_fields("atlassian").is_some());
     }
 
     #[test]
@@ -179,8 +221,12 @@ mod tests {
 
     #[test]
     fn allowed_fields_match_auth_fields() {
+        // Every UI auth field must live in exactly one storage tier:
+        // credential_files (worker-mounted) OR oauth_state_fields (off-mount,
+        // plan §PR3:290-299). Earlier versions of this test only checked
+        // credential_files — that became wrong when PR3 moved SharePoint's
+        // refresh_token / client_id / tenant_id off-mount.
         for svc in speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES {
-            let allowed = get_allowed_fields(svc.config_key).unwrap();
             let auth_fields = get_auth_fields(svc.config_key);
             for field in &auth_fields {
                 // config.json is a virtual file for redmine, not an auth field
@@ -188,8 +234,8 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    allowed.contains(&field.key.as_str()),
-                    "auth field '{}' for service '{}' not in allowed credential files",
+                    is_allowed_field(svc.config_key, &field.key),
+                    "auth field '{}' for service '{}' has no storage tier",
                     field.key,
                     svc.config_key
                 );
@@ -255,7 +301,7 @@ mod tests {
     fn secret_fields_excludes_non_secret_keys() {
         assert!(!is_secret_field("host_url"));
         assert!(!is_secret_field("project_id"));
-        assert!(!is_secret_field("base_path"));
+        assert!(!is_secret_field("site_id"));
     }
 
     #[test]
@@ -291,7 +337,7 @@ mod tests {
 
     #[test]
     fn get_auth_fields_other_services_no_oauth_flow() {
-        for svc_key in &["slack", "gitlab", "redmine"] {
+        for svc_key in &["slack", "gitlab", "github", "atlassian", "redmine"] {
             let fields = get_auth_fields(svc_key);
             for field in &fields {
                 assert!(

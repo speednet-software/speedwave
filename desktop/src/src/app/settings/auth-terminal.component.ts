@@ -23,12 +23,27 @@ import { TauriService } from '../services/tauri.service';
   template: `
     <div class="mt-3 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4">
       <p class="text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        Open a terminal and run the following command. Claude Code will launch its interactive setup
-        and walk you through the login flow.
+        Click the button below — Speedwave opens a terminal, runs Claude Code, and you type
+        <code>/login</code> at the prompt. Claude Code saves your credentials inside the container
+        so the next start skips the login flow.
       </p>
+      <div class="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          class="rounded bg-[var(--accent)] px-3 py-1.5 text-[12px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-50"
+          data-testid="auth-open-terminal"
+          [disabled]="opening"
+          (click)="openTerminal()"
+        >
+          {{ opening ? 'Opening…' : 'Open terminal and log in' }}
+        </button>
+      </div>
       @if (command) {
+        <p class="mt-4 text-[12px] leading-relaxed text-[var(--ink-dim)]">
+          Or run this command yourself in any terminal:
+        </p>
         <div
-          class="mt-3 flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-2"
+          class="mt-2 flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-2"
         >
           <code
             class="mono flex-1 select-all break-all text-[12px] text-[var(--accent)]"
@@ -47,7 +62,7 @@ import { TauriService } from '../services/tauri.service';
       }
       @if (isWindows) {
         <p class="mono mt-2 text-[10px] leading-relaxed text-[var(--ink-mute)]">
-          On Windows, run this in a WSL or bash terminal.
+          On Windows, run this in a PowerShell terminal (where the speedwave command is on PATH).
         </p>
       }
       @if (error) {
@@ -75,6 +90,8 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   error = '';
   /** Whether the current platform is Windows (for WSL terminal hint). */
   isWindows = false;
+  /** True while the host terminal-open Tauri call is in flight. */
+  opening = false;
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
@@ -94,11 +111,38 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
         this.error = err;
         this.cdr.markForCheck();
       });
-    this.tauri.invoke<string>('get_platform').then((platform) => {
-      this.isWindows = platform === 'windows';
-      this.cdr.markForCheck();
-    });
+    this.tauri
+      .invoke<string>('get_platform')
+      .then((platform) => {
+        this.isWindows = platform === 'windows';
+        this.cdr.markForCheck();
+      })
+      .catch((err: unknown) => {
+        // Non-fatal: the Windows PowerShell hint just won't show. Login still
+        // works. Log so the failure isn't completely invisible.
+        console.warn('auth-terminal: get_platform failed:', err);
+      });
     this.startPolling();
+  }
+
+  /**
+   * Spawns the host's system terminal running `speedwave login` for the
+   *  active project. Does NOT cancel polling — `get_auth_status` still
+   *  detects when the user finishes the OAuth flow.
+   */
+  openTerminal(): void {
+    this.opening = true;
+    this.error = '';
+    this.cdr.markForCheck();
+    this.tauri
+      .invoke<void>('start_oauth_login', { project: this.project() })
+      .catch((err: string) => {
+        this.error = err || 'Failed to open terminal';
+      })
+      .finally(() => {
+        this.opening = false;
+        this.cdr.markForCheck();
+      });
   }
 
   /** Copies the CLI command to the clipboard. */
@@ -142,8 +186,14 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
           }
           this.done.emit(true);
         }
-      } catch {
-        // Container may not be running — keep polling
+      } catch (err: unknown) {
+        // Expected while the container is still starting; log anything that
+        // doesn't look like that so a real regression (e.g. the command
+        // disappearing) leaves a trace instead of an infinite silent poll.
+        const msg = typeof err === 'string' ? err : String(err);
+        if (!/container|not running|starting/i.test(msg)) {
+          console.debug('auth-terminal: get_auth_status poll error:', err);
+        }
       }
     }, 3000);
   }

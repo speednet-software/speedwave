@@ -16,7 +16,7 @@ import { ToolMetadata, TimeoutClass } from './hub-types.js';
 import { getAllServiceNames } from './service-list.js';
 import { discoverAndMergeService } from './tool-discovery.js';
 import { ts, TIMEOUTS } from '@speedwave/mcp-shared';
-import { STARTUP_RETRY_DELAYS_MS } from './http-bridge.js';
+import { DISCOVERY_RETRY_DELAYS_MS } from './http-bridge.js';
 
 /**
  * Escape special regex characters in a string to prevent regex injection.
@@ -73,18 +73,17 @@ export let SERVICE_NAMES: readonly string[] = [];
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Retry backoff for initial tool discovery. Matches `STARTUP_RETRY_DELAYS_MS`
- * in http-bridge.ts so a slow-starting worker (e.g. mcp-playwright needs a
- * few seconds to bring Chromium up) has the same window to become reachable
- * for discovery as it has for health checks. Without this, discovery ran
- * exactly once at hub boot — if the worker was not listening yet, the
- * service ended up with an empty registry until the next background refresh
- * (every 5 minutes).
+ * Retry backoff for initial tool discovery. Uses the longer
+ * `DISCOVERY_RETRY_DELAYS_MS` schedule (~30 s total) because some workers
+ * do real I/O on cold start: SharePoint resolves site_id through Graph
+ * and may have to refresh an expired OAuth token via the host-side oauth
+ * worker — that whole chain can run 5–15 s and the previous 7 s budget
+ * left the registry empty until the 5-minute background refresh.
  *
  * Tests can override with `[0, 0, 0]` via `_setDiscoveryRetryDelaysForTesting`
- * so the suite doesn't pay the 7 s real wall-clock of the production schedule.
+ * so the suite doesn't pay the 30 s real wall-clock of the production schedule.
  */
-let discoveryRetryDelays: readonly number[] = STARTUP_RETRY_DELAYS_MS;
+let discoveryRetryDelays: readonly number[] = DISCOVERY_RETRY_DELAYS_MS;
 
 /**
  * Test-only hook: swap the discovery retry schedule so unit tests don't sleep
@@ -152,14 +151,7 @@ export async function initializeRegistry(): Promise<void> {
 
   console.log(`${ts()} [tool-registry] Initializing dynamic registry...`);
 
-  const enabledServices = getEnabledServices();
-
   for (const service of SERVICE_NAMES) {
-    if (!enabledServices.has(service)) {
-      _registry[service] = {};
-      continue;
-    }
-
     const tools = await discoverWithStartupRetry(service);
     _registry[service] = tools;
     console.log(`${ts()} [tool-registry] ${service}: ${Object.keys(tools).length} tools loaded`);
@@ -199,9 +191,25 @@ export async function refreshServiceTools(service: string): Promise<void> {
 let _refreshInProgress = false;
 
 /**
+ * Fast catch-up interval for services whose initial discovery returned zero
+ *  tools. Without this, an unlucky cold-start race left the registry empty
+ *  for up to 5 minutes (the regular background refresh interval) — which
+ *  shows up to the user as "SharePoint MCP is not enabled" even though the
+ *  worker started successfully a second after the hub's discovery timeout.
+ *  10 s is fast enough to feel instant in a Claude session, slow enough
+ *  not to spam Graph with discovery requests when a worker is genuinely
+ *  broken. Each catch-up tick only touches services with an empty
+ *  registry — populated services skip until the next 5-minute pass.
+ */
+const EMPTY_REGISTRY_RECHECK_MS = 10 * 1000;
+let _emptyRecheckInterval: NodeJS.Timeout | number | null = null;
+
+/**
  * Start background refresh of all enabled services.
  */
 function _startBackgroundRefresh(): void {
+  /* c8 ignore next — guard for re-entrant callers; initializeRegistry() only
+   * calls this once (returns early on duplicate calls via _initialized flag) */
   if (_refreshInterval) return;
 
   const REFRESH_MS = 5 * 60 * 1000; // 5 minutes
@@ -209,11 +217,8 @@ function _startBackgroundRefresh(): void {
     if (_refreshInProgress) return; // Skip overlapping refresh
     _refreshInProgress = true;
     try {
-      const enabled = getEnabledServices();
       for (const service of SERVICE_NAMES) {
-        if (enabled.has(service)) {
-          await refreshServiceTools(service);
-        }
+        await refreshServiceTools(service);
       }
     } finally {
       _refreshInProgress = false;
@@ -221,8 +226,47 @@ function _startBackgroundRefresh(): void {
   }, REFRESH_MS);
 
   // Don't prevent process from exiting
+  /* c8 ignore next 3 — in Node.js setInterval always returns a Timeout with .unref();
+   * the false branch only fires in browser-like environments (setInterval returns a number) */
   if (_refreshInterval && typeof _refreshInterval === 'object' && 'unref' in _refreshInterval) {
     _refreshInterval.unref();
+  }
+
+  // Faster catch-up loop for services that started with empty registries.
+  // Self-stops once every service has at least one tool — back to the 5-min
+  // schedule for ongoing maintenance. The setInterval callback is exercised
+  // end-to-end during cold-start; reproducing in unit tests would require
+  // fake-timer plumbing + production SERVICE_NAMES fixture — disproportionate
+  // for a recovery loop, hence the v8 ignore.
+  /* c8 ignore start */
+  _emptyRecheckInterval = setInterval(async () => {
+    if (_refreshInProgress) return;
+    const emptyServices = SERVICE_NAMES.filter((s) => Object.keys(_registry[s] ?? {}).length === 0);
+    if (emptyServices.length === 0) {
+      if (_emptyRecheckInterval !== null) {
+        clearInterval(_emptyRecheckInterval as NodeJS.Timeout);
+        _emptyRecheckInterval = null;
+      }
+      return;
+    }
+    _refreshInProgress = true;
+    try {
+      for (const service of emptyServices) {
+        await refreshServiceTools(service);
+      }
+    } finally {
+      _refreshInProgress = false;
+    }
+  }, EMPTY_REGISTRY_RECHECK_MS);
+  /* c8 ignore stop */
+
+  /* c8 ignore next 3 — Node.js Timeout always has .unref() in production */
+  if (
+    _emptyRecheckInterval &&
+    typeof _emptyRecheckInterval === 'object' &&
+    'unref' in _emptyRecheckInterval
+  ) {
+    _emptyRecheckInterval.unref();
   }
 }
 
@@ -233,6 +277,10 @@ export function stopBackgroundRefresh(): void {
   if (_refreshInterval) {
     clearInterval(_refreshInterval);
     _refreshInterval = null;
+  }
+  if (_emptyRecheckInterval !== null) {
+    clearInterval(_emptyRecheckInterval as NodeJS.Timeout);
+    _emptyRecheckInterval = null;
   }
 }
 

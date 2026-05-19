@@ -1,7 +1,8 @@
+use crate::config::ResolvedIntegrationsConfig;
 use crate::{bundle, runtime::ContainerRuntime};
 use std::path::PathBuf;
 
-/// A container image definition used by `build_all_images`.
+/// A container image definition. Build set is selected per project via [`enabled_images`].
 pub struct ImageDef {
     /// Docker/OCI repository name, e.g. `"speedwave-claude"`.
     pub name: &'static str,
@@ -12,6 +13,10 @@ pub struct ImageDef {
     /// Build arguments passed as `--build-arg KEY=VAL` to the container engine.
     pub build_args: &'static [(&'static str, &'static str)],
 }
+
+/// Prefix on every toggleable MCP worker image; the suffix is the integration
+/// config key (`speedwave-mcp-slack` ↔ `slack`). Same naming rule as compose names.
+const MCP_IMAGE_PREFIX: &str = "speedwave-mcp-";
 
 /// SSOT for all container images — used by both Desktop (setup wizard) and the update flow.
 ///
@@ -25,7 +30,11 @@ pub const IMAGE_MCP_SLACK: &str = "speedwave-mcp-slack";
 pub const IMAGE_MCP_SHAREPOINT: &str = "speedwave-mcp-sharepoint";
 pub const IMAGE_MCP_REDMINE: &str = "speedwave-mcp-redmine";
 pub const IMAGE_MCP_GITLAB: &str = "speedwave-mcp-gitlab";
+pub const IMAGE_MCP_GITHUB: &str = "speedwave-mcp-github";
+pub const IMAGE_MCP_ATLASSIAN: &str = "speedwave-mcp-atlassian";
+pub const IMAGE_MCP_OFFICE: &str = "speedwave-mcp-office";
 pub const IMAGE_MCP_PLAYWRIGHT: &str = "speedwave-mcp-playwright";
+pub const IMAGE_MCP_CONTEXT7: &str = "speedwave-mcp-context7";
 
 pub const IMAGES: &[ImageDef] = &[
     ImageDef {
@@ -65,28 +74,92 @@ pub const IMAGES: &[ImageDef] = &[
         build_args: &[],
     },
     ImageDef {
+        name: IMAGE_MCP_GITHUB,
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/github/Dockerfile",
+        build_args: &[],
+    },
+    ImageDef {
+        name: IMAGE_MCP_ATLASSIAN,
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/atlassian/Dockerfile",
+        build_args: &[],
+    },
+    ImageDef {
+        name: IMAGE_MCP_OFFICE,
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/office/Dockerfile",
+        build_args: &[],
+    },
+    ImageDef {
         name: IMAGE_MCP_PLAYWRIGHT,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/playwright/Containerfile",
         build_args: &[],
     },
+    ImageDef {
+        name: IMAGE_MCP_CONTEXT7,
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/context7/Dockerfile",
+        build_args: &[],
+    },
 ];
+
+/// Build set for the given integrations: `claude` + `mcp-hub` always, plus the
+/// worker image for each enabled built-in MCP service. Plugin images go through
+/// `plugin::ensure_plugin_images`; the `os` worker has no image.
+pub fn enabled_images(integrations: &ResolvedIntegrationsConfig) -> Vec<&'static ImageDef> {
+    IMAGES
+        .iter()
+        .filter(|img| match img.name.strip_prefix(MCP_IMAGE_PREFIX) {
+            None => true, // speedwave-claude — always built
+            Some("hub") => true,
+            Some(key) => integrations.is_service_enabled(key) == Some(true),
+        })
+        .collect()
+}
+
+/// `ImageDef` for a built-in MCP integration config key; test-only helper.
+#[cfg(test)]
+fn image_for_service_key(config_key: &str) -> Option<&'static ImageDef> {
+    if config_key == "hub" {
+        return None;
+    }
+    let target = format!("{MCP_IMAGE_PREFIX}{config_key}");
+    IMAGES.iter().find(|img| img.name == target)
+}
 
 /// Used when `std::thread::available_parallelism()` cannot determine CPU count.
 /// Conservative for nested-VM hosts where extra parallelism amplifies I/O
 /// contention (see ADR-032).
 const DEFAULT_BUILD_WORKER_FALLBACK: usize = 4;
 
+/// How many times to retry a build that failed with a transient error
+/// (I/O hiccup, DNS not yet settled after VM boot — see `is_transient_build_error`).
+const TRANSIENT_BUILD_RETRIES: u32 = 2;
+
+/// Base wait before the first transient retry; the Nth retry waits `BASE * N`.
+/// Sized so the VM's `systemd-resolved` has time to fall back from EDNS0 to plain
+/// UDP, while two attempts (3s + 6s) don't noticeably stall a genuinely-down network.
+/// Near-zero under `cfg(test)` so retry-path tests don't actually sleep.
+#[cfg(not(test))]
+const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
+
 pub fn image_ref(name: &str, bundle_id: &str) -> String {
     format!("{name}:{bundle_id}")
 }
 
-/// Returns `true` if all expected built-in container images exist in the runtime.
-///
-/// Callers should call `rt.ensure_ready()` first — this function does not check
-/// runtime readiness. Do **not** guard with `is_available()`: a stopped VM
-/// returns `false` there but `ensure_ready()` can start it.
-pub fn images_exist(rt: &dyn super::runtime::ContainerRuntime) -> bool {
+/// `true` if every image that should exist for `integrations` is present —
+/// only [`enabled_images`], since disabled integrations have no image under
+/// lazy builds. Pass the union across projects when reconciling. Call
+/// `rt.ensure_ready()` first; do not guard with `is_available()` (a stopped
+/// VM is false there but `ensure_ready()` starts it).
+pub fn images_exist(
+    rt: &dyn super::runtime::ContainerRuntime,
+    integrations: &ResolvedIntegrationsConfig,
+) -> bool {
     let manifest = match crate::bundle::load_current_bundle_manifest() {
         Ok(m) => m,
         Err(e) => {
@@ -94,7 +167,7 @@ pub fn images_exist(rt: &dyn super::runtime::ContainerRuntime) -> bool {
             return false;
         }
     };
-    IMAGES.iter().all(|img| {
+    enabled_images(integrations).iter().all(|img| {
         let tag = image_ref(img.name, &manifest.bundle_id);
         rt.image_exists(&tag).unwrap_or(false)
     })
@@ -172,72 +245,143 @@ fn resolve_build_root_inner(
 /// Step 2 before 3 ensures `make dev` uses local sources (with hoisted
 /// `node_modules`) instead of a stale bundle path written by the installed app.
 pub fn resolve_mcp_os_script() -> Option<std::path::PathBuf> {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
-    resolve_mcp_os_script_inner(
+    let dev = repo_dev_path("mcp-servers/os/dist/index.js");
+    resolve_worker_script_inner(
+        "mcp-os",
+        &["mcp-os", "os", "dist", "index.js"],
         crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
         dev,
     )
 }
 
-/// Internal implementation that accepts an explicit home directory for testability.
 #[cfg(test)]
 fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
-    resolve_mcp_os_script_inner(home, dev)
+    let dev = repo_dev_path("mcp-servers/os/dist/index.js");
+    resolve_worker_script_inner("mcp-os", &["mcp-os", "os", "dist", "index.js"], home, dev)
 }
 
-/// Core resolution logic, separated for testability (dev_path can be overridden).
+/// Resolves the `host_exec` worker `index.js` (bundle → CARGO source → marker).
+/// Mirrors [`resolve_mcp_os_script`]; ADR-054.
+pub fn resolve_host_exec_script() -> Option<std::path::PathBuf> {
+    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
+    resolve_worker_script_inner(
+        "host_exec",
+        &["host_exec", "host_exec", "dist", "index.js"],
+        crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
+        dev,
+    )
+}
+
+#[cfg(test)]
+fn resolve_host_exec_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
+    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
+    resolve_worker_script_inner(
+        "host_exec",
+        &["host_exec", "host_exec", "dist", "index.js"],
+        home,
+        dev,
+    )
+}
+
+/// Resolves the `oauth` worker `index.js` (bundle → CARGO source → marker).
+/// Mirrors [`resolve_mcp_os_script`]; ADR-060.
+pub fn resolve_oauth_script() -> Option<std::path::PathBuf> {
+    let dev = repo_dev_path("mcp-servers/oauth/dist/index.js");
+    resolve_worker_script_inner(
+        "oauth",
+        &["oauth", "oauth", "dist", "index.js"],
+        crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
+        dev,
+    )
+}
+
+/// Build a `<repo-root>/<rel>` path for the dev-tree fallback. `None` when out of tree.
+fn repo_dev_path(rel: &str) -> Option<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|repo| repo.join(rel))
+}
+
+/// Test-only alias — implementation is `resolve_worker_script_inner`.
+#[cfg(test)]
 fn resolve_mcp_os_script_inner(
     home: Option<PathBuf>,
     dev_path: Option<PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    // 1. SPEEDWAVE_RESOURCES_DIR (production — Tauri bundle)
+    resolve_worker_script_inner(
+        "mcp-os",
+        &["mcp-os", "os", "dist", "index.js"],
+        home,
+        dev_path,
+    )
+}
+
+/// Test-only alias — implementation is `resolve_worker_script_inner`.
+#[cfg(test)]
+fn resolve_host_exec_script_inner(
+    home: Option<PathBuf>,
+    dev_path: Option<PathBuf>,
+) -> Option<std::path::PathBuf> {
+    resolve_worker_script_inner(
+        "host_exec",
+        &["host_exec", "host_exec", "dist", "index.js"],
+        home,
+        dev_path,
+    )
+}
+
+/// Resolve a host-side worker script via the three-tier fallback shared by all
+/// bundled workers (`mcp-os`, `host_exec`, …): SPEEDWAVE_RESOURCES_DIR (bundle)
+/// → repo source tree (`make dev`) → `~/.speedwave/resources-dir` marker (CLI).
+/// `bundled_subpath` is the path *inside* the resources dir; `label` drives logs.
+fn resolve_worker_script_inner(
+    label: &str,
+    bundled_subpath: &[&str],
+    home: Option<PathBuf>,
+    dev_path: Option<PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let join_subpath = |base: PathBuf| -> PathBuf {
+        let mut p = base;
+        for seg in bundled_subpath {
+            p = p.join(seg);
+        }
+        p
+    };
+
+    // 1. SPEEDWAVE_RESOURCES_DIR — production Tauri bundle.
     if let Ok(res) = std::env::var(crate::consts::BUNDLE_RESOURCES_ENV) {
-        let p = PathBuf::from(&res)
-            .join("mcp-os")
-            .join("os")
-            .join("dist")
-            .join("index.js");
+        let p = join_subpath(PathBuf::from(&res));
         if p.exists() {
             return Some(p);
         }
-        log::warn!("mcp-os not found at bundled path: {}", p.display());
+        log::warn!("{label} not found at bundled path: {}", p.display());
     }
 
-    // 2. Dev source tree — prefer local sources over marker so `make dev`
-    //    picks up hoisted node_modules from the workspace
+    // 2. Repo source tree — prefer local sources over the marker so `make dev`
+    //    picks up hoisted node_modules from the workspace.
     if let Some(ref p) = dev_path {
         if p.exists() {
             return dev_path;
         }
     }
 
-    // 3. Marker file (CLI reads Desktop's resources path)
+    // 3. Marker file — CLI reads Desktop's resources path.
     if let Some(ref home) = home {
         let marker = home
             .join(crate::consts::DATA_DIR)
             .join(crate::consts::RESOURCES_MARKER);
         if let Ok(dir) = std::fs::read_to_string(&marker) {
-            let p = PathBuf::from(dir.trim())
-                .join("mcp-os")
-                .join("os")
-                .join("dist")
-                .join("index.js");
+            let p = join_subpath(PathBuf::from(dir.trim()));
             if p.is_absolute() && p.exists() {
                 return Some(p);
             }
-            log::warn!("mcp-os not found at marker path: {}", p.display());
+            log::warn!("{label} not found at marker path: {}", p.display());
         }
     }
 
     if let Some(ref p) = dev_path {
-        log::warn!("mcp-os not found at dev path: {}", p.display());
+        log::warn!("{label} not found at dev path: {}", p.display());
     }
 
     None
@@ -314,7 +458,7 @@ fn write_resources_marker_to(
 
 /// Containerd overlayfs snapshotter corruption that survived a prune attempt.
 ///
-/// Returned by `build_all_images` when:
+/// Returned by [`build_images_for_bundle`] when:
 /// 1. First build fails with a snapshotter error (e.g. "failed to rename: file exists")
 /// 2. `system_prune` + retry also fails
 ///
@@ -344,10 +488,6 @@ impl std::error::Error for SnapshotterRecoveryFailed {
 }
 
 fn platform_restart_hint() -> &'static str {
-    #[cfg(target_os = "linux")]
-    {
-        "systemctl --user restart containerd && systemctl --user restart buildkit"
-    }
     #[cfg(target_os = "macos")]
     {
         "limactl shell speedwave -- sudo systemctl restart containerd && \
@@ -359,39 +499,44 @@ fn platform_restart_hint() -> &'static str {
         "wsl.exe -d Speedwave -- systemctl restart containerd && \
          wsl.exe -d Speedwave -- systemctl restart buildkit"
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         "restart containerd and buildkit manually"
     }
 }
 
-/// Rebuilds all container images from their Containerfiles.
-///
-/// Calls `runtime.prepare_build_context()` to translate the host build-root into
-/// a path accessible by the container engine (e.g. copy into `~` for Lima VM,
-/// convert `C:\` → `/mnt/c/` for WSL).
-///
-/// If the build fails with a containerd overlayfs snapshotter error
-/// ("failed to rename: file exists"), automatically prunes dangling images and
-/// build cache, then retries once. If the retry also fails, returns
-/// `SnapshotterRecoveryFailed` so callers can decide whether to restart the
-/// container engine (safe during setup) or propagate with diagnostics
-/// (when containers are running).
-///
-/// This is a known containerd bug (containerd#11719, nerdctl#3420).
-///
-/// Returns the number of images successfully built.
-pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
+/// Builds `enabled_images(integrations)` for the current bundle.
+pub fn build_enabled_images(
+    runtime: &dyn ContainerRuntime,
+    integrations: &ResolvedIntegrationsConfig,
+) -> anyhow::Result<u32> {
     let manifest = bundle::load_current_bundle_manifest()?;
-    build_all_images_for_bundle(runtime, &manifest.bundle_id)
+    build_images_for_bundle(runtime, &enabled_images(integrations), &manifest.bundle_id)
 }
 
-/// Decide whether pruning a previous bundle's images is warranted.
-///
-/// Returns `Some(old_id)` only when the previously applied bundle exists and
-/// differs from the new one. Fresh installs (`applied` is `None`) and
-/// same-version rebuilds (`applied == new`) return `None`, so the caller
-/// skips `prune_old_bundle_images` entirely in those cases.
+/// Builds images from `images` not yet present for `bundle_id`. Returns count built.
+pub fn build_missing_images(
+    runtime: &dyn ContainerRuntime,
+    images: &[&ImageDef],
+    bundle_id: &str,
+) -> anyhow::Result<u32> {
+    let missing: Vec<&ImageDef> = images
+        .iter()
+        .copied()
+        .filter(|img| {
+            !runtime
+                .image_exists(&image_ref(img.name, bundle_id))
+                .unwrap_or(false)
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    build_images_for_bundle(runtime, &missing, bundle_id)?;
+    Ok(missing.len() as u32)
+}
+
+/// `Some(old_id)` only when the applied bundle exists and differs from `new_bundle_id`.
 pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) -> Option<&'a str> {
     match applied {
         Some(old) if old != new_bundle_id => Some(old),
@@ -399,7 +544,31 @@ pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) ->
     }
 }
 
-/// Remove images from a previous bundle to reclaim disk space.
+/// Force-removes orphan tags for `current_bundle_id` — tags that exist in the
+/// runtime but are not in `keep`. Filtered through `image_exists` so a fresh
+/// setup that never built a worker doesn't spam `rmi: no such image` warnings.
+pub fn prune_orphan_current_bundle_images(
+    runtime: &dyn ContainerRuntime,
+    current_bundle_id: &str,
+    keep: &[&ImageDef],
+) -> anyhow::Result<()> {
+    let keep_names: std::collections::HashSet<&str> = keep.iter().map(|i| i.name).collect();
+    let stale: Vec<String> = IMAGES
+        .iter()
+        .filter(|img| !keep_names.contains(img.name))
+        .map(|img| image_ref(img.name, current_bundle_id))
+        .filter(|tag| runtime.image_exists(tag).unwrap_or(false))
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    log::info!("Pruning {} orphan tag(s) for current bundle", stale.len());
+    runtime.remove_images(&stale, true)?;
+    Ok(())
+}
+
+/// Force-removes the previous bundle's image tags. `--force` is required
+/// because stopped containers from the previous session block plain `rmi`.
 pub fn prune_old_bundle_images(
     runtime: &dyn ContainerRuntime,
     old_bundle_id: &str,
@@ -415,7 +584,7 @@ pub fn prune_old_bundle_images(
         "Pruning {} images from old bundle {old_bundle_id}",
         tags.len()
     );
-    runtime.remove_images(&tags, false)?;
+    runtime.remove_images(&tags, true)?;
 
     log::info!("Pruning BuildKit cache");
     if let Err(e) = runtime.prune_buildkit_cache() {
@@ -424,15 +593,18 @@ pub fn prune_old_bundle_images(
     Ok(())
 }
 
-pub fn build_all_images_for_bundle(
+/// Builds `images` for `bundle_id`. Snapshotter/transient errors retry
+/// internally (see `is_snapshotter_error` / `is_transient_build_error`).
+pub fn build_images_for_bundle(
     runtime: &dyn ContainerRuntime,
+    images: &[&ImageDef],
     bundle_id: &str,
 ) -> anyhow::Result<u32> {
     let root = resolve_build_root()?;
     let vm_root = runtime.prepare_build_context(&root)?;
     let needs_cleanup = vm_root != root;
 
-    let result = try_build_all(runtime, &vm_root, bundle_id).or_else(|first_err| {
+    let result = try_build_images(runtime, images, &vm_root, bundle_id).or_else(|first_err| {
         if is_snapshotter_error(&first_err) {
             log::warn!(
                 "build failed with containerd snapshotter error, pruning and retrying: {first_err}"
@@ -440,12 +612,27 @@ pub fn build_all_images_for_bundle(
             if let Err(prune_err) = runtime.system_prune() {
                 log::warn!("system prune failed: {prune_err}");
             }
-            try_build_all(runtime, &vm_root, bundle_id).map_err(|second_err| {
+            try_build_images(runtime, images, &vm_root, bundle_id).map_err(|second_err| {
                 anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
             })
         } else if is_transient_build_error(&first_err) {
-            log::warn!("build failed with transient error, retrying once: {first_err}");
-            try_build_all(runtime, &vm_root, bundle_id)
+            // Transient — usually the boot-time DNS-fallback race (see
+            // `is_transient_build_error`). A few seconds' wait lets the resolver
+            // settle; two backed-off attempts cover a slow fallback.
+            let mut last_err = first_err;
+            for attempt in 1..=TRANSIENT_BUILD_RETRIES {
+                let delay = TRANSIENT_BUILD_RETRY_BASE_DELAY * attempt;
+                log::warn!(
+                    "build failed with transient error, retrying in {}s (attempt {attempt}/{TRANSIENT_BUILD_RETRIES}): {last_err}",
+                    delay.as_secs()
+                );
+                std::thread::sleep(delay);
+                match try_build_images(runtime, images, &vm_root, bundle_id) {
+                    Ok(n) => return Ok(n),
+                    Err(e) => last_err = e,
+                }
+            }
+            Err(last_err)
         } else {
             Err(first_err)
         }
@@ -474,25 +661,24 @@ pub fn build_all_images_for_bundle(
     result
 }
 
-/// Builds all images using a bounded worker pool. Extracted so the retry logic in
-/// `build_all_images_for_bundle` can re-call it.
-///
-/// Worker count is bounded by CPU parallelism and image count (see ADR-032).
-/// All worker errors are collected; the one to propagate upstream is chosen by priority:
-/// snapshotter-class > transient-class > lowest-image-index fallback.
-/// Non-chosen errors are logged via `log::error!` with full chain after scope join.
-/// The chosen error is returned as `Err` without a join-time log; the caller logs it.
-fn try_build_all(
+/// Builds `images` using a bounded worker pool. Extracted so the retry logic in
+/// [`build_images_for_bundle`] can re-call it. Worker count bounded by CPU + image
+/// count (ADR-032). Errors collected; propagate by priority: snapshotter > transient > first.
+fn try_build_images(
     runtime: &dyn ContainerRuntime,
+    images: &[&ImageDef],
     vm_root: &std::path::Path,
     bundle_id: &str,
 ) -> anyhow::Result<u32> {
-    let total = IMAGES.len();
+    let total = images.len();
+    if total == 0 {
+        return Ok(0);
+    }
     let worker_count = match std::thread::available_parallelism() {
         Ok(n) => n.get().min(total),
         Err(e) => {
             log::warn!(
-                "build_all_images: available_parallelism failed ({e}); using fallback of {DEFAULT_BUILD_WORKER_FALLBACK}"
+                "build_images: available_parallelism failed ({e}); using fallback of {DEFAULT_BUILD_WORKER_FALLBACK}"
             );
             DEFAULT_BUILD_WORKER_FALLBACK.min(total)
         }
@@ -500,11 +686,7 @@ fn try_build_all(
     let root_str = vm_root.to_string_lossy();
     let root_str = root_str.trim_end_matches('/');
 
-    // Distribute IMAGES indices across workers as static slices — no shared
-    // work-stealing queue needed for a fixed, small input list (ADR-032 §4).
-    // `chunks.len()` can be less than `worker_count` when `total / worker_count`
-    // does not divide evenly (e.g. 6 images on 4 cores → chunk_size=2 → 3 chunks),
-    // so we log the actual thread count, not the upper bound.
+    // Distribute indices across workers (ADR-032 §4); chunks.len() may be < worker_count.
     let indices: Vec<usize> = (0..total).collect();
     let chunks: Vec<&[usize]> = if worker_count == 0 {
         vec![]
@@ -512,30 +694,28 @@ fn try_build_all(
         indices.chunks(total.div_ceil(worker_count)).collect()
     };
     log::info!(
-        "build_all_images: building {total} images from {} ({} parallel workers)",
+        "build_images: building {total} images from {} ({} parallel workers)",
         vm_root.display(),
         chunks.len()
     );
 
-    // Per-worker results collected into a flat Vec after scope join. The Mutex
-    // can only be poisoned if a worker panics, which causes thread::scope to
-    // re-panic on the calling thread — making the into_inner() poison path unreachable.
+    // Per-worker results collected into a flat Vec; Mutex poison unreachable
+    // (thread::scope re-panics on the calling thread if any worker panics).
     let results = std::sync::Mutex::new(Vec::<(usize, anyhow::Result<()>)>::with_capacity(total));
 
     std::thread::scope(|s| {
         for chunk in &chunks {
             s.spawn(|| {
                 for &idx in *chunk {
-                    let img = &IMAGES[idx];
+                    let img = images[idx];
                     let tag = image_ref(img.name, bundle_id);
-                    // Use string concatenation with "/" instead of PathBuf::join because
-                    // vm_root may be a WSL/Linux path (e.g. "/mnt/c/Speedwave/build-context")
-                    // running on a Windows host. PathBuf::join treats `/`-prefixed paths as
-                    // absolute roots on Windows, replacing the base entirely instead of appending.
+                    // String-concat with "/" rather than PathBuf::join: vm_root may be
+                    // a WSL/Linux path on Windows where PathBuf::join treats /-prefixed
+                    // paths as absolute roots.
                     let abs_context = format!("{}/{}", root_str, img.context_dir);
                     let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
                     log::info!(
-                        "build_all_images: [{}/{}] building {} (context={}, file={})",
+                        "build_images: [{}/{}] building {} (context={}, file={})",
                         idx + 1,
                         total,
                         tag,
@@ -546,14 +726,16 @@ fn try_build_all(
                         runtime.build_image(&tag, &abs_context, &abs_containerfile, img.build_args);
                     match &res {
                         Ok(()) => {
-                            log::info!("build_all_images: [{}/{}] {} built OK", idx + 1, total, tag)
+                            log::info!("build_images: [{}/{}] {} built OK", idx + 1, total, tag);
                         }
-                        Err(err) => log::error!(
-                            "build_all_images: [{}/{}] {} failed: {err:#}",
-                            idx + 1,
-                            total,
-                            tag
-                        ),
+                        Err(err) => {
+                            log::error!(
+                                "build_images: [{}/{}] {} failed: {err:#}",
+                                idx + 1,
+                                total,
+                                tag
+                            );
+                        }
                     }
                     results
                         .lock()
@@ -580,6 +762,15 @@ fn try_build_all(
     let mut first: Option<(usize, anyhow::Error)> = None;
     let mut total_errors: usize = 0;
 
+    let also_failed = |idx: usize, e: &anyhow::Error| {
+        log::error!(
+            "build_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
+            idx + 1,
+            total,
+            images[idx].name
+        );
+    };
+
     for (idx, res) in outcomes {
         if let Err(e) = res {
             total_errors += 1;
@@ -590,52 +781,37 @@ fn try_build_all(
             } else if first.is_none() {
                 first = Some((idx, e));
             } else {
-                log::error!(
-                    "build_all_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
-                    idx + 1,
-                    total,
-                    IMAGES[idx].name
-                );
+                also_failed(idx, &e);
             }
         }
     }
 
     if total_errors == 0 {
-        log::info!("build_all_images: all {total} images built successfully");
+        log::info!("build_images: all {total} images built successfully");
         return Ok(total as u32);
     }
 
     // Determine winner; log the non-winning classified slots.
     let chosen = if let Some((_, snap_err)) = snapshotter {
         if let Some((idx, ref e)) = transient {
-            log::error!(
-                "build_all_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
-                idx + 1, total, IMAGES[idx].name
-            );
+            also_failed(idx, e);
         }
         if let Some((idx, ref e)) = first {
-            log::error!(
-                "build_all_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
-                idx + 1, total, IMAGES[idx].name
-            );
+            also_failed(idx, e);
         }
         snap_err
     } else if let Some((_, trans_err)) = transient {
         if let Some((idx, ref e)) = first {
-            log::error!(
-                "build_all_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
-                idx + 1, total, IMAGES[idx].name
-            );
+            also_failed(idx, e);
         }
         trans_err
     } else if let Some((_, e)) = first {
         e
     } else {
         // Unreachable: total_errors > 0 guarantees at least one error slot is filled.
-        // Returning Err (not Ok) protects callers from acting on a broken build tree
-        // if this invariant is ever violated by a future refactor.
+        // Returning Err (not Ok) protects callers from acting on a broken build tree.
         return Err(anyhow::anyhow!(
-            "internal bug: build_all_images recorded {total_errors} error(s) but no error slot was filled"
+            "internal bug: build_images recorded {total_errors} error(s) but no error slot was filled"
         ));
     };
     let additional = total_errors - 1;
@@ -671,24 +847,56 @@ fn is_snapshotter_error(err: &anyhow::Error) -> bool {
     false
 }
 
+/// Registry hostnames that our `FROM` lines reference. A DNS failure mentioning
+/// one of these is the boot-time-resolver race (see `is_transient_build_error`),
+/// not a user typo — so it's worth a retry. A DNS failure for some *other* host
+/// is more likely a real misconfiguration and is left to fail fast.
+const BASE_IMAGE_REGISTRY_HOSTS: &[&str] =
+    &["registry-1.docker.io", "docker.io", "mcr.microsoft.com"];
+
 /// Returns `true` if the build error looks transient (I/O timeout, connection reset,
-/// temporary unavailable). These may succeed on retry without any recovery action.
+/// temporary unavailable, or a DNS hiccup resolving a base-image registry). These may
+/// succeed on retry without any recovery action.
 ///
-/// Uses case-insensitive matching because kernel/libc error messages vary in casing
-/// across distros and locales.
+/// The DNS cases matter for first runs behind a VPN: when the Lima VM boots, its
+/// `systemd-resolved` initially tries `UDP+EDNS0`, whose large responses do not
+/// survive a low-MTU tunnel (e.g. Tailscale's 1380). It takes a second or two to
+/// detect that and fall back to plain UDP — but BuildKit fires its
+/// `FROM <base-image>` metadata fetch inside that window, so the resolver returns
+/// `SERVFAIL` (`server misbehaving` / `failed to resolve source metadata`) or even
+/// `NXDOMAIN` (`no such host`) for `docker.io` / `mcr.microsoft.com`. A retry a few
+/// seconds later hits the now-degraded resolver and succeeds. *All* DNS-shaped cases
+/// are scoped to `BASE_IMAGE_REGISTRY_HOSTS` so a typo'd — or rogue — custom registry
+/// URL fails fast instead of silently retrying (it could otherwise embed any of these
+/// strings in its error body to force up to `TRANSIENT_BUILD_RETRIES` retries).
+///
+/// Uses case-insensitive matching because kernel/libc/BuildKit error messages vary
+/// in casing across distros and locales.
 fn is_transient_build_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
+        let dns_shaped = msg.contains("server misbehaving")
+            || msg.contains("failed to resolve source metadata")
+            || msg.contains("no such host")
+            || (msg.contains("dial tcp") && msg.contains("lookup"));
         if msg.contains("i/o timeout")
             || msg.contains("input/output error")
             || msg.contains("connection reset")
             || msg.contains("temporary failure")
             || msg.contains("resource temporarily unavailable")
+            // DNS hiccups (SERVFAIL / NXDOMAIN / dial-lookup) are transient only when
+            // they name one of our base-image registries — see the doc above.
+            || (dns_shaped && mentions_base_image_registry(&msg))
         {
             return true;
         }
     }
     false
+}
+
+/// `true` if `msg` (already lowercased) mentions one of [`BASE_IMAGE_REGISTRY_HOSTS`].
+fn mentions_base_image_registry(msg: &str) -> bool {
+    BASE_IMAGE_REGISTRY_HOSTS.iter().any(|h| msg.contains(h))
 }
 
 #[cfg(test)]
@@ -697,6 +905,41 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
+
+    /// All built-in images as a slice — the pre-lazy-build "build everything" set.
+    fn all_images() -> Vec<&'static ImageDef> {
+        IMAGES.iter().collect()
+    }
+
+    /// Integrations config with every built-in MCP service enabled — so
+    /// `enabled_images` yields the full `IMAGES` list (used by tests that
+    /// predate lazy builds).
+    fn all_enabled() -> ResolvedIntegrationsConfig {
+        ResolvedIntegrationsConfig {
+            slack: true,
+            sharepoint: true,
+            redmine: true,
+            gitlab: true,
+            github: true,
+            atlassian: true,
+            playwright: true,
+            ..ResolvedIntegrationsConfig::default()
+        }
+    }
+
+    /// Builds the full `IMAGES` set, mirroring the old `build_all_images_for_bundle`.
+    fn build_all_for_bundle(rt: &dyn ContainerRuntime, bundle_id: &str) -> anyhow::Result<u32> {
+        build_images_for_bundle(rt, &all_images(), bundle_id)
+    }
+
+    /// Runs the worker pool over the full `IMAGES` set (old `try_build_all`).
+    fn try_build_all(
+        rt: &dyn ContainerRuntime,
+        vm_root: &std::path::Path,
+        bundle_id: &str,
+    ) -> anyhow::Result<u32> {
+        try_build_images(rt, &all_images(), vm_root, bundle_id)
+    }
 
     #[test]
     fn test_images_constant_has_entries() {
@@ -1200,8 +1443,180 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_host_exec_script_dev_mode() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        // In dev mode with None home, it falls through to CARGO_MANIFEST_DIR.
+        // The worker dist may or may not exist depending on whether host_exec
+        // was built; just verify it doesn't panic.
+        let result = resolve_host_exec_script_with_home(None);
+        let _ = result;
+    }
+
+    #[test]
+    fn test_resolve_host_exec_script_from_env() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let script_path = tmp
+            .path()
+            .join("host_exec")
+            .join("host_exec")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "// stub").unwrap();
+        std::env::set_var(
+            crate::consts::BUNDLE_RESOURCES_ENV,
+            tmp.path().to_string_lossy().as_ref(),
+        );
+        let result = resolve_host_exec_script_inner(None, None);
+        assert_eq!(result, Some(script_path));
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn test_resolve_host_exec_script_from_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        let script_path = fake_resources
+            .join("host_exec")
+            .join("host_exec")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "// stub").unwrap();
+
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        // Pass None as dev_path to test marker fallback in isolation
+        let result = resolve_host_exec_script_inner(Some(fake_home), None);
+        assert_eq!(result, Some(script_path));
+    }
+
+    #[test]
+    fn test_resolve_host_exec_script_dev_path_beats_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+        let fake_dev = tmp.path().join("dev-repo");
+
+        let marker_script = fake_resources
+            .join("host_exec")
+            .join("host_exec")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(marker_script.parent().unwrap()).unwrap();
+        std::fs::write(&marker_script, "// marker").unwrap();
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        let dev_script = fake_dev.join("mcp-servers/host_exec/dist/index.js");
+        std::fs::create_dir_all(dev_script.parent().unwrap()).unwrap();
+        std::fs::write(&dev_script, "// dev").unwrap();
+
+        let result = resolve_host_exec_script_inner(Some(fake_home), Some(dev_script.clone()));
+        assert_eq!(result, Some(dev_script), "dev path should win over marker");
+    }
+
+    #[test]
+    fn test_resolve_host_exec_script_none_when_nothing_present() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home"); // no marker file
+        let dev_path = tmp.path().join("dev/mcp-servers/host_exec/dist/index.js"); // does not exist
+
+        let result = resolve_host_exec_script_inner(Some(fake_home), Some(dev_path));
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn test_images_count() {
-        assert_eq!(IMAGES.len(), 7);
+        // Catalogue size, not build behaviour — the build set is filtered per
+        // project by `enabled_images`. Bump this when adding a built-in worker.
+        assert_eq!(IMAGES.len(), 11);
+    }
+
+    #[test]
+    fn test_enabled_images_minimal_when_nothing_enabled() {
+        let names: Vec<&str> = enabled_images(&ResolvedIntegrationsConfig::default())
+            .iter()
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+    }
+
+    #[test]
+    fn test_enabled_images_includes_enabled_workers_only() {
+        let cfg = ResolvedIntegrationsConfig {
+            slack: true,
+            playwright: true,
+            ..ResolvedIntegrationsConfig::default()
+        };
+        let names: Vec<&str> = enabled_images(&cfg).iter().map(|i| i.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                IMAGE_CLAUDE,
+                IMAGE_MCP_HUB,
+                IMAGE_MCP_SLACK,
+                IMAGE_MCP_PLAYWRIGHT
+            ]
+        );
+    }
+
+    #[test]
+    fn test_enabled_images_ignores_plugins() {
+        let mut cfg = ResolvedIntegrationsConfig::default();
+        cfg.plugins.insert("presale".to_string(), true);
+        let names: Vec<&str> = enabled_images(&cfg).iter().map(|i| i.name).collect();
+        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+    }
+
+    #[test]
+    fn test_every_worker_image_maps_to_a_toggleable_service() {
+        // SSOT tie: every non-claude/mcp-hub image name's `speedwave-mcp-<key>`
+        // suffix must be a known integration config key, so `enabled_images`
+        // can never silently drop (or keep) a worker.
+        for img in IMAGES {
+            let Some(suffix) = img.name.strip_prefix(MCP_IMAGE_PREFIX) else {
+                assert_eq!(
+                    img.name, IMAGE_CLAUDE,
+                    "only speedwave-claude lacks the prefix"
+                );
+                continue;
+            };
+            if suffix == "hub" {
+                continue;
+            }
+            assert!(
+                crate::consts::TOGGLEABLE_MCP_SERVICES
+                    .iter()
+                    .any(|s| s.config_key == suffix),
+                "image '{}' has no matching TOGGLEABLE_MCP_SERVICES entry for key '{suffix}'",
+                img.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_image_for_service_key() {
+        assert_eq!(
+            image_for_service_key("slack").map(|i| i.name),
+            Some(IMAGE_MCP_SLACK)
+        );
+        assert!(image_for_service_key("os").is_none());
+        assert!(image_for_service_key("claude").is_none());
+        assert!(image_for_service_key("hub").is_none());
+        assert!(image_for_service_key("nonsense").is_none());
     }
 
     #[test]
@@ -1363,10 +1778,10 @@ mod tests {
             prepare_called: Arc::clone(&prepare_called),
         };
 
-        // build_all_images resolves the real build root, then calls prepare_build_context.
-        // Since our mock overrides prepare_build_context, the translated path should be used.
+        // build_images_for_bundle resolves the real build root, then calls
+        // prepare_build_context; the mock returns the translated path.
         let bundle_id = "test-bundle";
-        let result = build_all_images_for_bundle(&rt, bundle_id);
+        let result = build_all_for_bundle(&rt, bundle_id);
         assert!(result.is_ok());
 
         assert!(
@@ -1546,6 +1961,126 @@ mod tests {
         (tmp, root)
     }
 
+    /// Records build_image calls; image_exists answers from a configurable
+    /// "already present" set (substring match on the tag). For lazy-build tests.
+    struct LazyBuildMock {
+        build_root: PathBuf,
+        builds: Arc<Mutex<Vec<String>>>,
+        present: Vec<String>,
+    }
+
+    impl LazyBuildMock {
+        fn new(build_root: PathBuf, present: Vec<&str>) -> Self {
+            Self {
+                build_root,
+                builds: Arc::new(Mutex::new(Vec::new())),
+                present: present.into_iter().map(String::from).collect(),
+            }
+        }
+    }
+
+    impl ContainerRuntime for LazyBuildMock {
+        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
+            Command::new("true")
+        }
+        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
+            Ok(Command::new("true"))
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn ensure_ready(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn build_image(
+            &self,
+            tag: &str,
+            _: &str,
+            _: &str,
+            _: &[(&str, &str)],
+        ) -> anyhow::Result<()> {
+            self.builds.lock().unwrap().push(tag.to_string());
+            Ok(())
+        }
+        fn prepare_build_context(&self, _: &std::path::Path) -> anyhow::Result<PathBuf> {
+            Ok(self.build_root.clone())
+        }
+        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+            Ok(self.present.iter().any(|p| tag.contains(p.as_str())))
+        }
+    }
+
+    #[test]
+    fn test_build_images_for_bundle_builds_only_the_given_slice() {
+        let (_tmp, root) = create_fake_build_root();
+        let cfg = ResolvedIntegrationsConfig {
+            github: true,
+            ..ResolvedIntegrationsConfig::default()
+        };
+        let rt = LazyBuildMock::new(root, vec![]);
+        let n = build_images_for_bundle(&rt, &enabled_images(&cfg), "b1").unwrap();
+        assert_eq!(n, 3);
+        let mut built: Vec<String> = rt.builds.lock().unwrap().clone();
+        built.sort();
+        assert_eq!(
+            built,
+            vec![
+                image_ref(IMAGE_CLAUDE, "b1"),
+                image_ref(IMAGE_MCP_GITHUB, "b1"),
+                image_ref(IMAGE_MCP_HUB, "b1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_missing_images_skips_present() {
+        let (_tmp, root) = create_fake_build_root();
+        // claude + mcp-hub already present; mcp-playwright missing.
+        let rt = LazyBuildMock::new(root, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+        let images: Vec<&ImageDef> = vec![
+            image_for_service_key("playwright").unwrap(),
+            IMAGES.iter().find(|i| i.name == IMAGE_CLAUDE).unwrap(),
+            IMAGES.iter().find(|i| i.name == IMAGE_MCP_HUB).unwrap(),
+        ];
+        let n = build_missing_images(&rt, &images, "b1").unwrap();
+        assert_eq!(n, 1, "only the missing playwright image is built");
+        assert_eq!(
+            *rt.builds.lock().unwrap(),
+            vec![image_ref(IMAGE_MCP_PLAYWRIGHT, "b1")]
+        );
+    }
+
+    #[test]
+    fn test_build_missing_images_noop_when_all_present() {
+        let (_tmp, root) = create_fake_build_root();
+        let rt = LazyBuildMock::new(root, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+        let images: Vec<&ImageDef> = all_images()
+            .into_iter()
+            .filter(|i| i.name == IMAGE_CLAUDE || i.name == IMAGE_MCP_HUB)
+            .collect();
+        let n = build_missing_images(&rt, &images, "b1").unwrap();
+        assert_eq!(n, 0);
+        assert!(rt.builds.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn test_retry_on_snapshotter_error() {
         let image_count = IMAGES.len() as u32;
@@ -1560,7 +2095,7 @@ mod tests {
         let (_tmp, build_root) = create_fake_build_root();
         let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle");
 
         assert!(result.is_ok(), "retry should succeed, got: {:?}", result);
         assert_eq!(result.unwrap(), image_count);
@@ -1607,7 +2142,7 @@ mod tests {
         let (_tmp, build_root) = create_fake_build_root();
         let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle");
 
         assert!(result.is_err(), "generic error should not be retried");
         assert!(
@@ -1643,7 +2178,7 @@ mod tests {
             std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.ps1"))
                 .expect("bundle-build-context.ps1 should exist");
 
-        // Extract: MCP_SERVICES="shared hub slack sharepoint redmine gitlab"
+        // Extract: MCP_SERVICES="shared hub slack sharepoint redmine gitlab github playwright"
         let sh_services: Vec<&str> = sh_content
             .lines()
             .find(|l| l.starts_with("MCP_SERVICES="))
@@ -1653,7 +2188,7 @@ mod tests {
             .split_whitespace()
             .collect();
 
-        // Extract: $services = @('shared','hub','slack','sharepoint','redmine','gitlab')
+        // Extract: $services = @('shared','hub','slack','sharepoint','redmine','gitlab','github','playwright')
         let ps1_line = ps1_content
             .lines()
             .find(|l| l.contains("$services = @("))
@@ -1691,7 +2226,7 @@ mod tests {
         let (_tmp, build_root) = create_fake_build_root();
         let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle");
 
         assert!(result.is_err(), "second failure should be returned");
         assert!(
@@ -1727,7 +2262,7 @@ mod tests {
         let (_tmp, build_root) = create_fake_build_root();
         let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle");
         assert!(result.is_err());
 
         let err = result.unwrap_err();
@@ -1783,7 +2318,7 @@ mod tests {
         let (_tmp, build_root) = create_fake_build_root();
         let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle");
         assert!(result.is_err());
 
         let err = result.unwrap_err();
@@ -1871,13 +2406,34 @@ mod tests {
         #[test]
         fn test_images_exist_returns_true_when_all_present() {
             let rt = ImageCheckRuntime::all_present();
-            assert!(images_exist(&rt));
+            assert!(images_exist(&rt, &all_enabled()));
         }
 
         #[test]
         fn test_images_exist_returns_false_when_any_missing() {
             let rt = ImageCheckRuntime::with_missing(vec!["speedwave-claude"]);
-            assert!(!images_exist(&rt));
+            assert!(!images_exist(&rt, &all_enabled()));
+        }
+
+        #[test]
+        fn test_images_exist_ignores_disabled_integration_images() {
+            // playwright image absent, but nothing enables playwright → still true.
+            let rt = ImageCheckRuntime::with_missing(vec![IMAGE_MCP_PLAYWRIGHT]);
+            let cfg = ResolvedIntegrationsConfig {
+                slack: true,
+                ..ResolvedIntegrationsConfig::default()
+            };
+            assert!(images_exist(&rt, &cfg));
+        }
+
+        #[test]
+        fn test_images_exist_false_when_an_enabled_worker_image_missing() {
+            let rt = ImageCheckRuntime::with_missing(vec![IMAGE_MCP_SLACK]);
+            let cfg = ResolvedIntegrationsConfig {
+                slack: true,
+                ..ResolvedIntegrationsConfig::default()
+            };
+            assert!(!images_exist(&rt, &cfg));
         }
     }
 
@@ -1983,6 +2539,92 @@ mod tests {
             .context("nerdctl build failed")
             .context("build step 3/10");
         assert!(is_transient_build_error(&outer));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_transient_build_error() — DNS hiccup while pulling a base image
+    // (VM's systemd-resolved still falling back from EDNS0 right after boot;
+    // BuildKit's `FROM <image>` metadata fetch lands in that window).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_transient_build_error_dns_server_misbehaving() {
+        // The exact BuildKit error seen on first run behind a VPN.
+        let err = anyhow::anyhow!(
+            "failed to do request: Head \"https://registry-1.docker.io/v2/library/node/manifests/24-alpine\": dial tcp: lookup registry-1.docker.io on 127.0.0.53:53: server misbehaving"
+        );
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_dns_resolve_source_metadata() {
+        let err = anyhow::anyhow!(
+            "node:24-alpine: failed to resolve source metadata for docker.io/library/node:24-alpine"
+        );
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_dns_no_such_host() {
+        let err = anyhow::anyhow!("dial tcp: lookup mcr.microsoft.com: no such host");
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_dial_tcp_lookup_chain() {
+        let inner =
+            anyhow::anyhow!("dial tcp: lookup registry-1.docker.io on 192.168.5.2:53: i/o timeout");
+        let outer = inner
+            .context("failed to do request")
+            .context("nerdctl build failed");
+        assert!(is_transient_build_error(&outer));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_plain_dial_tcp_without_lookup_is_not_transient() {
+        // A bare `dial tcp` without a DNS lookup (e.g. connection refused to a fixed IP)
+        // is not the DNS-fallback race; don't widen the net unnecessarily.
+        let err = anyhow::anyhow!("dial tcp 10.0.0.5:443: connect: connection refused");
+        assert!(!is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_dns_for_unknown_registry_is_not_transient() {
+        // NXDOMAIN / dial-lookup failure for a host that is NOT one of our base-image
+        // registries — most likely a typo'd custom registry URL. Should fail fast, not
+        // silently retry (the host scoping in `is_transient_build_error`).
+        let nxdomain = anyhow::anyhow!("dial tcp: lookup myregistry.example.com: no such host");
+        assert!(!is_transient_build_error(&nxdomain));
+        let dial_lookup =
+            anyhow::anyhow!("dial tcp: lookup ghcr.io on 127.0.0.53:53: server can't find ghcr.io");
+        // `ghcr.io` isn't in BASE_IMAGE_REGISTRY_HOSTS — a DNS-shaped error for it fails fast
+        // regardless of which DNS-failure string it carries.
+        assert!(!is_transient_build_error(&dial_lookup));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_servfail_for_known_registry_is_transient() {
+        // SERVFAIL-shaped errors that DO name a base-image registry are the boot-time
+        // resolver race — transient.
+        let servfail = anyhow::anyhow!(
+            "Head \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: server misbehaving"
+        );
+        assert!(is_transient_build_error(&servfail));
+        let no_metadata = anyhow::anyhow!(
+            "node:24-alpine: failed to resolve source metadata for docker.io/library/node"
+        );
+        assert!(is_transient_build_error(&no_metadata));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_servfail_for_unknown_host_is_not_transient() {
+        // SERVFAIL / "failed to resolve source metadata" for a host that is NOT a base-image
+        // registry must fail fast — a rogue or typo'd custom registry could otherwise embed
+        // these strings to force retries.
+        let servfail = anyhow::anyhow!("Head \"https://example.invalid/v2/\": server misbehaving");
+        assert!(!is_transient_build_error(&servfail));
+        let no_metadata = anyhow::anyhow!("foo:bar: failed to resolve source metadata for foo/bar");
+        assert!(!is_transient_build_error(&no_metadata));
     }
 
     // -----------------------------------------------------------------------
@@ -2174,6 +2816,34 @@ mod tests {
     }
 
     #[test]
+    fn test_prune_orphan_current_bundle_keeps_enabled_only() {
+        let cfg = ResolvedIntegrationsConfig {
+            slack: true,
+            ..ResolvedIntegrationsConfig::default()
+        };
+        let keep = enabled_images(&cfg);
+        let rt = PruneMockRuntime::new();
+        prune_orphan_current_bundle_images(&rt, "cur123", &keep).unwrap();
+        let removed = rt.removed_tags.lock().unwrap().clone();
+        // Removed = IMAGES \ {claude, mcp-hub, mcp-slack} = 6 tags.
+        assert_eq!(removed.len(), IMAGES.len() - keep.len());
+        for tag in &removed {
+            assert!(tag.ends_with(":cur123"));
+            assert!(!tag.contains("claude"));
+            assert!(!tag.contains("mcp-hub"));
+            assert!(!tag.contains("mcp-slack"));
+        }
+    }
+
+    #[test]
+    fn test_prune_orphan_current_bundle_noop_when_all_kept() {
+        let keep: Vec<&ImageDef> = IMAGES.iter().collect();
+        let rt = PruneMockRuntime::new();
+        prune_orphan_current_bundle_images(&rt, "cur123", &keep).unwrap();
+        assert!(rt.removed_tags.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn test_prune_old_bundle_images_also_prunes_buildkit_cache() {
         let rt = PruneMockRuntime::new();
         prune_old_bundle_images(&rt, "abc123").unwrap();
@@ -2298,6 +2968,9 @@ mod tests {
 
     #[test]
     fn test_parallel_build_transient_error_retries_without_prune() {
+        // Injects exactly one transient failure (attempt 1), so the first retry succeeds —
+        // see `test_parallel_build_dns_error_retries_then_succeeds_on_second_attempt` for the
+        // path where it takes more than one retry (TRANSIENT_BUILD_RETRIES = 2).
         let mut fail_on = std::collections::HashMap::new();
         fail_on.insert(
             format!("{}:1", image_ref(IMAGE_MCP_HUB, "test-bundle")),
@@ -2307,7 +2980,7 @@ mod tests {
         let (_tmp, build_root) = create_fake_build_root();
         let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle");
         assert_eq!(result.unwrap(), IMAGES.len() as u32);
 
         let recorded = rt.calls.lock().unwrap();
@@ -2320,6 +2993,80 @@ mod tests {
             count_builds(&recorded),
             2 * IMAGES.len(),
             "full first attempt (with one transient failure) + full retry"
+        );
+    }
+
+    #[test]
+    fn test_parallel_build_dns_error_retries_then_succeeds_on_second_attempt() {
+        // The DNS-fallback race: attempts 1 AND 2 fail with `server misbehaving`,
+        // attempt 3 succeeds (resolver has settled). Exercises the >1 retry path.
+        let mut fail_on = std::collections::HashMap::new();
+        let tag = image_ref(IMAGE_MCP_GITHUB, "test-bundle");
+        fail_on.insert(
+            format!("{tag}:1"),
+            "failed to do request: dial tcp: lookup registry-1.docker.io on 127.0.0.53:53: server misbehaving".to_string(),
+        );
+        fail_on.insert(
+            format!("{tag}:2"),
+            "node:24-alpine: failed to resolve source metadata for docker.io/library/node:24-alpine".to_string(),
+        );
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root, fail_on);
+
+        let result = build_all_for_bundle(&rt, "test-bundle");
+        assert_eq!(
+            result.unwrap(),
+            IMAGES.len() as u32,
+            "should succeed on the third (second-retry) attempt"
+        );
+
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(
+            count_prunes(&recorded),
+            0,
+            "DNS retry must NOT trigger prune"
+        );
+        assert_eq!(
+            count_builds(&recorded),
+            3 * IMAGES.len(),
+            "first attempt + 2 retries (all images rebuilt each time)"
+        );
+    }
+
+    #[test]
+    fn test_parallel_build_dns_error_exhausts_retries_and_fails() {
+        // All three attempts (1 + TRANSIENT_BUILD_RETRIES) fail with a DNS error.
+        let mut fail_on = std::collections::HashMap::new();
+        let tag = image_ref(IMAGE_MCP_GITHUB, "test-bundle");
+        for attempt in 1..=(TRANSIENT_BUILD_RETRIES + 1) {
+            fail_on.insert(
+                format!("{tag}:{attempt}"),
+                "dial tcp: lookup registry-1.docker.io: no such host".to_string(),
+            );
+        }
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root, fail_on);
+
+        let result = build_all_for_bundle(&rt, "test-bundle");
+        assert!(result.is_err(), "exhausting retries must surface the error");
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("no such host"),
+            "final error should carry the DNS failure, got: {msg}"
+        );
+
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(
+            count_prunes(&recorded),
+            0,
+            "DNS retry must NOT trigger prune"
+        );
+        assert_eq!(
+            count_builds(&recorded),
+            (TRANSIENT_BUILD_RETRIES as usize + 1) * IMAGES.len(),
+            "first attempt + all retries, every image each time"
         );
     }
 
@@ -2338,7 +3085,7 @@ mod tests {
         let (_tmp, build_root) = create_fake_build_root();
         let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle");
         assert_eq!(
             result.unwrap(),
             IMAGES.len() as u32,

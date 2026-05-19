@@ -1,0 +1,7 @@
+cpal — Cross-Platform Audio Library, pure Rust. Used by Speedwave (Desktop,
+meeting-transcription feature) on Windows only, for WASAPI loopback capture.
+Linked statically into the Windows build of the desktop app.
+
+Upstream: https://github.com/RustAudio/cpal
+License: Apache-2.0 (the crate is dual-licensed Apache-2.0; the Apache 2.0
+text is reproduced in sherpa-onnx-LICENSE in this directory).

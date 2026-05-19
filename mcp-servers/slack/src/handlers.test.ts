@@ -900,5 +900,491 @@ describe('handlers', () => {
 
       vi.unstubAllGlobals();
     });
+
+    it('returns cached user info on second handleReadChannel call without re-fetching', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      const messages = [{ user: 'U123', text: 'Hello', ts: '1700000000.000001', type: 'message' }];
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ ok: true, messages }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      vi.mocked(mockBot.users.info).mockResolvedValue({
+        ok: true,
+        user: { real_name: 'Alice', name: 'alice', profile: {} },
+      } as any);
+
+      // First call — populates cache
+      await handlers.handleReadChannel({ channel: 'C12345ABC' });
+      // Second call — should hit cache, not call users.info again
+      await handlers.handleReadChannel({ channel: 'C12345ABC' });
+
+      // users.info should only be called once across both reads (cache hit on second)
+      expect(mockBot.users.info).toHaveBeenCalledTimes(1);
+
+      vi.unstubAllGlobals();
+    });
+  });
+
+  //=============================================================================
+  // getUserInfo internal behavior
+  //=============================================================================
+
+  describe('getUserInfo internal behavior (via handleReadChannel)', () => {
+    it('falls back to user ID as display name when users.info returns ok=false', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            messages: [{ user: 'U999', text: 'Hello', ts: '1700000000.000001', type: 'message' }],
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      // API returns ok=false (no user data)
+      vi.mocked(mockBot.users.info).mockResolvedValue({
+        ok: false,
+        user: undefined,
+      } as any);
+
+      const result = await handlers.handleReadChannel({ channel: 'C12345ABC' });
+
+      // Should still succeed — user ID shown as fallback
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('Messages: 1');
+      // Display name falls back to user ID since getUserInfo threw
+      expect(result.content[0].text).toContain('U999');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('falls back to @username when user has name but no real_name', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            messages: [{ user: 'U123', text: 'Hi', ts: '1700000000.000001', type: 'message' }],
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      // User has name but no real_name
+      vi.mocked(mockBot.users.info).mockResolvedValue({
+        ok: true,
+        user: { name: 'bob', profile: {} },
+      } as any);
+
+      const result = await handlers.handleReadChannel({ channel: 'C12345ABC' });
+
+      expect(result.isError).toBeUndefined();
+      // Should show @bob instead of real name
+      expect(result.content[0].text).toContain('@bob');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('falls back to user ID when user info fetch throws non-UserInfoError', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            messages: [
+              { user: 'U777', text: 'Error case', ts: '1700000000.000001', type: 'message' },
+            ],
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      // Throw a plain Error (not UserInfoError) from users.info
+      vi.mocked(mockBot.users.info).mockRejectedValue(new Error('network timeout'));
+
+      const result = await handlers.handleReadChannel({ channel: 'C12345ABC' });
+
+      // Should still succeed — user ID as fallback
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('Messages: 1');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('shows (unknown time) for messages with no ts field', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            messages: [{ user: 'U123', text: 'No timestamp', type: 'message' }], // no ts
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      vi.mocked(mockBot.users.info).mockResolvedValue({
+        ok: true,
+        user: { real_name: 'Alice', name: 'alice', profile: {} },
+      } as any);
+
+      const result = await handlers.handleReadChannel({ channel: 'C12345ABC' });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('(unknown time)');
+
+      vi.unstubAllGlobals();
+    });
+  });
+
+  //=============================================================================
+  // resolveChannelId error wrapping
+  //=============================================================================
+
+  describe('resolveChannelId error wrapping', () => {
+    it('wraps non-ChannelResolutionError from fetch into ChannelResolutionError', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      // fetch() itself throws a plain network error
+      const mockFetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await handlers.handleSendChannel({
+        channel: '#general', // triggers resolveChannelId
+        message: 'Hello!',
+      });
+
+      expect(result.isError).toBe(true);
+      // The wrapping path converts it to ChannelResolutionError then Error sending message
+      expect(result.content[0].text).toContain('Error sending message');
+      expect(result.content[0].text).toContain('ECONNREFUSED');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('wraps loadToken failure (non-ChannelResolutionError) into ChannelResolutionError', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      // loadToken throws a plain Error, not a ChannelResolutionError
+      vi.mocked(loadToken).mockRejectedValue(new Error('Token file missing'));
+
+      const result = await handlers.handleSendChannel({
+        channel: '#general', // triggers resolveChannelId
+        message: 'Hello!',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Error sending message');
+      expect(result.content[0].text).toContain('Token file missing');
+    });
+
+    it('wraps non-Error value thrown from fetch in resolveChannelId', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      // fetch() throws a non-Error value (e.g. a string)
+      const mockFetch = vi.fn().mockRejectedValue('non-error string failure');
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await handlers.handleSendChannel({
+        channel: '#general',
+        message: 'Hello!',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Error sending message');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('resolveChannelId handles ok=false response (channels branch not taken)', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      // ok=false so the `if (result.ok && result.channels)` branch is not entered
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ ok: false, channels: [] }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await handlers.handleSendChannel({
+        channel: '#general',
+        message: 'Hello!',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Error sending message');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('resolveChannelId uses fallback count 0 when ok=true but channels is undefined', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      // ok=true but channels is undefined — triggers the `?? 0` fallback branch in the error message
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ ok: true, channels: undefined }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await handlers.handleSendChannel({
+        channel: '#missing-channel',
+        message: 'Hello!',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Error sending message');
+
+      vi.unstubAllGlobals();
+    });
+  });
+
+  //=============================================================================
+  // Non-Error thrown in catch blocks (ternary false branches)
+  //=============================================================================
+
+  describe('non-Error thrown in catch blocks', () => {
+    it('handleSendChannel handles non-Error thrown by conversations.members', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      // Throw a non-Error object from conversations.members (after channel ID resolution)
+      vi.mocked(mockBot.conversations.members).mockRejectedValue('non-error string');
+
+      const result = await handlers.handleSendChannel({
+        channel: 'C12345ABC', // channel ID — skips resolveChannelId
+        message: 'Hello!',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Error sending message');
+      // String error is converted via String() not .message
+      expect(result.content[0].text).toContain('non-error string');
+    });
+
+    it('handleReadChannel handles non-Error thrown by loadToken', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      // loadToken throws a non-Error value
+      vi.mocked(loadToken).mockRejectedValue('plain-string-error');
+
+      const result = await handlers.handleReadChannel({ channel: 'C12345ABC' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Error reading channel');
+      expect(result.content[0].text).toContain('plain-string-error');
+    });
+
+    it('handleGetChannels handles non-Error thrown by loadToken', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockRejectedValue('plain-string-error');
+
+      const result = await handlers.handleGetChannels({});
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Error listing channels');
+      expect(result.content[0].text).toContain('plain-string-error');
+    });
+
+    it('handleGetUsers handles non-Error thrown by lookupByEmail', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(mockBot.users.lookupByEmail).mockRejectedValue('plain-string-error');
+
+      const result = await handlers.handleGetUsers({ email: 'test@example.com' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Error getting user info');
+      expect(result.content[0].text).toContain('plain-string-error');
+    });
+
+    it('getUserInfo wraps non-Error thrown by users.info', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            messages: [{ user: 'U123', text: 'Hello', ts: '1700000000.000001', type: 'message' }],
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      // users.info throws a non-Error value
+      vi.mocked(mockBot.users.info).mockRejectedValue('non-error thrown from users.info');
+
+      const result = await handlers.handleReadChannel({ channel: 'C12345ABC' });
+
+      // Should still succeed — getUserInfo failure is caught and swallowed, user ID shown as fallback
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('Messages: 1');
+
+      vi.unstubAllGlobals();
+    });
+  });
+
+  //=============================================================================
+  // handleGetChannels formatting branches
+  //=============================================================================
+
+  describe('handleGetChannels formatting branches', () => {
+    it('shows private visibility for private channels', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            channels: [{ id: 'G123', name: 'secret', is_private: true, is_member: true }],
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await handlers.handleGetChannels({});
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('🔒 private');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('shows public visibility for public channels', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            channels: [{ id: 'C123', name: 'general', is_private: false, is_member: true }],
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await handlers.handleGetChannels({});
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('🌐 public');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('shows not-member status for channels user is not a member of', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            channels: [{ id: 'C999', name: 'other', is_private: false, is_member: false }],
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await handlers.handleGetChannels({});
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('❌ not member');
+
+      vi.unstubAllGlobals();
+    });
+  });
+
+  //=============================================================================
+  // handleSendChannel result.error branch
+  //=============================================================================
+
+  describe('handleSendChannel postMessage result.error branch', () => {
+    it('shows "Unknown error" when postMessage ok=false but no error field', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(mockBot.conversations.members).mockResolvedValue({
+        ok: true,
+        members: ['UBOTID123'],
+      } as any);
+      vi.mocked(mockBot.auth.test).mockResolvedValue({
+        ok: true,
+        user_id: 'UBOTID123',
+      } as any);
+      vi.mocked(mockUser.chat.postMessage).mockResolvedValue({
+        ok: false,
+        // No error field — forces the `|| 'Unknown error'` branch
+      } as any);
+
+      const result = await handlers.handleSendChannel({
+        channel: 'C12345ABC',
+        message: 'Hello!',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Unknown error');
+    });
+  });
+
+  //=============================================================================
+  // Response truncation
+  //=============================================================================
+
+  describe('response truncation', () => {
+    it('truncates response when total message content exceeds 100KB', async () => {
+      const handlers = createSlackHandlers({ bot: mockBot, user: mockUser });
+
+      vi.mocked(loadToken).mockResolvedValue('xoxp-user-token');
+
+      // Create messages that together exceed 100KB
+      // Each message text is ~1KB, and we send enough to exceed 100KB
+      const bigText = 'x'.repeat(1024); // ~1KB per message
+      const messages = Array.from({ length: 150 }, (_, i) => ({
+        user: 'U123',
+        text: bigText,
+        ts: `${1700000000 + i}.000001`,
+        type: 'message',
+      }));
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ ok: true, messages }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      vi.mocked(mockBot.users.info).mockResolvedValue({
+        ok: true,
+        user: { real_name: 'Alice', name: 'alice', profile: {} },
+      } as any);
+
+      const result = await handlers.handleReadChannel({ channel: 'C12345ABC' });
+
+      expect(result.isError).toBeUndefined();
+      // Should contain truncation notice
+      expect(result.content[0].text).toContain('truncated');
+
+      vi.unstubAllGlobals();
+    });
   });
 });

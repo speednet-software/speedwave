@@ -20,6 +20,7 @@ const ICON_NAMES: readonly IconName[] = [
   'cube',
   'settings',
   'document',
+  'microphone',
   'refresh',
 ];
 

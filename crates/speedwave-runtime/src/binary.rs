@@ -14,18 +14,20 @@ const PATH_SEP: char = ':';
 
 /// Resolves the path to a binary command.
 ///
-/// Lima (macOS), nerdctl-full (Linux), and Node.js (all platforms) binaries
-/// are bundled in the app resources directory. WSL2 uses system-installed nerdctl.
+/// Lima (macOS), Node.js, and the native macOS CLI helpers (`reminders-cli`,
+/// `audio-capture-cli`, …) are bundled in the app resources directory. WSL2
+/// uses the nerdctl bundle installed inside the distro, not on the host.
 ///
-/// Resolution order:
-/// 1. If `SPEEDWAVE_RESOURCES_DIR` env var is set and the binary exists at
-///    `<dir>/lima/bin/<cmd>`, return that absolute path (macOS).
-/// 2. If `SPEEDWAVE_RESOURCES_DIR` env var is set and the binary exists at
-///    `<dir>/nerdctl-full/bin/<cmd>`, return that absolute path (Linux).
-/// 3. If `SPEEDWAVE_RESOURCES_DIR` env var is set and the binary exists at
-///    `<dir>/nodejs/bin/<cmd>` (Unix) or `<dir>/nodejs/<cmd>.exe` (Windows),
-///    return that absolute path.
-/// 4. Otherwise return the bare command name (system PATH lookup).
+/// Resolution order (each step only if `SPEEDWAVE_RESOURCES_DIR` is set):
+/// 1. `<dir>/lima/bin/<cmd>` (macOS Lima bundle).
+/// 2. `<dir>/nerdctl-full/bin/<cmd>` — reserved for any future host-side
+///    nerdctl-full bundle layout; not currently populated in production
+///    (kept so `command()` can set CNI_PATH + PATH for callers that *do*
+///    drop a nerdctl tree under `Resources/`, e.g. in tests).
+/// 3. `<dir>/nodejs/bin/<cmd>` (Unix) or `<dir>/nodejs/<cmd>.exe` (Windows).
+/// 4. `<dir>/<cmd>` — native CLI helpers placed at the top of `Resources/`
+///    (matches `tauri.macos.conf.json` `bundle.resources`).
+/// 5. Otherwise the bare command name (system PATH lookup).
 pub fn resolve_binary(cmd: &str) -> String {
     if let Ok(resources_dir) = std::env::var(BUNDLE_RESOURCES_ENV) {
         let resources = PathBuf::from(&resources_dir);
@@ -36,7 +38,7 @@ pub fn resolve_binary(cmd: &str) -> String {
             return lima_bundled.to_string_lossy().to_string();
         }
 
-        // Try nerdctl-full bundle (Linux)
+        // Try nerdctl-full bundle (reserved layout — see fn docstring)
         let nerdctl_bundled = resources
             .join(consts::NERDCTL_FULL_SUBDIR)
             .join("bin")
@@ -59,6 +61,13 @@ pub fn resolve_binary(cmd: &str) -> String {
             if nodejs_win.exists() {
                 return nodejs_win.to_string_lossy().to_string();
             }
+        }
+
+        // Native CLI helpers (reminders-cli, audio-capture-cli, …) live at the
+        // top of Resources/ per tauri.macos.conf.json `bundle.resources`.
+        let top_level = resources.join(cmd);
+        if top_level.exists() {
+            return top_level.to_string_lossy().to_string();
         }
 
         log::debug!(
@@ -155,8 +164,9 @@ pub fn command(cmd: &str) -> Command {
 /// Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
 /// For interactive TTY commands, use raw `Command::new()` instead.
 pub fn system_command(program: &str) -> Command {
-    #[allow(unused_mut)] // mut needed on Windows for creation_flags()
-    let mut command = Command::new(program);
+    let command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    let mut command = command;
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -258,6 +268,25 @@ pub(crate) mod tests {
 
         env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
         assert_eq!(resolve_binary("unknown-cmd"), "unknown-cmd");
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn resolve_binary_top_level_native_cli_helper() {
+        // Native CLIs (audio-capture-cli, reminders-cli, …) sit at the top of
+        // Resources/, not under lima/nerdctl-full/nodejs — resolve_binary must
+        // find them there (regression: the audio-capture backend resolves its
+        // CLI via this path in a packaged app).
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cli_path = tmp.path().join("audio-capture-cli");
+        std::fs::write(&cli_path, "fake").expect("write");
+
+        env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
+        assert_eq!(
+            resolve_binary("audio-capture-cli"),
+            cli_path.to_string_lossy().to_string()
+        );
         env::remove_var(BUNDLE_RESOURCES_ENV);
     }
 

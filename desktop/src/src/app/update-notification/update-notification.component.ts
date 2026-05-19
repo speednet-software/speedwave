@@ -33,41 +33,32 @@ import { ProjectList, UpdateCheckOutcome, UpdateInfo } from '../models/update';
           @if (error) {
             <span class="text-sw-accent text-xs" data-testid="update-error">{{ error }}</span>
           }
-          @if (isLinux) {
+          @if (!confirmUpdate) {
             <button
               class="px-3 py-0.5 bg-sw-accent text-sw-bg-darkest border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
-              (click)="openReleasesPage()"
+              (click)="confirmUpdate = true"
+              [disabled]="installing"
             >
-              Download v{{ updateInfo!.version }}
+              Update now
             </button>
           } @else {
-            @if (!confirmUpdate) {
-              <button
-                class="px-3 py-0.5 bg-sw-accent text-sw-bg-darkest border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
-                (click)="confirmUpdate = true"
-                [disabled]="installing"
-              >
-                Update now
-              </button>
-            } @else {
-              <button
-                class="px-3 py-0.5 bg-sw-accent text-sw-bg-darkest border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
-                (click)="installAndRestart()"
-                [disabled]="installing"
-              >
-                {{ installing ? 'Updating...' : 'Confirm Update' }}
-              </button>
-              <button
-                class="px-3 py-0.5 bg-transparent text-sw-text-muted border border-sw-slider rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:not-disabled:text-sw-text hover:not-disabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
-                (click)="confirmUpdate = false"
-                [disabled]="installing"
-              >
-                Cancel
-              </button>
-            }
+            <button
+              class="px-3 py-0.5 bg-sw-accent text-sw-bg-darkest border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+              (click)="installAndRestart()"
+              [disabled]="installing"
+            >
+              {{ installing ? 'Updating...' : 'Confirm Update' }}
+            </button>
+            <button
+              class="px-3 py-0.5 bg-transparent text-sw-text-muted border border-sw-slider rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:not-disabled:text-sw-text hover:not-disabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
+              (click)="confirmUpdate = false"
+              [disabled]="installing"
+            >
+              Cancel
+            </button>
           }
-          @if (!confirmUpdate || isLinux) {
-            @if (containersRunning && !isLinux) {
+          @if (!confirmUpdate) {
+            @if (containersRunning) {
               <span class="text-sw-warning text-xs">Running containers will be interrupted</span>
             }
             @if (!updateInfo!.is_critical) {
@@ -92,7 +83,6 @@ export class UpdateNotificationComponent implements OnDestroy {
   error = '';
   confirmUpdate = false;
   containersRunning = false;
-  isLinux = false;
 
   private unlisten: UnlistenFn | null = null;
   private cdr = inject(ChangeDetectorRef);
@@ -105,9 +95,6 @@ export class UpdateNotificationComponent implements OnDestroy {
 
   private async setupListeners(): Promise<void> {
     try {
-      const platform = await this.tauri.invoke<string>('get_platform');
-      this.isLinux = platform === 'linux';
-
       this.unlisten = await this.tauri.listen<UpdateInfo>('update_available', (event) => {
         this.updateInfo = event.payload;
         this.dismissed = false;
@@ -176,17 +163,6 @@ export class UpdateNotificationComponent implements OnDestroy {
   /** Whether the app update banner should be shown. */
   get showUpdateBanner(): boolean {
     return !!this.updateInfo && !this.dismissed;
-  }
-
-  /** Opens the GitHub Releases page for the latest version (Linux .deb). */
-  async openReleasesPage(): Promise<void> {
-    try {
-      await this.tauri.invoke('open_url', {
-        url: 'https://github.com/speednet-software/speedwave/releases',
-      });
-    } catch {
-      // Fallback: not running inside Tauri
-    }
   }
 
   /** Cleans up the Tauri event listeners on component destruction. */

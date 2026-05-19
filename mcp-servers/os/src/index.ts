@@ -7,7 +7,6 @@
  *
  * Architecture:
  * - macOS: Swift CLI binaries (EventKit, AppleScript)
- * - Linux: Rust CLI binary (D-Bus, CalDAV)
  * - Windows: Rust CLI binary (WinRT, MAPI)
  *
  * Auth: Bearer token from MCP_OS_AUTH_TOKEN env var.

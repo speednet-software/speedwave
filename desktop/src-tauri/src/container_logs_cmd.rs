@@ -1,5 +1,6 @@
 // Tauri commands for viewing container and compose logs.
 
+use crate::logging_cmd::desktop_log_dir;
 use crate::types::check_project;
 
 /// Validate that a container name starts with the Speedwave compose prefix
@@ -100,6 +101,32 @@ pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String>
     .map_err(|e| e.to_string())?
 }
 
+/// Audit/stdout log of the per-project `host_exec` worker (`<data_dir>/host-exec/<project>/log`).
+#[tauri::command]
+pub(crate) async fn get_host_exec_logs(
+    project: String,
+    tail: Option<u32>,
+) -> Result<String, String> {
+    check_project(&project)?;
+    tokio::task::spawn_blocking(move || {
+        let log_path = host_exec_log_path(&project);
+        let tail = tail.unwrap_or(200).min(10_000) as usize;
+        read_tail_sanitized(&log_path, tail)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Path to a project's `host_exec` worker log (matches `host_exec_process` /
+/// `host_exec_cmd`'s state-dir layout).
+fn host_exec_log_path(project: &str) -> std::path::PathBuf {
+    speedwave_runtime::host_exec::host_exec_project_dir(
+        speedwave_runtime::consts::data_dir(),
+        project,
+    )
+    .join(speedwave_runtime::consts::HOST_EXEC_LOG_FILE)
+}
+
 #[tauri::command]
 pub(crate) async fn get_claude_session_logs(
     container: String,
@@ -114,6 +141,217 @@ pub(crate) async fn get_claude_session_logs(
     tokio::task::spawn_blocking(move || {
         let log_path = speedwave_runtime::consts::claude_session_log_path(&project);
         read_tail_sanitized(&log_path, tail)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Unified `/logs` view — merge of every log source the app produces
+// ---------------------------------------------------------------------------
+//
+// The frontend's `parseLogLine` recognises lines of the form
+// `<source-token> | <rest>`, where `<source-token>` matches `[\w.-]+`. Compose
+// container logs already arrive in that shape (`<container_name> | <ISO> msg`).
+// Host-side log files (tauri-desktop, mcp-os, claude-session) do not, so we
+// reformat them via `prefix_lines` before concatenating with the compose
+// stream into a single string. This is what `get_all_logs` returns.
+
+/// Returns true when the line already carries a `<source-token> | …` prefix
+/// that the frontend parser will recognise. Used to skip re-prefixing compose
+/// container lines (which `nerdctl compose logs` already prefixes for us).
+fn has_source_prefix(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        let is_word_char = c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'-';
+        if !is_word_char {
+            break;
+        }
+        i += 1;
+    }
+    if i == 0 {
+        return false;
+    }
+    // Skip optional whitespace before `|` (matches frontend `\s*\|`).
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    i < bytes.len() && bytes[i] == b'|'
+}
+
+/// Rewrites tauri-plugin-log's bracketed level (`[INFO]`, `[WARN]`, …) into
+/// the unbracketed form Angular's `LEVEL_RE` expects after timestamp
+/// extraction.
+///
+/// Production input:
+///   `2026-05-06T19:58:38.724+0200 [INFO][speedwave_desktop::integrations_cmd] msg`
+/// Output:
+///   `2026-05-06T19:58:38.724+0200 INFO [speedwave_desktop::integrations_cmd] msg`
+///
+/// Returns the line unchanged when it does not match the expected layout
+/// (e.g. multi-line stack traces or external library lines).
+fn rewrite_desktop_bracketed_level(line: &str) -> String {
+    // ISO timestamp ends at the first space (timestamp contains digits, `-`,
+    // `:`, `.`, `+`, optionally `Z` — never spaces).
+    let Some(space_idx) = line.find(' ') else {
+        return line.to_string();
+    };
+    let after_ts = &line[space_idx + 1..];
+    if !after_ts.starts_with('[') {
+        return line.to_string();
+    }
+    let Some(close_idx) = after_ts.find(']') else {
+        return line.to_string();
+    };
+    let level = &after_ts[1..close_idx];
+    if !matches!(
+        level,
+        "DEBUG" | "INFO" | "WARN" | "WARNING" | "ERROR" | "TRACE"
+    ) {
+        return line.to_string();
+    }
+    // `line[..space_idx]` = ISO timestamp (without trailing space)
+    // After the closing `]` comes the rest, which usually starts with `[target]`.
+    // The frontend `LEVEL_RE = /^(LEVEL)\s+(.*)$/i` requires a space after the
+    // level word — without it the line falls back to default `info` and we lose
+    // the WARN/ERROR signal in the level chip.
+    let before = &line[..space_idx];
+    let after = &after_ts[close_idx + 1..];
+    format!("{before} {level} {after}")
+}
+
+/// Reformats the raw output of one log source so that every non-empty line
+/// matches the frontend's `<source> | <rest>` parsing contract.
+///
+/// - Empty lines are dropped (they would break `parseLogLine` and add no value).
+/// - Lines that already carry a `<word> | …` prefix (compose container logs)
+///   are passed through unchanged — re-prefixing them would lose the
+///   container name in the dropdown.
+/// - Other lines (host-side log files) get the `<source> | ` prefix.
+/// - Desktop-log lines additionally have their bracketed level rewritten
+///   so the Angular level chip works (`[INFO]` → `INFO`).
+pub(crate) fn prefix_lines(source: &str, raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + raw.lines().count() * (source.len() + 4));
+    for line in raw.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if has_source_prefix(line) {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let normalized = if source == "desktop" {
+            rewrite_desktop_bracketed_level(line)
+        } else {
+            line.to_string()
+        };
+        out.push_str(source);
+        out.push_str(" | ");
+        out.push_str(&normalized);
+        out.push('\n');
+    }
+    out
+}
+
+/// Inputs to `merge_log_sources`. Held as owned strings so the merge function
+/// is pure (no IO) and testable without filesystem fixtures.
+pub(crate) struct LogSources {
+    pub compose: String,
+    pub desktop: String,
+    pub mcp_os: String,
+    pub host_exec: String,
+    pub claude: String,
+}
+
+/// Composes the per-source log buffers into a single newline-separated string,
+/// block-by-block in a deterministic source order. Chronological interleaving
+/// is the frontend's job (`sortLogLinesByTime` in `logs-view.component.ts`) —
+/// every line carries one ISO timestamp, so the renderer parses and merges
+/// them by instant; here we just concatenate.
+pub(crate) fn merge_log_sources(sources: LogSources) -> String {
+    let compose = prefix_lines("compose", &sources.compose);
+    let desktop = prefix_lines("desktop", &sources.desktop);
+    let mcp_os = prefix_lines("mcp-os", &sources.mcp_os);
+    let host_exec = prefix_lines("host-exec", &sources.host_exec);
+    let claude = prefix_lines("claude", &sources.claude);
+
+    // Apply the sanitizer once to the merged buffer (idempotent — sources are
+    // already individually sanitized, this is a defence-in-depth pass).
+    speedwave_runtime::log_sanitizer::sanitize(&format!(
+        "{compose}{desktop}{mcp_os}{host_exec}{claude}"
+    ))
+}
+
+/// Reads every host-side log file, fetches the compose stream, and returns a
+/// merged buffer that the frontend's existing `parseLogLine` understands.
+///
+/// Sources merged (in this fixed order, per-source-block):
+///   1. compose   — `nerdctl compose logs --timestamps --tail <N>`
+///   2. desktop   — tauri-plugin-log file (Rust + Angular `LoggerService` +
+///                  Swift CLI stderr forwarded by `check_os_permission`)
+///   3. mcp-os    — `~/.speedwave/mcp-os.log`
+///   4. host-exec — `~/.speedwave/host-exec/<project>/log` (if host_exec enabled)
+///   5. claude    — `~/.speedwave/logs/<project>/claude-session.log` (if exists)
+///
+/// Each source uses the full `tail` budget independently (default 200, cap
+/// 10 000). With 5 sources × 10 000 the upper bound is 50 000 lines — trivial
+/// for the renderer, especially since the frontend further filters by source
+/// in the dropdown.
+///
+/// Backwards-compatible with `get_compose_logs`: that command still exists for
+/// callers that want compose-only output (e.g. diagnostics export). New
+/// frontend code should prefer this command.
+#[tauri::command]
+pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<String, String> {
+    check_project(&project)?;
+    let tail_u32 = tail.unwrap_or(200).min(10_000);
+    let tail_us = tail_u32 as usize;
+
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let rt = speedwave_runtime::runtime::detect_runtime();
+
+        // compose (best-effort; missing runtime should not blank the whole view)
+        let compose = if rt.is_available() {
+            rt.compose_logs(&project, tail_u32).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // desktop (tauri-plugin-log) — best-effort, missing dir/file is fine
+        let desktop = match desktop_log_dir() {
+            Some(dir) => {
+                let path = dir.join("speedwave-desktop.log");
+                read_tail_sanitized(&path, tail_us).unwrap_or_default()
+            }
+            None => String::new(),
+        };
+
+        // mcp-os — same path resolution `get_mcp_os_logs` uses
+        let mcp_os_path =
+            speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
+        let mcp_os = read_tail_sanitized(&mcp_os_path, tail_us).unwrap_or_default();
+
+        // host-exec — per-project worker log (`get_host_exec_logs`'s path)
+        let host_exec =
+            read_tail_sanitized(&host_exec_log_path(&project), tail_us).unwrap_or_default();
+
+        // claude session log — same path resolution `get_claude_session_logs` uses
+        let claude_path = speedwave_runtime::consts::claude_session_log_path(&project);
+        let claude = read_tail_sanitized(&claude_path, tail_us).unwrap_or_default();
+
+        Ok(merge_log_sources(LogSources {
+            compose,
+            desktop,
+            mcp_os,
+            host_exec,
+            claude,
+        }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -316,8 +554,7 @@ mod tests {
     #[test]
     fn read_tail_sanitized_reads_and_sanitizes() {
         let tmp = tempfile::tempdir().unwrap();
-        let log_content =
-            "[07-04-2026 14:30:00] SESSION: started\n[07-04-2026 14:30:01] STDERR: Bearer sk-ant-secret-key-abc\n[07-04-2026 14:30:02] SESSION: stopped\n";
+        let log_content = "2026-04-07T14:30:00.000+02:00 SESSION: started\n2026-04-07T14:30:01.000+02:00 STDERR: Bearer sk-ant-secret-key-abc\n2026-04-07T14:30:02.000+02:00 SESSION: stopped\n";
         let log_path = tmp.path().join("claude-session.log");
         std::fs::write(&log_path, log_content).unwrap();
 
@@ -343,5 +580,248 @@ mod tests {
         assert!(!result.contains("line3"), "should only have last 2 lines");
         assert!(result.contains("line4"), "result: {result}");
         assert!(result.contains("line5"), "result: {result}");
+    }
+
+    // -- has_source_prefix tests --
+
+    #[test]
+    fn has_source_prefix_matches_compose_container_format() {
+        // What `nerdctl compose logs` emits — must pass through unchanged.
+        assert!(has_source_prefix("speedwave_acme_mcp_hub | hello"));
+        assert!(has_source_prefix("claude_1 | INFO foo"));
+        assert!(has_source_prefix("a.b-c | x"));
+    }
+
+    #[test]
+    fn has_source_prefix_rejects_lines_without_pipe() {
+        assert!(!has_source_prefix("plain log line without pipe"));
+        assert!(!has_source_prefix("2026-05-06T19:58:38 INFO msg"));
+    }
+
+    #[test]
+    fn has_source_prefix_rejects_empty_token() {
+        // `| no-source` would put an empty source token in the dropdown — guard against it
+        assert!(!has_source_prefix("| only pipe"));
+        assert!(!has_source_prefix(" | leading-space"));
+    }
+
+    #[test]
+    fn has_source_prefix_rejects_token_with_spaces() {
+        // Token chars are `[\w.-]`; any space inside the token portion fails.
+        // (`a b | c` — frontend `COMPOSE_RE` would not match either.)
+        assert!(!has_source_prefix("a b | c"));
+    }
+
+    // -- rewrite_desktop_bracketed_level tests --
+
+    #[test]
+    fn rewrite_desktop_level_unwraps_known_levels() {
+        let line = "2026-05-06T19:58:38.724+0200 [INFO][speedwave_desktop::integrations_cmd] hi";
+        let out = rewrite_desktop_bracketed_level(line);
+        assert_eq!(
+            out,
+            "2026-05-06T19:58:38.724+0200 INFO [speedwave_desktop::integrations_cmd] hi"
+        );
+    }
+
+    #[test]
+    fn rewrite_desktop_level_supports_warn_error_debug_trace_warning() {
+        for lvl in ["DEBUG", "INFO", "WARN", "WARNING", "ERROR", "TRACE"] {
+            let line = format!("2026-05-06T19:58:38.724+0200 [{lvl}][target] msg");
+            let out = rewrite_desktop_bracketed_level(&line);
+            assert!(
+                out.contains(&format!(" {lvl} [target]")),
+                "expected unbracketed {lvl} with trailing space (frontend LEVEL_RE needs \\s+), got: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_desktop_level_handles_colon_offset_timestamp() {
+        // `log_ts::log_timestamp()` emits the RFC-3339 colon form `+02:00`;
+        // the timestamp still has no space, so the first-space split lands
+        // exactly at the start of `[LEVEL]`.
+        let line = "2026-05-12T14:34:02.814+02:00 [WARN][speedwave_desktop::x] msg";
+        let out = rewrite_desktop_bracketed_level(line);
+        assert_eq!(
+            out,
+            "2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] msg"
+        );
+    }
+
+    #[test]
+    fn rewrite_desktop_level_passes_through_unknown_levels() {
+        // `[VERBOSE]` is not a recognised log level — line must pass unchanged.
+        let line = "2026-05-06T19:58:38 [VERBOSE][x] msg";
+        assert_eq!(rewrite_desktop_bracketed_level(line), line);
+    }
+
+    #[test]
+    fn rewrite_desktop_level_passes_through_lines_without_timestamp() {
+        // Multi-line stack traces, banners, etc.
+        let line = "stack trace continued";
+        assert_eq!(rewrite_desktop_bracketed_level(line), line);
+    }
+
+    // -- prefix_lines tests --
+
+    #[test]
+    fn prefix_lines_passthrough_for_compose_format() {
+        let raw = "claude_1 | hello\nmcp_hub_1 | world";
+        let out = prefix_lines("compose", raw);
+        // Compose lines pass through verbatim — they already have a source token.
+        assert!(out.contains("claude_1 | hello"));
+        assert!(out.contains("mcp_hub_1 | world"));
+        // Must NOT prepend `compose | `.
+        assert!(!out.contains("compose | claude_1"));
+    }
+
+    #[test]
+    fn prefix_lines_prepends_source_for_plain_lines() {
+        let raw = "2026-05-06T19:58:38 INFO mcp-os started\nready";
+        let out = prefix_lines("mcp-os", raw);
+        assert!(out.contains("mcp-os | 2026-05-06T19:58:38 INFO mcp-os started"));
+        assert!(out.contains("mcp-os | ready"));
+    }
+
+    #[test]
+    fn prefix_lines_rewrites_desktop_bracketed_level() {
+        let raw = "2026-05-06T19:58:38.724+0200 [INFO][speedwave_desktop::integrations_cmd] hi";
+        let out = prefix_lines("desktop", raw);
+        // Bracketed level is unwrapped (with trailing space — frontend LEVEL_RE
+        // requires \s+ after the level word) AND the line is prefixed with
+        // `desktop | `.
+        assert!(
+            out.contains("desktop | 2026-05-06T19:58:38.724+0200 INFO [speedwave_desktop::integrations_cmd] hi"),
+            "expected unwrapped level + desktop prefix, got: {out}"
+        );
+    }
+
+    #[test]
+    fn prefix_lines_skips_empty_lines() {
+        let raw = "first\n\nsecond\n";
+        let out = prefix_lines("desktop", raw);
+        // No `desktop | ` lines for the empty splits.
+        let pipe_count = out.matches("desktop | ").count();
+        assert_eq!(pipe_count, 2, "expected 2 prefixed lines, got: {out}");
+    }
+
+    #[test]
+    fn prefix_lines_does_not_double_rewrite_when_source_is_not_desktop() {
+        // mcp-os logs sometimes contain `[INFO]` text but we must NOT rewrite
+        // them (the rewrite is desktop-format-specific). Non-desktop sources
+        // pass content through with only the prefix added.
+        let raw = "2026-05-06T19:58:38 [INFO] foo";
+        let out = prefix_lines("mcp-os", raw);
+        assert!(
+            out.contains("mcp-os | 2026-05-06T19:58:38 [INFO] foo"),
+            "non-desktop source must NOT unwrap brackets; got: {out}"
+        );
+    }
+
+    // -- merge_log_sources tests --
+
+    #[test]
+    fn merge_log_sources_handles_missing_files_as_empty() {
+        // Every source empty → merged buffer is empty.
+        let merged = merge_log_sources(LogSources {
+            compose: String::new(),
+            desktop: String::new(),
+            mcp_os: String::new(),
+            host_exec: String::new(),
+            claude: String::new(),
+        });
+        assert_eq!(merged, "");
+    }
+
+    #[test]
+    fn merge_log_sources_includes_all_source_tokens_in_dropdown_friendly_form() {
+        let merged = merge_log_sources(LogSources {
+            compose: "claude_1 | first\n".to_string(),
+            desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] d\n".to_string(),
+            mcp_os: "ready\n".to_string(),
+            host_exec:
+                r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#
+                    .to_string(),
+            claude: "session started\n".to_string(),
+        });
+        assert!(merged.contains("claude_1 | first"), "compose passthrough");
+        assert!(merged.contains("desktop | 2026-01-01T00:00:00.000+0000 INFO [x] d"));
+        assert!(merged.contains("mcp-os | ready"));
+        assert!(
+            merged.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#),
+            "host-exec line must be prefixed, got: {merged}"
+        );
+        assert!(merged.contains("claude | session started"));
+    }
+
+    #[test]
+    fn merge_log_sources_sanitizes_secrets_across_sources() {
+        // A Bearer token in the desktop log must be redacted in the merged
+        // buffer (sanitizer is applied as a defence-in-depth pass at merge).
+        let merged = merge_log_sources(LogSources {
+            compose: String::new(),
+            desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] auth Bearer sk-ant-api03-secret123\n"
+                .to_string(),
+            mcp_os: String::new(),
+            host_exec: String::new(),
+            claude: String::new(),
+        });
+        assert!(
+            !merged.contains("sk-ant-api03-secret123"),
+            "Bearer token must be redacted, got: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_log_sources_preserves_compose_block_first() {
+        // The concatenation order is deterministic: compose, then desktop, …
+        // (the frontend re-sorts by timestamp; this just pins the wire order).
+        let merged = merge_log_sources(LogSources {
+            compose: "claude_1 | START\n".to_string(),
+            desktop: "desktop_only_line\n".to_string(),
+            mcp_os: String::new(),
+            host_exec: String::new(),
+            claude: String::new(),
+        });
+        let compose_idx = merged.find("claude_1 | START").unwrap();
+        let desktop_idx = merged.find("desktop | desktop_only_line").unwrap();
+        assert!(compose_idx < desktop_idx, "compose block must come first");
+    }
+
+    #[test]
+    fn merge_log_sources_host_exec_block_between_mcp_os_and_claude() {
+        let merged = merge_log_sources(LogSources {
+            compose: String::new(),
+            desktop: String::new(),
+            mcp_os: "mcp_os_line\n".to_string(),
+            host_exec: "host_exec_line\n".to_string(),
+            claude: "claude_line\n".to_string(),
+        });
+        let mcp_idx = merged.find("mcp-os | mcp_os_line").unwrap();
+        let he_idx = merged.find("host-exec | host_exec_line").unwrap();
+        let claude_idx = merged.find("claude | claude_line").unwrap();
+        assert!(mcp_idx < he_idx && he_idx < claude_idx, "got: {merged}");
+    }
+
+    #[test]
+    fn prefix_lines_does_not_unwrap_brackets_for_host_exec() {
+        // host_exec audit lines are JSON; a `[INFO]`-looking substring (e.g. in
+        // an argv) must not be rewritten — the desktop-only rewrite must not fire.
+        let raw = r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#;
+        let out = prefix_lines("host-exec", raw);
+        assert!(
+            out.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#),
+            "host-exec content must pass through verbatim with only the prefix, got: {out}"
+        );
+    }
+
+    #[test]
+    fn host_exec_log_path_uses_per_project_state_dir() {
+        let p = host_exec_log_path("myproj");
+        let s = p.to_string_lossy();
+        assert!(s.contains("host-exec"), "path: {s}");
+        assert!(s.contains("myproj"), "path: {s}");
+        assert!(s.ends_with("log"), "path: {s}");
     }
 }

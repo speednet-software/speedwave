@@ -9,7 +9,12 @@ pub fn cleanup_project_dirs(project: &str) {
 
 /// Best-effort cleanup of project directories under a given data directory.
 fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
-    for sub in &["tokens", "compose", "context", "claude-home"] {
+    for sub in &[
+        "tokens",
+        "compose",
+        "context",
+        crate::consts::CLAUDE_HOME_SUBDIR,
+    ] {
         let dir = data_dir.join(sub).join(project);
         if dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&dir) {
@@ -30,15 +35,22 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
 /// purely a recovery path for tampered or pre-existing trees).
 fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
     validation::validate_project_name(project)?;
-    let dirs_to_create = [
-        data_dir.join("tokens").join(project).join("slack"),
-        data_dir.join("tokens").join(project).join("sharepoint"),
-        data_dir.join("tokens").join(project).join("redmine"),
-        data_dir.join("tokens").join(project).join("gitlab"),
+    let tokens_root = data_dir.join("tokens").join(project);
+    let mut dirs_to_create = vec![
         data_dir.join("compose").join(project),
         data_dir.join("context").join(project),
-        data_dir.join("claude-home").join(project),
+        data_dir
+            .join(crate::consts::CLAUDE_HOME_SUBDIR)
+            .join(project),
     ];
+    // One token dir per credential-bearing service — derived from the SSOT so adding a
+    // service is a single edit in consts.rs (services with no `credential_files`, e.g.
+    // playwright, get no token dir).
+    for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+        if !svc.credential_files.is_empty() {
+            dirs_to_create.push(tokens_root.join(svc.config_key));
+        }
+    }
     for dir in &dirs_to_create {
         create_dir_all_secure(dir)?;
     }
@@ -240,16 +252,33 @@ mod tests {
 
         init_project_dirs_in("modecheck", &data_dir).unwrap();
 
-        let dirs = [
-            data_dir.join("tokens").join("modecheck"),
-            data_dir.join("tokens").join("modecheck").join("slack"),
-            data_dir.join("tokens").join("modecheck").join("sharepoint"),
-            data_dir.join("tokens").join("modecheck").join("redmine"),
-            data_dir.join("tokens").join("modecheck").join("gitlab"),
+        let mut dirs = vec![
             data_dir.join("compose").join("modecheck"),
             data_dir.join("context").join("modecheck"),
-            data_dir.join("claude-home").join("modecheck"),
+            data_dir
+                .join(crate::consts::CLAUDE_HOME_SUBDIR)
+                .join("modecheck"),
         ];
+        // One token dir per credential-bearing service — same SSOT-derived set as
+        // init_project_dirs_in. (At minimum: slack, sharepoint, redmine, gitlab, github, atlassian.)
+        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+            if !svc.credential_files.is_empty() {
+                dirs.push(
+                    data_dir
+                        .join("tokens")
+                        .join("modecheck")
+                        .join(svc.config_key),
+                );
+            }
+        }
+        assert!(
+            dirs.iter().any(|d| d.ends_with("modecheck/github")),
+            "github token dir must be among the created dirs"
+        );
+        assert!(
+            dirs.iter().any(|d| d.ends_with("modecheck/atlassian")),
+            "atlassian token dir must be among the created dirs"
+        );
         for dir in &dirs {
             let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
             assert_eq!(
@@ -310,6 +339,8 @@ mod tests {
             active_project: Some("existing".to_string()),
             selected_ide: None,
             log_level: None,
+            transcription: None,
+            ui: None,
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 
@@ -351,6 +382,8 @@ mod tests {
             active_project: None,
             selected_ide: None,
             log_level: None,
+            transcription: None,
+            ui: None,
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 
@@ -389,7 +422,12 @@ mod tests {
         );
 
         // Verify rollback: project directories should have been cleaned up
-        for sub in &["tokens", "compose", "context", "claude-home"] {
+        for sub in &[
+            "tokens",
+            "compose",
+            "context",
+            crate::consts::CLAUDE_HOME_SUBDIR,
+        ] {
             let dir = data_dir.join(sub).join("rollback-test");
             assert!(
                 !dir.exists(),

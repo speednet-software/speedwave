@@ -148,8 +148,21 @@ final class RemindersTests: XCTestCase {
         // Calling authorizationStatus() on a real EKEventStore is a pure read.
         let store = EKEventStore()
         let gate: PermissionGate = EventStoreGate(store: store)
-        let status = gate.authorizationStatus()
-        XCTAssertNotNil(status)
+        let _: RawAuthorizationStatus = gate.authorizationStatus()
+    }
+
+    func testRemindersEventStoreGateProducesRawStatus() {
+        // Sanity: at runtime, the gate's raw status is one of the documented cases.
+        // Reminders does not support .writeOnly (Calendar-only), but other cases are valid.
+        let store = EKEventStore()
+        let gate = EventStoreGate(store: store)
+        let raw = gate.authorizationStatus()
+        switch raw {
+        case .granted, .denied, .restricted, .notDetermined, .writeOnly, .unknown:
+            break
+        case .targetNotRunning:
+            XCTFail("EventKit gate must never produce .targetNotRunning — that is AE-only")
+        }
     }
 
     // MARK: - reminderToDict Output Keys

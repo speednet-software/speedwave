@@ -3,6 +3,11 @@ pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
 pub const LIMA_VM_NAME: &str = "speedwave";
 pub const LIMA_SUBDIR: &str = "lima";
 pub const DATA_DIR: &str = ".speedwave";
+/// Per-project Claude Code home directory under the data dir
+/// (`<data_dir>/claude-home/<project>/`) — holds credentials, sessions, and
+/// the `.clipboard-bridge` file. This is the SSOT; do not hard-code the
+/// `"claude-home"` literal at call sites.
+pub const CLAUDE_HOME_SUBDIR: &str = "claude-home";
 pub const CLI_BINARY: &str = "speedwave";
 pub const COMPOSE_PREFIX: &str = "speedwave";
 /// Port on which `mcp-hub` listens inside the compose network.
@@ -25,6 +30,100 @@ pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
+
+/// Subdirectory under the data dir holding per-project `host_exec` state.
+/// SSOT — do not hard-code `"host-exec"` at call sites.
+pub const HOST_EXEC_SUBDIR: &str = "host-exec";
+/// Per-project worker snapshot, written `0o600` (may hold env-value secrets).
+pub const HOST_EXEC_CONFIG_FILE: &str = "config.json";
+/// Per-project bearer token (`0o600`).
+pub const HOST_EXEC_AUTH_TOKEN_FILE: &str = "auth-token";
+/// Per-project worker listening port file.
+pub const HOST_EXEC_PORT_FILE: &str = "port";
+/// Per-project worker PID file — used for stale-process cleanup.
+pub const HOST_EXEC_PID_FILE: &str = "pid";
+/// Per-project audit log; env values redacted (ADR-054 §"Security model").
+pub const HOST_EXEC_LOG_FILE: &str = "log";
+
+/// Per-command timeout (7 min, fits under the hub's 600s long timeout).
+pub const HOST_EXEC_TIMEOUT_MS: u64 = 420_000;
+
+/// TCP connection probe timeout used by host-process liveness checks
+/// (oauth_process, host_exec_process). SSOT for both modules — see ADR-060.
+pub const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+/// Number of TCP probe attempts for liveness checks where a respawn is expensive
+/// (oauth, where every respawn rotates the ephemeral port and recreates every
+/// consumer container). Single-shot probes elsewhere are not affected.
+pub const PORT_PROBE_ATTEMPTS: u8 = 3;
+/// Backoff between TCP probe attempts.
+pub const PORT_PROBE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+/// Per-stream stdout/stderr tail-cap.
+pub const HOST_EXEC_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Per-stream line cap, applied alongside the byte cap.
+pub const HOST_EXEC_MAX_OUTPUT_LINES: usize = 2000;
+/// Ceiling on a recipe parameter's value length and on the declared `maxLen`.
+pub const HOST_EXEC_PARAM_MAX_LEN: usize = 65536;
+/// Sanity ceiling on a parameter's regex `pattern` length (semantics live in the worker).
+pub const HOST_EXEC_PARAM_PATTERN_MAX_LEN: usize = 4096;
+
+/// Banned `exec` basenames (shell / eval launchers).
+/// SSOT; case-insensitive. See ADR-054 §"Hard ban on direct shell/eval launchers".
+/// Windows interpreters (`powershell`, `cmd`, `pwsh`, `cscript`, `wscript`,
+/// `mshta`, `wsl`) are banned alongside Unix shells: each accepts an inline
+/// command or script argument (`-Command`/`/c`/script path) that executes
+/// arbitrary code.
+pub const HOST_EXEC_SHELL_LAUNCHERS: &[&str] = &[
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "eval",
+    "env",
+    "xargs",
+    "find",
+    "ssh",
+    "sshpass",
+    "busybox",
+    "toybox",
+    "powershell",
+    "cmd",
+    "pwsh",
+    "cscript",
+    "wscript",
+    "mshta",
+    "wsl",
+];
+
+/// Meta-tools banned only with a *bare* `{param}` argv element.
+/// SSOT; case-insensitive. See ADR-054 §"Config schema" (parameterised meta-invocation rule).
+pub const HOST_EXEC_META_TOOLS: &[&str] = &[
+    "node", "deno", "python", "python3", "perl", "ruby", "make", "npm", "npx", "pnpm", "yarn",
+    "awk", "gawk", "mawk", "nawk",
+];
+
+/// Subdirectory under the data dir holding per-project `oauth` worker state.
+/// SSOT — do not hard-code `"oauth"` at call sites. See ADR-060.
+pub const OAUTH_SUBDIR: &str = "oauth";
+/// Per-project bearer-token → service map (`0o600`). Lets the oauth worker
+/// derive `service` from the incoming bearer instead of trusting a model-controlled param.
+pub const OAUTH_BEARER_MAP_FILE: &str = ".bearer-map.json";
+/// Per-project worker supervisor's own auth-token (used by the supervisor for handshakes/diagnostics).
+pub const OAUTH_AUTH_TOKEN_FILE: &str = "auth-token";
+/// Per-project worker listening port file.
+pub const OAUTH_PORT_FILE: &str = "port";
+/// Per-project worker PID file — used for stale-process cleanup.
+pub const OAUTH_PID_FILE: &str = "pid";
+/// Per-project audit log; refresh / forget events are appended here (no token contents).
+pub const OAUTH_LOG_FILE: &str = "audit.log";
+/// Mode for the per-project oauth state directory (owner-only).
+pub const OAUTH_PROJECT_DIR_MODE: u32 = 0o700;
+/// Min seconds between successful refresh attempts per service when the
+/// current access token is still valid. Slows down a compromised-caller
+/// refresh-in-a-loop attack; cannot stop it (ADR-060 §"Threat model").
+pub const OAUTH_REFRESH_RATE_LIMIT_SECONDS: u64 = 1800;
+
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
@@ -34,38 +133,34 @@ pub const CONTAINER_PATH: &str = "/home/speedwave/.local/bin:/usr/local/bin:/usr
 
 /// Hostname reachable from inside Lima VM pointing to the macOS host.
 pub const LIMA_HOST: &str = "host.lima.internal";
-/// Hostname reachable from inside nerdctl rootless containers pointing to the Linux host.
-pub const NERDCTL_LINUX_HOST: &str = "host.docker.internal";
 /// Hostname reachable from inside WSL2/nerdctl containers pointing to the Windows host.
 pub const WSL_HOST: &str = "host.speedwave.internal";
 /// Podman-compatibility alias injected via `extra_hosts` in compose.template.yml.
 /// Containers use this when built for environments that expect the Podman convention.
 pub const CONTAINERS_HOST: &str = "host.containers.internal";
+/// Docker-compatibility alias. Speedwave does not use Docker, but every popular
+/// local-LLM runtime (Ollama, LM Studio, llama.cpp) and most third-party container
+/// docs use this name for "reach the host from inside a container" — a user
+/// copy-pasting that URL out of those docs must just work, so the alias is
+/// injected via `extra_hosts` alongside the Lima/WSL/Podman aliases.
+pub const DOCKER_HOST: &str = "host.docker.internal";
 
 /// All hostnames resolved inside containers to the host gateway via `extra_hosts`
 /// in `compose.template.yml`. Used by host-side code (Desktop settings) that needs
 /// to probe the same endpoint a container would hit: each alias is rewritten to
 /// `127.0.0.1` before a local HTTP probe because the aliases are not present in
-/// the host's resolver (Lima/WSL2/rootless nerdctl inject them only inside the VM).
-pub const CONTAINER_HOST_ALIASES: &[&str] =
-    &[LIMA_HOST, NERDCTL_LINUX_HOST, WSL_HOST, CONTAINERS_HOST];
+/// the host's resolver (Lima/WSL2 inject them only inside the VM).
+pub const CONTAINER_HOST_ALIASES: &[&str] = &[LIMA_HOST, WSL_HOST, CONTAINERS_HOST, DOCKER_HOST];
 
 /// IP of the macOS host as seen from inside nerdctl containers in the Lima vzNAT network.
 /// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
 pub const LIMA_VZ_HOST_IP: &str = "192.168.5.2";
-/// IP of the Linux host as seen from inside rootless nerdctl containers (slirp4netns gateway).
-pub const NERDCTL_LINUX_HOST_IP: &str = "10.0.2.2";
 /// IP of the Windows host as seen from inside WSL2 containers.
 pub const WSL_HOST_IP: &str = "192.168.65.1";
 
 /// Container user for unprivileged mode (macOS Lima, Windows WSL2).
-/// containerd runs as root → UID 1000 maps to UID 1000 on host.
+/// containerd runs as root inside the VM → UID 1000 maps to UID 1000 on host.
 pub const CONTAINER_USER_UNPRIVILEGED: &str = "1000:1000";
-/// Container user for rootless nerdctl (Linux native).
-/// In rootless mode, UID 0 in container maps to the host user's UID.
-/// UID 1000 would map to subuid range (~101000) and cannot access bind mounts.
-/// Security maintained by: cap_drop ALL, no-new-privileges, read_only, user namespace.
-pub const CONTAINER_USER_ROOTLESS: &str = "0:0";
 
 /// Subdirectory within resources for nerdctl-full binaries.
 pub const NERDCTL_FULL_SUBDIR: &str = "nerdctl-full";
@@ -113,12 +208,40 @@ pub const BUNDLE_RESOURCES_ENV: &str = "SPEEDWAVE_RESOURCES_DIR";
 /// The CLI reads it to locate bundled resources without the env var.
 pub const RESOURCES_MARKER: &str = "resources-dir";
 
-/// Error message returned when `newuidmap` is not found on the system.
-/// Used by both `NerdctlRuntime::ensure_ready()` and `setup_wizard::init_vm_linux()`.
-pub const UIDMAP_MISSING_MSG: &str = "newuidmap not found. Install the uidmap package:\n\
-     - Debian/Ubuntu: sudo apt-get install -y uidmap\n\
-     - Fedora/RHEL:   sudo dnf install -y shadow-utils\n\
-     - openSUSE:      sudo zypper install -y shadow";
+// --- Meeting transcription (ADR-056) ---------------------------------------
+
+/// Subdirectory of `data_dir()` holding recorded meetings + their transcripts.
+/// Layout: `<data_dir>/transcripts/<uuid>/{audio.wav,transcript.json,capture.pid}`.
+/// Directory perms `0o700`, files `0o600` — these contain microphone/system audio.
+pub const TRANSCRIPTS_SUBDIR: &str = "transcripts";
+
+/// Subdirectory of `data_dir()` holding downloaded Whisper + diarization models.
+/// Layout: `<data_dir>/models/whisper/ggml-*.bin`, `<data_dir>/models/diarization/*.onnx`.
+/// Directory perms `0o700`, files `0o600`.
+pub const MODELS_SUBDIR: &str = "models";
+
+/// Global ceiling (with headroom) on the total size of downloaded transcription
+/// models. `large-v3` alone is ~2.9 GiB; a realistic "I keep one model per role
+/// plus a couple of alternates" set is ~7 GiB, so this dome (~12 GiB) sits
+/// comfortably above that while still catching a misconfigured catalogue that
+/// would try to fill the disk. The per-model cap from the catalogue is the
+/// first-line check; this is the overall backstop.
+pub const MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES: u64 = 12 * 1024 * 1024 * 1024;
+
+/// Hosts the transcription model downloader is allowed to follow a redirect to.
+/// Hugging Face `302`-redirects model downloads to its Xet CDN and GitHub
+/// release assets redirect to their own CDN — both with signed URLs — so the
+/// downloader uses a custom redirect policy that follows redirects only to
+/// these hosts (exact match or a subdomain). An unrecognised redirect host
+/// produces a "model URL changed — report this" error rather than being
+/// followed. Frozen by ADR-056 spike 0C; HF CDN hostnames have changed before,
+/// so this list may need updating with a model-catalog bump.
+pub const TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS: &[&str] = &[
+    "huggingface.co",
+    "cas-bridge.xethub.hf.co",
+    "github.com",
+    "release-assets.githubusercontent.com",
+];
 
 /// Error message with remediation steps when WSL2 is not available on Windows.
 /// Used by `os_prereqs::check_os_prereqs()`.
@@ -179,9 +302,8 @@ pub const WSL_SERVICE_CHECK_MAX_RETRIES: u32 = 10;
 pub const CONTAINERD_RESTART_READY_DELAY_SECS: u64 = 5;
 
 /// Maximum number of readiness retries after restarting containerd/buildkitd.
-/// Each retry waits `CONTAINERD_RESTART_READY_DELAY_SECS` seconds. Worst-case wait
-/// per phase: 6 × 5s = 30s. NerdctlRuntime runs two phases (systemd is-active then
-/// nerdctl info), so Linux rootless worst-case is 60s. Lima/WSL2 are single-phase (30s).
+/// Each retry waits `CONTAINERD_RESTART_READY_DELAY_SECS` seconds. Worst-case
+/// wait: 6 × 5s = 30s. Lima/WSL2 are single-phase.
 pub const CONTAINERD_RESTART_READY_MAX_RETRIES: u32 = 6;
 
 /// Maximum seconds to wait for `limactl start` to boot the Lima VM.
@@ -208,6 +330,28 @@ pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 // watchdog fires, otherwise the watchdog kills the process mid-stop.
 const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);
 
+/// Where an auth/credential field is physically stored on disk (plan §PR3:290-299).
+///
+/// Before ADR-060/PR3 every field lived in `~/.speedwave/tokens/<project>/<service>/`.
+/// PR3 split SharePoint's OAuth state off-mount so a SharePoint container compromise
+/// no longer leaks `refresh_token`. `FieldStorage` is the explicit per-field tag
+/// that drives `save_integration_credentials`, `is_service_configured`, and
+/// `delete_integration_credentials` instead of branching on `service == "sharepoint"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldStorage {
+    /// Individual file under `~/.speedwave/tokens/<project>/<service>/<key>`,
+    /// mounted as `/tokens/<key>` (read-only since ADR-060) into the worker
+    /// container.
+    WorkerMountedToken,
+    /// Stored inside the per-service `config.json` (Redmine's `host_url`,
+    /// `project_id`), still mounted into the worker as part of `/tokens`.
+    WorkerMountedConfig,
+    /// Stored in `~/.speedwave/oauth/<project>/<service>.json` (ADR-060) and
+    /// NEVER mounted into the worker container. Only the host-side `oauth`
+    /// worker reads it.
+    OAuthState,
+}
+
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
     /// Field key used as filename in the tokens directory (e.g. "bot_token").
@@ -222,7 +366,9 @@ pub struct McpAuthFieldDescriptor {
     pub is_secret: bool,
     /// Whether this field is stored inside a `config.json` file rather than
     /// as an individual credential file. Used by Redmine's `host_url`
-    /// and `project_id` fields.
+    /// and `project_id` fields. Equivalent to `storage ==
+    /// FieldStorage::WorkerMountedConfig` and kept for backwards-compat
+    /// with existing callsites; new code should branch on `storage`.
     pub stored_in_config_json: bool,
     /// Whether this field is obtained via an OAuth flow rather than manual entry.
     /// Fields with `oauth_flow: true` are hidden from the credential form and
@@ -232,10 +378,25 @@ pub struct McpAuthFieldDescriptor {
     /// Optional fields are shown in the UI but do not block the
     /// "Configured" status when left empty.
     pub optional: bool,
+    /// Physical storage tier (plan §PR3:290-299). Drives storage routing for
+    /// `save_integration_credentials`, `is_service_configured`, and
+    /// `delete_integration_credentials` in the Desktop crate.
+    pub storage: FieldStorage,
+    /// Optional help text rendered under the input. `None` = no hint.
+    pub hint: Option<&'static str>,
 }
 
 /// OAuth scopes requested during the SharePoint Device Code Flow.
-pub const SHAREPOINT_OAUTH_SCOPES: &str = "https://graph.microsoft.com/Sites.Read.All \
+///
+/// `Sites.Manage.All` covers `Sites.ReadWrite.All` and `Sites.Read.All` and is
+/// required by Microsoft Graph `createList` (delegated permissions)[^create-list].
+/// It typically requires tenant admin consent — the Speedflow app must be
+/// admin-consented in the Azure AD tenant before users can grant it via the
+/// device-code flow. See `docs/guides/integrations.md` for the admin-consent
+/// prerequisite.
+///
+/// [^create-list]: <https://learn.microsoft.com/en-us/graph/api/list-create?view=graph-rest-1.0&tabs=http#permissions>
+pub const SHAREPOINT_OAUTH_SCOPES: &str = "https://graph.microsoft.com/Sites.Manage.All \
      https://graph.microsoft.com/Files.ReadWrite.All \
      https://graph.microsoft.com/User.Read offline_access";
 
@@ -254,10 +415,27 @@ pub struct McpServiceDescriptor {
     /// Auth/credential fields for this service.
     pub auth_fields: &'static [McpAuthFieldDescriptor],
     /// Credential file names allowed for this service (superset of auth field keys,
-    /// may include extra files like "config.json").
+    /// may include extra files like "config.json"). After ADR-060/PR3 this is the
+    /// list of files that LIVE under `~/.speedwave/tokens/<project>/<service>/`
+    /// and are mounted into the worker. SharePoint's OAuth-state-only fields
+    /// (refresh_token, client_id, tenant_id) are NOT here — they live in
+    /// `oauth/<project>/<service>.json` and are described by `oauth_state_fields`.
     pub credential_files: &'static [&'static str],
+    /// `Some(_)` for OAuth-using services: the field names that live in
+    /// `oauth/<project>/<service>.json` (NOT mounted into the worker). `None`
+    /// for services without OAuth state. Plan §PR3:290-299.
+    pub oauth_state_fields: Option<&'static [&'static str]>,
     /// Optional UI badge label (e.g. "BETA", "NEW"). `None` = no badge.
     pub badge: Option<&'static str>,
+    /// True if this worker runs on its own egress-less network `{NETWORK_NAME}_{config_key}`
+    /// (e.g. `office`) rather than only the shared project network. When such a service is
+    /// disabled, its dedicated network and the hub's attachment to it are removed from compose.
+    pub egress_less: bool,
+    /// True if this worker consumes the host-side `oauth` worker (ADR-060) to refresh
+    /// access tokens. When set, compose injects `WORKER_OAUTH_URL` + a per-service bearer
+    /// mount at `/secrets/oauth-auth-token-<config_key>:ro` into this worker's container.
+    /// SSOT — adding a new OAuth-using integration = flipping this bit on its descriptor.
+    pub uses_oauth_refresh: bool,
 }
 
 /// Toggleable MCP services — Single Source of Truth for service metadata.
@@ -279,6 +457,8 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "user_token",
@@ -289,10 +469,15 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
         ],
         credential_files: &["bot_token", "user_token"],
+        oauth_state_fields: None,
         badge: None,
+        egress_less: false,
+        uses_oauth_refresh: false,
     },
     McpServiceDescriptor {
         config_key: "sharepoint",
@@ -310,6 +495,10 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: true,
                 optional: false,
+                // Mounted into the worker — refreshed by the host-side `oauth`
+                // worker (ADR-060) and read by the SharePoint client at runtime.
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "refresh_token",
@@ -320,6 +509,11 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: true,
                 optional: false,
+                // Off-mount (ADR-060 §"Threat model"): a SharePoint container
+                // compromise cannot exfiltrate the refresh_token because it is
+                // not in `/tokens`.
+                storage: FieldStorage::OAuthState,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "client_id",
@@ -330,6 +524,11 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                // Application credentials (client_id, tenant_id) live in
+                // `oauth/<project>/sharepoint.json` together with the refresh
+                // token; only the host-side `oauth` worker reads them.
+                storage: FieldStorage::OAuthState,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "tenant_id",
@@ -340,37 +539,49 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::OAuthState,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "site_id",
                 label: "Site ID",
                 field_type: "text",
-                placeholder: "site-id",
+                placeholder: "acme.sharepoint.com:/sites/Marketing:",
                 is_secret: false,
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
-            },
-            McpAuthFieldDescriptor {
-                key: "base_path",
-                label: "Base Path",
-                field_type: "text",
-                placeholder: "Projects/my-project",
-                is_secret: false,
-                stored_in_config_json: false,
-                oauth_flow: false,
-                optional: false,
+                // Site policy by omission (ADR-060): the worker reads its
+                // stored site_id and Graph tools accept no `site_id` parameter.
+                storage: FieldStorage::WorkerMountedToken,
+                hint: Some(
+                    "Path form: \"acme.sharepoint.com:/sites/Marketing:\" (mind both colons: \
+                     one after the hostname (`:/`) and one at the end (`:`)). \
+                     Or composite form: \"acme.sharepoint.com,{site-guid},{web-guid}\" \
+                     (GET /sites/{hostname}:/sites/{path} in Graph Explorer, copy the response `id`). \
+                     NOT a SharePoint URL.",
+                ),
             },
         ],
-        credential_files: &[
-            "access_token",
+        // Plan §PR3:290-299: only files PHYSICALLY mounted into the worker.
+        // refresh_token / client_id / tenant_id moved off-mount to
+        // `oauth/<project>/sharepoint.json` — see `oauth_state_fields` below.
+        credential_files: &["access_token", "site_id"],
+        oauth_state_fields: Some(&[
+            // SSOT for the fields stored in `oauth/<project>/sharepoint.json`.
+            // `scopes` / `grantedScopes` / `expiresAt` / `lastRefreshAt` are
+            // managed exclusively by the oauth worker (not in `auth_fields`).
             "refresh_token",
             "client_id",
             "tenant_id",
-            "site_id",
-            "base_path",
-        ],
+            "scopes",
+            "grantedScopes",
+            "expiresAt",
+            "lastRefreshAt",
+        ]),
         badge: None,
+        egress_less: false,
+        uses_oauth_refresh: true,
     },
     McpServiceDescriptor {
         config_key: "redmine",
@@ -388,6 +599,8 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: true,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedConfig,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "api_key",
@@ -398,6 +611,8 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "project_id",
@@ -408,6 +623,8 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: true,
                 oauth_flow: false,
                 optional: true,
+                storage: FieldStorage::WorkerMountedConfig,
+                hint: None,
             },
         ],
         credential_files: &[
@@ -417,7 +634,10 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "project_id",
             "project_name",
         ],
+        oauth_state_fields: None,
         badge: None,
+        egress_less: false,
+        uses_oauth_refresh: false,
     },
     McpServiceDescriptor {
         config_key: "gitlab",
@@ -435,6 +655,8 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
             McpAuthFieldDescriptor {
                 key: "token",
@@ -445,10 +667,133 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
             },
         ],
         credential_files: &["token", "host_url"],
+        oauth_state_fields: None,
         badge: None,
+        egress_less: false,
+        uses_oauth_refresh: false,
+    },
+    McpServiceDescriptor {
+        config_key: "github",
+        compose_name: "mcp-github",
+        worker_env: "WORKER_GITHUB_URL",
+        display_name: "GitHub",
+        description: "Code hosting and CI/CD platform",
+        auth_fields: &[McpAuthFieldDescriptor {
+            key: "token",
+            label: "Personal Access Token (fine-grained)",
+            field_type: "password",
+            placeholder: "github_pat_...",
+            is_secret: true,
+            stored_in_config_json: false,
+            oauth_flow: false,
+            optional: false,
+            storage: FieldStorage::WorkerMountedToken,
+            hint: None,
+        }],
+        credential_files: &["token"],
+        oauth_state_fields: None,
+        badge: None,
+        egress_less: false,
+        uses_oauth_refresh: false,
+    },
+    McpServiceDescriptor {
+        config_key: "atlassian",
+        compose_name: "mcp-atlassian",
+        worker_env: "WORKER_ATLASSIAN_URL",
+        display_name: "Atlassian",
+        description: "Jira and Confluence (Atlassian Cloud)",
+        auth_fields: &[
+            McpAuthFieldDescriptor {
+                key: "site_url",
+                label: "Atlassian site URL",
+                field_type: "url",
+                placeholder: "https://your-domain.atlassian.net",
+                is_secret: false,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: false,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
+            },
+            McpAuthFieldDescriptor {
+                key: "email",
+                label: "Account email",
+                field_type: "text",
+                placeholder: "you@example.com",
+                is_secret: false,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: false,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
+            },
+            McpAuthFieldDescriptor {
+                key: "api_token",
+                label: "API token",
+                field_type: "password",
+                placeholder: "ATATT3x...",
+                is_secret: true,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: false,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
+            },
+            McpAuthFieldDescriptor {
+                key: "jira_project_keys",
+                label: "Jira project keys (allowlist, optional)",
+                field_type: "text",
+                placeholder: "PROJ,OPS — empty = all",
+                is_secret: false,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: true,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
+            },
+            McpAuthFieldDescriptor {
+                key: "confluence_space_keys",
+                label: "Confluence space keys (allowlist, optional)",
+                field_type: "text",
+                placeholder: "DEV,DOCS — empty = all",
+                is_secret: false,
+                stored_in_config_json: false,
+                oauth_flow: false,
+                optional: true,
+                storage: FieldStorage::WorkerMountedToken,
+                hint: None,
+            },
+        ],
+        credential_files: &[
+            "site_url",
+            "email",
+            "api_token",
+            "jira_project_keys",
+            "confluence_space_keys",
+        ],
+        oauth_state_fields: None,
+        badge: None,
+        egress_less: false,
+        uses_oauth_refresh: false,
+    },
+    McpServiceDescriptor {
+        config_key: "office",
+        compose_name: "mcp-office",
+        worker_env: "WORKER_OFFICE_URL",
+        display_name: "Office documents",
+        description: "Read, write, convert Word/Excel/PowerPoint/PDF; render charts",
+        // A pure file processor — no service credentials. Operates on /workspace files only.
+        auth_fields: &[],
+        credential_files: &[],
+        oauth_state_fields: None,
+        badge: Some("BETA"),
+        egress_less: true,
+        uses_oauth_refresh: false,
     },
     McpServiceDescriptor {
         config_key: "playwright",
@@ -459,7 +804,38 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         // Playwright has no credentials — it scrapes public URLs only.
         auth_fields: &[],
         credential_files: &[],
+        oauth_state_fields: None,
         badge: Some("BETA"),
+        egress_less: false,
+        uses_oauth_refresh: false,
+    },
+    McpServiceDescriptor {
+        config_key: "context7",
+        compose_name: "mcp-context7",
+        worker_env: "WORKER_CONTEXT7_URL",
+        display_name: "Context7",
+        description: "Up-to-date library documentation (React, Spring, Django, …)",
+        // `api_key` is OPTIONAL: anonymous mode works (per-IP rate limit ~200/day,
+        // see docs/architecture/security.md). The Tauri layer overrides the badge
+        // dynamically — present when the file is empty/absent, absent when the key
+        // is set. Default here is the unconfigured display.
+        auth_fields: &[McpAuthFieldDescriptor {
+            key: "api_key",
+            label: "API Key (optional — higher rate limits)",
+            field_type: "password",
+            placeholder: "ctx7sk_…",
+            is_secret: true,
+            stored_in_config_json: false,
+            oauth_flow: false,
+            optional: true,
+            storage: FieldStorage::WorkerMountedToken,
+            hint: None,
+        }],
+        credential_files: &["api_key"],
+        oauth_state_fields: None,
+        badge: Some("Anonymous"),
+        egress_less: false,
+        uses_oauth_refresh: false,
     },
 ];
 
@@ -531,19 +907,97 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-sharepoint",
     "mcp-redmine",
     "mcp-gitlab",
+    "mcp-github",
+    "mcp-atlassian",
+    "mcp-office",
     "mcp-playwright",
+    "mcp-context7",
 ];
 
 /// Built-in service IDs (logical names, not compose names).
 /// Used by plugin install to prevent slug collisions.
+///
+/// `host_exec` is here even though it has no compose service — it is a
+/// host-side worker (like `os`/`mcp-os`) reached via `WORKER_HOST_EXEC_URL`
+/// on the hub (ADR-054). Both Rust (`plugin::derive_worker_env`) and
+/// TypeScript (`mcp-servers/hub/src/worker-env.ts::deriveWorkerEnv`) normalize
+/// hyphens in the slug to underscores in the env var name, so slugs like
+/// `my-plugin` resolve to `WORKER_MY_PLUGIN_URL`.
 pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "slack",
     "sharepoint",
     "redmine",
     "gitlab",
+    "github",
+    "atlassian",
+    "office",
     "playwright",
+    "context7",
     "os",
+    "host_exec",
+    // Host-side OAuth refresh worker (ADR-060). Reserved so plugins cannot
+    // shadow it. The oauth worker is NEVER enumerated to Claude — it is not
+    // in ENABLED_SERVICES and the hub has no bearer for it. The reservation
+    // exists purely to prevent slug collisions in plugin manifests.
+    "oauth",
 ];
+
+/// Environment variable names that plugins are forbidden from setting via
+/// `extra_env`. Either reserved by Speedwave (auto-injected) or dangerous
+/// (dynamic-linker / language-runtime hijack vectors). Comparison must be
+/// case-insensitive — the OS treats env var names as case-sensitive on Unix
+/// but a plugin shipping `Ld_Preload` would still be a hijack on macOS.
+///
+/// SSOT — referenced from `validate_manifest()` in `plugin.rs`.
+pub const RESERVED_ENV_KEYS: &[&str] = &[
+    // Reserved by Speedwave — auto-injected
+    "PORT",
+    // Dynamic linker hijacks (Linux)
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    // Dynamic linker hijacks (macOS)
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FORCE_FLAT_NAMESPACE",
+    // Language-runtime hijacks
+    "NODE_OPTIONS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    // Shell / process environment
+    "PATH",
+    "HOME",
+    "SHELL",
+    "IFS",
+    "BASH_ENV",
+    "ENV",
+    // host_exec worker-internal env (must never reach a recipe child)
+    "HOST_EXEC_AUTH_TOKEN",
+    "HOST_EXEC_CONFIG_PATH",
+    "HOST_EXEC_LOG_FILE",
+];
+
+/// Upper bound for plugin `mem_limit`, normalised to MiB. A plugin requesting
+/// more is rejected at install time. Built-in services are not subject to
+/// this cap — they configure their own limits via `compose.template.yml`.
+/// 16 GiB is enough headroom for legitimate ML-heavy MCP workers (the
+/// in-tree `presale` plugin requests 12 GiB) while still rejecting
+/// ridiculous values like `mem_limit: 999g` that would let a plugin OOM
+/// the host VM.
+pub const PLUGIN_MEM_LIMIT_MAX_MIB: u64 = 16384;
+
+/// Upper bound for plugin `cpu_limit` (cores). 4 cores is enough for any
+/// MCP worker we ship; raising it requires an explicit ADR.
+pub const PLUGIN_CPU_LIMIT_MAX: f32 = 4.0;
+
+/// Upper bound (bytes) for two distinct JSON blobs in the plugin system,
+/// both of which end up inline in `user_config.json`: a plugin's
+/// `settings_schema` (validated at install / compose-render time) and a
+/// project's per-plugin settings payload (validated when the Desktop
+/// `plugin_save_settings` command writes it). 64 KiB is generous —
+/// settings are small key/value maps and schemas are hand-written — while
+/// still bounding what an attacker can wedge into the shared config file.
+pub const PLUGIN_SETTINGS_MAX_BYTES: usize = 64 * 1024;
 
 /// Pure, testable function for resolving the data directory.
 /// `env_val` = None or empty string → `home.join(DATA_DIR)` (empty string treated as unset)
@@ -634,6 +1088,34 @@ pub fn compose_prefix() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reserved_env_keys_complete_and_uppercase() {
+        // A change here is deliberate — bumping this count signals a new
+        // hijack vector was added (and the matching test in plugin.rs
+        // should grow too). Catches accidental deletions.
+        assert_eq!(RESERVED_ENV_KEYS.len(), 19);
+        for &k in RESERVED_ENV_KEYS {
+            assert_eq!(
+                k,
+                k.to_uppercase(),
+                "RESERVED_ENV_KEYS entries are stored uppercase; comparison is case-insensitive at the call site"
+            );
+        }
+        // Sanity: the dynamic-linker and Speedwave-reserved entries are present.
+        for required in [
+            "PORT",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "NODE_OPTIONS",
+            "PATH",
+        ] {
+            assert!(
+                RESERVED_ENV_KEYS.contains(&required),
+                "{required} must be reserved"
+            );
+        }
+    }
 
     #[test]
     fn test_nerdctl_full_version_is_semver() {
@@ -732,13 +1214,17 @@ mod tests {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
         // Explicit field enumeration — update this when adding/removing MCP fields.
         // Using a const to force a compile-time reminder when struct changes.
-        const EXPECTED_MCP_FIELDS: usize = 5; // slack, sharepoint, redmine, gitlab, playwright
+        const EXPECTED_MCP_FIELDS: usize = 9; // slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7
         let _ = (
             resolved.slack,
             resolved.sharepoint,
             resolved.redmine,
             resolved.gitlab,
+            resolved.github,
+            resolved.atlassian,
+            resolved.office,
             resolved.playwright,
+            resolved.context7,
         );
         assert_eq!(
             TOGGLEABLE_MCP_SERVICES.len(),
@@ -780,10 +1266,7 @@ mod tests {
 
     #[test]
     fn test_container_user_constants_are_valid_uid_gid() {
-        for (name, value) in [
-            ("CONTAINER_USER_UNPRIVILEGED", CONTAINER_USER_UNPRIVILEGED),
-            ("CONTAINER_USER_ROOTLESS", CONTAINER_USER_ROOTLESS),
-        ] {
+        for (name, value) in [("CONTAINER_USER_UNPRIVILEGED", CONTAINER_USER_UNPRIVILEGED)] {
             let parts: Vec<&str> = value.split(':').collect();
             assert_eq!(
                 parts.len(),
@@ -804,10 +1287,16 @@ mod tests {
     fn test_auth_fields_count_per_service() {
         let expected: &[(&str, usize)] = &[
             ("slack", 2),
-            ("sharepoint", 6),
+            // 5 = access_token, refresh_token, client_id, tenant_id, site_id
+            // (base_path was dropped — site_id alone scopes the worker)
+            ("sharepoint", 5),
             ("redmine", 3),
             ("gitlab", 2),
+            ("github", 1),
+            ("atlassian", 5),
+            ("office", 0),
             ("playwright", 0),
+            ("context7", 1),
         ];
         for &(key, count) in expected {
             let svc =
@@ -827,7 +1316,7 @@ mod tests {
     /// public resources (e.g. Playwright scrapes public URLs). Kept as a
     /// small explicit allowlist so forgetting to declare auth for a new
     /// service that actually needs it still fails this test.
-    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright"];
+    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright", "office"];
 
     #[test]
     fn test_every_service_has_auth_fields() {
@@ -869,15 +1358,45 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_field_keys_subset_of_credential_files() {
+    fn test_auth_field_keys_subset_of_credential_files_or_oauth_state() {
+        // Plan §PR3:290-299: every UI field must land in exactly one of the
+        // two physical storage tiers — `credential_files` (mounted into the
+        // worker) or `oauth_state_fields` (off-mount, in `oauth/<project>/
+        // <service>.json`). The split is what makes the SharePoint refresh
+        // token off-mount.
         for svc in TOGGLEABLE_MCP_SERVICES {
             for field in svc.auth_fields {
+                let in_creds = svc.credential_files.contains(&field.key);
+                let in_oauth = svc
+                    .oauth_state_fields
+                    .map(|f| f.contains(&field.key))
+                    .unwrap_or(false);
                 assert!(
-                    svc.credential_files.contains(&field.key),
-                    "auth field '{}' for service '{}' not in credential_files",
+                    in_creds || in_oauth,
+                    "auth field '{}' for service '{}' is in neither credential_files \
+                     {:?} nor oauth_state_fields {:?}",
                     field.key,
-                    svc.config_key
+                    svc.config_key,
+                    svc.credential_files,
+                    svc.oauth_state_fields,
                 );
+                // The FieldStorage tag must agree with the SSOT lists.
+                match field.storage {
+                    FieldStorage::WorkerMountedToken | FieldStorage::WorkerMountedConfig => {
+                        assert!(
+                            in_creds,
+                            "service '{}': field '{}' tagged worker-mounted but missing from credential_files",
+                            svc.config_key, field.key
+                        );
+                    }
+                    FieldStorage::OAuthState => {
+                        assert!(
+                            in_oauth,
+                            "service '{}': field '{}' tagged OAuthState but missing from oauth_state_fields",
+                            svc.config_key, field.key
+                        );
+                    }
+                }
             }
         }
     }
@@ -974,40 +1493,84 @@ mod tests {
     }
 
     #[test]
-    fn test_optional_only_on_redmine_project_fields() {
-        let redmine = find_mcp_service("redmine").unwrap();
-        let optional_fields: Vec<&str> = redmine
-            .auth_fields
-            .iter()
-            .filter(|f| f.optional)
-            .map(|f| f.key)
-            .collect();
-        assert_eq!(
-            optional_fields,
-            vec!["project_id"],
-            "only Redmine's project_id should be optional"
-        );
+    fn test_optional_auth_fields_are_only_where_expected() {
+        // Optional auth fields are exception-listed: a service not in this map
+        // must have every auth field required. The set: Redmine's project scope,
+        // and Atlassian's optional Jira-project / Confluence-space allowlists.
+        let expected: std::collections::HashMap<&str, Vec<&str>> = [
+            ("redmine", vec!["project_id"]),
+            (
+                "atlassian",
+                vec!["jira_project_keys", "confluence_space_keys"],
+            ),
+            // Context7 works in anonymous mode; api_key is the only field and it is optional.
+            ("context7", vec!["api_key"]),
+        ]
+        .into_iter()
+        .collect();
 
-        // No other service should have optional fields
         for svc in TOGGLEABLE_MCP_SERVICES {
-            if svc.config_key == "redmine" {
-                continue;
-            }
-            for field in svc.auth_fields {
-                assert!(
-                    !field.optional,
-                    "field '{}' in service '{}' should not be optional",
-                    field.key, svc.config_key
-                );
+            let optional_fields: Vec<&str> = svc
+                .auth_fields
+                .iter()
+                .filter(|f| f.optional)
+                .map(|f| f.key)
+                .collect();
+            match expected.get(svc.config_key) {
+                Some(want) => assert_eq!(
+                    &optional_fields, want,
+                    "service '{}' optional fields changed unexpectedly",
+                    svc.config_key
+                ),
+                None => assert!(
+                    optional_fields.is_empty(),
+                    "service '{}' has unexpected optional auth fields: {optional_fields:?}",
+                    svc.config_key
+                ),
             }
         }
     }
 
     #[test]
     fn test_sharepoint_oauth_scopes_contains_required_scopes() {
-        assert!(SHAREPOINT_OAUTH_SCOPES.contains("Sites.Read.All"));
+        assert!(
+            SHAREPOINT_OAUTH_SCOPES.contains("Sites.Manage.All"),
+            "Sites.Manage.All is required by createList per Microsoft Graph delegated permissions"
+        );
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("Files.ReadWrite.All"));
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("offline_access"));
+        // Sanity: the legacy narrower scope should NOT be requested as a separate
+        // entry — Sites.Manage.All implicitly covers Sites.ReadWrite.All / Sites.Read.All.
+        assert!(
+            !SHAREPOINT_OAUTH_SCOPES.contains("Sites.Read.All"),
+            "Sites.Read.All is a subset of Sites.Manage.All — do not list both"
+        );
+    }
+
+    /// Every `auth_fields[*].key` must live in `credential_files` OR
+    /// `oauth_state_fields` (plan §PR3:290-299). The UI collects values for
+    /// all auth fields; the storage tier is decided by `FieldStorage`. A field
+    /// that landed in neither list would be silently dropped on save.
+    #[test]
+    fn test_auth_field_key_has_a_storage_tier() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            for field in svc.auth_fields {
+                let in_creds = svc.credential_files.contains(&field.key);
+                let in_oauth = svc
+                    .oauth_state_fields
+                    .map(|f| f.contains(&field.key))
+                    .unwrap_or(false);
+                assert!(
+                    in_creds || in_oauth,
+                    "service '{}': auth field '{}' has no storage tier \
+                     (neither credential_files {:?} nor oauth_state_fields {:?})",
+                    svc.config_key,
+                    field.key,
+                    svc.credential_files,
+                    svc.oauth_state_fields,
+                );
+            }
+        }
     }
 
     #[test]
@@ -1016,6 +1579,7 @@ mod tests {
         assert!(find_mcp_service("sharepoint").is_some());
         assert!(find_mcp_service("redmine").is_some());
         assert!(find_mcp_service("gitlab").is_some());
+        assert!(find_mcp_service("github").is_some());
     }
 
     #[test]
@@ -1347,14 +1911,22 @@ mod tests {
 
     #[test]
     fn test_credential_services_have_no_badge() {
+        // Exception: services whose only credentials are all optional may carry
+        // an informational badge ("Anonymous") that the Tauri layer overrides
+        // dynamically once a key is set. See context7's descriptor.
         for svc in TOGGLEABLE_MCP_SERVICES {
-            if !svc.auth_fields.is_empty() {
-                assert_eq!(
-                    svc.badge, None,
-                    "service '{}' with credentials should not have a badge",
-                    svc.config_key
-                );
+            if svc.auth_fields.is_empty() {
+                continue;
             }
+            let all_optional = svc.auth_fields.iter().all(|f| f.optional);
+            if all_optional {
+                continue;
+            }
+            assert_eq!(
+                svc.badge, None,
+                "service '{}' with required credentials should not have a badge",
+                svc.config_key
+            );
         }
     }
 
@@ -1366,13 +1938,109 @@ mod tests {
         // that (separate template test does). This test catches the inverse:
         // renaming one of the named hosts without updating the composition.
         assert!(CONTAINER_HOST_ALIASES.contains(&LIMA_HOST));
-        assert!(CONTAINER_HOST_ALIASES.contains(&NERDCTL_LINUX_HOST));
         assert!(CONTAINER_HOST_ALIASES.contains(&WSL_HOST));
         assert!(CONTAINER_HOST_ALIASES.contains(&CONTAINERS_HOST));
+        assert!(CONTAINER_HOST_ALIASES.contains(&DOCKER_HOST));
         assert_eq!(
             CONTAINER_HOST_ALIASES.len(),
             4,
             "expected exactly 4 container host aliases; update this test if you added a new platform alias to compose.template.yml"
         );
+    }
+
+    // SSOT alignment guards (ADR-048, CLAUDE.md "WSL distro name" row).
+    // If WSL_DISTRO_NAME is renamed, at least one of these will fail at compile
+    // time (include_str! produces a compile error if the file is missing) or
+    // at test time. Update all four locations together in the same commit.
+
+    #[test]
+    fn wsl_distro_name_appears_in_installer_hooks() {
+        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
+        assert!(
+            src.contains(WSL_DISTRO_NAME),
+            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in installer-hooks.nsh; \
+             rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
+
+    #[test]
+    fn wsl_distro_name_appears_in_e2e_vm_script() {
+        let src = include_str!("../../../scripts/e2e-vm.sh");
+        assert!(
+            src.contains(WSL_DISTRO_NAME),
+            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in scripts/e2e-vm.sh; \
+             rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
+
+    #[test]
+    fn wsl_distro_name_appears_in_installation_doc() {
+        let src = include_str!("../../../docs/getting-started/installation.md");
+        assert!(
+            src.contains(WSL_DISTRO_NAME),
+            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in docs/getting-started/installation.md; \
+             rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
+
+    #[test]
+    fn data_dir_appears_in_installer_hooks() {
+        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
+        // DATA_DIR = ".speedwave"; the NSIS hook hard-codes "$PROFILE\.speedwave"
+        assert!(
+            src.contains(DATA_DIR),
+            "DATA_DIR ({DATA_DIR}) not found in installer-hooks.nsh; \
+             rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
+
+    // Cross-language SSOT for container host aliases. The TypeScript MCP-shared
+    // SSRF guard duplicates the alias allowlist (it cannot import the Rust
+    // const). Both lists must stay in lockstep — these guards catch any drift.
+
+    #[test]
+    fn container_host_aliases_appear_in_mcp_shared_ts() {
+        let src = include_str!("../../../mcp-servers/shared/src/security.ts");
+        for alias in CONTAINER_HOST_ALIASES {
+            assert!(
+                src.contains(&format!("'{alias}'")),
+                "{alias} not found in mcp-servers/shared/src/security.ts \
+                 HOST_GATEWAY_ALLOWLIST; the TS allowlist must mirror Rust \
+                 CONTAINER_HOST_ALIASES"
+            );
+        }
+    }
+
+    #[test]
+    fn container_host_aliases_appear_in_compose_template() {
+        let src = include_str!("../../../containers/compose.template.yml");
+        for alias in CONTAINER_HOST_ALIASES {
+            assert!(
+                src.contains(&format!("\"{alias}:")),
+                "{alias} not found in containers/compose.template.yml extra_hosts; \
+                 the template must list every alias from Rust CONTAINER_HOST_ALIASES"
+            );
+        }
+    }
+
+    // Guard: only the SharePoint `site_id` field carries a hint today. Adding
+    // a hint to another field is fine but should be a deliberate edit, not a
+    // silent regression — and dropping the site_id hint would break the UI fix.
+    #[test]
+    fn only_sharepoint_site_id_has_hint() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            for field in svc.auth_fields {
+                let expected_some = svc.config_key == "sharepoint" && field.key == "site_id";
+                assert_eq!(
+                    field.hint.is_some(),
+                    expected_some,
+                    "auth field {}.{}: hint={:?} but expected_some={}",
+                    svc.config_key,
+                    field.key,
+                    field.hint,
+                    expected_some
+                );
+            }
+        }
     }
 }

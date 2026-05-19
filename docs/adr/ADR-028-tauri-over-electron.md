@@ -30,7 +30,7 @@ With Electron, the runtime crate would need to be exposed via `napi-rs` (Rust �
 
 Tauri uses the OS-native WebView, so it does not ship a browser engine.[^3] A minimal Tauri app is under 600 KB.[^5] Electron bundles Chromium (~150 MB uncompressed) plus Node.js in every application.[^1]
 
-Speedwave already bundles Lima (~50 MB), nerdctl-full (~200 MB on Linux), and Node.js (for mcp-os). Adding Chromium would push the total installer past 500 MB — undermining the "download one file" promise (ADR-000).
+Speedwave already bundles Lima (~50 MB on macOS), nerdctl-full + Ubuntu rootfs (~250 MB on Windows for the WSL2 distro), and Node.js (for mcp-os). Adding Chromium would push the total installer past 500 MB — undermining the "download one file" promise (ADR-000).
 
 #### 3. Memory footprint — shared WebView vs. dedicated Chromium
 
