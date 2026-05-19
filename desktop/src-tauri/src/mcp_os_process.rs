@@ -309,8 +309,8 @@ fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
     cmd.env("PATH", env.var("PATH").unwrap_or_default());
 
     // HOME is set on Unix (macOS/Linux) but typically not on Windows, where
-    // USERPROFILE is the equivalent. Setting HOME to an empty string on
-    // any platform would break Node.js path resolution (e.g. os.homedir()).
+    // USERPROFILE is the equivalent. Setting HOME to an empty string on Unix
+    // would break Node.js path resolution (e.g. os.homedir()).
     // USERPROFILE is already forwarded via WINDOWS_SYSTEM_ENV_VARS above.
     #[cfg(not(target_os = "windows"))]
     if let Some(home) = env.var("HOME") {

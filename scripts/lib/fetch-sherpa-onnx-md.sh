@@ -70,7 +70,7 @@ echo "SHA256 verified (${ACTUAL})" >&2
 # path like `D:\a\...` as `user@host:path` SSH form. The drive letter is fine
 # in the working directory, just not in the archive argument.
 rm -rf "${OUT_ROOT:?}/${EXTRACTED_TOP}"
-(cd "$OUT_ROOT" && tar -xjf "$(basename "$ARCHIVE_PATH")")
+(cd "$OUT_ROOT" && tar -xjf "$ARCHIVE")
 
 if [ ! -d "$LIB_DIR" ] || [ ! -f "${LIB_DIR}/sherpa-onnx-c-api.lib" ]; then
   echo "::error::extraction produced no lib/ with sherpa-onnx-c-api.lib at ${LIB_DIR}" >&2
