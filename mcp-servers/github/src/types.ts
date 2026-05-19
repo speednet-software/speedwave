@@ -330,15 +330,5 @@ export interface GitHubCommitComparison {
   status: string;
 }
 
-/**
- * Result of a GitHub API connection test with error categorization.
- * @interface ConnectionTestResult
- */
-export interface ConnectionTestResult {
-  /** True if the connection test succeeded */
-  success: boolean;
-  /** Human-readable error message when the test failed */
-  error?: string;
-  /** Categorized error type for downstream handling */
-  errorType?: 'auth' | 'network' | 'permission' | 'not_found' | 'unknown';
-}
+// ConnectionTestResult moved to @speedwave/mcp-shared (SSOT). Import directly
+// from the shared package; this worker no longer defines its own variant.

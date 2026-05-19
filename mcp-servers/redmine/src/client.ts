@@ -17,7 +17,7 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
-import { TIMEOUTS, ts, withSetupGuidance } from '@speedwave/mcp-shared';
+import { TIMEOUTS, ts, withSetupGuidance, memoizedPromise } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Axios Retry Config Extension
@@ -842,13 +842,43 @@ export class RedmineClient {
   }
 
   /**
-   * Get project configuration.
+   * Memoized lookup of the configured project's display name. Bounded to 5 s
+   * via {@link memoizedPromise} so tool calls never hang on a slow Redmine.
+   * On timeout returns `null` and leaves the cache empty (next call retries).
+   * Cached for the lifetime of the client once resolved — names are immutable
+   * in Redmine for a given project_id.
+   */
+  private readonly _getProjectName = memoizedPromise<string | null>({
+    fetch: async () => {
+      const pid = this.projectConfig?.project_id;
+      if (!pid || pid.trim() === '') return null;
+      try {
+        const project = await this.showProject(pid);
+        return project.name ?? null;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`${ts()} Could not fetch project name for "${pid}": ${msg}`);
+        return null;
+      }
+    },
+    timeoutMs: 5_000,
+    timeoutValue: null,
+  });
+
+  /** Public accessor for the memoized project_name lookup. */
+  getProjectName(): Promise<string | null> {
+    return this._getProjectName();
+  }
+
+  /**
+   * Get project configuration. Resolves project_name lazily via the bounded
+   * background fetch so a slow Redmine never delays server startup.
    * @returns Configuration object with project_id, project_name, and URL.
    */
-  getConfig(): { project_id?: string; project_name?: string; url: string } {
+  async getConfig(): Promise<{ project_id?: string; project_name?: string; url: string }> {
     return {
       project_id: this.projectConfig?.project_id,
-      project_name: this.projectConfig?.project_name,
+      project_name: this.projectConfig?.project_name ?? (await this._getProjectName()) ?? undefined,
       url: this.config.url,
     };
   }
@@ -1712,26 +1742,16 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
       projectConfig
     );
 
-    // Eager fetch: if project_id is set but project_name is absent, fetch it from the API.
-    // This keeps getConfig() synchronous — no caller changes needed.
-    // Uses != null check (not truthiness) because "0" is a valid Redmine project slug.
+    // project_name resolves lazily via client.getProjectName() — fire-and-forget
+    // here so the cache warms in the background, but the HTTP listener never
+    // waits on Redmine. A slow or unreachable Redmine no longer delays startup.
     if (
       projectConfig != null &&
       projectConfig.project_id != null &&
       projectConfig.project_id !== '' &&
       projectConfig.project_name == null
     ) {
-      try {
-        const project = await client.showProject(projectConfig.project_id);
-        projectConfig.project_name = project.name;
-        console.log(
-          `${ts()} ✅ Redmine: project name fetched: "${project.name}" (id: ${projectConfig.project_id})`
-        );
-      } catch (fetchError) {
-        console.warn(
-          `${ts()} Could not fetch project name for "${projectConfig.project_id}": ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`
-        );
-      }
+      void client.getProjectName();
     }
 
     return client;

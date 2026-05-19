@@ -24,6 +24,7 @@ import {
   initializeRegistry,
   refreshServiceTools,
   _setDiscoveryRetryDelaysForTesting,
+  _setEmptyRecheckBaseMsForTesting,
 } from './tool-registry.js';
 import { TIMEOUTS } from '@speedwave/mcp-shared';
 import type { ToolMetadata } from './hub-types.js';
@@ -979,6 +980,112 @@ describe('tool-registry', () => {
 
       expect(mockDiscover).toHaveBeenCalledTimes(2);
       expect(Object.keys(TOOL_REGISTRY['gitlab'] ?? {}).length).toBe(1);
+    });
+  });
+
+  describe('empty-registry exponential backoff', () => {
+    const mockTool: ToolMetadata = {
+      name: 'listItems',
+      description: 'List items',
+      keywords: ['list'],
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: { type: 'object', properties: {} },
+      service: 'redmine',
+      category: 'read',
+      deferLoading: false,
+    };
+
+    it('computes 10s → 20s → 40s → 60s (cap) backoff', async () => {
+      const { _emptyRecheckDelayMs } = await import('./tool-registry.js');
+      expect(_emptyRecheckDelayMs(0)).toBe(10_000);
+      expect(_emptyRecheckDelayMs(1)).toBe(20_000);
+      expect(_emptyRecheckDelayMs(2)).toBe(40_000);
+      expect(_emptyRecheckDelayMs(3)).toBe(60_000);
+      expect(_emptyRecheckDelayMs(4)).toBe(60_000);
+      expect(_emptyRecheckDelayMs(10)).toBe(60_000);
+    });
+
+    it('schedules retry chain with growing delay on persistent empty discovery', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      vi.mocked(discoverAndMergeService).mockResolvedValue({});
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      _setDiscoveryRetryDelaysForTesting([0, 0, 0]);
+      // 5 ms base → backoff sequence 5, 10, 20, 40 ms (capped at MAX which is
+      // still 60_000 ms but we never reach it in this test).
+      _setEmptyRecheckBaseMsForTesting(5);
+      await initializeRegistry();
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(0);
+
+      const startupCalls = vi.mocked(discoverAndMergeService).mock.calls.length;
+
+      // First retry after 5 ms. Real timers — wait a bit longer than the delay.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBeGreaterThanOrEqual(
+        startupCalls + 1
+      );
+
+      // After ~50 ms total we should have seen at least 2 retries (5, 10 ms).
+      await new Promise((r) => setTimeout(r, 50));
+      expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBeGreaterThanOrEqual(
+        startupCalls + 2
+      );
+
+      // Restore real-world base for other tests in this file.
+      _setEmptyRecheckBaseMsForTesting(10_000);
+    });
+
+    it('drops the timer once discovery returns non-empty', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      vi.mocked(discoverAndMergeService).mockResolvedValue({});
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      _setDiscoveryRetryDelaysForTesting([0, 0, 0]);
+      _setEmptyRecheckBaseMsForTesting(5);
+      await initializeRegistry();
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(0);
+
+      // Next discovery call (from the recheck timer) succeeds.
+      const recoveryTool: ToolMetadata = { ...mockTool, name: 'listItems', service: 'redmine' };
+      vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: recoveryTool });
+
+      // Wait past the 5 ms backoff for the recovery to happen.
+      await new Promise((r) => setTimeout(r, 30));
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
+
+      // After success: no further calls even with extended wait.
+      const callsAfterRecovery = vi.mocked(discoverAndMergeService).mock.calls.length;
+      await new Promise((r) => setTimeout(r, 100));
+      expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBe(callsAfterRecovery);
+
+      _setEmptyRecheckBaseMsForTesting(10_000);
+    });
+
+    it('all services non-empty at init → no rechecks are scheduled', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const tool: ToolMetadata = { ...mockTool, name: 'listItems', service: 'redmine' };
+      // Startup discovery succeeds — registry populated immediately.
+      vi.mocked(discoverAndMergeService).mockResolvedValue({ listItems: tool });
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      _setDiscoveryRetryDelaysForTesting([0, 0, 0]);
+      _setEmptyRecheckBaseMsForTesting(5);
+      await initializeRegistry();
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
+
+      const callsAfterInit = vi.mocked(discoverAndMergeService).mock.calls.length;
+      // No empty-recheck timer should be scheduled — wait past any conceivable
+      // first retry (5 ms backoff for this test) and assert no extra calls.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBe(callsAfterInit);
+
+      _setEmptyRecheckBaseMsForTesting(10_000);
     });
   });
 });

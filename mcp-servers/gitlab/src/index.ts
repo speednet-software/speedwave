@@ -6,7 +6,13 @@
  * @module mcp-gitlab
  */
 
-import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
+import {
+  createMCPServer,
+  ts,
+  notConfiguredMessage,
+  retryAsync,
+  makeStandardHealthCheck,
+} from '@speedwave/mcp-shared';
 import { initializeGitLabClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
@@ -47,11 +53,11 @@ async function main(): Promise<void> {
     host: '0.0.0.0', // bind all interfaces — must be reachable from the container network
     tools,
     auth: { token: AUTH_TOKEN },
-    healthCheck: async () => {
-      if (!gitlabClient) {
-        throw new Error('GitLab client not configured');
-      }
-    },
+    healthCheck: gitlabClient
+      ? makeStandardHealthCheck(gitlabClient.statusTracker, 'GitLab')
+      : async () => {
+          throw new Error('GitLab client not configured');
+        },
   });
 
   const actualPort = await server.start();

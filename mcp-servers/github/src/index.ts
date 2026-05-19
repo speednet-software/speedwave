@@ -6,7 +6,13 @@
  * @module mcp-github
  */
 
-import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
+import {
+  createMCPServer,
+  ts,
+  notConfiguredMessage,
+  retryAsync,
+  makeStandardHealthCheck,
+} from '@speedwave/mcp-shared';
 import { initializeGitHubClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
@@ -47,11 +53,11 @@ async function main(): Promise<void> {
     host: '0.0.0.0', // bind all interfaces — must be reachable from the container network
     tools,
     auth: { token: AUTH_TOKEN },
-    healthCheck: async () => {
-      if (!githubClient) {
-        throw new Error('GitHub client not configured');
-      }
-    },
+    healthCheck: githubClient
+      ? makeStandardHealthCheck(githubClient.statusTracker, 'GitHub')
+      : async () => {
+          throw new Error('GitHub client not configured');
+        },
   });
 
   const actualPort = await server.start();

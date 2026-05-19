@@ -18,7 +18,10 @@ import {
   OAuthScopeMismatchError,
   accessTokenExpiresWithin,
   PROACTIVE_REFRESH_SECONDS,
+  ConnectionStatusTracker,
+  memoizedPromise,
 } from '@speedwave/mcp-shared';
+import type { HealthStatus } from '@speedwave/mcp-shared';
 import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
 import { splitPath } from './path-utils.js';
@@ -162,6 +165,17 @@ export class SharePointClient {
   private tokenManager: TokenManager;
   private pathValidator: PathValidator;
   private refreshMutex: Mutex;
+  /** Connection status tracker — surfaces siteId resolve / token health. */
+  public readonly statusTracker = new ConnectionStatusTracker();
+  /**
+   * Memoized lazy resolve of composite siteId — reuses the shared
+   * {@link memoizedPromise} helper (`shared/promise-memo.ts`). First call
+   * does the Graph lookup + token re-read + mutates `this.config.siteId`
+   * to composite form. Subsequent calls share the cached promise.
+   */
+  private readonly _resolveSiteIdMemo = memoizedPromise<void>({
+    fetch: () => this._resolveSiteIdOnce(),
+  });
 
   /**
    * Create a SharePoint client
@@ -184,6 +198,63 @@ export class SharePointClient {
   }
 
   /**
+   * Inner resolve: Graph lookup + token re-read + mutate `this.config.siteId`
+   * to composite form. Updates the status tracker. Throws on failure so the
+   * shared {@link memoizedPromise} clears its cache for retry.
+   *
+   * Path-form siteIds still work against Graph during the warm-up window
+   * (most file/page endpoints accept both forms), so tools called before
+   * resolve completes degrade gracefully.
+   */
+  private async _resolveSiteIdOnce(): Promise<void> {
+    if (!this.config.siteId.includes(':')) {
+      // Already composite — mark ok without touching the network.
+      this.statusTracker.setOk();
+      return;
+    }
+    const rawSiteId = this.config.siteId;
+    try {
+      const resolution = await resolveCompositeSiteId(rawSiteId, this.config.accessToken, {
+        tokensDir: this.tokensDir,
+        refreshOn401: true,
+      });
+      if (!resolution.ok) {
+        const err = new Error(`SharePoint siteId resolve failed: ${resolution.detail}`);
+        this.statusTracker.setFailed(err);
+        throw err;
+      }
+      // Re-read access_token in case resolveCompositeSiteId triggered a
+      // refresh-on-401 — disk may now hold a newer token than memory.
+      const fresh = await loadToken(path.join(this.tokensDir, 'access_token'));
+      if (fresh) {
+        this.config.accessToken = fresh;
+      }
+      this.config.siteId = resolution.compositeId;
+      this.statusTracker.setOk();
+      console.log(`${ts()} ✅ SharePoint siteId resolved (composite form)`);
+    } catch (err) {
+      this.statusTracker.setFailed(err);
+      console.warn(
+        `${ts()} SharePoint siteId background resolve failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * Fire-and-forget warm-up from `initializeSharePointClient`. The HTTP
+   * listener is never blocked — resolve runs in the background, mutating
+   * `this.config.siteId` once Graph responds. Subsequent calls share the
+   * cached promise from {@link memoizedPromise} (shared SSOT).
+   */
+  warmupSiteId(): void {
+    void this._resolveSiteIdMemo().catch(() => {
+      // Failure already logged + tracker updated in _resolveSiteIdOnce.
+      // Memo clears its cache on rejection so a subsequent call retries.
+    });
+  }
+
+  /**
    * Get the last token save error (if any)
    * This allows callers to check if token refresh succeeded but saving to disk failed
    * @returns {Error | null} Last token save error or null if no error occurred
@@ -201,11 +272,17 @@ export class SharePointClient {
   }
 
   /**
-   * Get health status including token save errors
-   * @returns {Object} Health status with token save error information
+   * Get health status. Returns the shared HealthStatus shape extended with
+   * SharePoint's `tokenSaveError` (ADR-060) so a single shape covers both the
+   * connection-test pattern used by other workers and SharePoint's
+   * token-refresh-aware health check.
    */
-  getHealthStatus(): { tokenSaveError: string | null } {
-    return this.tokenManager.getHealthStatus();
+  getHealthStatus(): HealthStatus {
+    const { tokenSaveError } = this.tokenManager.getHealthStatus();
+    return {
+      ...this.statusTracker.getHealth(),
+      tokenSaveError,
+    };
   }
 
   /**
@@ -1101,29 +1178,6 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       return null;
     }
 
-    const resolution = await resolveCompositeSiteId(siteId, accessToken, {
-      tokensDir,
-      refreshOn401: true,
-    });
-    // If a refresh-on-401 happened during resolve, the access_token on disk
-    // may now be newer than the one we loaded earlier. Re-read so the client
-    // boots with the freshest credentials.
-    const freshAccessToken = (await loadToken(path.join(tokensDir, 'access_token'))) || accessToken;
-    if (!resolution.ok) {
-      // Surface the typed reason so a 429 isn't confused with a typo, and a
-      // transient error nudges the user to retry rather than re-do setup.
-      const hint =
-        resolution.reason === 'transient'
-          ? `${resolution.detail}. Microsoft Graph reported a transient failure — retry the worker startup or wait a moment.`
-          : resolution.reason === 'network'
-            ? `${resolution.detail}. The worker could not reach Microsoft Graph.`
-            : `${resolution.detail}. Check that the value matches an existing site in the tenant.`;
-      // info-level for the first attempt so a transient/restart doesn't spam
-      // the logs; setup-guidance hint is the user-actionable message.
-      console.info(`${ts()} ${withSetupGuidance(hint)}`);
-      return null;
-    }
-
     console.log(`${ts()} ✅ SharePoint tokens loaded from /tokens/`);
 
     const config: SharePointConfig = {
@@ -1133,16 +1187,23 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       // refactor; the worker code path that read them has been removed.
       clientId: '',
       tenantId: '',
-      // Always store the composite id so every Graph endpoint receives the
-      // universally-accepted form, regardless of what the user typed.
-      siteId: resolution.compositeId,
-      accessToken: freshAccessToken,
+      // Store the raw siteId from /tokens/. Path-form values get resolved
+      // to composite by SharePointClient.warmupSiteId() in the background,
+      // which mutates this.config.siteId in place once Graph responds. Most
+      // Graph endpoints accept both forms during the warm-up window.
+      siteId,
+      accessToken,
       // refreshToken is no longer in this container's mount (ADR-060).
       // The host-side oauth worker holds it.
       refreshToken: '',
     };
 
-    return new SharePointClient(config, tokensDir);
+    const client = new SharePointClient(config, tokensDir);
+    // Fire-and-forget: resolves to composite + re-reads access_token after
+    // any refresh-on-401. Server starts immediately; tools degrade gracefully
+    // if Graph is slow or unreachable at boot.
+    client.warmupSiteId();
+    return client;
   } catch (error) {
     console.warn(
       `${ts()} Failed to initialize SharePoint client: ${error instanceof Error ? error.message : String(error)}`
