@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.11.0](https://github.com/speednet-software/speedwave/compare/v0.10.0...v0.11.0) (2026-05-19)
+
+
+### Features
+
+* **release:** v0.11.0 — Office worker, meeting transcription, Atlassian/GitHub/Context7 MCPs, host-exec, drop Linux ([#696](https://github.com/speednet-software/speedwave/issues/696)) ([ee399a9](https://github.com/speednet-software/speedwave/commit/ee399a900a21d4a86143c29d54f8259993c0a811))
+
 ## [0.10.0](https://github.com/speednet-software/speedwave/compare/v0.9.0...v0.10.0) (2026-05-05)
 
 
