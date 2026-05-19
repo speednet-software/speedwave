@@ -489,8 +489,10 @@ New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 Set-Location C:\speedwave-e2e
 
 # Windows CRT alignment: sherpa-onnx prebuilt MD-Release via SHERPA_ONNX_LIB_DIR
-# so the rest of the toolchain stays on /MD (default). See ADR-061.
-$libDir = (wsl.exe -d $WINDOWS_WSL_DISTRO -- bash /mnt/c/speedwave-e2e/scripts/lib/fetch-sherpa-onnx-md.sh).Trim()
+# so the rest of the toolchain stays on /MD (default). Stage on C:\ so wslpath
+# returns a plain Windows path (not \\wsl.localhost\...) and the idempotency
+# guard survives between E2E runs. See ADR-061.
+$libDir = (wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'SHERPA_ONNX_FETCH_DIR=/mnt/c/sherpa-onnx-md /mnt/c/speedwave-e2e/scripts/lib/fetch-sherpa-onnx-md.sh').Trim()
 Assert-ExitCode
 $env:SHERPA_ONNX_LIB_DIR = (wsl.exe -d $WINDOWS_WSL_DISTRO -- wslpath -w "$libDir").Trim()
 Write-Host "SHERPA_ONNX_LIB_DIR = $env:SHERPA_ONNX_LIB_DIR"

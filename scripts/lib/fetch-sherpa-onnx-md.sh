@@ -41,8 +41,10 @@ echo "Fetching ${CHECKSUM_URL}" >&2
 CHECKSUM_PATH="${OUT_ROOT}/checksum.txt"
 curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_PATH"
 
-# checksum.txt format: <filename>\t<sha256>  (tab-separated, filename first)
-EXPECTED="$(awk -v f="$ARCHIVE" '$1 == f { print $2 }' "$CHECKSUM_PATH")"
+# checksum.txt format today: <filename>\t<sha256>  (tab-separated, filename first).
+# Defensive: also accept the standard `sha256sum` ordering <sha256>  <filename>
+# in case k2-fsa flips the format on a future release.
+EXPECTED="$(awk -v f="$ARCHIVE" '$1 == f { print $2 } $2 == f { print $1 }' "$CHECKSUM_PATH")"
 if [ -z "$EXPECTED" ]; then
   echo "::error::no SHA256 for ${ARCHIVE} in checksum.txt" >&2
   exit 1
