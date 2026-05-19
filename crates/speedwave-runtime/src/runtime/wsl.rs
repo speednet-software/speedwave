@@ -508,6 +508,17 @@ impl ContainerRuntime for WslRuntime {
         Ok(())
     }
 
+    fn prune_unused_images(&self) -> anyhow::Result<()> {
+        let distro = self.distro();
+        self.runner.run(
+            "wsl.exe",
+            &[
+                "-d", distro, "--", "nerdctl", "system", "prune", "--all", "--force",
+            ],
+        )?;
+        Ok(())
+    }
+
     fn restart_container_engine(&self) -> anyhow::Result<()> {
         let distro = self.distro();
 

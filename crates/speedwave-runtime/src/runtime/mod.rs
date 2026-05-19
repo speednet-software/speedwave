@@ -121,6 +121,19 @@ pub trait ContainerRuntime: Send + Sync {
         Ok(())
     }
 
+    /// Aggressive prune: removes ALL tagged images not used by a running
+    /// container, plus BuildKit cache. Recovery path for disk-full build
+    /// failures — frees images left behind by other worktrees / older bundles
+    /// that `prune_old_bundle_images` cannot see (it only knows this worktree's
+    /// last `applied_bundle_id`).
+    ///
+    /// Safe because containerd refuses to remove images backing live
+    /// containers. Running Speedwave projects survive.
+    fn prune_unused_images(&self) -> anyhow::Result<()> {
+        log::debug!("prune_unused_images: not implemented for this runtime, skipping");
+        Ok(())
+    }
+
     /// Restarts the container engine (containerd + buildkitd) and waits for readiness.
     ///
     /// Implementations MUST restart containerd, MUST restart buildkit (skip
