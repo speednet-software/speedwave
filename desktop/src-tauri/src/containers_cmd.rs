@@ -481,6 +481,9 @@ pub async fn start_containers(
 #[tauri::command]
 pub async fn check_claude_auth(project: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
+        // check_claude_auth → setup_wizard::check_claude_auth → ensure_exec_healthy
+        // can call compose_up_recreate; block on bundle reconcile first.
+        ensure_images_ready()?;
         check_project(&project)?;
         log::info!("check_claude_auth: project={project}");
         setup_wizard::check_claude_auth(&project).map_err(|e| {
@@ -1840,6 +1843,56 @@ mod tests {
         // IMAGES_READY defaults to Ready — ensure_images_ready should return Ok
         let result = ensure_images_ready();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn check_claude_auth_waits_for_image_readiness() {
+        // Race guard: setup_wizard::check_claude_auth -> ensure_exec_healthy ->
+        // compose_up_recreate. Without this gate, polling auth at startup
+        // while reconcile rebuilds images surfaces image-not-available.
+        // The test extracts the body by brace-matching to avoid trailing
+        // tests' source content (this file uses include_str! on itself).
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn check_claude_auth(");
+
+        let ensure_pos = fn_body
+            .find("ensure_images_ready(")
+            .expect("check_claude_auth must call ensure_images_ready");
+        let inner_call_pos = fn_body
+            .find("setup_wizard::check_claude_auth(")
+            .expect("check_claude_auth must delegate to setup_wizard::check_claude_auth");
+        assert!(
+            ensure_pos < inner_call_pos,
+            "ensure_images_ready must come BEFORE setup_wizard::check_claude_auth"
+        );
+    }
+
+    /// Returns the body of a function by signature: locates the signature,
+    /// then walks brace depth from the next `{` to its matching `}`. Source
+    /// after the function (including tests that quote it) is excluded.
+    fn extract_fn_body_braced<'a>(source: &'a str, fn_signature: &str) -> &'a str {
+        let sig_pos = source
+            .find(fn_signature)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
+        let after = &source[sig_pos..];
+        let open = after
+            .find('{')
+            .expect("opening brace not found after signature");
+        let bytes = after.as_bytes();
+        let mut depth: i32 = 0;
+        for (i, &b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[..=i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("closing brace not found for {fn_signature}")
     }
 
     #[test]
