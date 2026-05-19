@@ -1,0 +1,11 @@
+name: 'Download sherpa-onnx MD-Release prebuilt (Windows)'
+description: 'Pre-fetches the dynamic-CRT sherpa-onnx static-lib variant and exports SHERPA_ONNX_LIB_DIR so cargo skips the upstream MT-Release download. See ADR-061.'
+runs:
+  using: 'composite'
+  steps:
+    - name: Fetch sherpa-onnx MD-Release prebuilt
+      shell: bash
+      run: |
+        LIB_DIR="$(scripts/lib/fetch-sherpa-onnx-md.sh)"
+        echo "SHERPA_ONNX_LIB_DIR=${LIB_DIR}" >> "$GITHUB_ENV"
+        echo "::notice::SHERPA_ONNX_LIB_DIR set to ${LIB_DIR}"

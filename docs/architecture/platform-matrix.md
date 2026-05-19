@@ -29,6 +29,7 @@ OS integration strategies. Linux as a host platform was dropped in
 - **Line endings:** `actions/checkout` on `windows-latest` defaults to `core.autocrlf=true`, which corrupts shell-script shebangs in the NSIS bundle (issue #603). `.gitattributes` forces LF repo-wide; `scripts/bundle-build-context.{sh,ps1}` strip residual CR from `*.sh` before the bundle is packed. The `runtime-windows` CI job re-clones with `core.autocrlf=true` and asserts no CRLF survives, so a missing/regressed `.gitattributes` fails CI before reaching the release pipeline.
 - **Uninstall cleanup:** The NSIS uninstaller offers an opt-in cleanup prompt that, when accepted, unregisters the `Speedwave` WSL2 distro (`wsl --unregister Speedwave`) and removes `%USERPROFILE%\.speedwave`. Default for silent uninstalls (`/S`) is to preserve data. If `SPEEDWAVE_DATA_DIR` is set (ADR-031), only the WSL distro is removed and the user is told to remove the custom data directory manually. See [ADR-048](../adr/ADR-048-windows-uninstall-cleanup.md).
 - **CLI on PATH:** `setup_wizard::link_cli()` copies `speedwave.exe` to `~/.speedwave/bin/` and adds the directory to `HKCU\Environment\Path` (PowerShell/CMD only — not the Speedwave WSL distro). The OAuth setup command shown in the Desktop UI is rendered in PowerShell syntax (`Set-Location 'C:\…'; speedwave`). See [ADR-016](../adr/ADR-016-cross-platform-cli-path.md).
+- **Native-library CRT alignment:** Speedwave's `audio-transcription` feature links sherpa-onnx + whisper.cpp on Windows. `sherpa-onnx-sys 1.13.2` hard-codes a static-CRT (`/MT`) prebuilt while cmake-rs and Rust `std` default to dynamic CRT (`/MD`), so every Windows build must override sherpa with its MD-Release prebuilt before cargo runs. The `download-sherpa-onnx` composite action (CI) and `scripts/lib/fetch-sherpa-onnx-md.sh` (E2E via WSL) handle that prefetch and set `SHERPA_ONNX_LIB_DIR`. See [ADR-061](../adr/ADR-061-windows-crt-runtime-alignment.md).
 
 ## Cross-platform Rust gating
 
@@ -40,3 +41,4 @@ OS integration strategies. Linux as a host platform was dropped in
 - [ADR-004: WSL2 + nerdctl on Windows](../adr/ADR-004-wsl2-and-nerdctl-on-windows.md)
 - [ADR-021: Bundled Dependencies and Zero-Install Strategy](../adr/ADR-021-bundled-dependencies-and-zero-install-strategy.md)
 - [ADR-059: Drop Linux Support](../adr/ADR-059-drop-linux-support.md)
+- [ADR-061: Windows CRT Runtime Alignment](../adr/ADR-061-windows-crt-runtime-alignment.md)

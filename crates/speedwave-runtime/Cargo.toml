@@ -58,11 +58,10 @@ bzip2 = { version = "0.4", optional = true }
 # submodule via cmake at build time (so CI needs `cmake`). The `metal` backend
 # is added on macOS only via the target-specific block below; CPU elsewhere.
 whisper-rs = { version = "0.16", optional = true }
-# Speaker diarization — the official sherpa-onnx Rust crate (csukuangfj). Its
-# `static` feature (default) downloads a prebuilt static-library archive from
-# k2-fsa's GitHub releases at build time (so CI needs network or a vendored
-# SHERPA_ONNX_LIB_DIR) and links it in — no shared libs to bundle/sign.
-sherpa-onnx = { version = "1.13", optional = true }
+# Speaker diarization. Exact pin: prebuilt static-lib tarball name encodes the
+# version, and Windows CI overrides SHERPA_ONNX_LIB_DIR with the MD-Release
+# variant matching this exact version (see ADR-061, .sherpa-onnx-version SSOT).
+sherpa-onnx = { version = "=1.13.2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # On macOS, build whisper.cpp with the Metal backend (the Metal shader library
