@@ -129,7 +129,7 @@ The MCP Hub HTTP bridge validates all outbound worker URLs at the single resolut
 point (`getWorkerUrl()`) before any `fetch()` call:
 
 - **Canonical URL allowlist**: Only Docker internal service names (`mcp-*`) and
-  platform host gateways (`host.{lima,docker,containers,speedwave}.internal`) are accepted
+  the canonical host gateway alias `host.docker.internal` are accepted
 - **Port enforcement**: Port must be present and in range 1-65535
 - **Protocol enforcement**: Only `http:` (internal Docker network, no TLS needed)
 - **No pathname/query**: Worker URLs must be bare endpoints

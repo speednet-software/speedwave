@@ -14,10 +14,7 @@ services:
     security_opt:
       - no-new-privileges:true
     extra_hosts:
-      - "host.lima.internal:${HOST_GATEWAY}"
-      - "host.containers.internal:${HOST_GATEWAY}"
       - "host.docker.internal:${HOST_GATEWAY}"
-      - "host.speedwave.internal:${HOST_GATEWAY}"
     tmpfs:
       - /tmp:noexec,nosuid,size=512m
     volumes:
