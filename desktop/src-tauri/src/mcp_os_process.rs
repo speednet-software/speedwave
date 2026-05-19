@@ -1589,7 +1589,7 @@ srv.listen(0, '127.0.0.1', () => {
     }
 
     #[test]
-    fn apply_child_env_defaults_path_and_home_to_empty_when_missing() {
+    fn apply_child_env_defaults_path_to_empty_when_missing_and_omits_home() {
         let mut cmd = Command::new("/bin/true");
         let env = FakeEnv(&[]);
 
@@ -1601,11 +1601,12 @@ srv.listen(0, '127.0.0.1', () => {
             Some(""),
             "PATH must always be set on the child, even if empty"
         );
+        // HOME="" makes Node.js os.homedir() return "" and breaks ~/.npm,
+        // ~/.cache, etc. — better to leave HOME unset than poison it.
         #[cfg(not(target_os = "windows"))]
-        assert_eq!(
-            captured.get("HOME").map(String::as_str),
-            Some(""),
-            "HOME must always be set on Unix children, even if empty"
+        assert!(
+            captured.get("HOME").is_none(),
+            "HOME must be omitted on Unix children when not set on the host"
         );
     }
 
