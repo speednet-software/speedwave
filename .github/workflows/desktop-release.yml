@@ -296,6 +296,10 @@ jobs:
         if: matrix.platform == 'windows-latest'
         uses: ./.github/actions/download-wsl-resources
 
+      - name: Pre-fetch sherpa-onnx MD-Release prebuilt (Windows CRT alignment)
+        if: matrix.platform == 'windows-latest'
+        uses: ./.github/actions/download-sherpa-onnx
+
       - name: Download Node.js for bundling
         uses: ./.github/actions/download-nodejs
         with:

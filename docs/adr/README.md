@@ -67,6 +67,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-058](ADR-058-beta-features-toggle.md)                             | Beta Features Toggle in the Tray Menu                                                    | Accepted              |
 | [ADR-059](ADR-059-drop-linux-support.md)                               | Drop Linux Support — Windows and macOS Only                                              | Accepted              |
 | [ADR-060](ADR-060-host-side-oauth-refresh-worker.md)                   | Host-Side OAuth Refresh Worker (`oauth`)                                                 | Accepted              |
+| [ADR-061](ADR-061-windows-crt-runtime-alignment.md)                    | Windows CRT Runtime Alignment for sherpa-onnx + whisper.cpp                              | Accepted              |
 
 ## Creating a New ADR
 
