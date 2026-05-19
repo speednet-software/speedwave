@@ -3291,6 +3291,23 @@ services:
             "mcp-playwright must set PORT={}",
             crate::consts::PORT_WORKER
         );
+
+        // ADR-062: mcp-playwright resolves `host.docker.internal` to the platform
+        // gateway IP so Claude and plugins can navigate to host-local services
+        // (e.g. local dev servers). Verifies the rendered compose — not the
+        // template — so the `${HOST_GATEWAY}` substitution must have occurred.
+        let extra_hosts = pw
+            .get("extra_hosts")
+            .and_then(|v| v.as_sequence())
+            .expect("mcp-playwright must have extra_hosts (ADR-062)");
+        let gateway_ip = crate::compose::host_gateway_ip();
+        let expected_entry = format!("host.docker.internal:{gateway_ip}");
+        assert!(
+            extra_hosts
+                .iter()
+                .any(|v| v.as_str() == Some(expected_entry.as_str())),
+            "mcp-playwright must resolve host.docker.internal to {gateway_ip} (rendered, not template)"
+        );
     }
 
     /// mcp-office has no credentials — the generated compose must not mount any `/tokens`
@@ -4602,9 +4619,9 @@ services:
 
     #[test]
     fn compose_template_claude_has_canonical_host_gateway_entry() {
-        // Static template guard — the `claude` service must list the canonical
-        // host gateway alias in extra_hosts. Other services receive it
-        // dynamically through `ensure_host_gateway_extra_host`.
+        // Static template guard — `claude` and `mcp-playwright` must list the
+        // canonical host gateway alias in extra_hosts (ADR-062). Other services
+        // receive it dynamically through `ensure_host_gateway_extra_host`.
         let expected = format!(r#"- "{}:${{HOST_GATEWAY}}""#, consts::HOST_GATEWAY_ALIAS);
         assert!(
             COMPOSE_TEMPLATE.lines().any(|l| l.trim() == expected),
@@ -4642,6 +4659,32 @@ services:
                 );
             }
         }
+    }
+
+    /// ADR-062: the `mcp-playwright` block in the template must declare
+    /// the canonical `extra_hosts` entry so Claude and plugins can navigate
+    /// to host-local services. This guard catches removal of the alias from
+    /// the template, independent of the rendered-compose test.
+    #[test]
+    fn mcp_playwright_section_has_extra_hosts_in_template() {
+        let needle = "\n  mcp-playwright:\n";
+        let pw_start = COMPOSE_TEMPLATE
+            .find(needle)
+            .expect("mcp-playwright section must exist in compose.template.yml");
+        let after_pw = pw_start + needle.len();
+        let next_service = COMPOSE_TEMPLATE[after_pw..]
+            .find("\n  mcp-")
+            .map(|i| after_pw + i)
+            .unwrap_or(COMPOSE_TEMPLATE.len());
+        let pw_block = &COMPOSE_TEMPLATE[pw_start..next_service];
+        let expected = format!(r#"- "{}:${{HOST_GATEWAY}}""#, consts::HOST_GATEWAY_ALIAS);
+        // Match an actual YAML list item, not the same string inside a comment.
+        // `lines().any(|l| l.trim() == expected)` rejects commented-out lines
+        // (they start with `#` after trim), unlike `contains()` on the whole block.
+        assert!(
+            pw_block.lines().any(|l| l.trim() == expected),
+            "mcp-playwright section in compose.template.yml must declare extra_hosts '{expected}' (ADR-062)"
+        );
     }
 
     // ---- ensure_host_gateway_extra_host + per-consumer injection tests ----

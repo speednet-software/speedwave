@@ -4,6 +4,8 @@
 
 Accepted
 
+**Updated by:** [ADR-062](ADR-062-playwright-host-gateway-access.md) — adds static `extra_hosts: host.docker.internal` to `mcp-playwright` so callers can reach host-local services through the canonical alias; also records that the shipped Containerfile uses `--allowed-hosts "*"` (not `mcp-hub` as stated in § Decision 2 below) with the rationale embedded in the Containerfile comment.
+
 ## Context
 
 Speedwave's existing MCP workers (Slack, SharePoint, Redmine, GitLab) all require per-project credentials stored under `~/.speedwave/tokens/<project>/<service>/`. The infrastructure around those workers — `is_service_configured`, `TOGGLEABLE_MCP_SERVICES`, and the Desktop service-card UI — was designed with credential-bearing services as the only case.

@@ -290,7 +290,7 @@ Prefer `WebFetch` when it works; drop to Playwright only when it does not. A Chr
 
 Playwright is unique among the built-in integrations in three ways:
 
-- **No credentials.** It accesses only public URLs; there is no `/tokens` mount and no credential file. Enabling the integration requires no configuration.
+- **No credentials.** It accesses public URLs and may navigate to services running on the host loopback (e.g. local dev servers like `http://host.docker.internal:4200` for an Angular project — see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)). There is no `/tokens` mount and no credential file. Enabling the integration requires no configuration.
 - **No `/workspace` mount.** Screenshots, PDFs, and page dumps are returned to Claude as base64 payloads rather than written to the project. This keeps a compromised Chromium from exfiltrating repo contents.
 - **Higher resource limits.** `shm_size: 2g` (Chromium IPC needs it), `tmpfs /tmp: 1g` (Chromium caches heavily), `cpus: 2.0`, `memory: 2048m` — noticeably larger than the 128 MiB budget given to HTTP-only workers.
 
