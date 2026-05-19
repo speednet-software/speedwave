@@ -512,6 +512,12 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 /// render time so a post-install tamper that only changed the manifest
 /// (not enough to change the digest, e.g. a different field semantic)
 /// would still be caught by the same code that gates install.
+///
+/// **Host-gateway note:** `ensure_host_gateway_extra_host` is intentionally NOT
+/// called for plugin services. Plugin workers communicate with `mcp-hub` over
+/// the internal compose network — they have no direct host-side dependency.
+/// If a future plugin needs to reach the host (e.g. invoking `host_exec`),
+/// the helper must be called for that plugin's compose service.
 fn apply_plugins(
     yaml: &str,
     project_name: &str,

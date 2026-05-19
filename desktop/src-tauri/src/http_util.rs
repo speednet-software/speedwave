@@ -58,8 +58,14 @@ pub(crate) async fn read_body_limited(
 /// Translates the canonical container-side host alias to `127.0.0.1`. Host-side only.
 ///
 /// Inside containers, `HOST_GATEWAY_ALIAS` resolves via `extra_hosts`. From the
-/// Desktop host process the alias is absent — this function rewrites it to
-/// `127.0.0.1` before issuing HTTP requests.
+/// Desktop host process the alias is absent (Speedwave doesn't bundle Docker
+/// Desktop's resolver, and Lima's native `host.lima.internal` injection only
+/// applies inside the VM — not on the macOS host) — this function rewrites it
+/// to `127.0.0.1` before issuing HTTP requests.
+///
+/// Previously-supported aliases (`host.lima.internal`, `host.speedwave.internal`,
+/// `host.containers.internal`) all return `None` after the SSOT consolidation;
+/// callers must canonicalize to `HOST_GATEWAY_ALIAS` before invoking.
 pub(crate) fn rewrite_container_alias_to_loopback(host: &str) -> Option<&'static str> {
     if host == speedwave_runtime::consts::HOST_GATEWAY_ALIAS {
         Some("127.0.0.1")

@@ -650,9 +650,10 @@ pub fn build_images_for_bundle(
     let result = result.map_err(|err| {
         if is_disk_full_error(&err) {
             err.context(
-                "Container VM disk full — aggressive prune already attempted and failed. \
-                 Free space in the Lima/WSL2 VM (delete unused projects in Speedwave, or \
-                 restart Speedwave to retry auto-prune). Check usage with `df -h` inside the VM.",
+                "Container VM disk full — aggressive prune already attempted but disk space \
+                 is still insufficient. Free space in the Lima/WSL2 VM (delete unused projects \
+                 in Speedwave, or restart Speedwave to retry auto-prune). Check usage with \
+                 `df -h` inside the VM.",
             )
         } else if is_transient_build_error(&err) {
             err.context(
@@ -2226,8 +2227,8 @@ mod tests {
 
         let msg = format!("{:#}", result.unwrap_err());
         assert!(
-            msg.contains("disk full") || msg.contains("Free space"),
-            "error must mention disk full, got: {msg}"
+            msg.contains("disk space is still insufficient"),
+            "error must mention insufficient disk space, got: {msg}"
         );
         assert!(
             !msg.contains("VM memory") && !msg.contains("nested virtualization"),
