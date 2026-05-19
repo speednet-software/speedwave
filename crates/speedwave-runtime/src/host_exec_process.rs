@@ -271,8 +271,12 @@ fn apply_child_env(cmd: &mut Command, host_path: &str, env: &dyn EnvSource) {
     cmd.env("PATH", host_path);
 
     // HOME on Unix; on Windows USERPROFILE is the equivalent (forwarded above).
+    // Forward only when set — HOME="" makes Node.js `os.homedir()` return ""
+    // and breaks anything resolving ~/.npm, ~/.cache, etc.
     #[cfg(not(target_os = "windows"))]
-    cmd.env("HOME", env.var("HOME").unwrap_or_default());
+    if let Some(home) = env.var("HOME") {
+        cmd.env("HOME", home);
+    }
 
     if let Some(res) = env.var(consts::BUNDLE_RESOURCES_ENV) {
         if !res.is_empty() {
