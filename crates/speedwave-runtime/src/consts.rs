@@ -132,9 +132,9 @@ pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 pub const CONTAINER_PATH: &str = "/home/speedwave/.local/bin:/usr/local/bin:/usr/bin:/bin";
 
 /// The single hostname Speedwave uses for "host gateway as seen from inside containers".
-/// Resolved via `extra_hosts: host.docker.internal:${HOST_GATEWAY}` injected per-service
-/// (statically for `claude` in compose.template.yml, dynamically for `mcp-hub` and
-/// OAuth-consumer services via `ensure_host_gateway_extra_host()`).
+/// Resolved via `extra_hosts: host.docker.internal:${HOST_GATEWAY}` injected per-service:
+/// statically for `claude` and `mcp-playwright` in compose.template.yml (ADR-062),
+/// dynamically for `mcp-hub` and OAuth-consumer services via `ensure_host_gateway_extra_host()`.
 /// Picked because Ollama / LM Studio / llama.cpp docs use this name — copy-paste must just work.
 pub const HOST_GATEWAY_ALIAS: &str = "host.docker.internal";
 
