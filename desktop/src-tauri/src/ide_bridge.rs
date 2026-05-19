@@ -401,10 +401,9 @@ pub(crate) fn handle_jsonrpc_message(
 // IDE Bridge — manages the connection between Claude (in VM) and IDE (on host)
 //
 // All platforms: Bridge listens on TCP 127.0.0.1:<random_port>.
-// CLAUDE_CODE_IDE_HOST_OVERRIDE env var tells Claude the gateway DNS name.
-//
-// macOS:   Claude → ws://host.lima.internal:<port> → Lima gvproxy → host
-// Windows: Claude → ws://host.speedwave.internal:<port> → WSL2 → host
+// CLAUDE_CODE_IDE_HOST_OVERRIDE=host.docker.internal tells Claude the gateway
+// DNS name; resolved inside the container by `extra_hosts` in compose
+// (Lima vzNAT on macOS, WSL2 NAT on Windows).
 //
 // Lock file at ~/.speedwave/ide-bridge/<port>.lock is mounted as
 // /home/speedwave/.claude/ide/<port>.lock in the container (:ro).
@@ -682,8 +681,8 @@ impl IdeBridge {
     /// single-threaded Tokio runtime instead of using `tokio::spawn`.
     ///
     /// The Bridge listens on `127.0.0.1:<port>`. Containers reach it via
-    /// host gateway DNS names (host.lima.internal, host.docker.internal,
-    /// host.speedwave.internal) which route to loopback on the host.
+    /// the canonical host gateway alias `host.docker.internal`, resolved
+    /// inside the container by `extra_hosts` to the platform gateway IP.
     pub fn start(&mut self) -> anyhow::Result<()> {
         cleanup_stale_lock_files();
         let (tx, _rx) = tokio::sync::broadcast::channel::<()>(1);
@@ -1041,10 +1040,9 @@ async fn handle_with_stubs<S>(
 // WebSocket TCP listener — all platforms
 // ---------------------------------------------------------------------------
 //
-// The Bridge listens on 127.0.0.1. Containers reach the host via DNS names
-// that route to loopback:
-//   macOS   → host.lima.internal
-//   Windows → host.speedwave.internal
+// The Bridge listens on 127.0.0.1. Containers reach the host via the canonical
+// gateway alias `host.docker.internal`, routed to loopback through `extra_hosts`
+// (Lima vzNAT on macOS, WSL2 NAT on Windows).
 
 async fn run_websocket_on_tcp(
     std_listener: std::net::TcpListener,

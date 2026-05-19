@@ -316,7 +316,7 @@ EOF
 }
 
 @test "mcp-config has only hub when MCP_OS_URL set but MCP_OS_AUTH_TOKEN unset" {
-    export MCP_OS_URL="http://192.168.5.2:4007"
+    export MCP_OS_URL="http://host.docker.internal:4007"
     unset MCP_OS_AUTH_TOKEN
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]

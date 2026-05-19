@@ -6,12 +6,7 @@ The IDE Bridge uses a **unified TCP-based approach** across all platforms — it
 
 ## Rationale
 
-Each platform has a different isolation boundary between the container runtime and the host. However, all provide a gateway DNS name that resolves to the host from inside the VM/container:[^1]
-
-| Platform | Isolation | Gateway DNS name              | How it works                                                                                |
-| -------- | --------- | ----------------------------- | ------------------------------------------------------------------------------------------- |
-| macOS    | Lima VM   | `host.lima.internal`[^2]      | Lima's hostagent registers this DNS in gvproxy; resolves to host gateway IP                 |
-| Windows  | WSL2      | `host.speedwave.internal`[^4] | `extra_hosts: host.speedwave.internal:host-gateway` in compose; nerdctl resolves to host IP |
+Each platform has a different isolation boundary between the container runtime and the host. All platforms use the canonical gateway alias `host.docker.internal`, injected into containers' `/etc/hosts` via Compose `extra_hosts`[^1][^4] and mapped to the per-platform gateway IP (Lima vzNAT on macOS, WSL2 NAT on Windows).
 
 ## How It Works
 
@@ -24,8 +19,7 @@ Each platform has a different isolation boundary between the container runtime a
 
 ```
 Claude (in VM/container)
-  → ws://host.lima.internal:<port>  (macOS)
-  → ws://host.speedwave.internal:<port>  (Windows)
+  → ws://host.docker.internal:<port>  (all platforms)
   → IDE Bridge on host (127.0.0.1:<port>)
   → proxies to real IDE (if connected)
 ```

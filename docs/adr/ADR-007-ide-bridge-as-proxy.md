@@ -34,15 +34,9 @@ The protocol is identical across all editors (VS Code, JetBrains, Neovim[^21], Z
 
 ## Per-Platform Connectivity
 
-The IDE Bridge listens on `127.0.0.1:<random_port>` on the host (TCP, all platforms). Each platform provides a gateway DNS name so Claude can reach the host from inside the VM/container:
+The IDE Bridge listens on `127.0.0.1:<random_port>` on the host (TCP, all platforms). The canonical gateway alias `host.docker.internal` is injected into every container's `/etc/hosts` via Compose `extra_hosts`[^4][^28], mapped to the per-platform gateway IP (Lima vzNAT on macOS, WSL2 NAT on Windows). One alias, one code path; the per-platform divergence is the host IP, not the hostname.
 
-| Platform | Gateway DNS name           | How Claude reaches the Bridge                                                                              |
-| -------- | -------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| macOS    | `host.lima.internal`[^27]  | Lima's hostagent registers DNS in gvproxy; resolves to host gateway IP                                     |
-| Linux    | `host.docker.internal`[^4] | nerdctl / containerd adds this entry to `/etc/hosts` inside containers (compatible with Docker convention) |
-| Windows  | `host.speedwave.internal`  | `extra_hosts: host.speedwave.internal:host-gateway` in compose; nerdctl resolves to host IP[^28]           |
-
-`render_compose()` injects `CLAUDE_CODE_IDE_HOST_OVERRIDE=<gateway_dns>` into the Claude container environment. Claude Code uses this env var to override the default `127.0.0.1` host when connecting to IDEs.
+`render_compose()` injects `CLAUDE_CODE_IDE_HOST_OVERRIDE=host.docker.internal` into the Claude container environment. Claude Code uses this env var to override the default `127.0.0.1` host when connecting to IDEs.
 
 See ADR-014 for the full platform mechanism details.
 

@@ -508,6 +508,20 @@ impl ContainerRuntime for WslRuntime {
         Ok(())
     }
 
+    fn prune_unused_images(&self) -> anyhow::Result<()> {
+        // No `require_running` gate — WSL2 distros auto-start on `wsl.exe -d`
+        // invocation (consistent with `system_prune` / `prune_buildkit_cache`
+        // above; LimaRuntime gates explicitly because Lima needs a manual start).
+        let distro = self.distro();
+        self.runner.run(
+            "wsl.exe",
+            &[
+                "-d", distro, "--", "nerdctl", "system", "prune", "--all", "--force",
+            ],
+        )?;
+        Ok(())
+    }
+
     fn restart_container_engine(&self) -> anyhow::Result<()> {
         let distro = self.distro();
 

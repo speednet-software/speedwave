@@ -757,6 +757,25 @@ impl ContainerRuntime for LimaRuntime {
         Ok(())
     }
 
+    fn prune_unused_images(&self) -> anyhow::Result<()> {
+        self.require_running()?;
+        self.runner.run(
+            "limactl",
+            &[
+                "shell",
+                consts::lima_vm_name(),
+                "--",
+                "sudo",
+                "nerdctl",
+                "system",
+                "prune",
+                "--all",
+                "--force",
+            ],
+        )?;
+        Ok(())
+    }
+
     fn restart_container_engine(&self) -> anyhow::Result<()> {
         self.require_running()?;
         let vm = consts::lima_vm_name();

@@ -75,6 +75,7 @@ export {
   validateToolName,
   validateWorkerUrl,
   validateOrigin,
+  HOST_GATEWAY_ALIAS,
 } from './security.js';
 
 // Transport

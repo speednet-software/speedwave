@@ -442,7 +442,7 @@ pub fn strip_trailing_v1(url: &str) -> String {
 /// Returns the default base URL for a known local model provider.
 /// Used by the frontend to show a placeholder without duplicating the URL logic.
 pub fn default_base_url(provider: &str) -> Option<String> {
-    let host = consts::DOCKER_HOST;
+    let host = consts::HOST_GATEWAY_ALIAS;
     match provider {
         "ollama" => Some(format!("http://{host}:11434")),
         "lmstudio" => Some(format!("http://{host}:1234")),
@@ -512,6 +512,12 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 /// render time so a post-install tamper that only changed the manifest
 /// (not enough to change the digest, e.g. a different field semantic)
 /// would still be caught by the same code that gates install.
+///
+/// **Host-gateway note:** `ensure_host_gateway_extra_host` is intentionally NOT
+/// called for plugin services. Plugin workers communicate with `mcp-hub` over
+/// the internal compose network — they have no direct host-side dependency.
+/// If a future plugin needs to reach the host (e.g. invoking `host_exec`),
+/// the helper must be called for that plugin's compose service.
 fn apply_plugins(
     yaml: &str,
     project_name: &str,
@@ -1100,6 +1106,7 @@ fn apply_oauth_config_with_paths(
                 continue;
             }
         }
+        ensure_host_gateway_extra_host(&mut doc, compose_service);
         inject_env_into(&mut doc, compose_service, "WORKER_OAUTH_URL", &url);
         let mount = format!(
             "{}:/secrets/oauth-auth-token-{service_id}:ro",
@@ -1150,6 +1157,7 @@ fn apply_worker_config(
     let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+    ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
     inject_worker_env(&mut doc, env_var, &url);
     add_hub_volume(
         &mut doc,
@@ -1181,14 +1189,7 @@ fn read_host_exec_port(port_path: &std::path::Path) -> Option<u16> {
 
 /// URL where a host-side worker listens, as seen from inside a container.
 fn worker_gateway_url(port: u16) -> String {
-    #[cfg(target_os = "macos")]
-    {
-        format!("http://host.lima.internal:{port}")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        format!("http://host.containers.internal:{port}")
-    }
+    format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS)
 }
 
 /// Test-only alias — implementation is `worker_gateway_url`.
@@ -1231,20 +1232,10 @@ pub fn container_user() -> &'static str {
 
 /// Returns the hostname Claude Code should use for IDE WebSocket connections.
 /// Set as `CLAUDE_CODE_IDE_HOST_OVERRIDE` in the container environment.
-///
-/// Claude Code hardcodes `ws://127.0.0.1:<port>` when connecting to IDEs.
-/// Inside a container, 127.0.0.1 is the container's own loopback — not the host.
-/// This env var overrides the host to the platform-specific gateway DNS name
-/// so Claude can reach the IDE Bridge running on the host.
+/// Overrides Claude Code's hardcoded `ws://127.0.0.1` so it reaches the IDE
+/// Bridge on the host via the gateway alias resolved by `extra_hosts`.
 fn ide_host_override() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        consts::LIMA_HOST // "host.lima.internal"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        consts::WSL_HOST // "host.speedwave.internal"
-    }
+    consts::HOST_GATEWAY_ALIAS
 }
 
 /// Verifies that a plugin's `claude-resources` directory and every entry
@@ -1341,6 +1332,38 @@ fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
 /// Adds a volume mount to the mcp-hub service.
 fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
     add_service_volume(doc, "mcp-hub", mount)
+}
+
+/// Idempotently ensures `<service>.extra_hosts` contains an entry mapping
+/// `HOST_GATEWAY_ALIAS` to the host gateway IP. Called AFTER `${HOST_GATEWAY}`
+/// substitution — inserts a literal IP, not a placeholder.
+/// Idempotency by hostname prefix: replaces an existing canonical entry (any IP)
+/// rather than appending a duplicate.
+fn ensure_host_gateway_extra_host(doc: &mut serde_yaml_ng::Value, service: &str) {
+    let canonical_entry = format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip());
+    let hostname_prefix = format!("{}:", consts::HOST_GATEWAY_ALIAS);
+    let Some(services) = doc.get_mut("services") else {
+        return;
+    };
+    let Some(svc) = services.get_mut(service) else {
+        return;
+    };
+    if svc.get("extra_hosts").is_none() {
+        svc["extra_hosts"] =
+            serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(canonical_entry)]);
+        return;
+    }
+    let Some(seq) = svc["extra_hosts"].as_sequence_mut() else {
+        return;
+    };
+    if let Some(existing) = seq
+        .iter_mut()
+        .find(|v| v.as_str().is_some_and(|s| s.starts_with(&hostname_prefix)))
+    {
+        *existing = serde_yaml_ng::Value::String(canonical_entry);
+    } else {
+        seq.push(serde_yaml_ng::Value::String(canonical_entry));
+    }
 }
 
 /// Adds a volume mount to an arbitrary service. No-op if the service is absent.
@@ -3735,11 +3758,11 @@ services:
             if let Some((key, value)) = entry.split_once('=') {
                 if key.starts_with("WORKER_") && key.ends_with("_URL") {
                     // WORKER_OS_URL and WORKER_HOST_EXEC_URL are host-side
-                    // gateways (host.lima.internal / host.docker.internal /
-                    // host.containers.internal) with dynamically assigned ports
-                    // — the workers run on the host, not in the compose network.
-                    // ADR-038's "every WORKER_*_URL points at :PORT_WORKER" rule
-                    // applies only to in-cluster (containerized) workers.
+                    // gateways (host.docker.internal) with dynamically assigned
+                    // ports — the workers run on the host, not in the compose
+                    // network. ADR-038's "every WORKER_*_URL points at
+                    // :PORT_WORKER" rule applies only to in-cluster (containerized)
+                    // workers.
                     if key == "WORKER_OS_URL" || key == "WORKER_HOST_EXEC_URL" {
                         continue;
                     }
@@ -4206,10 +4229,11 @@ services:
             None,
         )
         .unwrap();
-        // Ollama: direct injection at host.docker.internal:11434 (no /v1 suffix — ADR-040)
+        // Ollama: direct injection via default_base_url SSOT (no /v1 suffix — ADR-040)
+        let expected = format!("ANTHROPIC_BASE_URL={}", default_base_url("ollama").unwrap());
         assert!(
-            yaml.contains("ANTHROPIC_BASE_URL=http://host.docker.internal:11434"),
-            "Ollama provider should set ANTHROPIC_BASE_URL to host.docker.internal:11434 (no /v1)"
+            yaml.contains(&expected),
+            "Ollama provider should set {expected} (no /v1)"
         );
     }
 
@@ -4323,9 +4347,10 @@ services:
         )
         .unwrap();
         let env = get_claude_env(&yaml);
+        let expected_ollama = format!("ANTHROPIC_BASE_URL={}", default_base_url("ollama").unwrap());
         assert!(
-            env.iter().any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:11434"),
-            "Ollama must set ANTHROPIC_BASE_URL to host.docker.internal:11434 (no /v1), got: {env:?}"
+            env.iter().any(|e| e == &expected_ollama),
+            "Ollama must set {expected_ollama} (no /v1), got: {env:?}"
         );
         assert!(
             env.iter()
@@ -4400,10 +4425,13 @@ services:
         )
         .unwrap();
         let env = get_claude_env(&yaml);
+        let expected = format!(
+            "ANTHROPIC_BASE_URL={}",
+            default_base_url("lmstudio").unwrap()
+        );
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:1234"),
-            "LM Studio must use port 1234, got: {env:?}"
+            env.iter().any(|e| e == &expected),
+            "LM Studio must set {expected}, got: {env:?}"
         );
     }
 
@@ -4428,10 +4456,13 @@ services:
         )
         .unwrap();
         let env = get_claude_env(&yaml);
+        let expected = format!(
+            "ANTHROPIC_BASE_URL={}",
+            default_base_url("llamacpp").unwrap()
+        );
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:8080"),
-            "llama.cpp must use port 8080, got: {env:?}"
+            env.iter().any(|e| e == &expected),
+            "llama.cpp must set {expected}, got: {env:?}"
         );
     }
 
@@ -4570,27 +4601,21 @@ services:
     }
 
     #[test]
-    fn test_compose_template_contains_all_container_host_aliases() {
-        // compose.template.yml injects all aliases from CONTAINER_HOST_ALIASES via
-        // extra_hosts. Iterating the constant (rather than asserting on a literal)
-        // keeps the test in sync with the SSOT — adding a new alias to the const
-        // without updating the template will fail here.
-        for alias in consts::CONTAINER_HOST_ALIASES {
-            assert!(
-                COMPOSE_TEMPLATE.contains(alias),
-                "compose.template.yml must map {} (named in CONTAINER_HOST_ALIASES)",
-                alias
-            );
-        }
+    fn compose_template_claude_has_canonical_host_gateway_entry() {
+        // Static template guard — the `claude` service must list the canonical
+        // host gateway alias in extra_hosts. Other services receive it
+        // dynamically through `ensure_host_gateway_extra_host`.
+        let expected = format!(r#"- "{}:${{HOST_GATEWAY}}""#, consts::HOST_GATEWAY_ALIAS);
+        assert!(
+            COMPOSE_TEMPLATE.lines().any(|l| l.trim() == expected),
+            "compose.template.yml must contain '{expected}' in extra_hosts"
+        );
     }
 
     #[test]
-    fn test_all_template_aliases_are_in_container_host_aliases() {
-        // Inverse guard: every "host.*.internal" hostname that appears in the
-        // extra_hosts block of compose.template.yml must be named in
-        // CONTAINER_HOST_ALIASES.  Without this check, adding an alias to the
-        // template without updating the constant would silently break host-side
-        // code that uses CONTAINER_HOST_ALIASES to rewrite aliases to loopback.
+    fn compose_template_extra_hosts_contains_only_canonical_alias() {
+        // Inverse guard: no deprecated `host.*.internal` alias may sneak back
+        // into the template's extra_hosts block.
         let mut in_extra_hosts = false;
         for line in COMPOSE_TEMPLATE.lines() {
             let trimmed = line.trim();
@@ -4598,27 +4623,177 @@ services:
                 in_extra_hosts = true;
                 continue;
             }
-            // A non-indented, non-list line signals the end of the extra_hosts block.
             if in_extra_hosts && !trimmed.starts_with('-') && !trimmed.is_empty() {
                 in_extra_hosts = false;
             }
             if !in_extra_hosts {
                 continue;
             }
-            // Lines look like: - "host.lima.internal:${HOST_GATEWAY}"
             if let Some(alias) = trimmed
                 .strip_prefix("- \"")
                 .and_then(|s| s.split(':').next())
                 .filter(|h| h.starts_with("host.") && h.ends_with(".internal"))
             {
-                assert!(
-                    consts::CONTAINER_HOST_ALIASES.contains(&alias),
-                    "compose.template.yml extra_hosts contains '{}' which is not in \
-                     CONTAINER_HOST_ALIASES — add it to the const in consts.rs",
-                    alias
+                assert_eq!(
+                    alias,
+                    consts::HOST_GATEWAY_ALIAS,
+                    "compose.template.yml extra_hosts contains deprecated alias '{alias}'; \
+                     only the canonical HOST_GATEWAY_ALIAS is allowed"
                 );
             }
         }
+    }
+
+    // ---- ensure_host_gateway_extra_host + per-consumer injection tests ----
+
+    fn render_substituted_template() -> String {
+        COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", host_gateway_ip())
+    }
+
+    fn write_token_and_port(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let token_path = tmp.join("token");
+        let port_path = tmp.join("port");
+        std::fs::write(&token_path, "test-token").unwrap();
+        std::fs::write(&port_path, "4007").unwrap();
+        (token_path, port_path)
+    }
+
+    fn extra_hosts_for(yaml: &str, service: &str) -> Vec<String> {
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        doc["services"][service]["extra_hosts"]
+            .as_sequence()
+            .map(|s| {
+                s.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn count_canonical_entries(entries: &[String]) -> usize {
+        let prefix = format!("{}:", consts::HOST_GATEWAY_ALIAS);
+        entries.iter().filter(|e| e.starts_with(&prefix)).count()
+    }
+
+    #[test]
+    fn apply_mcp_os_config_adds_host_gateway_to_hub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, port_path) = write_token_and_port(tmp.path());
+        let yaml = render_substituted_template();
+        let result = apply_mcp_os_config_with_path(&yaml, &token_path, &port_path).unwrap();
+        let entries = extra_hosts_for(&result, "mcp-hub");
+        assert_eq!(
+            count_canonical_entries(&entries),
+            1,
+            "mcp-hub must have exactly 1 host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn apply_host_exec_config_adds_host_gateway_to_hub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, port_path) = write_token_and_port(tmp.path());
+        let yaml = render_substituted_template();
+        let result = apply_host_exec_config_with_paths(&yaml, &token_path, &port_path).unwrap();
+        let entries = extra_hosts_for(&result, "mcp-hub");
+        assert_eq!(
+            count_canonical_entries(&entries),
+            1,
+            "mcp-hub must have exactly 1 host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn apply_oauth_config_adds_host_gateway_to_each_consumer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port_path = tmp.path().join("port");
+        std::fs::write(&port_path, "4090").unwrap();
+        let bearer_map_path = tmp.path().join("bearer-map.json");
+        std::fs::write(
+            &bearer_map_path,
+            r#"{"bearer-sharepoint-secret":"sharepoint"}"#,
+        )
+        .unwrap();
+
+        let yaml = render_substituted_template();
+        let result =
+            apply_oauth_config_with_paths(&yaml, tmp.path(), &port_path, &bearer_map_path).unwrap();
+
+        // Each OAuth-consumer in the bearer map gets the canonical alias in its extra_hosts.
+        let entries = extra_hosts_for(&result, "mcp-sharepoint");
+        assert_eq!(
+            count_canonical_entries(&entries),
+            1,
+            "mcp-sharepoint must have exactly 1 host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_host_gateway_extra_host_is_idempotent() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        let yaml = serde_yaml_ng::to_string(&doc).unwrap();
+        let entries = extra_hosts_for(&yaml, "mcp-hub");
+        assert_eq!(
+            count_canonical_entries(&entries),
+            1,
+            "after 2× helper calls, mcp-hub must still have 1 entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_host_gateway_extra_host_replaces_existing_canonical_entry() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
+        // Pre-seed mcp-hub with a stale canonical entry pointing at a wrong IP.
+        doc["services"]["mcp-hub"]["extra_hosts"] =
+            serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(format!(
+                "{}:9.9.9.9",
+                consts::HOST_GATEWAY_ALIAS
+            ))]);
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        let yaml = serde_yaml_ng::to_string(&doc).unwrap();
+        let entries = extra_hosts_for(&yaml, "mcp-hub");
+        assert_eq!(
+            entries.len(),
+            1,
+            "must replace, not append, got: {entries:?}"
+        );
+        assert_eq!(
+            entries[0],
+            format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip())
+        );
+    }
+
+    // SSOT-definition guards: literal expected values for each local provider.
+    // Render tests above use `default_base_url()` to avoid drift; these tests
+    // pin the actual literal so that breaking BOTH the function AND the render
+    // assertion in lockstep would still fail here.
+
+    #[test]
+    fn test_default_base_url_ollama_returns_canonical_url() {
+        assert_eq!(
+            default_base_url("ollama").as_deref(),
+            Some("http://host.docker.internal:11434")
+        );
+    }
+
+    #[test]
+    fn test_default_base_url_lmstudio_returns_canonical_url() {
+        assert_eq!(
+            default_base_url("lmstudio").as_deref(),
+            Some("http://host.docker.internal:1234")
+        );
+    }
+
+    #[test]
+    fn test_default_base_url_llamacpp_returns_canonical_url() {
+        assert_eq!(
+            default_base_url("llamacpp").as_deref(),
+            Some("http://host.docker.internal:8080")
+        );
     }
 
     #[test]
@@ -5076,22 +5251,11 @@ services:
     fn test_mcp_os_gateway_url_uses_gateway_not_bind_addr() {
         let port: u16 = 12345;
         let url = mcp_os_gateway_url(port);
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(
-                url,
-                format!("http://host.lima.internal:{port}"),
-                "macOS: containers reach mcp-os via host.lima.internal"
-            );
-        }
-        #[cfg(target_os = "windows")]
-        {
-            assert_eq!(
-                url,
-                format!("http://host.containers.internal:{port}"),
-                "Windows: containers reach mcp-os via WSL2 host alias"
-            );
-        }
+        assert_eq!(
+            url,
+            format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS),
+            "containers reach mcp-os via the canonical host gateway alias"
+        );
         // URL must never contain 0.0.0.0 — that's the bind address, not a routable address
         assert!(
             !url.contains("0.0.0.0"),
@@ -5303,10 +5467,7 @@ services:
             !url.contains("0.0.0.0"),
             "must be a routable host-gateway address, not the bind addr"
         );
-        #[cfg(target_os = "macos")]
-        assert_eq!(url, "http://host.lima.internal:49215");
-        #[cfg(target_os = "windows")]
-        assert_eq!(url, "http://host.containers.internal:49215");
+        assert_eq!(url, format!("http://{}:49215", consts::HOST_GATEWAY_ALIAS));
         // Same alias scheme as mcp-os — only the port differs.
         assert_eq!(host_exec_gateway_url(1), mcp_os_gateway_url(1));
     }
@@ -6007,8 +6168,8 @@ services:
 
     #[test]
     fn test_ide_host_override_uses_gateway_hostname() {
-        // CLAUDE_CODE_IDE_HOST_OVERRIDE must use the same gateway hostname
-        // as mcp_os_gateway_url — it resolves to the host from inside the VM.
+        // CLAUDE_CODE_IDE_HOST_OVERRIDE must use the canonical host gateway alias
+        // — same as worker_gateway_url, resolvable from inside the VM via extra_hosts.
         let host = ide_host_override();
         assert!(
             !host.contains("127.0.0.1"),
@@ -6018,10 +6179,7 @@ services:
             !host.contains("0.0.0.0"),
             "IDE host override must NOT be 0.0.0.0"
         );
-        #[cfg(target_os = "macos")]
-        assert_eq!(host, consts::LIMA_HOST);
-        #[cfg(target_os = "windows")]
-        assert_eq!(host, consts::WSL_HOST);
+        assert_eq!(host, consts::HOST_GATEWAY_ALIAS);
     }
 
     #[test]
