@@ -69,6 +69,11 @@ All platforms use the canonical gateway alias `host.docker.internal`, injected i
 
 On all platforms, the Bridge binds to `127.0.0.1` only — the port is never exposed to the LAN.
 
+A 127.0.0.1-only bind on the host is still reachable from inside the VM because both Lima and WSL2 install a default forwarder from their gateway → host loopback. Lima registers a catch-all rule for non-privileged ports on loopback when no explicit port forwards are configured ([Lima docs][lima-port]). WSL2 reaches the host loopback through the host gateway in both NAT and mirrored networking modes ([WSL networking][wsl-net]).
+
+[lima-port]: https://lima-vm.io/docs/config/port/
+[wsl-net]: https://learn.microsoft.com/en-us/windows/wsl/networking
+
 ## See Also
 
 - [ADR-007: IDE Bridge as Proxy](../adr/ADR-007-ide-bridge-as-proxy.md)

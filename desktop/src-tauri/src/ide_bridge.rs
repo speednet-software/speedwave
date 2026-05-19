@@ -680,9 +680,12 @@ impl IdeBridge {
     /// at that point, so we spin up a dedicated background thread with its own
     /// single-threaded Tokio runtime instead of using `tokio::spawn`.
     ///
-    /// The Bridge listens on `127.0.0.1:<port>`. Containers reach it via
-    /// the canonical host gateway alias `host.docker.internal`, resolved
-    /// inside the container by `extra_hosts` to the platform gateway IP.
+    /// The Bridge listens on `127.0.0.1:<port>` on the host. Containers reach
+    /// it via the canonical host gateway alias `host.docker.internal`,
+    /// resolved inside the container by `extra_hosts` to the platform gateway
+    /// IP. The VM (Lima vzNAT on macOS, WSL2 NAT on Windows) provides a
+    /// default catch-all forwarder from gateway → host loopback. See
+    /// `run_websocket_on_tcp` for the full mechanism.
     pub fn start(&mut self) -> anyhow::Result<()> {
         cleanup_stale_lock_files();
         let (tx, _rx) = tokio::sync::broadcast::channel::<()>(1);
@@ -1040,9 +1043,21 @@ async fn handle_with_stubs<S>(
 // WebSocket TCP listener — all platforms
 // ---------------------------------------------------------------------------
 //
-// The Bridge listens on 127.0.0.1. Containers reach the host via the canonical
-// gateway alias `host.docker.internal`, routed to loopback through `extra_hosts`
-// (Lima vzNAT on macOS, WSL2 NAT on Windows).
+// The Bridge listens on 127.0.0.1 on the host. Containers reach it via the
+// canonical gateway alias `host.docker.internal`, routed to the platform
+// gateway IP through `extra_hosts` (Lima vzNAT 192.168.5.2 on macOS, WSL2
+// NAT 192.168.65.1 on Windows).
+//
+// Reaching a 127.0.0.1-only bind from the container works because the host
+// VM (Lima on macOS, WSL2 on Windows) installs a default forwarder from VM
+// gateway → host loopback. Lima registers a catch-all rule for non-privileged
+// ports on loopback when no explicit port forwards are configured. [^1] [^2]
+// WSL2 reaches the host loopback through the host gateway in both NAT and
+// mirrored networking modes. [^3]
+//
+// [^1]: https://lima-vm.io/docs/config/port/
+// [^2]: https://github.com/lima-vm/lima/blob/master/pkg/hostagent/hostagent.go
+// [^3]: https://learn.microsoft.com/en-us/windows/wsl/networking
 
 async fn run_websocket_on_tcp(
     std_listener: std::net::TcpListener,
