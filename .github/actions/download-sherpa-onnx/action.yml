@@ -7,5 +7,10 @@ runs:
       shell: bash
       run: |
         LIB_DIR="$(scripts/lib/fetch-sherpa-onnx-md.sh)"
-        echo "SHERPA_ONNX_LIB_DIR=${LIB_DIR}" >> "$GITHUB_ENV"
-        echo "::notice::SHERPA_ONNX_LIB_DIR set to ${LIB_DIR}"
+        # Git Bash on windows-latest is MSYS2 — convert the POSIX path
+        # (/d/a/_temp/...) to native Windows form (D:\a\_temp\...) so cargo's
+        # native sherpa-onnx-sys build process resolves it. Same class of fix
+        # as wslpath -w in scripts/e2e-vm.sh.
+        WIN_LIB_DIR="$(cygpath -w "$LIB_DIR")"
+        echo "SHERPA_ONNX_LIB_DIR=${WIN_LIB_DIR}" >> "$GITHUB_ENV"
+        echo "::notice::SHERPA_ONNX_LIB_DIR set to ${WIN_LIB_DIR}"
