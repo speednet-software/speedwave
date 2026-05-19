@@ -16,6 +16,8 @@ import {
   withSetupGuidance,
   refreshAccessToken as oauthRefreshAccessToken,
   OAuthScopeMismatchError,
+  accessTokenExpiresWithin,
+  PROACTIVE_REFRESH_SECONDS,
 } from '@speedwave/mcp-shared';
 import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
@@ -104,6 +106,29 @@ export interface DriveItemMetadata {
   folder?: { childCount: number };
   '@microsoft.graph.downloadUrl'?: string;
   eTag?: string;
+}
+
+/**
+ * Projection of `driveItem` used by image web part composition. Holds the
+ * exact fields SharePoint requires for the picker validator to accept the
+ * payload on "Save & Close": `sharepointIds` (siteId/webId/listId/
+ * listItemUniqueId) + `image` (width/height).
+ */
+export interface DriveItemForImage {
+  id: string;
+  name: string;
+  webUrl?: string;
+  size?: number;
+  image?: { width?: number; height?: number };
+  sharepointIds: {
+    siteId: string;
+    webId: string;
+    listId: string;
+    listItemId?: string;
+    listItemUniqueId: string;
+    tenantId?: string;
+    siteUrl?: string;
+  };
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -313,15 +338,37 @@ export class SharePointClient {
   }
 
   /**
-   * Call Graph API with automatic token refresh
-   * Automatically retries with refreshed token on 401 responses
-   * @param {string} url - Graph API endpoint URL
-   * @param {RequestInit} [options={}] - Fetch request options
-   * @returns {Promise<Response>} API response
-   * @throws {Error} If request times out
-   * @private
+   * Call Graph API with automatic token refresh.
+   * @param url - Graph API endpoint URL
+   * @param options - fetch options
+   * @returns API response (caller checks `response.ok`)
+   * @throws {Error} on request timeout
+   * @throws {OAuthScopeMismatchError} when proactive refresh detects scope mismatch
    */
   private async callGraphAPI(url: string, options: RequestInit = {}): Promise<Response> {
+    // See PROACTIVE_REFRESH_SECONDS for rationale.
+    if (accessTokenExpiresWithin(this.config.accessToken, PROACTIVE_REFRESH_SECONDS)) {
+      const tokenBeforeProactive = this.config.accessToken;
+      const release = await this.refreshMutex.acquire();
+      try {
+        if (this.config.accessToken === tokenBeforeProactive) {
+          await this.refreshAccessToken();
+        }
+      } catch (e) {
+        // Proactive refresh is an optimization; fall through to the reactive
+        // 401 path with the existing token if it fails. Scope mismatch is the
+        // exception — it cannot be fixed by retrying, so propagate.
+        if (e instanceof OAuthScopeMismatchError) {
+          throw e;
+        }
+        console.warn(
+          `${ts()} SharePoint: proactive refresh failed, falling back to existing token: ${e instanceof Error ? e.message : String(e)}`
+        );
+      } finally {
+        release();
+      }
+    }
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.API_CALL_MS);
 
@@ -337,13 +384,12 @@ export class SharePointClient {
       if (response.status === 401) {
         clearTimeout(timeoutId);
 
-        // Save token before acquiring mutex - for double-check locking
-        const tokenBeforeRefresh = this.config.accessToken;
+        const tokenBefore401 = this.config.accessToken;
         const release = await this.refreshMutex.acquire();
 
         try {
           // Double-check: another thread may have already refreshed the token
-          if (tokenBeforeRefresh !== this.config.accessToken) {
+          if (tokenBefore401 !== this.config.accessToken) {
             // Token was refreshed by another thread - retry with the new token
             const retryController = new AbortController();
             const retryTimeoutId = setTimeout(() => retryController.abort(), TIMEOUTS.API_CALL_MS);
@@ -643,6 +689,39 @@ export class SharePointClient {
   }
 
   /**
+   * Fetch a driveItem by its path under the site's default drive. Used by
+   * page tools that need `sharepointIds` (siteId/webId/listId/listItemUniqueId)
+   * + image dimensions to compose an image web part body — SharePoint's UI
+   * "Save & Close" reconciliation drops external image URLs that lack these
+   * ids, so the worker must pin every image to a real Site Assets / Documents
+   * file before pushing the web part.
+   * @param sharepointPath - path relative to the drive root (e.g. "speedwave-hero.jpg")
+   * @returns driveItem id, sharepointIds, image dimensions, webUrl, name
+   * @throws {Error} If path is invalid or the driveItem is not found
+   */
+  async getDriveItemForSharePointPath(sharepointPath: string): Promise<DriveItemForImage> {
+    if (!this.pathValidator.validatePath(sharepointPath)) {
+      throw new Error('Invalid sharepoint_path (security check failed)');
+    }
+    const url =
+      `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(sharepointPath)}` +
+      `?$select=id,name,webUrl,size,image,sharepointIds`;
+    const response = await this.callGraphAPI(url);
+    if (!response.ok) {
+      const errorData = (await response.json()) as { error?: { message?: string } };
+      throw new Error(
+        errorData.error?.message ||
+          `driveItem lookup failed: ${response.status} ${response.statusText}`
+      );
+    }
+    const data = (await response.json()) as DriveItemForImage;
+    if (!data.id || !data.sharepointIds) {
+      throw new Error('driveItem response missing id or sharepointIds');
+    }
+    return data;
+  }
+
+  /**
    * Download file from SharePoint to local path using streaming
    * @param {string} sharepointPath - SharePoint path relative to the site's drive root
    * @param {string} localPath - Local destination path (must be within /workspace)
@@ -821,6 +900,127 @@ export class SharePointClient {
 // Factory & Initialization
 //═══════════════════════════════════════════════════════════════════════════════
 
+/** Outcome of `resolveCompositeSiteId` — successful id or a typed error. */
+export type ResolveResult =
+  | { ok: true; compositeId: string }
+  | { ok: false; reason: 'validation' | 'transient' | 'not_found' | 'network'; detail: string };
+
+/**
+ * Resolve a path-form site id (`{hostname}:/sites/{path}:`) to its composite
+ * id (`{hostname},{site-guid},{web-guid}`). Composite is accepted by every
+ * Graph endpoint; path-form has documented support for `/sites/{path}` and
+ * `/sites/{path}:/drive` but surfaces as 400 on some sub-endpoints (notably
+ * `/drive/root/children`). One authorised lookup at startup sidesteps the
+ * whole class of bugs and adds no new trust surface — the token is already
+ * present in `/tokens`.
+ *
+ * Defence in depth: the function re-validates `siteId` through
+ * `validateGraphSiteId` even though `initializeSharePointClient` already
+ * does so. The helper is exported, so a future caller that forgets the
+ * validator would otherwise interpolate user-controlled data into a URL.
+ * @param siteId - site id loaded from `/tokens/site_id` (any accepted form)
+ * @param accessToken - bearer token used for the lookup
+ * @param opts - cold-start refresh tuning
+ * @param opts.tokensDir - tokens mount path (default `/tokens`); only read when refreshing
+ * @param opts.refreshOn401 - retry once after `oauthRefreshAccessToken` when the lookup returns 401 (default true). Set false in unit tests that don't mock the refresh worker.
+ * @returns the composite id (or untouched value if already composite), or a typed error
+ */
+export async function resolveCompositeSiteId(
+  siteId: string,
+  accessToken: string,
+  opts: { tokensDir?: string; refreshOn401?: boolean } = {}
+): Promise<ResolveResult> {
+  const validationError = validateGraphSiteId(siteId);
+  if (validationError) {
+    return { ok: false, reason: 'validation', detail: validationError };
+  }
+  // Composite ids never contain `:` (they use `,` as separator). If a value
+  // both has a comma AND a colon it's malformed — refuse to interpolate it.
+  if (siteId.includes(',') && siteId.includes(':')) {
+    return {
+      ok: false,
+      reason: 'validation',
+      detail: 'site_id mixes composite (",") and path-form (":") separators',
+    };
+  }
+  if (!siteId.includes(':')) {
+    return { ok: true, compositeId: siteId };
+  }
+  const refreshOn401 = opts.refreshOn401 !== false;
+  const tokensDir = opts.tokensDir ?? '/tokens';
+  // Cold-start hang here blocks initializeSharePointClient indefinitely, which
+  // in turn blocks the hub's discovery retry budget. Apply the same per-request
+  // timeout the steady-state path uses (callGraphAPI's TIMEOUTS.API_CALL_MS).
+  const siteLookupWithTimeout = async (bearer: string): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.API_CALL_MS);
+    try {
+      return await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}`, {
+        headers: { Authorization: `Bearer ${bearer}` },
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+  try {
+    let response = await siteLookupWithTimeout(accessToken);
+    if (response.status === 401 && refreshOn401) {
+      // Stale `access_token` on cold start — delegate refresh to the host-side
+      // oauth worker, then re-read /tokens/access_token and retry once. This
+      // mirrors `SharePointClient.callGraphAPI`'s 401 path but is needed here
+      // because the client isn't constructed yet at this point.
+      try {
+        await oauthRefreshAccessToken({ service: 'sharepoint' });
+        const fresh = await loadToken(path.join(tokensDir, 'access_token'));
+        if (fresh) {
+          response = await siteLookupWithTimeout(fresh);
+        }
+      } catch (err) {
+        // Refresh itself failed (scope mismatch, network, …) — fall through
+        // to the standard 401 → not_found / transient branch below.
+        console.warn(
+          `${ts()} SharePoint site lookup: token refresh failed during init — ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+    if (!response.ok) {
+      const detail = `Graph lookup of "${siteId}" failed: ${response.status} ${response.statusText}`;
+      const reason = response.status >= 500 || response.status === 429 ? 'transient' : 'not_found';
+      return { ok: false, reason, detail };
+    }
+    const data = (await response.json()) as unknown;
+    const id =
+      data &&
+      typeof data === 'object' &&
+      'id' in data &&
+      typeof (data as { id: unknown }).id === 'string'
+        ? (data as { id: string }).id
+        : null;
+    if (!id) {
+      return {
+        ok: false,
+        reason: 'not_found',
+        detail: 'Graph site lookup response did not contain a string `id` field',
+      };
+    }
+    return { ok: true, compositeId: id };
+  } catch (e) {
+    if (e instanceof Error && e.name === 'AbortError') {
+      return {
+        ok: false,
+        reason: 'transient',
+        detail: `Graph site lookup timed out after ${TIMEOUTS.API_CALL_MS}ms`,
+      };
+    }
+    return {
+      ok: false,
+      reason: 'network',
+      detail: `Graph site lookup network error: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
+
 /**
  * Reject anything that isn't a Graph site id. Fail-closed: no URL normalization
  * in the worker — the token mount sits at a trust boundary and a parser bug
@@ -901,6 +1101,29 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       return null;
     }
 
+    const resolution = await resolveCompositeSiteId(siteId, accessToken, {
+      tokensDir,
+      refreshOn401: true,
+    });
+    // If a refresh-on-401 happened during resolve, the access_token on disk
+    // may now be newer than the one we loaded earlier. Re-read so the client
+    // boots with the freshest credentials.
+    const freshAccessToken = (await loadToken(path.join(tokensDir, 'access_token'))) || accessToken;
+    if (!resolution.ok) {
+      // Surface the typed reason so a 429 isn't confused with a typo, and a
+      // transient error nudges the user to retry rather than re-do setup.
+      const hint =
+        resolution.reason === 'transient'
+          ? `${resolution.detail}. Microsoft Graph reported a transient failure — retry the worker startup or wait a moment.`
+          : resolution.reason === 'network'
+            ? `${resolution.detail}. The worker could not reach Microsoft Graph.`
+            : `${resolution.detail}. Check that the value matches an existing site in the tenant.`;
+      // info-level for the first attempt so a transient/restart doesn't spam
+      // the logs; setup-guidance hint is the user-actionable message.
+      console.info(`${ts()} ${withSetupGuidance(hint)}`);
+      return null;
+    }
+
     console.log(`${ts()} ✅ SharePoint tokens loaded from /tokens/`);
 
     const config: SharePointConfig = {
@@ -910,8 +1133,10 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       // refactor; the worker code path that read them has been removed.
       clientId: '',
       tenantId: '',
-      siteId,
-      accessToken,
+      // Always store the composite id so every Graph endpoint receives the
+      // universally-accepted form, regardless of what the user typed.
+      siteId: resolution.compositeId,
+      accessToken: freshAccessToken,
       // refreshToken is no longer in this container's mount (ADR-060).
       // The host-side oauth worker holds it.
       refreshToken: '',

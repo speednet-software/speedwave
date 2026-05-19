@@ -43,6 +43,10 @@ echo "UNEXPECTED curl: $*" >&2
 exit 1
 EOF
     chmod +x "$STUBS_DIR/curl"
+
+    # Tests run outside the compose network, so there is no mcp-hub to wait
+    # for. The startup gate is opt-in via this env var so tests stay fast.
+    export SPEEDWAVE_SKIP_HUB_WAIT=1
 }
 
 teardown() {
@@ -809,3 +813,36 @@ EOF
     # Core entry visible through the symlink
     [ -d "$HOME/.claude/skills/core-skill" ]
 }
+
+
+# ---------------------------------------------------------------------------
+# MCP hub wait — startup race claude↔hub fix
+# ---------------------------------------------------------------------------
+
+@test "SPEEDWAVE_SKIP_HUB_WAIT=1 bypasses the hub readiness probe" {
+    # Default in setup() — confirms no waiting when explicitly skipped.
+    export SPEEDWAVE_SKIP_HUB_WAIT=1
+    SECONDS=0
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    # Should be ~instant, never near the 30s timeout.
+    [ "$SECONDS" -lt 5 ]
+}
+
+@test "without SPEEDWAVE_SKIP_HUB_WAIT, hub probe runs but tolerates failure" {
+    # mcp-hub host does not resolve in test environment; probe must fail
+    # within bounded time and entrypoint must still succeed. Patch the
+    # attempts count down from 30 to 2 so the test is fast.
+    unset SPEEDWAVE_SKIP_HUB_WAIT
+    local patched
+    patched="$(mktemp)"
+    sed 's/local host="mcp-hub" port="${MCP_HUB_PORT}" attempts=30/local host="mcp-hub" port="${MCP_HUB_PORT}" attempts=2/' \
+        "$ENTRYPOINT" > "$patched"
+    run bash "$patched" true
+    [ "$status" -eq 0 ]
+    [ -f /tmp/claude-ready ]
+    # Stderr should carry the warning so operators see the degraded mode.
+    [[ "$output" == *"did not respond"* ]]
+    rm -f "$patched"
+}
+

@@ -130,6 +130,19 @@ The mcp-os process runs on the host (not in a container) and binds to a dynamic 
 
 This ensures the MCP Hub always routes OS integration requests to the live mcp-os instance, even after process restarts.
 
+## Dynamic Port Reconciliation (oauth worker)
+
+The host-side `oauth` worker (ADR-060) follows the same pattern as `mcp-os`. It binds to a dynamic loopback port on startup; the watchdog respawns it on liveness failure, picking a fresh ephemeral port each time. OAuth-consuming workers (currently SharePoint) read this port from `WORKER_OAUTH_URL` baked into compose env.
+
+When the watchdog respawns the oauth worker it:
+
+1. Stops and re-runs `OauthProcess::spawn_in`, getting a new port.
+2. Adds the project to a `respawned` list (built under the worker map's mutex, then drained outside it).
+3. Calls `host_exec_cmd::recreate_project_containers_if_running` for each respawned project — wrapped in `std::panic::catch_unwind` so a single bad project does not silently kill the watchdog thread.
+4. `recreate_project_containers_if_running` regenerates the compose YAML via `render_compose()`, runs the security check, and recreates the project's containers — they pick up the new `WORKER_OAUTH_URL` in env.
+
+The `is_oauth_alive` TCP probe retries 3 × with a 200 ms backoff before declaring a worker dead, because every false-positive respawn cascades into a full container recreate of every OAuth consumer.
+
 ## Reconcile Guard (Image Readiness)
 
 When Speedwave detects a bundle change (e.g. after an app update), it rebuilds container images in a background thread (`reconcile_bundle_update`). During this time, any operation that starts containers (`start_containers`, `add_project`, `recreate_project_containers`, `switch_project`) will block via `ensure_images_ready()` until images are ready.

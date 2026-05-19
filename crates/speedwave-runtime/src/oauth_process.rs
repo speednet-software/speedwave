@@ -19,9 +19,6 @@ const PORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// Cap on the per-project audit log size at spawn time.
 const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-/// TCP liveness probe timeout for the worker's loopback port.
-const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-
 /// Defense-in-depth slug check applied before writing a service id into the
 /// bearer-map. Mirrors `plugin::validate_manifest`'s slug regex so a malformed
 /// service id cannot escape as a path component in `loadOAuthState` or
@@ -228,6 +225,9 @@ impl OauthProcess {
     /// from disk (`.bearer-map.json`) so bearer files remain stable across
     /// supervisor restarts; consumers don't need to reload their bearer mounts.
     /// Caller still triggers compose re-render to pick up the new port.
+    ///
+    /// On error: `self.child` is `None` and `self.port` is reset to `0`, so
+    /// `is_alive()` returns `false` and `port()` returns the sentinel.
     pub fn respawn(&mut self) -> anyhow::Result<u16> {
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
@@ -236,6 +236,9 @@ impl OauthProcess {
         for handle in self.drain_handles.drain(..) {
             let _ = handle.join();
         }
+        // Zero the port now so a failed spawn_in below leaves us in a known
+        // post-error state (port() returns 0 sentinel instead of the dead port).
+        self.port = 0;
         // Read back existing bearer-map to preserve consumer→bearer mapping.
         let bearer_map_path = self.state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
         let existing_services = read_consumers_from_bearer_map(&bearer_map_path);
@@ -273,13 +276,25 @@ impl Drop for OauthProcess {
     }
 }
 
-/// Quick TCP liveness probe against `127.0.0.1:<port>`.
+/// TCP liveness probe against `127.0.0.1:<port>`. Retries on failure with
+/// backoff — oauth respawn forces a recreate of every consumer container,
+/// so a transient probe failure (worker mid-refresh, accept loop briefly
+/// stalled) must NOT cascade into a respawn loop. Constants live in
+/// `consts::PORT_PROBE_ATTEMPTS` / `consts::PORT_PROBE_BACKOFF`.
 pub fn is_oauth_alive(port: u16) -> bool {
     if port == 0 {
         return false;
     }
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    std::net::TcpStream::connect_timeout(&addr, PORT_PROBE_TIMEOUT).is_ok()
+    for attempt in 0..consts::PORT_PROBE_ATTEMPTS {
+        if std::net::TcpStream::connect_timeout(&addr, consts::PORT_PROBE_TIMEOUT).is_ok() {
+            return true;
+        }
+        if attempt + 1 < consts::PORT_PROBE_ATTEMPTS {
+            std::thread::sleep(consts::PORT_PROBE_BACKOFF);
+        }
+    }
+    false
 }
 
 /// Set owner-only permissions on the per-project state dir.
@@ -575,6 +590,35 @@ mod tests {
     fn is_oauth_alive_returns_false_for_closed_port() {
         // Port 1 is privileged and almost never listening
         assert!(!is_oauth_alive(1));
+    }
+
+    #[test]
+    fn is_oauth_alive_returns_true_when_listener_accepts() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(is_oauth_alive(port));
+    }
+
+    #[test]
+    fn is_oauth_alive_false_takes_at_least_two_retry_backoffs() {
+        // Bind then drop so every connect_timeout gets a fast RST on every
+        // platform (port 1 RST behaviour is OS/privilege-dependent and slow
+        // on filtered-port CI hosts).
+        let addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let start = std::time::Instant::now();
+        assert!(!is_oauth_alive(addr.port()));
+        // 2 × PORT_PROBE_BACKOFF elapses between the 3 failed attempts.
+        let min = consts::PORT_PROBE_BACKOFF
+            .checked_mul((consts::PORT_PROBE_ATTEMPTS - 1) as u32)
+            .unwrap();
+        assert!(
+            start.elapsed() >= min,
+            "probe gave up too early: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

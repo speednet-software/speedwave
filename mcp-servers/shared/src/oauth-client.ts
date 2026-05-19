@@ -14,6 +14,19 @@
  */
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { TIMEOUTS } from './timeouts.js';
+
+/** Discriminant for {@link OAuthRefreshError}. */
+export type OAuthRefreshCode =
+  | 'not_configured'
+  | 'no_bearer'
+  | 'timeout'
+  | 'worker_unreachable'
+  | 'http'
+  | 'unauthorized'
+  | 'jsonrpc'
+  | 'malformed'
+  | 'tool_error';
 
 /**
  * Typed error thrown when Microsoft refuses the refresh because the granted scopes
@@ -32,17 +45,64 @@ export class OAuthScopeMismatchError extends Error {
 
 /** Generic error for refresh failures other than scope mismatch. */
 export class OAuthRefreshError extends Error {
-  readonly code: string;
+  readonly code: OAuthRefreshCode;
+  readonly httpStatus?: number;
   /**
-   * Construct a refresh error with a machine-readable code and a human detail.
-   * @param code - machine-readable error code from the oauth worker
-   * @param message - human-readable detail
+   * Construct a typed refresh error.
+   * @param code - machine-readable code (drives caller branching)
+   * @param message - human-readable detail (safe to surface to the user)
+   * @param httpStatus - optional HTTP status when the failure was an HTTP response
    */
-  constructor(code: string, message: string) {
+  constructor(code: OAuthRefreshCode, message: string, httpStatus?: number) {
     super(message);
     this.name = 'OAuthRefreshError';
     this.code = code;
+    this.httpStatus = httpStatus;
   }
+}
+
+/**
+ * Refresh when the JWT `exp` claim is within this many seconds of now. Avoids
+ * the 401→refresh→retry round-trip and the race window where the host oauth
+ * watchdog has just respawned the worker.
+ */
+export const PROACTIVE_REFRESH_SECONDS = 120;
+
+/**
+ * Read the `exp` claim (UNIX seconds) from a Microsoft Graph access token (JWT).
+ * Returns `null` for malformed/non-JWT tokens; callers treat that as "do not
+ * refresh proactively" so legacy or test tokens keep working via the 401 path.
+ * @param token - JWT access token
+ */
+export function readJwtExp(token: string): number | null {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = Buffer.from(padded, 'base64').toString('utf8');
+    const payload = JSON.parse(json) as { exp?: unknown };
+    return typeof payload.exp === 'number' ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when the access token's `exp` claim is within `seconds` of now (or in
+ * the past). Returns `false` for unparseable tokens — they go through the
+ * reactive 401 path.
+ * @param token - JWT access token
+ * @param seconds - refresh window
+ * @param nowMs - injectable clock for tests
+ */
+export function accessTokenExpiresWithin(
+  token: string,
+  seconds: number,
+  nowMs: number = Date.now()
+): boolean {
+  const exp = readJwtExp(token);
+  if (exp === null) return false;
+  return exp * 1000 - nowMs < seconds * 1000;
 }
 
 /**
@@ -102,12 +162,10 @@ export async function refreshAccessToken(
         `bearer file ${bearerPath} is empty; oauth worker did not provision this consumer`
       );
     }
-    // 30s timeout on the loopback HTTP call to the host-side oauth worker.
-    // The worker is local and refresh is fast in practice; if it hangs (the
-    // worker stalled mid-refresh, mid-fsync, etc.) we want to fail the
-    // caller's tool invocation rather than block its handler forever.
+    // Loopback HTTP call to the host-side oauth worker — if it hangs we want
+    // to fail the caller's tool invocation rather than block its handler.
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOKEN_REFRESH_MS);
     let response: Response;
     try {
       response = await fetchImpl(workerUrl, {
@@ -124,13 +182,30 @@ export async function refreshAccessToken(
         }),
         signal: controller.signal,
       });
+    } catch (err) {
+      // undici/Node's fetch throws TypeError("fetch failed") on TCP refused
+      // (stale ephemeral port after worker respawn). Wrap as typed errors so
+      // callers can branch without parsing message strings. Worker URL stays
+      // out of the user-facing message — it leaks the ephemeral oauth port.
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.warn(`oauth worker timeout at ${workerUrl}`);
+        const secs = TIMEOUTS.TOKEN_REFRESH_MS / 1000;
+        throw new OAuthRefreshError(
+          'timeout',
+          `oauth worker did not respond within ${secs}s. Restart the project from Speedwave Desktop.`
+        );
+      }
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(`oauth worker unreachable at ${workerUrl}: ${detail}`);
+      throw new OAuthRefreshError(
+        'worker_unreachable',
+        `cannot reach oauth worker: ${detail}. Restart the project from Speedwave Desktop.`
+      );
     } finally {
       clearTimeout(timeoutId);
     }
     if (response.status === 401) {
-      const err = new OAuthRefreshError('unauthorized', 'oauth worker returned 401');
-      (err as { httpStatus?: number }).httpStatus = 401;
-      throw err;
+      throw new OAuthRefreshError('unauthorized', 'oauth worker returned 401', 401);
     }
     if (!response.ok) {
       throw new OAuthRefreshError(
@@ -145,7 +220,7 @@ export async function refreshAccessToken(
   try {
     body = await callOnce();
   } catch (err) {
-    if (err instanceof OAuthRefreshError && (err as { httpStatus?: number }).httpStatus === 401) {
+    if (err instanceof OAuthRefreshError && err.httpStatus === 401) {
       body = await callOnce();
     } else {
       throw err;

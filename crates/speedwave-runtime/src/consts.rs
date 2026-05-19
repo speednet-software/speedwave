@@ -47,6 +47,16 @@ pub const HOST_EXEC_LOG_FILE: &str = "log";
 
 /// Per-command timeout (7 min, fits under the hub's 600s long timeout).
 pub const HOST_EXEC_TIMEOUT_MS: u64 = 420_000;
+
+/// TCP connection probe timeout used by host-process liveness checks
+/// (oauth_process, host_exec_process). SSOT for both modules — see ADR-060.
+pub const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+/// Number of TCP probe attempts for liveness checks where a respawn is expensive
+/// (oauth, where every respawn rotates the ephemeral port and recreates every
+/// consumer container). Single-shot probes elsewhere are not affected.
+pub const PORT_PROBE_ATTEMPTS: u8 = 3;
+/// Backoff between TCP probe attempts.
+pub const PORT_PROBE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
 /// Per-stream stdout/stderr tail-cap.
 pub const HOST_EXEC_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Per-stream line cap, applied alongside the byte cap.
@@ -513,8 +523,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 key: "site_id",
                 label: "Site ID",
                 field_type: "text",
-                // Graph site id (composite or path form) — not a SharePoint URL.
-                placeholder: "{tenant}.sharepoint.com,{site-guid},{web-guid}",
+                placeholder: "acme.sharepoint.com:/sites/Marketing:",
                 is_secret: false,
                 stored_in_config_json: false,
                 oauth_flow: false,
@@ -522,7 +531,13 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 // Site policy by omission (ADR-060): the worker reads its
                 // stored site_id and Graph tools accept no `site_id` parameter.
                 storage: FieldStorage::WorkerMountedToken,
-                hint: Some("Paste a Graph site id, NOT a SharePoint URL. Composite form: \"{hostname},{site-guid},{web-guid}\" or path form: \"{hostname}:/sites/{path}:\". To get the composite id, GET /sites/{hostname}:/sites/{path} in Graph Explorer and copy the response `id`."),
+                hint: Some(
+                    "Path form: \"acme.sharepoint.com:/sites/Marketing:\" (mind both colons: \
+                     one after the hostname (`:/`) and one at the end (`:`)). \
+                     Or composite form: \"acme.sharepoint.com,{site-guid},{web-guid}\" \
+                     (GET /sites/{hostname}:/sites/{path} in Graph Explorer, copy the response `id`). \
+                     NOT a SharePoint URL.",
+                ),
             },
         ],
         // Plan §PR3:290-299: only files PHYSICALLY mounted into the worker.

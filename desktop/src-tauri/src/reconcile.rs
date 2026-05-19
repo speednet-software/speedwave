@@ -555,11 +555,7 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
                 set_image_readiness(ImageReadiness::Failed(e));
             }
             Err(panic_info) => {
-                let msg = panic_info
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-                    .or_else(|| panic_info.downcast_ref::<&str>().copied())
-                    .unwrap_or("unknown panic");
+                let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*panic_info);
                 log::error!("reconcile_bundle: panicked: {msg}");
                 set_image_readiness(ImageReadiness::Failed(format!("reconcile panicked: {msg}")));
             }

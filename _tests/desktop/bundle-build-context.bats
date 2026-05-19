@@ -9,13 +9,12 @@
 # and mcp-servers/shared/dist/ exist for dev-mode copying.
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.sh"
-DEST="$BATS_TEST_DIRNAME/../../desktop/src-tauri"
 
+# Per-test temp DEST so the suite can run in parallel with `make dev` (which
+# writes to the real desktop/src-tauri/). The script honours $BUNDLE_DEST.
 # macOS EDR products (Bitdefender, Microsoft Defender) open freshly-written
-# files for real-time scanning. `bundle-build-context.sh` writes ~100MB into
-# $DEST/build-context within a second; a follow-up `rm -rf` racing the
-# scanner's open fd surfaces as `Directory not empty`. Retry with a short
-# backoff so the scanner has time to release the fd.
+# files for real-time scanning, so a follow-up `rm -rf` can race the scanner's
+# open fd — retry with a short backoff.
 rm_with_retry() {
     local target="$1"
     local attempt
@@ -27,13 +26,12 @@ rm_with_retry() {
 }
 
 setup() {
-    rm_with_retry "$DEST/build-context"
-    rm_with_retry "$DEST/mcp-os"
+    DEST="$(mktemp -d "${TMPDIR:-/tmp}/bundle-bats.XXXXXX")"
+    export BUNDLE_DEST="$DEST"
 }
 
 teardown() {
-    rm_with_retry "$DEST/build-context"
-    rm_with_retry "$DEST/mcp-os"
+    rm_with_retry "$DEST"
 }
 
 @test "bundle script exists and is executable" {

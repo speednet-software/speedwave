@@ -14,9 +14,6 @@ const PORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// Cap on the per-project audit log size at spawn time.
 const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-/// TCP liveness probe timeout for the worker's loopback port.
-const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-
 /// Windows env vars required for Node.js BCryptGenRandom (ADR-013).
 #[cfg(target_os = "windows")]
 const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[
@@ -230,7 +227,7 @@ pub fn is_host_exec_alive(port: u16) -> bool {
         return false;
     }
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    std::net::TcpStream::connect_timeout(&addr, PORT_PROBE_TIMEOUT).is_ok()
+    std::net::TcpStream::connect_timeout(&addr, consts::PORT_PROBE_TIMEOUT).is_ok()
 }
 
 /// Write the config snapshot JSON `chmod 600` — may hold env-value secrets.

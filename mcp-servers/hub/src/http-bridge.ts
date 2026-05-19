@@ -419,6 +419,17 @@ export const STARTUP_HEALTH_RETRIES = 3;
 export const STARTUP_RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
 
 /**
+ * Delays for tool-registry discovery retries. Wider than `STARTUP_RETRY_DELAYS_MS`
+ * because some workers do real I/O on first boot (SharePoint resolves site_id
+ * via Graph and may have to refresh an expired OAuth token, which routes
+ * through the host-side oauth worker — total cold-start can run 5–15 s).
+ * Hub's 7 s budget left those workers with an empty registry until the
+ * 5-minute background refresh, blocking the Claude session for that whole
+ * window. Total budget here: 1+2+4+8+15 = 30 s.
+ */
+export const DISCOVERY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+
+/**
  * Check worker health at startup with retry + backoff.
  * Logs at info level (not warn) because startup races are expected.
  * @param service - Service name to check

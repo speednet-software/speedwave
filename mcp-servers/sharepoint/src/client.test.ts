@@ -10,6 +10,7 @@ import {
   initializeSharePointClient,
   SharePointConfig,
   validateGraphSiteId,
+  resolveCompositeSiteId,
 } from './client.js';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
@@ -58,6 +59,17 @@ const mockConfig: SharePointConfig = {
 };
 
 const mockTokensDir = '/test/tokens';
+
+/** Build a fake JWT with the given payload for proactive-refresh tests. */
+function makeJwt(payload: Record<string, unknown>): string {
+  const b64url = (s: string) =>
+    Buffer.from(s, 'utf8')
+      .toString('base64')
+      .replace(/=/g, '')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_');
+  return `${b64url('{"alg":"HS256"}')}.${b64url(JSON.stringify(payload))}.sig`;
+}
 
 describe('SharePointClient', () => {
   let client: SharePointClient;
@@ -329,6 +341,21 @@ describe('SharePointClient', () => {
         /Graph API GET .* failed: 500 Internal Server Error/
       );
     });
+
+    it('falls back to status line when Graph returns valid JSON without an error.message field', async () => {
+      // Some Graph error responses arrive as `{}` or `{error: {}}`. Without
+      // a message we keep the bare status line — appending ": undefined"
+      // would be a regression caller error UIs surface.
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: async () => ({ error: {} }),
+      });
+      await expect(client.graphRequest('PATCH', '/sites/{site-id}/pages')).rejects.toThrow(
+        /Graph API PATCH .* failed: 422 Unprocessable Entity$/
+      );
+    });
   });
 
   // SharePointClient.formatError() is a static helper used by every tool's
@@ -405,6 +432,145 @@ describe('SharePointClient', () => {
       expect(mockOauthRefresh).toHaveBeenCalledWith(
         expect.objectContaining({ service: 'sharepoint' })
       );
+    });
+
+    it('proactively refreshes before fetch when JWT exp is near', async () => {
+      // 60s expiry is well under the 120s proactive window even on a slow CI host.
+      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
+      const expiringClient = new SharePointClient(
+        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
+        mockTokensDir
+      );
+      mockLoadToken.mockResolvedValueOnce('post-proactive-refresh-token');
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await expiringClient.listFiles();
+
+      expect(mockOauthRefresh).toHaveBeenCalledWith(
+        expect.objectContaining({ service: 'sharepoint' })
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: 'Bearer post-proactive-refresh-token',
+          }),
+        })
+      );
+    });
+
+    it('does NOT proactively refresh when JWT exp is far in the future', async () => {
+      const farExpiry = Math.floor(Date.now() / 1000) + 3600;
+      const freshClient = new SharePointClient(
+        { ...mockConfig, accessToken: makeJwt({ exp: farExpiry }) },
+        mockTokensDir
+      );
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await freshClient.listFiles();
+
+      expect(mockOauthRefresh).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to existing token when proactive refresh fails with worker_unreachable', async () => {
+      const { OAuthRefreshError } = await import('@speedwave/mcp-shared');
+      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
+      const expiringClient = new SharePointClient(
+        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry, label: 'stale' }) },
+        mockTokensDir
+      );
+      // Proactive refresh fails — oauth worker unreachable.
+      mockOauthRefresh.mockRejectedValueOnce(
+        new OAuthRefreshError('worker_unreachable', 'cannot reach oauth worker')
+      );
+      // The Graph request proceeds with the stale (but still valid for ~60s) token.
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await expiringClient.listFiles();
+
+      expect(mockOauthRefresh).toHaveBeenCalledTimes(1);
+      // listFiles still made its fetch with the existing (pre-refresh) token.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to existing token when proactive refresh fails with timeout', async () => {
+      const { OAuthRefreshError } = await import('@speedwave/mcp-shared');
+      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
+      const expiringClient = new SharePointClient(
+        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
+        mockTokensDir
+      );
+      mockOauthRefresh.mockRejectedValueOnce(
+        new OAuthRefreshError('timeout', 'oauth worker did not respond within 30s.')
+      );
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await expiringClient.listFiles();
+
+      expect(mockOauthRefresh).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-throws OAuthScopeMismatchError from proactive refresh (cannot self-heal)', async () => {
+      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
+      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
+      const expiringClient = new SharePointClient(
+        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
+        mockTokensDir
+      );
+      mockOauthRefresh.mockRejectedValueOnce(
+        new OAuthScopeMismatchError('Sites.Manage.All not granted')
+      );
+
+      await expect(expiringClient.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
+      // No fetch should have been attempted — scope mismatch will not be fixed by retry.
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('proactive refresh double-check skips a redundant call when another caller already refreshed', async () => {
+      // Two concurrent calls enter proactive refresh because the cached JWT is
+      // near expiry. The mutex serializes them; the second one, after acquiring
+      // the lock, must observe that this.config.accessToken changed and SKIP
+      // its own oauth.refresh — otherwise we waste a round-trip to the host
+      // oauth worker on every overlapping tool call.
+      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
+      const client = new SharePointClient(
+        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
+        mockTokensDir
+      );
+      mockLoadToken.mockResolvedValueOnce('post-shared-refresh');
+      fetchMock.mockResolvedValue({ ok: true, json: async () => ({ value: [] }) });
+
+      await Promise.all([client.listFiles(), client.listFiles()]);
+
+      // Both calls completed but only ONE refresh round-trip happened.
+      expect(mockOauthRefresh).toHaveBeenCalledTimes(1);
+      // Both ultimately issued their Graph fetch using the refreshed token.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('logs proactive refresh failure when the rejection is a non-Error value', async () => {
+      // refreshAccessToken could in theory reject with a plain string (older
+      // shared/oauth-client paths did so before typed errors landed). The
+      // fall-through path must still produce a usable warning instead of
+      // crashing on `e.message` of a non-Error.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
+      const client = new SharePointClient(
+        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
+        mockTokensDir
+      );
+      mockOauthRefresh.mockRejectedValueOnce('opaque string failure');
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await client.listFiles();
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('opaque string failure'));
+      // Fell through to Graph with the stale-but-still-valid token.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      warnSpy.mockRestore();
     });
 
     it('should use already-refreshed token when double-check detects another thread refreshed it', async () => {
@@ -498,6 +664,97 @@ describe('SharePointClient', () => {
       }
     });
 
+    it('re-throws non-Abort retry errors verbatim after double-check sees a refreshed token', async () => {
+      // Surface real network failures during the post-double-check retry
+      // instead of swallowing them as timeouts — important for diagnostics
+      // when DNS dies mid-tool-call.
+      mockFs.writeFile.mockResolvedValue(undefined);
+      mockLoadToken
+        .mockResolvedValueOnce('first-refresh-token')
+        .mockResolvedValueOnce('first-refresh-token');
+      let fetchCallCount = 0;
+      global.fetch = vi.fn(async () => {
+        fetchCallCount++;
+        const n = fetchCallCount;
+        // Both initial calls 401.
+        if (n === 1 || n === 2) return { status: 401, ok: false } as Response;
+        // First retry (own-refresh) succeeds.
+        if (n === 3)
+          return { ok: true, status: 200, json: async () => ({ value: [] }) } as Response;
+        // Second retry (double-check path with token-changed) hits a non-Abort
+        // network blip — must surface verbatim, not as a timeout.
+        throw new TypeError('fetch failed');
+      }) as typeof fetch;
+
+      const results = await Promise.allSettled([client.listFiles(), client.listFiles()]);
+      const rejected = results.find((r) => r.status === 'rejected') as
+        | PromiseRejectedResult
+        | undefined;
+      expect(rejected).toBeDefined();
+      const err = (rejected as PromiseRejectedResult).reason as Error;
+      expect(err.message).not.toMatch(/timeout/i);
+      expect(err.message).toMatch(/fetch failed/);
+    });
+
+    it('wraps AbortError as a request-timeout message after double-check sees a refreshed token', async () => {
+      // Double-check path: second concurrent call's retry aborts. The error
+      // must be surfaced as the typed timeout message so diagnostics are
+      // consistent with the other retry paths.
+      mockFs.writeFile.mockResolvedValue(undefined);
+      mockLoadToken
+        .mockResolvedValueOnce('first-refresh-token')
+        .mockResolvedValueOnce('first-refresh-token');
+      let fetchCallCount = 0;
+      global.fetch = vi.fn(async () => {
+        fetchCallCount++;
+        const n = fetchCallCount;
+        if (n === 1 || n === 2) return { status: 401, ok: false } as Response;
+        if (n === 3)
+          return { ok: true, status: 200, json: async () => ({ value: [] }) } as Response;
+        const abortError = new Error('aborted');
+        abortError.name = 'AbortError';
+        throw abortError;
+      }) as typeof fetch;
+
+      const results = await Promise.allSettled([client.listFiles(), client.listFiles()]);
+      const rejected = results.find((r) => r.status === 'rejected') as
+        | PromiseRejectedResult
+        | undefined;
+      expect(rejected).toBeDefined();
+      const err = (rejected as PromiseRejectedResult).reason as Error;
+      expect(err.message).toMatch(/Graph API request timeout after/);
+    });
+
+    it('wraps AbortError as a request-timeout message during own-refresh retry', async () => {
+      // Reactive 401 → host oauth refresh writes new access_token → retry the
+      // Graph fetch. If THAT retry itself aborts, surface a typed timeout
+      // message so callers see "Graph API request timeout after Xms" instead
+      // of the raw AbortError name leaking into diagnostics.
+      mockLoadToken.mockResolvedValueOnce('post-refresh-token');
+      fetchMock
+        .mockResolvedValueOnce({ status: 401, ok: false }) // initial 401
+        .mockImplementationOnce(async () => {
+          // retry after refresh: aborts
+          const abortError = new Error('aborted');
+          abortError.name = 'AbortError';
+          throw abortError;
+        });
+
+      await expect(client.listFiles()).rejects.toThrow(/Graph API request timeout after/);
+    });
+
+    it('re-throws non-Abort retry errors verbatim during own-refresh retry', async () => {
+      // Same shape as above but the retry hits a non-Abort network blip
+      // (TypeError("fetch failed") from undici). Must not be misreported
+      // as a timeout — DNS / TCP / TLS failures need their real message.
+      mockLoadToken.mockResolvedValueOnce('post-refresh-token');
+      fetchMock
+        .mockResolvedValueOnce({ status: 401, ok: false })
+        .mockRejectedValueOnce(new TypeError('socket hang up'));
+
+      await expect(client.listFiles()).rejects.toThrow(/socket hang up/);
+    });
+
     it('should merge custom headers with authorization', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test content'));
 
@@ -519,6 +776,72 @@ describe('SharePointClient', () => {
           }),
         })
       );
+    });
+  });
+
+  // getDriveItemForSharePointPath is the lookup path that addImageWebPart
+  // relies on — it must reject traversal attempts before issuing a Graph
+  // call, and must surface usable errors when Graph returns 4xx/5xx or a
+  // malformed payload.
+  describe('getDriveItemForSharePointPath', () => {
+    it('rejects path-traversal input before issuing any Graph call (security)', async () => {
+      await expect(client.getDriveItemForSharePointPath('../../etc/passwd')).rejects.toThrow(
+        /Invalid sharepoint_path \(security check failed\)/
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('uses Graph error.message when the lookup fails with an error body', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: async () => ({ error: { message: 'itemNotFound: hero.jpg' } }),
+      });
+      await expect(
+        client.getDriveItemForSharePointPath('Shared Documents/hero.jpg')
+      ).rejects.toThrow(/itemNotFound: hero\.jpg/);
+    });
+
+    it('falls back to status line when Graph error body has no message field', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Server Error',
+        json: async () => ({ error: {} }),
+      });
+      await expect(client.getDriveItemForSharePointPath('Shared Documents/x.png')).rejects.toThrow(
+        /driveItem lookup failed: 500 Server Error/
+      );
+    });
+
+    it('rejects responses missing id or sharepointIds (defensive parse)', async () => {
+      // Graph normally returns both fields, but a malformed/incomplete payload
+      // would surface as a confusing error later in addImageWebPart. Fail fast.
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ name: 'hero.jpg' /* no id, no sharepointIds */ }),
+      });
+      await expect(
+        client.getDriveItemForSharePointPath('Shared Documents/hero.jpg')
+      ).rejects.toThrow(/response missing id or sharepointIds/);
+    });
+
+    it('returns the full DriveItem on a complete response', async () => {
+      const payload = {
+        id: 'drive-item-1',
+        name: 'hero.jpg',
+        webUrl: 'https://example/hero.jpg',
+        size: 1024,
+        image: { width: 800, height: 600 },
+        sharepointIds: { listId: 'L1', listItemId: 'I1', listItemUniqueId: 'U1', siteId: 'S1' },
+      };
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => payload,
+      });
+      const result = await client.getDriveItemForSharePointPath('Shared Documents/hero.jpg');
+      expect(result).toEqual(payload);
     });
   });
 
@@ -1708,6 +2031,37 @@ describe('SharePointClient', () => {
         })
       );
     });
+
+    it('emits a debug log entry with the parseError context when DEBUG is set', async () => {
+      // debugLog has a two-arg overload (message, data) used by createRemoteFolder
+      // when JSON parsing fails. Under DEBUG=1 the log must include the parseError
+      // so the operator can see *why* the body was unparseable, not just that it
+      // was. This guards the two-arg branch from regressing when someone refactors
+      // the logger.
+      const prev = process.env.DEBUG;
+      process.env.DEBUG = '1';
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          json: async () => {
+            throw new Error('boom');
+          },
+          text: async () => 'plain text body',
+        });
+        await expect(client.createRemoteFolder('x')).rejects.toThrow(/500 - plain text body/);
+        const debugCall = logSpy.mock.calls.find((args) =>
+          String(args[0]).includes('Failed to parse error response')
+        );
+        expect(debugCall).toBeDefined();
+        expect(debugCall![1]).toMatchObject({ parseError: expect.any(Error) });
+      } finally {
+        logSpy.mockRestore();
+        if (prev === undefined) delete process.env.DEBUG;
+        else process.env.DEBUG = prev;
+      }
+    });
   });
 
   //═══════════════════════════════════════════════════════════════════════════════
@@ -1880,15 +2234,70 @@ describe('SharePointClient', () => {
       expect(result).not.toBeNull();
     });
 
-    it('should accept path-form site_id', async () => {
+    it('should accept path-form site_id and resolve it to composite via Graph lookup', async () => {
       mockLoadToken.mockImplementation(async (path: string) => {
         if (path.includes('access_token')) return 'test-access-token';
         if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/Speedwave:';
         return '';
       });
+      const fetchSpy = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+        }),
+      });
+      global.fetch = fetchSpy as unknown as typeof fetch;
 
       const result = await initializeSharePointClient();
       expect(result).not.toBeNull();
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:/sites/Speedwave:',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer test-access-token' }),
+        })
+      );
+      // Client stores the composite id, not the path-form the user typed.
+      expect(result?.getConfig().siteId).toBe(
+        'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
+      );
+    });
+
+    it('should return null when path-form site_id lookup fails (404)', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/Nonexistent:';
+        return '';
+      });
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+      }) as unknown as typeof fetch;
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+      const result = await initializeSharePointClient();
+      expect(result).toBeNull();
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('404'));
+      infoSpy.mockRestore();
+    });
+
+    it('should surface a "transient" hint when site lookup returns 429', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/X:';
+        return '';
+      });
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+      }) as unknown as typeof fetch;
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+      const result = await initializeSharePointClient();
+      expect(result).toBeNull();
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('transient'));
+      infoSpy.mockRestore();
     });
   });
 
@@ -1966,6 +2375,236 @@ describe('SharePointClient', () => {
     it('rejects RTL override character', () => {
       const err = validateGraphSiteId('acme.sharepoint.com‮:/sites/X:');
       expect(err).toContain('ASCII');
+    });
+  });
+
+  describe('resolveCompositeSiteId', () => {
+    it('passes composite-form site_id through unchanged (no lookup)', async () => {
+      const spy = vi.fn();
+      global.fetch = spy as unknown as typeof fetch;
+      const composite = 'contoso.sharepoint.com,guid1,guid2';
+      await expect(resolveCompositeSiteId(composite, 'tok')).resolves.toEqual({
+        ok: true,
+        compositeId: composite,
+      });
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('looks up path-form via Graph and returns the composite id', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: 'contoso.sharepoint.com,site-guid,web-guid' }),
+      }) as unknown as typeof fetch;
+      await expect(
+        resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok')
+      ).resolves.toEqual({
+        ok: true,
+        compositeId: 'contoso.sharepoint.com,site-guid,web-guid',
+      });
+    });
+
+    it('reports `not_found` reason on 4xx Graph responses', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+      }) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+      if (!result.ok) {
+        expect(result.detail).toContain('404');
+      }
+    });
+
+    it('reports `transient` reason on 429 / 5xx', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+      }) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'transient' });
+    });
+
+    it('reports `not_found` when Graph response lacks a string id', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({}),
+      }) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+    });
+
+    it('rejects non-string `id` field (defends against malformed Graph response)', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: 42 }),
+      }) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+    });
+
+    it('reports `network` reason on fetch rejection', async () => {
+      global.fetch = vi.fn().mockRejectedValue(new Error('boom')) as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'network' });
+      if (!result.ok) {
+        expect(result.detail).toContain('boom');
+      }
+    });
+
+    it('retries with refreshed access_token on initial 401', async () => {
+      // Cold-start scenario: /tokens/access_token is stale because the worker
+      // restarted long after the last activity. Without the refresh path,
+      // resolveCompositeSiteId would fail permanently — sharepoint container
+      // crashes with "401 Unauthorized" and never recovers (verified live).
+      const fetchMock = vi
+        .fn()
+        // First call returns 401 with the stale bearer.
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 401,
+          statusText: 'Unauthorized',
+        })
+        // Refresh succeeds → /tokens/access_token has a fresh bearer.
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: 'contoso.sharepoint.com,site-guid,web-guid' }),
+        });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      mockOauthRefresh.mockResolvedValueOnce({
+        expiresIn: 3600,
+        grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
+      });
+      mockLoadToken.mockResolvedValueOnce('a-fresh');
+
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'a-stale', {
+        tokensDir: '/test/tokens',
+      });
+      expect(result).toEqual({
+        ok: true,
+        compositeId: 'contoso.sharepoint.com,site-guid,web-guid',
+      });
+      // Refresh path: first fetch with stale token, then refresh, then retry
+      // with the fresh bearer.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1][1]).toMatchObject({
+        headers: { Authorization: 'Bearer a-fresh' },
+      });
+    });
+
+    it('logs and continues when proactive refresh during init fails with a non-Error value', async () => {
+      // resolveCompositeSiteId triggers a refresh on first-call 401 (cold-start
+      // path). If oauth.refresh throws a plain string the catch must still log
+      // a usable warning instead of crashing on `e.message` and aborting init.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const fetchMock = vi
+        .fn()
+        // First call: stale 401.
+        .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      mockOauthRefresh.mockRejectedValueOnce('non-error string failure');
+
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'stale-tok', {
+        refreshOn401: true,
+      });
+
+      // Fell through to the standard 401 → not_found branch.
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+      // The non-Error value made it into the warning message verbatim.
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('non-error string failure'));
+      warnSpy.mockRestore();
+    });
+
+    it('passes an AbortSignal to the cold-start fetch (timeout guard against hangs)', async () => {
+      // Pre-fix the cold-start fetch had no timeout — a hung Graph response
+      // would block initializeSharePointClient indefinitely and starve the
+      // hub's discovery retry budget. The signal proves the AbortController
+      // is wired up; the actual timeout behavior is exercised by the
+      // dedicated "aborts and returns transient" test below.
+      const fetchMock = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: 'contoso.sharepoint.com,site-guid,web-guid' }),
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('https://graph.microsoft.com/v1.0/sites/'),
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+    });
+
+    it('returns transient/timeout when the cold-start fetch aborts', async () => {
+      const fetchMock = vi.fn().mockImplementation(() => {
+        const e = new Error('The operation was aborted');
+        e.name = 'AbortError';
+        return Promise.reject(e);
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok');
+      expect(result).toMatchObject({
+        ok: false,
+        reason: 'transient',
+        detail: expect.stringMatching(/timed out after \d+ms/),
+      });
+    });
+
+    it('also guards the post-401-refresh retry with an AbortSignal', async () => {
+      // After a 401 → refresh, the retry must carry the same timeout — pre-fix
+      // only the initial fetch had one.
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: 'contoso.sharepoint.com,site,web' }),
+        });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      mockOauthRefresh.mockResolvedValueOnce({ expiresIn: 3600, grantedScopes: [] });
+      mockLoadToken.mockResolvedValueOnce('fresh-after-refresh');
+
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'stale-tok', {
+        refreshOn401: true,
+      });
+
+      expect(result).toMatchObject({ ok: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0][1]).toMatchObject({ signal: expect.any(AbortSignal) });
+      expect(fetchMock.mock.calls[1][1]).toMatchObject({ signal: expect.any(AbortSignal) });
+    });
+
+    it('does not retry on 401 when refreshOn401:false is passed', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok', {
+        refreshOn401: false,
+      });
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(mockOauthRefresh).not.toHaveBeenCalled();
+    });
+
+    it('rejects URL site_id without making a network call (defence in depth)', async () => {
+      const spy = vi.fn();
+      global.fetch = spy as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId('https://contoso.sharepoint.com/sites/X', 'tok');
+      expect(result).toMatchObject({ ok: false, reason: 'validation' });
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('rejects malformed site_id mixing composite (`,`) and path (`:`) separators', async () => {
+      const spy = vi.fn();
+      global.fetch = spy as unknown as typeof fetch;
+      const result = await resolveCompositeSiteId(
+        'contoso.sharepoint.com:/sites/X,guid,guid',
+        'tok'
+      );
+      expect(result).toMatchObject({ ok: false, reason: 'validation' });
+      expect(spy).not.toHaveBeenCalled();
     });
   });
 });

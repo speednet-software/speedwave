@@ -7,6 +7,8 @@
  * ADR-060.
  */
 
+import { TIMEOUTS } from '@speedwave/mcp-shared';
+
 /** Inputs for the Microsoft v2 refresh-token POST. */
 export interface MicrosoftTokenRequest {
   clientId: string;
@@ -50,12 +52,10 @@ export async function refreshMicrosoftToken(
     scope: req.scopes.join(' '),
   });
 
-  // 30s upper bound on the Microsoft token endpoint round-trip. A hang
-  // here would block every SharePoint tool call (refresh fires on 401),
-  // so we abort rather than wait indefinitely. The connection-pool kept-
-  // alive default is much shorter; this is purely a stall guard.
+  // Upper bound on the Microsoft token endpoint round-trip — a hang here
+  // would block every SharePoint tool call (refresh fires on 401).
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30_000);
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOKEN_REFRESH_MS);
   let response: Response;
   try {
     response = await fetch(url, {
@@ -126,9 +126,15 @@ export async function refreshMicrosoftToken(
     typeof grantedScope === 'string' && grantedScope.trim() ? grantedScope.trim().split(/\s+/) : [];
 
   // Scope mismatch (granted ⊊ requested) — Microsoft returns 200 in this case.
-  const missing = req.scopes.filter(
-    (s) => !grantedScopes.some((g) => g.toLowerCase() === s.toLowerCase())
-  );
+  // Exception: `offline_access` is an OIDC scope, not an API permission. Even
+  // when granted (and a `refresh_token` is returned), Microsoft does NOT echo
+  // it back in the `scope` field of the token response. Treat its presence in
+  // `req.scopes` as satisfied iff the response carries a refresh_token on the
+  // initial exchange, or — for refresh calls — implicitly (we got here at all).
+  const missing = req.scopes.filter((s) => {
+    if (s.toLowerCase() === 'offline_access') return false;
+    return !grantedScopes.some((g) => g.toLowerCase() === s.toLowerCase());
+  });
   if (missing.length > 0) {
     return {
       ok: false,

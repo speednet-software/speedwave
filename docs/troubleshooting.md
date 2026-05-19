@@ -3,8 +3,8 @@
 ## After upgrading: OS integration is disabled and a banner appears
 
 **Symptom:** After installing a new Speedwave version, the Integrations view
-shows an amber banner like *"OS integration disabled — macOS does not currently
-grant Speedwave permission for `<service>`"*. The Calendar / Reminders / Mail /
+shows an amber banner like _"OS integration disabled — macOS does not currently
+grant Speedwave permission for `<service>`"_. The Calendar / Reminders / Mail /
 Notes toggle was previously ON and is now OFF.
 
 **Cause:** Speedwave 0.11.0 changed how each native macOS CLI binary
@@ -20,7 +20,7 @@ keep the UI honest with the actual macOS state.
 **Recovery:**
 
 Click each affected toggle once. macOS shows a fresh consent dialog. Click
-*Allow*. The integration is now bound to the new identifier and the banner does
+_Allow_. The integration is now bound to the new identifier and the banner does
 not reappear.
 
 This is a one-time migration. See ADR-039 for the rationale.
@@ -35,7 +35,7 @@ This is a one-time migration. See ADR-039 for the rationale.
 > tccutil reset Calendar pl.speedwave.desktop.calendar
 > Then click the toggle again.
 
-**Cause:** The user previously clicked *Don't Allow* in the TCC consent dialog.
+**Cause:** The user previously clicked _Don't Allow_ in the TCC consent dialog.
 Apple removed the `+` button from System Settings → Privacy & Security on
 macOS 14+, so there is no UI path to re-add Speedwave. The `tccutil reset`
 command is the only recovery path.
@@ -43,19 +43,19 @@ command is the only recovery path.
 **Recovery:** Run the exact command shown in the toast. The TCC service name
 and the bundle identifier depend on the integration:
 
-| Integration | TCC service | Identifier | Full command |
-|---|---|---|---|
-| Calendar | `Calendar` | `pl.speedwave.desktop.calendar` | `tccutil reset Calendar pl.speedwave.desktop.calendar` |
-| Reminders | `Reminders` | `pl.speedwave.desktop.reminders` | `tccutil reset Reminders pl.speedwave.desktop.reminders` |
-| Mail | `AppleEvents` | `pl.speedwave.desktop.mail` | `tccutil reset AppleEvents pl.speedwave.desktop.mail` |
-| Notes | `AppleEvents` | `pl.speedwave.desktop.notes` | `tccutil reset AppleEvents pl.speedwave.desktop.notes` |
+| Integration | TCC service   | Identifier                       | Full command                                             |
+| ----------- | ------------- | -------------------------------- | -------------------------------------------------------- |
+| Calendar    | `Calendar`    | `pl.speedwave.desktop.calendar`  | `tccutil reset Calendar pl.speedwave.desktop.calendar`   |
+| Reminders   | `Reminders`   | `pl.speedwave.desktop.reminders` | `tccutil reset Reminders pl.speedwave.desktop.reminders` |
+| Mail        | `AppleEvents` | `pl.speedwave.desktop.mail`      | `tccutil reset AppleEvents pl.speedwave.desktop.mail`    |
+| Notes       | `AppleEvents` | `pl.speedwave.desktop.notes`     | `tccutil reset AppleEvents pl.speedwave.desktop.notes`   |
 
 > **Note:** Mail and Notes use the `AppleEvents` TCC service (not `Mail` or
 > `Notes`) because they communicate via Apple Events, which TCC scopes per
 > (sender, target) under that single service name. Running `tccutil reset Mail`
-> would not reset the right entry — this is *not* an oversight in the message.
+> would not reset the right entry — this is _not_ an oversight in the message.
 
-After the reset, click the toggle again and choose *Allow* in the consent
+After the reset, click the toggle again and choose _Allow_ in the consent
 dialog.
 
 ---
@@ -74,7 +74,7 @@ lacks an embedded `Info.plist` containing `NSCalendarsFullAccessUsageDescription
 or `NSRemindersFullAccessUsageDescription` — the parent `.app`'s Info.plist
 does not propagate across `posix_spawn` to a child CLI binary.
 
-This was the *original* Calendar TCC bug fixed in 0.11.0 by embedding
+This was the _original_ Calendar TCC bug fixed in 0.11.0 by embedding
 `Info.plist` directly into each native CLI's Mach-O `__TEXT,__info_plist`
 section. If you see this message on 0.11.0 or later, the bundle is corrupted
 or has been tampered with — the embedded section is required by build and
@@ -91,6 +91,22 @@ verified by signing.
    ```
 2. Reinstall Speedwave from a fresh download at [speedwave.pl](https://speedwave.pl).
 3. Click the toggle again — the system consent dialog should appear.
+
+---
+
+## SharePoint: "cannot reach oauth worker"
+
+**Symptom:** SharePoint tools fail with a message containing:
+
+> cannot reach oauth worker: ... Restart the project from Speedwave Desktop.
+
+or:
+
+> oauth worker did not respond within 30s. Restart the project from Speedwave Desktop.
+
+**Cause:** The host-side `oauth` worker rotated its loopback port (e.g. it was respawned by the watchdog), and the SharePoint container is still pointing at the old port via `WORKER_OAUTH_URL` until its compose is re-rendered. Until containers are recreated, OAuth refresh requests hit a dead socket — surfaced as `OAuthRefreshError(worker_unreachable)` / `OAuthRefreshError(timeout)`.
+
+**Recovery:** Restart the project from Speedwave Desktop. The compose render that runs on start picks up the live oauth port and re-issues the env var into every consumer container. The watchdog also recreates containers automatically after a respawn — most users see this error only during the short window between the worker coming back up and containers picking up the new env.
 
 ---
 

@@ -31,12 +31,15 @@ describe('refreshMicrosoftToken', () => {
   }
 
   it('returns ok on a well-formed 200 response', async () => {
+    // Microsoft NEVER echoes `offline_access` in the `scope` field of the
+    // token response — it is an OIDC scope, not an API permission. The
+    // refresh path treats its presence in req.scopes as satisfied implicitly.
     mockFetchResponse({
       body: {
         access_token: 'a-new',
         refresh_token: 'r-new',
         expires_in: 3600,
-        scope: 'https://graph.microsoft.com/Sites.Manage.All offline_access',
+        scope: 'https://graph.microsoft.com/Sites.Manage.All',
         token_type: 'Bearer',
       },
     });
@@ -46,8 +49,33 @@ describe('refreshMicrosoftToken', () => {
       expect(result.value.accessToken).toBe('a-new');
       expect(result.value.refreshToken).toBe('r-new');
       expect(result.value.expiresIn).toBe(3600);
-      expect(result.value.grantedScopes).toContain('offline_access');
+      // grantedScopes mirrors the `scope` field as-is.
+      expect(result.value.grantedScopes).toEqual(['https://graph.microsoft.com/Sites.Manage.All']);
     }
+  });
+
+  it('does NOT flag offline_access as missing even when Microsoft omits it from the response', async () => {
+    // Production bug repro: Microsoft never returns offline_access in `scope`
+    // on a refresh response. Before the fix, this raised scope_mismatch and
+    // locked the worker out of read operations too.
+    mockFetchResponse({
+      body: {
+        access_token: 'a',
+        refresh_token: 'r',
+        expires_in: 3600,
+        scope: 'https://graph.microsoft.com/Sites.Manage.All https://graph.microsoft.com/User.Read',
+        token_type: 'Bearer',
+      },
+    });
+    const result = await refreshMicrosoftToken({
+      ...baseReq,
+      scopes: [
+        'https://graph.microsoft.com/Sites.Manage.All',
+        'https://graph.microsoft.com/User.Read',
+        'offline_access',
+      ],
+    });
+    expect(result.ok).toBe(true);
   });
 
   it('returns network error when fetch throws', async () => {
@@ -182,11 +210,17 @@ describe('refreshMicrosoftToken', () => {
       body: {
         access_token: 'a',
         expires_in: 3600,
-        // only offline_access granted; Sites.Manage.All missing
-        scope: 'offline_access',
+        // Sites.Manage.All missing from the granted set — User.Read alone.
+        scope: 'https://graph.microsoft.com/User.Read',
       },
     });
-    const result = await refreshMicrosoftToken(baseReq);
+    const result = await refreshMicrosoftToken({
+      ...baseReq,
+      scopes: [
+        'https://graph.microsoft.com/Sites.Manage.All',
+        'https://graph.microsoft.com/User.Read',
+      ],
+    });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe('scope_mismatch');
