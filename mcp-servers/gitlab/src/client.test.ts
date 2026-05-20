@@ -2460,7 +2460,10 @@ describe('initializeGitLabClient', () => {
     expect(console.warn).toHaveBeenCalled();
   });
 
-  it('should return null when connection test fails', async () => {
+  it('returns client + schedules background test when testConnection fails', async () => {
+    // Init no longer blocks on testConnection — it kicks the check into the
+    // background. The client is returned immediately; healthCheck reads the
+    // tracker to surface the failure.
     mockLoadToken.mockResolvedValue('test-token');
     mockReadFile.mockRejectedValue(new Error('ENOENT'));
 
@@ -2472,8 +2475,29 @@ describe('initializeGitLabClient', () => {
     mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
 
     const result = await initializeGitLabClient();
-    expect(result).toBeNull();
-    expect(console.warn).toHaveBeenCalled();
+    expect(result).not.toBeNull();
+    // Wait for the background test to settle and update the tracker.
+    await vi.waitFor(() => expect(result!.statusTracker.getStatus()).toBe('failed'));
+    expect(result!.statusTracker.getError()).toContain('Connection failed');
+  });
+
+  it('initializeGitLabClient resolves quickly when testConnection hangs', async () => {
+    // Hanging testConnection must not block init — background pattern.
+    mockLoadToken.mockResolvedValue('test-token');
+    mockReadFile.mockRejectedValue(new Error('ENOENT'));
+
+    const mockGitlabInstance = {
+      Users: {
+        showCurrentUser: vi.fn().mockImplementation(() => new Promise(() => {})),
+      },
+    };
+    mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
+
+    const t0 = Date.now();
+    const result = await initializeGitLabClient();
+    const elapsedMs = Date.now() - t0;
+    expect(result).not.toBeNull();
+    expect(elapsedMs).toBeLessThan(100);
   });
 
   it('should return null when initialization throws error', async () => {
@@ -2482,6 +2506,52 @@ describe('initializeGitLabClient', () => {
     const result = await initializeGitLabClient();
     expect(result).toBeNull();
     expect(console.warn).toHaveBeenCalled();
+  });
+
+  it('status tracker drives makeStandardHealthCheck — bg failure makes hc throw', async () => {
+    const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
+    mockLoadToken.mockResolvedValue('test-token');
+    mockReadFile.mockRejectedValue(new Error('ENOENT'));
+    mockGitlabConstructor.mockImplementation(() => ({
+      Users: {
+        showCurrentUser: vi.fn().mockRejectedValue(new Error('Bad credentials')),
+      },
+    }));
+
+    const client = await initializeGitLabClient();
+    expect(client).not.toBeNull();
+    await vi.waitFor(() => expect(client!.statusTracker.getStatus()).toBe('failed'));
+
+    const hc = makeStandardHealthCheck(client!.statusTracker, 'GitLab');
+    await expect(hc()).rejects.toThrow(/GitLab connection failed/);
+  });
+
+  it('status tracker drives makeStandardHealthCheck — unknown during warmup is healthy', async () => {
+    const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
+    mockLoadToken.mockResolvedValue('test-token');
+    mockReadFile.mockRejectedValue(new Error('ENOENT'));
+    // testConnection hangs — tracker stays 'unknown' during warmup window.
+    mockGitlabConstructor.mockImplementation(() => ({
+      Users: {
+        showCurrentUser: vi.fn().mockImplementation(() => new Promise(() => {})),
+      },
+    }));
+
+    const client = await initializeGitLabClient();
+    expect(client).not.toBeNull();
+    expect(client!.statusTracker.getStatus()).toBe('unknown');
+
+    const hc = makeStandardHealthCheck(client!.statusTracker, 'GitLab');
+    // Within the warmup window (default 10 s) unknown is treated as healthy.
+    await expect(hc()).resolves.toBeUndefined();
+  });
+
+  it('getHealthStatus delegates to the shared statusTracker', async () => {
+    const { GitLabClient } = await import('./client.js');
+    const c = new GitLabClient({ token: 'x', host: 'https://gitlab.com' });
+    expect(c.getHealthStatus()).toEqual({ connection: 'unknown', connectionError: null });
+    c.statusTracker.setFailed(new Error('boom'));
+    expect(c.getHealthStatus()).toEqual({ connection: 'failed', connectionError: 'boom' });
   });
 });
 

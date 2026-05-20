@@ -6,7 +6,13 @@
  * @module mcp-slack
  */
 
-import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
+import {
+  createMCPServer,
+  ts,
+  notConfiguredMessage,
+  retryAsync,
+  makeStandardHealthCheck,
+} from '@speedwave/mcp-shared';
 import { initializeSlackClients } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
@@ -34,14 +40,17 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Initialize Slack clients (may be null if not configured)
-  const slackClients = await retryAsync(initializeSlackClients, {
+  // initializeSlackClients always returns an object — `_tokensStatus` says
+  // whether tokens were loadable. retryAsync still retries on rejection
+  // (loadToken throwing), but in the missing-tokens path we get a valid
+  // object back on the first try.
+  const slackClients = (await retryAsync(initializeSlackClients, {
     maxRetries: 3,
     baseDelayMs: 2000,
     label: 'Slack client init',
-  });
+  }))!; // initializeSlackClients now resolves non-null in every branch
 
-  if (!slackClients) {
+  if (slackClients._tokensStatus === 'missing') {
     console.warn(`${ts()} ⚠️  ${notConfiguredMessage('Slack')}`);
     console.warn(`${ts()}    Server will start but tools will return errors until configured.`);
   } else {
@@ -56,11 +65,12 @@ async function main(): Promise<void> {
     host: '0.0.0.0', // bind all interfaces — must be reachable from the container network
     tools: createToolDefinitions(slackClients),
     auth: { token: AUTH_TOKEN },
-    healthCheck: async () => {
-      if (!slackClients) {
-        throw new Error('Slack client not configured');
-      }
-    },
+    healthCheck:
+      slackClients._tokensStatus === 'present' && slackClients.statusTracker
+        ? makeStandardHealthCheck(slackClients.statusTracker, 'Slack')
+        : async () => {
+            throw new Error('Slack client not configured');
+          },
   });
 
   const actualPort = await server.start();

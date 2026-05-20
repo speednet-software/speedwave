@@ -16,12 +16,20 @@
  */
 
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
-import { ts, withSetupGuidance, TIMEOUTS } from '@speedwave/mcp-shared';
+import {
+  ts,
+  withSetupGuidance,
+  TIMEOUTS,
+  ConnectionStatusTracker,
+  backgroundConnectionTest,
+} from '@speedwave/mcp-shared';
+import type { ConnectionTestResult, HealthStatus } from '@speedwave/mcp-shared';
 import { readCredentials } from './auth.js';
-import type { AtlassianConfig, ConnectionTestResult } from './types.js';
+import type { AtlassianConfig } from './types.js';
 import { ScopeError } from './scope.js';
 
-export type { AtlassianConfig, ConnectionTestResult } from './types.js';
+export type { AtlassianConfig } from './types.js';
+export type { ConnectionTestResult } from '@speedwave/mcp-shared';
 
 /** Max retry attempts (in addition to the initial try). */
 const MAX_RETRIES = 3;
@@ -80,6 +88,13 @@ function backoff(n: number): number {
 export class AtlassianClient {
   private readonly http: AxiosInstance;
   private readonly config: AtlassianConfig;
+  /** Connection status tracker. Updated by background test scheduled in init. */
+  public readonly statusTracker = new ConnectionStatusTracker();
+
+  /** Shared health snapshot. Read by the index.ts healthCheck callback. */
+  getHealthStatus(): HealthStatus {
+    return this.statusTracker.getHealth();
+  }
 
   /**
    * Build the client from a resolved configuration.
@@ -327,12 +342,19 @@ export async function initializeAtlassianClient(): Promise<AtlassianClient | nul
     if (!config) return null;
 
     const client = new AtlassianClient(config);
-    const result = await client.testConnection();
-    if (!result.success) {
-      console.warn(`${ts()} Atlassian connection test failed: ${result.error}`);
-      return null;
-    }
-    console.log(`${ts()} ✅ Atlassian client initialized (site: ${new URL(config.siteUrl).host})`);
+    backgroundConnectionTest(
+      client.statusTracker,
+      async () => {
+        const result = await client.testConnection();
+        if (!result.success) {
+          throw new Error(result.error ?? 'connection test failed');
+        }
+      },
+      'Atlassian'
+    );
+    console.log(
+      `${ts()} ✅ Atlassian client initialized (site: ${new URL(config.siteUrl).host}), connection test scheduled`
+    );
     return client;
   } catch (error) {
     console.warn(

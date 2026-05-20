@@ -28,6 +28,16 @@ vi.mock('../client.js', async () => {
 });
 
 import * as client from '../client.js';
+import { WebClient } from '@slack/web-api';
+
+/** Helper: clients object representing "tokens missing" — replaces null. */
+function unconfiguredClients(): SlackClients {
+  return {
+    bot: new WebClient('xoxb-not-configured'),
+    user: new WebClient('xoxp-not-configured'),
+    _tokensStatus: 'missing',
+  };
+}
 
 describe('channel-tools', () => {
   let mockClients: SlackClients;
@@ -37,6 +47,7 @@ describe('channel-tools', () => {
     mockClients = {
       bot: {} as any,
       user: {} as any,
+      _tokensStatus: 'present',
     };
   });
 
@@ -366,7 +377,7 @@ describe('channel-tools', () => {
 
 describe('createChannelTools (null clients — not configured)', () => {
   it('returns three tool definitions when clients are null', () => {
-    const tools = createChannelTools(null);
+    const tools = createChannelTools(unconfiguredClients());
     expect(tools).toHaveLength(3);
     expect(tools.map((t) => t.tool.name)).toEqual([
       'sendChannel',
@@ -376,7 +387,7 @@ describe('createChannelTools (null clients — not configured)', () => {
   });
 
   it('sendChannel handler returns NOT_CONFIGURED error when clients are null', async () => {
-    const tools = createChannelTools(null);
+    const tools = createChannelTools(unconfiguredClients());
     const sendHandler = tools.find((t) => t.tool.name === 'sendChannel')!.handler;
 
     const result = await sendHandler({ channel: '#general', message: 'hi' });
@@ -388,7 +399,7 @@ describe('createChannelTools (null clients — not configured)', () => {
   });
 
   it('getChannelMessages handler returns NOT_CONFIGURED error when clients are null', async () => {
-    const tools = createChannelTools(null);
+    const tools = createChannelTools(unconfiguredClients());
     const readHandler = tools.find((t) => t.tool.name === 'getChannelMessages')!.handler;
 
     const result = await readHandler({ channel: '#general' });
@@ -399,7 +410,7 @@ describe('createChannelTools (null clients — not configured)', () => {
   });
 
   it('listChannelIds handler returns NOT_CONFIGURED error when clients are null', async () => {
-    const tools = createChannelTools(null);
+    const tools = createChannelTools(unconfiguredClients());
     const listHandler = tools.find((t) => t.tool.name === 'listChannelIds')!.handler;
 
     const result = await listHandler({});
@@ -418,6 +429,7 @@ describe('createChannelTools (with clients — configured path)', () => {
     mockClients = {
       bot: {} as any,
       user: {} as any,
+      _tokensStatus: 'present',
     };
   });
 

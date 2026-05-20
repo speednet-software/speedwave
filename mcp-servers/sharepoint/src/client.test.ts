@@ -130,8 +130,14 @@ describe('SharePointClient', () => {
       expect(client.getLastTokenSaveError()).toBeNull();
     });
 
-    it('getHealthStatus exposes tokenSaveError', () => {
-      expect(client.getHealthStatus()).toEqual({ tokenSaveError: null });
+    it('getHealthStatus exposes tokenSaveError + connection status', () => {
+      // Now returns the shared HealthStatus shape with SharePoint's
+      // tokenSaveError as an optional extension.
+      expect(client.getHealthStatus()).toEqual({
+        connection: 'unknown',
+        connectionError: null,
+        tokenSaveError: null,
+      });
     });
   });
 
@@ -2084,6 +2090,9 @@ describe('SharePointClient', () => {
     });
 
     it('should initialize client with valid tokens', async () => {
+      // mockReset clears any leftover mockResolvedValueOnce from earlier tests
+      // (vi.clearAllMocks does not drain the Once queue, only call history).
+      mockLoadToken.mockReset();
       mockLoadToken.mockImplementation(async (path: string) => {
         if (path.includes('access_token')) return 'test-access-token';
         if (path.includes('refresh_token')) return 'test-refresh-token';
@@ -2234,7 +2243,7 @@ describe('SharePointClient', () => {
       expect(result).not.toBeNull();
     });
 
-    it('should accept path-form site_id and resolve it to composite via Graph lookup', async () => {
+    it('accepts path-form site_id and resolves it to composite in background', async () => {
       mockLoadToken.mockImplementation(async (path: string) => {
         if (path.includes('access_token')) return 'test-access-token';
         if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/Speedwave:';
@@ -2250,19 +2259,22 @@ describe('SharePointClient', () => {
 
       const result = await initializeSharePointClient();
       expect(result).not.toBeNull();
+      // Background warmup eventually mutates siteId to composite form.
+      await vi.waitFor(() =>
+        expect(result!.getConfig().siteId).toBe(
+          'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
+        )
+      );
+      expect(result!.statusTracker.getStatus()).toBe('ok');
       expect(fetchSpy).toHaveBeenCalledWith(
         'https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:/sites/Speedwave:',
         expect.objectContaining({
           headers: expect.objectContaining({ Authorization: 'Bearer test-access-token' }),
         })
       );
-      // Client stores the composite id, not the path-form the user typed.
-      expect(result?.getConfig().siteId).toBe(
-        'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
-      );
     });
 
-    it('should return null when path-form site_id lookup fails (404)', async () => {
+    it('returns client + marks tracker failed when path-form site_id lookup 404s', async () => {
       mockLoadToken.mockImplementation(async (path: string) => {
         if (path.includes('access_token')) return 'test-access-token';
         if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/Nonexistent:';
@@ -2273,15 +2285,15 @@ describe('SharePointClient', () => {
         status: 404,
         statusText: 'Not Found',
       }) as unknown as typeof fetch;
-      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       const result = await initializeSharePointClient();
-      expect(result).toBeNull();
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('404'));
-      infoSpy.mockRestore();
+      expect(result).not.toBeNull();
+      // Background resolve eventually fails — tracker captures the reason.
+      await vi.waitFor(() => expect(result!.statusTracker.getStatus()).toBe('failed'));
+      expect(result!.statusTracker.getError()).toContain('404');
     });
 
-    it('should surface a "transient" hint when site lookup returns 429', async () => {
+    it('returns client + marks tracker failed when site lookup returns 429', async () => {
       mockLoadToken.mockImplementation(async (path: string) => {
         if (path.includes('access_token')) return 'test-access-token';
         if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/X:';
@@ -2292,12 +2304,28 @@ describe('SharePointClient', () => {
         status: 429,
         statusText: 'Too Many Requests',
       }) as unknown as typeof fetch;
-      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       const result = await initializeSharePointClient();
-      expect(result).toBeNull();
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('transient'));
-      infoSpy.mockRestore();
+      expect(result).not.toBeNull();
+      await vi.waitFor(() => expect(result!.statusTracker.getStatus()).toBe('failed'));
+      expect(result!.statusTracker.getError()).toContain('429');
+    });
+
+    it('initializeSharePointClient resolves quickly when Graph lookup hangs', async () => {
+      mockLoadToken.mockImplementation(async (path: string) => {
+        if (path.includes('access_token')) return 'test-access-token';
+        if (path.includes('site_id')) return 'contoso.sharepoint.com:/sites/Slow:';
+        return '';
+      });
+      global.fetch = vi
+        .fn()
+        .mockImplementation(() => new Promise(() => {})) as unknown as typeof fetch;
+
+      const t0 = Date.now();
+      const result = await initializeSharePointClient();
+      const elapsedMs = Date.now() - t0;
+      expect(result).not.toBeNull();
+      expect(elapsedMs).toBeLessThan(100);
     });
   });
 

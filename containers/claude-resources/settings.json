@@ -5,17 +5,5 @@
   "statusLine": {
     "type": "command",
     "command": "~/.claude/statusline.sh"
-  },
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/self-review.sh"
-          }
-        ]
-      }
-    ]
   }
 }

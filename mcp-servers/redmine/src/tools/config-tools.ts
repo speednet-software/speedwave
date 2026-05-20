@@ -110,7 +110,7 @@ export function createConfigTools(client: RedmineClient | null): ToolDefinition[
       tool: getConfigTool,
       handler: async () => {
         try {
-          const result = client.getConfig();
+          const result = await client.getConfig();
           return jsonResult(result);
         } catch (error) {
           return errorResult(RedmineClient.formatError(error));

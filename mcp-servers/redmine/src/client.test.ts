@@ -115,12 +115,12 @@ describe('RedmineClient', () => {
   });
 
   describe('getConfig', () => {
-    it('should return config with URL from constructor', () => {
-      const result = client.getConfig();
+    it('should return config with URL from constructor', async () => {
+      const result = await client.getConfig();
       expect(result.url).toBe('https://redmine.example.com');
     });
 
-    it('should return config with project info from projectConfig', () => {
+    it('should return config with project info from projectConfig', async () => {
       const projectConfig: RedmineProjectConfig = {
         host_url: 'https://redmine.example.com',
         project_id: 'test-project',
@@ -128,14 +128,14 @@ describe('RedmineClient', () => {
       };
       const clientWithProject = new RedmineClient(config, projectConfig);
 
-      const result = clientWithProject.getConfig();
+      const result = await clientWithProject.getConfig();
       expect(result.project_id).toBe('test-project');
       expect(result.project_name).toBe('Test Project');
       expect(result.url).toBe('https://redmine.example.com');
     });
 
-    it('should handle missing project config', () => {
-      const result = client.getConfig();
+    it('should handle missing project config', async () => {
+      const result = await client.getConfig();
       expect(result.project_id).toBeUndefined();
       expect(result.project_name).toBeUndefined();
       expect(result.url).toBe('https://redmine.example.com');
@@ -3449,7 +3449,7 @@ describe('initializeRedmineClient', () => {
   // Eager project_name fetch
   //═══════════════════════════════════════════════════════════════════════════════
 
-  describe('eager project_name fetch', () => {
+  describe('lazy project_name fetch', () => {
     it('should fetch project_name when project_id is set but project_name is absent', async () => {
       mockedFs.readFile.mockImplementation(async (path: any) => {
         if (path.includes('api_key')) {
@@ -3471,13 +3471,13 @@ describe('initializeRedmineClient', () => {
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
+      // Fire-and-forget warm-up + explicit getConfig both resolve to the
+      // network result; assert getConfig sees the project name.
+      const cfg = await client!.getConfig();
+      expect(cfg.project_name).toBe('My Project');
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project.json', {
         params: {},
       });
-      expect(client?.getConfig().project_name).toBe('My Project');
-      expect(console.log).toHaveBeenCalledWith(
-        expect.stringContaining('project name fetched: "My Project"')
-      );
     });
 
     it('should use existing project_name when both project_id and project_name are present', async () => {
@@ -3499,7 +3499,8 @@ describe('initializeRedmineClient', () => {
 
       expect(client).not.toBeNull();
       expect(mockAxiosInstance.get).not.toHaveBeenCalled();
-      expect(client?.getConfig().project_name).toBe('Existing Name');
+      const cfg = await client!.getConfig();
+      expect(cfg.project_name).toBe('Existing Name');
     });
 
     it('should handle network error from showProject gracefully', async () => {
@@ -3521,7 +3522,8 @@ describe('initializeRedmineClient', () => {
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
-      expect(client?.getConfig().project_name).toBeUndefined();
+      const cfg = await client!.getConfig();
+      expect(cfg.project_name).toBeUndefined();
       expect(console.warn).toHaveBeenCalledWith(
         expect.stringContaining('Could not fetch project name')
       );
@@ -3553,7 +3555,8 @@ describe('initializeRedmineClient', () => {
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
-      expect(client?.getConfig().project_name).toBeUndefined();
+      const cfg = await client!.getConfig();
+      expect(cfg.project_name).toBeUndefined();
       expect(console.warn).toHaveBeenCalledWith(
         expect.stringContaining('Could not fetch project name')
       );
@@ -3578,7 +3581,8 @@ describe('initializeRedmineClient', () => {
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
-      expect(client?.getConfig().project_name).toBeUndefined();
+      const cfg = await client!.getConfig();
+      expect(cfg.project_name).toBeUndefined();
       expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('string error'));
     });
 
@@ -3599,7 +3603,8 @@ describe('initializeRedmineClient', () => {
 
       expect(client).not.toBeNull();
       expect(mockAxiosInstance.get).not.toHaveBeenCalled();
-      expect(client?.getConfig().project_name).toBeUndefined();
+      const cfg = await client!.getConfig();
+      expect(cfg.project_name).toBeUndefined();
     });
 
     it('should not fetch when project_id is empty string', async () => {
@@ -3663,8 +3668,9 @@ describe('initializeRedmineClient', () => {
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
+      const cfg = await client!.getConfig();
+      expect(cfg.project_name).toBe('Zero Project');
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/0.json', { params: {} });
-      expect(client?.getConfig().project_name).toBe('Zero Project');
     });
 
     it('should pass project_id with special characters to showProject as-is', async () => {
@@ -3694,10 +3700,11 @@ describe('initializeRedmineClient', () => {
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
+      const cfg = await client!.getConfig();
+      expect(cfg.project_name).toBe('Special Project');
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/proj/with&special chars.json', {
         params: {},
       });
-      expect(client?.getConfig().project_name).toBe('Special Project');
     });
 
     it('should pass project_id with Unicode to showProject as-is', async () => {
@@ -3723,10 +3730,116 @@ describe('initializeRedmineClient', () => {
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
+      const cfg = await client!.getConfig();
+      expect(cfg.project_name).toBe('Unicode Project');
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/проект-юникод.json', {
         params: {},
       });
-      expect(client?.getConfig().project_name).toBe('Unicode Project');
+    });
+
+    it('initializeRedmineClient resolves quickly when showProject hangs', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'my-project',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      // showProject hangs forever — init must NOT wait on it.
+      mockAxiosInstance.get.mockImplementation(() => new Promise(() => {}));
+
+      const t0 = Date.now();
+      const client = await initializeRedmineClient();
+      const elapsedMs = Date.now() - t0;
+
+      expect(client).not.toBeNull();
+      expect(elapsedMs).toBeLessThan(100);
+    });
+  });
+
+  describe('getProjectName', () => {
+    let projectClient: RedmineClient;
+    const localConfig: RedmineConfig = {
+      url: 'https://redmine.example.com',
+      apiKey: 'test-api-key-123',
+    };
+    const projectConfig: RedmineProjectConfig = {
+      host_url: 'https://redmine.example.com',
+      project_id: 'my-project',
+    };
+
+    beforeEach(() => {
+      mockAxiosInstance.get.mockReset();
+      projectClient = new RedmineClient(localConfig, projectConfig);
+    });
+
+    it('memoizes successful fetch: 2 calls trigger 1 HTTP request', async () => {
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { project: { id: 42, name: 'My Project', identifier: 'my-project' } },
+      });
+
+      const a = await projectClient.getProjectName();
+      const b = await projectClient.getProjectName();
+      expect(a).toBe('My Project');
+      expect(b).toBe('My Project');
+      expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns null and bounds wait when showProject hangs longer than timeout', async () => {
+      vi.useFakeTimers();
+      mockAxiosInstance.get.mockImplementation(() => new Promise(() => {}));
+
+      const promise = projectClient.getProjectName();
+      await vi.advanceTimersByTimeAsync(5_001);
+      await expect(promise).resolves.toBeNull();
+
+      vi.useRealTimers();
+    });
+
+    it('returns null when project_id is absent', async () => {
+      const noScopeClient = new RedmineClient(localConfig, {
+        host_url: 'https://redmine.example.com',
+      });
+      const name = await noScopeClient.getProjectName();
+      expect(name).toBeNull();
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('caches successful result on subsequent calls (memo across N calls)', async () => {
+      // showProject internally catches rejections and returns null — there is
+      // no caller-visible rejection path. The relevant memo invariant for
+      // redmine: once a name is resolved, repeated calls do NOT re-hit HTTP.
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { project: { id: 42, name: 'My Project', identifier: 'my-project' } },
+      });
+
+      for (let i = 0; i < 5; i++) {
+        const name = await projectClient.getProjectName();
+        expect(name).toBe('My Project');
+      }
+      expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+    });
+
+    it('getConfig returns within bound time when project_name fetch hangs', async () => {
+      vi.useFakeTimers();
+      mockAxiosInstance.get.mockImplementation(() => new Promise(() => {}));
+
+      const promise = projectClient.getConfig();
+      // Bound: 5 s memoizedPromise timeout — getConfig must resolve in 5.1 s
+      // even though showProject never settles.
+      await vi.advanceTimersByTimeAsync(5_100);
+      const cfg = await promise;
+      expect(cfg.project_name).toBeUndefined();
+      expect(cfg.project_id).toBe('my-project');
+      expect(cfg.url).toBe('https://redmine.example.com');
+
+      vi.useRealTimers();
     });
   });
 });

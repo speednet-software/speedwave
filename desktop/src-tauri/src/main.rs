@@ -178,6 +178,13 @@ fn start_session_inner(
     // per-service bearer mount into OAuth-consuming workers (ADR-060). No-op if
     // no integration with `uses_oauth_refresh = true` is enabled.
     let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
+
+    // Block on bundle reconcile before any path that may call compose_up_recreate.
+    // Without this guard, both the recreate-on-fresh-worker branch below and
+    // check_claude_auth → ensure_exec_healthy can hit nerdctl with a tag that
+    // reconcile has not yet built, surfacing "image not available" to the user.
+    containers_cmd::ensure_images_ready()?;
+
     if host_exec_just_started || oauth_just_started {
         host_exec_cmd::recreate_project_containers_if_running(project);
     }
@@ -2355,6 +2362,36 @@ mod tests {
         assert!(
             compose_pos < auth_pos,
             "compose lock must be acquired BEFORE check_claude_auth"
+        );
+    }
+
+    #[test]
+    fn start_session_inner_waits_for_image_readiness_before_compose_paths() {
+        // Race guard: both recreate_project_containers_if_running (fresh
+        // host_exec/oauth branch) and check_claude_auth → ensure_exec_healthy
+        // can call compose_up_recreate. Gate must come BEFORE the if-block
+        // (covers fresh-worker branch) AND BEFORE check_claude_auth (covers
+        // the always-runs path).
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+
+        let ensure_pos = body
+            .find("containers_cmd::ensure_images_ready")
+            .expect("start_session_inner must call ensure_images_ready");
+        let recreate_pos = body
+            .find("recreate_project_containers_if_running")
+            .expect("start_session_inner must reach recreate_project_containers_if_running");
+        let auth_pos = body
+            .find("setup_wizard::check_claude_auth")
+            .expect("start_session_inner must reach check_claude_auth");
+
+        assert!(
+            ensure_pos < recreate_pos,
+            "ensure_images_ready must come BEFORE recreate_project_containers_if_running"
+        );
+        assert!(
+            ensure_pos < auth_pos,
+            "ensure_images_ready must come BEFORE check_claude_auth"
         );
     }
 

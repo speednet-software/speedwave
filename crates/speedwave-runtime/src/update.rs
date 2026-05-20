@@ -239,16 +239,11 @@ pub fn update_containers(
     // 6. Rebuild images from local Containerfiles BEFORE stopping containers.
     //    If the build fails, containers keep running with the previous version.
     //    containerd uses content-addressable storage — new builds don't affect running containers.
+    //    Old-bundle prune is moved to the end of update_containers (after the
+    //    new containers are verified running) so a partial failure leaves
+    //    the previous bundle's images on disk for rollback.
     let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
-    if let Some(old_id) = build::should_prune_bundle(
-        bundle_state.applied_bundle_id.as_deref(),
-        &new_manifest.bundle_id,
-    ) {
-        if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
-            log::warn!("Failed to prune old bundle images: {e}");
-        }
-    }
     let images_rebuilt = build::build_images_for_bundle(
         runtime,
         &build::enabled_images(&integrations),
@@ -292,6 +287,18 @@ pub fn update_containers(
             "Update completed but no containers are running ({} exited)",
             total
         );
+    }
+
+    // Atomic prune: only drop the previous bundle's images now that the new
+    // containers are confirmed running. If anything above this point failed,
+    // the previous-bundle images remain on disk for a clean rollback.
+    if let Some(old_id) = build::should_prune_bundle(
+        bundle_state.applied_bundle_id.as_deref(),
+        &new_manifest.bundle_id,
+    ) {
+        if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
+            log::warn!("Failed to prune old bundle images: {e}");
+        }
     }
 
     Ok(ContainerUpdateResult {
@@ -742,10 +749,11 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_before_build_in_update_containers() {
-        // Structural test: prune_old_bundle_images must appear BEFORE build_images_for_bundle
-        // inside update_containers — pruning first means old images are removed before
-        // new ones are built, with no risk of removing newly-built images.
+    fn test_prune_after_recreate_in_update_containers() {
+        // Structural test: prune_old_bundle_images must appear AFTER the new
+        // containers are recreated and verified — atomicity guarantee. If
+        // anything earlier failed, the previous bundle's images stay on disk
+        // so rollback has a complete previous state to restore.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -759,11 +767,19 @@ mod tests {
         let build_pos = fn_body
             .find("build::build_images_for_bundle")
             .expect("build_images_for_bundle call must exist in update_containers");
+        let recreate_pos = fn_body
+            .find("compose_up_recreate(project)")
+            .expect("compose_up_recreate call must exist in update_containers");
 
         assert!(
-            prune_pos < build_pos,
-            "prune_old_bundle_images (at byte {prune_pos}) must appear before \
+            prune_pos > build_pos,
+            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
              build_images_for_bundle (at byte {build_pos}) in update_containers"
+        );
+        assert!(
+            prune_pos > recreate_pos,
+            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
+             compose_up_recreate (at byte {recreate_pos}) in update_containers"
         );
     }
 

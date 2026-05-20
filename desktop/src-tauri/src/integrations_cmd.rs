@@ -1230,6 +1230,7 @@ pub async fn restart_integration_containers(
     just_enabled: Option<String>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
+        crate::containers_cmd::ensure_images_ready()?;
         check_project(&project)?;
         // Pre-flight: detect CloudStorage TCC denial before restarting containers.
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
@@ -1737,6 +1738,29 @@ mod tests {
         assert!(
             fn_body.contains("compose_up_recreate"),
             "restart_integration_containers must use compose_up_recreate, not compose_up"
+        );
+    }
+
+    #[test]
+    fn restart_integration_containers_waits_for_image_readiness() {
+        // Race guard: bundle reconcile may be rebuilding images while a user
+        // toggles an integration; without this gate, compose_up_recreate would
+        // surface "image not available" through nerdctl to the user.
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers function must exist");
+        let fn_body = &source[fn_start..];
+
+        let ensure_pos = fn_body
+            .find("ensure_images_ready")
+            .expect("restart_integration_containers must call ensure_images_ready");
+        let up_pos = fn_body
+            .find("compose_up_recreate")
+            .expect("compose_up_recreate must exist in restart_integration_containers");
+        assert!(
+            ensure_pos < up_pos,
+            "ensure_images_ready must come BEFORE compose_up_recreate"
         );
     }
 
