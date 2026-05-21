@@ -8,24 +8,8 @@ use std::thread::JoinHandle;
 use crate::consts;
 use crate::fs_perms::write_restricted_file;
 
-/// Worker port-announcement read timeout (same value as `mcp-os`).
-const PORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// Cap on the per-project audit log size at spawn time.
 const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
-
-/// Windows env vars required for Node.js BCryptGenRandom (ADR-013).
-#[cfg(target_os = "windows")]
-const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[
-    "SystemRoot",
-    "SYSTEMDRIVE",
-    "TEMP",
-    "TMP",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "USERPROFILE",
-    "PROGRAMDATA",
-];
 
 /// Manages one project's `host_exec` worker as a child Node process.
 ///
@@ -238,200 +222,25 @@ pub fn write_host_exec_config_snapshot(
     write_restricted_file(path, &serde_json::to_string_pretty(snapshot)?)
 }
 
-// Child-env policy — mirrors `mcp_os_process::apply_child_env`.
+// Child-env policy, stale-PID cleanup, stdio drain — see
+// `crate::host_mcp_process` (SSOT extracted in PR1). `host_exec`-specific
+// behavior: the recovered login-shell PATH is passed as `path_override`
+// instead of the inherited PATH.
+use crate::host_mcp_process::{
+    apply_child_env as apply_child_env_shared, drain_and_read_port as drain_and_read_port_shared,
+    kill_stale_by_pid_file, CurrentProcessEnv, EnvSource,
+};
 
-/// Reads environment variables from a source (process env, or a fake in tests).
-trait EnvSource {
-    fn var(&self, key: &str) -> Option<String>;
-}
-
-/// Real implementation reading from `std::env`.
-struct CurrentProcessEnv;
-
-impl EnvSource for CurrentProcessEnv {
-    fn var(&self, key: &str) -> Option<String> {
-        std::env::var(key).ok()
-    }
-}
-
-/// `env_clear()` + re-add only PATH/HOME/Windows-CSPRNG/bundle vars (ADR-054).
 fn apply_child_env(cmd: &mut Command, host_path: &str, env: &dyn EnvSource) {
-    cmd.env_clear();
-
-    #[cfg(target_os = "windows")]
-    {
-        for key in WINDOWS_SYSTEM_ENV_VARS {
-            if let Some(val) = env.var(key) {
-                cmd.env(key, val);
-            }
-        }
-    }
-
-    // Recovered login-shell PATH — propagates to the worker and its recipes.
-    cmd.env("PATH", host_path);
-
-    // HOME on Unix; on Windows USERPROFILE is the equivalent (forwarded above).
-    // Forward only when set — HOME="" makes Node.js `os.homedir()` return ""
-    // and breaks anything resolving ~/.npm, ~/.cache, etc.
-    #[cfg(not(target_os = "windows"))]
-    if let Some(home) = env.var("HOME") {
-        cmd.env("HOME", home);
-    }
-
-    if let Some(res) = env.var(consts::BUNDLE_RESOURCES_ENV) {
-        if !res.is_empty() {
-            cmd.env(consts::BUNDLE_RESOURCES_ENV, &res);
-            cmd.env("SPEEDWAVE_PROD", "1");
-        }
-    }
+    apply_child_env_shared(cmd, Some(host_path), env);
 }
 
-// Stale-PID cleanup — mirrors `mcp_os_process`.
-
-/// Kill a stale worker from `pid_path` (only if it's still a node process).
-fn kill_stale_by_pid_file(pid_path: &Path) {
-    let pid_str = match std::fs::read_to_string(pid_path) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return,
-    };
-    let pid: u32 = match pid_str.parse() {
-        Ok(p) if p > 0 => p,
-        _ => return,
-    };
-    if !is_node_process(pid) {
-        log::debug!("host_exec: stale PID {pid} is not a node process — skipping kill");
-        let _ = std::fs::remove_file(pid_path);
-        return;
-    }
-    log::info!("host_exec: killing stale worker (PID {pid})");
-    kill_process(pid);
-    let _ = std::fs::remove_file(pid_path);
-}
-
-/// True if `pid` is a node process (`/proc/<pid>/comm` on Linux, `ps` on macOS).
-#[cfg(unix)]
-fn is_node_process(pid: u32) -> bool {
-    if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-        return s.trim().contains("node");
-    }
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().contains("node"),
-        _ => false,
-    }
-}
-
-#[cfg(windows)]
-fn is_node_process(pid: u32) -> bool {
-    let output = crate::binary::system_command("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .to_lowercase()
-            .contains("node"),
-        _ => false,
-    }
-}
-
-/// Terminate `pid` — SIGTERM then SIGKILL on Unix, `taskkill /F` on Windows.
-#[cfg(unix)]
-fn kill_process(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status();
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    let _ = Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .status();
-}
-
-#[cfg(windows)]
-fn kill_process(pid: u32) {
-    let _ = crate::binary::system_command("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .status();
-}
-
-// Port handshake + stdio drain — mirrors `mcp_os_process`.
-
-/// Drain stdio in background threads and wait for the `{"port":N}` line (10s).
 fn drain_and_read_port(
     child: &mut Child,
     log_path: &Path,
 ) -> anyhow::Result<(u16, Vec<JoinHandle<()>>)> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("host_exec worker stdout not captured"))?;
-
-    let mut handles = Vec::new();
-
-    if let Some(stderr) = child.stderr.take() {
-        let log_path_stderr = log_path.to_path_buf();
-        let h = std::thread::spawn(move || {
-            use std::io::BufRead;
-            let mut log_file = crate::log_file::open_log_file(&log_path_stderr);
-            let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        log::warn!("host_exec stderr: {line}");
-                        crate::log_file::write_log_line(&mut log_file, "STDERR", &line);
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        handles.push(h);
-    }
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let log_path_stdout = log_path.to_path_buf();
-    let h = std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut log_file = crate::log_file::open_log_file(&log_path_stdout);
-        let reader = std::io::BufReader::new(stdout);
-        let mut port_sent = false;
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if !port_sent {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                            if let Some(port) = json.get("port").and_then(|v| v.as_u64()) {
-                                let _ =
-                                    tx.send(u16::try_from(port).map_err(|_| {
-                                        anyhow::anyhow!("port {port} out of u16 range")
-                                    }));
-                                port_sent = true;
-                                crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
-                                continue;
-                            }
-                        }
-                    }
-                    log::debug!("host_exec: {line}");
-                    crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
-                }
-                Err(_) => break,
-            }
-        }
-        if !port_sent {
-            let _ = tx.send(Err(anyhow::anyhow!(
-                "host_exec worker exited without announcing a port"
-            )));
-        }
-    });
-    handles.push(h);
-
-    match rx.recv_timeout(PORT_READ_TIMEOUT) {
-        Ok(result) => result.map(|port| (port, handles)),
-        Err(_) => anyhow::bail!("timed out waiting for host_exec worker port announcement"),
-    }
+    drain_and_read_port_shared(child, log_path, "host_exec")
 }
-
-// Restricted file write — see `crate::fs_perms::write_restricted_file` (SSOT extracted in PR1).
 
 // Test-only accessors — gated behind `cfg(test)` to keep clippy honest.
 
@@ -479,6 +288,7 @@ impl HostExecProcess {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::host_mcp_process::{is_node_process, kill_process};
     use serial_test::serial;
     use std::collections::HashMap;
 
@@ -758,12 +568,17 @@ setTimeout(() => {}, 60000);
     #[cfg(unix)]
     #[test]
     fn drain_and_read_port_rejects_port_over_u16() {
+        // The shared parse_port_line drops over-range ports silently;
+        // the child then exits without a valid port announcement.
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join(consts::HOST_EXEC_LOG_FILE);
         let mut child = spawn_stdout_lines(&[r#"{"port":70000}"#]);
         let r = drain_and_read_port(&mut child, &log);
         assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("out of u16 range"));
+        assert!(r
+            .unwrap_err()
+            .to_string()
+            .contains("exited without announcing"));
         child.kill().ok();
         child.wait().ok();
     }

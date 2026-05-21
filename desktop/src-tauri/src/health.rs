@@ -117,34 +117,10 @@ fn is_lock_entry_alive(pid: u32, port: u16) -> bool {
 }
 
 /// Returns true if a process with the given PID is currently running.
+/// Cienki re-eksport — implementacja w
+/// `speedwave_runtime::host_mcp_process::is_pid_alive` (SSOT).
 pub(crate) fn is_pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-    #[cfg(windows)]
-    {
-        // `tasklist /FI "PID eq N" /NH` prints "INFO: No tasks are running..."
-        // when the PID does not exist. Check for absence of that message rather
-        // than substring-matching the PID (which could false-positive on process
-        // names, session numbers, or memory columns that contain the same digits).
-        speedwave_runtime::binary::system_command("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output()
-            .map(|o| {
-                let out = String::from_utf8_lossy(&o.stdout);
-                o.status.success() && !out.contains("INFO:") && !out.trim().is_empty()
-            })
-            .unwrap_or(false)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
+    speedwave_runtime::host_mcp_process::is_pid_alive(pid)
 }
 
 /// Check if the mcp-os process is alive AND listening on its port.

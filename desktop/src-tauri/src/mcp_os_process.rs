@@ -1,4 +1,3 @@
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread::JoinHandle;
@@ -26,24 +25,6 @@ pub struct McpOsProcess {
     pid_path: PathBuf,
     script_path: String,
 }
-
-/// Timeout for reading the port announcement from mcp-os stdout.
-const PORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Windows system environment variables required for Node.js OpenSSL CSPRNG
-/// (BCryptGenRandom) initialization. Without these, `node.exe` aborts with
-/// "Assertion failed: ncrypto::CSPRNG(nullptr, 0)".
-#[cfg(target_os = "windows")]
-const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[
-    "SystemRoot",
-    "SYSTEMDRIVE",
-    "TEMP",
-    "TMP",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "USERPROFILE",
-    "PROGRAMDATA",
-];
 
 impl McpOsProcess {
     /// Spawn the mcp-os node process with a dynamic port.
@@ -266,241 +247,24 @@ impl Drop for McpOsProcess {
     }
 }
 
-/// Reads environment variables from a source (process env, or a fake source
-/// in tests). Pulled out of `spawn_in` so the env-construction logic is
-/// testable without mutating the process-global environment, which races with
-/// other tests and any Speedwave instance running concurrently on the host.
-trait EnvSource {
-    fn var(&self, key: &str) -> Option<String>;
-}
+// Child-env policy, stale-PID cleanup, and stdio drain are shared with the
+// other host-MCP workers in `speedwave_runtime::host_mcp_process`
+// (SSOT extracted in PR1).
+use speedwave_runtime::host_mcp_process::{
+    apply_child_env as apply_child_env_shared, drain_and_read_port as drain_and_read_port_shared,
+    kill_stale_by_pid_file, CurrentProcessEnv, EnvSource,
+};
 
-/// Real implementation reading from `std::env`.
-struct CurrentProcessEnv;
-
-impl EnvSource for CurrentProcessEnv {
-    fn var(&self, key: &str) -> Option<String> {
-        std::env::var(key).ok()
-    }
-}
-
-/// Apply the child-process environment policy to `cmd` from the given source.
-///
-/// Starts by clearing the inherited environment so secrets in the parent
-/// (API keys, tokens, credentials) cannot leak to mcp-os, then adds back
-/// only the variables the child needs (PATH, HOME/USERPROFILE, optional
-/// Windows CSPRNG vars, and SPEEDWAVE_RESOURCES_DIR/SPEEDWAVE_PROD when
-/// running as a bundled .app). Never reads `std::env` directly — every
-/// value comes from `env`, so callers in tests can supply a `FakeEnv`.
 fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
-    cmd.env_clear();
-
-    // On Windows, Node.js (OpenSSL) needs certain system environment variables
-    // to initialize BCryptGenRandom for its CSPRNG. Without these, node.exe
-    // aborts with "Assertion failed: ncrypto::CSPRNG(nullptr, 0)".
-    #[cfg(target_os = "windows")]
-    {
-        for key in WINDOWS_SYSTEM_ENV_VARS {
-            if let Some(val) = env.var(key) {
-                cmd.env(key, val);
-            }
-        }
-    }
-
-    cmd.env("PATH", env.var("PATH").unwrap_or_default());
-
-    // HOME is set on Unix (macOS/Linux) but typically not on Windows, where
-    // USERPROFILE is the equivalent. Setting HOME to an empty string on Unix
-    // would break Node.js path resolution (e.g. os.homedir()).
-    // USERPROFILE is already forwarded via WINDOWS_SYSTEM_ENV_VARS above.
-    #[cfg(not(target_os = "windows"))]
-    if let Some(home) = env.var("HOME") {
-        cmd.env("HOME", home);
-    }
-
-    // Production mode: forward resource directory so mcp-os resolves native
-    // CLI binaries from the bundled .app/Contents/Resources/ layout instead
-    // of the dev-mode source tree.
-    if let Some(res) = env.var(consts::BUNDLE_RESOURCES_ENV) {
-        if !res.is_empty() {
-            cmd.env(consts::BUNDLE_RESOURCES_ENV, &res);
-            cmd.env("SPEEDWAVE_PROD", "1");
-        }
-    }
+    apply_child_env_shared(cmd, None, env);
 }
 
-/// Kill a stale mcp-os process identified by its PID file.
-///
-/// Cross-platform: uses `kill` on Unix and `taskkill` on Windows.
-/// Only kills the process if it looks like a `node` process (verified via
-/// `ps` on Unix, `tasklist` on Windows) to avoid killing unrelated PIDs
-/// that may have been recycled by the OS.
-fn kill_stale_by_pid_file(pid_path: &std::path::Path) {
-    let pid_str = match std::fs::read_to_string(pid_path) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return,
-    };
-    let pid: u32 = match pid_str.parse() {
-        Ok(p) if p > 0 => p,
-        _ => return,
-    };
-
-    if !is_node_process(pid) {
-        log::debug!("stale PID {pid} is not a node process — skipping kill");
-        let _ = std::fs::remove_file(pid_path);
-        return;
-    }
-
-    log::info!("killing stale mcp-os process (PID {pid})");
-    kill_process(pid);
-    let _ = std::fs::remove_file(pid_path);
-}
-
-/// Check whether a given PID belongs to a `node` process.
-#[cfg(unix)]
-fn is_node_process(pid: u32) -> bool {
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let comm = String::from_utf8_lossy(&o.stdout);
-            comm.trim().contains("node")
-        }
-        _ => false, // process doesn't exist or ps failed
-    }
-}
-
-#[cfg(windows)]
-fn is_node_process(pid: u32) -> bool {
-    let output = speedwave_runtime::binary::system_command("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            text.to_lowercase().contains("node")
-        }
-        _ => false,
-    }
-}
-
-/// Terminate a process by PID. Sends SIGTERM then SIGKILL on Unix,
-/// uses `taskkill /F` on Windows.
-#[cfg(unix)]
-fn kill_process(pid: u32) {
-    // SIGTERM for graceful shutdown
-    let _ = Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status();
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    // SIGKILL as fallback — ignore errors (process may already be gone)
-    let _ = Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .status();
-}
-
-#[cfg(windows)]
-fn kill_process(pid: u32) {
-    let _ = speedwave_runtime::binary::system_command("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .status();
-}
-
-/// Spawn background threads to drain both stdout and stderr of the child,
-/// then wait for the `{"port":<N>}` JSON line on stdout.
-///
-/// Returns the port and the join handles for both drain threads so the
-/// caller can join them on stop (releasing log file handles).
-///
-/// mcp-os uses `console.log` (→ stdout) for all its logging after the
-/// initial port announcement. If the stdout/stderr pipes are closed or
-/// their buffers fill up, the child process dies (SIGPIPE or write block).
-/// The drain threads keep both pipes open for the entire lifetime of the
-/// child process.
 fn drain_and_read_port(
     child: &mut Child,
     log_path: &Path,
 ) -> anyhow::Result<(u16, Vec<JoinHandle<()>>)> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("mcp-os stdout not captured"))?;
-
-    let mut handles = Vec::new();
-
-    // Open log file for appending (both drain threads share the concept but
-    // each opens its own handle to avoid cross-thread synchronization).
-    let log_path_stderr = log_path.to_path_buf();
-
-    // Drain stderr — mcp-os writes warnings here via console.error/console.warn
-    if let Some(stderr) = child.stderr.take() {
-        let h = std::thread::spawn(move || {
-            let mut log_file = speedwave_runtime::log_file::open_log_file(&log_path_stderr);
-            let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        log::warn!("mcp-os stderr: {line}");
-                        speedwave_runtime::log_file::write_log_line(&mut log_file, "STDERR", &line);
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        handles.push(h);
-    }
-
-    // Drain stdout — reads port from first JSON line, then keeps draining
-    // all subsequent console.log output to prevent pipe buffer exhaustion.
-    let (tx, rx) = std::sync::mpsc::channel();
-    let log_path_stdout = log_path.to_path_buf();
-    let h = std::thread::spawn(move || {
-        let mut log_file = speedwave_runtime::log_file::open_log_file(&log_path_stdout);
-        let reader = std::io::BufReader::new(stdout);
-        let mut port_sent = false;
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if !port_sent {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                            if let Some(port) = json.get("port").and_then(|v| v.as_u64()) {
-                                let _ =
-                                    tx.send(u16::try_from(port).map_err(|_| {
-                                        anyhow::anyhow!("port {port} out of u16 range")
-                                    }));
-                                port_sent = true;
-                                speedwave_runtime::log_file::write_log_line(
-                                    &mut log_file,
-                                    "STDOUT",
-                                    &line,
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                    // After port is found, keep draining stdout so the pipe
-                    // never fills up and the child never gets SIGPIPE.
-                    log::debug!("mcp-os: {line}");
-                    speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &line);
-                }
-                Err(_) => break,
-            }
-        }
-        if !port_sent {
-            let _ = tx.send(Err(anyhow::anyhow!(
-                "mcp-os exited without announcing a port"
-            )));
-        }
-    });
-    handles.push(h);
-
-    match rx.recv_timeout(PORT_READ_TIMEOUT) {
-        Ok(result) => result.map(|port| (port, handles)),
-        Err(_) => anyhow::bail!("timed out waiting for mcp-os port announcement"),
-    }
+    drain_and_read_port_shared(child, log_path, "mcp-os")
 }
-
-// Restricted file write — see `speedwave_runtime::fs_perms::write_restricted_file` (SSOT extracted in PR1).
 
 // ---------------------------------------------------------------------------
 // Test-only accessors — gated behind cfg(test) so clippy reports dead code
@@ -526,6 +290,8 @@ impl McpOsProcess {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use speedwave_runtime::host_mcp_process::{is_node_process, kill_process};
+    use std::io::BufRead;
 
     use serial_test::serial;
 
@@ -1223,15 +989,17 @@ process.stdout.write(JSON.stringify({ leaked }));
     #[cfg(unix)]
     #[test]
     fn drain_and_read_port_rejects_port_zero() {
+        // Shared `parse_port_line` rejects 0 (invalid bind target). The
+        // child then exits without a valid port announcement and the
+        // error surfaces as "exited without announcing a port".
         let (_tmp, log_path) = temp_log_path();
-        // Port 0 fits in u16 but is not a valid listening port.
-        // The current implementation accepts it (u16::try_from(0) succeeds).
-        // This test documents the behavior: port 0 IS returned as-is.
         let mut child = spawn_stdout_lines(&[r#"{"port":0}"#]);
-
-        let (port, _handles) =
-            drain_and_read_port(&mut child, &log_path).expect("port 0 fits in u16");
-        assert_eq!(port, 0, "port 0 is returned (caller must validate)");
+        let result = drain_and_read_port(&mut child, &log_path);
+        assert!(result.is_err(), "port 0 must be rejected");
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exited without announcing"));
         child.kill().ok();
         child.wait().ok();
     }
@@ -1241,17 +1009,15 @@ process.stdout.write(JSON.stringify({ leaked }));
     fn drain_and_read_port_rejects_port_over_65535() {
         let (_tmp, log_path) = temp_log_path();
         let mut child = spawn_stdout_lines(&[r#"{"port":70000}"#]);
-
         let result = drain_and_read_port(&mut child, &log_path);
         assert!(
             result.is_err(),
             "port 70000 exceeds u16 range and should be rejected"
         );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("out of u16 range"),
-            "error message should mention u16 range: {err_msg}"
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exited without announcing"));
         child.kill().ok();
         child.wait().ok();
     }

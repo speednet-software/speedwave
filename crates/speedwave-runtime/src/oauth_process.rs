@@ -13,9 +13,6 @@ use std::thread::JoinHandle;
 use crate::consts;
 use crate::fs_perms::write_restricted_file;
 
-/// Worker port-announcement read timeout (same value as `mcp-os` / `host_exec`).
-const PORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// Cap on the per-project audit log size at spawn time.
 const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -35,19 +32,6 @@ fn is_valid_service_slug(slug: &str) -> bool {
         .iter()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
-
-/// Windows env vars required for Node.js BCryptGenRandom (ADR-013).
-#[cfg(target_os = "windows")]
-const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[
-    "SystemRoot",
-    "SYSTEMDRIVE",
-    "TEMP",
-    "TMP",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "USERPROFILE",
-    "PROGRAMDATA",
-];
 
 /// Per-project `oauth` worker state directory: `<data_dir>/oauth/<project>/`.
 ///
@@ -310,194 +294,25 @@ fn set_dir_owner_only(_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Child-env policy — narrower than host_exec (no recipes, no project_dir).
-// ---------------------------------------------------------------------------
+// Child-env policy, stale-PID cleanup, and stdio drain are shared with the
+// other host-MCP workers in `crate::host_mcp_process` (SSOT extracted in PR1).
+use crate::host_mcp_process::{
+    apply_child_env as apply_child_env_shared, drain_and_read_port as drain_and_read_port_shared,
+    kill_stale_by_pid_file, CurrentProcessEnv, EnvSource,
+};
 
-trait EnvSource {
-    fn var(&self, key: &str) -> Option<String>;
-}
+#[cfg(test)]
+use crate::host_mcp_process::parse_port_line;
 
-struct CurrentProcessEnv;
-
-impl EnvSource for CurrentProcessEnv {
-    fn var(&self, key: &str) -> Option<String> {
-        std::env::var(key).ok()
-    }
-}
-
-/// `env_clear()` + re-add only PATH/HOME/Windows-CSPRNG/bundle vars.
 fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
-    cmd.env_clear();
-
-    #[cfg(target_os = "windows")]
-    {
-        for key in WINDOWS_SYSTEM_ENV_VARS {
-            if let Some(val) = env.var(key) {
-                cmd.env(key, val);
-            }
-        }
-    }
-
-    if let Some(p) = env.var("PATH") {
-        cmd.env("PATH", p);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    cmd.env("HOME", env.var("HOME").unwrap_or_default());
-
-    if let Some(res) = env.var(consts::BUNDLE_RESOURCES_ENV) {
-        if !res.is_empty() {
-            cmd.env(consts::BUNDLE_RESOURCES_ENV, &res);
-            cmd.env("SPEEDWAVE_PROD", "1");
-        }
-    }
+    apply_child_env_shared(cmd, None, env);
 }
-
-// ---------------------------------------------------------------------------
-// Stale-PID cleanup — mirrors host_exec / mcp_os.
-// ---------------------------------------------------------------------------
-
-fn kill_stale_by_pid_file(pid_path: &Path) {
-    let pid_str = match std::fs::read_to_string(pid_path) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return,
-    };
-    let pid: u32 = match pid_str.parse() {
-        Ok(p) if p > 0 => p,
-        _ => return,
-    };
-    if !is_node_process(pid) {
-        log::debug!("oauth: stale PID {pid} is not a node process — skipping kill");
-        let _ = std::fs::remove_file(pid_path);
-        return;
-    }
-    log::info!("oauth: killing stale worker (PID {pid})");
-    kill_process(pid);
-    let _ = std::fs::remove_file(pid_path);
-}
-
-#[cfg(unix)]
-fn is_node_process(pid: u32) -> bool {
-    if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-        return s.trim().contains("node");
-    }
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().contains("node"),
-        _ => false,
-    }
-}
-
-#[cfg(windows)]
-fn is_node_process(pid: u32) -> bool {
-    let output = crate::binary::system_command("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .to_lowercase()
-            .contains("node"),
-        _ => false,
-    }
-}
-
-#[cfg(unix)]
-fn kill_process(pid: u32) {
-    let _ = Command::new("kill").arg(pid.to_string()).status();
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-}
-
-#[cfg(windows)]
-fn kill_process(pid: u32) {
-    let _ = crate::binary::system_command("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .status();
-}
-
-// ---------------------------------------------------------------------------
-// Port-handshake: reads `{"port":N}` from the worker's stdout within 10s.
-// Mirrors host_exec_process::drain_and_read_port.
-// ---------------------------------------------------------------------------
 
 fn drain_and_read_port(
     child: &mut Child,
     log_path: &Path,
 ) -> anyhow::Result<(u16, Vec<JoinHandle<()>>)> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("oauth worker stdout not captured"))?;
-
-    let mut handles = Vec::new();
-
-    if let Some(stderr) = child.stderr.take() {
-        let log_path_stderr = log_path.to_path_buf();
-        let h = std::thread::spawn(move || {
-            use std::io::BufRead;
-            let mut log_file = crate::log_file::open_log_file(&log_path_stderr);
-            let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        log::warn!("oauth stderr: {line}");
-                        crate::log_file::write_log_line(&mut log_file, "STDERR", &line);
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        handles.push(h);
-    }
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let log_path_stdout = log_path.to_path_buf();
-    let h = std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut log_file = crate::log_file::open_log_file(&log_path_stdout);
-        let reader = std::io::BufReader::new(stdout);
-        let mut port_sent = false;
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if !port_sent {
-                        if let Some(port) = parse_port_line(&line) {
-                            let _ = tx.send(Ok(port));
-                            port_sent = true;
-                            crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
-                            continue;
-                        }
-                    }
-                    log::debug!("oauth: {line}");
-                    crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
-                }
-                Err(_) => break,
-            }
-        }
-        if !port_sent {
-            let _ = tx.send(Err(anyhow::anyhow!(
-                "oauth worker exited without announcing a port"
-            )));
-        }
-    });
-    handles.push(h);
-
-    match rx.recv_timeout(PORT_READ_TIMEOUT) {
-        Ok(result) => result.map(|port| (port, handles)),
-        Err(_) => anyhow::bail!("timed out waiting for oauth worker port announcement"),
-    }
-}
-
-fn parse_port_line(line: &str) -> Option<u16> {
-    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    let port = v.get("port")?.as_u64()?;
-    if port == 0 || port > u16::MAX as u64 {
-        return None;
-    }
-    u16::try_from(port).ok()
+    drain_and_read_port_shared(child, log_path, "oauth")
 }
 
 #[cfg(test)]
