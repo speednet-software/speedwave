@@ -45,6 +45,12 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         ),
         // Anthropic API keys: sk-ant- prefixed
         (r"sk-ant-[A-Za-z0-9_-]+", "***REDACTED_ANTHROPIC_KEY***"),
+        // Bare sk-prefixed keys: sk-proj-*, sk-test-*, sk-or-* (OpenRouter),
+        // vLLM/LiteLLM/LM Studio user-configured keys. ≥16 trailing chars to
+        // avoid false positives on short identifiers like "sk-short" or words
+        // ending in "sk-…". Order matters: this runs AFTER sk-ant- so Anthropic
+        // keys keep their dedicated marker.
+        (r"\bsk-[A-Za-z0-9_-]{16,}", "***REDACTED_API_KEY***"),
         // URL userinfo credentials: ://user:password@host — redact password
         (r"(://[^:/@\s]+:)[^@\s]+(@)", "${1}***REDACTED***${2}"),
         // API keys in URL query parameters: ?key=<value> or &key=<value>
@@ -140,7 +146,7 @@ mod tests {
     /// The definitions vec contains exactly this many rules. If a new rule is
     /// added to the vec but fails to compile, RULES.len() will be less than
     /// this constant and the test will fail, catching the silent drop.
-    const EXPECTED_RULE_COUNT: usize = 17;
+    const EXPECTED_RULE_COUNT: usize = 18;
 
     #[test]
     fn test_rules_count() {
@@ -174,6 +180,7 @@ mod tests {
             r"glpat-[A-Za-z0-9\-]{20,}",
             r"ATATT[A-Za-z0-9_\-]{20,}",
             r"sk-ant-[A-Za-z0-9_-]+",
+            r"\bsk-[A-Za-z0-9_-]{16,}",
             r"(://[^:/@\s]+:)[^@\s]+(@)",
             r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token)=)[^&\s]+",
             r"(?i)(X-Redmine-API-Key:\s*)\S+",
@@ -887,6 +894,64 @@ mod tests {
         assert_eq!(
             output, input,
             "False positive: 'sk-antenna' should not be redacted"
+        );
+    }
+
+    // ── Bare sk-* keys (vLLM, LiteLLM, LM Studio, OpenRouter, …) ─────────
+
+    #[test]
+    fn test_bare_sk_proj_key_redaction() {
+        // OpenAI project-scoped key shape, also used by self-hosted servers.
+        let input = "ANTHROPIC_AUTH_TOKEN=sk-proj-abc123def456ghi789xyz";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED_API_KEY***"),
+            "bare sk-proj- key not redacted: {output}"
+        );
+        assert!(
+            !output.contains("abc123def456ghi789xyz"),
+            "key body should not appear: {output}"
+        );
+    }
+
+    #[test]
+    fn test_bare_sk_or_key_redaction() {
+        // OpenRouter style.
+        let input = "key=sk-or-v1-aaaabbbbccccddddeeee";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED"),
+            "OpenRouter-style sk- key not redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_bare_sk_short_not_redacted() {
+        // Below the 16-char minimum after the sk- prefix.
+        let input = "see sk-short for details";
+        let output = sanitize(input);
+        assert_eq!(
+            output, input,
+            "false positive: sk-short below 16-char threshold"
+        );
+    }
+
+    #[test]
+    fn test_bare_sk_word_boundary_not_redacted() {
+        // "task-skipped" contains "sk-" mid-word; \b boundary must reject.
+        let input = "task-skipped after disk-check completed";
+        let output = sanitize(input);
+        assert_eq!(output, input, "false positive on mid-word sk-: {output}");
+    }
+
+    #[test]
+    fn test_bare_sk_does_not_clobber_anthropic_marker() {
+        // sk-ant- key must still get the ANTHROPIC marker, not the generic one.
+        let input = "key=sk-ant-api03-aaaabbbbccccddddeeeeffffgggg";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED_ANTHROPIC_KEY***"),
+            "Anthropic-specific marker lost: {output}"
         );
     }
 

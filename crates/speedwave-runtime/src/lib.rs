@@ -13,6 +13,7 @@ pub mod fs_perms;
 pub mod fs_security;
 pub mod host_exec;
 pub mod host_exec_process;
+pub mod http_debug_collator;
 pub mod log_file;
 pub mod log_sanitizer;
 pub mod log_ts;

@@ -136,7 +136,7 @@ pub fn render_compose(
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
     // Handle LLM provider switching
-    yaml = apply_llm_config(&yaml, &resolved_config.llm)?;
+    yaml = apply_llm_config(&yaml, &resolved_config.llm, project_name)?;
 
     // Ensure plugin images exist (builds pending and missing) before compose generation.
     // Scoped to plugins enabled for this project — a broken plugin in another project
@@ -245,13 +245,18 @@ pub fn compose_output_path_in(
     Ok(data_dir.join("compose").join(project).join("compose.yml"))
 }
 
-/// Saves the rendered compose YAML to disk.
+/// Saves the rendered compose YAML to disk with owner-only permissions.
+///
+/// Compose may carry `ANTHROPIC_AUTH_TOKEN=<real-key>` when local-LLM auth is
+/// configured (ADR-040 delta) — the rendered file is therefore a secret and
+/// must be 0o600 (Unix) / owner-only ACL (Windows). Atomic via fs_perms so
+/// crash mid-render cannot leave a truncated YAML.
 pub fn save_compose(project: &str, yaml: &str) -> anyhow::Result<()> {
     let path = compose_output_path(project)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, yaml)?;
+    crate::fs_perms::write_restricted_file_atomic(&path, yaml)?;
     Ok(())
 }
 
@@ -346,8 +351,14 @@ fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
         .map_err(|e| anyhow::anyhow!("inject_host_timezone: failed to serialize compose YAML: {e}"))
 }
 
-fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
+fn apply_llm_config(yaml: &str, llm: &LlmConfig, project: &str) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
+    if !crate::config::LOCAL_PROVIDERS.contains(&provider) && provider != "anthropic" {
+        anyhow::bail!(
+            "Unsupported LLM provider '{provider}'. Supported: anthropic, {}.",
+            crate::config::LOCAL_PROVIDERS.join(", ")
+        );
+    }
     match provider {
         "anthropic" => {
             // ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL pin each alias to the
@@ -357,18 +368,16 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
             // (anthropics/claude-code#34083). Generated dynamically so a SSOT
             // bump (Opus 4.8 etc.) propagates without touching this branch.
             let mut extra_env = crate::defaults::anthropic_default_models_env();
-            // When the user picks an explicit model in Settings, propagate it
-            // through ANTHROPIC_MODEL so Claude Code respects the choice.
-            // Leaving the field blank means the active model resolves through
-            // an alias (`opus`/`sonnet`/`haiku`) which the DEFAULT_*_MODEL
-            // entries above already steer toward the latest 1M variant.
             let model = llm.model.as_deref().map(str::trim).unwrap_or("");
             if !model.is_empty() {
                 extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
             }
             inject_claude_env(yaml, &extra_env)
         }
-        "ollama" | "lmstudio" | "llamacpp" => {
+        // All local providers (legacy aliases + `local`) share the same env
+        // injection. `LOCAL_PROVIDERS` is the SSOT — adding a new local name
+        // there propagates here automatically.
+        local if crate::config::LOCAL_PROVIDERS.contains(&local) => {
             let base_url = llm
                 .base_url
                 .clone()
@@ -383,20 +392,25 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
                     provider
                 )
             })?;
-            let extra_env = std::collections::HashMap::from([
+
+            // Resolve Bearer auth token. If a per-project key file exists, use
+            // it; otherwise inject the documented `sk-no-key-required` dummy so
+            // Claude Code keeps the Authorization header present (some local
+            // servers expect *any* non-empty Bearer).
+            const DUMMY_TOKEN: &str = "sk-no-key-required";
+            let auth_token = if llm.has_api_key {
+                read_local_llm_token_opt(project, "api_key").unwrap_or_else(|| {
+                    log::warn!("local-llm api_key flagged but unreadable — using dummy");
+                    DUMMY_TOKEN.to_string()
+                })
+            } else {
+                DUMMY_TOKEN.to_string()
+            };
+
+            let mut extra_env = std::collections::HashMap::from([
                 ("ANTHROPIC_BASE_URL".to_string(), base_url),
-                (
-                    "ANTHROPIC_AUTH_TOKEN".to_string(),
-                    "sk-no-key-required".to_string(),
-                ),
-                // ANTHROPIC_MODEL is Claude Code's primary mechanism for setting
-                // the active model (and what statusline / `/status` display).
-                // Without it Claude Code falls back to its account-tier default
-                // (Haiku/Sonnet) regardless of where ANTHROPIC_BASE_URL points.
+                ("ANTHROPIC_AUTH_TOKEN".to_string(), auth_token),
                 ("ANTHROPIC_MODEL".to_string(), model.to_string()),
-                // CUSTOM_MODEL_OPTION* adds a friendly entry to the `/model`
-                // picker. Documented as supplementary — useful when the gateway
-                // doesn't auto-populate the picker via /v1/models discovery.
                 (
                     "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
                     model.to_string(),
@@ -418,12 +432,53 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
                     "0".to_string(),
                 ),
             ]);
+
+            // Custom HTTP headers — stored as `Name: Value` per line for
+            // human-friendly editing, flattened to a comma-separated single
+            // line here because nerdctl-compose rejects YAML block literals
+            // inside an `environment:` sequence. `Authorization` is rejected
+            // defensively (a stale token file must not smuggle a header that
+            // would collide with the `ANTHROPIC_AUTH_TOKEN` Bearer).
+            if llm.has_custom_headers {
+                if let Some(headers) = read_local_llm_token_opt(project, "custom_headers") {
+                    let flattened = headers
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .filter(|line| {
+                            // Strip any leading `Authorization:` header.
+                            !line
+                                .split_once(':')
+                                .map(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+                                .unwrap_or(false)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !flattened.is_empty() {
+                        extra_env.insert("ANTHROPIC_CUSTOM_HEADERS".to_string(), flattened);
+                    }
+                }
+            }
+
             inject_claude_env(yaml, &extra_env)
         }
-        other => anyhow::bail!(
-            "Unsupported LLM provider '{other}'. \
-             Supported: anthropic, ollama, lmstudio, llamacpp."
-        ),
+        // Unreachable: the early guard above filters all non-LOCAL_PROVIDERS
+        // and non-"anthropic" values before this match.
+        _ => unreachable!("provider validated by early guard"),
+    }
+}
+
+/// Reads a local-LLM token file. Returns `None` on any failure (missing
+/// file, I/O error, empty content). Callers decide whether to fall back to
+/// a dummy or skip env injection.
+pub fn read_local_llm_token_opt(project: &str, file: &str) -> Option<String> {
+    let path = tokens_path(project, "local-llm", file).ok()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let trimmed = content.trim_end_matches(['\n', '\r']).to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 
@@ -441,10 +496,12 @@ pub fn strip_trailing_v1(url: &str) -> String {
 
 /// Returns the default base URL for a known local model provider.
 /// Used by the frontend to show a placeholder without duplicating the URL logic.
+/// `"local"` defaults to the Ollama port — the most common starting point;
+/// users typically replace it when pointing at a different server.
 pub fn default_base_url(provider: &str) -> Option<String> {
     let host = consts::HOST_GATEWAY_ALIAS;
     match provider {
-        "ollama" => Some(format!("http://{host}:11434")),
+        "ollama" | "local" => Some(format!("http://{host}:11434")),
         "lmstudio" => Some(format!("http://{host}:1234")),
         "llamacpp" => Some(format!("http://{host}:8080")),
         _ => None,
@@ -455,13 +512,14 @@ pub fn default_base_url(provider: &str) -> Option<String> {
 ///
 /// Invariant: the only callers (`custom_model_display_name` and
 /// `custom_model_description`) are reached only after `apply_llm_config`
-/// narrows the provider to one of the three local values below. Any other
+/// narrows the provider to one of the local values below. Any other
 /// value at this point indicates a programmer error in `apply_llm_config`.
 fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         "ollama" => "Ollama",
         "lmstudio" => "LM Studio",
         "llamacpp" => "llama.cpp",
+        "local" => "Local",
         other => unreachable!("provider_display_label called with unsupported provider '{other}'"),
     }
 }
@@ -475,8 +533,18 @@ fn custom_model_description(provider: &str) -> String {
 }
 
 /// Validates a base URL for local model providers. Rejects non-HTTP schemes,
-/// credentials, paths, query strings, and fragments.
+/// credentials, query strings, and fragments.
+///
+/// Path policy: accepts `/` (or empty), or a single-segment prefix matching
+/// `^/[A-Za-z0-9_-]+$` (e.g. LiteLLM's `/anthropic`, AWS gateway's `/v1`).
+/// Multi-segment paths, `..`, and trailing slashes on segments are rejected.
 pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
+    // Reject `..` / `.` segments in the *raw* input before url::Url parses, as
+    // the URL crate normalizes them away (`http://host/..` parses to path `/`).
+    // Without this, a malicious URL could slip through traversal checks.
+    if raw.contains("/..") || raw.contains("/./") || raw.ends_with("/.") {
+        anyhow::bail!("base_url must not contain '..' or '.' path segments");
+    }
     let parsed =
         url::Url::parse(raw).map_err(|e| anyhow::anyhow!("Invalid base_url '{}': {}", raw, e))?;
     match parsed.scheme() {
@@ -488,12 +556,115 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
     }
     let path = parsed.path();
     if path != "/" && !path.is_empty() {
-        anyhow::bail!("base_url must not contain a path (got '{}')", path);
+        // Allow a single-segment path prefix (LiteLLM `/anthropic`,
+        // AWS-style `/v1`). Anything multi-segment, traversal, or trailing
+        // slash on the segment is rejected.
+        if !path.starts_with('/') {
+            anyhow::bail!("base_url path must start with '/', got '{}'", path);
+        }
+        let segment = &path[1..];
+        let valid = !segment.is_empty()
+            && !segment.contains('/')
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !valid {
+            anyhow::bail!(
+                "base_url path must be a single segment matching ^/[A-Za-z0-9_-]+$ (got '{}')",
+                path
+            );
+        }
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
         anyhow::bail!("base_url must not contain query or fragment");
     }
     Ok(())
+}
+
+// ── Local-LLM token paths ────────────────────────────────────────────────
+//
+// Per-project secrets for the "local" LLM provider (Bearer token + custom
+// headers) live at `~/.speedwave/tokens/<project>/local-llm/<file>` with
+// owner-only perms (Unix 0o600 files, 0o700 dirs; Windows ACL deny-others).
+//
+// `tokens_path` and `ensure_token_dir` are the SSOT for resolving these paths.
+// Service and file names are whitelisted to prevent path traversal — adding a
+// new local-LLM artifact = edit one constant, not the helper signature.
+
+/// Services with token files under `~/.speedwave/tokens/<project>/<service>/`.
+/// Whitelist enforced by `tokens_path`. Plugins use a separate path discipline
+/// (validated by `plugin::validate_manifest`).
+const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm"];
+
+/// Per-service whitelist of file names allowed under
+/// `tokens/<project>/<service>/`. Adding a new file = edit this map.
+const ALLOWED_TOKEN_FILES_LOCAL_LLM: &[&str] = &["api_key", "custom_headers"];
+
+fn allowed_files_for(service: &str) -> Option<&'static [&'static str]> {
+    match service {
+        "local-llm" => Some(ALLOWED_TOKEN_FILES_LOCAL_LLM),
+        _ => None,
+    }
+}
+
+/// Resolves the on-disk path for a per-project local-LLM token file.
+/// Validates every segment against allow-lists to prevent path traversal.
+pub fn tokens_path(project: &str, service: &str, file: &str) -> anyhow::Result<PathBuf> {
+    tokens_path_in(consts::data_dir().as_path(), project, service, file)
+}
+
+/// Testable variant: resolves under an explicit data directory.
+pub fn tokens_path_in(
+    data_dir: &Path,
+    project: &str,
+    service: &str,
+    file: &str,
+) -> anyhow::Result<PathBuf> {
+    crate::validation::validate_project_name(project)?;
+    if !ALLOWED_TOKEN_SERVICES.contains(&service) {
+        anyhow::bail!("tokens_path: service '{}' not in allow-list", service);
+    }
+    let files = allowed_files_for(service).ok_or_else(|| {
+        anyhow::anyhow!("tokens_path: no file allow-list for service '{}'", service)
+    })?;
+    if !files.contains(&file) {
+        anyhow::bail!(
+            "tokens_path: file '{}' not allowed for service '{}'",
+            file,
+            service
+        );
+    }
+    Ok(data_dir
+        .join("tokens")
+        .join(project)
+        .join(service)
+        .join(file))
+}
+
+/// Ensures `~/.speedwave/tokens/<project>/<service>/` exists with owner-only
+/// perms on every level (`tokens/`, `tokens/<project>/`,
+/// `tokens/<project>/<service>/`). Validates segments via `tokens_path`.
+pub fn ensure_token_dir(project: &str, service: &str) -> anyhow::Result<PathBuf> {
+    ensure_token_dir_in(consts::data_dir().as_path(), project, service)
+}
+
+/// Testable variant.
+pub fn ensure_token_dir_in(
+    data_dir: &Path,
+    project: &str,
+    service: &str,
+) -> anyhow::Result<PathBuf> {
+    crate::validation::validate_project_name(project)?;
+    if !ALLOWED_TOKEN_SERVICES.contains(&service) {
+        anyhow::bail!("ensure_token_dir: service '{}' not in allow-list", service);
+    }
+    let tokens_root = data_dir.join("tokens");
+    crate::fs_perms::ensure_owner_only_dir(&tokens_root)?;
+    let project_dir = tokens_root.join(project);
+    crate::fs_perms::ensure_owner_only_dir(&project_dir)?;
+    let service_dir = project_dir.join(service);
+    crate::fs_perms::ensure_owner_only_dir(&service_dir)?;
+    Ok(service_dir)
 }
 
 // --- Plugin integration ---
@@ -2691,6 +2862,190 @@ mod tests {
 
     const SECURITY_RULE_COUNT: usize = 31;
 
+    /// Render the same compose template via `render_compose` with a local
+    /// LLM provider + multi-line custom_headers token, and check the result
+    /// re-parses. This is the production code path; if it diverges from
+    /// `inject_claude_env_multiline_value_keeps_yaml_parseable`, the bug
+    /// is elsewhere in the pipeline (token reader, env merger, host_tz, …).
+    #[test]
+    fn render_compose_with_multiline_custom_headers_is_valid_yaml() {
+        // Use the same locking pattern as the existing token-touching tests
+        // — they share a global `~/.speedwave/tokens` namespace and would
+        // otherwise race when run in parallel.
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let project = format!("render-multiline-headers-{}", std::process::id());
+        let tokens_dir = ensure_token_dir(&project, "local-llm")
+            .expect("ensure_token_dir must succeed in test env");
+        std::fs::write(tokens_dir.join("api_key"), "sk-test-key").unwrap();
+        std::fs::write(
+            tokens_dir.join("custom_headers"),
+            "X-Tenant-ID: foo\nX-Subscription-ID: bar\n",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm: crate::config::LlmConfig {
+                provider: Some("local".to_string()),
+                model: Some("unsloth/Qwen3.6-35B".to_string()),
+                base_url: Some("http://100.74.182.88:8888".to_string()),
+                context_tokens: None,
+                has_api_key: true,
+                has_custom_headers: true,
+            },
+        };
+        let integrations = ResolvedIntegrationsConfig::default();
+
+        let yaml = render_compose(
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &integrations,
+            None,
+        )
+        .expect("render must succeed");
+
+        // Sanitised in the panic message — the rendered YAML contains the
+        // injected ANTHROPIC_AUTH_TOKEN, which CodeQL flags as cleartext
+        // secret logging. The parse error alone identifies the regression.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
+            .unwrap_or_else(|e| panic!("rendered compose YAML must re-parse: {e}"));
+        // Custom headers must survive intact AND be on a single line —
+        // nerdctl/docker-compose YAML parsers reject block literals inside
+        // an `environment:` sequence (manifested as `line N: could not find
+        // expected ':'`), so the headers are joined with `, ` separators.
+        let env_seq = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .expect("claude.environment must be a sequence");
+        let header_entry = env_seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
+            .expect("ANTHROPIC_CUSTOM_HEADERS entry present");
+        assert!(
+            !header_entry.contains('\n'),
+            "header env var must be a single line, got: {header_entry:?}"
+        );
+        assert!(header_entry.contains("X-Tenant-ID: foo"));
+        assert!(header_entry.contains("X-Subscription-ID: bar"));
+        // The rendered scalar must also be a plain scalar in the raw YAML —
+        // a block literal (`|-`, `>`) would still parse via serde_yaml_ng but
+        // breaks nerdctl-compose, which is what triggered the original bug.
+        assert!(
+            !yaml.contains("ANTHROPIC_CUSTOM_HEADERS=\n")
+                && !yaml.contains("- |-")
+                && !yaml.contains("- |\n"),
+            "headers env var must render as a single-line plain scalar, not \
+             a block literal (would break nerdctl-compose)"
+        );
+
+        // Cleanup — best-effort, errors here would mask the assertion above.
+        let _ = std::fs::remove_file(tokens_dir.join("api_key"));
+        let _ = std::fs::remove_file(tokens_dir.join("custom_headers"));
+        let _ = std::fs::remove_dir(&tokens_dir);
+    }
+
+    /// `Authorization` in a stale `custom_headers` token must not be allowed
+    /// to smuggle a header that collides with `ANTHROPIC_AUTH_TOKEN` Bearer.
+    /// Mirrors the defensive reject in `build_llm_probe_client_with_auth`.
+    #[test]
+    fn render_compose_strips_authorization_from_custom_headers() {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let project = format!("authz-strip-{}", std::process::id());
+        let tokens_dir = ensure_token_dir(&project, "local-llm")
+            .expect("ensure_token_dir must succeed in test env");
+        std::fs::write(tokens_dir.join("api_key"), "sk-test").unwrap();
+        std::fs::write(
+            tokens_dir.join("custom_headers"),
+            "X-Tenant-ID: foo\nAuthorization: Bearer leaked\nX-Other: bar\n",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm: crate::config::LlmConfig {
+                provider: Some("local".to_string()),
+                model: Some("m".to_string()),
+                base_url: Some("http://x:1".to_string()),
+                context_tokens: None,
+                has_api_key: true,
+                has_custom_headers: true,
+            },
+        };
+        let yaml = render_compose(
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let header_entry = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
+            .expect("header entry present");
+        assert!(header_entry.contains("X-Tenant-ID"));
+        assert!(header_entry.contains("X-Other"));
+        assert!(
+            !header_entry.to_ascii_lowercase().contains("authorization"),
+            "Authorization header must be stripped, got: {header_entry:?}"
+        );
+        assert!(!header_entry.contains("leaked"));
+
+        let _ = std::fs::remove_file(tokens_dir.join("api_key"));
+        let _ = std::fs::remove_file(tokens_dir.join("custom_headers"));
+        let _ = std::fs::remove_dir(&tokens_dir);
+    }
+
+    /// Repro for the broken compose YAML observed when a user saves custom
+    /// HTTP headers for a local LLM. Multi-line `ANTHROPIC_CUSTOM_HEADERS`
+    /// values must serialise as a quoted scalar so the YAML parser does not
+    /// treat the second line as a new top-level key.
+    #[test]
+    fn inject_claude_env_multiline_value_keeps_yaml_parseable() {
+        let yaml = "services:\n  claude:\n    image: x\n    environment:\n    - PORT=4000\n";
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+            "X-Tenant-ID: foo\nX-Subscription-ID: bar".to_string(),
+        );
+        let injected = inject_claude_env(yaml, &env).expect("inject must succeed");
+        // The injected YAML must re-parse cleanly; if the multi-line value
+        // breaks YAML structure, `from_str` will fail.
+        let _doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&injected).expect("re-parsed YAML must be valid");
+        // And the header value must still be retrievable intact.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&injected).unwrap();
+        let env_seq = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .unwrap();
+        let header_entry = env_seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
+            .expect("header entry present");
+        assert!(header_entry.contains("X-Tenant-ID: foo"));
+        assert!(header_entry.contains("X-Subscription-ID: bar"));
+    }
+
     fn default_flags() -> Vec<String> {
         crate::defaults::DEFAULT_FLAGS
             .iter()
@@ -4236,6 +4591,8 @@ services:
                 model: Some("llama3.3".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4264,6 +4621,8 @@ services:
                 model: None,
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let result = render_compose(
@@ -4353,6 +4712,8 @@ services:
                 model: Some("llama3.3".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4431,6 +4792,8 @@ services:
                 model: Some("qwen2.5-coder".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4462,6 +4825,8 @@ services:
                 model: Some("deepseek-r1".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4493,6 +4858,8 @@ services:
                 model: Some("some-model".to_string()),
                 base_url: Some("http://host.docker.internal:9999".to_string()),
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let result = render_compose(
@@ -4524,6 +4891,8 @@ services:
                 model: Some("my-model".to_string()),
                 base_url: Some("http://host.docker.internal:9999".to_string()),
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let result = render_compose(
@@ -4566,9 +4935,11 @@ services:
             model: Some("llama3.3".to_string()),
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let result1 = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
-        let result2 = apply_llm_config(&result1, &llm).unwrap();
+        let result1 = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let result2 = apply_llm_config(&result1, &llm, "test-project").unwrap();
         assert_eq!(
             result1, result2,
             "apply_llm_config must be idempotent (no UUID injection)"
@@ -4594,11 +4965,63 @@ services:
     }
 
     #[test]
-    fn test_base_url_rejects_path() {
-        assert!(
-            validate_base_url("http://host.docker.internal:11434/api/v1/").is_err(),
-            "Must reject URL with path"
-        );
+    fn test_base_url_rejects_multi_segment_path() {
+        // Multi-segment paths must be rejected even with the relaxed policy.
+        for bad in &[
+            "http://host.docker.internal:11434/api/v1/",
+            "http://host.docker.internal:11434/a/b",
+            "http://host.docker.internal:11434/anthropic/v1",
+        ] {
+            assert!(
+                validate_base_url(bad).is_err(),
+                "Must reject multi-segment path: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_url_accepts_single_segment_path() {
+        // LiteLLM `/anthropic`, AWS-style `/v1`, any single ASCII segment.
+        for ok in &[
+            "http://host.docker.internal:4000/anthropic",
+            "http://litellm.local/v1",
+            "https://gateway.example.com/aws_proxy",
+            "http://host:8080/my-route",
+        ] {
+            assert!(
+                validate_base_url(ok).is_ok(),
+                "Must accept single-segment path: {ok}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_url_rejects_path_traversal() {
+        for bad in &[
+            "http://host/..",
+            "http://host/../etc",
+            "http://host/./foo",
+            "http://host/foo/",
+        ] {
+            assert!(
+                validate_base_url(bad).is_err(),
+                "Must reject traversal/trailing-slash path: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_url_rejects_query_and_fragment() {
+        for bad in &[
+            "http://host/anthropic?api_key=x",
+            "http://host/v1#section",
+            "http://host?token=x",
+        ] {
+            assert!(
+                validate_base_url(bad).is_err(),
+                "Must reject query/fragment: {bad}"
+            );
+        }
     }
 
     #[test]
@@ -4851,8 +5274,10 @@ services:
             model: Some("claude-sonnet-4-6".to_string()),
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
             env.iter().any(|e| e == "ANTHROPIC_MODEL=claude-sonnet-4-6"),
@@ -4875,8 +5300,10 @@ services:
             model: None,
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
             !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
@@ -4890,8 +5317,11 @@ services:
             model: Some("   ".to_string()),
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let rendered_blank = apply_llm_config(COMPOSE_TEMPLATE, &llm_blank).unwrap();
+        let rendered_blank =
+            apply_llm_config(COMPOSE_TEMPLATE, &llm_blank, "test-project").unwrap();
         let env_blank = get_claude_env(&rendered_blank);
         assert!(
             !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
@@ -4912,8 +5342,10 @@ services:
             model: None,
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
 
         let expected = crate::defaults::anthropic_default_models_env();
@@ -4937,11 +5369,14 @@ services:
             model: Some("llama3.3".to_string()),
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
         let llm_anthropic = LlmConfig::default();
 
-        let with_ollama = apply_llm_config(COMPOSE_TEMPLATE, &llm_ollama).unwrap();
-        let with_anthropic = apply_llm_config(COMPOSE_TEMPLATE, &llm_anthropic).unwrap();
+        let with_ollama = apply_llm_config(COMPOSE_TEMPLATE, &llm_ollama, "test-project").unwrap();
+        let with_anthropic =
+            apply_llm_config(COMPOSE_TEMPLATE, &llm_anthropic, "test-project").unwrap();
 
         let env_ollama = get_claude_env(&with_ollama);
         let env_anthropic = get_claude_env(&with_anthropic);
@@ -4985,6 +5420,8 @@ services:
                 model: Some("deepseek-r1".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -5013,6 +5450,8 @@ services:
                 model: Some("qwen2.5-coder".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -10030,5 +10469,286 @@ services:
         std::fs::write(deep.join("ok.md"), b"hi").unwrap();
         super::ensure_resources_dir_safe(&plugin, &plugin.join("claude-resources"))
             .expect("deep real-directory tree must be accepted");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Local LLM: tokens_path / ensure_token_dir / read_local_llm_token /
+    // apply_llm_config for provider="local"
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tokens_path_resolves_for_local_llm() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = super::tokens_path_in(dir.path(), "myproj", "local-llm", "api_key").unwrap();
+        let expected = dir
+            .path()
+            .join("tokens")
+            .join("myproj")
+            .join("local-llm")
+            .join("api_key");
+        assert_eq!(p, expected);
+    }
+
+    #[test]
+    fn tokens_path_rejects_unknown_service() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::tokens_path_in(dir.path(), "myproj", "../etc", "api_key").is_err());
+        assert!(super::tokens_path_in(dir.path(), "myproj", "slack", "token").is_err());
+    }
+
+    #[test]
+    fn tokens_path_rejects_unknown_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::tokens_path_in(dir.path(), "myproj", "local-llm", "../passwd").is_err());
+        assert!(super::tokens_path_in(dir.path(), "myproj", "local-llm", "random").is_err());
+    }
+
+    #[test]
+    fn tokens_path_rejects_invalid_project_name() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::tokens_path_in(dir.path(), "../etc", "local-llm", "api_key").is_err());
+    }
+
+    #[test]
+    fn ensure_token_dir_creates_three_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let service_dir = super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
+
+        assert!(service_dir.is_dir());
+        assert!(dir.path().join("tokens").is_dir());
+        assert!(dir.path().join("tokens").join("myproj").is_dir());
+        assert!(dir
+            .path()
+            .join("tokens")
+            .join("myproj")
+            .join("local-llm")
+            .is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_token_dir_sets_0o700_on_all_levels() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
+
+        for level in &[
+            dir.path().join("tokens"),
+            dir.path().join("tokens").join("myproj"),
+            dir.path().join("tokens").join("myproj").join("local-llm"),
+        ] {
+            let mode = std::fs::metadata(level).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "expected 0o700 at {}, got 0o{mode:o}",
+                level.display()
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_token_dir_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
+        // Second call must succeed and not change tree.
+        super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
+    }
+
+    #[test]
+    fn apply_llm_config_local_provider_renders_with_dummy_when_no_key() {
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("my-model".to_string()),
+            base_url: Some("http://host.docker.internal:8080/anthropic".to_string()),
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let env = get_claude_env(&rendered);
+
+        // Dummy token when has_api_key=false.
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
+            "Expected dummy token, got env: {env:?}"
+        );
+        // Base URL with path prefix preserved.
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:8080/anthropic"),
+            "Base URL with path prefix lost, got env: {env:?}"
+        );
+        // Friendly label uses "Local".
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=my-model (Local)"),
+            "Expected 'Local' display label, got env: {env:?}"
+        );
+        // Custom headers NOT injected when has_custom_headers=false.
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_CUSTOM_HEADERS=")),
+            "Custom headers must not be injected when flag is false, got env: {env:?}"
+        );
+    }
+
+    #[test]
+    fn apply_llm_config_local_uses_default_base_url_when_none() {
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("foo".to_string()),
+            base_url: None,
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let env = get_claude_env(&rendered);
+        let expected = format!("ANTHROPIC_BASE_URL={}", default_base_url("local").unwrap());
+        assert!(
+            env.iter().any(|e| e == &expected),
+            "Expected default base_url for 'local', got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn default_base_url_for_local_matches_ollama() {
+        // Both resolve to the same canonical default — `local` is the new name
+        // for "an Anthropic-Messages-speaking server"; Ollama port is the most
+        // common starting point.
+        assert_eq!(default_base_url("local"), default_base_url("ollama"));
+    }
+
+    #[test]
+    fn provider_display_label_local_returns_local() {
+        assert_eq!(provider_display_label("local"), "Local");
+    }
+
+    /// Crash recovery invariant: if `update_llm_config` writes the token file
+    /// but a crash kills the process before `save_user_config` flips the
+    /// `has_api_key=true` flag, the orphaned token file is left on disk with
+    /// `has_api_key=false` in config. `apply_llm_config` must **ignore the
+    /// orphaned file** and fall back to the documented dummy. Otherwise an
+    /// abandoned token could silently leak into a future container render.
+    #[test]
+    fn apply_llm_config_ignores_orphaned_token_when_flag_is_false() {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+
+        let project = format!("crash-recovery-{}", std::process::id());
+        let dir = ensure_token_dir(&project, "local-llm")
+            .expect("ensure_token_dir must succeed in test env");
+        let api_key_path = dir.join("api_key");
+        // Simulate the orphan: a token written by an interrupted save that
+        // never reached config.json.
+        crate::fs_perms::write_restricted_file_atomic(&api_key_path, "leaked-secret-from-crash")
+            .expect("write must succeed");
+
+        // Config carries `has_api_key=false` (crash before flag flip).
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("test-model".to_string()),
+            base_url: Some("http://host.docker.internal:8080".to_string()),
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, &project).unwrap();
+        let env = get_claude_env(&rendered);
+
+        // Critical: dummy, not the orphaned secret.
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
+            "Orphaned token file MUST NOT leak when has_api_key=false. \
+             Got env: {env:?}"
+        );
+        assert!(
+            !env.iter().any(|e| e.contains("leaked-secret-from-crash")),
+            "Leaked secret must not appear in rendered YAML: {env:?}"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&api_key_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// CRITICAL: multi-line `ANTHROPIC_CUSTOM_HEADERS` (one `Name: Value` per
+    /// line in the on-disk token file) must be flattened to a single-line,
+    /// comma-separated env entry before injection. nerdctl-compose / Docker
+    /// Compose YAML parsers reject block literals inside an `environment:`
+    /// sequence — a multi-line scalar produces `yaml: line N: could not find
+    /// expected ':'` and `compose up` fails. Claude Code's
+    /// `ANTHROPIC_CUSTOM_HEADERS` parser accepts both newline- and
+    /// comma-separated forms, so flattening is lossless.
+    ///
+    /// Test guarantees:
+    /// 1. The injected env var value is present in the YAML environment list.
+    /// 2. The value is a single line (no `\n`), with each header joined by
+    ///    `, ` separators.
+    /// 3. Every original header survives intact.
+    /// 4. The rendered YAML re-parses cleanly (defensive check against future
+    ///    regressions that might re-introduce block-literal serialisation).
+    #[test]
+    fn apply_llm_config_multiline_custom_headers_survives_yaml_roundtrip() {
+        use std::sync::Mutex;
+        // Serialize across test threads — apply_llm_config reads from the
+        // real `tokens_path` which is global state. Each invocation uses a
+        // unique project name so per-project files do not collide.
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+
+        let project = format!("custom-headers-roundtrip-{}", std::process::id());
+        let dir = ensure_token_dir(&project, "local-llm")
+            .expect("ensure_token_dir must succeed in test env");
+        let headers_path = dir.join("custom_headers");
+        let multiline = "X-Foo: bar\nX-Tenant-ID: acme\nOcp-Apim-Subscription-Key: secret-123";
+        crate::fs_perms::write_restricted_file_atomic(&headers_path, multiline)
+            .expect("write_restricted_file_atomic must succeed");
+
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("test-model".to_string()),
+            base_url: Some("http://host.docker.internal:8080".to_string()),
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: true,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, &project).unwrap();
+
+        // Step 1: the env entry is present as a string.
+        let env = get_claude_env(&rendered);
+        let entry = env
+            .iter()
+            .find(|e| e.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
+            .unwrap_or_else(|| panic!("ANTHROPIC_CUSTOM_HEADERS not injected: {env:?}"));
+        let value = entry
+            .strip_prefix("ANTHROPIC_CUSTOM_HEADERS=")
+            .expect("env entry must start with prefix");
+
+        // Step 2: value is single-line, comma-joined, with every original
+        // header preserved.
+        assert!(
+            !value.contains('\n'),
+            "ANTHROPIC_CUSTOM_HEADERS must be a single line (nerdctl-compose \
+             rejects block literals inside an environment: sequence), got: {value:?}"
+        );
+        for header in multiline.split('\n') {
+            assert!(
+                value.contains(header),
+                "header {header:?} missing after flattening, got: {value:?}"
+            );
+        }
+        // Step 3: full re-parse defends against future serialiser changes
+        // that might re-introduce block literals.
+        let _: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendered)
+            .expect("rendered compose must re-parse — block-literal regression?");
+
+        // Cleanup — best-effort, errors here would mask the assertion above.
+        let _ = std::fs::remove_file(&headers_path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

@@ -539,6 +539,29 @@ impl ContainerRuntime for LimaRuntime {
         Ok(command)
     }
 
+    fn vm_exec(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        stdin: &[u8],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<super::VmExecOutput> {
+        self.require_running()?;
+        let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
+        let remote_cmd = super::shell_quote_argv(&argv);
+
+        let mut command = crate::binary::command("limactl");
+        command.args([
+            "shell",
+            consts::lima_vm_name(),
+            "--",
+            "sh",
+            "-c",
+            &remote_cmd,
+        ]);
+        super::vm_exec_run(command, stdin, timeout)
+    }
+
     fn is_available(&self) -> bool {
         let limactl_ok = self.runner.run("limactl", &["--version"]).is_ok();
         if !limactl_ok {

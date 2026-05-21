@@ -101,7 +101,7 @@ describe('LlmProviderComponent', () => {
     expect(component.saved).toBe(false);
   });
 
-  it('loads config on init', async () => {
+  it('loads config on init (legacy `ollama` auto-migrates to `local` with banner)', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -119,7 +119,11 @@ describe('LlmProviderComponent', () => {
     component.ngOnInit();
     await fixture.whenStable();
 
-    expect(component.provider).toBe('ollama');
+    // Legacy provider name auto-migrated to `local` for the UI; the
+    // legacyMigrationProvider flag drives the migration banner.
+    expect(component.provider).toBe('local');
+    expect(component.legacyMigrationProvider).toBe('ollama');
+    expect(component.provider).not.toBe('ollama');
     expect(component.model).toBe('llama3.3');
     expect(component.baseUrl).toBe('http://localhost:11434');
     expect(component.defaultBaseUrl).toBe('http://host.docker.internal:11434');
@@ -149,14 +153,8 @@ describe('LlmProviderComponent', () => {
     component.provider = 'anthropic';
     expect(component.modelPlaceholder()).toBe('claude-sonnet-4-6');
 
-    component.provider = 'ollama';
+    component.provider = 'local';
     expect(component.modelPlaceholder()).toBe('llama3.3');
-
-    component.provider = 'lmstudio';
-    expect(component.modelPlaceholder()).toBe('qwen2.5-coder');
-
-    component.provider = 'llamacpp';
-    expect(component.modelPlaceholder()).toBe('deepseek-r1');
   });
 
   it('saves config and sets saved flag', async () => {
@@ -365,17 +363,17 @@ describe('LlmProviderComponent', () => {
     expect(refreshSpy).not.toHaveBeenCalled();
   });
 
-  it('renders four provider cards in a radiogroup', async () => {
+  it('renders two provider cards (anthropic + local) in a radiogroup', async () => {
     component.ngOnInit();
     await fixture.whenStable();
     fixture.detectChanges();
 
     const cards = fixture.nativeElement.querySelectorAll('[data-testid^="settings-llm-provider-"]');
-    expect(cards.length).toBe(4);
+    expect(cards.length).toBe(2);
     const ids = Array.from(cards).map((c) =>
       (c as HTMLElement).getAttribute('data-testid')?.replace('settings-llm-provider-', '')
     );
-    expect(ids).toEqual(['anthropic', 'ollama', 'lmstudio', 'llamacpp']);
+    expect(ids).toEqual(['anthropic', 'local']);
   });
 
   it('marks the active provider card with aria-checked=true', async () => {
@@ -386,11 +384,11 @@ describe('LlmProviderComponent', () => {
     const anthropicCard = fixture.nativeElement.querySelector(
       '[data-testid="settings-llm-provider-anthropic"]'
     );
-    const ollamaCard = fixture.nativeElement.querySelector(
-      '[data-testid="settings-llm-provider-ollama"]'
+    const localCard = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-provider-local"]'
     );
     expect(anthropicCard.getAttribute('aria-checked')).toBe('true');
-    expect(ollamaCard.getAttribute('aria-checked')).toBe('false');
+    expect(localCard.getAttribute('aria-checked')).toBe('false');
   });
 
   it('shows base URL and a backend-served model dropdown for anthropic', async () => {
@@ -672,9 +670,9 @@ describe('LlmProviderComponent', () => {
           discoverCalls.push(args);
           if (opts.discover) {
             const ids = await opts.discover(args);
-            return ids.map((id) => ({ id }));
+            return { models: ids.map((id) => ({ id })) };
           }
-          return [];
+          return { models: [] };
         default:
           return undefined;
       }
@@ -793,7 +791,7 @@ describe('LlmProviderComponent', () => {
       if (cmd === 'discover_llm_models') {
         callIdx += 1;
         if (callIdx === 1) return await slow;
-        return ['model-from-second'];
+        return { models: [{ id: 'model-from-second' }] };
       }
       return undefined;
     };
@@ -811,7 +809,7 @@ describe('LlmProviderComponent', () => {
     await fixture.whenStable();
     expect(component.discoveryState.kind).toBe('ready');
     if (component.discoveryState.kind === 'ready') {
-      expect(component.discoveryState.models).toEqual(['model-from-second']);
+      expect(component.discoveryState.models).toEqual([{ id: 'model-from-second' }]);
       expect(component.discoveryState.url).toBe('http://b.invalid');
     }
   });

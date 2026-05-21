@@ -167,17 +167,8 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
 // HTTP client helper
 // ---------------------------------------------------------------------------
 
-/// Builds a reqwest client configured for Redmine API calls.
-///
-/// - No redirect following (prevents SSRF via open redirects)
-/// - Custom User-Agent header
-/// - No cookie jar
 fn build_redmine_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(format!("Speedwave-Desktop/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+    crate::http_util::build_hardened_client(None)
 }
 
 // ---------------------------------------------------------------------------

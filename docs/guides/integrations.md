@@ -531,7 +531,31 @@ You can run Claude Code inside Speedwave against a local LLM server instead of A
 
 ### Non-standard addresses
 
-The `custom` provider no longer exists. If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), pick the closest matching provider (Ollama, LM Studio, or llama.cpp) and override the **Base URL** field to point at your server. The URL must use `http://` or `https://` and must not include a path.
+If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), select any local provider and override the **Base URL** field. The URL must use `http://` or `https://` and may include a single-segment path prefix such as `/anthropic` (LiteLLM) or `/v1` (AWS-style gateways). Multi-segment paths and query strings are rejected.
+
+### Servers requiring authentication
+
+When the local server requires a Bearer token (vLLM `--api-key`, LM Studio with "Require Authentication" enabled, llama.cpp `--api-key`, LiteLLM `LITELLM_MASTER_KEY`, corporate gateways):
+
+1. In Settings → LLM Provider, enter the token in the **api_key** field. The value is stored in `~/.speedwave/tokens/<project>/local-llm/api_key` (chmod 0600) — the on-disk config never contains the secret.
+2. Click **Discover models** to verify connectivity (the probe sends an `Authorization: Bearer <token>` header and a 1-token `/v1/messages` sanity request).
+
+A leading `Bearer ` typed by mistake is stripped automatically (Claude Code already adds the prefix). Clearing the field and saving deletes the stored token; saving without touching the field leaves the stored token untouched.
+
+### Custom headers (Azure APIM, corporate gateways)
+
+For gateways that require a non-`Authorization` header (e.g. `Ocp-Apim-Subscription-Key`, tenant routing), use the **custom_headers** textarea. Format: one `Name: Value` per line. The parser rejects `Authorization` (use the api_key field instead), `Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`, and any CRLF in values (HTTP request-smuggling defense).
+
+### LiteLLM proxy (route via `/anthropic`)
+
+LiteLLM exposes an Anthropic-compatible path at `/anthropic`. Configure it as:
+
+- **Base URL:** `http://host.docker.internal:4000/anthropic`
+- **api_key:** the value of `LITELLM_MASTER_KEY` set on the LiteLLM server
+
+### Servers without `/v1/messages`
+
+Speedwave requires the server to implement Anthropic Messages on `POST /v1/messages`. Pure OpenAI Chat Completions servers (vLLM stock, TGI, Triton) **will not work for chat** — Settings shows a yellow banner after Discover when the sanity probe detects a missing `/v1/messages` endpoint. Resolve by running a translation proxy (LiteLLM with `/anthropic` route is the common choice) between Speedwave and the OpenAI-only server.
 
 ## See Also
 
