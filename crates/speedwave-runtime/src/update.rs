@@ -195,6 +195,7 @@ pub fn update_containers(
         &resolved,
         &integrations,
         Some(runtime),
+        &compose::HostBridgesInfo::default(),
     )?;
 
     // 3a. OS prerequisite check

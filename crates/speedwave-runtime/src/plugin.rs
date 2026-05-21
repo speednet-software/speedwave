@@ -82,6 +82,68 @@ pub struct PluginManifest {
     /// Core integrations this plugin depends on (e.g. `["sharepoint"]`).
     #[serde(default)]
     pub requires_integrations: Vec<String>,
+    /// Host-side WebSocket bridge declaration. Optional — only plugins
+    /// that need to pair their container worker with a desktop-side
+    /// application set this. Speedwave Desktop spawns one `HostBridge`
+    /// per declaration; container workers receive the bridge URL and
+    /// token via env vars named here. See ADR-064.
+    #[serde(default)]
+    pub host_bridge: Option<HostBridgeManifest>,
+}
+
+/// Host-bridge declaration in `plugin.json`. Speedwave Desktop reads
+/// this at startup and spawns a `HostBridge` configured per these
+/// fields; `compose::apply_plugins` injects `{url_env}` and `{token_env}`
+/// into the worker's environment.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HostBridgeManifest {
+    /// Env var name for the bridge URL injected into the container worker.
+    pub url_env: String,
+    /// Env var name for the auth token injected into the container worker.
+    pub token_env: String,
+    /// One entry per role: header- or query-param-authenticated client.
+    /// Pairing mode requires at least two distinct roles.
+    pub roles: HashMap<String, HostBridgeRoleAuth>,
+    /// CSRF / Origin policy. Defaults to `reject_if_present`.
+    #[serde(default)]
+    pub origin_policy: HostBridgeOriginPolicy,
+    /// Per-frame size cap in bytes. `None` = no cap.
+    #[serde(default)]
+    pub max_frame_bytes: Option<usize>,
+    /// What to do on same-role collision. Defaults to `evict_older`.
+    #[serde(default)]
+    pub collision_policy: HostBridgeCollisionPolicy,
+    /// Pending slot timeout in seconds. `None` = no timeout.
+    #[serde(default)]
+    pub pending_slot_timeout_secs: Option<u64>,
+    /// Display name written into the lock file's `ideName` field.
+    pub display_name: String,
+}
+
+/// Per-role auth scheme declaration.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "scheme", rename_all = "snake_case")]
+pub enum HostBridgeRoleAuth {
+    /// HTTP header — clients that can set arbitrary headers on upgrade.
+    Header { name: String },
+    /// `?<name>=<token>` — required for browser-based clients.
+    QueryParam { name: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBridgeOriginPolicy {
+    #[default]
+    RejectIfPresent,
+    AcceptIfAuthIsQueryParam,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBridgeCollisionPolicy {
+    Reject,
+    #[default]
+    EvictOlder,
 }
 
 /// Streaming progress event emitted while `install_plugin` runs.
@@ -1986,6 +2048,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec!["sharepoint".to_string()],
+            host_bridge: None,
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: PluginManifest = serde_json::from_str(&json).unwrap();
@@ -2095,6 +2158,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let tmp = tempfile::tempdir().unwrap();
             let result = validate_manifest(&manifest, tmp.path());
@@ -2125,6 +2189,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -2151,6 +2216,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         // No Containerfile created
@@ -2182,6 +2248,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -2223,6 +2290,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -2288,6 +2356,7 @@ mod tests {
             mem_limit: Some("512m".to_string()),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
@@ -2328,6 +2397,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -2446,6 +2516,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:2.0.0");
     }
@@ -2469,6 +2540,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:custom-tag");
     }
@@ -2632,6 +2704,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2685,6 +2758,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2718,6 +2792,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2752,6 +2827,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2795,6 +2871,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3884,6 +3961,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         // Replicate the duplicate check from install_plugin
@@ -3920,6 +3998,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let conflict_found = if let Some(ref sid) = conflict_manifest.service_id {
@@ -3967,6 +4046,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -4069,6 +4149,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -4098,6 +4179,7 @@ mod tests {
             mem_limit: Some("256m; rm -rf /".to_string()),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4122,6 +4204,7 @@ mod tests {
             mem_limit: Some("256m".to_string()),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4146,6 +4229,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: Some("2.0'; injected".to_string()),
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4170,6 +4254,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: Some("4.0".to_string()),
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4194,6 +4279,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: Some("4.0".to_string()),
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
@@ -4229,6 +4315,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4259,6 +4346,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4289,6 +4377,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -4318,6 +4407,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4345,6 +4435,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4369,6 +4460,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4402,6 +4494,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4432,6 +4525,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec!["nonexistent-service".to_string()],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4462,6 +4556,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![consts::BUILT_IN_SERVICE_IDS[0].to_string()],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4492,6 +4587,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4721,6 +4817,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("ReadWrite must be rejected for plugins");
@@ -4757,6 +4854,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("slug colliding with built-in compose name must be rejected");
@@ -4814,6 +4912,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("dangerous env key must be rejected");
@@ -4846,6 +4945,7 @@ mod tests {
             mem_limit: Some("999g".to_string()),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("mem_limit beyond cap must be rejected");
@@ -4876,6 +4976,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: Some("16".to_string()),
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("cpu_limit beyond cap must be rejected");
@@ -4910,6 +5011,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: Some(bad.to_string()),
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err =
                 validate_manifest(&manifest, dir.path()).expect_err("cpu_limit must be rejected");
@@ -4950,6 +5052,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("non-object settings_schema must be rejected");
@@ -4987,6 +5090,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("oversized settings_schema must be rejected");
@@ -5023,6 +5127,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         validate_manifest(&manifest, dir.path()).expect("valid schema must pass");
     }
@@ -5861,6 +5966,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         }
     }
 

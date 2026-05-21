@@ -158,7 +158,14 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
     let rt = runtime::detect_runtime();
     let rt_ref: Option<&dyn crate::runtime::ContainerRuntime> =
         if rt.is_available() { Some(&*rt) } else { None };
-    let yaml = compose::render_compose(name, &canonical_str, &resolved, &integrations, rt_ref)?;
+    let yaml = compose::render_compose(
+        name,
+        &canonical_str,
+        &resolved,
+        &integrations,
+        rt_ref,
+        &compose::HostBridgesInfo::default(),
+    )?;
 
     // ── Phase 2: commit (all writes) ─────────────────────────────────────
 

@@ -1393,6 +1393,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let allowed_keys: Vec<&str> = manifest

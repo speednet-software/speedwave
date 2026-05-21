@@ -38,6 +38,34 @@ fn resolve_tokens_dir(project_name: &str) -> PathBuf {
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
 const COMPOSE_TEMPLATE: &str = include_str!("../../../containers/compose.template.yml");
 
+/// One live host-side bridge that compose can advertise to a container
+/// worker. The plugin manifest's `host_bridge` declaration drives both
+/// `slug` (which plugin to match) and the env-var names; the Desktop
+/// process supplies the runtime values (`port`, `auth_token`).
+#[derive(Clone, Debug)]
+pub struct HostBridgeRegistration {
+    /// Plugin slug — matched against `PluginManifest.slug` during
+    /// `apply_plugins_from_verified` to decide which worker receives
+    /// the env vars.
+    pub plugin_slug: String,
+    /// TCP port the bridge listens on (loopback only).
+    pub port: u16,
+    /// UUID v4 minted by the bridge at startup.
+    pub auth_token: String,
+    /// Env var name for the bridge URL injected into the worker.
+    pub url_env: String,
+    /// Env var name for the auth token injected into the worker.
+    pub token_env: String,
+}
+
+/// Snapshot of every host-side bridge currently active. CLI builds and
+/// early Desktop startup pass an empty list — affected plugins log
+/// `BRIDGE_NOT_CONFIGURED` and degrade gracefully.
+#[derive(Clone, Debug, Default)]
+pub struct HostBridgesInfo {
+    pub bridges: Vec<HostBridgeRegistration>,
+}
+
 /// Renders a compose.yml for a given project by substituting template variables.
 pub fn render_compose(
     project_name: &str,
@@ -45,6 +73,7 @@ pub fn render_compose(
     resolved_config: &ResolvedClaudeConfig,
     integrations: &ResolvedIntegrationsConfig,
     runtime: Option<&dyn ContainerRuntime>,
+    bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
     let data_dir = consts::data_dir();
@@ -154,6 +183,7 @@ pub fn render_compose(
         integrations,
         &network_name,
         &tokens_dir,
+        bridges,
     )?;
 
     // Propagate host timezone into every service; must run after plugin injection.
@@ -525,6 +555,7 @@ fn apply_plugins(
     integrations: &ResolvedIntegrationsConfig,
     network_name: &str,
     tokens_dir: &std::path::Path,
+    bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
     let plugins = plugin::list_verified_plugins()?;
     apply_plugins_from_verified(
@@ -535,6 +566,7 @@ fn apply_plugins(
         network_name,
         tokens_dir,
         &plugins,
+        bridges,
     )
 }
 
@@ -544,6 +576,11 @@ fn apply_plugins(
 /// `apply_plugins`; tests inject crafted scenarios (forged manifest,
 /// dangling `claude-resources` symlink, slug collision) without
 /// touching the user's real data dir.
+// Internal helper exposed only for tests that need to inject crafted
+// `VerifiedPlugin` fixtures; the public entrypoint is `apply_plugins`.
+// Eight arguments is the cost of mirroring `render_compose`'s shape
+// without introducing a context struct that would touch every caller.
+#[allow(clippy::too_many_arguments)]
 fn apply_plugins_from_verified(
     yaml: &str,
     project_name: &str,
@@ -552,6 +589,7 @@ fn apply_plugins_from_verified(
     network_name: &str,
     tokens_dir: &std::path::Path,
     plugins: &[plugin::VerifiedPlugin],
+    bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
     if plugins.is_empty() {
         return Ok(yaml.to_string());
@@ -628,6 +666,31 @@ fn apply_plugins_from_verified(
                 consts::PORT_WORKER
             );
             inject_worker_env(&mut doc, &worker_env, &url);
+
+            // Plugin's manifest may declare a host-side WebSocket bridge
+            // (see ADR-064). When the Desktop has registered one for this
+            // slug, inject the env vars the plugin asked for.
+            if manifest.host_bridge.is_some() {
+                if let Some(registration) = bridges.bridges.iter().find(|r| r.plugin_slug == *slug)
+                {
+                    let compose_name = plugin::derive_compose_name(sid);
+                    let bridge_url =
+                        format!("ws://{}:{}/", consts::HOST_GATEWAY_ALIAS, registration.port);
+                    add_service_env_var(
+                        &mut doc,
+                        &compose_name,
+                        &registration.url_env,
+                        &bridge_url,
+                    )?;
+                    add_service_env_var(
+                        &mut doc,
+                        &compose_name,
+                        &registration.token_env,
+                        &registration.auth_token,
+                    )?;
+                    ensure_host_gateway_extra_host(&mut doc, &compose_name);
+                }
+            }
         }
 
         // Mount claude-resources to claude container. The resources dir
@@ -3124,6 +3187,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_ok());
         let yaml = result.unwrap();
@@ -3160,6 +3224,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3217,6 +3282,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -3249,6 +3315,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3330,6 +3397,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -3387,6 +3455,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3423,6 +3492,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3460,6 +3530,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3496,6 +3567,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3588,6 +3660,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3668,6 +3741,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -3695,6 +3769,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let expected = format!("MCP_HUB_PORT={}", crate::consts::PORT_BASE);
@@ -3721,6 +3796,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3767,6 +3843,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3817,6 +3894,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
@@ -3867,6 +3945,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3981,6 +4060,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -4046,6 +4126,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -4244,6 +4325,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         // Ollama: direct injection via default_base_url SSOT (no /v1 suffix — ADR-040)
@@ -4272,6 +4354,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -4298,6 +4381,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         // Default anthropic: no proxy, no ANTHROPIC_BASE_URL override
@@ -4361,6 +4445,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -4439,6 +4524,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -4470,6 +4556,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -4501,6 +4588,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -4532,6 +4620,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -4993,6 +5082,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -5021,6 +5111,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -5045,6 +5136,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let expected = format!("CLAUDE_VERSION={}", crate::defaults::CLAUDE_VERSION);
@@ -5077,6 +5169,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .expect("render_compose should succeed");
 
@@ -5867,6 +5960,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6067,6 +6161,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -6130,6 +6225,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -6161,6 +6257,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -6196,6 +6293,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -6239,6 +6337,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6273,6 +6372,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6307,6 +6407,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6434,11 +6535,33 @@ services:
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig::default();
-        assert!(render_compose("", "/tmp/proj", &resolved, &integrations, None).is_err());
-        assert!(render_compose("../evil", "/tmp/proj", &resolved, &integrations, None).is_err());
-        assert!(
-            render_compose(&"a".repeat(64), "/tmp/proj", &resolved, &integrations, None).is_err()
-        );
+        assert!(render_compose(
+            "",
+            "/tmp/proj",
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default()
+        )
+        .is_err());
+        assert!(render_compose(
+            "../evil",
+            "/tmp/proj",
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default()
+        )
+        .is_err());
+        assert!(render_compose(
+            &"a".repeat(64),
+            "/tmp/proj",
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default()
+        )
+        .is_err());
     }
 
     #[test]
@@ -6742,6 +6865,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(
             result.is_ok(),
@@ -6944,8 +7068,15 @@ services:
             context7: true,
             ..ResolvedIntegrationsConfig::default()
         };
-        let result =
-            render_compose("test-project", "/workspace", &config, &integrations, None).unwrap();
+        let result = render_compose(
+            "test-project",
+            "/workspace",
+            &config,
+            &integrations,
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
         let expected = container_user();
 
@@ -7041,6 +7172,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         }
     }
 
@@ -7319,6 +7451,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
@@ -7367,6 +7500,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let svc = plugin::generate_plugin_service(
             &manifest,
@@ -7462,6 +7596,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -7836,6 +7971,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         // generate_plugin_service requires a port for MCP plugins,
@@ -8768,6 +8904,7 @@ networks:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         }];
 
         // Compose with plugin service already present (as apply_plugins would leave it)
@@ -8879,6 +9016,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let violations = SecurityCheck::run(&yaml, "test", &[manifest], &test_expected_paths());
         assert!(
@@ -9655,6 +9793,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -9880,10 +10019,16 @@ services:
         plugin_dir: &Path,
         mem_limit: Option<&str>,
     ) -> plugin::VerifiedPlugin {
-        // MCP plugins (service_id present) require a Containerfile per
-        // validate_manifest. Stub one in the fixture dir so apply_plugins
-        // re-validation passes the existence check and proceeds to the
-        // render-time invariants we actually want to test.
+        fixture_verified_plugin_full(slug, service_id, plugin_dir, mem_limit, None)
+    }
+
+    fn fixture_verified_plugin_full(
+        slug: &str,
+        service_id: Option<&str>,
+        plugin_dir: &Path,
+        mem_limit: Option<&str>,
+        host_bridge: Option<plugin::HostBridgeManifest>,
+    ) -> plugin::VerifiedPlugin {
         if service_id.is_some() {
             std::fs::create_dir_all(plugin_dir).ok();
             std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").ok();
@@ -9905,8 +10050,22 @@ services:
             mem_limit: mem_limit.map(String::from),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge,
         };
         plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
+    }
+
+    fn fixture_host_bridge_manifest(url_env: &str, token_env: &str) -> plugin::HostBridgeManifest {
+        plugin::HostBridgeManifest {
+            url_env: url_env.into(),
+            token_env: token_env.into(),
+            roles: std::collections::HashMap::new(),
+            origin_policy: plugin::HostBridgeOriginPolicy::default(),
+            max_frame_bytes: None,
+            collision_policy: plugin::HostBridgeCollisionPolicy::default(),
+            pending_slot_timeout_secs: None,
+            display_name: "Fixture".into(),
+        }
     }
 
     /// `apply_plugins` re-runs `validate_manifest` so a manifest whose
@@ -9931,6 +10090,7 @@ services:
             "test-net",
             tmp.path(),
             &[vp],
+            &super::HostBridgesInfo::default(),
         );
         let err = result.expect_err("oversized mem_limit must be rejected at render");
         assert!(err.to_string().contains("exceeds maximum"));
@@ -9977,6 +10137,7 @@ services:
             "test-net",
             tmp.path(),
             &[vp],
+            &super::HostBridgesInfo::default(),
         )
         .expect_err("collision must abort the render");
         assert!(
@@ -10005,6 +10166,7 @@ services:
             "test-net",
             tmp.path(),
             &[vp],
+            &super::HostBridgesInfo::default(),
         )
         .expect("happy path must render");
         assert!(
@@ -10030,5 +10192,227 @@ services:
         std::fs::write(deep.join("ok.md"), b"hi").unwrap();
         super::ensure_resources_dir_safe(&plugin, &plugin.join("claude-resources"))
             .expect("deep real-directory tree must be accepted");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Figma bridge injection
+    // ──────────────────────────────────────────────────────────────────────
+
+    fn render_with_host_bridge_plugin(
+        slug: &str,
+        url_env: &str,
+        token_env: &str,
+        bridges: &super::HostBridgesInfo,
+    ) -> anyhow::Result<String> {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join(slug);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin_full(
+            slug,
+            Some(slug),
+            &plugin_dir,
+            None,
+            Some(fixture_host_bridge_manifest(url_env, token_env)),
+        );
+        super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            "test-project",
+            "/tmp/test",
+            &fixture_integrations_with_enabled(slug),
+            "test-net",
+            tmp.path(),
+            &[vp],
+            bridges,
+        )
+    }
+
+    #[test]
+    fn test_render_compose_default_bridges_omits_host_bridge_env() {
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &super::HostBridgesInfo::default(),
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("FIGMA_BRIDGE_URL"),
+            "host-bridge env must NOT be injected when bridges is empty, got:\n{yaml}"
+        );
+        assert!(!yaml.contains("FIGMA_BRIDGE_TOKEN"));
+    }
+
+    #[test]
+    fn test_render_compose_with_host_bridge_registration_injects_url_and_token() {
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "figma".to_string(),
+                port: 54321,
+                auth_token: "test-token-abc".to_string(),
+                url_env: "FIGMA_BRIDGE_URL".to_string(),
+                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("FIGMA_BRIDGE_URL"),
+            "FIGMA_BRIDGE_URL must be injected, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("FIGMA_BRIDGE_TOKEN"),
+            "FIGMA_BRIDGE_TOKEN must be injected, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("54321"),
+            "port must appear in URL, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("test-token-abc"),
+            "token must appear in env, got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn test_render_compose_host_bridge_url_uses_host_docker_internal() {
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "figma".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "FIGMA_BRIDGE_URL".to_string(),
+                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("ws://host.docker.internal:54321/"),
+            "URL must use host.docker.internal alias, got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn test_render_compose_host_bridge_adds_extra_hosts_for_plugin_service() {
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "figma".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "FIGMA_BRIDGE_URL".to_string(),
+                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let services = doc.get("services").and_then(|v| v.as_mapping()).unwrap();
+        let mcp_figma = services
+            .get(serde_yaml_ng::Value::String("mcp-figma".to_string()))
+            .and_then(|v| v.as_mapping())
+            .expect("mcp-figma service must be present");
+        let extra_hosts = mcp_figma
+            .get(serde_yaml_ng::Value::String("extra_hosts".to_string()))
+            .expect("mcp-figma needs extra_hosts for host.docker.internal");
+        let entries: Vec<String> = extra_hosts
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.starts_with("host.docker.internal:")),
+            "extra_hosts must include host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_from_verified_skips_bridge_for_plugins_without_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("notbridge");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin("notbridge", Some("notbridge"), &plugin_dir, None);
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "notbridge".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "SOMETHING_URL".to_string(),
+                token_env: "SOMETHING_TOKEN".to_string(),
+            }],
+        };
+        let yaml = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            "test-project",
+            "/tmp/test",
+            &fixture_integrations_with_enabled("notbridge"),
+            "test-net",
+            tmp.path(),
+            &[vp],
+            &bridges,
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("SOMETHING_URL"),
+            "plugin without host_bridge manifest must NOT receive bridge env, got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_from_verified_skips_bridge_when_no_registration_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("figma");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin_full(
+            "figma",
+            Some("figma"),
+            &plugin_dir,
+            None,
+            Some(fixture_host_bridge_manifest(
+                "FIGMA_BRIDGE_URL",
+                "FIGMA_BRIDGE_TOKEN",
+            )),
+        );
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "other".to_string(),
+                port: 54322,
+                auth_token: "x".to_string(),
+                url_env: "OTHER_URL".to_string(),
+                token_env: "OTHER_TOKEN".to_string(),
+            }],
+        };
+        let yaml = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            "test-project",
+            "/tmp/test",
+            &fixture_integrations_with_enabled("figma"),
+            "test-net",
+            tmp.path(),
+            &[vp],
+            &bridges,
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("FIGMA_BRIDGE_URL"),
+            "figma plugin declares host_bridge but no registration matches its slug, got:\n{yaml}"
+        );
     }
 }

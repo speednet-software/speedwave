@@ -9,6 +9,7 @@
 
 mod auth;
 mod auth_commands;
+mod bridges;
 mod chat;
 mod clipboard_bridge;
 mod cloudstorage_cmd;
@@ -22,7 +23,7 @@ mod history;
 mod host_exec_cmd;
 mod host_path;
 mod http_util;
-mod ide_bridge;
+use bridges::ide_bridge;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
@@ -68,7 +69,7 @@ use tauri::Manager;
 
 use reconcile::{
     ExitCleanupContext, SharedAutoCheckHandle, SharedHostExec, SharedIdeBridge, SharedMcpOs,
-    SharedOauth,
+    SharedOauth, SharedPluginBridges,
 };
 
 pub(crate) use host_path::recovered_host_path;
@@ -790,16 +791,20 @@ fn select_ide(
     state: tauri::State<SharedIdeBridge>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Validate that the port belongs to a currently detected IDE
-    if !health::list_available_ides()
-        .iter()
-        .any(|i| i.port == Some(port))
-    {
+    // Validate against the raw live-port list (pre-dedupe): UI may pick
+    // an older-window port that `list_available_ides` collapsed away, but
+    // we still want the user to be able to connect to that specific window.
+    if !health::is_ide_port_alive(port) {
+        log::warn!(
+            target: "ide_bridge",
+            "select_ide: port {port} is not a live IDE lock"
+        );
         return Err(format!(
             "IDE on port {} is not in the detected IDEs list",
             port
         ));
     }
+    log::info!(target: "ide_bridge", "select_ide: connecting to {ide_name} on port {port}");
 
     // Persist the selection to config.json
     config::with_config_lock(|| {
@@ -832,6 +837,27 @@ fn select_ide(
 fn get_selected_ide() -> Result<Option<speedwave_runtime::config::SelectedIde>, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     Ok(user_config.selected_ide)
+}
+
+/// User-initiated disconnect from the upstream IDE. Clears both the live
+/// bridge proxy and the persisted `selected_ide` so a restart will not
+/// auto-reconnect.
+#[tauri::command]
+fn disconnect_ide(state: tauri::State<SharedIdeBridge>) -> Result<(), String> {
+    log::info!(target: "ide_bridge", "disconnect_ide: clearing upstream");
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        user_config.selected_ide = None;
+        config::save_user_config(&user_config)
+    })
+    .map_err(|e| e.to_string())?;
+    let guard = state
+        .lock()
+        .map_err(|e| format!("Bridge mutex poisoned: {e}"))?;
+    if let Some(bridge) = guard.as_ref() {
+        bridge.clear_upstream();
+    }
+    Ok(())
 }
 
 use diagnostics::export_diagnostics;
@@ -882,6 +908,127 @@ fn init_and_start_ide_bridge_inner(app_handle: &tauri::AppHandle) -> Option<ide_
             log::error!("IDE Bridge init error: {e}");
             None
         }
+    }
+}
+
+/// Iterate every verified plugin whose manifest declares a `host_bridge`
+/// block and spawn a `PluginHostBridge` for it. Each bridge listens for
+/// the lifetime of the Desktop process — the worker container connects
+/// only after the plugin is enabled in a project, but the lock file +
+/// listener are available from startup so the user can paste credentials
+/// into the host-side plugin UI any time (see ADR-064).
+fn init_and_start_plugin_bridges(
+    plugin_bridges: &SharedPluginBridges,
+    app_handle: &tauri::AppHandle,
+) {
+    let plugins = match speedwave_runtime::plugin::list_verified_plugins() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("plugin bridges init: list_verified_plugins failed: {e}");
+            return;
+        }
+    };
+    for vp in plugins {
+        let manifest = match vp.manifest.host_bridge.clone() {
+            Some(m) => m,
+            None => continue,
+        };
+        let slug = vp.manifest.slug.clone();
+        match crate::bridges::plugin_host_bridge::PluginHostBridge::new(&slug, manifest) {
+            Ok(mut bridge) => {
+                let handle = app_handle.clone();
+                let event_slug = slug.clone();
+                bridge.set_event_callback(std::sync::Arc::new(move |evt| {
+                    use crate::bridges::plugin_host_bridge::PluginBridgeEvent;
+                    use tauri::Emitter;
+                    let kind = match &evt {
+                        PluginBridgeEvent::SlotOccupied { .. } => "slot_occupied",
+                        PluginBridgeEvent::Paired { .. } => "paired",
+                        PluginBridgeEvent::Disconnected { .. } => "disconnected",
+                        PluginBridgeEvent::PairBusy => "pair_busy",
+                        PluginBridgeEvent::EvictedOlder { .. } => "evicted_older",
+                        PluginBridgeEvent::PendingTimeout { .. } => "pending_timeout",
+                    };
+                    let mut payload = serde_json::json!({
+                        "slug": event_slug,
+                        "kind": kind,
+                    });
+                    match &evt {
+                        PluginBridgeEvent::SlotOccupied { role }
+                        | PluginBridgeEvent::EvictedOlder { role }
+                        | PluginBridgeEvent::PendingTimeout { role } => {
+                            payload["role"] = serde_json::Value::String(role.clone());
+                        }
+                        PluginBridgeEvent::Paired { roles } => {
+                            payload["roles"] = serde_json::json!(roles);
+                        }
+                        PluginBridgeEvent::Disconnected { reason } => {
+                            payload["reason"] = serde_json::Value::String(reason.clone());
+                        }
+                        PluginBridgeEvent::PairBusy => {}
+                    }
+                    let _ = handle.emit("plugin_bridge_event", payload);
+                }));
+                if let Err(e) = bridge.start() {
+                    log::error!("plugin bridge[{slug}] start error: {e}");
+                    continue;
+                }
+                log::info!("plugin bridge[{slug}] started on port {}", bridge.port());
+                if let Ok(mut map) = plugin_bridges.lock() {
+                    map.insert(slug, bridge);
+                }
+            }
+            Err(e) => {
+                log::error!("plugin bridge[{slug}] init error: {e}");
+            }
+        }
+    }
+}
+
+/// Tauri command: credentials a host-side companion app (e.g. the Figma
+/// Desktop plugin UI) pastes into its connect dialog. URL uses
+/// `127.0.0.1` (loopback); the container-side URL using
+/// `host.docker.internal` is injected by `render_compose`.
+#[tauri::command]
+fn plugin_bridge_get_credentials(
+    slug: String,
+    plugin_bridges: tauri::State<SharedPluginBridges>,
+) -> Result<serde_json::Value, String> {
+    let guard = plugin_bridges
+        .lock()
+        .map_err(|e| format!("mutex poisoned: {e}"))?;
+    let bridge = guard
+        .get(&slug)
+        .ok_or_else(|| format!("plugin bridge '{slug}' not running"))?;
+    let creds = bridge.credentials_for_local_ui();
+    Ok(serde_json::json!({
+        "slug": slug,
+        "url": creds.local_ui_url,
+        "token": creds.token,
+    }))
+}
+
+/// Tauri command: status snapshot for the Plugin Detail UI (port +
+/// running state). Auth token is not returned here — use
+/// `plugin_bridge_get_credentials` when the user explicitly asks for it.
+#[tauri::command]
+fn plugin_bridge_get_status(
+    slug: String,
+    plugin_bridges: tauri::State<SharedPluginBridges>,
+) -> Result<serde_json::Value, String> {
+    let guard = plugin_bridges
+        .lock()
+        .map_err(|e| format!("mutex poisoned: {e}"))?;
+    match guard.get(&slug) {
+        Some(bridge) => Ok(serde_json::json!({
+            "slug": slug,
+            "running": true,
+            "port": bridge.port(),
+        })),
+        None => Ok(serde_json::json!({
+            "slug": slug,
+            "running": false,
+        })),
     }
 }
 
@@ -1437,13 +1584,19 @@ fn main() {
     let transcript_forwarders: transcription_cmd::ForwardersHandle =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
-    // Shared state: IDE Bridge, mcp-os, per-project host_exec workers, per-project
-    // oauth workers, auto-check handle. (Tray menu state is a managed `TrayMenuState`, below.)
+    // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project host_exec
+    // workers, per-project oauth workers, auto-check handle.
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
+    let plugin_bridges: SharedPluginBridges = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let host_exec: SharedHostExec = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
+
+    // Publish the plugin-bridges map globally so compose-render call sites
+    // in setup_wizard / containers_cmd can read it without taking tauri::State
+    // (they are free functions and reachable from CLI helpers too).
+    reconcile::set_global_plugin_bridges(plugin_bridges.clone());
 
     let tray_available = Arc::new(AtomicBool::new(false));
     let tray_available_setup = tray_available.clone();
@@ -1452,6 +1605,7 @@ fn main() {
     // One context struct → one clone per exit path instead of N parallel Arc clones.
     let cleanup_ctx = ExitCleanupContext {
         ide_bridge: ide_bridge.clone(),
+        plugin_bridges: plugin_bridges.clone(),
         mcp_os: mcp_os.clone(),
         host_exec: host_exec.clone(),
         oauth: oauth.clone(),
@@ -1559,6 +1713,7 @@ fn main() {
         .manage(initial_session)
         .manage(compose_lock.clone())
         .manage(ide_bridge.clone())
+        .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
         .manage(host_exec.clone())
         .manage(oauth.clone())
@@ -1637,6 +1792,13 @@ fn main() {
 
                 // Start IDE Bridge
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
+
+                // Start a `PluginHostBridge` for every verified plugin whose
+                // manifest declares a `host_bridge` block. Always on,
+                // mirroring IDE Bridge's "passive listener" behavior — when
+                // the corresponding plugin is disabled in a project the
+                // bridge sits idle on its loopback port.
+                init_and_start_plugin_bridges(&plugin_bridges, app.handle());
 
                 // Start mcp-os process
                 let script = speedwave_runtime::build::resolve_mcp_os_script();
@@ -1970,8 +2132,12 @@ fn main() {
             // IDE Bridge
             list_available_ides,
             select_ide,
+            disconnect_ide,
             get_selected_ide,
             get_bridge_status,
+            // Per-plugin host bridges (manifest-declared)
+            plugin_bridge_get_credentials,
+            plugin_bridge_get_status,
             // Container updates
             update_commands::update_containers,
             update_commands::rollback_containers,

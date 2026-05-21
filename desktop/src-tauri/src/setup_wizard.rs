@@ -843,12 +843,17 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let project_path = std::path::Path::new(project_dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);
+    // Bridge info is sourced from the globally-shared plugin-bridges map
+    // via crate::reconcile::current_bridges_info(). When no host-bridged
+    // plugins are running yet (e.g. during early setup), the registration
+    // list is empty and the corresponding env vars stay absent in compose.yml.
     let yaml = compose::render_compose(
         project,
         project_dir,
         &resolved,
         &integrations,
         Some(rt.as_ref()),
+        &crate::reconcile::current_bridges_info(),
     )?;
 
     let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_else(|e| {

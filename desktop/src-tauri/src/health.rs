@@ -317,16 +317,42 @@ pub fn list_available_ides() -> Vec<DetectedIde> {
     lock_dir.map(|d| list_ides_in_dir(&d)).unwrap_or_default()
 }
 
+/// Returns true if `~/.claude/ide/<port>.lock` exists and points at a
+/// live (PID + TCP) IDE instance. Probes a single lock file rather than
+/// scanning the whole directory — used by `select_ide` to validate the
+/// exact port the UI sent, including older-window ports that
+/// `list_available_ides` collapses away during dedupe.
+pub fn is_ide_port_alive(port: u16) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let lock_path = home.join(".claude").join("ide").join(format!("{port}.lock"));
+    is_ide_lock_alive(&lock_path)
+}
+
 /// Tracks the last number of detected IDEs so we only log at `info!` level
 /// when the count changes (avoids spam from the 5-second polling cycle).
 static LAST_IDE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Scans `lock_dir/*.lock` for IDE lock files with live PIDs and listening ports.
+///
+/// Deduplicates by `(pid, ide_name)` — VS Code writes one lock per window,
+/// all sharing the same `pid`. Keeps the entry with the most recent mtime so
+/// the user-visible list collapses to one row per IDE instance.
 fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
     let Ok(entries) = std::fs::read_dir(lock_dir) else {
         return Vec::new();
     };
-    let result: Vec<DetectedIde> = entries
+
+    struct LiveEntry {
+        ide_name: String,
+        port: u16,
+        ws_url: Option<String>,
+        pid: u32,
+        mtime: std::time::SystemTime,
+    }
+
+    let live: Vec<LiveEntry> = entries
         .flatten()
         .filter_map(|e| {
             let p = e.path();
@@ -340,7 +366,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                 .to_string();
             let contents = std::fs::read_to_string(&p).ok()?;
             let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
-            // Skip our own lock file — user wants to see external IDEs only
             let pid = v
                 .get("pid")
                 .and_then(|x| x.as_u64())
@@ -351,7 +376,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                     return None;
                 }
             }
-            // Derive port from filename when missing in JSON (e.g. "<port>.lock")
             let json_port = v
                 .get("port")
                 .and_then(|x| x.as_u64())
@@ -361,7 +385,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                     .and_then(|s| s.to_str())
                     .and_then(|s| s.parse::<u16>().ok())
             });
-            // Port is required to verify liveness — skip entries without one.
             let Some(port) = port else {
                 debug!("{filename}: skipped (no resolvable port)");
                 return None;
@@ -371,12 +394,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
             } else {
                 "filename"
             };
-            // Skip stale lock files where PID is gone or port is no longer listening.
-            // IDE_POLL_TIMEOUT (50ms) keeps the synchronous health poll fast even with
-            // N stale files. Unlike ide_bridge.rs:cleanup_stale_lock_files() which uses
-            // a port-only TCP check with 200ms timeout, health.rs verifies both PID
-            // liveness and TCP port reachability via is_lock_entry_alive() — called
-            // directly with already-parsed data to avoid a redundant file read.
             let Some(check_pid) = pid else {
                 debug!("{filename}: skipped (no valid PID in JSON)");
                 return None;
@@ -394,12 +411,45 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                 .and_then(|x| x.as_str())
                 .unwrap_or("Unknown")
                 .to_string();
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
             debug!("{filename}: alive, ide={ide_name} port={port} (from {port_source})");
-            Some(DetectedIde {
+            Some(LiveEntry {
                 ide_name,
-                port: Some(port),
+                port,
                 ws_url,
+                pid: check_pid,
+                mtime,
             })
+        })
+        .collect();
+
+    // Dedupe by (pid, ide_name): one IDE process can spawn multiple lock
+    // files (e.g. VS Code with several windows). Keep the most recent.
+    let mut by_key: std::collections::HashMap<(u32, String), LiveEntry> =
+        std::collections::HashMap::new();
+    for entry in live {
+        let key = (entry.pid, entry.ide_name.clone());
+        match by_key.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if entry.mtime > slot.get().mtime {
+                    slot.insert(entry);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+        }
+    }
+
+    let result: Vec<DetectedIde> = by_key
+        .into_values()
+        .map(|e| DetectedIde {
+            ide_name: e.ide_name,
+            port: Some(e.port),
+            ws_url: e.ws_url,
         })
         .collect();
 
@@ -802,6 +852,71 @@ mod tests {
         assert_eq!(result[0].ide_name, "Cursor");
         assert_eq!(result[0].port, Some(port));
         drop(listener);
+    }
+
+    #[test]
+    fn list_ides_dedupes_multiple_windows_of_same_ide() {
+        use super::list_ides_in_dir;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // One external "VS Code" process with two windows → two lock files,
+        // same pid + ide_name, different ports.
+        let (external_pid, _child) = external_alive_pid();
+        let listener_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = listener_a.local_addr().unwrap().port();
+        let listener_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_b = listener_b.local_addr().unwrap().port();
+        for port in [port_a, port_b] {
+            std::fs::write(
+                tmp.path().join(format!("{port}.lock")),
+                format!(
+                    r#"{{"pid":{external_pid},"port":{port},"wsUrl":"ws://127.0.0.1:{port}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Visual Studio Code","transport":"ws"}}"#,
+                ),
+            )
+            .unwrap();
+        }
+
+        let result = list_ides_in_dir(tmp.path());
+        assert_eq!(
+            result.len(),
+            1,
+            "two windows of the same IDE process must collapse to one entry"
+        );
+        assert_eq!(result[0].ide_name, "Visual Studio Code");
+        // Either port is acceptable — the dedupe keeps the latest mtime.
+        assert!(result[0].port == Some(port_a) || result[0].port == Some(port_b));
+        drop(listener_a);
+        drop(listener_b);
+    }
+
+    #[test]
+    fn list_ides_keeps_separate_entries_for_different_ides() {
+        use super::list_ides_in_dir;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Two distinct IDEs (different ide_name) — must NOT collapse.
+        let (external_pid, _child) = external_alive_pid();
+        let l_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = l_a.local_addr().unwrap().port();
+        let l_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_b = l_b.local_addr().unwrap().port();
+        std::fs::write(
+            tmp.path().join(format!("{port_a}.lock")),
+            format!(
+                r#"{{"pid":{external_pid},"port":{port_a},"wsUrl":"ws://127.0.0.1:{port_a}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Cursor","transport":"ws"}}"#,
+            ),
+        ).unwrap();
+        std::fs::write(
+            tmp.path().join(format!("{port_b}.lock")),
+            format!(
+                r#"{{"pid":{external_pid},"port":{port_b},"wsUrl":"ws://127.0.0.1:{port_b}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Visual Studio Code","transport":"ws"}}"#,
+            ),
+        ).unwrap();
+
+        let result = list_ides_in_dir(tmp.path());
+        assert_eq!(result.len(), 2);
+        drop(l_a);
+        drop(l_b);
     }
 
     #[test]

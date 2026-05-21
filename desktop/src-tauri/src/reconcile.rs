@@ -1,19 +1,69 @@
 // Compose port reconciliation, exit cleanup, and resource directory resolution.
 
-use crate::ide_bridge;
+use crate::bridges::ide_bridge;
+use crate::bridges::plugin_host_bridge::PluginHostBridge;
 use crate::mcp_os_process;
 use crate::types::BundleReconcileStatus;
+use speedwave_runtime::compose::{HostBridgeRegistration, HostBridgesInfo};
 use speedwave_runtime::host_exec_process::HostExecProcess;
 use speedwave_runtime::oauth_process::OauthProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::Emitter;
 
 /// Shared handle for the IDE Bridge instance.
 pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
+
+/// Per-slug handles for all host-bridged plugins started by Desktop.
+pub(crate) type SharedPluginBridges = Arc<Mutex<HashMap<String, PluginHostBridge>>>;
+
+/// Process-global handle to the active plugin bridges. Set once in
+/// `main.rs::setup()`; read from free functions like
+/// `compose::render_compose` callers in setup_wizard / containers_cmd
+/// which do not receive Tauri state. Empty until init.
+static GLOBAL_PLUGIN_BRIDGES: OnceLock<SharedPluginBridges> = OnceLock::new();
+
+/// Register the plugin-bridges map for global access. Called once at
+/// startup. Subsequent calls are no-ops (`OnceLock` semantics).
+pub(crate) fn set_global_plugin_bridges(handle: SharedPluginBridges) {
+    let _ = GLOBAL_PLUGIN_BRIDGES.set(handle);
+}
+
+/// Look up the global plugin-bridges map. Returns `None` before
+/// `set_global_plugin_bridges` has run.
+pub(crate) fn global_plugin_bridges() -> Option<&'static SharedPluginBridges> {
+    GLOBAL_PLUGIN_BRIDGES.get()
+}
+
+/// Collect compose-injection registrations for every running plugin
+/// bridge. Returns an empty `HostBridgesInfo` when nothing is registered
+/// yet (e.g. CLI-only contexts).
+pub(crate) fn current_bridges_info() -> HostBridgesInfo {
+    let registrations = global_plugin_bridges()
+        .and_then(|handle| handle.lock().ok())
+        .map(|guard| {
+            guard
+                .iter()
+                .map(|(slug, bridge)| {
+                    let info = bridge.compose_info();
+                    HostBridgeRegistration {
+                        plugin_slug: slug.clone(),
+                        port: info.port,
+                        auth_token: info.auth_token,
+                        url_env: bridge.manifest().url_env.clone(),
+                        token_env: bridge.manifest().token_env.clone(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    HostBridgesInfo {
+        bridges: registrations,
+    }
+}
 
 /// Shared handle for the mcp-os process.
 pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
@@ -31,6 +81,7 @@ pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::J
 #[derive(Clone)]
 pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
+    pub(crate) plugin_bridges: SharedPluginBridges,
     pub(crate) mcp_os: SharedMcpOs,
     /// Per-project `host_exec` workers — stopped + files cleaned on exit.
     pub(crate) host_exec: SharedHostExec,
@@ -788,6 +839,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let ide_bridge = ctx.ide_bridge.clone();
+    let plugin_bridges = ctx.plugin_bridges.clone();
     let mcp_os = ctx.mcp_os.clone();
     let host_exec = ctx.host_exec.clone();
     let oauth = ctx.oauth.clone();
@@ -816,6 +868,16 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 }
             }
             Err(e) => log::warn!("IDE Bridge cleanup skipped: mutex poisoned: {e}"),
+        }
+        match plugin_bridges.lock() {
+            Ok(mut map) => {
+                for (slug, mut bridge) in map.drain() {
+                    if let Err(e) = bridge.stop() {
+                        log::warn!("plugin bridge[{slug}] stop error: {e}");
+                    }
+                }
+            }
+            Err(e) => log::warn!("plugin bridges cleanup skipped: mutex poisoned: {e}"),
         }
         match mcp_os.lock() {
             Ok(mut guard) => {
@@ -1649,6 +1711,7 @@ mod tests {
     fn cleanup_once_idempotency() {
         let ctx = ExitCleanupContext {
             ide_bridge: SharedIdeBridge::default(),
+            plugin_bridges: SharedPluginBridges::default(),
             mcp_os: SharedMcpOs::default(),
             host_exec: SharedHostExec::default(),
             oauth: SharedOauth::default(),
