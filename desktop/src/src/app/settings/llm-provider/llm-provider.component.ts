@@ -17,7 +17,9 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 import {
   AnthropicModel,
   DiscoveredModel,
+  DiscoverResult,
   formatContextLabel,
+  LEGACY_LOCAL_PROVIDERS,
   LlmConfigResponse,
 } from '../../models/llm';
 
@@ -38,16 +40,14 @@ type DiscoveryState =
 
 /** Static catalog of provider cards rendered at the top of the section. */
 interface ProviderCard {
-  readonly id: 'anthropic' | 'ollama' | 'lmstudio' | 'llamacpp';
+  readonly id: 'anthropic' | 'local';
   readonly label: string;
   readonly tag: string;
 }
 
 const PROVIDER_CARDS: readonly ProviderCard[] = [
   { id: 'anthropic', label: 'anthropic', tag: 'cloud · default' },
-  { id: 'ollama', label: 'ollama', tag: 'local' },
-  { id: 'lmstudio', label: 'lm studio', tag: 'local' },
-  { id: 'llamacpp', label: 'llama.cpp', tag: 'local' },
+  { id: 'local', label: 'local', tag: 'any anthropic messages server' },
 ] as const;
 
 /** Manages LLM provider selection and configuration. */
@@ -63,12 +63,18 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
         Where Claude Code routes model requests. Local providers keep everything on-device.
       </p>
 
-      <!-- Provider cards (4-col grid on lg) -->
-      <div
-        class="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4"
-        role="radiogroup"
-        aria-label="LLM provider"
-      >
+      @if (legacyMigrationProvider) {
+        <div
+          class="mono mt-3 rounded border border-[var(--accent-dim)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] text-[var(--accent)]"
+          data-testid="settings-llm-legacy-migration-banner"
+        >
+          Provider name <code>{{ legacyMigrationProvider }}</code> is legacy and will be saved as
+          <code>local</code> on next Save. Same behavior, unified naming.
+        </div>
+      }
+
+      <!-- Provider cards (2-column grid: anthropic + local) -->
+      <div class="mt-4 grid grid-cols-2 gap-2" role="radiogroup" aria-label="LLM provider">
         @for (p of providerCards; track p.id) {
           <button
             type="button"
@@ -214,6 +220,58 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
       </div>
 
       @if (provider !== 'anthropic') {
+        <!-- API key (optional) — Bearer token for servers requiring auth. -->
+        <div class="mt-4">
+          <label
+            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            for="llm-api-key"
+            >api_key (optional)</label
+          >
+          <input
+            id="llm-api-key"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            [value]="apiKey"
+            (input)="onApiKeyInput($any($event.target).value)"
+            [placeholder]="
+              hasApiKey
+                ? '••••• (key saved — type to replace, clear to remove)'
+                : 'Bearer token (e.g. sk-…)'
+            "
+            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+            data-testid="settings-llm-api-key"
+          />
+        </div>
+
+        <!-- Custom headers (optional) — Azure APIM, corporate gateways. -->
+        <div class="mt-3">
+          <label
+            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            for="llm-custom-headers"
+            >custom_headers (optional)</label
+          >
+          <textarea
+            id="llm-custom-headers"
+            rows="3"
+            spellcheck="false"
+            [value]="customHeaders"
+            (input)="onCustomHeadersInput($any($event.target).value)"
+            [placeholder]="
+              hasCustomHeaders
+                ? '••••• (saved — type to replace, clear to remove)'
+                : 'X-Tenant-ID: foo
+Ocp-Apim-Subscription-Key: bar'
+            "
+            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+            data-testid="settings-llm-custom-headers"
+          ></textarea>
+          <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
+            One header per line, format <code>Name: Value</code>. Cannot set Authorization (use
+            api_key) or hop-by-hop headers.
+          </p>
+        </div>
+
         <button
           type="button"
           data-testid="settings-llm-refresh"
@@ -229,6 +287,21 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
             &#8635; discover models
           }
         </button>
+        <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
+          Sends a 1-token test request to verify chat endpoint compatibility.
+        </p>
+
+        @if (messagesEndpointOk === false) {
+          <div
+            class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
+            data-testid="settings-llm-messages-endpoint-warning"
+          >
+            <strong>Warning:</strong> the server returned a model list but did not respond to
+            <code>POST /v1/messages</code> (Anthropic Messages API). Save is allowed, but chat will
+            fail. Use a server with Anthropic Messages support (Ollama 0.14+, LM Studio 0.4.1+,
+            llama.cpp Jan 2026+, or LiteLLM via <code>/anthropic</code>).
+          </div>
+        }
       }
 
       <div class="mt-3 flex items-center gap-3">
@@ -257,6 +330,37 @@ export class LlmProviderComponent implements OnInit {
   defaultBaseUrl = '';
   saving = false;
   saved = false;
+
+  /**
+   * Local-LLM API key (Bearer). Form-only — the value never round-trips
+   * through `get_llm_config`; backend stores it in a per-project token file
+   * and exposes only `has_api_key` to the frontend. `apiKeyTouched` flips on
+   * any user edit so Save can distinguish "leave unchanged" from "set to
+   * empty" from "set to value".
+   */
+  apiKey = '';
+  apiKeyTouched = false;
+  hasApiKey = false;
+
+  /**
+   * Optional custom HTTP headers (Azure APIM, corporate gateways). Same
+   * touched-flag pattern as apiKey. Format: one `Name: Value` per line.
+   */
+  customHeaders = '';
+  customHeadersTouched = false;
+  hasCustomHeaders = false;
+
+  /** Result of the latest discovery probe — populated for `provider==="local"`. */
+  messagesEndpointOk: boolean | null = null;
+
+  /**
+   * Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) detected in the
+   * persisted config. `null` when the config carries the current `local`
+   * name or `anthropic`. Drives the auto-migration banner above the
+   * provider cards — the rewrite to `local` only happens on the next Save,
+   * which keeps downgrade safety until the user opts in.
+   */
+  legacyMigrationProvider: string | null = null;
 
   /**
    * Context window persisted in `claude.llm.context_tokens` for the active
@@ -398,6 +502,24 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
+   * Touched-flag handler — see `apiKeyTouched` doc for the tri-state rationale.
+   * @param value - New value typed by the user.
+   */
+  protected onApiKeyInput(value: string): void {
+    this.apiKey = value;
+    this.apiKeyTouched = true;
+  }
+
+  /**
+   * Touched-flag handler — see `customHeadersTouched` doc.
+   * @param value - New value typed by the user (multi-line `Name: Value`).
+   */
+  protected onCustomHeadersInput(value: string): void {
+    this.customHeaders = value;
+    this.customHeadersTouched = true;
+  }
+
+  /**
    * Resolves the value to send as `context_tokens` on save.
    *
    * - Anthropic + non-empty model id → SSOT catalog lookup.
@@ -469,16 +591,8 @@ export class LlmProviderComponent implements OnInit {
 
   /** Returns a placeholder model name based on the selected LLM provider. */
   modelPlaceholder(): string {
-    switch (this.provider) {
-      case 'ollama':
-        return 'llama3.3';
-      case 'lmstudio':
-        return 'qwen2.5-coder';
-      case 'llamacpp':
-        return 'deepseek-r1';
-      default:
-        return 'claude-sonnet-4-6';
-    }
+    if (this.provider === 'anthropic') return 'claude-sonnet-4-6';
+    return 'llama3.3';
   }
 
   /** Returns a fallback base URL placeholder when backend default_base_url is unavailable. */
@@ -510,16 +624,7 @@ export class LlmProviderComponent implements OnInit {
 
   /** Returns the UI-friendly label for the current provider. */
   private providerDisplayLabel(): string {
-    switch (this.provider) {
-      case 'ollama':
-        return 'Ollama';
-      case 'lmstudio':
-        return 'LM Studio';
-      case 'llamacpp':
-        return 'llama.cpp';
-      default:
-        return 'Provider';
-    }
+    return this.provider === 'local' ? 'Local LLM server' : 'Provider';
   }
 
   /**
@@ -611,22 +716,35 @@ export class LlmProviderComponent implements OnInit {
     this.cdr.markForCheck();
 
     try {
-      const models = await this.tauri.invoke<DiscoveredModel[]>('discover_llm_models', {
-        provider: this.provider,
-        baseUrl: effectiveUrl,
+      // Tri-state via `LlmConfigUpdate.api_key` (see types.rs).
+      const args: {
+        provider: string;
+        baseUrl: string;
+        apiKey?: string | null;
+        customHeaders?: string | null;
+      } = { provider: this.provider, baseUrl: effectiveUrl };
+      if (this.apiKeyTouched) {
+        args.apiKey = this.apiKey.trim() === '' ? null : this.apiKey;
+      }
+      if (this.customHeadersTouched) {
+        args.customHeaders = this.customHeaders.trim() === '' ? null : this.customHeaders;
+      }
+      const result = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
+        args,
       });
       // Stale-discard: drop responses whose id doesn't match the latest trigger.
       if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
       // Invariant: do_discover_llm_models maps empty lists to Err("empty"),
       // so a resolved Ok always carries a non-empty array — the success path
       // never observes length === 0.
-      this.discoveryState = { kind: 'ready', url: effectiveUrl, models };
+      this.discoveryState = { kind: 'ready', url: effectiveUrl, models: result.models };
+      this.messagesEndpointOk = result.messages_endpoint_ok ?? null;
       // Auto-select the first discovered model when the current value is
       // blank or not on the list — otherwise the <select> renders with no
       // active <option> and Save would persist an empty model name.
-      const ids = models.map((m) => m.id);
+      const ids = result.models.map((m) => m.id);
       if (!this.model || !ids.includes(this.model)) {
-        this.model = models[0].id;
+        this.model = result.models[0].id;
       }
     } catch (e: unknown) {
       if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
@@ -663,15 +781,40 @@ export class LlmProviderComponent implements OnInit {
       // ignores baseUrl entirely, so null is correct there.
       const effectiveBaseUrl =
         this.provider === 'anthropic' ? null : this.baseUrl || this.defaultBaseUrl || null;
-      await this.tauri.invoke('update_llm_config', {
-        update: {
-          provider: this.provider,
-          model: this.model || null,
-          base_url: effectiveBaseUrl,
-          context_tokens: this.resolveContextTokensForSave(),
-        },
-      });
+      const update: {
+        provider: string;
+        model: string | null;
+        base_url: string | null;
+        context_tokens: number | null;
+        api_key?: string | null;
+        custom_headers?: string | null;
+      } = {
+        provider: this.provider,
+        model: this.model || null,
+        base_url: effectiveBaseUrl,
+        context_tokens: this.resolveContextTokensForSave(),
+      };
+      if (this.apiKeyTouched) {
+        update.api_key = this.apiKey.trim() === '' ? null : this.apiKey;
+      }
+      if (this.customHeadersTouched) {
+        update.custom_headers = this.customHeaders.trim() === '' ? null : this.customHeaders;
+      }
+      await this.tauri.invoke('update_llm_config', { update });
       this.saved = true;
+      // Reset touched flags so subsequent saves don't re-send the credentials
+      // unless the user edits the fields again. Update the `has_*` flags
+      // optimistically based on what we just persisted.
+      if (this.apiKeyTouched) {
+        this.hasApiKey = !!update.api_key;
+        this.apiKey = '';
+        this.apiKeyTouched = false;
+      }
+      if (this.customHeadersTouched) {
+        this.hasCustomHeaders = !!update.custom_headers;
+        this.customHeaders = '';
+        this.customHeadersTouched = false;
+      }
       // Push the freshly-persisted context_tokens into ChatStateService so
       // the chat footer's `used / max` reflects the new model immediately,
       // not after the next session start.
@@ -707,7 +850,18 @@ export class LlmProviderComponent implements OnInit {
   private async loadConfig(): Promise<void> {
     try {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
-      this.provider = config.provider || 'anthropic';
+      const persistedProvider = config.provider || 'anthropic';
+      // Auto-migration UX: configs with legacy provider names
+      // (`ollama`/`lmstudio`/`llamacpp`) display the unified `local` card
+      // and a one-time banner. The persisted value is only rewritten on
+      // the user's next Save, preserving downgrade-safety until then.
+      if (LEGACY_LOCAL_PROVIDERS.includes(persistedProvider)) {
+        this.legacyMigrationProvider = persistedProvider;
+        this.provider = 'local';
+      } else {
+        this.legacyMigrationProvider = null;
+        this.provider = persistedProvider;
+      }
       this.model = config.model || '';
       this.baseUrl = config.base_url || '';
       this.defaultBaseUrl = config.default_base_url || '';
@@ -716,6 +870,8 @@ export class LlmProviderComponent implements OnInit {
       // instead of nulling it out.
       this.loadedLocalContextTokens =
         this.provider !== 'anthropic' ? (config.context_tokens ?? null) : null;
+      this.hasApiKey = !!config.has_api_key;
+      this.hasCustomHeaders = !!config.has_custom_headers;
       this.lastKnownProvider = this.provider;
       // Seed the per-provider cache with the backend-authoritative default for
       // the persisted provider so `isDefaultBaseUrl` can compare without a

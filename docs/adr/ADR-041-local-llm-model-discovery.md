@@ -83,8 +83,22 @@ The Tauri command signature is `discover_llm_models(provider, base_url) -> Vec<D
 ## Known Limitations
 
 - Discovery does not cache results. Every trigger re-probes. Localhost is fast enough; over a LAN the latency is bounded by the 5-second timeout.
-- Discovery does not validate that the chosen model actually serves Anthropic-compatible `/v1/messages`. Upstream compatibility errors surface only on the first chat message.
 - `rustls-tls` uses bundled CA roots, inherited from Redmine[^18]. Corporate users with custom CAs may see TLS errors on public-domain HTTPS endpoints.
+- Ollama does not implement `/v1/messages/count_tokens?beta=true`. Claude Code's token counting falls back gracefully but counts may be approximate. Tracked upstream at [ollama/ollama#13949](https://github.com/ollama/ollama/issues/13949).
+
+## Update — Unified `discover_local` and chat-endpoint sanity probe
+
+This section supersedes the per-provider endpoint table above for the unified `provider="local"` path. Legacy `ollama`/`lmstudio`/`llamacpp` continue to work via their original helpers for two release cycles.
+
+**Dialect autodetect.** A single `GET /v1/models` request returns the model list. For each entry, context window is extracted in priority order: `meta.n_ctx_train` (llama.cpp / Unsloth / vLLM inline shape), then `max_context_length` (LM Studio 0.4.1+ inline). Entries lacking inline metadata trigger a single sanity `POST /api/show` on the first missing entry: 200 → fan out to the rest with bounded concurrency (Ollama path), 404/non-2xx → all remaining missing stay `context_tokens: None`. This bounds the worst-case call count for unknown servers to **3 HTTP requests** (`/v1/models` + `/api/show` sanity + `/v1/messages` sanity), not N×404.
+
+**Bearer + custom headers.** The Tauri command accepts two tri-state credential parameters (`api_key`, `custom_headers`). Field omitted → use the project's stored token file (if `has_api_key=true`); JSON `null` or empty string → probe without auth (UI explicitly testing "without"); non-empty string → use the transient value, strip a leading `Bearer ` prefix. Custom headers are applied to the reqwest client as default headers; `Authorization` is rejected (collides with Bearer); per-line `Name: Value` parser rejects CRLF and the hop-by-hop blacklist (`Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`).
+
+**Chat-endpoint sanity probe.** Discovery additionally hits `POST /v1/messages` with a 1-token request (`{model, max_tokens: 1, messages: [{role:"user", content:"ping"}]}`, 3 s timeout). 200 / 4xx (not 404/405) → `messages_endpoint_ok: Some(true)`; 404 or 405 → `Some(false)`; transport error / timeout → `None` ("unknown"). **No OPTIONS preflight** — local servers (Ollama, llama.cpp) frequently return 405 to OPTIONS even when the endpoint exists, producing false negatives in ~90% of practical setups.
+
+Cost disclosure: on a local GPU server the probe consumes 1 token (effectively free); on cloud-backed gateways (LiteLLM, Bedrock proxies) it costs a single token billed against the user's account. The UI surfaces this disclosure under the Discover button.
+
+**Honest context-window fallback.** When discovery returns no context for the selected model, the frontend's `ChatStateService.resolveContextWindow` propagates `null` for local providers (does **not** fall back to `DEFAULT_CONTEXT_TOKENS` = 200 K). `session-stats.component` hides the `used / max` ratio and the progress bar rather than fabricating a ratio. ADR-041 "never guess" is honored at every layer.
 
 ## References
 

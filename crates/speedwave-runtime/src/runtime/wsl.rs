@@ -351,6 +351,21 @@ impl ContainerRuntime for WslRuntime {
         Ok(command)
     }
 
+    fn vm_exec(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        stdin: &[u8],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<super::VmExecOutput> {
+        let distro = self.distro();
+        let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
+        let remote_cmd = super::shell_quote_argv(&argv);
+        let mut command = crate::binary::system_command("wsl.exe");
+        command.args(["-d", distro, "--", "sh", "-c", &remote_cmd]);
+        super::vm_exec_run(command, stdin, timeout)
+    }
+
     fn is_available(&self) -> bool {
         let distro = self.distro();
         self.runner
