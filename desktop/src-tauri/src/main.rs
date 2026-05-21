@@ -27,7 +27,6 @@ use bridges::ide_bridge;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
-mod mcp_os_process;
 mod oauth_cmd;
 mod oauth_login_cmd;
 mod patch_emitter;
@@ -1138,7 +1137,7 @@ fn ensure_mcp_os_running(
     let script = speedwave_runtime::build::resolve_mcp_os_script();
     if let Some(script_path) = script {
         let script_str = script_path.to_string_lossy().to_string();
-        match mcp_os_process::McpOsProcess::spawn(&script_str) {
+        match speedwave_runtime::mcp_os_process::McpOsProcess::spawn(&script_str) {
             Ok(proc) => {
                 log::info!("ensure_mcp_os_running: started (port {})", proc.port());
                 *guard = Some(proc);
@@ -1804,7 +1803,7 @@ fn main() {
                 let script = speedwave_runtime::build::resolve_mcp_os_script();
                 if let Some(script_path) = script {
                     let script_str = script_path.to_string_lossy().to_string();
-                    match mcp_os_process::McpOsProcess::spawn(&script_str) {
+                    match speedwave_runtime::mcp_os_process::McpOsProcess::spawn(&script_str) {
                         Ok(proc) => {
                             let new_port = proc.port();
                             log::info!("mcp-os process started (port {new_port})");

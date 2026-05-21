@@ -74,9 +74,6 @@ impl HealthReport {
 /// Timeout for IDE TCP port probe during polling cycles.
 pub(crate) const IDE_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Timeout for mcp-os TCP port probe (used by both health UI and watchdog).
-const MCP_OS_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
-
 /// Check if an IDE lock file represents a live IDE by verifying PID liveness and TCP port reachability.
 pub(crate) fn is_ide_lock_alive(lock_path: &std::path::Path) -> bool {
     let contents = match std::fs::read_to_string(lock_path) {
@@ -124,42 +121,17 @@ pub(crate) fn is_pid_alive(pid: u32) -> bool {
 }
 
 /// Check if the mcp-os process is alive AND listening on its port.
-/// Used by both the health check UI (check_mcp_os) and the watchdog.
+/// Cienki re-eksport — implementacja w
+/// `speedwave_runtime::mcp_os_process::is_mcp_os_alive` (SSOT).
 pub(crate) fn is_mcp_os_alive() -> bool {
-    check_mcp_os_alive_in(speedwave_runtime::consts::data_dir())
+    speedwave_runtime::mcp_os_process::is_mcp_os_alive()
 }
 
-/// Testable inner implementation: checks PID liveness + TCP port probe
-/// against files in the given `data_dir`.
+/// Testable inner implementation; takes `data_dir` so tests can point at
+/// a temporary directory. Cienki wrapper przez runtime SSOT.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn check_mcp_os_alive_in(data_dir: &std::path::Path) -> bool {
-    let token_path = data_dir.join(speedwave_runtime::consts::MCP_OS_AUTH_TOKEN_FILE);
-    let pid_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PID_FILE);
-    let port_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PORT_FILE);
-
-    if !token_path.exists() {
-        return false;
-    }
-
-    let pid: u32 = match std::fs::read_to_string(&pid_path) {
-        Ok(s) => match s.trim().parse() {
-            Ok(p) if p > 0 => p,
-            _ => return false,
-        },
-        Err(_) => return false,
-    };
-    if !is_pid_alive(pid) {
-        return false;
-    }
-
-    let port: u16 = match std::fs::read_to_string(&port_path) {
-        Ok(s) => match s.trim().parse() {
-            Ok(p) if p > 0 => p,
-            _ => return false,
-        },
-        Err(_) => return false,
-    };
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    std::net::TcpStream::connect_timeout(&addr, MCP_OS_POLL_TIMEOUT).is_ok()
+    speedwave_runtime::mcp_os_process::is_mcp_os_alive_in(data_dir)
 }
 
 pub struct HealthMonitor;

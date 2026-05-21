@@ -1,9 +1,17 @@
+//! Process manager for the singleton mcp-os Node MCP worker (Calendar/
+//! Mail/Reminders integration). Previously lived in `desktop/src-tauri`
+//! alongside the Desktop binary; moved to `speedwave-runtime` in PR2 so
+//! the CLI can re-use it and so all three host-MCP managers live in one
+//! crate.
+
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use speedwave_runtime::consts;
-use speedwave_runtime::fs_perms::write_restricted_file;
+use crate::consts;
+use crate::fs_perms::write_restricted_file;
 
 /// Manages the mcp-os TypeScript worker as a child process.
 ///
@@ -50,7 +58,7 @@ impl McpOsProcess {
         kill_stale_by_pid_file(&pid_path);
 
         // Truncate log file if it exceeds 2 MB to prevent unbounded growth
-        speedwave_runtime::log_file::truncate_if_oversized(&log_path, 2 * 1024 * 1024);
+        crate::log_file::truncate_if_oversized(&log_path, 2 * 1024 * 1024);
 
         // Write token file with restrictive permissions
         write_restricted_file(&token_path, &token)?;
@@ -79,7 +87,7 @@ impl McpOsProcess {
         //    running as a bundled .app). This lets mcp-os resolve native CLI
         //    binaries from the flat Resources/ layout instead of the dev-mode
         //    source tree.
-        let mut cmd = speedwave_runtime::binary::command("node");
+        let mut cmd = crate::binary::command("node");
         cmd.arg(script_path);
         apply_child_env(&mut cmd, &CurrentProcessEnv);
 
@@ -236,8 +244,46 @@ impl McpOsProcess {
         if self.child.is_none() {
             return false;
         }
-        crate::health::is_mcp_os_alive()
+        is_mcp_os_alive_in(&self.data_dir)
     }
+}
+
+/// Check whether the singleton mcp-os process is alive AND listening on
+/// its port. Reads PID + port from disk in `data_dir`, then probes TCP.
+/// Used by `McpOsProcess::is_alive` and by `desktop::health::is_mcp_os_alive`.
+pub fn is_mcp_os_alive() -> bool {
+    is_mcp_os_alive_in(consts::data_dir())
+}
+
+/// Testable inner implementation; takes `data_dir` so tests can point at
+/// a temporary directory.
+pub fn is_mcp_os_alive_in(data_dir: &Path) -> bool {
+    let token_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
+    let pid_path = data_dir.join(consts::MCP_OS_PID_FILE);
+    let port_path = data_dir.join(consts::MCP_OS_PORT_FILE);
+
+    if !token_path.exists() {
+        return false;
+    }
+    let pid: u32 = match std::fs::read_to_string(&pid_path) {
+        Ok(s) => match s.trim().parse() {
+            Ok(p) if p > 0 => p,
+            _ => return false,
+        },
+        Err(_) => return false,
+    };
+    if !crate::host_mcp_process::is_pid_alive(pid) {
+        return false;
+    }
+    let port: u16 = match std::fs::read_to_string(&port_path) {
+        Ok(s) => match s.trim().parse() {
+            Ok(p) if p > 0 => p,
+            _ => return false,
+        },
+        Err(_) => return false,
+    };
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
 }
 
 impl Drop for McpOsProcess {
@@ -248,9 +294,9 @@ impl Drop for McpOsProcess {
 }
 
 // Child-env policy, stale-PID cleanup, and stdio drain are shared with the
-// other host-MCP workers in `speedwave_runtime::host_mcp_process`
+// other host-MCP workers in `crate::host_mcp_process`
 // (SSOT extracted in PR1).
-use speedwave_runtime::host_mcp_process::{
+use crate::host_mcp_process::{
     apply_child_env as apply_child_env_shared, drain_and_read_port as drain_and_read_port_shared,
     kill_stale_by_pid_file, CurrentProcessEnv, EnvSource,
 };
@@ -290,7 +336,7 @@ impl McpOsProcess {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use speedwave_runtime::host_mcp_process::{is_node_process, kill_process};
+    use crate::host_mcp_process::{is_node_process, kill_process};
     use std::io::BufRead;
 
     use serial_test::serial;

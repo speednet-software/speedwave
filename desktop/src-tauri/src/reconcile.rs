@@ -2,10 +2,10 @@
 
 use crate::bridges::ide_bridge;
 use crate::bridges::plugin_host_bridge::PluginHostBridge;
-use crate::mcp_os_process;
 use crate::types::BundleReconcileStatus;
 use speedwave_runtime::compose::{HostBridgeRegistration, HostBridgesInfo};
 use speedwave_runtime::host_exec_process::HostExecProcess;
+use speedwave_runtime::mcp_os_process;
 use speedwave_runtime::oauth_process::OauthProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
 use std::collections::HashMap;

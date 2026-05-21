@@ -17,6 +17,7 @@ pub mod host_mcp_process;
 pub mod log_file;
 pub mod log_sanitizer;
 pub mod log_ts;
+pub mod mcp_os_process;
 pub mod migration_oauth;
 pub mod oauth_process;
 pub mod os_prereqs;
