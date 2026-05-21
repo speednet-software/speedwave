@@ -703,12 +703,9 @@ async fn run_endpoint_loop(
                 let outcome_cb = outcome.clone();
 
                 let ws_config = make_ws_config(config.max_frame_bytes);
-                // The handshake callback returns `Result<Response, ErrorResponse>`
-                // where `ErrorResponse = http::Response<Option<String>>` —
-                // its layout is dictated by `tokio_tungstenite`, so we
-                // cannot box the variant. Clippy's size warning is not
-                // actionable here.
-                #[allow(clippy::result_large_err)]
+                // Result<Response, http::Response<Option<String>>> — the
+                // error variant size is dictated by tokio_tungstenite.
+                // Threshold raised in clippy.toml, no per-site allow.
                 let upgrade_result = tokio_tungstenite::accept_hdr_async_with_config(
                     stream,
                     move |req: &Request<()>, mut resp: Response<()>| {
@@ -851,9 +848,8 @@ async fn run_pairing_loop(
                 let outcome_cb = outcome.clone();
 
                 let ws_config = make_ws_config(config.max_frame_bytes);
-                // `ErrorResponse` layout is fixed by tokio_tungstenite; see the
-                // `result_large_err` allow on the endpoint accept loop above.
-                #[allow(clippy::result_large_err)]
+                // ErrorResponse layout fixed by tokio_tungstenite — see
+                // clippy.toml `result-large-err-threshold`.
                 let upgrade_result = tokio_tungstenite::accept_hdr_async_with_config(
                     stream,
                     move |req: &Request<()>, mut resp: Response<()>| {

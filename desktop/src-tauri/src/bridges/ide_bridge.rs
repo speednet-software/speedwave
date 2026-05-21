@@ -390,8 +390,11 @@ pub struct IdeBridge {
     // (in `new_with_paths`). Tests read these directly via field access.
     tcp_port: u16,
     lock_file_path: PathBuf,
-    #[cfg_attr(not(test), allow(dead_code))]
-    auth: Arc<Mutex<AuthState>>,
+    /// `_`-prefix because the field is only read inside `#[cfg(test)]
+    /// fn write_lock_file` — no production read site exists, but tests
+    /// need it via field access. Mirrors the `_path`/`_query`/… pattern
+    /// in `bridges::host_bridge::ConnectionContext`.
+    _auth: Arc<Mutex<AuthState>>,
 
     upstream: Arc<Mutex<Option<UpstreamIde>>>,
     upstream_changed_tx: tokio::sync::broadcast::Sender<()>,
@@ -429,7 +432,7 @@ impl IdeBridge {
             inner: Some(inner),
             tcp_port,
             lock_file_path,
-            auth,
+            _auth: auth,
             upstream: Arc::new(Mutex::new(None)),
             upstream_changed_tx,
             event_cb: None,
@@ -510,7 +513,7 @@ impl IdeBridge {
             inner: None,
             tcp_port,
             lock_file_path,
-            auth: Arc::new(Mutex::new(AuthState::new(auth_token.to_string()))),
+            _auth: Arc::new(Mutex::new(AuthState::new(auth_token.to_string()))),
             upstream: Arc::new(Mutex::new(None)),
             upstream_changed_tx,
             event_cb: None,
@@ -545,7 +548,7 @@ impl IdeBridge {
     /// path delegates this to HostBridge in `start()`).
     #[cfg(test)]
     pub(crate) fn write_lock_file(&self) -> anyhow::Result<()> {
-        write_lock_file_static(&self.lock_file_path, &self.auth)
+        write_lock_file_static(&self.lock_file_path, &self._auth)
     }
 
     pub fn stop(&mut self) -> anyhow::Result<()> {
