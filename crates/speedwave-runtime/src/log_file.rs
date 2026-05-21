@@ -32,10 +32,18 @@ pub fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str
 
 /// Rotate a log file if it exceeds `max_bytes` by keeping the last half
 /// (line-aligned). Preserves the most recent entries. Best-effort.
+///
+/// Cheap on the common case: only a `metadata` stat runs when the file
+/// is under the threshold (no full read until truncation is actually
+/// warranted).
 pub fn truncate_if_oversized(path: &Path, max_bytes: u64) {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) if c.len() as u64 > max_bytes => c,
+    match std::fs::metadata(path) {
+        Ok(m) if m.len() > max_bytes => {}
         _ => return,
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
     };
     let keep_from = content.len() / 2;
     let tail = match content[keep_from..].find('\n') {

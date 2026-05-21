@@ -9,6 +9,13 @@ use std::path::{Path, PathBuf};
 /// Slug validation: lowercase letters, digits, hyphens. Starts with letter. Max 64 chars.
 const SLUG_PATTERN: &str = r"^[a-z][a-z0-9-]{0,63}$";
 
+/// Public predicate version of [`validate_slug`]. Used by callers that
+/// want a `bool` rather than `Result<()>` (e.g. defense-in-depth checks
+/// in worker spec hooks).
+pub fn is_valid_slug(slug: &str) -> bool {
+    validate_slug(slug).is_ok()
+}
+
 #[derive(Debug, PartialEq)]
 pub enum TokenStatus {
     /// All required secret fields have token files.

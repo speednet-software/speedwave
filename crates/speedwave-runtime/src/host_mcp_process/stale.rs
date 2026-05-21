@@ -1,39 +1,12 @@
-//! Stale-process detection and termination shared by every host MCP
-//! worker manager.
+//! Stale-process detection helpers shared by every host MCP worker
+//! manager.
 //!
-//! On startup, each manager reads a PID from disk (left by the previous
-//! session), verifies it still points to a `node` process, then kills
-//! it. The "is this still node?" check protects us from killing
-//! unrelated PIDs that the OS may have recycled.
+//! The generic [`super::process::HostMcpProcess::spawn_with_spec`]
+//! reads the PID from `lock.json` and gates the kill behind
+//! `is_node_process` so a recycled PID for a non-node process is not
+//! touched.
 
-use std::path::Path;
 use std::process::Command;
-
-/// Read a PID from `pid_path`, verify it belongs to a `node` process,
-/// kill it, and remove the PID file. No-op if the file is missing,
-/// unreadable, or contains a non-positive integer. Best-effort — never
-/// returns an error; cleanup happens before a fresh spawn so a stale
-/// PID file is recoverable from on the next start.
-pub fn kill_stale_by_pid_file(pid_path: &Path) {
-    let pid_str = match std::fs::read_to_string(pid_path) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return,
-    };
-    let pid: u32 = match pid_str.parse() {
-        Ok(p) if p > 0 => p,
-        _ => return,
-    };
-
-    if !is_node_process(pid) {
-        log::debug!("stale PID {pid} is not a node process — skipping kill");
-        let _ = std::fs::remove_file(pid_path);
-        return;
-    }
-
-    log::info!("killing stale node process (PID {pid})");
-    kill_process(pid);
-    let _ = std::fs::remove_file(pid_path);
-}
 
 /// Check whether a PID belongs to a `node` process. Used as a safety
 /// gate before killing — if the OS recycled the PID into something
@@ -93,49 +66,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kill_stale_missing_file_is_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_path = dir.path().join("does-not-exist");
-        kill_stale_by_pid_file(&pid_path);
-    }
-
-    #[test]
-    fn kill_stale_invalid_pid_skips_kill_and_keeps_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_path = dir.path().join("pid");
-        std::fs::write(&pid_path, "not-a-number").unwrap();
-        kill_stale_by_pid_file(&pid_path);
-        assert!(
-            pid_path.exists(),
-            "non-numeric pid keeps the file untouched"
-        );
-    }
-
-    #[test]
-    fn kill_stale_zero_pid_skips_kill() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_path = dir.path().join("pid");
-        std::fs::write(&pid_path, "0").unwrap();
-        kill_stale_by_pid_file(&pid_path);
-        assert!(pid_path.exists(), "zero pid keeps the file untouched");
-    }
-
-    #[test]
-    fn kill_stale_non_node_pid_removes_file_but_does_not_kill() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_path = dir.path().join("pid");
-        // PID 1 (init/launchd) exists, is not node, must not be killed.
-        std::fs::write(&pid_path, "1").unwrap();
-        kill_stale_by_pid_file(&pid_path);
-        assert!(
-            !pid_path.exists(),
-            "non-node PID still triggers PID-file cleanup"
-        );
-    }
-
-    #[test]
     fn is_node_process_returns_false_for_pid_1() {
         // PID 1 is init/launchd on every Unix and System on Windows.
         assert!(!is_node_process(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_node_process_returns_false_for_nonexistent_pid() {
+        // Almost certainly not a node process (PID this high is rare).
+        assert!(!is_node_process(u32::MAX - 1));
     }
 }

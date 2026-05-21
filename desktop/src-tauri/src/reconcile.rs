@@ -669,19 +669,16 @@ pub(crate) fn reconcile_compose_port(
             return;
         }
 
-        // Read current compose and check if WORKER_OS_URL matches the port file
+        // Read the current mcp-os port from its unified lock.json.
         let data_dir = speedwave_runtime::consts::data_dir();
-        let port_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PORT_FILE);
-        let current_port = match std::fs::read_to_string(&port_path) {
-            Ok(c) => match c.trim().parse::<u16>() {
-                Ok(p) => p,
-                Err(e) => {
-                    log::debug!("reconcile_compose_port: port parse error: {e}");
-                    return;
-                }
-            },
-            Err(e) => {
-                log::debug!("reconcile_compose_port: port file read error: {e}");
+        let lock_path = data_dir.join(speedwave_runtime::consts::MCP_OS_LOCK_FILE);
+        let current_port = match speedwave_runtime::host_mcp_process::lock::read(
+            &lock_path,
+            speedwave_runtime::host_mcp_process::lock::LockService::McpOs,
+        ) {
+            Some(lock) => lock.port,
+            None => {
+                log::debug!("reconcile_compose_port: lock.json missing/invalid");
                 return;
             }
         };

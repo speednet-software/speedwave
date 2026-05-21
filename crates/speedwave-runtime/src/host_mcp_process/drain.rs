@@ -111,6 +111,7 @@ pub fn drain_and_read_port(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
     use std::process::{Child, Stdio};
 
     /// Spawn a `bash -c` child whose stdout emits the given lines (one
@@ -131,6 +132,42 @@ pub(crate) mod test_support {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap()
+    }
+
+    /// Minimal Node "fake worker" used by every host MCP worker manager's
+    /// spawn tests. Binds 127.0.0.1 on an OS-assigned port, announces it
+    /// on stdout as `{"port":N}` (the universal handshake — see
+    /// [`super::parse_port_line`]), then sleeps so the parent can probe
+    /// PID / port / lock.json before the child exits.
+    pub const FAKE_WORKER_JS: &str = r#"
+const http = require('http');
+const srv = http.createServer((_, r) => { r.end('ok'); });
+srv.listen(0, '127.0.0.1', () => {
+  process.stdout.write(JSON.stringify({ port: srv.address().port }) + '\n');
+});
+setTimeout(() => {}, 60000);
+"#;
+
+    /// Write [`FAKE_WORKER_JS`] to `<dir>/<name>` and return the full path.
+    /// Convenience for tests that pass a script path to `spawn_in`.
+    pub fn write_fake_worker(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, FAKE_WORKER_JS).unwrap();
+        p
+    }
+
+    /// Block (up to ~1 s) until `is_node_process(pid)` reports true.
+    /// Linux CI has a fork/execve race where the child PID exists but
+    /// `/proc/<pid>/comm` is still the parent shell briefly; this
+    /// pollster lets stale-detection tests skip past that window
+    /// instead of asserting under the race.
+    pub fn wait_for_node_comm(pid: u32) {
+        for _ in 0..40 {
+            if super::super::stale::is_node_process(pid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
     }
 }
 
@@ -219,5 +256,52 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("exited without announcing a port"));
+    }
+
+    // ── test_support smoke tests ────────────────────────────────────────
+    // These keep the shared fixtures (FAKE_WORKER_JS, write_fake_worker,
+    // wait_for_node_comm) compiling and exercised until the per-worker
+    // managers consume them directly.
+
+    #[test]
+    fn fake_worker_js_announces_a_port_and_is_picked_up_by_drain() {
+        // End-to-end smoke: write the fake worker, spawn Node on it,
+        // and confirm `drain_and_read_port` reads a non-zero port.
+        // Skips when Node is not on PATH (e.g. a stripped CI image).
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = temp_log();
+        let script = super::test_support::write_fake_worker(dir.path(), "fake.js");
+        assert!(script.exists(), "write_fake_worker must produce the file");
+        let mut child = std::process::Command::new("node")
+            .arg(&script)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let log = dir.path().join("audit.log");
+        let result = drain_and_read_port(&mut child, &log, "test-worker");
+
+        // Always kill the child before asserting so we don't leak Node processes.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let (port, _handles) = result.expect("fake worker must announce a port");
+        assert!(port > 0, "fake worker port must be non-zero");
+    }
+
+    #[test]
+    fn wait_for_node_comm_returns_quickly_for_definitely_not_node_pid() {
+        // PID 1 is init/launchd on every Unix and System on Windows —
+        // never node. `wait_for_node_comm` polls up to ~1 s; this test
+        // confirms it returns without hanging when the PID will never
+        // match. We do not assert timing — only that it returns.
+        super::test_support::wait_for_node_comm(1);
     }
 }

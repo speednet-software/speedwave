@@ -26,22 +26,44 @@ pub const PORT_BASE: u16 = 4000;
 ///
 /// See ADR-038 for the rationale behind the single-internal-port model.
 pub const PORT_WORKER: u16 = 3000;
+/// mcp-os bind-mount token file. Hub mounts this at
+/// `/secrets/os-auth-token:ro`; compose reads the port from
+/// `MCP_OS_LOCK_FILE`. Dual-written by `mcp_os_process::spawn`
+/// alongside the lock so the container sees a token-only file
+/// (never the structured JSON).
 pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
-pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
-pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
+/// Legacy `mcp-os` port file. **Migration-only** — pre-lock.json
+/// builds (Speedwave ≤ 0.10) wrote this; `mcp_os_process::spawn`
+/// folds it into `mcp-os.lock.json` on the first start after upgrade
+/// and removes it. Slated for removal once every supported user has
+/// passed through one migration cycle.
+pub const MCP_OS_LEGACY_PORT_FILE: &str = "mcp-os-port";
+/// Legacy `mcp-os` PID file. **Migration-only** — see
+/// [`MCP_OS_LEGACY_PORT_FILE`].
+pub const MCP_OS_LEGACY_PID_FILE: &str = "mcp-os-pid";
+/// Single-file lock for the mcp-os singleton. Sits in `data_dir`
+/// alongside the audit log; carries `{service, pid, port, authToken,
+/// transport}` and is the SSOT for compose port injection + watchdog.
+pub const MCP_OS_LOCK_FILE: &str = "mcp-os.lock.json";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
+
+/// Per-project unified lock file (PR3). Sits next to the audit log
+/// inside each per-project state directory. SSOT — pre-PR3 callers used
+/// three separate `port`/`pid`/`auth-token` files (see deprecated
+/// per-worker consts below).
+pub const PER_PROJECT_LOCK_FILE: &str = "lock.json";
 
 /// Subdirectory under the data dir holding per-project `host_exec` state.
 /// SSOT — do not hard-code `"host-exec"` at call sites.
 pub const HOST_EXEC_SUBDIR: &str = "host-exec";
 /// Per-project worker snapshot, written `0o600` (may hold env-value secrets).
 pub const HOST_EXEC_CONFIG_FILE: &str = "config.json";
-/// Per-project bearer token (`0o600`).
+/// Per-project bind-mount token file. Hub mounts this at
+/// `/secrets/host_exec-auth-token:ro`; compose reads the port from
+/// `PER_PROJECT_LOCK_FILE`. Dual-written by
+/// `host_exec_process::spawn_in` alongside the lock so the container
+/// sees a token-only file (never the structured JSON).
 pub const HOST_EXEC_AUTH_TOKEN_FILE: &str = "auth-token";
-/// Per-project worker listening port file.
-pub const HOST_EXEC_PORT_FILE: &str = "port";
-/// Per-project worker PID file — used for stale-process cleanup.
-pub const HOST_EXEC_PID_FILE: &str = "pid";
 /// Per-project audit log; env values redacted (ADR-054 §"Security model").
 pub const HOST_EXEC_LOG_FILE: &str = "log";
 
@@ -109,12 +131,6 @@ pub const OAUTH_SUBDIR: &str = "oauth";
 /// Per-project bearer-token → service map (`0o600`). Lets the oauth worker
 /// derive `service` from the incoming bearer instead of trusting a model-controlled param.
 pub const OAUTH_BEARER_MAP_FILE: &str = ".bearer-map.json";
-/// Per-project worker supervisor's own auth-token (used by the supervisor for handshakes/diagnostics).
-pub const OAUTH_AUTH_TOKEN_FILE: &str = "auth-token";
-/// Per-project worker listening port file.
-pub const OAUTH_PORT_FILE: &str = "port";
-/// Per-project worker PID file — used for stale-process cleanup.
-pub const OAUTH_PID_FILE: &str = "pid";
 /// Per-project audit log; refresh / forget events are appended here (no token contents).
 pub const OAUTH_LOG_FILE: &str = "audit.log";
 /// Mode for the per-project oauth state directory (owner-only).

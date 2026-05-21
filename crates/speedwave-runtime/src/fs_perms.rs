@@ -8,21 +8,31 @@
 //! and `crates/speedwave-runtime/src/host_exec_process.rs`. A third copy would
 //! have appeared for the OAuth worker; PR1 extracted before that.
 
+use std::io::Write;
 use std::path::Path;
+
+use tempfile::NamedTempFile;
 
 /// Write `content` to `path` with owner-only permissions.
 ///
-/// - Unix: opens with `O_CREAT | O_WRONLY | O_TRUNC` and mode `0o600`, then
-///   re-`chmod`s to `0o600`. The explicit chmod is load-bearing: `OpenOptions::mode`
-///   only applies on file creation, so a pre-existing file keeps its old (possibly
-///   world-readable) bits unless we reset them.
-/// - Windows: writes the file, then runs `icacls /inheritance:r /grant:r <user>:(F)`
-///   to replace the DACL with a single ACE granting the current user full control.
-///   `icacls` runs on every call, so a pre-existing inherited or relaxed ACL is
-///   replaced as well. **An `icacls` failure now returns `Err`** — previous behavior
-///   swallowed the error and logged a warning, leaving the file world-readable.
-///   ADR-009 / PR1 make Windows ACL failure a hard error so the owner-only
-///   invariant is real.
+/// Both platforms now use the same write-then-atomic-rename pattern via
+/// `tempfile::NamedTempFile`. The destination path never sees a world-readable
+/// state: the file is created in `path`'s parent directory with owner-only
+/// permissions, written, locked down, then atomically renamed into place.
+///
+/// - Unix: `NamedTempFile` opens with `O_CREAT | mode 0o600`. We explicitly
+///   re-`chmod` after writing so a pre-existing destination file's old (possibly
+///   world-readable) bits are replaced too. `persist()` is atomic on Unix —
+///   the destination is the new file or the old one, never a partial write.
+/// - Windows: tightens the ACL on the tempfile **before** rename, so the
+///   destination path never appears world-readable to a concurrent reader.
+///   Previous behavior (`fs::write(dest) + icacls dest`) opened a TOCTOU window
+///   where the destination file existed with the inherited (potentially
+///   world-readable) DACL between the two syscalls. `persist()` uses
+///   `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which is atomic on NTFS.
+///   **An `icacls` failure returns `Err`** — the tempfile is dropped before
+///   ever appearing at `path`, so no secret leaks. ADR-009 makes Windows ACL
+///   failure a hard error so the owner-only invariant is real.
 ///
 /// Existing directories at `path` are removed first (consistent with prior behavior).
 pub fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
@@ -34,30 +44,36 @@ pub fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
         std::fs::remove_dir_all(path)?;
     }
 
+    // Tempfile must live on the same filesystem as `path` — otherwise
+    // `persist()` falls back to a copy and the rename is not atomic.
+    let parent = path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "write_restricted_file: path {} has no parent directory",
+            path.display()
+        )
+    })?;
+    let mut tmp = NamedTempFile::with_prefix_in("write-", parent)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.flush()?;
+
     #[cfg(unix)]
     {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-        // `OpenOptions::mode` only applies on file creation. If the file already
-        // existed with looser bits (e.g. 0o644 from a pre-PR1 path) we must
-        // explicitly reset the mode — otherwise the "owner-only" contract is
-        // a lie on overwrite.
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::PermissionsExt;
+        // `NamedTempFile` already creates with mode 0o600, but on overwrite of
+        // an existing file `persist()` replaces the target inode entirely — the
+        // bits we set here are what the destination ends up with. Belt-and-suspenders.
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600))?;
     }
 
     #[cfg(windows)]
     {
-        std::fs::write(path, content)?;
+        // Tighten ACL on the **tempfile** before rename. The tempfile path is
+        // in the same parent directory as the destination (so rename is atomic),
+        // but the random prefix makes a concurrent reader unable to guess it.
+        // After `persist()` the destination already has the restricted DACL.
         let status = crate::binary::system_command("icacls")
             .args([
-                path.as_os_str(),
+                tmp.path().as_os_str(),
                 "/inheritance:r".as_ref(),
                 "/grant:r".as_ref(),
             ])
@@ -71,17 +87,17 @@ pub fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
         match status {
             Ok(s) if s.success() => {}
             Ok(s) => {
-                let _ = std::fs::remove_file(path);
+                // `tmp` is dropped here, which removes it — the destination
+                // path is never touched, so no secret leaks.
                 anyhow::bail!(
-                    "icacls failed (exit {}) on {}: refusing to leave a world-readable secret",
+                    "icacls failed (exit {}) on tempfile for {}: refusing to leave a world-readable secret",
                     s,
                     path.display()
                 );
             }
             Err(e) => {
-                let _ = std::fs::remove_file(path);
                 anyhow::bail!(
-                    "failed to run icacls on {}: {} — refusing to leave a world-readable secret",
+                    "failed to run icacls on tempfile for {}: {} — refusing to leave a world-readable secret",
                     path.display(),
                     e
                 );
@@ -95,6 +111,11 @@ pub fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
             "write_restricted_file: unsupported platform — add file permission logic for this target"
         );
     }
+
+    // Atomic rename. On error, `tmp` is dropped (cleanup on Unix; on Windows
+    // the tempfile path may linger but never as `path`).
+    tmp.persist(path)
+        .map_err(|e| anyhow::anyhow!("failed to persist tempfile to {}: {}", path.display(), e))?;
 
     Ok(())
 }
@@ -216,5 +237,68 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    /// TOCTOU regression guard: prior implementation did `fs::write(dest) + chmod/icacls(dest)`,
+    /// which opened a window where the destination existed with looser bits. The
+    /// tempfile-based implementation must never expose a world-readable file at the
+    /// destination path.
+    ///
+    /// On Unix we prove this indirectly by checking that the tempfile produced by
+    /// `NamedTempFile::with_prefix_in` is already 0o600 at the moment of creation —
+    /// before any write, before `persist`. That is the only state the destination
+    /// can transition from, so the destination cannot be world-readable.
+    #[cfg(unix)]
+    #[test]
+    fn tempfile_is_0o600_before_persist() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // Mimic the production path: tempfile lives in same parent as destination.
+        let tmp = tempfile::NamedTempFile::with_prefix_in("write-", dir.path()).unwrap();
+        let mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "NamedTempFile must create with 0o600 — got 0o{mode:o}. \
+             If tempfile changes its default, write_restricted_file must chmod \
+             explicitly before persist to keep the TOCTOU guarantee."
+        );
+    }
+
+    /// Atomicity smoke test: while the file is being written, the destination
+    /// path either does not exist or already contains the new content with the
+    /// restricted mode — never a partial write with default perms.
+    #[cfg(unix)]
+    #[test]
+    fn destination_never_observed_world_readable_under_overwrite() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+
+        // Pre-existing file with world-readable mode (simulates pre-PR1 layout).
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // Overwrite — must end with 0o600 and new content. Because persist is
+        // a single rename, intermediate states are not observable.
+        write_restricted_file(&path, "new").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    /// `persist` requires the tempfile to live on the same filesystem as the
+    /// destination. The implementation uses `with_prefix_in(parent)` to ensure
+    /// this — guard against a regression that switches to system tempdir.
+    #[test]
+    fn tempfile_created_in_destination_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+
+        // Write must succeed even when the system tempdir is a different fs
+        // (we can't easily simulate that, but `with_prefix_in(parent)` is the
+        // structural fix and this test exercises the code path).
+        write_restricted_file(&path, "x").unwrap();
+        assert!(path.exists());
     }
 }

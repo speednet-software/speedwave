@@ -1059,22 +1059,26 @@ fn remove_hub_env_var(doc: &mut serde_yaml_ng::Value, env_var_name: &str) {
 /// Claude container is NOT modified — it only sees the hub.
 fn apply_mcp_os_config(yaml: &str) -> anyhow::Result<String> {
     let data_dir = consts::data_dir();
-    let token_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
-    let port_path = data_dir.join(consts::MCP_OS_PORT_FILE);
-    apply_mcp_os_config_with_path(yaml, &token_path, &port_path)
+    let lock_path = data_dir.join(consts::MCP_OS_LOCK_FILE);
+    let token_mount_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
+    apply_mcp_os_config_with_path(yaml, &token_mount_path, &lock_path)
 }
 
-/// Test-only alias preserved so existing fixtures keep working.
+/// Test-only alias preserved so existing fixtures keep working. `lock_path`
+/// is the unified `lock.json`; `token_mount_path` is the standalone
+/// token file bind-mounted into the hub (dual-write contract — see
+/// `mcp_os_process::spawn_in`).
 fn apply_mcp_os_config_with_path(
     yaml: &str,
-    token_path: &std::path::Path,
-    port_path: &std::path::Path,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
 ) -> anyhow::Result<String> {
     apply_worker_config(
         yaml,
         "mcp-os",
-        token_path,
-        port_path,
+        token_mount_path,
+        lock_path,
+        crate::host_mcp_process::lock::LockService::McpOs,
         "WORKER_OS_URL",
         "os-auth-token",
     )
@@ -1083,22 +1087,23 @@ fn apply_mcp_os_config_with_path(
 /// Injects `WORKER_HOST_EXEC_URL` + bearer-token mount into the hub if the worker is up.
 fn apply_host_exec_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     let state_dir = crate::host_exec::host_exec_project_dir(consts::data_dir(), project);
-    let token_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
-    let port_path = state_dir.join(consts::HOST_EXEC_PORT_FILE);
-    apply_host_exec_config_with_paths(yaml, &token_path, &port_path)
+    let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
+    let token_mount_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
+    apply_host_exec_config_with_paths(yaml, &token_mount_path, &lock_path)
 }
 
 /// Test-only alias preserved so existing fixtures keep working.
 fn apply_host_exec_config_with_paths(
     yaml: &str,
-    token_path: &std::path::Path,
-    port_path: &std::path::Path,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
 ) -> anyhow::Result<String> {
     apply_worker_config(
         yaml,
         "host_exec",
-        token_path,
-        port_path,
+        token_mount_path,
+        lock_path,
+        crate::host_mcp_process::lock::LockService::HostExec,
         "WORKER_HOST_EXEC_URL",
         "host_exec-auth-token",
     )
@@ -1115,19 +1120,19 @@ fn apply_host_exec_config_with_paths(
 /// `<oauth-state-dir>/.bearer-map.json` (bearer → service).
 fn apply_oauth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     let state_dir = crate::oauth_process::oauth_project_dir(consts::data_dir(), project);
-    let port_path = state_dir.join(consts::OAUTH_PORT_FILE);
+    let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
     let bearer_map_path = state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
-    apply_oauth_config_with_paths(yaml, &state_dir, &port_path, &bearer_map_path)
+    apply_oauth_config_with_paths(yaml, &state_dir, &lock_path, &bearer_map_path)
 }
 
 /// Test-only entry point — same logic, explicit paths.
 fn apply_oauth_config_with_paths(
     yaml: &str,
     state_dir: &std::path::Path,
-    port_path: &std::path::Path,
+    lock_path: &std::path::Path,
     bearer_map_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let port = match read_worker_port_file(port_path, "oauth") {
+    let port = match read_lock_port(lock_path, crate::host_mcp_process::lock::LockService::Oauth) {
         Some(p) => p,
         None => return Ok(yaml.to_string()),
     };
@@ -1191,32 +1196,34 @@ fn read_oauth_bearer_map(
     Some(map)
 }
 
-/// Inject `<env_var>=<gateway-url>` + mount `<token_path>:/secrets/<secret_name>:ro` into the
-/// hub iff token+port files are readable. No-op (returns unchanged YAML) when files absent —
-/// any read failure is treated as not running (avoids TOCTOU vs runtime respawn).
+/// Inject `<env_var>=<gateway-url>` + mount `<token_mount_path>:/secrets/<secret_name>:ro`
+/// into the hub iff `lock.json` is readable and the mount-token file exists.
+/// No-op (returns unchanged YAML) when files absent — any read failure is
+/// treated as not running (avoids TOCTOU vs runtime respawn).
 fn apply_worker_config(
     yaml: &str,
     label: &str,
-    token_path: &std::path::Path,
-    port_path: &std::path::Path,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
+    service: crate::host_mcp_process::lock::LockService,
     env_var: &str,
     secret_name: &str,
 ) -> anyhow::Result<String> {
-    let token = match std::fs::read_to_string(token_path) {
+    let port = match read_lock_port(lock_path, service) {
+        Some(p) => p,
+        None => return Ok(yaml.to_string()),
+    };
+    let token = match std::fs::read_to_string(token_mount_path) {
         Ok(s) => s.trim().to_string(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(yaml.to_string()),
         Err(e) => {
-            log::debug!("{label} token read failed ({e}); treating as not running");
+            log::debug!("{label} token mount read failed ({e}); treating as not running");
             return Ok(yaml.to_string());
         }
     };
     if token.is_empty() {
         return Ok(yaml.to_string());
     }
-    let port = match read_worker_port_file(port_path, label) {
-        Some(p) => p,
-        None => return Ok(yaml.to_string()),
-    };
     let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
@@ -1224,12 +1231,29 @@ fn apply_worker_config(
     inject_worker_env(&mut doc, env_var, &url);
     add_hub_volume(
         &mut doc,
-        &format!("{}:/secrets/{secret_name}:ro", to_engine_path(token_path)?),
+        &format!(
+            "{}:/secrets/{secret_name}:ro",
+            to_engine_path(token_mount_path)?
+        ),
     );
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
+/// Read a worker's port from its `lock.json`. `None` when the file is
+/// absent or the JSON is unparseable / has the wrong `service` tag.
+///
+/// Each worker manager migrates pre-PR3 layout to `lock.json` before
+/// completing `spawn_*`, so by the time compose reads the port the
+/// JSON must exist; no legacy fallback is required here.
+fn read_lock_port(
+    lock_path: &std::path::Path,
+    service: crate::host_mcp_process::lock::LockService,
+) -> Option<u16> {
+    crate::host_mcp_process::lock::read(lock_path, service).map(|lock| lock.port)
+}
+
 /// Read a worker's `port` file. `None` when missing or unparseable; warns on invalid content.
+#[cfg(test)]
 fn read_worker_port_file(port_path: &std::path::Path, label: &str) -> Option<u16> {
     let content = std::fs::read_to_string(port_path).ok()?;
     match content.trim().parse::<u16>() {
@@ -4782,12 +4806,26 @@ services:
         COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", host_gateway_ip())
     }
 
-    fn write_token_and_port(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-        let token_path = tmp.join("token");
-        let port_path = tmp.join("port");
+    /// Write a fixture lock.json + standalone token mount file, for the
+    /// given service. Returns `(token_mount_path, lock_path)` — both are
+    /// inputs to `apply_*_config_with_path*`.
+    fn write_lock_and_token_mount(
+        tmp: &std::path::Path,
+        service: crate::host_mcp_process::lock::LockService,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use crate::host_mcp_process::lock::{self, LockFile};
+        let token_path = tmp.join("auth-token");
+        let lock_path = tmp.join(consts::PER_PROJECT_LOCK_FILE);
         std::fs::write(&token_path, "test-token").unwrap();
-        std::fs::write(&port_path, "4007").unwrap();
-        (token_path, port_path)
+        let lock = LockFile::new(service, 12345, 4007, "test-token".into());
+        lock::write(&lock_path, &lock).unwrap();
+        (token_path, lock_path)
+    }
+
+    /// Legacy shim — kept under the old name to minimize churn in tests
+    /// that don't care about the service tag (host_exec by default).
+    fn write_token_and_port(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        write_lock_and_token_mount(tmp, crate::host_mcp_process::lock::LockService::HostExec)
     }
 
     fn extra_hosts_for(yaml: &str, service: &str) -> Vec<String> {
@@ -4810,9 +4848,12 @@ services:
     #[test]
     fn apply_mcp_os_config_adds_host_gateway_to_hub() {
         let tmp = tempfile::tempdir().unwrap();
-        let (token_path, port_path) = write_token_and_port(tmp.path());
+        let (token_path, lock_path) = write_lock_and_token_mount(
+            tmp.path(),
+            crate::host_mcp_process::lock::LockService::McpOs,
+        );
         let yaml = render_substituted_template();
-        let result = apply_mcp_os_config_with_path(&yaml, &token_path, &port_path).unwrap();
+        let result = apply_mcp_os_config_with_path(&yaml, &token_path, &lock_path).unwrap();
         let entries = extra_hosts_for(&result, "mcp-hub");
         assert_eq!(
             count_canonical_entries(&entries),
@@ -4837,9 +4878,14 @@ services:
 
     #[test]
     fn apply_oauth_config_adds_host_gateway_to_each_consumer() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "4090").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        lock::write(
+            &lock_path,
+            &LockFile::new(LockService::Oauth, 12345, 4090, "supervisor".into()),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join("bearer-map.json");
         std::fs::write(
             &bearer_map_path,
@@ -4849,7 +4895,7 @@ services:
 
         let yaml = render_substituted_template();
         let result =
-            apply_oauth_config_with_paths(&yaml, tmp.path(), &port_path, &bearer_map_path).unwrap();
+            apply_oauth_config_with_paths(&yaml, tmp.path(), &lock_path, &bearer_map_path).unwrap();
 
         // Each OAuth-consumer in the bearer map gets the canonical alias in its extra_hosts.
         let entries = extra_hosts_for(&result, "mcp-sharepoint");
@@ -5319,27 +5365,35 @@ services:
 
     #[test]
     fn test_mcp_os_config_injects_when_token_exists() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("mcp-os-auth-token");
-        let port_path = tmp.path().join("mcp-os-port");
+        let lock_path = tmp.path().join(consts::MCP_OS_LOCK_FILE);
         std::fs::write(&token_path, "test-uuid-token-abc").unwrap();
-        std::fs::write(&port_path, "54321").unwrap();
+        lock::write(
+            &lock_path,
+            &LockFile::new(
+                LockService::McpOs,
+                12345,
+                54321,
+                "test-uuid-token-abc".into(),
+            ),
+        )
+        .unwrap();
 
-        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &port_path).unwrap();
+        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &lock_path).unwrap();
 
-        // WORKER_OS_URL must be injected into mcp-hub env with the dynamic port
         assert!(
             result.contains("WORKER_OS_URL="),
-            "WORKER_OS_URL must be injected when token file exists.\nGot:\n{}",
+            "WORKER_OS_URL must be injected when lock.json exists.\nGot:\n{}",
             result
         );
         assert!(
             result.contains(":54321"),
-            "WORKER_OS_URL must use port from port file.\nGot:\n{}",
+            "WORKER_OS_URL must use port from lock.json.\nGot:\n{}",
             result
         );
 
-        // Token file must be bind-mounted into hub
         let expected_mount = format!("{}:/secrets/os-auth-token:ro", token_path.display());
         assert!(
             result.contains(&expected_mount),
@@ -5541,14 +5595,24 @@ services:
 
     #[test]
     fn test_host_exec_config_injects_url_and_mounts_token() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("auth-token");
-        let port_path = tmp.path().join("port");
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
         std::fs::write(&token_path, "host-exec-uuid-token").unwrap();
-        std::fs::write(&port_path, "49215").unwrap();
+        lock::write(
+            &lock_path,
+            &LockFile::new(
+                LockService::HostExec,
+                12345,
+                49215,
+                "host-exec-uuid-token".into(),
+            ),
+        )
+        .unwrap();
 
         let result =
-            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &port_path).unwrap();
+            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &lock_path).unwrap();
 
         // WORKER_HOST_EXEC_URL injected into mcp-hub with the dynamic port and a
         // host-gateway hostname (never 0.0.0.0).
@@ -5681,12 +5745,21 @@ services:
     #[test]
     fn test_oauth_config_skipped_when_bearer_map_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49300").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49300,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &tmp.path().join("no-bearer-map.json"),
         )
         .unwrap();
@@ -5699,14 +5772,23 @@ services:
     #[test]
     fn test_oauth_config_skipped_when_bearer_map_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49300").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49300,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, "{}").unwrap();
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -5719,15 +5801,24 @@ services:
     #[test]
     fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49301").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp-uuid": "sharepoint"}"#).unwrap();
 
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -5788,15 +5879,24 @@ services:
     #[test]
     fn test_oauth_config_writes_per_service_bearer_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49301").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-x": "sharepoint"}"#).unwrap();
 
         apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -5829,15 +5929,24 @@ services:
     #[test]
     fn test_oauth_config_does_not_inject_into_slack_or_redmine() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49301").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
 
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_MULTIPLE_WORKERS,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -5905,6 +6014,50 @@ services:
         assert_eq!(read_host_exec_port(&p), Some(0)); // a worker never picks 0; parsing is lenient
         std::fs::write(&p, "70000").unwrap();
         assert_eq!(read_host_exec_port(&p), None, "out of u16 range");
+    }
+
+    // ── read_lock_port legacy fallback ──────────────────────────────────
+
+    #[test]
+    fn test_read_lock_port_reads_lock_json_when_present() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("lock.json");
+        lock::write(
+            &lock_path,
+            &LockFile::new(LockService::HostExec, 12345, 49215, "tok".into()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_lock_port(&lock_path, LockService::HostExec),
+            Some(49215)
+        );
+    }
+
+    #[test]
+    fn test_read_lock_port_returns_none_when_lock_json_absent() {
+        use crate::host_mcp_process::lock::LockService;
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("lock.json"); // absent
+
+        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
+    }
+
+    #[test]
+    fn test_read_lock_port_returns_none_when_wrong_service_tag() {
+        // `read` returns None if the JSON exists but `service` doesn't match
+        // — defends against a lock file from a different worker getting picked up.
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("lock.json");
+        lock::write(
+            &lock_path,
+            &LockFile::new(LockService::Oauth, 12345, 49215, "tok".into()),
+        )
+        .unwrap();
+
+        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
     }
 
     #[test]
