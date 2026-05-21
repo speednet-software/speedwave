@@ -114,52 +114,30 @@ All MCP workers listen on the same internal port (`PORT_WORKER`, see [ADR-038](.
 
 ## Host Bridges
 
-Speedwave Desktop runs two host-side WebSocket bridges on the same generic
-skeleton (`desktop/src-tauri/src/bridges/host_bridge.rs`, see [ADR-063](../adr/ADR-063-host-bridge-generic.md)):
+Speedwave Desktop runs the IDE Bridge on the generic host-bridge
+skeleton (`desktop/src-tauri/src/bridges/host_bridge.rs`, see
+[ADR-063](../adr/ADR-063-host-bridge-generic.md)). It pairs Claude Code
+(in the container) with a local IDE on the host (Endpoint mode). Lock
+file: `~/.speedwave/ide-bridge/<port>.lock`. Mounted into the container
+as `/home/speedwave/.claude/ide/` (`:ro`).
 
-- **IDE Bridge** — pairs Claude Code (in the container) with a local IDE
-  on the host (Endpoint mode). Lock file:
-  `~/.speedwave/ide-bridge/<port>.lock`. Mounted into the container as
-  `/home/speedwave/.claude/ide/` (`:ro`).
-- **Figma Bridge** — pairs the `mcp-figma` worker (in the container)
-  with the "Speedwave DS Bridge" plugin loaded in Figma Desktop
-  (Pairing mode, see [ADR-064](../adr/ADR-064-figma-bridge-host-relay.md)). Lock file:
-  `~/.speedwave/figma-bridge/<port>.lock`. Not mounted into any
-  container; the bridge URL + token are injected into `mcp-figma` via
-  `FIGMA_BRIDGE_URL` / `FIGMA_BRIDGE_TOKEN` env vars (see
-  [ADR-064](../adr/ADR-064-figma-bridge-host-relay.md)).
-
-Both bridges share the same security invariants:
+Security invariants:
 
 - **Bind only to `127.0.0.1`** (kernel-assigned port). Not reachable from
   LAN.
 - **UUID v4 auth token per session** (regenerated on every Desktop
   start; never persisted across restarts).
 - **Constant-time token comparison** prevents timing side channels.
-- **Origin header policy** rejects browser CSRF (IDE Bridge:
-  `RejectIfPresent`; Figma Bridge: `AcceptIfAuthIsQueryParam` — browser
-  clients are accepted iff they authenticated via query parameter, and
-  workers that set Origin are treated as a forged combo).
+- **Origin header policy** rejects browser CSRF (`RejectIfPresent`).
 - **Lock file `0o600` in `0o700` parent dir** — token unreadable by other
   users on the host. Atomic write via `tempfile::NamedTempFile::persist`
   closes the partial-write window.
 - **Token never logged.** `HostBridge::Debug` redacts the token; the
   Desktop event channel emits role + state only.
 
-Pairing-mode specifics (Figma Bridge):
-
-- **One pair at a time.** Third connection is rejected with HTTP 409
-  Conflict *before* the WebSocket upgrade — prevents a hostile process
-  from holding the bridge open while a legitimate user can never sneak
-  in. Same-role collisions evict the older pending connection.
-- **Per-frame size cap.** Figma Bridge enforces 1 MiB per WebSocket
-  frame; violations close the pair with status 1009. Defends against
-  memory exhaustion from a rogue plugin.
-
 Residual risk: a user-mode process running as the same UID as the
 Desktop can read the lock file. This matches the platform assumption
-that same-uid processes are inside the trust boundary; it is the same
-residual risk as the IDE Bridge.
+that same-uid processes are inside the trust boundary.
 
 ## Executor Sandbox (MCP Hub)
 

@@ -362,59 +362,6 @@ This allows MCP workers and Claude to share files through identical paths — `/
 
 The path validator blocks access to sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. These entries are enforced by a denylist in `path-validator.ts`, ensuring that MCP workers cannot read or write protected files even though the full project directory is mounted.
 
-## Figma Plugin (host-paired)
-
-The Figma plugin (`speedwave-plugins/figma`) pairs the in-container
-`mcp-figma` worker with a Figma Desktop plugin ("Speedwave DS Bridge")
-loaded inside Figma Desktop. This is the only Speedwave integration
-that requires a host-side relay (see [ADR-064](../adr/ADR-064-figma-bridge-host-relay.md)).
-
-### How it works
-
-Speedwave Desktop runs a small WebSocket relay (`figma_bridge.rs`,
-built on the generic `host_bridge` skeleton — see [ADR-063](../adr/ADR-063-host-bridge-generic.md))
-listening on `127.0.0.1:<random>`. The relay accepts exactly two
-clients — the worker container and the Figma Desktop plugin — and
-forwards every WebSocket frame between them verbatim. The token used
-by both clients is the same UUID v4 minted at Desktop startup.
-
-```
-mcp-figma worker (container)            Figma Desktop plugin UI
-            │                                      │
-            │  ws://host.docker.internal:<port>/    │  ws://127.0.0.1:<port>/?token=…
-            │  x-figma-bridge-auth: <uuid>          │
-            └──────────────► figma_bridge ◄─────────┘
-                          (Speedwave Desktop)
-```
-
-### Connecting the Figma plugin
-
-1. Install the Figma plugin in your Figma Desktop (one-time).
-2. In Speedwave Desktop, open the Plugin Detail panel for `figma` and
-   click "Copy bridge credentials". You get `ws://127.0.0.1:<port>/`
-   and a token.
-3. In Figma Desktop, run the "Speedwave DS Bridge" plugin, paste the
-   URL + token, click Connect.
-4. The worker (in the container) connects automatically using
-   `FIGMA_BRIDGE_URL` + `FIGMA_BRIDGE_TOKEN` env vars injected by
-   `render_compose`. When both sides are paired, the bridge starts
-   forwarding frames and `figma_plugin_*` tools become available.
-
-### Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `BRIDGE_NOT_CONFIGURED` | Worker doesn't see `FIGMA_BRIDGE_URL`/`FIGMA_BRIDGE_TOKEN` env vars. | Restart the project containers (`speedwave restart <project>`). The Desktop process must be running so `render_compose` can pick up the bridge handle. |
-| HTTP 409 when connecting from the Figma plugin | Another pair is already active. | Only one Speedwave Desktop instance and one Figma plugin instance may be paired at a time. Close the other Figma plugin window. |
-| Token mismatch | The token is regenerated each Desktop startup. | Re-copy the URL + token from Plugin Detail; never persist the old token. |
-| Plugin works in CLI mode? | No — the relay lives in Desktop, the CLI cannot serve as the host side. | Use Desktop, or restrict the project to REST-only Figma tools. |
-
-### Security
-
-The bridge binds only to `127.0.0.1` and uses constant-time token
-comparison. See [Host Bridges in security.md](../architecture/security.md#host-bridges) for the full
-threat model.
-
 ## Adding New Integrations
 
 Speedwave supports extending integrations via the plugin system:

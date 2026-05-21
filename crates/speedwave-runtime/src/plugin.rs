@@ -93,7 +93,7 @@ pub struct PluginManifest {
     /// that need to pair their container worker with a desktop-side
     /// application set this. Speedwave Desktop spawns one `HostBridge`
     /// per declaration; container workers receive the bridge URL and
-    /// token via env vars named here. See ADR-064.
+    /// token via env vars named here. See ADR-063.
     #[serde(default)]
     pub host_bridge: Option<HostBridgeManifest>,
 }

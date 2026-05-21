@@ -915,7 +915,7 @@ fn init_and_start_ide_bridge_inner(app_handle: &tauri::AppHandle) -> Option<ide_
 /// the lifetime of the Desktop process — the worker container connects
 /// only after the plugin is enabled in a project, but the lock file +
 /// listener are available from startup so the user can paste credentials
-/// into the host-side plugin UI any time (see ADR-064).
+/// into the host-side plugin UI any time (see ADR-063).
 fn init_and_start_plugin_bridges(
     plugin_bridges: &SharedPluginBridges,
     app_handle: &tauri::AppHandle,

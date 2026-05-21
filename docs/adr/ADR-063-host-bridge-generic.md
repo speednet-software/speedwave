@@ -8,15 +8,16 @@
 Speedwave shipped one host-side WebSocket bridge in the Desktop process:
 the **IDE Bridge** (`desktop/src-tauri/src/ide_bridge.rs`, ~1841 LOC),
 which pairs Claude Code inside the container with a local IDE
-(VS Code / Cursor). A second bridge — **Figma Bridge** — was about to
-land for the Figma plugin (see ADR-064). The two designs shared ~95% of
-their infrastructure: TCP listener on `127.0.0.1`, lock file at
-`~/.speedwave/<name>-bridge/<port>.lock`, UUID v4 auth token,
-constant-time compare, `tokio_tungstenite::accept_hdr_async`, Origin /
-subprotocol policy, watchdog re-creating the lock file, stale-lock
-cleanup, graceful shutdown via `tokio::sync::broadcast`. Duplicating
-that skeleton for every new bridge would multiply the security surface
-(every place that hand-rolls a 0o600 lock file is one place to get the
+(VS Code / Cursor). Future bridges (host-side relays for plugins that
+need to pair a container worker with a desktop-side companion app) will
+share ~95% of the IDE Bridge's infrastructure: TCP listener on
+`127.0.0.1`, lock file at `~/.speedwave/<name>-bridge/<port>.lock`,
+UUID v4 auth token, constant-time compare,
+`tokio_tungstenite::accept_hdr_async`, Origin / subprotocol policy,
+watchdog re-creating the lock file, stale-lock cleanup, graceful
+shutdown via `tokio::sync::broadcast`. Duplicating that skeleton for
+every new bridge would multiply the security surface (every place that
+hand-rolls a 0o600 lock file is one place to get the
 permissions wrong), and would scatter the threat model across modules.
 
 The differences between bridges live in the connection handler:
@@ -155,9 +156,9 @@ disconnect would clear `active` *after* the main loop wrote a new
 - Atomic lock-file write closes the partial-write window without
   changing the public surface of `IdeBridge` (43 existing tests pass
   unchanged after the refactor).
-- Pairing relay forwards binary frames as-is, which is a prerequisite
-  for the Figma plugin's `export_snapshot` chunked-binary protocol
-  (out of scope for this ADR — see ADR-064).
+- Pairing relay forwards binary frames as-is, so future plugins that
+  need a chunked-binary protocol over the bridge can opt into it
+  without further infrastructure work.
 
 ### Negative
 
@@ -171,14 +172,12 @@ disconnect would clear `active` *after* the main loop wrote a new
 ### Neutral
 
 - `RoleCollisionPolicy` started as a two-variant enum
-  (`Reject | EvictOlder`) but the only consumer (`FigmaBridge`) uses
-  `EvictOlder`, so the variant was reduced to one. The enum stays —
-  if a future bridge wants `Reject`-style rejection, re-adding the
-  variant is mechanical.
+  (`Reject | EvictOlder`) but only `EvictOlder` is used today; the
+  variant was reduced to one. The enum stays — if a future bridge
+  wants `Reject`-style rejection, re-adding the variant is mechanical.
 
 ## References
 
-- ADR-064 — Figma Bridge host relay (consumer of HostBridge::Pairing).
 - `desktop/src-tauri/src/ide_bridge.rs` history pre-refactor (43 tests
   retained).
 - ADR-062 — Playwright host-gateway access (uses the same

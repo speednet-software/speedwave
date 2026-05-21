@@ -668,7 +668,7 @@ fn apply_plugins_from_verified(
             inject_worker_env(&mut doc, &worker_env, &url);
 
             // Plugin's manifest may declare a host-side WebSocket bridge
-            // (see ADR-064). When the Desktop has registered one for this
+            // (see ADR-063). When the Desktop has registered one for this
             // slug, inject the env vars the plugin asked for.
             if manifest.host_bridge.is_some() {
                 if let Some(registration) = bridges.bridges.iter().find(|r| r.plugin_slug == *slug)
