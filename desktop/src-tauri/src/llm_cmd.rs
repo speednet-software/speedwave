@@ -516,6 +516,19 @@ fn run_vm_curl_blocking(
             if line.is_empty() {
                 continue;
             }
+            // Mirror the HostProbe / save-path guard: a stale custom_headers
+            // file must not smuggle an `Authorization` header that collides
+            // with the Bearer added separately.
+            if line
+                .split_once(':')
+                .map(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+                .unwrap_or(false)
+            {
+                log::warn!(
+                    "LLM probe (vm): dropping Authorization from custom_headers (use api_key)"
+                );
+                continue;
+            }
             args.push("-H".into());
             args.push(line.to_string());
         }

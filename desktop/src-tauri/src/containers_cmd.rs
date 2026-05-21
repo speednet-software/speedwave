@@ -31,9 +31,10 @@ const FORBIDDEN_HEADER_NAMES: &[&str] = &[
     "transfer-encoding",
 ];
 
-/// Validates and normalises an `api_key` before persisting.
-/// Bearer-prefix strip is shared with the discovery path via
-/// `llm_cmd::strip_bearer_prefix`.
+/// Validates and normalises an `api_key` before persisting. An empty result
+/// after `Bearer ` strip is an explicit error so the user gets an actionable
+/// message — passing `""` to clear the key is a separate code path
+/// (`save_compose` deletes the file when the resolver yields `Delete`).
 pub(crate) fn validate_api_key(value: &str) -> Result<String, String> {
     if value.len() > MAX_API_KEY_BYTES {
         return Err(format!("api_key exceeds {} byte limit", MAX_API_KEY_BYTES));
@@ -41,7 +42,19 @@ pub(crate) fn validate_api_key(value: &str) -> Result<String, String> {
     if value.contains('\r') || value.contains('\n') {
         return Err("api_key must not contain newline characters".to_string());
     }
-    Ok(crate::llm_cmd::strip_bearer_prefix(value).unwrap_or_default())
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    // A bare `Bearer` (no token after it) reaches `strip_bearer_prefix` only
+    // when the trailing space survives the trim — but `trimmed` already
+    // removed it. Detect the prefix-only case explicitly so the user sees
+    // the actionable error instead of having the stripper return `Some("Bearer")`.
+    if trimmed.eq_ignore_ascii_case("bearer") {
+        return Err("api_key must not be empty after stripping the 'Bearer ' prefix".to_string());
+    }
+    crate::llm_cmd::strip_bearer_prefix(value)
+        .ok_or_else(|| "api_key must not be empty after stripping the 'Bearer ' prefix".to_string())
 }
 
 /// Validates and normalises a `custom_headers` blob. Returns the original
@@ -2190,6 +2203,27 @@ mod tests {
     fn validate_api_key_rejects_newline() {
         assert!(super::validate_api_key("sk-test\nfoo").is_err());
         assert!(super::validate_api_key("sk-test\rfoo").is_err());
+    }
+
+    #[test]
+    fn validate_api_key_rejects_bearer_prefix_with_no_token() {
+        // Pasting just "Bearer " (forgot to copy the token) must surface an
+        // actionable error, not silently turn into a Delete action.
+        let err = super::validate_api_key("Bearer ").unwrap_err();
+        assert!(
+            err.contains("'Bearer '"),
+            "error must mention the Bearer prefix: {err}"
+        );
+        // Case-insensitive variant + extra whitespace must also error.
+        assert!(super::validate_api_key("bearer  ").is_err());
+        assert!(super::validate_api_key("BEARER  \t").is_err());
+    }
+
+    #[test]
+    fn validate_api_key_empty_input_returns_empty_string() {
+        // Empty input is the explicit "clear the key" signal — accepted.
+        assert_eq!(super::validate_api_key("").unwrap(), "");
+        assert_eq!(super::validate_api_key("   ").unwrap(), "");
     }
 
     #[test]

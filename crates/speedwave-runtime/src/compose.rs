@@ -2912,9 +2912,11 @@ mod tests {
         )
         .expect("render must succeed");
 
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap_or_else(|e| {
-            panic!("rendered compose YAML must re-parse:\n---YAML---\n{yaml}\n---ERR---\n{e}")
-        });
+        // Sanitised in the panic message — the rendered YAML contains the
+        // injected ANTHROPIC_AUTH_TOKEN, which CodeQL flags as cleartext
+        // secret logging. The parse error alone identifies the regression.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
+            .unwrap_or_else(|e| panic!("rendered compose YAML must re-parse: {e}"));
         // Custom headers must survive intact AND be on a single line —
         // nerdctl/docker-compose YAML parsers reject block literals inside
         // an `environment:` sequence (manifested as `line N: could not find

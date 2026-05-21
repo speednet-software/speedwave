@@ -525,9 +525,11 @@ fn merge_wslconfig_vpn_keys(input: &str) -> String {
         ("autoProxy", "true"),
     ];
 
-    // Walk existing lines, tracking the current section. When we leave
-    // [wsl2], inject any missing keys at the end of the section. If [wsl2]
-    // never appears, append it at the end of the file.
+    // Match the dominant line ending of the input — `.wslconfig` written by
+    // Notepad on Windows is CRLF; emitting bare LF for new keys would yield
+    // a mixed-ending file (tolerated by WSL but cosmetically ugly).
+    let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
+
     let mut out = String::with_capacity(input.len() + 128);
     let mut current_section: Option<String> = None;
     let mut wsl2_seen = false;
@@ -538,7 +540,7 @@ fn merge_wslconfig_vpn_keys(input: &str) -> String {
                              pending: &mut Vec<String>| {
         for (k, v) in VPN_KEYS {
             if !present.contains(&k.to_ascii_lowercase()) {
-                pending.push(format!("{k}={v}\n"));
+                pending.push(format!("{k}={v}{nl}"));
             }
         }
     };
@@ -546,7 +548,6 @@ fn merge_wslconfig_vpn_keys(input: &str) -> String {
     for line in input.split_inclusive('\n') {
         let trimmed = line.trim();
         if let Some(stripped) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            // Entering a new section — if we're leaving [wsl2], flush pending injects.
             if current_section.as_deref() == Some("wsl2") {
                 push_missing_keys(&wsl2_key_present, &mut pending_inject);
                 for inj in pending_inject.drain(..) {
@@ -560,16 +561,14 @@ fn merge_wslconfig_vpn_keys(input: &str) -> String {
             out.push_str(line);
             continue;
         }
-        // Inside [wsl2]: detect existing keys (possibly to overwrite values).
         if current_section.as_deref() == Some("wsl2") {
             if let Some(eq) = trimmed.find('=') {
                 let key = trimmed[..eq].trim().to_ascii_lowercase();
                 if let Some((_, desired_val)) =
                     VPN_KEYS.iter().find(|(k, _)| k.eq_ignore_ascii_case(&key))
                 {
-                    // Rewrite the value, preserving casing of the key.
                     let original_key = trimmed[..eq].trim_end();
-                    out.push_str(&format!("{original_key}={desired_val}\n"));
+                    out.push_str(&format!("{original_key}={desired_val}{nl}"));
                     wsl2_key_present.insert(key);
                     continue;
                 }
@@ -579,26 +578,24 @@ fn merge_wslconfig_vpn_keys(input: &str) -> String {
         out.push_str(line);
     }
 
-    // EOF — if we were still inside [wsl2], flush missing keys.
     if current_section.as_deref() == Some("wsl2") {
         push_missing_keys(&wsl2_key_present, &mut pending_inject);
         if !out.ends_with('\n') && !pending_inject.is_empty() {
-            out.push('\n');
+            out.push_str(nl);
         }
         for inj in pending_inject {
             out.push_str(&inj);
         }
     } else if !wsl2_seen {
-        // No [wsl2] section at all — append a fresh one with all three keys.
         if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
+            out.push_str(nl);
         }
         if !out.is_empty() {
-            out.push('\n');
+            out.push_str(nl);
         }
-        out.push_str("[wsl2]\n");
+        out.push_str(&format!("[wsl2]{nl}"));
         for (k, v) in VPN_KEYS {
-            out.push_str(&format!("{k}={v}\n"));
+            out.push_str(&format!("{k}={v}{nl}"));
         }
     }
 
@@ -1235,12 +1232,11 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         }
     }
 
-    // Migration rewrite: replaces the memory line and ensures the
-    // VPN-aware provision script is present. Preserves all other user
-    // customizations (cpus, mounts, etc.) and original indentation.
-    // The safest path is to regenerate the whole config from the SSOT
-    // `lima_config()` when the existing file is missing the provision
-    // block — keeping legacy user edits would force us to merge YAML.
+    // Migration rewrite: in-place line-by-line — replaces the memory line
+    // and appends the SSOT provision block. Preserves user customisations
+    // (cpus, mounts, original indentation). Full regeneration from
+    // `lima_config()` would clobber any user-added fields, so we limit
+    // mutations to the two fields we control.
     let rewrite_config = |text: &str| -> String {
         let mut new_text: String = text
             .lines()
@@ -3927,8 +3923,8 @@ networks:
     }
 
     /// `.wslconfig` on Windows is typically CRLF — the merger must produce
-    /// valid output regardless of input line endings (idempotent on the
-    /// VPN keys, doesn't duplicate sections).
+    /// valid output regardless of input line endings and must NOT mix LF and
+    /// CRLF in the result (cosmetic but reviewers care).
     #[test]
     fn merge_wslconfig_handles_crlf_line_endings() {
         let input = "[wsl2]\r\nmemory=8GB\r\nnetworkingMode=NAT\r\n";
@@ -3937,6 +3933,27 @@ networks:
         assert!(!out.contains("networkingMode=NAT"));
         assert!(out.contains("memory=8GB"));
         assert_eq!(out.matches("[wsl2]").count(), 1, "no duplicate sections");
+        // Every newline in the output must be preceded by CR (no bare LF mixed in).
+        let lone_lf = out
+            .as_bytes()
+            .windows(2)
+            .filter(|w| w[1] == b'\n' && w[0] != b'\r')
+            .count();
+        let starts_with_lf = out.as_bytes().first() == Some(&b'\n');
+        assert_eq!(
+            lone_lf + if starts_with_lf { 1 } else { 0 },
+            0,
+            "CRLF input must not produce mixed line endings, got: {out:?}"
+        );
+    }
+
+    /// Pure-LF input must not get CRLF injected for the new VPN keys.
+    #[test]
+    fn merge_wslconfig_preserves_lf_input_as_lf() {
+        let out = super::merge_wslconfig_vpn_keys("[wsl2]\nmemory=8GB\nnetworkingMode=NAT\n");
+        assert!(out.contains("networkingMode=mirrored"));
+        // No CR characters anywhere.
+        assert!(!out.contains('\r'), "LF input must stay LF: {out:?}");
     }
 
     /// Input ending without a trailing newline must still produce well-formed
