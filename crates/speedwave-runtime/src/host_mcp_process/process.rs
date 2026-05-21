@@ -123,7 +123,9 @@ pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) script_path: String,
     /// Cleared by `respawn()` before `*self = new` so the dropped old
     /// instance does not delete the replacement's on-disk artifacts.
-    pub(crate) cleanup_on_drop: bool,
+    /// Kept private — only `spawn_with_spec`, `respawn`, and `Drop`
+    /// inside this module may mutate it.
+    cleanup_on_drop: bool,
 }
 
 impl<S: WorkerSpec> HostMcpProcess<S> {

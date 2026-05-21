@@ -178,12 +178,14 @@ pub fn render_compose(
     // Integrate installed plugins
     yaml = apply_plugins(
         &yaml,
-        project_name,
-        project_dir,
-        integrations,
-        &network_name,
-        &tokens_dir,
-        bridges,
+        &ApplyPluginsCtx {
+            project_name,
+            project_dir,
+            integrations,
+            network_name: &network_name,
+            tokens_dir: &tokens_dir,
+            bridges,
+        },
     )?;
 
     // Propagate host timezone into every service; must run after plugin injection.
@@ -548,26 +550,21 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 /// the internal compose network — they have no direct host-side dependency.
 /// If a future plugin needs to reach the host (e.g. invoking `host_exec`),
 /// the helper must be called for that plugin's compose service.
-fn apply_plugins(
-    yaml: &str,
-    project_name: &str,
-    project_dir: &str,
-    integrations: &ResolvedIntegrationsConfig,
-    network_name: &str,
-    tokens_dir: &std::path::Path,
-    bridges: &HostBridgesInfo,
-) -> anyhow::Result<String> {
+fn apply_plugins(yaml: &str, ctx: &ApplyPluginsCtx<'_>) -> anyhow::Result<String> {
     let plugins = plugin::list_verified_plugins()?;
-    apply_plugins_from_verified(
-        yaml,
-        project_name,
-        project_dir,
-        integrations,
-        network_name,
-        tokens_dir,
-        &plugins,
-        bridges,
-    )
+    apply_plugins_from_verified(yaml, ctx, &plugins)
+}
+
+/// Per-call inputs shared by `apply_plugins` and `apply_plugins_from_verified`.
+/// Bundled together so each new plugin-injection knob lives in one struct
+/// instead of growing the function signature.
+pub(crate) struct ApplyPluginsCtx<'a> {
+    pub project_name: &'a str,
+    pub project_dir: &'a str,
+    pub integrations: &'a ResolvedIntegrationsConfig,
+    pub network_name: &'a str,
+    pub tokens_dir: &'a std::path::Path,
+    pub bridges: &'a HostBridgesInfo,
 }
 
 /// Test-friendly variant of [`apply_plugins`] — accepts a pre-built
@@ -578,19 +575,19 @@ fn apply_plugins(
 /// touching the user's real data dir.
 // Internal helper exposed only for tests that need to inject crafted
 // `VerifiedPlugin` fixtures; the public entrypoint is `apply_plugins`.
-// Eight arguments is the cost of mirroring `render_compose`'s shape
-// without introducing a context struct that would touch every caller.
-#[allow(clippy::too_many_arguments)]
 fn apply_plugins_from_verified(
     yaml: &str,
-    project_name: &str,
-    project_dir: &str,
-    integrations: &ResolvedIntegrationsConfig,
-    network_name: &str,
-    tokens_dir: &std::path::Path,
+    ctx: &ApplyPluginsCtx<'_>,
     plugins: &[plugin::VerifiedPlugin],
-    bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
+    let ApplyPluginsCtx {
+        project_name,
+        project_dir,
+        integrations,
+        network_name,
+        tokens_dir,
+        bridges,
+    } = *ctx;
     if plugins.is_empty() {
         return Ok(yaml.to_string());
     }
@@ -10235,15 +10232,18 @@ services:
         std::fs::create_dir_all(&plugin_dir).unwrap();
         // 999g is far above the 16 GiB cap. Re-validation must reject.
         let vp = fixture_verified_plugin("evil", Some("evil"), &plugin_dir, Some("999g"));
+        let cfg = fixture_integrations_with_enabled("evil");
         let result = super::apply_plugins_from_verified(
             fixture_compose_yaml(),
-            "test-project",
-            "/tmp/test",
-            &fixture_integrations_with_enabled("evil"),
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &super::HostBridgesInfo::default(),
+            },
             &[vp],
-            &super::HostBridgesInfo::default(),
         );
         let err = result.expect_err("oversized mem_limit must be rejected at render");
         assert!(err.to_string().contains("exceeds maximum"));
@@ -10284,13 +10284,15 @@ services:
         let vp = fixture_verified_plugin("decoy", Some("decoy"), &plugin_dir, None);
         let err = super::apply_plugins_from_verified(
             yaml,
-            "test-project",
-            "/tmp/test",
-            &cfg,
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &super::HostBridgesInfo::default(),
+            },
             &[vp],
-            &super::HostBridgesInfo::default(),
         )
         .expect_err("collision must abort the render");
         assert!(
@@ -10313,13 +10315,15 @@ services:
         let vp = fixture_verified_plugin("ok-plugin", Some("ok-plugin"), &plugin_dir, None);
         let yaml = super::apply_plugins_from_verified(
             fixture_compose_yaml(),
-            "test-project",
-            "/tmp/test",
-            &cfg,
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &super::HostBridgesInfo::default(),
+            },
             &[vp],
-            &super::HostBridgesInfo::default(),
         )
         .expect("happy path must render");
         assert!(
@@ -10367,15 +10371,18 @@ services:
             None,
             Some(fixture_host_bridge_manifest(url_env, token_env)),
         );
+        let cfg = fixture_integrations_with_enabled(slug);
         super::apply_plugins_from_verified(
             fixture_compose_yaml(),
-            "test-project",
-            "/tmp/test",
-            &fixture_integrations_with_enabled(slug),
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges,
+            },
             &[vp],
-            bridges,
         )
     }
 
@@ -10511,15 +10518,18 @@ services:
                 token_env: "SOMETHING_TOKEN".to_string(),
             }],
         };
+        let cfg = fixture_integrations_with_enabled("notbridge");
         let yaml = super::apply_plugins_from_verified(
             fixture_compose_yaml(),
-            "test-project",
-            "/tmp/test",
-            &fixture_integrations_with_enabled("notbridge"),
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &bridges,
+            },
             &[vp],
-            &bridges,
         )
         .unwrap();
         assert!(
@@ -10552,15 +10562,18 @@ services:
                 token_env: "OTHER_TOKEN".to_string(),
             }],
         };
+        let cfg = fixture_integrations_with_enabled("figma");
         let yaml = super::apply_plugins_from_verified(
             fixture_compose_yaml(),
-            "test-project",
-            "/tmp/test",
-            &fixture_integrations_with_enabled("figma"),
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &bridges,
+            },
             &[vp],
-            &bridges,
         )
         .unwrap();
         assert!(

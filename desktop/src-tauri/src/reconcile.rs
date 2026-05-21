@@ -108,10 +108,6 @@ pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project
     }
 }
 
-// `teardown_oauth_for_project` intentionally omitted — added in PR3 when the
-// SharePoint reconciler needs to tear down the oauth worker on integration disable.
-// Until then, cleanup happens only on process exit via `run_exit_cleanup`.
-
 /// Reconcile phase: nothing running.
 const RECONCILE_IDLE: u8 = 0;
 /// Reconcile phase: background thread is checking whether a rebuild is needed.

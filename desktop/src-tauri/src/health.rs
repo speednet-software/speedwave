@@ -114,14 +114,14 @@ fn is_lock_entry_alive(pid: u32, port: u16) -> bool {
 }
 
 /// Check if the mcp-os process is alive AND listening on its port.
-/// Cienki re-eksport — implementacja w
-/// `speedwave_runtime::mcp_os_process::is_mcp_os_alive` (SSOT).
+/// Thin re-export of `speedwave_runtime::mcp_os_process::is_mcp_os_alive`
+/// (SSOT).
 pub(crate) fn is_mcp_os_alive() -> bool {
     speedwave_runtime::mcp_os_process::is_mcp_os_alive()
 }
 
-/// Testable inner implementation; takes `data_dir` so tests can point at
-/// a temporary directory. Cienki wrapper przez runtime SSOT.
+/// Testable inner implementation; takes `data_dir` so tests can point
+/// at a temporary directory. Thin wrapper over the runtime SSOT.
 #[cfg(test)]
 pub(crate) fn check_mcp_os_alive_in(data_dir: &std::path::Path) -> bool {
     speedwave_runtime::mcp_os_process::is_mcp_os_alive_in(data_dir)
@@ -1201,57 +1201,6 @@ mod tests {
         let _ = health.running;
     }
 
-    #[test]
-    fn check_mcp_os_returns_false_when_token_exists_but_no_pid_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path();
-        let token_path = data_dir.join("mcp-os-auth-token");
-        std::fs::write(&token_path, "test-token").unwrap();
-        // No PID file — should report not running.
-        // We test the logic directly since check_mcp_os() uses the real home dir.
-        let pid_path = data_dir.join("mcp-os-pid");
-        let running = token_path.exists() && {
-            let pid_str = std::fs::read_to_string(&pid_path);
-            pid_str.is_ok()
-        };
-        assert!(!running, "should not report running without PID file");
-    }
-
-    #[test]
-    fn check_mcp_os_returns_false_when_pid_is_dead() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path();
-        let token_path = data_dir.join("mcp-os-auth-token");
-        let pid_path = data_dir.join("mcp-os-pid");
-        std::fs::write(&token_path, "test-token").unwrap();
-        // PID 999999999 is virtually guaranteed not to exist.
-        std::fs::write(&pid_path, "999999999").unwrap();
-        let running = token_path.exists() && {
-            let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-            let pid: u32 = pid_str.trim().parse().unwrap_or(0);
-            pid > 0 && speedwave_runtime::host_mcp_process::is_pid_alive(pid)
-        };
-        assert!(!running, "should not report running for dead PID");
-    }
-
-    #[test]
-    fn check_mcp_os_returns_true_when_pid_is_alive() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path();
-        let token_path = data_dir.join("mcp-os-auth-token");
-        let pid_path = data_dir.join("mcp-os-pid");
-        std::fs::write(&token_path, "test-token").unwrap();
-        // Use current process PID — guaranteed alive.
-        let current_pid = std::process::id();
-        std::fs::write(&pid_path, current_pid.to_string()).unwrap();
-        let running = token_path.exists() && {
-            let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-            let pid: u32 = pid_str.trim().parse().unwrap_or(0);
-            pid > 0 && speedwave_runtime::host_mcp_process::is_pid_alive(pid)
-        };
-        assert!(running, "should report running for alive PID");
-    }
-
     // ── is_mcp_os_alive tests (via check_mcp_os_alive_in) ──────────────
     //
     // After the unified-lock migration (PR3), `is_mcp_os_alive_in` reads
@@ -1292,6 +1241,23 @@ mod tests {
         assert!(
             super::check_mcp_os_alive_in(data_dir),
             "PID alive + port listening should return true"
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn is_mcp_os_alive_false_when_pid_in_lock_is_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        // PID 999_999_999 is virtually guaranteed not to be alive on the
+        // host. Even if its port were somehow listening, `is_pid_alive`
+        // short-circuits before the TCP probe.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        write_mcp_os_lock(data_dir, 999_999_999, port);
+        assert!(
+            !super::check_mcp_os_alive_in(data_dir),
+            "dead PID in lock.json must report not-alive"
         );
         drop(listener);
     }

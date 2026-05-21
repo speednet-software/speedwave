@@ -942,6 +942,11 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     // in ENABLED_SERVICES and the hub has no bearer for it. The reservation
     // exists purely to prevent slug collisions in plugin manifests.
     "oauth",
+    // Reserved for the IDE bridge: `HostBridge::new("ide", ...)` writes its
+    // lock files under `<data_dir>/ide-bridge/`. A plugin slug `"ide"` would
+    // collide on that directory (`PluginHostBridge::new(slug, ...)` uses the
+    // slug verbatim as the bridge name). No compose service — pure reservation.
+    "ide",
 ];
 
 /// Environment variable names that plugins are forbidden from setting via

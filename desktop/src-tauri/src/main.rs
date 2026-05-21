@@ -1390,15 +1390,6 @@ impl WatchdogWorker for speedwave_runtime::host_exec_process::HostExecProcess {
     }
 }
 
-impl WatchdogWorker for speedwave_runtime::mcp_os_process::McpOsProcess {
-    fn is_alive(&self) -> bool {
-        speedwave_runtime::mcp_os_process::McpOsProcess::is_alive(self)
-    }
-    fn respawn(&mut self) -> anyhow::Result<u16> {
-        speedwave_runtime::mcp_os_process::McpOsProcess::respawn(self)
-    }
-}
-
 /// Shared watchdog loop for per-project host-side workers (oauth, host_exec).
 /// Polls every 30 s; under the map mutex, calls [`sweep_per_project_workers`]
 /// to respawn dead workers; releases the lock; then recreates each respawned

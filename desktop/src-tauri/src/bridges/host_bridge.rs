@@ -35,7 +35,12 @@ pub enum AuthScheme {
     Header(&'static str),
     /// Token in the URL query string (`?<name>=<token>`). Required for
     /// browser-based clients — the WebSocket API does not allow custom
-    /// headers on the upgrade.
+    /// headers on the upgrade. **Accepted risk:** URL query strings
+    /// can leak via process arg lists, browser history, and HTTP
+    /// `Referer` headers. Mitigated by (a) listening only on
+    /// `127.0.0.1`, (b) regenerating the token on every Desktop
+    /// startup, (c) `0o600` lock file. Prefer `Header` when the client
+    /// can set headers.
     QueryParam(&'static str),
 }
 
@@ -52,14 +57,9 @@ pub enum OriginPolicy {
     /// Reject any request carrying `Origin`. Used by IDE Bridge.
     RejectIfPresent,
     /// Accept `Origin` iff auth was `QueryParam`. Used by browser-based
-    /// plugin UIs (e.g. Figma plugin iframe) that always set `Origin` and
-    /// cannot set custom headers on the WebSocket upgrade.
+    /// plugin UIs that always set `Origin` and cannot set custom
+    /// headers on the WebSocket upgrade.
     AcceptIfAuthIsQueryParam,
-    /// Accept `Origin` only if it appears in this allow-list. No current
-    /// bridge uses this — exercised by tests only; cfg-gated to silence
-    /// dead-code in the production `--bin` build.
-    #[cfg_attr(not(test), allow(dead_code))]
-    AllowList(Vec<&'static str>),
 }
 
 /// Sec-WebSocket-Protocol echo policy. Empty list = ignore.
@@ -87,9 +87,9 @@ pub struct PairingConfig {
 /// pending slot. See ADR-063.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoleCollisionPolicy {
-    /// Pre-handshake HTTP 409 — reject the new connection. No current
-    /// bridge uses this; tests exercise the Reject path directly.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Pre-handshake HTTP 409 — reject the new connection. Selected by
+    /// `plugin_host_bridge::translate_collision_policy` when a plugin
+    /// manifest sets `host_bridge.collision: reject`.
     Reject,
     /// Drop the older pending stream, accept the new one.
     EvictOlder,
@@ -280,16 +280,15 @@ pub type ConnectionHandler = Arc<
 pub struct ConnectionContext {
     pub bridge_name: String,
     pub peer_addr: SocketAddr,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub path: String,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub query: Option<String>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub selected_subprotocol: Option<String>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub matched_auth: AuthMatch,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub shutdown: broadcast::Receiver<()>,
+    /// `_`-prefixed fields are part of the public API for connection
+    /// handlers but currently have no in-tree handler that reads them.
+    /// The prefix signals "available, not currently consumed" without
+    /// silencing dead-code lints with `#[allow(...)]`.
+    pub _path: String,
+    pub _query: Option<String>,
+    pub _selected_subprotocol: Option<String>,
+    pub _matched_auth: AuthMatch,
+    pub _shutdown: broadcast::Receiver<()>,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,19 +297,17 @@ pub struct ConnectionContext {
 
 pub type PairingEventCallback = Arc<dyn Fn(PairingEvent) + Send + Sync + 'static>;
 
-/// Event surface for Pairing-mode bridges. Many fields are consumed only
-/// by tests / future telemetry; `cfg_attr(not(test), allow(dead_code))`
-/// silences dead-code in the prod `--bin` build while keeping the API
-/// contract intact.
+/// Event surface for Pairing-mode bridges. `_`-prefixed fields are
+/// emitted for future telemetry / test inspection but no in-tree
+/// consumer reads them — the prefix signals "available, not currently
+/// consumed" without silencing dead-code lints with `#[allow(...)]`.
 #[derive(Clone, Debug)]
 pub enum PairingEvent {
     SlotOccupied {
         role: &'static str,
-        #[cfg_attr(not(test), allow(dead_code))]
-        peer_addr: SocketAddr,
+        _peer_addr: SocketAddr,
     },
     Paired {
-        #[cfg_attr(not(test), allow(dead_code))]
         roles: Vec<&'static str>,
     },
     PairClosed {
@@ -319,15 +316,13 @@ pub enum PairingEvent {
     SameRoleCollision {
         role: &'static str,
         policy: RoleCollisionPolicy,
-        #[cfg_attr(not(test), allow(dead_code))]
-        peer_addr: SocketAddr,
+        _peer_addr: SocketAddr,
     },
     PendingSlotTimeout {
         role: &'static str,
     },
     PairBusy {
-        #[cfg_attr(not(test), allow(dead_code))]
-        peer_addr: SocketAddr,
+        _peer_addr: SocketAddr,
     },
 }
 
@@ -771,11 +766,11 @@ async fn run_endpoint_loop(
                 let ctx = ConnectionContext {
                     bridge_name: config.name.clone(),
                     peer_addr,
-                    path: outcome.path,
-                    query: outcome.query,
-                    selected_subprotocol: outcome.selected_subprotocol,
-                    matched_auth: outcome.matched_auth,
-                    shutdown: shutdown_rx.resubscribe(),
+                    _path: outcome.path,
+                    _query: outcome.query,
+                    _selected_subprotocol: outcome.selected_subprotocol,
+                    _matched_auth: outcome.matched_auth,
+                    _shutdown: shutdown_rx.resubscribe(),
                 };
                 let fut = (handler)(ws, ctx);
                 tokio::spawn(fut);
@@ -894,7 +889,9 @@ async fn run_pairing_loop(
                         };
                         if st.active.is_some() {
                             if let Some(cb) = &event_cb_for_cb {
-                                cb(PairingEvent::PairBusy { peer_addr });
+                                cb(PairingEvent::PairBusy {
+                                    _peer_addr: peer_addr,
+                                });
                             }
                             return Err(http_response(409, "Pair busy"));
                         }
@@ -905,7 +902,7 @@ async fn run_pairing_loop(
                                         cb(PairingEvent::SameRoleCollision {
                                             role,
                                             policy: RoleCollisionPolicy::Reject,
-                                            peer_addr,
+                                            _peer_addr: peer_addr,
                                         });
                                     }
                                     return Err(http_response(409, "Role already pending"));
@@ -916,7 +913,7 @@ async fn run_pairing_loop(
                                             cb(PairingEvent::SameRoleCollision {
                                                 role,
                                                 policy: RoleCollisionPolicy::EvictOlder,
-                                                peer_addr,
+                                                _peer_addr: peer_addr,
                                             });
                                         }
                                     }
@@ -963,7 +960,7 @@ async fn run_pairing_loop(
                 if let Some(cb) = &event_cb {
                     cb(PairingEvent::SlotOccupied {
                         role: outcome.role,
-                        peer_addr,
+                        _peer_addr: peer_addr,
                     });
                 }
 
@@ -1172,16 +1169,6 @@ fn check_origin(req: &Request<()>, policy: &OriginPolicy, matched_auth: &AuthMat
         OriginPolicy::RejectIfPresent => !has_origin,
         OriginPolicy::AcceptIfAuthIsQueryParam => {
             !has_origin || matches!(matched_auth, AuthMatch::QueryParam(_))
-        }
-        OriginPolicy::AllowList(allow) => {
-            if !has_origin {
-                return true;
-            }
-            req.headers()
-                .get("origin")
-                .and_then(|v| v.to_str().ok())
-                .map(|o| allow.contains(&o))
-                .unwrap_or(false)
         }
     }
 }
@@ -1805,14 +1792,14 @@ mod tests {
                 // Touch every public ConnectionContext field so the
                 // contract is exercised end-to-end. `shutdown` is a
                 // broadcast receiver — resubscribe instead of cloning.
-                let _shutdown_alive = ctx.shutdown.try_recv().is_err();
+                let _shutdown_alive = ctx._shutdown.try_recv().is_err();
                 *observed.lock().unwrap() = Some((
                     ctx.bridge_name.clone(),
                     ctx.peer_addr,
-                    ctx.path.clone(),
-                    ctx.query.clone(),
-                    ctx.selected_subprotocol.clone(),
-                    ctx.matched_auth.clone(),
+                    ctx._path.clone(),
+                    ctx._query.clone(),
+                    ctx._selected_subprotocol.clone(),
+                    ctx._matched_auth.clone(),
                 ));
                 let _ = ws.close(None).await;
             })
@@ -1889,7 +1876,7 @@ mod tests {
         let handler: ConnectionHandler = Arc::new(|mut ws, mut ctx| {
             Box::pin(async move {
                 // Wait for shutdown signal, then close.
-                let _ = ctx.shutdown.recv().await;
+                let _ = ctx._shutdown.recv().await;
                 let _ = ws.close(None).await;
             })
         });
@@ -2068,8 +2055,8 @@ mod tests {
 
         let evts = events.lock().unwrap().clone();
         let busy_with_addr = evts.iter().find_map(|e| {
-            if let PairingEvent::PairBusy { peer_addr } = e {
-                Some(*peer_addr)
+            if let PairingEvent::PairBusy { _peer_addr } = e {
+                Some(*_peer_addr)
             } else {
                 None
             }
@@ -2352,8 +2339,12 @@ mod tests {
         });
         let evts = events.lock().unwrap().clone();
         let worker_addr = evts.iter().find_map(|e| {
-            if let PairingEvent::SlotOccupied { role: "worker", peer_addr } = e {
-                Some(*peer_addr)
+            if let PairingEvent::SlotOccupied {
+                role: "worker",
+                _peer_addr,
+            } = e
+            {
+                Some(*_peer_addr)
             } else {
                 None
             }
@@ -2585,11 +2576,11 @@ mod tests {
         let reject_addr = evts.iter().find_map(|e| {
             if let PairingEvent::SameRoleCollision {
                 policy: RoleCollisionPolicy::Reject,
-                peer_addr,
+                _peer_addr,
                 ..
             } = e
             {
-                Some(*peer_addr)
+                Some(*_peer_addr)
             } else {
                 None
             }
@@ -2905,33 +2896,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn origin_allow_list_accepts_listed_origin() {
-        // Direct check_origin invocation — full integration test is
-        // unnecessary for this branch.
-        use http::Request;
-        let mut req = Request::builder()
-            .uri("/")
-            .header("origin", "https://app.example")
-            .body(())
-            .unwrap();
-        // Use any matched_auth, AllowList ignores it.
-        let _ = req.headers_mut();
-        let policy = OriginPolicy::AllowList(vec!["https://app.example"]);
-        let matched = AuthMatch::Header("x-test-auth");
-        assert!(check_origin(&req, &policy, &matched));
-    }
-
-    #[test]
-    fn origin_allow_list_rejects_unlisted_origin() {
-        use http::Request;
-        let req = Request::builder()
-            .uri("/")
-            .header("origin", "https://evil.example")
-            .body(())
-            .unwrap();
-        let policy = OriginPolicy::AllowList(vec!["https://app.example"]);
-        let matched = AuthMatch::Header("x-test-auth");
-        assert!(!check_origin(&req, &policy, &matched));
-    }
 }

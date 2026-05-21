@@ -90,21 +90,19 @@ mod tests {
 
     #[test]
     fn probe_tcp_applies_backoff_between_attempts() {
-        // We cannot deterministically pick a "guaranteed closed" port —
-        // any port can be bound by another process between bind+drop
-        // and the probe. Instead, test that backoff is observed when
-        // probing port 1 (privileged, normally not listening) with
-        // multiple attempts. The timing assertion proves the loop ran
-        // at least the requested number of attempts; whether each
-        // connect succeeds is OS-dependent.
+        // Probe a port that is highly unlikely to be listening (1 — a
+        // privileged port that on most hosts gets immediate RST). With
+        // 3 attempts the function must sleep `backoff` twice between
+        // them. Lower-bound only: a wall-clock upper bound flakes
+        // under heavy CI load and slow OS connect timeouts.
+        let backoff = Duration::from_millis(50);
         let start = std::time::Instant::now();
-        let _ = probe_tcp(1, 3, Duration::from_millis(50));
-        // Connect to port 1 is expected to fail immediately on most
-        // hosts (RST), so at minimum two backoff sleeps run.
-        // Allow for the possibility that connect itself takes time
-        // — only assert that the function returns within a reasonable
-        // upper bound.
-        assert!(start.elapsed() < Duration::from_secs(3));
+        let _ = probe_tcp(1, 3, backoff);
+        assert!(
+            start.elapsed() >= backoff * 2,
+            "3 attempts must include 2 backoff sleeps; got {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
