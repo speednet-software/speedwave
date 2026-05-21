@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
 import type { SessionStats } from '../../models/chat';
-import { DEFAULT_CONTEXT_TOKENS, formatContextLabel } from '../../models/llm';
+import { formatContextLabel } from '../../models/llm';
 import { IconComponent } from '../../shared/icon.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 
@@ -51,8 +51,8 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
           </span>
         }
 
-        <!-- Context bar (sm+) -->
-        @if (ctxPct() > 0) {
+        <!-- Context bar (sm+) — hidden when ctxPct is null (unknown window). -->
+        @if (ctxPct() !== null && ctxPct()! > 0) {
           <span
             class="hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex"
             [appTooltip]="
@@ -221,25 +221,41 @@ export class SessionStatsComponent {
     return usage.input_tokens + (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0);
   });
 
-  /** Context window usage as an integer percentage (0–100). */
-  readonly ctxPct = computed<number>(() => {
+  /**
+   * Context window usage as an integer percentage (0–100), or `null` when
+   * the active provider didn't advertise a window (local LLM without
+   * inline metadata). Template hides the progress bar in that case rather
+   * than fabricating a default — ADR-041 "never guess".
+   */
+  readonly ctxPct = computed<number | null>(() => {
     const total = this.totalInput();
     if (total <= 0) return 0;
-    const windowSize = this.stats()?.context_window_size ?? DEFAULT_CONTEXT_TOKENS;
+    const windowSize = this.stats()?.context_window_size;
+    if (!windowSize || windowSize <= 0) return null;
     return Math.min(100, Math.round((total / windowSize) * 100));
   });
 
-  /** Filled segments (0–5) for the context bar, rounded to nearest. */
-  readonly ctxFilled = computed<number>(() => bucketFilled(this.ctxPct()));
+  /** Filled segments (0–5) for the context bar; 0 when ctxPct is null. */
+  readonly ctxFilled = computed<number>(() => {
+    const pct = this.ctxPct();
+    return pct === null ? 0 : bucketFilled(pct);
+  });
 
-  /** Tailwind class for filled context-bar segments. */
-  readonly ctxBarColor = computed<string>(() => barColor(this.ctxPct()));
+  /** Tailwind class for filled context-bar segments; empty when ctxPct is null. */
+  readonly ctxBarColor = computed<string>(() => {
+    const pct = this.ctxPct();
+    return pct === null ? '' : barColor(pct);
+  });
 
-  /** `used/max` label in short-form (e.g. `116k/200k`); empty string if not derivable. */
-  readonly ctxUsedMax = computed<string>(() => {
+  /**
+   * `used/max` label (e.g. `116k/200k`), or `null` when the context window
+   * is unknown — template hides the label.
+   */
+  readonly ctxUsedMax = computed<string | null>(() => {
     const total = this.totalInput();
     if (total <= 0) return '';
-    const windowSize = this.stats()?.context_window_size ?? DEFAULT_CONTEXT_TOKENS;
+    const windowSize = this.stats()?.context_window_size;
+    if (!windowSize || windowSize <= 0) return null;
     return `${formatContextLabel(total)}/${formatContextLabel(windowSize)}`;
   });
 

@@ -64,6 +64,31 @@ pub(crate) struct AuthStatusResponse {
     pub(crate) oauth_authenticated: bool,
 }
 
+/// Update DTO for the LLM settings save path.
+///
+/// Mirrors `speedwave_runtime::config::LlmConfig` fields but adds two
+/// tri-state credential fields that the runtime struct doesn't carry (it
+/// only stores presence flags). The `api_key` / `custom_headers` *values*
+/// land in token files on disk; only `has_api_key` / `has_custom_headers`
+/// reach `LlmConfig` in `config.json`.
+///
+/// Tri-state semantics via `serde_with::rust::double_option`:
+/// - **field omitted** (`None`) — leave on-disk file unchanged
+/// - **explicit `null`** (`Some(None)`) — delete on-disk file, flag becomes false
+/// - **string** (`Some(Some(value))`) — write/replace; empty string also deletes
+#[derive(Deserialize, Default)]
+pub(crate) struct LlmConfigUpdate {
+    pub(crate) provider: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) base_url: Option<String>,
+    #[serde(default)]
+    pub(crate) context_tokens: Option<u32>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) api_key: Option<Option<String>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) custom_headers: Option<Option<String>>,
+}
+
 #[derive(Serialize, Clone)]
 pub(crate) struct AuthField {
     pub(crate) key: String,
@@ -401,6 +426,8 @@ mod tests {
                 model: Some("qwen3:35b".to_string()),
                 base_url: Some("http://localhost:11434".to_string()),
                 context_tokens: Some(32_768),
+                has_api_key: false,
+                has_custom_headers: false,
             },
             default_base_url: Some("http://host.docker.internal:11434".to_string()),
         };

@@ -249,7 +249,12 @@ export interface SessionStats {
   usage?: UsageInfo;
   model?: string;
   rate_limit?: RateLimitInfo;
-  context_window_size: number;
+  /**
+   * Context window in tokens; `null` for local providers when the discovery
+   * probe couldn't determine a value (ADR-041 "never guess"). UI hides the
+   * `used / max` ratio when this is null rather than fabricating a default.
+   */
+  context_window_size: number | null;
   /** Cumulative output tokens across all turns in the session. */
   total_output_tokens: number;
 }

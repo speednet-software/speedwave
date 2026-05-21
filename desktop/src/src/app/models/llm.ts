@@ -40,6 +40,41 @@ export interface DiscoveredModel {
 }
 
 /**
+ * Result of a `provider="local"` discovery probe. Pairs the model list with
+ * a chat-endpoint sanity flag — the UI shows a warning when the server has
+ * `/v1/models` but does NOT implement `/v1/messages` (Anthropic Messages).
+ * `messages_endpoint_ok === undefined` means "could not determine" (timeout
+ * or transport error); treat as "unknown", not "failure".
+ */
+export interface DiscoverResult {
+  models: DiscoveredModel[];
+  messages_endpoint_ok?: boolean;
+}
+
+/** Local-provider names treated as "Local" in the UI (`isLocalProvider`). */
+export const LOCAL_PROVIDERS: ReadonlyArray<string> = ['ollama', 'lmstudio', 'llamacpp', 'local'];
+
+/**
+ * Legacy local-provider names auto-migrated to `local` on Save. Derived
+ * from {@link LOCAL_PROVIDERS} so a future rename of the canonical name
+ * stays consistent without touching two arrays.
+ */
+export const LEGACY_LOCAL_PROVIDERS: ReadonlyArray<string> = LOCAL_PROVIDERS.filter(
+  (p) => p !== 'local'
+);
+
+/**
+ * Mirror of `speedwave_runtime::config::is_local_provider`. Frontend uses
+ * this to: (a) render the unified "Local" radio card for legacy configs,
+ * (b) decide whether the honest context fallback applies (no `DEFAULT_CONTEXT_TOKENS`
+ * fallback for local providers — ADR-041 "never guess").
+ * @param provider - Provider id from `get_llm_config().provider` (may be null).
+ */
+export function isLocalProvider(provider: string | null | undefined): boolean {
+  return !!provider && LOCAL_PROVIDERS.includes(provider);
+}
+
+/**
  * Frontend mirror of the Rust `LlmConfigResponse` returned by the
  * `get_llm_config` Tauri command (`desktop/src-tauri/src/types.rs`). Fields
  * come from `claude.llm` (`speedwave_runtime::config::LlmConfig`) plus the
@@ -56,11 +91,14 @@ export interface LlmConfigResponse {
   /**
    * Persisted context window for the active model (in tokens). For Anthropic
    * the frontend sets this from the SSOT catalog; for local providers it
-   * comes from the discovery probe (Ollama `/api/show`, LM Studio
-   * `/api/v0/models`, llama.cpp `/v1/models`). The chat footer falls back
-   * to this value when the stream-level `context_window_size` is missing.
+   * comes from the discovery probe. The chat footer falls back to this
+   * value when the stream-level `context_window_size` is missing.
    */
   context_tokens?: number | null;
+  /** True when an api_key file exists for this project. */
+  has_api_key?: boolean;
+  /** True when a custom_headers file exists for this project. */
+  has_custom_headers?: boolean;
 }
 
 /**

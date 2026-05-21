@@ -1700,6 +1700,11 @@ fn main() {
                     log::warn!("Lima VM config migration failed: {e}");
                 }
 
+                #[cfg(target_os = "windows")]
+                if let Err(e) = setup_wizard::ensure_wslconfig_vpn_compat() {
+                    log::warn!(".wslconfig VPN-compat migration failed: {e}");
+                }
+
                 if let Err(e) = setup_wizard::link_cli() {
                     log::warn!("CLI re-link on startup failed: {e}");
                 }

@@ -1453,6 +1453,7 @@ impl ChatSession {
                 .and_then(speedwave_runtime::log_file::open_log_file);
             let reader = BufReader::new(stdout);
             let mut got_result = false;
+            let mut http_collator = speedwave_runtime::http_debug_collator::Collator::new();
             for line in reader.lines() {
                 let line = match line {
                     Ok(l) => l,
@@ -1462,15 +1463,19 @@ impl ChatSession {
                     }
                 };
 
-                // Parse JSON once — pass the Value to both control_request and stream parsers
+                // Parse JSON once — pass the Value to both control_request and stream parsers.
+                // Non-JSON lines (e.g. ANTHROPIC_LOG=debug HTTP traces) are joined into single
+                // entries by `http_debug_collator` before being written to the session log.
                 let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(v) => v,
                     Err(_) => {
-                        speedwave_runtime::log_file::write_log_line(
-                            &mut log_file,
-                            "STDOUT",
-                            "[non-json stdout suppressed]",
-                        );
+                        for entry in http_collator.push(line) {
+                            speedwave_runtime::log_file::write_log_line(
+                                &mut log_file,
+                                "STDOUT",
+                                &entry,
+                            );
+                        }
                         continue;
                     }
                 };
@@ -1578,6 +1583,18 @@ impl ChatSession {
                         entry.prefix,
                         &entry.message,
                     );
+                    // Stream-protocol markers signal in-flight HTTP transactions
+                    // are done — flush any pending ANTHROPIC_LOG=debug response
+                    // fragments so they appear in the log alongside the marker.
+                    if matches!(entry.prefix, "RESULT" | "SYSTEM" | "SESSION" | "RATE_LIMIT") {
+                        for merged in http_collator.flush_all_pending_responses() {
+                            speedwave_runtime::log_file::write_log_line(
+                                &mut log_file,
+                                "STDOUT",
+                                &merged,
+                            );
+                        }
+                    }
                 }
                 // Track whether we received a terminal event so we can
                 // emit a fallback error on unexpected EOF.  Covers:
@@ -1623,6 +1640,10 @@ impl ChatSession {
                 if let Some(session_id) = result_session_id {
                     drain_queued_message(&app_handle, &session_id, &stdin_for_reader);
                 }
+            }
+
+            if let Some(entry) = http_collator.flush() {
+                speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
             }
 
             // If the stdout pipe closed without a proper result/error,

@@ -55,6 +55,29 @@ pub(crate) async fn read_body_limited(
     Ok(buf)
 }
 
+/// Builds a `reqwest::Client` with the ADR-041 host-side hardening baseline:
+/// no redirect following (SSRF defence), Speedwave User-Agent, plus any
+/// caller-supplied default headers (e.g. `Authorization: Bearer …`, custom
+/// per-tenant headers). Body-size cap and Content-Type allow-list are applied
+/// per-request by [`read_body_limited`] / callsite policy.
+///
+/// Two callsites today (LLM probe, Redmine API) — extracting here keeps the
+/// four hardening constants travelling together. Adding a third outbound
+/// client = reuse this, do not retype the four lines.
+pub(crate) fn build_hardened_client(
+    default_headers: Option<reqwest::header::HeaderMap>,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(format!("Speedwave-Desktop/{}", env!("CARGO_PKG_VERSION")));
+    if let Some(headers) = default_headers {
+        builder = builder.default_headers(headers);
+    }
+    builder
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
 /// Translates the canonical container-side host alias to `127.0.0.1`. Host-side only.
 ///
 /// Inside containers, `HOST_GATEWAY_ALIAS` resolves via `extra_hosts`. From the
