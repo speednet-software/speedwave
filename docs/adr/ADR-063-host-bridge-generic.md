@@ -171,10 +171,11 @@ disconnect would clear `active` *after* the main loop wrote a new
 
 ### Neutral
 
-- `RoleCollisionPolicy` started as a two-variant enum
-  (`Reject | EvictOlder`) but only `EvictOlder` is used today; the
-  variant was reduced to one. The enum stays — if a future bridge
-  wants `Reject`-style rejection, re-adding the variant is mechanical.
+- `RoleCollisionPolicy` exposes both `Reject` (pre-handshake HTTP 409)
+  and `EvictOlder` (drop older pending stream, accept the new one).
+  The IDE Bridge uses `EvictOlder` exclusively; plugins opt in to
+  `Reject` via `host_bridge.collision: "reject"` in their manifest
+  (translated by `plugin_host_bridge::translate_collision_policy`).
 
 ## References
 

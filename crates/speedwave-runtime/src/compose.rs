@@ -10647,10 +10647,17 @@ services:
     }
 
     fn fixture_host_bridge_manifest(url_env: &str, token_env: &str) -> plugin::HostBridgeManifest {
+        // `validate_manifest` rejects empty roles, so seed one valid role.
+        let roles = std::collections::HashMap::from([(
+            "worker".to_string(),
+            plugin::HostBridgeRoleAuth::Header {
+                name: "x-bridge-auth".to_string(),
+            },
+        )]);
         plugin::HostBridgeManifest {
             url_env: url_env.into(),
             token_env: token_env.into(),
-            roles: std::collections::HashMap::new(),
+            roles,
             origin_policy: plugin::HostBridgeOriginPolicy::default(),
             max_frame_bytes: None,
             collision_policy: plugin::HostBridgeCollisionPolicy::default(),

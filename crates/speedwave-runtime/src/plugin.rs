@@ -801,6 +801,78 @@ pub(crate) fn validate_manifest(
         }
     }
 
+    if let Some(ref bridge) = manifest.host_bridge {
+        validate_host_bridge_manifest(bridge)?;
+    }
+
+    Ok(())
+}
+
+/// Manifest-time checks for the optional `host_bridge` block. Mirrors
+/// the four edge categories required by `.claude/rules/plugins.md`:
+/// missing (`Option<...>`), empty (zero roles, blank display_name),
+/// malformed (control chars / `=` in env names), and reserved
+/// (RESERVED_ENV_KEYS collision).
+fn validate_host_bridge_manifest(bridge: &HostBridgeManifest) -> anyhow::Result<()> {
+    if bridge.roles.is_empty() {
+        anyhow::bail!("host_bridge.roles must declare at least one role");
+    }
+    if bridge.display_name.trim().is_empty() {
+        anyhow::bail!("host_bridge.display_name must not be empty");
+    }
+    validate_bridge_env_name("url_env", &bridge.url_env)?;
+    validate_bridge_env_name("token_env", &bridge.token_env)?;
+    if bridge.url_env == bridge.token_env {
+        anyhow::bail!(
+            "host_bridge.url_env and host_bridge.token_env must differ ('{}' on both)",
+            bridge.url_env
+        );
+    }
+    for (role, auth) in &bridge.roles {
+        if role.is_empty() {
+            anyhow::bail!("host_bridge.roles contains an empty role name");
+        }
+        if role.chars().any(|c| c.is_control()) {
+            anyhow::bail!("host_bridge.roles role name '{role}' contains a control character");
+        }
+        let header_name = match auth {
+            HostBridgeRoleAuth::Header { name } | HostBridgeRoleAuth::QueryParam { name } => name,
+        };
+        if header_name.is_empty() {
+            anyhow::bail!("host_bridge.roles['{role}']: auth scheme name must not be empty");
+        }
+        if header_name.chars().any(|c| c.is_control()) {
+            anyhow::bail!(
+                "host_bridge.roles['{role}']: auth scheme name '{header_name}' contains a control character"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_bridge_env_name(field: &str, name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("host_bridge.{field} must not be empty");
+    }
+    if consts::RESERVED_ENV_KEYS
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(name))
+    {
+        anyhow::bail!(
+            "host_bridge.{field} '{name}' is reserved (auto-injected by Speedwave or a dangerous runtime hijack vector)"
+        );
+    }
+    if name.contains('=') {
+        anyhow::bail!("host_bridge.{field} must not contain '=' (got: '{name}')");
+    }
+    if name
+        .chars()
+        .any(|c| c == '\n' || c == '\r' || c == '\0' || c.is_control())
+    {
+        anyhow::bail!(
+            "host_bridge.{field} '{name}' contains control characters (newline / null / etc.)"
+        );
+    }
     Ok(())
 }
 
@@ -4929,6 +5001,212 @@ mod tests {
                 "expected reserved-key rejection for '{dangerous}', got: {msg}"
             );
         }
+    }
+
+    // ── host_bridge manifest validation ─────────────────────────────────
+
+    fn fixture_host_bridge_manifest_with(
+        roles: HashMap<String, HostBridgeRoleAuth>,
+        url_env: &str,
+        token_env: &str,
+        display_name: &str,
+    ) -> HostBridgeManifest {
+        HostBridgeManifest {
+            url_env: url_env.to_string(),
+            token_env: token_env.to_string(),
+            roles,
+            origin_policy: HostBridgeOriginPolicy::default(),
+            max_frame_bytes: None,
+            collision_policy: HostBridgeCollisionPolicy::default(),
+            pending_slot_timeout_secs: None,
+            display_name: display_name.to_string(),
+        }
+    }
+
+    fn fixture_manifest_with_host_bridge(bridge: HostBridgeManifest) -> PluginManifest {
+        PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-bridge".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: Some(bridge),
+        }
+    }
+
+    fn valid_roles() -> HashMap<String, HostBridgeRoleAuth> {
+        HashMap::from([
+            (
+                "worker".to_string(),
+                HostBridgeRoleAuth::Header {
+                    name: "x-auth".to_string(),
+                },
+            ),
+            (
+                "plugin".to_string(),
+                HostBridgeRoleAuth::QueryParam {
+                    name: "token".to_string(),
+                },
+            ),
+        ])
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_valid_host_bridge() {
+        let bridge = fixture_host_bridge_manifest_with(
+            valid_roles(),
+            "MY_BRIDGE_URL",
+            "MY_BRIDGE_TOKEN",
+            "My Bridge",
+        );
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        validate_manifest(&manifest, tmp.path()).expect("valid host_bridge must pass");
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_empty_roles() {
+        let bridge = fixture_host_bridge_manifest_with(HashMap::new(), "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            validate_manifest(&manifest, tmp.path()).expect_err("empty roles must be rejected");
+        assert!(
+            err.to_string().contains("at least one role"),
+            "expected roles-empty rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_empty_display_name() {
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "   ");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("blank display_name must be rejected");
+        assert!(
+            err.to_string().contains("display_name"),
+            "expected display_name rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_reserved_url_env() {
+        // PORT is in RESERVED_ENV_KEYS (auto-injected by Speedwave).
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "PORT", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("reserved url_env must be rejected");
+        assert!(
+            err.to_string().contains("reserved"),
+            "expected reserved-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_reserved_token_env() {
+        // LD_PRELOAD is a dangerous runtime hijack vector reserved by Speedwave.
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "LD_PRELOAD", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("reserved token_env must be rejected");
+        assert!(
+            err.to_string().contains("reserved"),
+            "expected reserved-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_equal_url_and_token_env() {
+        // Same env name on both fields would collide on the container env.
+        let bridge =
+            fixture_host_bridge_manifest_with(valid_roles(), "SAME_NAME", "SAME_NAME", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("identical url_env/token_env must be rejected");
+        assert!(
+            err.to_string().contains("must differ"),
+            "expected differ rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_control_char_in_env_name() {
+        let bridge =
+            fixture_host_bridge_manifest_with(valid_roles(), "URL\nWITH_NEWLINE", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("control char in url_env must be rejected");
+        assert!(
+            err.to_string().contains("control"),
+            "expected control-char rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_equal_sign_in_env_name() {
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "URL=oops", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            validate_manifest(&manifest, tmp.path()).expect_err("'=' in url_env must be rejected");
+        assert!(
+            err.to_string().contains("'='"),
+            "expected '=' rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_empty_role_auth_name() {
+        let roles = HashMap::from([(
+            "worker".to_string(),
+            HostBridgeRoleAuth::Header {
+                name: String::new(),
+            },
+        )]);
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("empty auth scheme name must be rejected");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "expected empty-name rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_control_char_in_role_auth_name() {
+        let roles = HashMap::from([(
+            "worker".to_string(),
+            HostBridgeRoleAuth::QueryParam {
+                name: "tok\0bad".to_string(),
+            },
+        )]);
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("control char in auth scheme name must be rejected");
+        assert!(
+            err.to_string().contains("control character"),
+            "expected control-char rejection, got: {err}"
+        );
     }
 
     #[test]

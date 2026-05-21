@@ -14,9 +14,8 @@ use super::probe::probe_tcp;
 use super::{drain_and_read_port, is_node_process, kill_process};
 
 /// Worker-specific contract every per-manager `Spec` implements.
-/// Plan §"Architektura docelowa": `apply_env`, `pre_spawn`,
-/// `extra_cleanup_files` and `probe` capture the only places three
-/// existing managers actually differ.
+/// `apply_env`, `pre_spawn`, `extra_cleanup_files` and `probe` capture
+/// the only places three existing managers actually differ.
 pub trait WorkerSpec: Send + 'static {
     /// Service tag persisted in `lock.json` and used by all log labels.
     fn service(&self) -> LockService;
@@ -70,7 +69,7 @@ pub trait WorkerSpec: Send + 'static {
     }
 }
 
-/// Liveness probe variants. Plan §"Architektura docelowa".
+/// Liveness probe variants.
 #[derive(Clone, Copy, Debug)]
 pub enum LivenessProbe {
     /// Single TCP connect to `127.0.0.1:port`. host_exec default.
@@ -441,7 +440,7 @@ mod tests {
 
     #[test]
     fn fake_spec_records_hook_order() {
-        // Plan obietnica: pre_spawn → apply_env → spawn → write_atomic.
+        // Spawn-sequence contract: pre_spawn → apply_env → spawn → write_atomic.
         // Without a real node binary we can't test the full sequence
         // end-to-end, but we can prove the order pre_spawn → apply_env
         // by invoking them directly the way `spawn_in` would.
