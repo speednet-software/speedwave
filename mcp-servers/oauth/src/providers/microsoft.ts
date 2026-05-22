@@ -8,6 +8,7 @@
  */
 
 import { TIMEOUTS } from '@speedwave/mcp-shared';
+import type { OAuthProvider, RefreshRequest, RefreshResult } from './types.js';
 
 /** Inputs for the Microsoft v2 refresh-token POST. */
 export interface MicrosoftTokenRequest {
@@ -160,3 +161,21 @@ export async function refreshMicrosoftToken(
     },
   };
 }
+
+/**
+ * Microsoft Identity v2 provider — public-client device-code flow per ADR-060.
+ * Adapter over {@link refreshMicrosoftToken} that satisfies the generic
+ * {@link OAuthProvider} contract.
+ */
+export const microsoftProvider: OAuthProvider = {
+  id: 'microsoft',
+  displayName: 'Microsoft Identity',
+  requiredFields: ['clientId', 'tenantId'],
+  refresh: (req: RefreshRequest): Promise<RefreshResult> =>
+    refreshMicrosoftToken({
+      clientId: req.providerData.clientId,
+      tenantId: req.providerData.tenantId,
+      scopes: req.scopes,
+      refreshToken: req.refreshToken,
+    }),
+};

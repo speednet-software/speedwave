@@ -20,8 +20,10 @@ describe('oauth-state', () => {
 
   const sample: OAuthState = {
     provider: 'microsoft',
-    clientId: '11111111-1111-1111-1111-111111111111',
-    tenantId: 'common',
+    providerData: {
+      clientId: '11111111-1111-1111-1111-111111111111',
+      tenantId: 'common',
+    },
     scopes: ['https://graph.microsoft.com/Sites.Manage.All'],
     grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
     refreshToken: 'r',
@@ -46,6 +48,88 @@ describe('oauth-state', () => {
     it('throws on malformed JSON', async () => {
       await writeFile(join(dir, 'broken.json'), 'not-json', { mode: 0o600 });
       await expect(loadOAuthState(dir, 'broken')).rejects.toThrow();
+    });
+
+    it('throws when root is not an object', async () => {
+      await writeFile(join(dir, 'arr.json'), JSON.stringify([sample]), { mode: 0o600 });
+      await expect(loadOAuthState(dir, 'arr')).rejects.toThrow(/must be a JSON object/);
+    });
+
+    it('throws when root is null', async () => {
+      await writeFile(join(dir, 'null.json'), 'null', { mode: 0o600 });
+      await expect(loadOAuthState(dir, 'null')).rejects.toThrow(/must be a JSON object/);
+    });
+
+    it('throws when provider is missing', async () => {
+      const { provider: _p, ...rest } = sample;
+      await writeFile(join(dir, 'noprov.json'), JSON.stringify(rest), { mode: 0o600 });
+      await expect(loadOAuthState(dir, 'noprov')).rejects.toThrow(
+        /`provider` must be a non-empty string/
+      );
+    });
+
+    it('throws when provider is empty', async () => {
+      await writeFile(join(dir, 'empty.json'), JSON.stringify({ ...sample, provider: '' }), {
+        mode: 0o600,
+      });
+      await expect(loadOAuthState(dir, 'empty')).rejects.toThrow(
+        /`provider` must be a non-empty string/
+      );
+    });
+
+    it('throws when provider is not a string', async () => {
+      await writeFile(join(dir, 'notstr.json'), JSON.stringify({ ...sample, provider: 42 }), {
+        mode: 0o600,
+      });
+      await expect(loadOAuthState(dir, 'notstr')).rejects.toThrow(
+        /`provider` must be a non-empty string/
+      );
+    });
+
+    it('throws when providerData is null', async () => {
+      await writeFile(join(dir, 'pdnull.json'), JSON.stringify({ ...sample, providerData: null }), {
+        mode: 0o600,
+      });
+      await expect(loadOAuthState(dir, 'pdnull')).rejects.toThrow(
+        /`providerData` must be a plain object/
+      );
+    });
+
+    it('throws when providerData is an array', async () => {
+      await writeFile(join(dir, 'pdarr.json'), JSON.stringify({ ...sample, providerData: [] }), {
+        mode: 0o600,
+      });
+      await expect(loadOAuthState(dir, 'pdarr')).rejects.toThrow(
+        /`providerData` must be a plain object/
+      );
+    });
+
+    it('throws when providerData is a scalar', async () => {
+      await writeFile(join(dir, 'pdscal.json'), JSON.stringify({ ...sample, providerData: 'x' }), {
+        mode: 0o600,
+      });
+      await expect(loadOAuthState(dir, 'pdscal')).rejects.toThrow(
+        /`providerData` must be a plain object/
+      );
+    });
+
+    it('throws when providerData values are non-string', async () => {
+      await writeFile(
+        join(dir, 'pdval.json'),
+        JSON.stringify({ ...sample, providerData: { clientId: 42 } }),
+        { mode: 0o600 }
+      );
+      await expect(loadOAuthState(dir, 'pdval')).rejects.toThrow(
+        /providerData\['clientId'\] must be a string/
+      );
+    });
+
+    it('accepts an empty providerData object (provider with zero requiredFields)', async () => {
+      await writeFile(join(dir, 'pdempty.json'), JSON.stringify({ ...sample, providerData: {} }), {
+        mode: 0o600,
+      });
+      const result = await loadOAuthState(dir, 'pdempty');
+      expect(result?.providerData).toEqual({});
     });
   });
 

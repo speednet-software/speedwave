@@ -192,7 +192,7 @@ SharePoint integration combines two Microsoft Graph surfaces: a SharePoint docum
 **Configuration.** The Desktop integration form collects `client_id`, `tenant_id`, `site_id`. The OAuth device-code flow runs once at setup and writes:
 
 - `~/.speedwave/tokens/<project>/sharepoint/` (mounted into the worker as `/tokens:ro`): `access_token`, `site_id`.
-- `~/.speedwave/oauth/<project>/sharepoint.json` (host-only, NOT mounted into the worker): `clientId`, `tenantId`, `refreshToken`, `scopes`, `grantedScopes`, `expiresAt`, `lastRefreshAt`.
+- `~/.speedwave/oauth/<project>/sharepoint.json` (host-only, NOT mounted into the worker): `{ provider: "microsoft", providerData: { clientId, tenantId }, refreshToken, scopes, grantedScopes, expiresAt, lastRefreshAt }`. The `provider` field selects the IdP implementation in `mcp-servers/oauth/src/providers/registry.ts`; IdP-specific keys live under `providerData` so future OAuth integrations (e.g. Atlassian) plug in without touching this schema.
 
 **Site ID format.** `site_id` must be a Graph site id — either path form (e.g. `acme.sharepoint.com:/sites/Marketing:` — note both colons: one after the hostname and one at the end) or composite form (`{hostname},{site-guid},{web-guid}`, obtained by calling `GET /sites/{hostname}:/sites/{path}` in Graph Explorer and copying the `id` field). A raw SharePoint URL (`https://{tenant}.sharepoint.com/sites/{name}`) is rejected at worker startup with a guidance message; the worker reports `configured: false` until a valid value is provided. Validation is fail-closed (no URL normalization in the worker) to keep the token mount at a clear trust boundary.
 

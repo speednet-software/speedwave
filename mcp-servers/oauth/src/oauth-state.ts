@@ -1,9 +1,12 @@
 /**
  * Read / write per-service OAuth state files.
  *
- * `oauth.json` schema (ADR-060):
- *   { provider, clientId, tenantId, scopes, grantedScopes, refreshToken,
+ * `oauth.json` schema (ADR-060, post-OAuthProvider refactor):
+ *   { provider, providerData, scopes, grantedScopes, refreshToken,
  *     expiresAt, lastRefreshAt }
+ *
+ * `provider` identifies the IdP implementation in `providers/registry.ts`;
+ * `providerData` holds IdP-specific fields (Microsoft: clientId, tenantId).
  *
  * Files live at `<state_dir>/<service>.json`, mode 0o600. The Rust supervisor
  * creates `<state_dir>` with mode 0o700 so `writeRestrictedSecret` accepts
@@ -15,9 +18,8 @@ import { writeRestrictedSecret } from '@speedwave/mcp-shared';
 
 /** Per-service OAuth state on disk. See ADR-060 for field semantics. */
 export interface OAuthState {
-  provider: 'microsoft';
-  clientId: string;
-  tenantId: string;
+  provider: string;
+  providerData: Record<string, string>;
   scopes: string[];
   grantedScopes: string[];
   refreshToken: string;
@@ -32,7 +34,11 @@ export interface OAuthState {
 export type BearerMap = Record<string, string>;
 
 /**
- * Load OAuth state for one service from disk.
+ * Load OAuth state for one service from disk. Validates the structural shape
+ * (`provider` non-empty string, `providerData` plain object of strings) so a
+ * malformed file fails fast with a descriptive error instead of crashing the
+ * dispatcher mid-refresh. Field-value semantics (e.g. Microsoft tenantId
+ * format) are the provider's responsibility — see `OAuthProvider.requiredFields`.
  * @param stateDir - the per-project state dir
  * @param service - service id (e.g. 'sharepoint')
  * @returns parsed OAuthState, or null if no file exists
@@ -42,13 +48,44 @@ export async function loadOAuthState(
   service: string
 ): Promise<OAuthState | null> {
   const path = join(stateDir, `${service}.json`);
+  let raw: string;
   try {
-    const raw = await readFile(path, 'utf8');
-    return JSON.parse(raw) as OAuthState;
+    raw = await readFile(path, 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;
   }
+  const parsed = JSON.parse(raw) as unknown;
+  return assertOAuthState(parsed);
+}
+
+/**
+ * Structural validation for {@link OAuthState}. Throws on any deviation from
+ * the documented shape. Extracted so corruption surfaces uniformly through
+ * `loadOAuthState`.
+ * @param value - parsed JSON to validate
+ */
+function assertOAuthState(value: unknown): OAuthState {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('oauth state must be a JSON object');
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.provider !== 'string' || !obj.provider) {
+    throw new Error('oauth state: `provider` must be a non-empty string');
+  }
+  if (
+    obj.providerData === null ||
+    typeof obj.providerData !== 'object' ||
+    Array.isArray(obj.providerData)
+  ) {
+    throw new Error('oauth state: `providerData` must be a plain object');
+  }
+  for (const [k, v] of Object.entries(obj.providerData as Record<string, unknown>)) {
+    if (typeof v !== 'string') {
+      throw new Error(`oauth state: providerData['${k}'] must be a string`);
+    }
+  }
+  return obj as unknown as OAuthState;
 }
 
 /**

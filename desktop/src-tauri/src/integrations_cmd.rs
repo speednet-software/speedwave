@@ -11,15 +11,17 @@ use speedwave_runtime::config;
 use speedwave_runtime::log_sanitizer;
 use speedwave_runtime::plugin;
 
-/// For SharePoint only: returns `Some("scope_mismatch")` when the stored
-/// `grantedScopes` is a strict subset of the currently-required scopes (or
-/// empty, which is the migration sentinel ADR-060 writes). Returns `None`
-/// when there is no oauth.json yet (never configured) or when the granted
-/// scopes already cover the required set.
+/// For SharePoint only: returns `Some("scope_mismatch")` when the user must
+/// re-authorize — either because the granted scopes no longer cover the
+/// required set, or because the on-disk oauth state is corrupted / pre-dates
+/// the current schema (post-OAuthProvider refactor: missing `providerData`).
+/// Returns `None` when there is no oauth.json yet (never configured) or when
+/// the state is healthy and covers the required scopes.
 ///
-/// This lets the integrations page surface a "Re-authorize SharePoint" banner
-/// proactively instead of waiting for the first SharePoint tool call to fail
-/// with `OAUTH_SCOPE_MISMATCH`.
+/// All non-`Ok` cases collapse to the same UI signal (`"scope_mismatch"`)
+/// because the Angular banner has one code path for re-consent and a malformed
+/// state is recovered exactly the same way: the user re-grants. See the plan
+/// for the rationale (one error code keeps the UX surface flat).
 fn detect_oauth_action_required(project: &str, service: &str) -> Option<String> {
     if service != "sharepoint" {
         return None;
@@ -27,29 +29,56 @@ fn detect_oauth_action_required(project: &str, service: &str) -> Option<String> 
     let oauth_path = plugin::oauth_state_file(project, service);
     let raw = std::fs::read_to_string(&oauth_path).ok()?;
     let required = sharepoint_required_scopes();
-    detect_scope_mismatch(&raw, &required)
+    match detect_scope_mismatch_or_stale(&raw, &required) {
+        ReauthorizeReason::Ok => None,
+        // ScopeMismatch and Stale share the UI banner — see fn-level doc.
+        ReauthorizeReason::ScopeMismatch | ReauthorizeReason::Stale => {
+            Some("scope_mismatch".to_string())
+        }
+    }
 }
 
-/// Pure helper for `detect_oauth_action_required` — given the raw `oauth.json`
-/// contents and the list of currently-required scopes, returns
-/// `Some("scope_mismatch")` if `grantedScopes` does not cover the required set.
-/// Extracted so unit tests don't have to round-trip through the filesystem and
-/// the `consts::data_dir()` `OnceLock` cache.
-fn detect_scope_mismatch(oauth_json_raw: &str, required: &[String]) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(oauth_json_raw).ok()?;
-    let granted: Vec<String> = json
-        .get("grantedScopes")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str().map(|s| s.to_lowercase()))
-                .collect()
-        })
-        .unwrap_or_default();
+/// Outcome of inspecting `oauth.json` for re-consent triggers.
+#[derive(Debug, PartialEq, Eq)]
+enum ReauthorizeReason {
+    /// State is well-formed and covers the required scopes.
+    Ok,
+    /// State is well-formed but granted scopes ⊊ required scopes.
+    ScopeMismatch,
+    /// State cannot be interpreted — corrupted JSON, wrong root type, missing
+    /// `providerData` (pre-refactor file), or no `grantedScopes` array.
+    Stale,
+}
+
+/// Pure helper for `detect_oauth_action_required`. Extracted so unit tests do
+/// not round-trip through the filesystem and the `consts::data_dir()`
+/// `OnceLock` cache.
+fn detect_scope_mismatch_or_stale(oauth_json_raw: &str, required: &[String]) -> ReauthorizeReason {
+    let json: serde_json::Value = match serde_json::from_str(oauth_json_raw) {
+        Ok(v) => v,
+        Err(_) => return ReauthorizeReason::Stale,
+    };
+    let obj = match json.as_object() {
+        Some(o) => o,
+        None => return ReauthorizeReason::Stale,
+    };
+    // Post-OAuthProvider refactor: a well-formed state has `providerData` as
+    // an object. Anything else is pre-refactor or corrupted at that node.
+    if !obj.get("providerData").is_some_and(|v| v.is_object()) {
+        return ReauthorizeReason::Stale;
+    }
+    let granted_arr = match obj.get("grantedScopes").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return ReauthorizeReason::Stale,
+    };
+    let granted: Vec<String> = granted_arr
+        .iter()
+        .filter_map(|s| s.as_str().map(|s| s.to_lowercase()))
+        .collect();
     if required.iter().all(|r| granted.contains(r)) {
-        None
+        ReauthorizeReason::Ok
     } else {
-        Some("scope_mismatch".to_string())
+        ReauthorizeReason::ScopeMismatch
     }
 }
 
@@ -353,8 +382,7 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         .all(|f| match f.storage {
             speedwave_runtime::consts::FieldStorage::OAuthState => oauth_state_json
                 .as_ref()
-                .and_then(|j| j.get(snake_to_oauth_json_key(f.key)))
-                .and_then(|v| v.as_str())
+                .and_then(|j| get_oauth_field(j, f.key))
                 .map(|s| !s.is_empty())
                 .unwrap_or(false),
             speedwave_runtime::consts::FieldStorage::WorkerMountedConfig => config_json
@@ -372,8 +400,8 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
 }
 
 /// Map a descriptor's snake_case `key` to the camelCase property name used
-/// inside `oauth/<project>/<service>.json` (the Microsoft OAuth wire format).
-/// Centralised so the routing helper and `save_*_credentials` agree.
+/// inside `oauth/<project>/<service>.json`. Centralised so every read/write
+/// path agrees on the JSON property naming.
 fn snake_to_oauth_json_key(key: &str) -> &str {
     match key {
         "client_id" => "clientId",
@@ -381,6 +409,29 @@ fn snake_to_oauth_json_key(key: &str) -> &str {
         "refresh_token" => "refreshToken",
         _ => key,
     }
+}
+
+/// `true` when the given logical descriptor key is an IdP-specific field that
+/// lives under `providerData` (post-OAuthProvider refactor). Today only
+/// Microsoft uses `client_id` / `tenant_id`; future providers add their own
+/// keys here. The rest of the keys (`refresh_token`, `scopes`, `grantedScopes`,
+/// `expiresAt`, `lastRefreshAt`) stay top-level.
+fn is_provider_specific_field(key: &str) -> bool {
+    matches!(key, "client_id" | "tenant_id")
+}
+
+/// Read a field value from a parsed `oauth.json` document. Routes
+/// IdP-specific keys (`client_id` / `tenant_id` / …) through `providerData`;
+/// other keys stay top-level. Returns `None` when the field is absent or not
+/// a string.
+fn get_oauth_field<'a>(json: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    let prop = snake_to_oauth_json_key(key);
+    let value = if is_provider_specific_field(key) {
+        json.get("providerData").and_then(|p| p.get(prop))
+    } else {
+        json.get(prop)
+    };
+    value.and_then(|v| v.as_str())
 }
 
 /// Testable core: takes an explicit `home` path so tests can inject a temp dir.
@@ -429,8 +480,7 @@ fn is_service_configured_with_home(home: &std::path::Path, project: &str, servic
         .all(|f| match f.storage {
             speedwave_runtime::consts::FieldStorage::OAuthState => oauth_state_json
                 .as_ref()
-                .and_then(|j| j.get(snake_to_oauth_json_key(f.key)))
-                .and_then(|v| v.as_str())
+                .and_then(|j| get_oauth_field(j, f.key))
                 .map(|s| !s.is_empty())
                 .unwrap_or(false),
             speedwave_runtime::consts::FieldStorage::WorkerMountedConfig => config_json
@@ -998,8 +1048,12 @@ fn save_with_field_storage(
 
 /// Read-modify-write merge into `oauth/<project>/<service>.json`. Atomic write
 /// preserves owner-only perms (0o600 on Unix). Caller's UI fields use
-/// snake_case keys; we translate them to the camelCase Microsoft OAuth wire
-/// format via {@link snake_to_oauth_json_key}.
+/// snake_case keys; IdP-specific keys (e.g. `client_id` / `tenant_id`) land
+/// inside `providerData`, the rest stay top-level — see ADR-060 schema.
+///
+/// `provider: "microsoft"` is hard-coded here because today every UI-driven
+/// OAuth save targets the SharePoint integration. The next OAuth integration
+/// (Atlassian) will parameterise this; YAGNI today.
 fn merge_oauth_state_json(
     project: &str,
     service: &str,
@@ -1016,18 +1070,30 @@ fn merge_oauth_state_json(
     }
     let mut state: serde_json::Value = if path.exists() {
         let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+        serde_json::from_str(&raw)
+            .unwrap_or_else(|_| serde_json::json!({ "provider": "microsoft", "providerData": {} }))
     } else {
-        serde_json::json!({ "provider": "microsoft" })
+        serde_json::json!({ "provider": "microsoft", "providerData": {} })
     };
     let obj = state
         .as_object_mut()
         .ok_or_else(|| "oauth state must be a JSON object".to_string())?;
+    // Ensure providerData exists as an object even if the existing file pre-dated
+    // the OAuthProvider refactor or was corrupted at that node.
+    if !obj.get("providerData").is_some_and(|v| v.is_object()) {
+        obj.insert("providerData".to_string(), serde_json::json!({}));
+    }
     for (key, value) in fields {
-        obj.insert(
-            snake_to_oauth_json_key(key).to_string(),
-            serde_json::json!(value),
-        );
+        let prop = snake_to_oauth_json_key(key).to_string();
+        if is_provider_specific_field(key) {
+            let pd = obj
+                .get_mut("providerData")
+                .and_then(|v| v.as_object_mut())
+                .ok_or_else(|| "providerData node went missing mid-merge".to_string())?;
+            pd.insert(prop, serde_json::json!(value));
+        } else {
+            obj.insert(prop, serde_json::json!(value));
+        }
     }
     let body = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())? + "\n";
     speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())
@@ -1358,60 +1424,115 @@ mod tests {
         ));
     }
 
-    // -- detect_scope_mismatch tests (PR3 / FIX-P1-4 re-consent banner) --
+    // -- detect_scope_mismatch_or_stale tests (PR3 / FIX-P1-4 re-consent banner) --
+
+    fn well_formed_state(granted: &[&str]) -> String {
+        serde_json::json!({
+            "provider": "microsoft",
+            "providerData": { "clientId": "cid", "tenantId": "tid" },
+            "grantedScopes": granted,
+        })
+        .to_string()
+    }
 
     #[test]
-    fn detect_scope_mismatch_returns_some_when_granted_is_empty() {
-        let raw = r#"{"provider":"microsoft","grantedScopes":[]}"#;
+    fn detect_scope_mismatch_returns_mismatch_when_granted_is_empty() {
+        let raw = well_formed_state(&[]);
         let required = vec!["sites.manage.all".to_string()];
         assert_eq!(
-            detect_scope_mismatch(raw, &required),
-            Some("scope_mismatch".to_string())
+            detect_scope_mismatch_or_stale(&raw, &required),
+            ReauthorizeReason::ScopeMismatch
         );
     }
 
     #[test]
-    fn detect_scope_mismatch_returns_some_when_granted_is_strict_subset() {
-        let raw = r#"{"provider":"microsoft","grantedScopes":["user.read"]}"#;
+    fn detect_scope_mismatch_returns_mismatch_when_granted_is_strict_subset() {
+        let raw = well_formed_state(&["user.read"]);
         let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
         assert_eq!(
-            detect_scope_mismatch(raw, &required),
-            Some("scope_mismatch".to_string())
+            detect_scope_mismatch_or_stale(&raw, &required),
+            ReauthorizeReason::ScopeMismatch
         );
     }
 
     #[test]
-    fn detect_scope_mismatch_returns_none_when_granted_covers_required() {
+    fn detect_scope_mismatch_returns_ok_when_granted_covers_required() {
+        let raw = well_formed_state(&[
+            "sites.manage.all",
+            "user.read",
+            "files.readwrite.all",
+            "offline_access",
+        ]);
+        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
+        assert_eq!(
+            detect_scope_mismatch_or_stale(&raw, &required),
+            ReauthorizeReason::Ok
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_ok_when_granted_matches_with_different_case() {
+        // grantedScopes come back in mixed case from Microsoft (e.g.
+        // `Sites.Manage.All`). The helper normalises both sides.
+        let raw = well_formed_state(&["Sites.Manage.All", "User.Read"]);
+        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
+        assert_eq!(
+            detect_scope_mismatch_or_stale(&raw, &required),
+            ReauthorizeReason::Ok
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_stale_on_malformed_json() {
+        let required = vec!["sites.manage.all".to_string()];
+        assert_eq!(
+            detect_scope_mismatch_or_stale("not-json", &required),
+            ReauthorizeReason::Stale
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_stale_on_non_object_root() {
+        let required = vec!["sites.manage.all".to_string()];
+        assert_eq!(
+            detect_scope_mismatch_or_stale("[1,2,3]", &required),
+            ReauthorizeReason::Stale
+        );
+        assert_eq!(
+            detect_scope_mismatch_or_stale("null", &required),
+            ReauthorizeReason::Stale
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_stale_when_provider_data_missing() {
+        // Pre-OAuthProvider-refactor files lack `providerData` — UI banner
+        // must surface re-consent to migrate the user forward.
         let raw = r#"{"provider":"microsoft","grantedScopes":["sites.manage.all","user.read","files.readwrite.all","offline_access"]}"#;
-        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
-        assert!(detect_scope_mismatch(raw, &required).is_none());
-    }
-
-    #[test]
-    fn detect_scope_mismatch_returns_none_when_granted_matches_with_different_case() {
-        // grantedScopes typically come back in mixed case from Microsoft
-        // (e.g. `Sites.Manage.All`). The helper normalises both sides.
-        let raw = r#"{"provider":"microsoft","grantedScopes":["Sites.Manage.All","User.Read"]}"#;
-        let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
-        assert!(detect_scope_mismatch(raw, &required).is_none());
-    }
-
-    #[test]
-    fn detect_scope_mismatch_returns_none_on_malformed_json() {
-        // Best-effort — if oauth.json is corrupt we treat it as "no signal,
-        // don't surface a banner" (the next refresh will fail loudly).
-        let required = vec!["sites.manage.all".to_string()];
-        assert!(detect_scope_mismatch("not-json", &required).is_none());
-        assert!(detect_scope_mismatch("{}", &required).is_some());
-    }
-
-    #[test]
-    fn detect_scope_mismatch_treats_missing_grantedscopes_as_empty() {
-        let raw = r#"{"provider":"microsoft"}"#;
         let required = vec!["sites.manage.all".to_string()];
         assert_eq!(
-            detect_scope_mismatch(raw, &required),
-            Some("scope_mismatch".to_string())
+            detect_scope_mismatch_or_stale(raw, &required),
+            ReauthorizeReason::Stale
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_stale_when_provider_data_is_not_object() {
+        let raw = r#"{"provider":"microsoft","providerData":"oops","grantedScopes":["sites.manage.all"]}"#;
+        let required = vec!["sites.manage.all".to_string()];
+        assert_eq!(
+            detect_scope_mismatch_or_stale(raw, &required),
+            ReauthorizeReason::Stale
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_returns_stale_when_grantedscopes_missing() {
+        let raw = r#"{"provider":"microsoft","providerData":{"clientId":"cid","tenantId":"tid"}}"#;
+        let required = vec!["sites.manage.all".to_string()];
+        assert_eq!(
+            detect_scope_mismatch_or_stale(raw, &required),
+            ReauthorizeReason::Stale
         );
     }
 
@@ -1812,8 +1933,11 @@ mod tests {
         std::fs::write(
             oauth_dir.join("sharepoint.json"),
             serde_json::json!({
-                "clientId": "550e8400-e29b-41d4-a716-446655440000",
-                "tenantId": "common",
+                "provider": "microsoft",
+                "providerData": {
+                    "clientId": "550e8400-e29b-41d4-a716-446655440000",
+                    "tenantId": "common",
+                },
                 "refreshToken": "ref",
             })
             .to_string(),
@@ -2371,5 +2495,165 @@ mod tests {
             !svc_dir.join("config.json").exists(),
             "config.json should also be cleaned up"
         );
+    }
+
+    #[test]
+    fn get_oauth_field_routes_provider_specific_through_provider_data() {
+        let json = serde_json::json!({
+            "provider": "microsoft",
+            "providerData": { "clientId": "cid", "tenantId": "tid" },
+            "refreshToken": "rt",
+            "grantedScopes": ["a"],
+        });
+        assert_eq!(get_oauth_field(&json, "client_id"), Some("cid"));
+        assert_eq!(get_oauth_field(&json, "tenant_id"), Some("tid"));
+        assert_eq!(get_oauth_field(&json, "refresh_token"), Some("rt"));
+        assert_eq!(get_oauth_field(&json, "missing"), None);
+    }
+
+    #[test]
+    fn get_oauth_field_returns_none_when_provider_data_absent() {
+        let json = serde_json::json!({ "provider": "microsoft", "refreshToken": "rt" });
+        assert_eq!(get_oauth_field(&json, "client_id"), None);
+        assert_eq!(get_oauth_field(&json, "tenant_id"), None);
+        assert_eq!(get_oauth_field(&json, "refresh_token"), Some("rt"));
+    }
+
+    #[test]
+    fn get_oauth_field_returns_none_when_value_not_string() {
+        let json = serde_json::json!({
+            "providerData": { "clientId": 42 },
+            "refreshToken": ["arr"],
+        });
+        assert_eq!(get_oauth_field(&json, "client_id"), None);
+        assert_eq!(get_oauth_field(&json, "refresh_token"), None);
+    }
+
+    #[test]
+    #[serial]
+    fn merge_oauth_state_json_initializes_with_provider_data_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("client_id", "cid");
+        fields.insert("tenant_id", "tid");
+        fields.insert("refresh_token", "rt");
+        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+
+        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["provider"], "microsoft");
+        assert_eq!(json["providerData"]["clientId"], "cid");
+        assert_eq!(json["providerData"]["tenantId"], "tid");
+        assert_eq!(json["refreshToken"], "rt");
+        // Provider-specific fields must NOT appear top-level.
+        assert!(json.get("clientId").is_none());
+        assert!(json.get("tenantId").is_none());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "oauth.json must be created with chmod 600");
+        }
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn merge_oauth_state_json_merges_into_existing_provider_data() {
+        // Existing file already has a populated providerData node (typical
+        // read-modify-write: user updates one field via UI, the others stay).
+        // The merge must add the new field, preserve the old one, and keep
+        // top-level fields intact.
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "microsoft",
+                "providerData": { "clientId": "old-cid" },
+                "refreshToken": "old-rt",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut fields = std::collections::HashMap::new();
+        // Add tenant_id (new) + overwrite refresh_token (top-level).
+        fields.insert("tenant_id", "new-tid");
+        fields.insert("refresh_token", "new-rt");
+        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Old providerData.clientId preserved.
+        assert_eq!(json["providerData"]["clientId"], "old-cid");
+        // New providerData.tenantId added under providerData (NOT top-level).
+        assert_eq!(json["providerData"]["tenantId"], "new-tid");
+        assert!(json.get("tenantId").is_none());
+        // Top-level refresh_token overwritten.
+        assert_eq!(json["refreshToken"], "new-rt");
+        // Provider literal preserved.
+        assert_eq!(json["provider"], "microsoft");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "oauth.json must remain chmod 600 across merges"
+            );
+        }
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn merge_oauth_state_json_repairs_missing_provider_data_node() {
+        // Existing file lacks `providerData` (e.g. corrupted at that node).
+        // The merge must repair it rather than silently drop client_id/tenant_id.
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({ "provider": "microsoft", "refreshToken": "old" }).to_string(),
+        )
+        .unwrap();
+
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("client_id", "cid");
+        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["providerData"]["clientId"], "cid");
+        // Pre-existing top-level fields preserved.
+        assert_eq!(json["refreshToken"], "old");
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
     }
 }

@@ -32,19 +32,18 @@ import { splitPath } from './path-utils.js';
 
 /**
  * Configuration for SharePoint client with OAuth credentials and site details
+/**
+ * SharePoint worker runtime config. Post-ADR-060 the worker holds only the
+ * mount-resident state (`accessToken` + `siteId`); refresh is delegated to
+ * the host-side `oauth` worker, and the application identity (`clientId`,
+ * `tenantId`) + refresh token live off-mount in `oauth/<project>/sharepoint.json`.
  * @interface SharePointConfig
- * @property {string} clientId - Azure AD application client ID
- * @property {string} tenantId - Azure AD tenant ID
  * @property {string} siteId - SharePoint site ID
- * @property {string} accessToken - OAuth access token
- * @property {string} refreshToken - OAuth refresh token
+ * @property {string} accessToken - OAuth access token (worker-mounted)
  */
 export interface SharePointConfig {
-  clientId: string;
-  tenantId: string;
   siteId: string;
   accessToken: string;
-  refreshToken: string;
 }
 
 /**
@@ -186,13 +185,7 @@ export class SharePointClient {
     this.config = config;
     this.tokensDir = tokensDir;
 
-    // Initialize modules
-    this.tokenManager = new TokenManager({
-      clientId: config.clientId,
-      tenantId: config.tenantId,
-      tokensDir,
-    });
-
+    this.tokenManager = new TokenManager();
     this.pathValidator = new PathValidator();
     this.refreshMutex = new Mutex();
   }
@@ -1180,23 +1173,11 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
 
     console.log(`${ts()} ✅ SharePoint tokens loaded from /tokens/`);
 
-    const config: SharePointConfig = {
-      // clientId / tenantId no longer needed inside the worker — refresh is
-      // delegated to the host-side `oauth` worker (ADR-060). Kept as empty
-      // strings to preserve the `SharePointConfig` shape until the next
-      // refactor; the worker code path that read them has been removed.
-      clientId: '',
-      tenantId: '',
-      // Store the raw siteId from /tokens/. Path-form values get resolved
-      // to composite by SharePointClient.warmupSiteId() in the background,
-      // which mutates this.config.siteId in place once Graph responds. Most
-      // Graph endpoints accept both forms during the warm-up window.
-      siteId,
-      accessToken,
-      // refreshToken is no longer in this container's mount (ADR-060).
-      // The host-side oauth worker holds it.
-      refreshToken: '',
-    };
+    // Store the raw siteId from /tokens/. Path-form values get resolved to
+    // composite by SharePointClient.warmupSiteId() in the background, which
+    // mutates this.config.siteId in place once Graph responds. Most Graph
+    // endpoints accept both forms during the warm-up window.
+    const config: SharePointConfig = { siteId, accessToken };
 
     const client = new SharePointClient(config, tokensDir);
     // Fire-and-forget: resolves to composite + re-reads access_token after

@@ -51,11 +51,8 @@ const mockOauthRefresh = vi.mocked(refreshAccessToken);
 
 // Test configuration
 const mockConfig: SharePointConfig = {
-  clientId: 'test-client-id',
-  tenantId: 'test-tenant-id',
   siteId: 'test-site-id',
   accessToken: 'test-access-token',
-  refreshToken: 'test-refresh-token',
 };
 
 const mockTokensDir = '/test/tokens';
@@ -113,11 +110,6 @@ describe('SharePointClient', () => {
     it('should initialize with valid config', () => {
       expect(client).toBeInstanceOf(SharePointClient);
       expect(client.getConfig()).toEqual(mockConfig);
-    });
-
-    it('should store tokens directory', () => {
-      const config = client.getConfig();
-      expect(config.clientId).toBe(mockConfig.clientId);
     });
   });
 

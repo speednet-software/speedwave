@@ -7,11 +7,12 @@
  * "compromised-caller forges service" failure mode.
  */
 import { join } from 'node:path';
-import { unlink, readFile } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import type { ToolDefinition, ToolHandlerContext, ToolsCallResult } from '@speedwave/mcp-shared';
 import { writeRestrictedSecret, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { loadOAuthState, saveOAuthState, loadBearerMap, type OAuthState } from './oauth-state.js';
-import { refreshMicrosoftToken } from './providers/microsoft.js';
+import { getProvider, knownProviderIds } from './providers/registry.js';
+import type { OAuthProvider } from './providers/types.js';
 import { appendAuditEvent } from './audit-log.js';
 
 /** Default rate-limit between refreshes when access token is still valid. */
@@ -29,8 +30,8 @@ export interface ToolDeps {
   accessTokenPathFor: (service: string) => string;
   /** Override for tests; defaults to `Date.now()`. */
   now?: () => number;
-  /** Override for tests; defaults to `refreshMicrosoftToken`. */
-  doRefresh?: typeof refreshMicrosoftToken;
+  /** Override registry for tests; defaults to the static `providers/registry.ts`. */
+  providers?: Record<string, OAuthProvider>;
   /** Override the rate-limit constant (seconds). */
   rateLimitSeconds?: number;
 }
@@ -55,7 +56,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
       tool: {
         name: 'forget',
         description:
-          'Delete local OAuth state for the caller service. Does NOT revoke at Microsoft — complete revocation requires user action at account.microsoft.com or admin action in Azure AD.',
+          'Delete local OAuth state for the caller service. Does NOT revoke at the identity provider — complete revocation requires user action at the IdP.',
         inputSchema: { type: 'object', properties: {} },
       },
       handler: (_params: Record<string, unknown>, ctx?: ToolHandlerContext) =>
@@ -100,7 +101,6 @@ async function handleRefresh(
   ctx: ToolHandlerContext | undefined
 ): Promise<ToolsCallResult> {
   const now = deps.now ?? Date.now;
-  const doRefresh = deps.doRefresh ?? refreshMicrosoftToken;
   const rateLimitMs = (deps.rateLimitSeconds ?? DEFAULT_RATE_LIMIT_SECONDS) * 1000;
   const ts = new Date().toISOString();
 
@@ -108,7 +108,20 @@ async function handleRefresh(
   if (!callerResult.ok) return callerResult.result;
   const service = callerResult.service;
 
-  const state = await loadOAuthState(deps.stateDir, service);
+  let state: OAuthState | null;
+  try {
+    state = await loadOAuthState(deps.stateDir, service);
+  } catch (err) {
+    await appendAuditEvent(deps.auditLogPath, {
+      ts,
+      project: deps.project,
+      service,
+      action: 'refresh',
+      outcome: { error: 'malformed_state' },
+    });
+    const msg = err instanceof Error ? err.message : String(err);
+    return errorResult(`malformed_state: ${msg}`);
+  }
   if (!state) {
     await appendAuditEvent(deps.auditLogPath, {
       ts,
@@ -118,6 +131,36 @@ async function handleRefresh(
       outcome: { error: 'no_state' },
     });
     return errorResult(`no_state: no oauth state on disk for service '${service}'`);
+  }
+
+  const provider = deps.providers?.[state.provider] ?? getProvider(state.provider);
+  if (!provider) {
+    await appendAuditEvent(deps.auditLogPath, {
+      ts,
+      project: deps.project,
+      service,
+      action: 'refresh',
+      outcome: { error: 'unknown_provider' },
+    });
+    return errorResult(
+      `unknown_provider: '${state.provider}' is not registered (known: ${knownProviderIds().join(', ')})`
+    );
+  }
+
+  for (const field of provider.requiredFields) {
+    const value = state.providerData[field];
+    if (typeof value !== 'string' || !value) {
+      await appendAuditEvent(deps.auditLogPath, {
+        ts,
+        project: deps.project,
+        service,
+        action: 'refresh',
+        outcome: { error: 'missing_field' },
+      });
+      return errorResult(
+        `missing_field: providerData['${field}'] is required by provider '${provider.id}'`
+      );
+    }
   }
 
   // Rate limit: if access token is still valid AND last refresh was within the
@@ -143,9 +186,8 @@ async function handleRefresh(
     );
   }
 
-  const result = await doRefresh({
-    clientId: state.clientId,
-    tenantId: state.tenantId,
+  const result = await provider.refresh({
+    providerData: state.providerData,
     scopes: state.scopes,
     refreshToken: state.refreshToken,
   });
@@ -209,7 +251,3 @@ async function handleForget(
   });
   return jsonResult({ forgotten: service });
 }
-
-// Used only in tests to keep `readFile` import warning-free if a future test
-// stub injects a different filesystem layer.
-export { readFile as _readFileForTest };

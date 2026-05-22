@@ -213,10 +213,14 @@ fn save_oauth_state(
     // Granted scopes start equal to requested (initial consent succeeded).
     let scopes_vec: Vec<&str> = scopes.split_whitespace().collect();
 
+    // ADR-060 post-OAuthProvider-refactor schema: IdP-specific fields live
+    // under `providerData`; refresh_token / scopes / timing stay top-level.
     let state = serde_json::json!({
         "provider": "microsoft",
-        "clientId": client_id,
-        "tenantId": tenant_id,
+        "providerData": {
+            "clientId": client_id,
+            "tenantId": tenant_id,
+        },
         "scopes": scopes_vec,
         "grantedScopes": scopes_vec,
         "refreshToken": refresh_token,
@@ -928,8 +932,15 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(json["provider"], "microsoft");
-        assert_eq!(json["clientId"], "11111111-1111-1111-1111-111111111111");
-        assert_eq!(json["tenantId"], "common");
+        // IdP-specific fields live under `providerData` (post-OAuthProvider refactor).
+        assert_eq!(
+            json["providerData"]["clientId"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(json["providerData"]["tenantId"], "common");
+        // Top-level must NOT carry the old shape — guards against accidental regression.
+        assert!(json.get("clientId").is_none());
+        assert!(json.get("tenantId").is_none());
         assert_eq!(json["refreshToken"], "rt-secret");
         assert!(json["scopes"].as_array().unwrap().len() >= 2);
         assert!(json["grantedScopes"].as_array().unwrap().len() >= 2);
@@ -1016,12 +1027,16 @@ mod tests {
                 .exists(),
             "refresh_token must NOT be in the worker-mounted dir"
         );
-        // refresh_token + client_id + tenant_id in oauth.json
+        // refresh_token + client_id + tenant_id in oauth.json (nested under providerData)
         let state_path = speedwave_runtime::plugin::oauth_state_file("test-project", "sharepoint");
         let content = std::fs::read_to_string(&state_path).unwrap();
-        assert!(content.contains("rt-secret"));
-        assert!(content.contains("11111111-1111-1111-1111-111111111111"));
-        assert!(content.contains("common"));
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(json["refreshToken"], "rt-secret");
+        assert_eq!(
+            json["providerData"]["clientId"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(json["providerData"]["tenantId"], "common");
 
         match prev {
             Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),

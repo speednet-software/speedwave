@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { ToolHandlerContext, ToolsCallResult } from '@speedwave/mcp-shared';
 import { buildTools, type ToolDeps } from './tools.js';
 import type { OAuthState } from './oauth-state.js';
+import type { OAuthProvider, RefreshRequest, RefreshResult } from './providers/types.js';
 
 function getTextResult(r: ToolsCallResult): string {
   const block = r.content?.[0];
@@ -17,18 +18,31 @@ describe('oauth tools', () => {
   let auditLogPath: string;
   let deps: ToolDeps;
   let now: number;
-  let refreshCalls: Array<Record<string, unknown>>;
-  let refreshResult: Awaited<ReturnType<NonNullable<ToolDeps['doRefresh']>>>;
+  let refreshCalls: RefreshRequest[];
+  let refreshResult: RefreshResult;
 
   const sharepointState: OAuthState = {
     provider: 'microsoft',
-    clientId: '11111111-1111-1111-1111-111111111111',
-    tenantId: 'common',
+    providerData: {
+      clientId: '11111111-1111-1111-1111-111111111111',
+      tenantId: 'common',
+    },
     scopes: ['https://graph.microsoft.com/Sites.Manage.All', 'offline_access'],
     grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All', 'offline_access'],
     refreshToken: 'old-refresh',
     expiresAt: new Date(0).toISOString(),
     lastRefreshAt: new Date(0).toISOString(),
+  };
+
+  /** Spy provider used to assert dispatcher behavior without hitting Microsoft. */
+  const microsoftSpy: OAuthProvider = {
+    id: 'microsoft',
+    displayName: 'Microsoft (spy)',
+    requiredFields: ['clientId', 'tenantId'],
+    refresh: async (req: RefreshRequest): Promise<RefreshResult> => {
+      refreshCalls.push({ ...req, providerData: { ...req.providerData } });
+      return refreshResult;
+    },
   };
 
   beforeEach(async () => {
@@ -61,10 +75,7 @@ describe('oauth tools', () => {
       auditLogPath,
       accessTokenPathFor: (svc) => join(tokensBase, 'test-project', svc, 'access_token'),
       now: () => now,
-      doRefresh: async (req) => {
-        refreshCalls.push({ ...req });
-        return refreshResult;
-      },
+      providers: { microsoft: microsoftSpy },
     };
   });
 
@@ -124,11 +135,11 @@ describe('oauth tools', () => {
       expect(getTextResult(result)).toContain('unauthorized');
     });
 
-    it('falls back to Date.now / refreshMicrosoftToken when overrides absent', async () => {
-      // Covers the `deps.now ?? Date.now` and `deps.doRefresh ?? ...` fallback
-      // lines in tools.ts:102-103. We do NOT actually call Microsoft — fetch
-      // is mocked to fail, but the branch coverage we care about (the `??`
-      // fallback selection) is already executed by then.
+    it('falls back to Date.now / static registry when overrides absent', async () => {
+      // Covers `deps.now ?? Date.now` and the registry fallback when
+      // `deps.providers` is omitted. We do NOT actually call Microsoft — fetch
+      // is mocked, but the branch coverage we care about (real registry →
+      // microsoftProvider → refreshMicrosoftToken → fetch) is exercised.
       await seedBearerMap({ 'bearer-sp': 'sharepoint' });
       await seedState(sharepointState);
       const fetchSpy = vi
@@ -140,12 +151,9 @@ describe('oauth tools', () => {
           project: deps.project,
           auditLogPath: deps.auditLogPath,
           accessTokenPathFor: deps.accessTokenPathFor,
-          // `now` and `doRefresh` deliberately omitted to exercise the fallback.
+          // `now` and `providers` deliberately omitted to exercise the fallback.
         });
         const refresh = tools.find((t) => t.tool.name === 'refresh')!;
-        // The call may error (rate-limit / unhealthy mock) but the assertion
-        // is just that the handler reached `fetch`, proving the doRefresh
-        // fallback was selected.
         await refresh.handler({}, ctxFor('sharepoint'));
         expect(fetchSpy).toHaveBeenCalled();
       } finally {
@@ -188,11 +196,13 @@ describe('oauth tools', () => {
       expect(payload.expiresIn).toBe(3600);
       expect(payload.grantedScopes).toContain('offline_access');
 
-      // refresh called with stored refreshToken
+      // provider.refresh called with stored providerData + refreshToken
       expect(refreshCalls).toHaveLength(1);
       expect(refreshCalls[0]).toMatchObject({
-        clientId: sharepointState.clientId,
-        tenantId: sharepointState.tenantId,
+        providerData: {
+          clientId: sharepointState.providerData.clientId,
+          tenantId: sharepointState.providerData.tenantId,
+        },
         refreshToken: 'old-refresh',
       });
 
@@ -283,6 +293,78 @@ describe('oauth tools', () => {
       expect(result.isError).toBe(true);
       expect(getTextResult(result)).toContain('scope_mismatch');
       expect(await readAuditLog()).toContain('outcome=error:scope_mismatch');
+    });
+
+    it('rejects unknown provider and audits unknown_provider', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState({ ...sharepointState, provider: 'nonexistent' });
+      // Use the static registry (no override) so `getProvider('nonexistent')` returns undefined.
+      const tools = buildTools({
+        stateDir: deps.stateDir,
+        project: deps.project,
+        auditLogPath: deps.auditLogPath,
+        accessTokenPathFor: deps.accessTokenPathFor,
+        now: deps.now,
+      });
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('unknown_provider');
+      expect(getTextResult(result)).toContain('nonexistent');
+      expect(await readAuditLog()).toContain('outcome=error:unknown_provider');
+    });
+
+    it('rejects missing required field and audits missing_field', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState({ ...sharepointState, providerData: { tenantId: 'common' } });
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('missing_field');
+      expect(getTextResult(result)).toContain('clientId');
+      expect(refreshCalls).toHaveLength(0);
+      expect(await readAuditLog()).toContain('outcome=error:missing_field');
+    });
+
+    it('rejects empty required field as missing_field', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState({
+        ...sharepointState,
+        providerData: { clientId: '', tenantId: 'common' },
+      });
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('missing_field');
+      expect(refreshCalls).toHaveLength(0);
+    });
+
+    it('returns malformed_state on corrupted oauth.json and audits', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      // Write JSON that parses but fails OAuthState assertion (provider missing).
+      await writeFile(join(stateDir, 'sharepoint.json'), JSON.stringify({ providerData: {} }), {
+        mode: 0o600,
+      });
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBe(true);
+      expect(getTextResult(result)).toContain('malformed_state');
+      expect(await readAuditLog()).toContain('outcome=error:malformed_state');
+    });
+
+    it('preserves providerData verbatim through a successful refresh', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+      await refresh.handler({}, ctxFor('sharepoint'));
+      const newState = JSON.parse(
+        await readFile(join(stateDir, 'sharepoint.json'), 'utf8')
+      ) as OAuthState;
+      expect(newState.providerData).toEqual(sharepointState.providerData);
     });
 
     it('surfaces network errors and does not mutate state', async () => {

@@ -1775,14 +1775,14 @@ fn main() {
             std::thread::spawn(host_path::init_recovered_host_path);
 
             if setup_started {
-                // Run one-shot OAuth state migration (ADR-060 / PR3) before any
-                // worker spawns. Migrates legacy SharePoint credentials from
-                // `tokens/<project>/sharepoint/` to `oauth/<project>/sharepoint.json`
-                // so the oauth worker sees the new layout when it first runs.
-                let migrated =
-                    speedwave_runtime::migration_oauth::run_oauth_migration_at_startup();
-                if migrated > 0 {
-                    log::info!("oauth migration: {migrated} project(s) migrated to new layout");
+                // Sanitise any v1 SharePoint secrets still in the worker-mounted
+                // token dir (refresh_token / client_id / tenant_id). Best-effort,
+                // idempotent. Users with v1 state see the "Re-authorize SharePoint"
+                // banner — see legacy_token_cleanup module docs.
+                let cleaned =
+                    speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
+                if cleaned > 0 {
+                    log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
                 }
 
                 // Start IDE Bridge

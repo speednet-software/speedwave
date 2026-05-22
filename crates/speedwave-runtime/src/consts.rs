@@ -590,9 +590,17 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         // `oauth/<project>/sharepoint.json` — see `oauth_state_fields` below.
         credential_files: &["access_token", "site_id"],
         oauth_state_fields: Some(&[
-            // SSOT for the fields stored in `oauth/<project>/sharepoint.json`.
-            // `scopes` / `grantedScopes` / `expiresAt` / `lastRefreshAt` are
-            // managed exclusively by the oauth worker (not in `auth_fields`).
+            // LOGICAL allowlist of fields the UI may save into oauth.json.
+            // Post-OAuthProvider refactor the on-disk layout nests IdP-specific
+            // keys (`client_id`, `tenant_id`) under `providerData` — this list
+            // still names them in their logical form because:
+            //   * `auth_fields` references them by logical key, and
+            //   * `is_allowed_field` (desktop/src-tauri/src/types.rs) uses this
+            //     allowlist to accept UI form submissions.
+            // The logical→disk mapping lives in `integrations_cmd::get_oauth_field`
+            // / `merge_oauth_state_json`. `scopes` / `grantedScopes` /
+            // `expiresAt` / `lastRefreshAt` are managed exclusively by the
+            // oauth worker (not in `auth_fields`).
             "refresh_token",
             "client_id",
             "tenant_id",
