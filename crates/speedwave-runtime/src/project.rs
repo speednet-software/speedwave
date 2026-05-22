@@ -757,8 +757,7 @@ mod tests {
         }
 
         // Second registration with the same UNC string must hit the fast path.
-        let result =
-            add_project_with_validated_dir("second", canonical, unc_str, &data_dir);
+        let result = add_project_with_validated_dir("second", canonical, unc_str, &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
