@@ -194,16 +194,23 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
     // upstream `isMeta` on assistant/result rows isn't silently swallowed.
     // `isMeta` lives at the top level today; we also probe `message.isMeta`
     // defensively in case Anthropic nests it later.
-    if msg_type == "user"
-        && (parsed["isMeta"].as_bool().unwrap_or(false)
-            || parsed["message"]["isMeta"].as_bool().unwrap_or(false)
-            || is_synthetic_user_entry(&parsed))
-    {
-        log::debug!(
-            "skipping synthetic user JSONL entry uuid={}",
-            parsed["uuid"].as_str().unwrap_or("?")
-        );
-        return None;
+    if msg_type == "user" {
+        let reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
+            Some("isMeta")
+        } else if parsed["message"]["isMeta"].as_bool().unwrap_or(false) {
+            Some("message.isMeta")
+        } else if is_synthetic_user_entry(&parsed) {
+            Some("synthetic-content")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            log::debug!(
+                "skipping synthetic user JSONL entry reason={reason} uuid={}",
+                parsed["uuid"].as_str().unwrap_or("?")
+            );
+            return None;
+        }
     }
 
     match msg_type {
