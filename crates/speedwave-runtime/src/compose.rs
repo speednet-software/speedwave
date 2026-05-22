@@ -38,6 +38,34 @@ fn resolve_tokens_dir(project_name: &str) -> PathBuf {
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
 const COMPOSE_TEMPLATE: &str = include_str!("../../../containers/compose.template.yml");
 
+/// One live host-side bridge that compose can advertise to a container
+/// worker. The plugin manifest's `host_bridge` declaration drives both
+/// `slug` (which plugin to match) and the env-var names; the Desktop
+/// process supplies the runtime values (`port`, `auth_token`).
+#[derive(Clone, Debug)]
+pub struct HostBridgeRegistration {
+    /// Plugin slug — matched against `PluginManifest.slug` during
+    /// `apply_plugins_from_verified` to decide which worker receives
+    /// the env vars.
+    pub plugin_slug: String,
+    /// TCP port the bridge listens on (loopback only).
+    pub port: u16,
+    /// UUID v4 minted by the bridge at startup.
+    pub auth_token: String,
+    /// Env var name for the bridge URL injected into the worker.
+    pub url_env: String,
+    /// Env var name for the auth token injected into the worker.
+    pub token_env: String,
+}
+
+/// Snapshot of every host-side bridge currently active. CLI builds and
+/// early Desktop startup pass an empty list — affected plugins log
+/// `BRIDGE_NOT_CONFIGURED` and degrade gracefully.
+#[derive(Clone, Debug, Default)]
+pub struct HostBridgesInfo {
+    pub bridges: Vec<HostBridgeRegistration>,
+}
+
 /// Renders a compose.yml for a given project by substituting template variables.
 pub fn render_compose(
     project_name: &str,
@@ -45,6 +73,7 @@ pub fn render_compose(
     resolved_config: &ResolvedClaudeConfig,
     integrations: &ResolvedIntegrationsConfig,
     runtime: Option<&dyn ContainerRuntime>,
+    bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
     let data_dir = consts::data_dir();
@@ -149,11 +178,14 @@ pub fn render_compose(
     // Integrate installed plugins
     yaml = apply_plugins(
         &yaml,
-        project_name,
-        project_dir,
-        integrations,
-        &network_name,
-        &tokens_dir,
+        &ApplyPluginsCtx {
+            project_name,
+            project_dir,
+            integrations,
+            network_name: &network_name,
+            tokens_dir: &tokens_dir,
+            bridges,
+        },
     )?;
 
     // Propagate host timezone into every service; must run after plugin injection.
@@ -689,24 +721,21 @@ pub fn ensure_token_dir_in(
 /// the internal compose network — they have no direct host-side dependency.
 /// If a future plugin needs to reach the host (e.g. invoking `host_exec`),
 /// the helper must be called for that plugin's compose service.
-fn apply_plugins(
-    yaml: &str,
-    project_name: &str,
-    project_dir: &str,
-    integrations: &ResolvedIntegrationsConfig,
-    network_name: &str,
-    tokens_dir: &std::path::Path,
-) -> anyhow::Result<String> {
+fn apply_plugins(yaml: &str, ctx: &ApplyPluginsCtx<'_>) -> anyhow::Result<String> {
     let plugins = plugin::list_verified_plugins()?;
-    apply_plugins_from_verified(
-        yaml,
-        project_name,
-        project_dir,
-        integrations,
-        network_name,
-        tokens_dir,
-        &plugins,
-    )
+    apply_plugins_from_verified(yaml, ctx, &plugins)
+}
+
+/// Per-call inputs shared by `apply_plugins` and `apply_plugins_from_verified`.
+/// Bundled together so each new plugin-injection knob lives in one struct
+/// instead of growing the function signature.
+pub(crate) struct ApplyPluginsCtx<'a> {
+    pub project_name: &'a str,
+    pub project_dir: &'a str,
+    pub integrations: &'a ResolvedIntegrationsConfig,
+    pub network_name: &'a str,
+    pub tokens_dir: &'a std::path::Path,
+    pub bridges: &'a HostBridgesInfo,
 }
 
 /// Test-friendly variant of [`apply_plugins`] — accepts a pre-built
@@ -715,15 +744,21 @@ fn apply_plugins(
 /// `apply_plugins`; tests inject crafted scenarios (forged manifest,
 /// dangling `claude-resources` symlink, slug collision) without
 /// touching the user's real data dir.
+// Internal helper exposed only for tests that need to inject crafted
+// `VerifiedPlugin` fixtures; the public entrypoint is `apply_plugins`.
 fn apply_plugins_from_verified(
     yaml: &str,
-    project_name: &str,
-    project_dir: &str,
-    integrations: &ResolvedIntegrationsConfig,
-    network_name: &str,
-    tokens_dir: &std::path::Path,
+    ctx: &ApplyPluginsCtx<'_>,
     plugins: &[plugin::VerifiedPlugin],
 ) -> anyhow::Result<String> {
+    let ApplyPluginsCtx {
+        project_name,
+        project_dir,
+        integrations,
+        network_name,
+        tokens_dir,
+        bridges,
+    } = *ctx;
     if plugins.is_empty() {
         return Ok(yaml.to_string());
     }
@@ -799,6 +834,31 @@ fn apply_plugins_from_verified(
                 consts::PORT_WORKER
             );
             inject_worker_env(&mut doc, &worker_env, &url);
+
+            // Plugin's manifest may declare a host-side WebSocket bridge
+            // (see ADR-063). When the Desktop has registered one for this
+            // slug, inject the env vars the plugin asked for.
+            if manifest.host_bridge.is_some() {
+                if let Some(registration) = bridges.bridges.iter().find(|r| r.plugin_slug == *slug)
+                {
+                    let compose_name = plugin::derive_compose_name(sid);
+                    let bridge_url =
+                        format!("ws://{}:{}/", consts::HOST_GATEWAY_ALIAS, registration.port);
+                    add_service_env_var(
+                        &mut doc,
+                        &compose_name,
+                        &registration.url_env,
+                        &bridge_url,
+                    )?;
+                    add_service_env_var(
+                        &mut doc,
+                        &compose_name,
+                        &registration.token_env,
+                        &registration.auth_token,
+                    )?;
+                    ensure_host_gateway_extra_host(&mut doc, &compose_name);
+                }
+            }
         }
 
         // Mount claude-resources to claude container. The resources dir
@@ -1167,22 +1227,26 @@ fn remove_hub_env_var(doc: &mut serde_yaml_ng::Value, env_var_name: &str) {
 /// Claude container is NOT modified — it only sees the hub.
 fn apply_mcp_os_config(yaml: &str) -> anyhow::Result<String> {
     let data_dir = consts::data_dir();
-    let token_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
-    let port_path = data_dir.join(consts::MCP_OS_PORT_FILE);
-    apply_mcp_os_config_with_path(yaml, &token_path, &port_path)
+    let lock_path = data_dir.join(consts::MCP_OS_LOCK_FILE);
+    let token_mount_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
+    apply_mcp_os_config_with_path(yaml, &token_mount_path, &lock_path)
 }
 
-/// Test-only alias preserved so existing fixtures keep working.
+/// Test-only alias preserved so existing fixtures keep working. `lock_path`
+/// is the unified `lock.json`; `token_mount_path` is the standalone
+/// token file bind-mounted into the hub (dual-write contract — see
+/// `mcp_os_process::spawn_in`).
 fn apply_mcp_os_config_with_path(
     yaml: &str,
-    token_path: &std::path::Path,
-    port_path: &std::path::Path,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
 ) -> anyhow::Result<String> {
     apply_worker_config(
         yaml,
         "mcp-os",
-        token_path,
-        port_path,
+        token_mount_path,
+        lock_path,
+        crate::host_mcp_process::lock::LockService::McpOs,
         "WORKER_OS_URL",
         "os-auth-token",
     )
@@ -1191,22 +1255,23 @@ fn apply_mcp_os_config_with_path(
 /// Injects `WORKER_HOST_EXEC_URL` + bearer-token mount into the hub if the worker is up.
 fn apply_host_exec_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     let state_dir = crate::host_exec::host_exec_project_dir(consts::data_dir(), project);
-    let token_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
-    let port_path = state_dir.join(consts::HOST_EXEC_PORT_FILE);
-    apply_host_exec_config_with_paths(yaml, &token_path, &port_path)
+    let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
+    let token_mount_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
+    apply_host_exec_config_with_paths(yaml, &token_mount_path, &lock_path)
 }
 
 /// Test-only alias preserved so existing fixtures keep working.
 fn apply_host_exec_config_with_paths(
     yaml: &str,
-    token_path: &std::path::Path,
-    port_path: &std::path::Path,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
 ) -> anyhow::Result<String> {
     apply_worker_config(
         yaml,
         "host_exec",
-        token_path,
-        port_path,
+        token_mount_path,
+        lock_path,
+        crate::host_mcp_process::lock::LockService::HostExec,
         "WORKER_HOST_EXEC_URL",
         "host_exec-auth-token",
     )
@@ -1223,19 +1288,19 @@ fn apply_host_exec_config_with_paths(
 /// `<oauth-state-dir>/.bearer-map.json` (bearer → service).
 fn apply_oauth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     let state_dir = crate::oauth_process::oauth_project_dir(consts::data_dir(), project);
-    let port_path = state_dir.join(consts::OAUTH_PORT_FILE);
+    let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
     let bearer_map_path = state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
-    apply_oauth_config_with_paths(yaml, &state_dir, &port_path, &bearer_map_path)
+    apply_oauth_config_with_paths(yaml, &state_dir, &lock_path, &bearer_map_path)
 }
 
 /// Test-only entry point — same logic, explicit paths.
 fn apply_oauth_config_with_paths(
     yaml: &str,
     state_dir: &std::path::Path,
-    port_path: &std::path::Path,
+    lock_path: &std::path::Path,
     bearer_map_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let port = match read_worker_port_file(port_path, "oauth") {
+    let port = match read_lock_port(lock_path, crate::host_mcp_process::lock::LockService::Oauth) {
         Some(p) => p,
         None => return Ok(yaml.to_string()),
     };
@@ -1299,32 +1364,34 @@ fn read_oauth_bearer_map(
     Some(map)
 }
 
-/// Inject `<env_var>=<gateway-url>` + mount `<token_path>:/secrets/<secret_name>:ro` into the
-/// hub iff token+port files are readable. No-op (returns unchanged YAML) when files absent —
-/// any read failure is treated as not running (avoids TOCTOU vs runtime respawn).
+/// Inject `<env_var>=<gateway-url>` + mount `<token_mount_path>:/secrets/<secret_name>:ro`
+/// into the hub iff `lock.json` is readable and the mount-token file exists.
+/// No-op (returns unchanged YAML) when files absent — any read failure is
+/// treated as not running (avoids TOCTOU vs runtime respawn).
 fn apply_worker_config(
     yaml: &str,
     label: &str,
-    token_path: &std::path::Path,
-    port_path: &std::path::Path,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
+    service: crate::host_mcp_process::lock::LockService,
     env_var: &str,
     secret_name: &str,
 ) -> anyhow::Result<String> {
-    let token = match std::fs::read_to_string(token_path) {
+    let port = match read_lock_port(lock_path, service) {
+        Some(p) => p,
+        None => return Ok(yaml.to_string()),
+    };
+    let token = match std::fs::read_to_string(token_mount_path) {
         Ok(s) => s.trim().to_string(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(yaml.to_string()),
         Err(e) => {
-            log::debug!("{label} token read failed ({e}); treating as not running");
+            log::debug!("{label} token mount read failed ({e}); treating as not running");
             return Ok(yaml.to_string());
         }
     };
     if token.is_empty() {
         return Ok(yaml.to_string());
     }
-    let port = match read_worker_port_file(port_path, label) {
-        Some(p) => p,
-        None => return Ok(yaml.to_string()),
-    };
     let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
@@ -1332,12 +1399,29 @@ fn apply_worker_config(
     inject_worker_env(&mut doc, env_var, &url);
     add_hub_volume(
         &mut doc,
-        &format!("{}:/secrets/{secret_name}:ro", to_engine_path(token_path)?),
+        &format!(
+            "{}:/secrets/{secret_name}:ro",
+            to_engine_path(token_mount_path)?
+        ),
     );
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
+/// Read a worker's port from its `lock.json`. `None` when the file is
+/// absent or the JSON is unparseable / has the wrong `service` tag.
+///
+/// Each worker manager migrates pre-PR3 layout to `lock.json` before
+/// completing `spawn_*`, so by the time compose reads the port the
+/// JSON must exist; no legacy fallback is required here.
+fn read_lock_port(
+    lock_path: &std::path::Path,
+    service: crate::host_mcp_process::lock::LockService,
+) -> Option<u16> {
+    crate::host_mcp_process::lock::read(lock_path, service).map(|lock| lock.port)
+}
+
 /// Read a worker's `port` file. `None` when missing or unparseable; warns on invalid content.
+#[cfg(test)]
 fn read_worker_port_file(port_path: &std::path::Path, label: &str) -> Option<u16> {
     let content = std::fs::read_to_string(port_path).ok()?;
     match content.trim().parse::<u16>() {
@@ -2909,6 +2993,7 @@ mod tests {
             &resolved,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .expect("render must succeed");
 
@@ -2992,6 +3077,7 @@ mod tests {
             &resolved,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -3479,6 +3565,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_ok());
         let yaml = result.unwrap();
@@ -3515,6 +3602,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3572,6 +3660,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -3604,6 +3693,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3685,6 +3775,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -3742,6 +3833,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3778,6 +3870,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3815,6 +3908,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3851,6 +3945,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3943,6 +4038,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -4023,6 +4119,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -4050,6 +4147,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let expected = format!("MCP_HUB_PORT={}", crate::consts::PORT_BASE);
@@ -4076,6 +4174,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -4122,6 +4221,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -4172,6 +4272,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
@@ -4222,6 +4323,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -4336,6 +4438,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -4401,6 +4504,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -4601,6 +4705,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         // Ollama: direct injection via default_base_url SSOT (no /v1 suffix — ADR-040)
@@ -4631,6 +4736,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -4657,6 +4763,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         // Default anthropic: no proxy, no ANTHROPIC_BASE_URL override
@@ -4722,6 +4829,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -4802,6 +4910,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -4835,6 +4944,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -4868,6 +4978,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -4901,6 +5012,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -5116,12 +5228,26 @@ services:
         COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", host_gateway_ip())
     }
 
-    fn write_token_and_port(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-        let token_path = tmp.join("token");
-        let port_path = tmp.join("port");
+    /// Write a fixture lock.json + standalone token mount file, for the
+    /// given service. Returns `(token_mount_path, lock_path)` — both are
+    /// inputs to `apply_*_config_with_path*`.
+    fn write_lock_and_token_mount(
+        tmp: &std::path::Path,
+        service: crate::host_mcp_process::lock::LockService,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use crate::host_mcp_process::lock::{self, LockFile};
+        let token_path = tmp.join("auth-token");
+        let lock_path = tmp.join(consts::PER_PROJECT_LOCK_FILE);
         std::fs::write(&token_path, "test-token").unwrap();
-        std::fs::write(&port_path, "4007").unwrap();
-        (token_path, port_path)
+        let lock = LockFile::new(service, 12345, 4007, "test-token".into());
+        lock::write(&lock_path, &lock).unwrap();
+        (token_path, lock_path)
+    }
+
+    /// Legacy shim — kept under the old name to minimize churn in tests
+    /// that don't care about the service tag (host_exec by default).
+    fn write_token_and_port(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        write_lock_and_token_mount(tmp, crate::host_mcp_process::lock::LockService::HostExec)
     }
 
     fn extra_hosts_for(yaml: &str, service: &str) -> Vec<String> {
@@ -5144,9 +5270,12 @@ services:
     #[test]
     fn apply_mcp_os_config_adds_host_gateway_to_hub() {
         let tmp = tempfile::tempdir().unwrap();
-        let (token_path, port_path) = write_token_and_port(tmp.path());
+        let (token_path, lock_path) = write_lock_and_token_mount(
+            tmp.path(),
+            crate::host_mcp_process::lock::LockService::McpOs,
+        );
         let yaml = render_substituted_template();
-        let result = apply_mcp_os_config_with_path(&yaml, &token_path, &port_path).unwrap();
+        let result = apply_mcp_os_config_with_path(&yaml, &token_path, &lock_path).unwrap();
         let entries = extra_hosts_for(&result, "mcp-hub");
         assert_eq!(
             count_canonical_entries(&entries),
@@ -5171,9 +5300,14 @@ services:
 
     #[test]
     fn apply_oauth_config_adds_host_gateway_to_each_consumer() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "4090").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        lock::write(
+            &lock_path,
+            &LockFile::new(LockService::Oauth, 12345, 4090, "supervisor".into()),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join("bearer-map.json");
         std::fs::write(
             &bearer_map_path,
@@ -5183,7 +5317,7 @@ services:
 
         let yaml = render_substituted_template();
         let result =
-            apply_oauth_config_with_paths(&yaml, tmp.path(), &port_path, &bearer_map_path).unwrap();
+            apply_oauth_config_with_paths(&yaml, tmp.path(), &lock_path, &bearer_map_path).unwrap();
 
         // Each OAuth-consumer in the bearer map gets the canonical alias in its extra_hosts.
         let entries = extra_hosts_for(&result, "mcp-sharepoint");
@@ -5430,6 +5564,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -5460,6 +5595,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -5484,6 +5620,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let expected = format!("CLAUDE_VERSION={}", crate::defaults::CLAUDE_VERSION);
@@ -5516,6 +5653,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .expect("render_compose should succeed");
 
@@ -5665,27 +5803,35 @@ services:
 
     #[test]
     fn test_mcp_os_config_injects_when_token_exists() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("mcp-os-auth-token");
-        let port_path = tmp.path().join("mcp-os-port");
+        let lock_path = tmp.path().join(consts::MCP_OS_LOCK_FILE);
         std::fs::write(&token_path, "test-uuid-token-abc").unwrap();
-        std::fs::write(&port_path, "54321").unwrap();
+        lock::write(
+            &lock_path,
+            &LockFile::new(
+                LockService::McpOs,
+                12345,
+                54321,
+                "test-uuid-token-abc".into(),
+            ),
+        )
+        .unwrap();
 
-        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &port_path).unwrap();
+        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &lock_path).unwrap();
 
-        // WORKER_OS_URL must be injected into mcp-hub env with the dynamic port
         assert!(
             result.contains("WORKER_OS_URL="),
-            "WORKER_OS_URL must be injected when token file exists.\nGot:\n{}",
+            "WORKER_OS_URL must be injected when lock.json exists.\nGot:\n{}",
             result
         );
         assert!(
             result.contains(":54321"),
-            "WORKER_OS_URL must use port from port file.\nGot:\n{}",
+            "WORKER_OS_URL must use port from lock.json.\nGot:\n{}",
             result
         );
 
-        // Token file must be bind-mounted into hub
         let expected_mount = format!("{}:/secrets/os-auth-token:ro", token_path.display());
         assert!(
             result.contains(&expected_mount),
@@ -5887,14 +6033,24 @@ services:
 
     #[test]
     fn test_host_exec_config_injects_url_and_mounts_token() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("auth-token");
-        let port_path = tmp.path().join("port");
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
         std::fs::write(&token_path, "host-exec-uuid-token").unwrap();
-        std::fs::write(&port_path, "49215").unwrap();
+        lock::write(
+            &lock_path,
+            &LockFile::new(
+                LockService::HostExec,
+                12345,
+                49215,
+                "host-exec-uuid-token".into(),
+            ),
+        )
+        .unwrap();
 
         let result =
-            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &port_path).unwrap();
+            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &lock_path).unwrap();
 
         // WORKER_HOST_EXEC_URL injected into mcp-hub with the dynamic port and a
         // host-gateway hostname (never 0.0.0.0).
@@ -6027,12 +6183,21 @@ services:
     #[test]
     fn test_oauth_config_skipped_when_bearer_map_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49300").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49300,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &tmp.path().join("no-bearer-map.json"),
         )
         .unwrap();
@@ -6045,14 +6210,23 @@ services:
     #[test]
     fn test_oauth_config_skipped_when_bearer_map_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49300").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49300,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, "{}").unwrap();
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -6065,15 +6239,24 @@ services:
     #[test]
     fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49301").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp-uuid": "sharepoint"}"#).unwrap();
 
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -6134,15 +6317,24 @@ services:
     #[test]
     fn test_oauth_config_writes_per_service_bearer_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49301").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-x": "sharepoint"}"#).unwrap();
 
         apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -6175,15 +6367,24 @@ services:
     #[test]
     fn test_oauth_config_does_not_inject_into_slack_or_redmine() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49301").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
 
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_MULTIPLE_WORKERS,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -6253,6 +6454,50 @@ services:
         assert_eq!(read_host_exec_port(&p), None, "out of u16 range");
     }
 
+    // ── read_lock_port legacy fallback ──────────────────────────────────
+
+    #[test]
+    fn test_read_lock_port_reads_lock_json_when_present() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("lock.json");
+        lock::write(
+            &lock_path,
+            &LockFile::new(LockService::HostExec, 12345, 49215, "tok".into()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_lock_port(&lock_path, LockService::HostExec),
+            Some(49215)
+        );
+    }
+
+    #[test]
+    fn test_read_lock_port_returns_none_when_lock_json_absent() {
+        use crate::host_mcp_process::lock::LockService;
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("lock.json"); // absent
+
+        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
+    }
+
+    #[test]
+    fn test_read_lock_port_returns_none_when_wrong_service_tag() {
+        // `read` returns None if the JSON exists but `service` doesn't match
+        // — defends against a lock file from a different worker getting picked up.
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("lock.json");
+        lock::write(
+            &lock_path,
+            &LockFile::new(LockService::Oauth, 12345, 49215, "tok".into()),
+        )
+        .unwrap();
+
+        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
+    }
+
     #[test]
     fn test_apply_integrations_filter_enabled_services_includes_host_exec_when_on() {
         let mut integrations = ResolvedIntegrationsConfig::default();
@@ -6306,6 +6551,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6506,6 +6752,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -6569,6 +6816,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -6600,6 +6848,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -6635,6 +6884,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -6678,6 +6928,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6712,6 +6963,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6746,6 +6998,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6873,11 +7126,33 @@ services:
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig::default();
-        assert!(render_compose("", "/tmp/proj", &resolved, &integrations, None).is_err());
-        assert!(render_compose("../evil", "/tmp/proj", &resolved, &integrations, None).is_err());
-        assert!(
-            render_compose(&"a".repeat(64), "/tmp/proj", &resolved, &integrations, None).is_err()
-        );
+        assert!(render_compose(
+            "",
+            "/tmp/proj",
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default()
+        )
+        .is_err());
+        assert!(render_compose(
+            "../evil",
+            "/tmp/proj",
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default()
+        )
+        .is_err());
+        assert!(render_compose(
+            &"a".repeat(64),
+            "/tmp/proj",
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default()
+        )
+        .is_err());
     }
 
     #[test]
@@ -7181,6 +7456,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(
             result.is_ok(),
@@ -7383,8 +7659,15 @@ services:
             context7: true,
             ..ResolvedIntegrationsConfig::default()
         };
-        let result =
-            render_compose("test-project", "/workspace", &config, &integrations, None).unwrap();
+        let result = render_compose(
+            "test-project",
+            "/workspace",
+            &config,
+            &integrations,
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
         let expected = container_user();
 
@@ -7480,6 +7763,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         }
     }
 
@@ -7758,6 +8042,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
@@ -7806,6 +8091,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let svc = plugin::generate_plugin_service(
             &manifest,
@@ -7901,6 +8187,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -8275,6 +8562,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         // generate_plugin_service requires a port for MCP plugins,
@@ -9207,6 +9495,7 @@ networks:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         }];
 
         // Compose with plugin service already present (as apply_plugins would leave it)
@@ -9318,6 +9607,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let violations = SecurityCheck::run(&yaml, "test", &[manifest], &test_expected_paths());
         assert!(
@@ -10094,6 +10384,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -10319,10 +10610,16 @@ services:
         plugin_dir: &Path,
         mem_limit: Option<&str>,
     ) -> plugin::VerifiedPlugin {
-        // MCP plugins (service_id present) require a Containerfile per
-        // validate_manifest. Stub one in the fixture dir so apply_plugins
-        // re-validation passes the existence check and proceeds to the
-        // render-time invariants we actually want to test.
+        fixture_verified_plugin_full(slug, service_id, plugin_dir, mem_limit, None)
+    }
+
+    fn fixture_verified_plugin_full(
+        slug: &str,
+        service_id: Option<&str>,
+        plugin_dir: &Path,
+        mem_limit: Option<&str>,
+        host_bridge: Option<plugin::HostBridgeManifest>,
+    ) -> plugin::VerifiedPlugin {
         if service_id.is_some() {
             std::fs::create_dir_all(plugin_dir).ok();
             std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").ok();
@@ -10344,8 +10641,29 @@ services:
             mem_limit: mem_limit.map(String::from),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge,
         };
         plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
+    }
+
+    fn fixture_host_bridge_manifest(url_env: &str, token_env: &str) -> plugin::HostBridgeManifest {
+        // `validate_manifest` rejects empty roles, so seed one valid role.
+        let roles = std::collections::HashMap::from([(
+            "worker".to_string(),
+            plugin::HostBridgeRoleAuth::Header {
+                name: "x-bridge-auth".to_string(),
+            },
+        )]);
+        plugin::HostBridgeManifest {
+            url_env: url_env.into(),
+            token_env: token_env.into(),
+            roles,
+            origin_policy: plugin::HostBridgeOriginPolicy::default(),
+            max_frame_bytes: None,
+            collision_policy: plugin::HostBridgeCollisionPolicy::default(),
+            pending_slot_timeout_secs: None,
+            display_name: "Fixture".into(),
+        }
     }
 
     /// `apply_plugins` re-runs `validate_manifest` so a manifest whose
@@ -10362,13 +10680,17 @@ services:
         std::fs::create_dir_all(&plugin_dir).unwrap();
         // 999g is far above the 16 GiB cap. Re-validation must reject.
         let vp = fixture_verified_plugin("evil", Some("evil"), &plugin_dir, Some("999g"));
+        let cfg = fixture_integrations_with_enabled("evil");
         let result = super::apply_plugins_from_verified(
             fixture_compose_yaml(),
-            "test-project",
-            "/tmp/test",
-            &fixture_integrations_with_enabled("evil"),
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &super::HostBridgesInfo::default(),
+            },
             &[vp],
         );
         let err = result.expect_err("oversized mem_limit must be rejected at render");
@@ -10410,11 +10732,14 @@ services:
         let vp = fixture_verified_plugin("decoy", Some("decoy"), &plugin_dir, None);
         let err = super::apply_plugins_from_verified(
             yaml,
-            "test-project",
-            "/tmp/test",
-            &cfg,
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &super::HostBridgesInfo::default(),
+            },
             &[vp],
         )
         .expect_err("collision must abort the render");
@@ -10438,11 +10763,14 @@ services:
         let vp = fixture_verified_plugin("ok-plugin", Some("ok-plugin"), &plugin_dir, None);
         let yaml = super::apply_plugins_from_verified(
             fixture_compose_yaml(),
-            "test-project",
-            "/tmp/test",
-            &cfg,
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &super::HostBridgesInfo::default(),
+            },
             &[vp],
         )
         .expect("happy path must render");
@@ -10469,6 +10797,93 @@ services:
         std::fs::write(deep.join("ok.md"), b"hi").unwrap();
         super::ensure_resources_dir_safe(&plugin, &plugin.join("claude-resources"))
             .expect("deep real-directory tree must be accepted");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Host-bridge env injection (generic plugin host-bridge plumbing)
+    // ──────────────────────────────────────────────────────────────────────
+
+    fn render_with_host_bridge_plugin(
+        slug: &str,
+        url_env: &str,
+        token_env: &str,
+        bridges: &super::HostBridgesInfo,
+    ) -> anyhow::Result<String> {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join(slug);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin_full(
+            slug,
+            Some(slug),
+            &plugin_dir,
+            None,
+            Some(fixture_host_bridge_manifest(url_env, token_env)),
+        );
+        let cfg = fixture_integrations_with_enabled(slug);
+        super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges,
+            },
+            &[vp],
+        )
+    }
+
+    #[test]
+    fn test_render_compose_default_bridges_omits_host_bridge_env() {
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &super::HostBridgesInfo::default(),
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("FIGMA_BRIDGE_URL"),
+            "host-bridge env must NOT be injected when bridges is empty, got:\n{yaml}"
+        );
+        assert!(!yaml.contains("FIGMA_BRIDGE_TOKEN"));
+    }
+
+    #[test]
+    fn test_render_compose_with_host_bridge_registration_injects_url_and_token() {
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "figma".to_string(),
+                port: 54321,
+                auth_token: "test-token-abc".to_string(),
+                url_env: "FIGMA_BRIDGE_URL".to_string(),
+                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("FIGMA_BRIDGE_URL"),
+            "FIGMA_BRIDGE_URL must be injected, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("FIGMA_BRIDGE_TOKEN"),
+            "FIGMA_BRIDGE_TOKEN must be injected, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("54321"),
+            "port must appear in URL, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("test-token-abc"),
+            "token must appear in env, got:\n{yaml}"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -10595,6 +11010,30 @@ services:
     }
 
     #[test]
+    fn test_render_compose_host_bridge_url_uses_host_docker_internal() {
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "figma".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "FIGMA_BRIDGE_URL".to_string(),
+                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("ws://host.docker.internal:54321/"),
+            "URL must use host.docker.internal alias, got:\n{yaml}"
+        );
+    }
+
+    #[test]
     fn apply_llm_config_local_uses_default_base_url_when_none() {
         let llm = LlmConfig {
             provider: Some("local".to_string()),
@@ -10610,6 +11049,126 @@ services:
         assert!(
             env.iter().any(|e| e == &expected),
             "Expected default base_url for 'local', got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_compose_host_bridge_adds_extra_hosts_for_plugin_service() {
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "figma".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "FIGMA_BRIDGE_URL".to_string(),
+                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let services = doc.get("services").and_then(|v| v.as_mapping()).unwrap();
+        let mcp_figma = services
+            .get(serde_yaml_ng::Value::String("mcp-figma".to_string()))
+            .and_then(|v| v.as_mapping())
+            .expect("mcp-figma service must be present");
+        let extra_hosts = mcp_figma
+            .get(serde_yaml_ng::Value::String("extra_hosts".to_string()))
+            .expect("mcp-figma needs extra_hosts for host.docker.internal");
+        let entries: Vec<String> = extra_hosts
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.starts_with("host.docker.internal:")),
+            "extra_hosts must include host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_from_verified_skips_bridge_for_plugins_without_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("notbridge");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin("notbridge", Some("notbridge"), &plugin_dir, None);
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "notbridge".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "SOMETHING_URL".to_string(),
+                token_env: "SOMETHING_TOKEN".to_string(),
+            }],
+        };
+        let cfg = fixture_integrations_with_enabled("notbridge");
+        let yaml = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &bridges,
+            },
+            &[vp],
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("SOMETHING_URL"),
+            "plugin without host_bridge manifest must NOT receive bridge env, got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_from_verified_skips_bridge_when_no_registration_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("figma");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin_full(
+            "figma",
+            Some("figma"),
+            &plugin_dir,
+            None,
+            Some(fixture_host_bridge_manifest(
+                "FIGMA_BRIDGE_URL",
+                "FIGMA_BRIDGE_TOKEN",
+            )),
+        );
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "other".to_string(),
+                port: 54322,
+                auth_token: "x".to_string(),
+                url_env: "OTHER_URL".to_string(),
+                token_env: "OTHER_TOKEN".to_string(),
+            }],
+        };
+        let cfg = fixture_integrations_with_enabled("figma");
+        let yaml = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &bridges,
+            },
+            &[vp],
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("FIGMA_BRIDGE_URL"),
+            "figma plugin declares host_bridge but no registration matches its slug, got:\n{yaml}"
         );
     }
 

@@ -754,6 +754,7 @@ fn main() -> anyhow::Result<()> {
         &resolved,
         &integrations,
         Some(&*runtime),
+        &compose::HostBridgesInfo::default(),
     )?;
 
     let manifests = plugin::list_installed_plugins().unwrap_or_else(|e| {

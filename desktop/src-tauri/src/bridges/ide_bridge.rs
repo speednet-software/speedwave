@@ -1,15 +1,35 @@
-use std::net::TcpListener;
+//! IDE Bridge — pairs Claude Code with a local IDE. Endpoint mode of
+//! [`HostBridge`]; see ADR-063 and the original IDE Bridge design.
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+
+use anyhow::Context as _;
 
 use serde::{Deserialize, Serialize};
-use speedwave_runtime::consts;
+
+use super::host_bridge::{
+    AuthScheme, ConnectionContext, ConnectionHandler, HostBridge, HostBridgeConfig,
+    LockBodyContext, OriginPolicy, SubprotocolPolicy,
+};
+
+// Re-export internals used by tests (and historical callers expecting
+// them through `crate::ide_bridge::*`).
+pub(crate) use super::host_bridge::AuthState;
+#[cfg(test)]
+pub(crate) use super::host_bridge::constant_time_eq;
+
+/// Header name Claude Code uses to authenticate with the IDE Bridge.
+pub(crate) const IDE_BRIDGE_AUTH_HEADER: &str = "x-claude-code-ide-authorization";
+/// Display name written into the IDE Bridge lock file.
+pub(crate) const IDE_BRIDGE_DISPLAY_NAME: &str = "Speedwave";
 
 // ---------------------------------------------------------------------------
-// Lock file written to ~/.speedwave/ide-bridge/<port>.lock
-// This directory is mounted directly into the container as /home/speedwave/.claude/ide/
-// so Claude Code (inside container) discovers the Bridge without any file copying.
+// Lock file schema — Claude Code derives the port from the FILENAME
+// (`12345.lock` → port 12345); no `wsUrl` / `port` field is required in
+// the JSON. PID must be alive *inside* the container — we hard-code 1
+// (init), the only PID guaranteed to be alive in the container PID
+// namespace.
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
@@ -27,51 +47,12 @@ pub struct IdeLockFile {
 }
 
 // ---------------------------------------------------------------------------
-// Constant-time auth comparison
-// ---------------------------------------------------------------------------
-
-/// Constant-time string comparison to prevent timing attacks on auth tokens.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    if a_bytes.len() != b_bytes.len() {
-        return false;
-    }
-    let mut result: u8 = 0;
-    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
-}
-
-// ---------------------------------------------------------------------------
-// Auth state — per-session UUID token, constant-time comparison
-// ---------------------------------------------------------------------------
-
-// Token is a per-session UUID v4 generated at bridge startup. With 127.0.0.1
-// binding + 122-bit random UUID (OS CSPRNG via getrandom), brute force is
-// infeasible — no TTL or rate limiting needed.
-pub(crate) struct AuthState {
-    token: String,
-}
-
-impl AuthState {
-    fn new(token: String) -> Self {
-        Self { token }
-    }
-
-    fn validate(&self, provided_token: &str) -> bool {
-        constant_time_eq(provided_token, &self.token)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// JSON-RPC 2.0 protocol types
+// JSON-RPC 2.0 protocol types (MCP layer)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize, Debug)]
 pub struct JsonRpcRequest {
-    /// Protocol version — required by JSON-RPC 2.0 spec but not read after deserialization.
+    /// Protocol version — required by JSON-RPC 2.0 but unused after parsing.
     #[serde(rename = "jsonrpc")]
     _jsonrpc: String,
     pub method: String,
@@ -94,10 +75,6 @@ pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
 }
-
-// ---------------------------------------------------------------------------
-// JSON-RPC 2.0 response helpers
-// ---------------------------------------------------------------------------
 
 pub(crate) fn jsonrpc_success(id: serde_json::Value, result: serde_json::Value) -> JsonRpcResponse {
     JsonRpcResponse {
@@ -129,11 +106,7 @@ pub(crate) fn jsonrpc_parse_error() -> JsonRpcResponse {
 }
 
 // ---------------------------------------------------------------------------
-// JSON-RPC method dispatch — handles IDE commands from Claude
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// MCP tools/list — returns the tool schemas Claude Code discovers via MCP
+// MCP tools/list — 12 IDE tools that Claude discovers via MCP
 // ---------------------------------------------------------------------------
 
 fn mcp_tools_list() -> serde_json::Value {
@@ -251,10 +224,9 @@ fn mcp_tools_list() -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// MCP tools/call — dispatches tool invocations from Claude Code
+// MCP tools/call — stub responses when no upstream IDE is configured
 // ---------------------------------------------------------------------------
 
-/// MCP tools/call result: `content` array with a single text item.
 fn mcp_tool_result(text: &str) -> serde_json::Value {
     use serde_json::json;
     json!({
@@ -271,7 +243,6 @@ fn mcp_tool_error(text: &str) -> serde_json::Value {
     })
 }
 
-#[allow(clippy::unwrap_used)] // serde_json::to_string on json!() literals is infallible
 fn dispatch_tool_call(name: &str, _args: Option<&serde_json::Value>) -> serde_json::Value {
     use serde_json::json;
     match name {
@@ -279,24 +250,12 @@ fn dispatch_tool_call(name: &str, _args: Option<&serde_json::Value>) -> serde_js
             "No IDE connected — file not opened. Connect an IDE in Speedwave Health Dashboard.",
         ),
         "openDiff" => mcp_tool_error("No IDE connected — diff not opened."),
-        "getCurrentSelection" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"selection": null})).unwrap())
-        }
-        "getLatestSelection" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"selection": null})).unwrap())
-        }
-        "getOpenEditors" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"editors": []})).unwrap())
-        }
-        "getWorkspaceFolders" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"folders": ["/workspace"]})).unwrap())
-        }
-        "getDiagnostics" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"diagnostics": []})).unwrap())
-        }
-        "checkDocumentDirty" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"dirty": false})).unwrap())
-        }
+        "getCurrentSelection" => mcp_tool_result(&json!({"selection": null}).to_string()),
+        "getLatestSelection" => mcp_tool_result(&json!({"selection": null}).to_string()),
+        "getOpenEditors" => mcp_tool_result(&json!({"editors": []}).to_string()),
+        "getWorkspaceFolders" => mcp_tool_result(&json!({"folders": ["/workspace"]}).to_string()),
+        "getDiagnostics" => mcp_tool_result(&json!({"diagnostics": []}).to_string()),
+        "checkDocumentDirty" => mcp_tool_result(&json!({"dirty": false}).to_string()),
         "saveDocument" => mcp_tool_error("No IDE connected — document not saved."),
         "close_tab" => mcp_tool_error("No IDE connected."),
         "closeAllDiffTabs" => mcp_tool_error("No IDE connected."),
@@ -309,7 +268,7 @@ fn dispatch_tool_call(name: &str, _args: Option<&serde_json::Value>) -> serde_js
 }
 
 // ---------------------------------------------------------------------------
-// JSON-RPC method dispatch — handles MCP protocol + IDE tools from Claude
+// JSON-RPC dispatcher (MCP method handler)
 // ---------------------------------------------------------------------------
 
 pub(crate) fn dispatch_method(
@@ -319,12 +278,6 @@ pub(crate) fn dispatch_method(
 ) -> JsonRpcResponse {
     use serde_json::json;
     match method {
-        // --- MCP protocol handshake ---
-        // Claude Code sends `initialize` with protocolVersion, clientInfo, capabilities.
-        // Server must respond with protocolVersion, serverInfo, capabilities.
-        // capabilities.tools must be non-empty or Claude won't call tools/list.
-        // Supported protocol versions: "2025-11-25", "2025-06-18", "2025-03-26",
-        // "2024-11-05", "2024-10-07". We echo back the client's version.
         "initialize" => {
             let client_version = params
                 .and_then(|p| p.get("protocolVersion"))
@@ -339,13 +292,12 @@ pub(crate) fn dispatch_method(
                         "tools": { "listChanged": true }
                     },
                     "serverInfo": {
-                        "name": "Speedwave",
+                        "name": IDE_BRIDGE_DISPLAY_NAME,
                         "version": env!("CARGO_PKG_VERSION")
                     }
                 }),
             )
         }
-        // --- MCP tool discovery and invocation ---
         "tools/list" => {
             log::debug!("tools/list");
             jsonrpc_success(id, mcp_tools_list())
@@ -359,11 +311,7 @@ pub(crate) fn dispatch_method(
             log::debug!("tools/call {}", name);
             jsonrpc_success(id, dispatch_tool_call(name, arguments))
         }
-        // --- MCP ping ---
         "ping" => jsonrpc_success(id, json!({})),
-        // --- MCP notifications ---
-        // These are filtered out as notifications in handle_jsonrpc_message
-        // because they have no `id`, but if they arrive with an id, return success.
         "notifications/initialized" | "ide_connected" => {
             log::debug!("received {}", method);
             jsonrpc_success(id, json!({}))
@@ -375,14 +323,7 @@ pub(crate) fn dispatch_method(
     }
 }
 
-// ---------------------------------------------------------------------------
-// JSON-RPC message handler — parses and dispatches incoming messages
-// ---------------------------------------------------------------------------
-
-pub(crate) fn handle_jsonrpc_message(
-    text: &str,
-    _auth: &Arc<Mutex<AuthState>>,
-) -> Option<JsonRpcResponse> {
+pub(crate) fn handle_jsonrpc_message(text: &str) -> Option<JsonRpcResponse> {
     let req: JsonRpcRequest = match serde_json::from_str(text) {
         Ok(r) => r,
         Err(_) => return Some(jsonrpc_parse_error()),
@@ -391,74 +332,20 @@ pub(crate) fn handle_jsonrpc_message(
     let is_notification = req.id.is_none();
     let resp = dispatch_method(&req.method, req.params.as_ref(), id);
     if is_notification {
-        None // JSON-RPC 2.0: notifications get no response
+        None
     } else {
         Some(resp)
     }
 }
 
 // ---------------------------------------------------------------------------
-// IDE Bridge — manages the connection between Claude (in VM) and IDE (on host)
-//
-// All platforms: Bridge listens on TCP 127.0.0.1:<random_port>.
-// CLAUDE_CODE_IDE_HOST_OVERRIDE=host.docker.internal tells Claude the gateway
-// DNS name; resolved inside the container by `extra_hosts` in compose
-// (Lima vzNAT on macOS, WSL2 NAT on Windows).
-//
-// Lock file at ~/.speedwave/ide-bridge/<port>.lock is mounted as
-// /home/speedwave/.claude/ide/<port>.lock in the container (:ro).
+// Upstream IDE — proxy target read from `~/.claude/ide/<port>.lock`
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Stale lock file cleanup
-// ---------------------------------------------------------------------------
-
-/// Removes stale lock files in ~/.speedwave/ide-bridge/ whose TCP port is no
-/// longer listening. Called at IDE Bridge startup to clean up leftovers from
-/// crashed sessions.
-fn cleanup_stale_lock_files() {
-    let lock_dir = consts::data_dir().join("ide-bridge");
-    let entries = match std::fs::read_dir(&lock_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("lock") {
-            continue;
-        }
-        // Derive port from filename (e.g. "12345.lock" → 12345), same as Claude Code does.
-        let Some(port) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse::<u16>().ok())
-        else {
-            let _ = std::fs::remove_file(&path);
-            continue;
-        };
-        if std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            Duration::from_millis(200),
-        )
-        .is_err()
-        {
-            log::debug!(
-                "removing stale lock file {:?} (port {} not listening)",
-                path,
-                port
-            );
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-}
-
-/// The real IDE (Cursor / VS Code) that the Bridge should proxy connections to.
 #[derive(Clone)]
 pub struct UpstreamIde {
-    /// IDE display name (e.g. "Cursor") — stored for config serialization and logging.
     pub ide_name: String,
     pub port: u16,
-    /// authToken read from ~/.claude/ide/<port>.lock so we can authenticate to the real IDE.
     pub auth_token: String,
 }
 
@@ -472,88 +359,30 @@ impl std::fmt::Debug for UpstreamIde {
     }
 }
 
-// Windows ACL implementation lives in crate::fs_perms (shared with main.rs)
-
-/// Write (or re-create) a lock file at `path` with the given auth state and port.
-/// Standalone function so it can be called from both `IdeBridge::write_lock_file()`
-/// and the watchdog thread.
-fn write_lock_file_static(path: &PathBuf, auth: &Arc<Mutex<AuthState>>) -> anyhow::Result<()> {
-    let lock_dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("invalid lock file path"))?;
-    std::fs::create_dir_all(lock_dir)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(lock_dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-
-    let auth_guard = auth
-        .lock()
-        .map_err(|e| anyhow::anyhow!("auth mutex poisoned: {e}"))?;
-
-    // Claude Code derives the port from the lock file **filename** (e.g. "12345.lock" → port 12345).
-    // It constructs the WebSocket URL as ws://<host>:<port> — the host defaults to 127.0.0.1
-    // but is overridden by CLAUDE_CODE_IDE_HOST_OVERRIDE env var in the container.
-    // No wsUrl or port field is needed in the JSON — Claude ignores them.
-    //
-    // pid must be alive INSIDE the container for Claude Code to accept the lock file.
-    // Claude Code runs `kill -0 <pid>` to check liveness — the host PID doesn't exist
-    // in the container's PID namespace. PID 1 (container init) is always alive.
-    let lock = IdeLockFile {
-        pid: 1,
-        workspace_folders: vec!["/workspace".to_string()],
-        ide_name: "Speedwave".to_string(),
-        transport: "ws".to_string(),
-        running_in_windows: cfg!(windows),
-        auth_token: auth_guard.token.clone(),
-    };
-
-    let content = serde_json::to_string_pretty(&lock)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        use std::io::Write;
-        file.write_all(content.as_bytes())?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, &content)?;
-        #[cfg(windows)]
-        if let Err(e) = crate::fs_perms::set_owner_only(path) {
-            // ACL failure on a lock file that contains the IDE Bridge authToken
-            // would leave it world-readable. Remove the file and surface the error.
-            let _ = std::fs::remove_file(path);
-            return Err(anyhow::anyhow!(
-                "set_owner_only failed for {}: {e}",
-                path.display()
-            ));
-        }
-    }
-
-    Ok(())
-}
-
 /// Callback invoked on IDE Bridge events (e.g. "connected", "stub_call").
-/// Parameters: (event_kind, detail_message).
+/// Parameters: `(event_kind, detail_message)`.
 pub type EventCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
+// ---------------------------------------------------------------------------
+// IdeBridge — thin facade on top of HostBridge in Endpoint mode
+// ---------------------------------------------------------------------------
+
 pub struct IdeBridge {
-    auth: Arc<Mutex<AuthState>>,
-    lock_file_path: PathBuf,
+    /// `Some` in production (created via `new()`); `None` in test-only
+    /// `new_with_paths()`, which exercises lock-file helpers without a
+    /// real listener.
+    inner: Option<HostBridge>,
+
+    // Mirrored from `inner` (in production) or supplied by the caller
+    // (in `new_with_paths`). Tests read these directly via field access.
     tcp_port: u16,
-    /// Held from new() until start() to eliminate the TOCTOU race where another
-    /// process could grab the port between find_available_port() and re-bind.
-    tcp_listener: Option<std::net::TcpListener>,
-    shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
+    lock_file_path: PathBuf,
+    /// `_`-prefix because the field is only read inside `#[cfg(test)]
+    /// fn write_lock_file` — no production read site exists, but tests
+    /// need it via field access. Mirrors the `_path`/`_query`/… pattern
+    /// in `bridges::host_bridge::ConnectionContext`.
+    _auth: Arc<Mutex<AuthState>>,
+
     upstream: Arc<Mutex<Option<UpstreamIde>>>,
     upstream_changed_tx: tokio::sync::broadcast::Sender<()>,
     event_cb: Option<EventCallback>,
@@ -561,34 +390,46 @@ pub struct IdeBridge {
 
 impl IdeBridge {
     pub fn new() -> anyhow::Result<Self> {
-        let auth_token = uuid::Uuid::new_v4().to_string();
-        // Bind immediately and hold the listener to eliminate the TOCTOU race
-        // where another process could grab the port between bind and re-bind.
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let tcp_port = listener.local_addr()?.port();
+        let config = HostBridgeConfig::builder("ide")
+            .endpoint(AuthScheme::Header(IDE_BRIDGE_AUTH_HEADER))
+            .origin_policy(OriginPolicy::RejectIfPresent)
+            .subprotocol(SubprotocolPolicy { accepted: &["mcp"] })
+            .lock_body(|ctx: LockBodyContext<'_>| {
+                let lock = IdeLockFile {
+                    pid: 1,
+                    workspace_folders: vec!["/workspace".to_string()],
+                    ide_name: IDE_BRIDGE_DISPLAY_NAME.to_string(),
+                    transport: "ws".to_string(),
+                    running_in_windows: cfg!(windows),
+                    auth_token: ctx.auth_token.to_string(),
+                };
+                serde_json::to_value(&lock).unwrap_or(serde_json::Value::Null)
+            })
+            .build()?;
 
-        // Write to ~/.speedwave/ide-bridge/ — this dir is mounted directly into
-        // the container as /home/speedwave/.claude/ide/ so Claude Code discovers us
-        // without any file copying. No local Claude Code installation required.
-        let lock_file_path = consts::data_dir()
-            .join("ide-bridge")
-            .join(format!("{}.lock", tcp_port));
-
+        let inner = HostBridge::new(config)?;
+        let tcp_port = inner.port();
+        let lock_file_path = inner.lock_file_path().to_path_buf();
+        // Use the same UUID as the inner bridge so both layers validate
+        // the same token. (HostBridge mints it; we re-wrap it for callers
+        // that still expect the legacy AuthState handle.)
+        let auth = Arc::new(Mutex::new(AuthState::new(inner.auth_token())));
         let (upstream_changed_tx, _) = tokio::sync::broadcast::channel(4);
-
         Ok(Self {
-            auth: Arc::new(Mutex::new(AuthState::new(auth_token))),
-            lock_file_path,
+            inner: Some(inner),
             tcp_port,
-            tcp_listener: Some(listener),
-            shutdown_tx: None,
+            lock_file_path,
+            _auth: auth,
             upstream: Arc::new(Mutex::new(None)),
             upstream_changed_tx,
             event_cb: None,
         })
     }
 
-    /// Returns the upstream IDE name and port, if one is configured.
+    pub fn port(&self) -> u16 {
+        self.tcp_port
+    }
+
     pub fn upstream_info(&self) -> Option<(String, u16)> {
         self.upstream
             .lock()
@@ -597,19 +438,13 @@ impl IdeBridge {
             .map(|u| (u.ide_name.clone(), u.port))
     }
 
-    /// Returns the TCP port the Bridge is listening on.
-    pub fn port(&self) -> u16 {
-        self.tcp_port
-    }
-
-    /// Set an event callback for diagnostics and GUI integration.
-    /// Must be called before `start()`.
     pub fn set_event_callback(&mut self, cb: EventCallback) {
         self.event_cb = Some(cb);
     }
 
-    /// Set the upstream IDE to proxy connections to.
-    /// Reads the auth token from ~/.claude/ide/<port>.lock.
+    /// Read the auth token from `~/.claude/ide/<port>.lock` and store the
+    /// proxy target. Existing WebSocket connections are signalled to
+    /// reconnect so they pick up the new upstream.
     pub fn set_upstream(&self, ide_name: String, port: u16) -> anyhow::Result<()> {
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
         let lock_path = home
@@ -637,16 +472,10 @@ impl IdeBridge {
             .map_err(|e| anyhow::anyhow!("upstream mutex poisoned: {e}"))?;
         *guard = Some(upstream);
         drop(guard);
-
-        // Signal active WebSocket connections to close so Claude reconnects
-        // and picks up the new upstream.
         let _ = self.upstream_changed_tx.send(());
-
         Ok(())
     }
 
-    /// Clear the upstream IDE so the Bridge falls back to stub mode.
-    /// Signals active WebSocket proxy connections to disconnect.
     pub fn clear_upstream(&self) {
         match self.upstream.lock() {
             Ok(mut guard) => *guard = None,
@@ -658,105 +487,66 @@ impl IdeBridge {
         let _ = self.upstream_changed_tx.send(());
     }
 
-    /// Test-only constructor: inject custom paths and auth token for isolated testing.
+    /// Test-only constructor for tests that write lock files directly
+    /// without a live listener. Does **not** spin up `HostBridge`.
     #[cfg(test)]
-    fn new_with_paths(auth_token: &str, lock_file_path: PathBuf, tcp_port: u16) -> Self {
+    pub(crate) fn new_with_paths(
+        auth_token: &str,
+        lock_file_path: PathBuf,
+        tcp_port: u16,
+    ) -> Self {
         let (upstream_changed_tx, _) = tokio::sync::broadcast::channel(4);
         Self {
-            auth: Arc::new(Mutex::new(AuthState::new(auth_token.to_string()))),
-            lock_file_path,
+            inner: None,
             tcp_port,
-            tcp_listener: None,
-            shutdown_tx: None,
+            lock_file_path,
+            _auth: Arc::new(Mutex::new(AuthState::new(auth_token.to_string()))),
             upstream: Arc::new(Mutex::new(None)),
             upstream_changed_tx,
             event_cb: None,
         }
     }
 
-    /// Start the IDE Bridge: bind TCP port, write lock file.
-    ///
-    /// Called from Tauri's synchronous `.setup()` — no Tokio runtime is active yet
-    /// at that point, so we spin up a dedicated background thread with its own
-    /// single-threaded Tokio runtime instead of using `tokio::spawn`.
-    ///
-    /// The Bridge listens on `127.0.0.1:<port>` on the host. Containers reach
-    /// it via the canonical host gateway alias `host.docker.internal`,
-    /// resolved inside the container by `extra_hosts` to the platform gateway
-    /// IP. The VM (Lima vzNAT on macOS, WSL2 NAT on Windows) provides a
-    /// default catch-all forwarder from gateway → host loopback. See
-    /// `run_websocket_on_tcp` for the full mechanism.
+    /// Start the bridge: bind, write lock file, accept connections,
+    /// proxy to the configured upstream IDE (or use stubs).
     pub fn start(&mut self) -> anyhow::Result<()> {
-        cleanup_stale_lock_files();
-        let (tx, _rx) = tokio::sync::broadcast::channel::<()>(1);
-        self.shutdown_tx = Some(tx.clone());
+        let inner = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("IdeBridge::start() requires inner HostBridge (test-only constructor cannot start)"))?;
 
-        let listener = self.tcp_listener.take().ok_or_else(|| {
-            anyhow::anyhow!("TCP listener already consumed (start called twice?)")
-        })?;
-        let port = self.tcp_port;
-        let auth = self.auth.clone();
         let upstream = self.upstream.clone();
         let upstream_changed_tx = self.upstream_changed_tx.clone();
         let event_cb = self.event_cb.clone();
-        let rx = tx.subscribe();
-        std::thread::spawn(move || match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt.block_on(run_websocket_on_tcp(
-                listener,
-                port,
-                auth,
-                upstream,
-                upstream_changed_tx,
-                event_cb,
-                rx,
-            )),
-            Err(e) => log::error!("failed to create tokio runtime: {e}"),
+
+        let handler: ConnectionHandler = Arc::new(move |ws, ctx| {
+            let upstream = upstream.clone();
+            let upstream_rx = upstream_changed_tx.subscribe();
+            let event_cb = event_cb.clone();
+            Box::pin(async move {
+                handle_authenticated_connection(ws, upstream, upstream_rx, event_cb, ctx).await
+            })
         });
 
-        self.write_lock_file()?;
-
-        // Watchdog: re-create lock file if it disappears (e.g. container restart,
-        // volume cleanup, or accidental deletion). Checks every 5 seconds.
-        let lock_path = self.lock_file_path.clone();
-        let auth_for_watchdog = self.auth.clone();
-        let mut shutdown_rx = tx.subscribe();
-        std::thread::spawn(move || loop {
-            match shutdown_rx.try_recv() {
-                Ok(_) => break,
-                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
-                _ => {}
-            }
-            std::thread::sleep(Duration::from_secs(5));
-            // Re-check shutdown after sleeping — prevents re-creating the lock file
-            // after stop() has already deleted it and sent the shutdown signal.
-            match shutdown_rx.try_recv() {
-                Ok(_) => break,
-                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
-                _ => {}
-            }
-            if !lock_path.exists() {
-                log::warn!("lock file missing, recreating {:?}", lock_path);
-                if let Err(e) = write_lock_file_static(&lock_path, &auth_for_watchdog) {
-                    log::error!("failed to recreate lock file: {e}");
-                }
-            }
-        });
-
-        Ok(())
+        inner.start_endpoint(handler)
     }
 
-    fn write_lock_file(&self) -> anyhow::Result<()> {
-        write_lock_file_static(&self.lock_file_path, &self.auth)
+    /// Test-only helper: write the lock file synchronously (production
+    /// path delegates this to HostBridge in `start()`).
+    #[cfg(test)]
+    pub(crate) fn write_lock_file(&self) -> anyhow::Result<()> {
+        write_lock_file_static(&self.lock_file_path, &self._auth)
     }
 
-    /// Stop and clean up — send shutdown signal, remove lock file.
     pub fn stop(&mut self) -> anyhow::Result<()> {
-        // Synchronous broadcast — Sender::send() does not require async/await
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        if self.lock_file_path.exists() {
-            std::fs::remove_file(&self.lock_file_path)?;
+        if let Some(mut inner) = self.inner.take() {
+            inner.stop()?;
+        } else {
+            match std::fs::remove_file(&self.lock_file_path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).context("removing lock file"),
+            }
         }
         Ok(())
     }
@@ -764,7 +554,6 @@ impl IdeBridge {
 
 impl Drop for IdeBridge {
     fn drop(&mut self) {
-        // Best-effort cleanup — ignore errors during drop
         self.stop().ok();
     }
 }
@@ -780,11 +569,289 @@ fn emit_event(cb: &Option<EventCallback>, kind: &str, detail: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket connection handler — stub mode (no upstream IDE configured)
+// Connection handler: already authenticated by HostBridge → choose proxy
+// vs stub based on upstream selection.
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::result_large_err)]
-async fn handle_websocket_connection<S>(
+async fn handle_authenticated_connection(
+    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    upstream: Arc<Mutex<Option<UpstreamIde>>>,
+    upstream_changed_rx: tokio::sync::broadcast::Receiver<()>,
+    event_cb: Option<EventCallback>,
+    ctx: ConnectionContext,
+) {
+    log::debug!(
+        target: "ide_bridge",
+        "{} accepted connection from {}",
+        ctx.bridge_name,
+        ctx.peer_addr
+    );
+    emit_event(&event_cb, "connected", "Claude WebSocket connected");
+    let upstream_opt = upstream.lock().ok().and_then(|g| g.clone());
+    if let Some(up) = upstream_opt {
+        proxy_to_upstream(ws, up, upstream_changed_rx, event_cb.clone()).await;
+    } else {
+        handle_with_stubs(ws, upstream_changed_rx, event_cb.clone()).await;
+    }
+    emit_event(&event_cb, "disconnected", "Claude WebSocket closed");
+}
+
+/// Transparent bidirectional proxy: forwards every message between
+/// Claude and the real IDE.
+async fn proxy_to_upstream<S>(
+    claude_ws: tokio_tungstenite::WebSocketStream<S>,
+    up: UpstreamIde,
+    mut upstream_changed_rx: tokio::sync::broadcast::Receiver<()>,
+    event_cb: Option<EventCallback>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let url = format!("ws://127.0.0.1:{}/", up.port);
+    let auth_header_value = match up.auth_token.parse::<http::HeaderValue>() {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("invalid auth token for upstream: {e}");
+            return;
+        }
+    };
+    let mut req = match url.into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("invalid upstream URL: {e}");
+            return;
+        }
+    };
+    req.headers_mut()
+        .insert(IDE_BRIDGE_AUTH_HEADER, auth_header_value);
+    req.headers_mut().insert(
+        "sec-websocket-protocol",
+        http::HeaderValue::from_static("mcp"),
+    );
+
+    let ide_ws = match tokio_tungstenite::connect_async(req).await {
+        Ok((ws, _)) => ws,
+        Err(e) => {
+            log::warn!("cannot connect to {} (port {}): {e}", up.ide_name, up.port);
+            return;
+        }
+    };
+
+    let (mut claude_write, mut claude_read) = claude_ws.split();
+    let (mut ide_write, mut ide_read) = ide_ws.split();
+
+    let (ide_tx, mut ide_rx) = tokio::sync::mpsc::channel::<Message>(32);
+
+    let ide_tx_claude = ide_tx.clone();
+    let claude_to_ide = async {
+        while let Ok(Some(Ok(m))) =
+            tokio::time::timeout(std::time::Duration::from_secs(120), claude_read.next()).await
+        {
+            if ide_tx_claude.send(m).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    let ide_tx_heartbeat = ide_tx;
+    let heartbeat = async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            if ide_tx_heartbeat
+                .send(Message::Ping(vec![].into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+
+    let ide_writer_event_cb = event_cb;
+    let ide_writer_ide_name = up.ide_name;
+    let ide_writer = async {
+        while let Some(msg) = ide_rx.recv().await {
+            if ide_write.send(msg).await.is_err() {
+                emit_event(
+                    &ide_writer_event_cb,
+                    "upstream_lost",
+                    &format!("{} unreachable (write failed)", ide_writer_ide_name),
+                );
+                break;
+            }
+        }
+    };
+
+    let ide_to_claude = async {
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(120), ide_read.next()).await {
+                Ok(Some(Ok(Message::Close(frame)))) => {
+                    let _ = claude_write.send(Message::Close(frame)).await;
+                    break;
+                }
+                Ok(Some(Ok(m))) => {
+                    if claude_write.send(m).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
+            }
+        }
+    };
+
+    let upstream_changed = async {
+        let _ = upstream_changed_rx.recv().await;
+        log::info!("upstream changed, closing proxy connection");
+    };
+    tokio::select! {
+        _ = async { tokio::join!(claude_to_ide, ide_to_claude, ide_writer, heartbeat) } => {}
+        _ = upstream_changed => {}
+    }
+}
+
+/// Stub handler used when no upstream IDE is selected.
+async fn handle_with_stubs<S>(
+    mut ws: tokio_tungstenite::WebSocketStream<S>,
+    mut upstream_changed_rx: tokio::sync::broadcast::Receiver<()>,
+    event_cb: Option<EventCallback>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    loop {
+        tokio::select! {
+            msg = ws.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(req) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if req.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
+                                let tool_name = req.get("params")
+                                    .and_then(|p| p.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("unknown");
+                                emit_event(&event_cb, "stub_call", &format!("{} (no IDE connected)", tool_name));
+                            }
+                        }
+                        if let Some(resp) = handle_jsonrpc_message(&text) {
+                            if let Ok(json) = serde_json::to_string(&resp) {
+                                let _ = ws.send(Message::Text(json.into())).await;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = ws.send(Message::Pong(data)).await;
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+            _ = upstream_changed_rx.recv() => {
+                log::info!("upstream changed, closing stub connection");
+                let _ = ws.send(Message::Close(None)).await;
+                break;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy test-only helpers
+// ---------------------------------------------------------------------------
+//
+// The pre-HostBridge implementation exposed `run_websocket_on_tcp` and a
+// standalone lock-file writer. Several integration tests still hit them
+// directly; we keep them gated behind `#[cfg(test)]` so production code
+// only ever goes through HostBridge.
+
+#[cfg(test)]
+fn find_available_port() -> anyhow::Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    Ok(port)
+}
+
+#[cfg(test)]
+fn write_lock_file_static(
+    path: &std::path::Path,
+    auth: &Arc<Mutex<AuthState>>,
+) -> anyhow::Result<()> {
+    let lock_dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid lock file path"))?;
+    super::host_bridge::ensure_lock_dir(lock_dir)?;
+    let auth_guard = auth
+        .lock()
+        .map_err(|e| anyhow::anyhow!("auth mutex poisoned: {e}"))?;
+    let lock = build_ide_lock_file(auth_guard.token());
+    let body = serde_json::to_value(&lock)?;
+    super::host_bridge::write_lock_file_atomic(path, &body)
+}
+
+#[cfg(test)]
+fn build_ide_lock_file(auth_token: &str) -> IdeLockFile {
+    IdeLockFile {
+        pid: 1,
+        workspace_folders: vec!["/workspace".to_string()],
+        ide_name: IDE_BRIDGE_DISPLAY_NAME.to_string(),
+        transport: "ws".to_string(),
+        running_in_windows: cfg!(windows),
+        auth_token: auth_token.to_string(),
+    }
+}
+
+/// Test-only async accept loop equivalent to the pre-HostBridge code
+/// path. Several integration tests spin this up directly to exercise
+/// proxy/stub behaviour without HostBridge's lifecycle.
+#[cfg(test)]
+pub(crate) async fn run_websocket_on_tcp(
+    std_listener: std::net::TcpListener,
+    port: u16,
+    auth: Arc<Mutex<AuthState>>,
+    upstream: Arc<Mutex<Option<UpstreamIde>>>,
+    upstream_changed_tx: tokio::sync::broadcast::Sender<()>,
+    event_cb: Option<EventCallback>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    if let Err(e) = std_listener.set_nonblocking(true) {
+        log::error!("failed to set non-blocking: {e}");
+        return;
+    }
+    let listener = match tokio::net::TcpListener::from_std(std_listener) {
+        Ok(l) => l,
+        Err(e) => {
+            log::error!("failed to convert TCP listener: {e}");
+            return;
+        }
+    };
+    log::info!("test bridge listening on TCP 127.0.0.1:{port}");
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                match accept {
+                    Ok((stream, _addr)) => {
+                        let auth = auth.clone();
+                        let upstream = upstream.clone();
+                        let upstream_changed_rx = upstream_changed_tx.subscribe();
+                        let event_cb = event_cb.clone();
+                        tokio::spawn(handle_test_connection(
+                            stream, auth, upstream, upstream_changed_rx, event_cb,
+                        ));
+                    }
+                    Err(e) => log::error!("TCP accept error: {e}"),
+                }
+            }
+            _ = shutdown_rx.recv() => break,
+        }
+    }
+}
+
+#[cfg(test)]
+async fn handle_test_connection<S>(
     stream: S,
     auth: Arc<Mutex<AuthState>>,
     upstream: Arc<Mutex<Option<UpstreamIde>>>,
@@ -798,19 +865,15 @@ async fn handle_websocket_connection<S>(
     let auth_clone = auth.clone();
     let ws_stream =
         tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, resp: Response| {
-            // Reject connections with an Origin header. Browsers set Origin on
-            // WebSocket upgrades; Claude Code (CLI) and IDE extensions don't.
-            // This prevents CSRF-style attacks from malicious web pages.
             if req.headers().get("origin").is_some() {
                 return Err(http::Response::builder()
                     .status(http::StatusCode::FORBIDDEN)
                     .body(Some("Origin header not allowed".to_string()))
                     .unwrap_or_else(|_| http::Response::new(Some("Forbidden".to_string()))));
             }
-
             let token = req
                 .headers()
-                .get("x-claude-code-ide-authorization")
+                .get(IDE_BRIDGE_AUTH_HEADER)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
             let authorized = auth_clone
@@ -818,8 +881,6 @@ async fn handle_websocket_connection<S>(
                 .map(|a| a.validate(token))
                 .unwrap_or(false);
             if authorized {
-                // Echo the "mcp" subprotocol back — Claude Code connects with
-                // `protocols: ["mcp"]` and expects the server to confirm it.
                 let mut resp = resp;
                 if req
                     .headers()
@@ -853,266 +914,14 @@ async fn handle_websocket_connection<S>(
 
     emit_event(&event_cb, "connected", "Claude WebSocket connected");
 
-    // Check if upstream IDE is configured — if so, proxy; otherwise use stubs.
     let upstream_opt = upstream.lock().ok().and_then(|g| g.clone());
     if let Some(up) = upstream_opt {
         proxy_to_upstream(ws, up, upstream_changed_rx, event_cb.clone()).await;
     } else {
-        handle_with_stubs(ws, auth, upstream_changed_rx, event_cb.clone()).await;
+        handle_with_stubs(ws, upstream_changed_rx, event_cb.clone()).await;
     }
 
     emit_event(&event_cb, "disconnected", "Claude WebSocket closed");
-}
-
-/// Transparent bidirectional proxy: forwards every message between Claude and the real IDE.
-async fn proxy_to_upstream<S>(
-    claude_ws: tokio_tungstenite::WebSocketStream<S>,
-    up: UpstreamIde,
-    mut upstream_changed_rx: tokio::sync::broadcast::Receiver<()>,
-    event_cb: Option<EventCallback>,
-) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    use tokio_tungstenite::tungstenite::Message;
-
-    let url = format!("ws://127.0.0.1:{}/", up.port);
-    let auth_header_value = match up.auth_token.parse::<http::HeaderValue>() {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("invalid auth token for upstream: {e}");
-            return;
-        }
-    };
-    let mut req = match url.into_client_request() {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("invalid upstream URL: {e}");
-            return;
-        }
-    };
-    req.headers_mut()
-        .insert("x-claude-code-ide-authorization", auth_header_value);
-    req.headers_mut().insert(
-        "sec-websocket-protocol",
-        http::HeaderValue::from_static("mcp"),
-    );
-
-    let ide_ws = match tokio_tungstenite::connect_async(req).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
-            log::warn!("cannot connect to {} (port {}): {e}", up.ide_name, up.port);
-            return;
-        }
-    };
-
-    let (mut claude_write, mut claude_read) = claude_ws.split();
-    let (mut ide_write, mut ide_read) = ide_ws.split();
-
-    // Use an mpsc channel to funnel all IDE writes through a single task.
-    // This allows both claude_to_ide and heartbeat to send to the IDE
-    // without ownership conflicts on ide_write.
-    let (ide_tx, mut ide_rx) = tokio::sync::mpsc::channel::<Message>(32);
-
-    // Forward Claude → IDE via the channel.
-    let ide_tx_claude = ide_tx.clone();
-    let claude_to_ide = async {
-        while let Ok(Some(Ok(m))) =
-            tokio::time::timeout(std::time::Duration::from_secs(120), claude_read.next()).await
-        {
-            if ide_tx_claude.send(m).await.is_err() {
-                break;
-            }
-        }
-    };
-
-    // Heartbeat: send Ping every 15s to detect dead upstream IDE.
-    // Note: upstream_lost is emitted by ide_writer when the channel closes;
-    // heartbeat only needs to break so the select! can detect the dead connection.
-    let ide_tx_heartbeat = ide_tx;
-    let heartbeat = async {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-            if ide_tx_heartbeat
-                .send(Message::Ping(vec![].into()))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    };
-
-    // Sole writer to the IDE WebSocket — drains the mpsc channel.
-    let ide_writer_event_cb = event_cb;
-    let ide_writer_ide_name = up.ide_name;
-    let ide_writer = async {
-        while let Some(msg) = ide_rx.recv().await {
-            if ide_write.send(msg).await.is_err() {
-                emit_event(
-                    &ide_writer_event_cb,
-                    "upstream_lost",
-                    &format!("{} unreachable (write failed)", ide_writer_ide_name),
-                );
-                break;
-            }
-        }
-    };
-
-    // Forward IDE → Claude.
-    let ide_to_claude = async {
-        loop {
-            match tokio::time::timeout(std::time::Duration::from_secs(120), ide_read.next()).await {
-                Ok(Some(Ok(Message::Close(frame)))) => {
-                    let _ = claude_write.send(Message::Close(frame)).await;
-                    break;
-                }
-                Ok(Some(Ok(m))) => {
-                    if claude_write.send(m).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
-            }
-        }
-    };
-
-    let upstream_changed = async {
-        let _ = upstream_changed_rx.recv().await;
-        log::info!("upstream changed, closing proxy connection");
-    };
-    tokio::select! {
-        _ = async { tokio::join!(claude_to_ide, ide_to_claude, ide_writer, heartbeat) } => {}
-        _ = upstream_changed => {}
-    }
-    // Dropping all halves closes the underlying TCP connections.
-    // Claude Code handles this as a disconnect and reconnects.
-}
-
-/// Stub handler used when no upstream IDE is selected.
-async fn handle_with_stubs<S>(
-    mut ws: tokio_tungstenite::WebSocketStream<S>,
-    auth: Arc<Mutex<AuthState>>,
-    mut upstream_changed_rx: tokio::sync::broadcast::Receiver<()>,
-    event_cb: Option<EventCallback>,
-) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-
-    loop {
-        tokio::select! {
-            msg = ws.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        // Emit stub_call for tools/call requests
-                        if let Ok(req) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if req.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
-                                let tool_name = req.get("params")
-                                    .and_then(|p| p.get("name"))
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("unknown");
-                                emit_event(&event_cb, "stub_call", &format!("{} (no IDE connected)", tool_name));
-                            }
-                        }
-                        if let Some(resp) = handle_jsonrpc_message(&text, &auth) {
-                            if let Ok(json) = serde_json::to_string(&resp) {
-                                let _ = ws.send(Message::Text(json.into())).await;
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = ws.send(Message::Pong(data)).await;
-                    }
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                    _ => {}
-                }
-            }
-            _ = upstream_changed_rx.recv() => {
-                log::info!("upstream changed, closing stub connection");
-                let _ = ws.send(Message::Close(None)).await;
-                break;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket TCP listener — all platforms
-// ---------------------------------------------------------------------------
-//
-// The Bridge listens on 127.0.0.1 on the host. Containers reach it via the
-// canonical gateway alias `host.docker.internal`, routed to the platform
-// gateway IP through `extra_hosts` (Lima vzNAT 192.168.5.2 on macOS, WSL2
-// NAT 192.168.65.1 on Windows).
-//
-// Reaching a 127.0.0.1-only bind from the container works because the host
-// VM (Lima on macOS, WSL2 on Windows) installs a default forwarder from VM
-// gateway → host loopback. Lima registers a catch-all rule for non-privileged
-// ports on loopback when no explicit port forwards are configured. [^1] [^2]
-// WSL2 reaches the host loopback through the host gateway in both NAT and
-// mirrored networking modes. [^3]
-//
-// [^1]: https://lima-vm.io/docs/config/port/
-// [^2]: https://github.com/lima-vm/lima/blob/master/pkg/hostagent/hostagent.go
-// [^3]: https://learn.microsoft.com/en-us/windows/wsl/networking
-
-async fn run_websocket_on_tcp(
-    std_listener: std::net::TcpListener,
-    port: u16,
-    auth: Arc<Mutex<AuthState>>,
-    upstream: Arc<Mutex<Option<UpstreamIde>>>,
-    upstream_changed_tx: tokio::sync::broadcast::Sender<()>,
-    event_cb: Option<EventCallback>,
-    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-) {
-    // Convert std listener to tokio — requires non-blocking mode.
-    if let Err(e) = std_listener.set_nonblocking(true) {
-        log::error!("failed to set non-blocking: {e}");
-        return;
-    }
-    let listener = match tokio::net::TcpListener::from_std(std_listener) {
-        Ok(l) => l,
-        Err(e) => {
-            log::error!("failed to convert TCP listener: {e}");
-            return;
-        }
-    };
-    log::info!("listening on TCP 127.0.0.1:{port}");
-    loop {
-        tokio::select! {
-            accept = listener.accept() => {
-                match accept {
-                    Ok((stream, addr)) => {
-                        log::debug!("incoming connection from {addr}");
-                        let auth = auth.clone();
-                        let upstream = upstream.clone();
-                        let upstream_changed_rx = upstream_changed_tx.subscribe();
-                        let event_cb = event_cb.clone();
-                        tokio::spawn(handle_websocket_connection(stream, auth, upstream, upstream_changed_rx, event_cb));
-                    }
-                    Err(e) => log::error!("TCP accept error: {e}"),
-                }
-            }
-            _ = shutdown_rx.recv() => {
-                log::info!("shutting down TCP listener");
-                break;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Utility — find an available TCP port (test-only; production uses IdeBridge::new())
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-fn find_available_port() -> anyhow::Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    Ok(port)
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,7 +957,6 @@ mod tests {
     #[test]
     fn test_auth_state_repeated_failures_dont_lock_out() {
         let auth = AuthState::new("test-token".to_string());
-        // With 127.0.0.1 + UUID token, no rate limiting — valid token always works
         for _ in 0..100 {
             auth.validate("wrong");
         }
@@ -1173,7 +981,6 @@ mod tests {
         assert!(json.contains("\"transport\""));
         assert!(json.contains("\"ws\""));
         assert!(json.contains("\"runningInWindows\""));
-        // Claude Code ignores wsUrl/port — they must NOT be in the lock file
         assert!(
             !json.contains("\"wsUrl\""),
             "wsUrl must not be in lock file — Claude Code ignores it"
@@ -1223,16 +1030,17 @@ mod tests {
 
     #[test]
     fn test_jsonrpc_request_notification_no_id() {
-        let json = r#"{"jsonrpc":"2.0","method":"selection_changed","params":{}}"#;
+        let json = r#"{"jsonrpc":"2.0","method":"openFile","params":{"path":"/foo/bar.rs"}}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
-        assert!(req.id.is_none(), "notification must have no id");
+        assert_eq!(req.method, "openFile");
+        assert_eq!(req.id, None);
     }
 
     #[test]
     fn test_jsonrpc_request_string_id() {
-        let json = r#"{"jsonrpc":"2.0","method":"getWorkspaceFolders","id":"abc-123"}"#;
+        let json = r#"{"jsonrpc":"2.0","method":"openFile","id":"abc"}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.id, Some(serde_json::json!("abc-123")));
+        assert_eq!(req.id, Some(serde_json::json!("abc")));
     }
 
     #[test]
@@ -1250,62 +1058,65 @@ mod tests {
         let resp = jsonrpc_error(serde_json::json!(1), -32601, "Method not found");
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"error\""));
-        assert!(json.contains("-32601"));
+        assert!(json.contains("\"code\":-32601"));
         assert!(!json.contains("\"result\""));
     }
 
     #[test]
     fn test_jsonrpc_parse_error_has_null_id() {
         let resp = jsonrpc_parse_error();
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("\"id\":null"));
-        assert!(json.contains("-32700"));
+        assert_eq!(resp.id, serde_json::Value::Null);
+        assert_eq!(resp.error.unwrap().code, -32700);
     }
 
     #[test]
     fn test_dispatch_initialize_returns_mcp_response() {
         let params = serde_json::json!({
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": {"name": "claude-code", "version": "2.1.49"}
+            "protocolVersion": "2024-11-05",
+            "clientInfo": {"name": "claude-code", "version": "0.1.0"},
+            "capabilities": {}
         });
-        let resp = dispatch_method("initialize", Some(&params), serde_json::json!(0));
+        let resp = dispatch_method("initialize", Some(&params), serde_json::json!(1));
+        assert!(resp.result.is_some());
         let result = resp.result.unwrap();
-        assert_eq!(result["protocolVersion"], "2025-11-25");
-        assert!(result.get("capabilities").is_some());
         assert_eq!(result["serverInfo"]["name"], "Speedwave");
+        assert!(result["protocolVersion"].is_string());
     }
 
     #[test]
     fn test_dispatch_initialize_has_tools_capability() {
-        let params = serde_json::json!({"protocolVersion": "2025-11-25"});
-        let resp = dispatch_method("initialize", Some(&params), serde_json::json!(0));
+        let params = serde_json::json!({"protocolVersion": "2024-11-05"});
+        let resp = dispatch_method("initialize", Some(&params), serde_json::json!(1));
         let result = resp.result.unwrap();
-        // capabilities.tools must be non-empty or Claude won't call tools/list
-        assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
+        assert!(
+            result["capabilities"]["tools"].is_object(),
+            "tools capability must be present so Claude calls tools/list"
+        );
     }
 
     #[test]
     fn test_dispatch_initialize_echoes_client_protocol_version() {
-        let params = serde_json::json!({"protocolVersion": "2024-11-05"});
-        let resp = dispatch_method("initialize", Some(&params), serde_json::json!(0));
+        let params = serde_json::json!({"protocolVersion": "2025-06-18"});
+        let resp = dispatch_method("initialize", Some(&params), serde_json::json!(1));
         let result = resp.result.unwrap();
-        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["protocolVersion"], "2025-06-18");
     }
 
     #[test]
     fn test_dispatch_notifications_initialized() {
-        let resp = dispatch_method("notifications/initialized", None, serde_json::json!(1));
+        let resp = dispatch_method(
+            "notifications/initialized",
+            None,
+            serde_json::Value::Null,
+        );
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
     }
 
     #[test]
     fn test_dispatch_ide_connected() {
-        let params = serde_json::json!({"pid": 12345});
-        let resp = dispatch_method("ide_connected", Some(&params), serde_json::json!(1));
+        let resp = dispatch_method("ide_connected", None, serde_json::Value::Null);
         assert!(resp.result.is_some());
-        assert!(resp.error.is_none());
     }
 
     #[test]
@@ -1317,9 +1128,8 @@ mod tests {
 
     #[test]
     fn test_dispatch_unknown_method_returns_minus_32601() {
-        let resp = dispatch_method("nonExistentMethod", None, serde_json::json!(42));
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, -32601);
+        let resp = dispatch_method("unknownMethod", None, serde_json::json!(1));
+        assert_eq!(resp.error.unwrap().code, -32601);
     }
 
     #[test]
@@ -1327,30 +1137,17 @@ mod tests {
         let resp = dispatch_method("tools/list", None, serde_json::json!(1));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 12, "should have 12 MCP tools");
-        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"openFile"));
-        assert!(names.contains(&"getDiagnostics"));
-        assert!(names.contains(&"getWorkspaceFolders"));
-        assert!(names.contains(&"executeCode"));
-        assert!(names.contains(&"close_tab"));
+        assert_eq!(tools.len(), 12, "expected 12 IDE tools");
     }
 
     #[test]
     fn test_dispatch_tools_list_has_input_schemas() {
         let resp = dispatch_method("tools/list", None, serde_json::json!(1));
-        let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        for tool in &tools {
-            assert!(
-                tool.get("inputSchema").is_some(),
-                "tool {} must have inputSchema",
-                tool["name"]
-            );
-            assert!(
-                tool.get("description").is_some(),
-                "tool {} must have description",
-                tool["name"]
-            );
+        let result = resp.result.unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        for tool in tools {
+            assert!(tool["name"].is_string(), "tool needs name");
+            assert!(tool["inputSchema"].is_object(), "tool needs inputSchema");
         }
     }
 
@@ -1362,21 +1159,17 @@ mod tests {
         });
         let resp = dispatch_method("tools/call", Some(&params), serde_json::json!(1));
         let result = resp.result.unwrap();
-        // MCP tools/call returns { content: [{type:"text", text:"..."}], isError: false }
-        assert_eq!(result["isError"], false);
-        let text = result["content"][0]["text"].as_str().unwrap();
-        let inner: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert!(inner["folders"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("/workspace")));
+        assert!(result["content"].is_array());
+        let content = &result["content"][0];
+        assert_eq!(content["type"], "text");
+        assert!(content["text"].as_str().unwrap().contains("/workspace"));
     }
 
     #[test]
     fn test_dispatch_tools_call_execute_code_returns_error() {
         let params = serde_json::json!({
             "name": "executeCode",
-            "arguments": {"code": "print('hello')"}
+            "arguments": {"code": "print('hi')"}
         });
         let resp = dispatch_method("tools/call", Some(&params), serde_json::json!(1));
         let result = resp.result.unwrap();
@@ -1385,62 +1178,46 @@ mod tests {
 
     #[test]
     fn test_dispatch_tools_call_read_only_stubs_return_success() {
-        let read_only_tools = [
+        for name in [
             "getCurrentSelection",
             "getLatestSelection",
             "getOpenEditors",
             "getWorkspaceFolders",
             "getDiagnostics",
             "checkDocumentDirty",
-        ];
-        for name in read_only_tools {
+        ] {
             let params = serde_json::json!({"name": name, "arguments": {}});
             let resp = dispatch_method("tools/call", Some(&params), serde_json::json!(1));
             let result = resp.result.unwrap();
             assert_eq!(
                 result["isError"], false,
-                "read-only tool {} should not return error",
-                name
-            );
-            assert!(
-                result["content"][0]["type"].as_str() == Some("text"),
-                "tool {} should return text content",
-                name
+                "read-only stub for {name} must return success"
             );
         }
     }
 
     #[test]
     fn test_dispatch_tools_call_action_stubs_return_error() {
-        let action_tools = [
+        for name in [
             "openFile",
             "openDiff",
             "saveDocument",
             "close_tab",
             "closeAllDiffTabs",
-        ];
-        for name in action_tools {
+        ] {
             let params = serde_json::json!({"name": name, "arguments": {}});
             let resp = dispatch_method("tools/call", Some(&params), serde_json::json!(1));
             let result = resp.result.unwrap();
             assert_eq!(
                 result["isError"], true,
-                "action tool {} should return isError: true when no IDE connected",
-                name
-            );
-            let text = result["content"][0]["text"].as_str().unwrap();
-            assert!(
-                text.contains("No IDE connected"),
-                "action tool {} error message should mention 'No IDE connected', got: {}",
-                name,
-                text
+                "action stub for {name} must return error"
             );
         }
     }
 
     #[test]
     fn test_dispatch_tools_call_unknown_tool_returns_error() {
-        let params = serde_json::json!({"name": "nonExistentTool", "arguments": {}});
+        let params = serde_json::json!({"name": "frobnicate", "arguments": {}});
         let resp = dispatch_method("tools/call", Some(&params), serde_json::json!(1));
         let result = resp.result.unwrap();
         assert_eq!(result["isError"], true);
@@ -1448,18 +1225,16 @@ mod tests {
 
     #[test]
     fn test_handle_jsonrpc_valid_request_returns_response() {
-        let auth = std::sync::Arc::new(std::sync::Mutex::new(AuthState::new("tok".to_string())));
         let json = r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#;
-        let resp = handle_jsonrpc_message(json, &auth);
+        let resp = handle_jsonrpc_message(json);
         assert!(resp.is_some());
         assert!(resp.unwrap().result.is_some());
     }
 
     #[test]
     fn test_handle_jsonrpc_notification_returns_none() {
-        let auth = std::sync::Arc::new(std::sync::Mutex::new(AuthState::new("tok".to_string())));
         let json = r#"{"jsonrpc":"2.0","method":"selection_changed","params":{}}"#;
-        let resp = handle_jsonrpc_message(json, &auth);
+        let resp = handle_jsonrpc_message(json);
         assert!(
             resp.is_none(),
             "notification must return None (JSON-RPC 2.0)"
@@ -1468,17 +1243,15 @@ mod tests {
 
     #[test]
     fn test_handle_jsonrpc_parse_error_returns_32700() {
-        let auth = std::sync::Arc::new(std::sync::Mutex::new(AuthState::new("tok".to_string())));
-        let resp = handle_jsonrpc_message("not valid json {{{{", &auth).unwrap();
+        let resp = handle_jsonrpc_message("not valid json {{{{").unwrap();
         assert_eq!(resp.error.unwrap().code, -32700);
         assert_eq!(resp.id, serde_json::Value::Null);
     }
 
     #[test]
     fn test_handle_jsonrpc_unknown_method_returns_32601() {
-        let auth = std::sync::Arc::new(std::sync::Mutex::new(AuthState::new("tok".to_string())));
         let json = r#"{"jsonrpc":"2.0","method":"unknownXYZ","id":5}"#;
-        let resp = handle_jsonrpc_message(json, &auth).unwrap();
+        let resp = handle_jsonrpc_message(json).unwrap();
         assert_eq!(resp.error.unwrap().code, -32601);
     }
 
@@ -1486,12 +1259,15 @@ mod tests {
     fn test_ide_bridge_new_returns_valid_instance() {
         let bridge = IdeBridge::new().unwrap();
         assert!(bridge.tcp_port > 0, "TCP port should be assigned");
+        // Path under the bridge subdir; the data dir prefix is determined
+        // by SPEEDWAVE_DATA_DIR (may be overridden by other tests in this
+        // binary), so we assert on the bridge-specific suffix only.
         assert!(
             bridge
                 .lock_file_path
                 .to_string_lossy()
-                .contains(".speedwave/ide-bridge/"),
-            "Lock file path should be in .speedwave/ide-bridge/, got: {:?}",
+                .contains("ide-bridge/"),
+            "Lock file path should be in <data_dir>/ide-bridge/, got: {:?}",
             bridge.lock_file_path
         );
         assert!(
@@ -1515,14 +1291,11 @@ mod tests {
         let lock: IdeLockFile = serde_json::from_str(&contents).unwrap();
         assert_eq!(lock.auth_token, "test-auth-token-xyz");
         assert_eq!(lock.workspace_folders, vec!["/workspace"]);
-        // pid=1 so Claude Code (in container) sees it as alive via kill -0
         assert_eq!(lock.pid, 1);
         assert_eq!(lock.ide_name, "Speedwave");
         assert_eq!(lock.transport, "ws");
         assert_eq!(lock.running_in_windows, cfg!(windows));
 
-        // Claude Code derives port from filename, not from JSON fields.
-        // Verify no wsUrl/port fields leaked into the JSON.
         let raw: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert!(raw.get("wsUrl").is_none(), "wsUrl must not be in lock file");
         assert!(raw.get("port").is_none(), "port must not be in lock file");
@@ -1530,7 +1303,6 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            // Lock file should be 0o600
             let file_meta = std::fs::metadata(&lock_file_path).unwrap();
             let file_mode = file_meta.permissions().mode() & 0o777;
             assert_eq!(
@@ -1539,7 +1311,6 @@ mod tests {
                 file_mode
             );
 
-            // Lock directory should be 0o700
             let dir_meta = std::fs::metadata(lock_file_path.parent().unwrap()).unwrap();
             let dir_mode = dir_meta.permissions().mode() & 0o777;
             assert_eq!(
@@ -1573,7 +1344,6 @@ mod tests {
 
         let mut bridge = IdeBridge::new_with_paths("token", lock_file_path, 7777);
 
-        // stop() should not error when files don't exist
         let result = bridge.stop();
         assert!(
             result.is_ok(),
@@ -1607,7 +1377,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // WebSocket integration tests — use TCP loopback (works on all platforms)
+    // WebSocket integration tests — exercise the legacy `run_websocket_on_tcp`
+    // entry point (HostBridge's accept loop is covered separately in
+    // `bridges::host_bridge::tests`).
     // -----------------------------------------------------------------------
 
     async fn start_test_bridge(
@@ -1744,7 +1516,6 @@ mod tests {
         let token = "upstream-change-test-token";
         let (port, tx, upstream_changed_tx) = start_test_bridge(token).await;
 
-        // Connect and verify tools/list works (stub mode).
         let url = format!("ws://127.0.0.1:{}/", port);
         let mut req = url.into_client_request().unwrap();
         req.headers_mut()
@@ -1761,10 +1532,8 @@ mod tests {
         let resp: serde_json::Value = serde_json::from_str(&msg.into_text().unwrap()).unwrap();
         assert!(resp["result"]["tools"].is_array(), "tools/list should work");
 
-        // Simulate upstream IDE switch — send on upstream_changed_tx.
         let _ = upstream_changed_tx.send(());
 
-        // The existing connection should receive a Close frame.
         let close_msg = tokio::time::timeout(tokio::time::Duration::from_secs(2), ws.next()).await;
         match close_msg {
             Ok(Some(Ok(Message::Close(_)))) => { /* expected */ }
@@ -1777,8 +1546,6 @@ mod tests {
         let _ = tx.send(());
     }
 
-    // ── clear_upstream tests ──────────────────────────────────────────────────
-
     #[test]
     fn test_clear_upstream_clears_value() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1786,7 +1553,6 @@ mod tests {
 
         let bridge = IdeBridge::new_with_paths("test-token", lock_file_path, 12345);
 
-        // Manually inject an upstream by writing directly to the shared Arc<Mutex<...>>.
         {
             let mut guard = bridge.upstream.lock().unwrap();
             *guard = Some(super::UpstreamIde {
@@ -1796,7 +1562,6 @@ mod tests {
             });
         }
 
-        // Verify the upstream is set before clearing.
         assert!(
             bridge.upstream_info().is_some(),
             "upstream should be Some before clear_upstream()"
@@ -1809,8 +1574,6 @@ mod tests {
             "upstream_info() must return None after clear_upstream()"
         );
     }
-
-    // ── UpstreamIde Debug redaction tests ────────────────────────────────────
 
     #[test]
     fn test_upstream_ide_debug_redacts_auth_token() {

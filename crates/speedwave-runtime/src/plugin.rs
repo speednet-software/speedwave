@@ -9,6 +9,13 @@ use std::path::{Path, PathBuf};
 /// Slug validation: lowercase letters, digits, hyphens. Starts with letter. Max 64 chars.
 const SLUG_PATTERN: &str = r"^[a-z][a-z0-9-]{0,63}$";
 
+/// Public predicate version of [`validate_slug`]. Used by callers that
+/// want a `bool` rather than `Result<()>` (e.g. defense-in-depth checks
+/// in worker spec hooks).
+pub fn is_valid_slug(slug: &str) -> bool {
+    validate_slug(slug).is_ok()
+}
+
 #[derive(Debug, PartialEq)]
 pub enum TokenStatus {
     /// All required secret fields have token files.
@@ -82,6 +89,68 @@ pub struct PluginManifest {
     /// Core integrations this plugin depends on (e.g. `["sharepoint"]`).
     #[serde(default)]
     pub requires_integrations: Vec<String>,
+    /// Host-side WebSocket bridge declaration. Optional — only plugins
+    /// that need to pair their container worker with a desktop-side
+    /// application set this. Speedwave Desktop spawns one `HostBridge`
+    /// per declaration; container workers receive the bridge URL and
+    /// token via env vars named here. See ADR-063.
+    #[serde(default)]
+    pub host_bridge: Option<HostBridgeManifest>,
+}
+
+/// Host-bridge declaration in `plugin.json`. Speedwave Desktop reads
+/// this at startup and spawns a `HostBridge` configured per these
+/// fields; `compose::apply_plugins` injects `{url_env}` and `{token_env}`
+/// into the worker's environment.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HostBridgeManifest {
+    /// Env var name for the bridge URL injected into the container worker.
+    pub url_env: String,
+    /// Env var name for the auth token injected into the container worker.
+    pub token_env: String,
+    /// One entry per role: header- or query-param-authenticated client.
+    /// Pairing mode requires at least two distinct roles.
+    pub roles: HashMap<String, HostBridgeRoleAuth>,
+    /// CSRF / Origin policy. Defaults to `reject_if_present`.
+    #[serde(default)]
+    pub origin_policy: HostBridgeOriginPolicy,
+    /// Per-frame size cap in bytes. `None` = no cap.
+    #[serde(default)]
+    pub max_frame_bytes: Option<usize>,
+    /// What to do on same-role collision. Defaults to `evict_older`.
+    #[serde(default)]
+    pub collision_policy: HostBridgeCollisionPolicy,
+    /// Pending slot timeout in seconds. `None` = no timeout.
+    #[serde(default)]
+    pub pending_slot_timeout_secs: Option<u64>,
+    /// Display name written into the lock file's `ideName` field.
+    pub display_name: String,
+}
+
+/// Per-role auth scheme declaration.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "scheme", rename_all = "snake_case")]
+pub enum HostBridgeRoleAuth {
+    /// HTTP header — clients that can set arbitrary headers on upgrade.
+    Header { name: String },
+    /// `?<name>=<token>` — required for browser-based clients.
+    QueryParam { name: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBridgeOriginPolicy {
+    #[default]
+    RejectIfPresent,
+    AcceptIfAuthIsQueryParam,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBridgeCollisionPolicy {
+    Reject,
+    #[default]
+    EvictOlder,
 }
 
 /// Streaming progress event emitted while `install_plugin` runs.
@@ -732,6 +801,113 @@ pub(crate) fn validate_manifest(
         }
     }
 
+    if let Some(ref bridge) = manifest.host_bridge {
+        validate_host_bridge_manifest(bridge)?;
+    }
+
+    Ok(())
+}
+
+/// Manifest-time checks for the optional `host_bridge` block. Mirrors
+/// the four edge categories required by `.claude/rules/plugins.md`:
+/// missing (`Option<...>`), empty (zero roles, blank display_name),
+/// malformed (control chars / `=` in env names), and reserved
+/// (RESERVED_ENV_KEYS collision).
+fn validate_host_bridge_manifest(bridge: &HostBridgeManifest) -> anyhow::Result<()> {
+    if bridge.roles.is_empty() {
+        anyhow::bail!("host_bridge.roles must declare at least one role");
+    }
+    if bridge.roles.len() > consts::PLUGIN_BRIDGE_ROLES_MAX_COUNT {
+        anyhow::bail!(
+            "host_bridge.roles must not exceed {} entries (got {})",
+            consts::PLUGIN_BRIDGE_ROLES_MAX_COUNT,
+            bridge.roles.len()
+        );
+    }
+    if bridge.display_name.trim().is_empty() {
+        anyhow::bail!("host_bridge.display_name must not be empty");
+    }
+    if bridge.display_name.len() > consts::PLUGIN_BRIDGE_DISPLAY_NAME_MAX_LEN {
+        anyhow::bail!(
+            "host_bridge.display_name must not exceed {} bytes (got {})",
+            consts::PLUGIN_BRIDGE_DISPLAY_NAME_MAX_LEN,
+            bridge.display_name.len()
+        );
+    }
+    validate_bridge_env_name("url_env", &bridge.url_env)?;
+    validate_bridge_env_name("token_env", &bridge.token_env)?;
+    if bridge.url_env == bridge.token_env {
+        anyhow::bail!(
+            "host_bridge.url_env and host_bridge.token_env must differ ('{}' on both)",
+            bridge.url_env
+        );
+    }
+    for (role, auth) in &bridge.roles {
+        if role.is_empty() {
+            anyhow::bail!("host_bridge.roles contains an empty role name");
+        }
+        if role.len() > consts::PLUGIN_BRIDGE_ROLE_NAME_MAX_LEN {
+            anyhow::bail!(
+                "host_bridge.roles role name must not exceed {} bytes (got {})",
+                consts::PLUGIN_BRIDGE_ROLE_NAME_MAX_LEN,
+                role.len()
+            );
+        }
+        if role.chars().any(|c| c.is_control()) {
+            anyhow::bail!("host_bridge.roles role name '{role}' contains a control character");
+        }
+        let header_name = match auth {
+            HostBridgeRoleAuth::Header { name } | HostBridgeRoleAuth::QueryParam { name } => name,
+        };
+        if header_name.is_empty() {
+            anyhow::bail!("host_bridge.roles['{role}']: auth scheme name must not be empty");
+        }
+        if header_name.len() > consts::PLUGIN_BRIDGE_AUTH_NAME_MAX_LEN {
+            anyhow::bail!(
+                "host_bridge.roles['{role}']: auth scheme name must not exceed {} bytes (got {})",
+                consts::PLUGIN_BRIDGE_AUTH_NAME_MAX_LEN,
+                header_name.len()
+            );
+        }
+        if header_name.chars().any(|c| c.is_control()) {
+            anyhow::bail!(
+                "host_bridge.roles['{role}']: auth scheme name '{header_name}' contains a control character"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_bridge_env_name(field: &str, name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("host_bridge.{field} must not be empty");
+    }
+    if name.len() > consts::PLUGIN_BRIDGE_ENV_NAME_MAX_LEN {
+        anyhow::bail!(
+            "host_bridge.{field} must not exceed {} bytes (got {})",
+            consts::PLUGIN_BRIDGE_ENV_NAME_MAX_LEN,
+            name.len()
+        );
+    }
+    if consts::RESERVED_ENV_KEYS
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(name))
+    {
+        anyhow::bail!(
+            "host_bridge.{field} '{name}' is reserved (auto-injected by Speedwave or a dangerous runtime hijack vector)"
+        );
+    }
+    if name.contains('=') {
+        anyhow::bail!("host_bridge.{field} must not contain '=' (got: '{name}')");
+    }
+    if name
+        .chars()
+        .any(|c| c == '\n' || c == '\r' || c == '\0' || c.is_control())
+    {
+        anyhow::bail!(
+            "host_bridge.{field} '{name}' contains control characters (newline / null / etc.)"
+        );
+    }
     Ok(())
 }
 
@@ -1986,6 +2162,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec!["sharepoint".to_string()],
+            host_bridge: None,
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: PluginManifest = serde_json::from_str(&json).unwrap();
@@ -2095,6 +2272,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let tmp = tempfile::tempdir().unwrap();
             let result = validate_manifest(&manifest, tmp.path());
@@ -2125,6 +2303,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -2151,6 +2330,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         // No Containerfile created
@@ -2182,6 +2362,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -2223,6 +2404,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -2288,6 +2470,7 @@ mod tests {
             mem_limit: Some("512m".to_string()),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
@@ -2328,6 +2511,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -2446,6 +2630,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:2.0.0");
     }
@@ -2469,6 +2654,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:custom-tag");
     }
@@ -2632,6 +2818,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2685,6 +2872,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2718,6 +2906,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2752,6 +2941,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2795,6 +2985,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3884,6 +4075,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         // Replicate the duplicate check from install_plugin
@@ -3920,6 +4112,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let conflict_found = if let Some(ref sid) = conflict_manifest.service_id {
@@ -3967,6 +4160,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -4069,6 +4263,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -4098,6 +4293,7 @@ mod tests {
             mem_limit: Some("256m; rm -rf /".to_string()),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4122,6 +4318,7 @@ mod tests {
             mem_limit: Some("256m".to_string()),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4146,6 +4343,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: Some("2.0'; injected".to_string()),
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4170,6 +4368,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: Some("4.0".to_string()),
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4194,6 +4393,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: Some("4.0".to_string()),
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
@@ -4229,6 +4429,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4259,6 +4460,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4289,6 +4491,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -4318,6 +4521,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4345,6 +4549,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4369,6 +4574,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4402,6 +4608,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4432,6 +4639,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec!["nonexistent-service".to_string()],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4462,6 +4670,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![consts::BUILT_IN_SERVICE_IDS[0].to_string()],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4492,6 +4701,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4721,6 +4931,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("ReadWrite must be rejected for plugins");
@@ -4757,6 +4968,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("slug colliding with built-in compose name must be rejected");
@@ -4814,6 +5026,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("dangerous env key must be rejected");
@@ -4823,6 +5036,316 @@ mod tests {
                 "expected reserved-key rejection for '{dangerous}', got: {msg}"
             );
         }
+    }
+
+    // ── host_bridge manifest validation ─────────────────────────────────
+
+    fn fixture_host_bridge_manifest_with(
+        roles: HashMap<String, HostBridgeRoleAuth>,
+        url_env: &str,
+        token_env: &str,
+        display_name: &str,
+    ) -> HostBridgeManifest {
+        HostBridgeManifest {
+            url_env: url_env.to_string(),
+            token_env: token_env.to_string(),
+            roles,
+            origin_policy: HostBridgeOriginPolicy::default(),
+            max_frame_bytes: None,
+            collision_policy: HostBridgeCollisionPolicy::default(),
+            pending_slot_timeout_secs: None,
+            display_name: display_name.to_string(),
+        }
+    }
+
+    fn fixture_manifest_with_host_bridge(bridge: HostBridgeManifest) -> PluginManifest {
+        PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-bridge".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: Some(bridge),
+        }
+    }
+
+    fn valid_roles() -> HashMap<String, HostBridgeRoleAuth> {
+        HashMap::from([
+            (
+                "worker".to_string(),
+                HostBridgeRoleAuth::Header {
+                    name: "x-auth".to_string(),
+                },
+            ),
+            (
+                "plugin".to_string(),
+                HostBridgeRoleAuth::QueryParam {
+                    name: "token".to_string(),
+                },
+            ),
+        ])
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_valid_host_bridge() {
+        let bridge = fixture_host_bridge_manifest_with(
+            valid_roles(),
+            "MY_BRIDGE_URL",
+            "MY_BRIDGE_TOKEN",
+            "My Bridge",
+        );
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        validate_manifest(&manifest, tmp.path()).expect("valid host_bridge must pass");
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_empty_roles() {
+        let bridge = fixture_host_bridge_manifest_with(HashMap::new(), "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            validate_manifest(&manifest, tmp.path()).expect_err("empty roles must be rejected");
+        assert!(
+            err.to_string().contains("at least one role"),
+            "expected roles-empty rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_empty_display_name() {
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "   ");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("blank display_name must be rejected");
+        assert!(
+            err.to_string().contains("display_name"),
+            "expected display_name rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_reserved_url_env() {
+        // PORT is in RESERVED_ENV_KEYS (auto-injected by Speedwave).
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "PORT", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("reserved url_env must be rejected");
+        assert!(
+            err.to_string().contains("reserved"),
+            "expected reserved-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_reserved_token_env() {
+        // LD_PRELOAD is a dangerous runtime hijack vector reserved by Speedwave.
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "LD_PRELOAD", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("reserved token_env must be rejected");
+        assert!(
+            err.to_string().contains("reserved"),
+            "expected reserved-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_equal_url_and_token_env() {
+        // Same env name on both fields would collide on the container env.
+        let bridge =
+            fixture_host_bridge_manifest_with(valid_roles(), "SAME_NAME", "SAME_NAME", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("identical url_env/token_env must be rejected");
+        assert!(
+            err.to_string().contains("must differ"),
+            "expected differ rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_control_char_in_env_name() {
+        let bridge =
+            fixture_host_bridge_manifest_with(valid_roles(), "URL\nWITH_NEWLINE", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("control char in url_env must be rejected");
+        assert!(
+            err.to_string().contains("control"),
+            "expected control-char rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_equal_sign_in_env_name() {
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "URL=oops", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            validate_manifest(&manifest, tmp.path()).expect_err("'=' in url_env must be rejected");
+        assert!(
+            err.to_string().contains("'='"),
+            "expected '=' rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_empty_role_auth_name() {
+        let roles = HashMap::from([(
+            "worker".to_string(),
+            HostBridgeRoleAuth::Header {
+                name: String::new(),
+            },
+        )]);
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("empty auth scheme name must be rejected");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "expected empty-name rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_control_char_in_role_auth_name() {
+        let roles = HashMap::from([(
+            "worker".to_string(),
+            HostBridgeRoleAuth::QueryParam {
+                name: "tok\0bad".to_string(),
+            },
+        )]);
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("control char in auth scheme name must be rejected");
+        assert!(
+            err.to_string().contains("control character"),
+            "expected control-char rejection, got: {err}"
+        );
+    }
+
+    // ── host_bridge oversize edge cases ─────────────────────────────────
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_url_env() {
+        let huge = "X".repeat(consts::PLUGIN_BRIDGE_ENV_NAME_MAX_LEN + 1);
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), &huge, "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize url_env must be rejected");
+        assert!(
+            err.to_string().contains("must not exceed"),
+            "expected oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_token_env() {
+        let huge = "Y".repeat(consts::PLUGIN_BRIDGE_ENV_NAME_MAX_LEN + 1);
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", &huge, "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize token_env must be rejected");
+        assert!(
+            err.to_string().contains("must not exceed"),
+            "expected oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_display_name() {
+        let huge = "D".repeat(consts::PLUGIN_BRIDGE_DISPLAY_NAME_MAX_LEN + 1);
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", &huge);
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize display_name must be rejected");
+        assert!(
+            err.to_string().contains("display_name must not exceed"),
+            "expected display_name oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_role_name() {
+        let huge_role = "r".repeat(consts::PLUGIN_BRIDGE_ROLE_NAME_MAX_LEN + 1);
+        let roles = HashMap::from([(
+            huge_role,
+            HostBridgeRoleAuth::Header {
+                name: "x-auth".to_string(),
+            },
+        )]);
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize role name must be rejected");
+        assert!(
+            err.to_string().contains("role name must not exceed"),
+            "expected role-name oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_auth_scheme_name() {
+        let huge_name = "h".repeat(consts::PLUGIN_BRIDGE_AUTH_NAME_MAX_LEN + 1);
+        let roles = HashMap::from([(
+            "worker".to_string(),
+            HostBridgeRoleAuth::Header { name: huge_name },
+        )]);
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize auth scheme name must be rejected");
+        assert!(
+            err.to_string().contains("auth scheme name must not exceed"),
+            "expected auth-name oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_too_many_roles() {
+        let mut roles = HashMap::new();
+        for i in 0..=consts::PLUGIN_BRIDGE_ROLES_MAX_COUNT {
+            roles.insert(
+                format!("role{i}"),
+                HostBridgeRoleAuth::Header {
+                    name: format!("x-auth-{i}"),
+                },
+            );
+        }
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            validate_manifest(&manifest, tmp.path()).expect_err("too many roles must be rejected");
+        assert!(
+            err.to_string().contains("must not exceed"),
+            "expected roles-count rejection, got: {err}"
+        );
     }
 
     #[test]
@@ -4846,6 +5369,7 @@ mod tests {
             mem_limit: Some("999g".to_string()),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("mem_limit beyond cap must be rejected");
@@ -4876,6 +5400,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: Some("16".to_string()),
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("cpu_limit beyond cap must be rejected");
@@ -4910,6 +5435,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: Some(bad.to_string()),
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err =
                 validate_manifest(&manifest, dir.path()).expect_err("cpu_limit must be rejected");
@@ -4950,6 +5476,7 @@ mod tests {
                 mem_limit: None,
                 cpu_limit: None,
                 requires_integrations: vec![],
+                host_bridge: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("non-object settings_schema must be rejected");
@@ -4987,6 +5514,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("oversized settings_schema must be rejected");
@@ -5023,6 +5551,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         validate_manifest(&manifest, dir.path()).expect("valid schema must pass");
     }
@@ -5861,6 +6390,7 @@ mod tests {
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         }
     }
 

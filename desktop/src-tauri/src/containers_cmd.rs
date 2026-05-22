@@ -238,6 +238,7 @@ pub(crate) fn render_and_save_compose(
         &resolved,
         &integrations,
         Some(rt),
+        &crate::reconcile::current_bridges_info(),
     )
     .map_err(|e| e.to_string())?;
 

@@ -9,6 +9,7 @@
 
 mod auth;
 mod auth_commands;
+mod bridges;
 mod chat;
 mod clipboard_bridge;
 mod cloudstorage_cmd;
@@ -22,11 +23,10 @@ mod history;
 mod host_exec_cmd;
 mod host_path;
 mod http_util;
-mod ide_bridge;
+use bridges::ide_bridge;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
-mod mcp_os_process;
 mod oauth_cmd;
 mod oauth_login_cmd;
 mod patch_emitter;
@@ -68,7 +68,7 @@ use tauri::Manager;
 
 use reconcile::{
     ExitCleanupContext, SharedAutoCheckHandle, SharedHostExec, SharedIdeBridge, SharedMcpOs,
-    SharedOauth,
+    SharedOauth, SharedPluginBridges,
 };
 
 pub(crate) use host_path::recovered_host_path;
@@ -790,16 +790,20 @@ fn select_ide(
     state: tauri::State<SharedIdeBridge>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Validate that the port belongs to a currently detected IDE
-    if !health::list_available_ides()
-        .iter()
-        .any(|i| i.port == Some(port))
-    {
+    // Validate against the raw live-port list (pre-dedupe): UI may pick
+    // an older-window port that `list_available_ides` collapsed away, but
+    // we still want the user to be able to connect to that specific window.
+    if !health::is_ide_port_alive(port) {
+        log::warn!(
+            target: "ide_bridge",
+            "select_ide: port {port} is not a live IDE lock"
+        );
         return Err(format!(
             "IDE on port {} is not in the detected IDEs list",
             port
         ));
     }
+    log::info!(target: "ide_bridge", "select_ide: connecting to {ide_name} on port {port}");
 
     // Persist the selection to config.json
     config::with_config_lock(|| {
@@ -832,6 +836,27 @@ fn select_ide(
 fn get_selected_ide() -> Result<Option<speedwave_runtime::config::SelectedIde>, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     Ok(user_config.selected_ide)
+}
+
+/// User-initiated disconnect from the upstream IDE. Clears both the live
+/// bridge proxy and the persisted `selected_ide` so a restart will not
+/// auto-reconnect.
+#[tauri::command]
+fn disconnect_ide(state: tauri::State<SharedIdeBridge>) -> Result<(), String> {
+    log::info!(target: "ide_bridge", "disconnect_ide: clearing upstream");
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        user_config.selected_ide = None;
+        config::save_user_config(&user_config)
+    })
+    .map_err(|e| e.to_string())?;
+    let guard = state
+        .lock()
+        .map_err(|e| format!("Bridge mutex poisoned: {e}"))?;
+    if let Some(bridge) = guard.as_ref() {
+        bridge.clear_upstream();
+    }
+    Ok(())
 }
 
 use diagnostics::export_diagnostics;
@@ -882,6 +907,127 @@ fn init_and_start_ide_bridge_inner(app_handle: &tauri::AppHandle) -> Option<ide_
             log::error!("IDE Bridge init error: {e}");
             None
         }
+    }
+}
+
+/// Iterate every verified plugin whose manifest declares a `host_bridge`
+/// block and spawn a `PluginHostBridge` for it. Each bridge listens for
+/// the lifetime of the Desktop process — the worker container connects
+/// only after the plugin is enabled in a project, but the lock file +
+/// listener are available from startup so the user can paste credentials
+/// into the host-side plugin UI any time (see ADR-063).
+fn init_and_start_plugin_bridges(
+    plugin_bridges: &SharedPluginBridges,
+    app_handle: &tauri::AppHandle,
+) {
+    let plugins = match speedwave_runtime::plugin::list_verified_plugins() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("plugin bridges init: list_verified_plugins failed: {e}");
+            return;
+        }
+    };
+    for vp in plugins {
+        let manifest = match vp.manifest.host_bridge.clone() {
+            Some(m) => m,
+            None => continue,
+        };
+        let slug = vp.manifest.slug.clone();
+        match crate::bridges::plugin_host_bridge::PluginHostBridge::new(&slug, manifest) {
+            Ok(mut bridge) => {
+                let handle = app_handle.clone();
+                let event_slug = slug.clone();
+                bridge.set_event_callback(std::sync::Arc::new(move |evt| {
+                    use crate::bridges::plugin_host_bridge::PluginBridgeEvent;
+                    use tauri::Emitter;
+                    let kind = match &evt {
+                        PluginBridgeEvent::SlotOccupied { .. } => "slot_occupied",
+                        PluginBridgeEvent::Paired { .. } => "paired",
+                        PluginBridgeEvent::Disconnected { .. } => "disconnected",
+                        PluginBridgeEvent::PairBusy => "pair_busy",
+                        PluginBridgeEvent::EvictedOlder { .. } => "evicted_older",
+                        PluginBridgeEvent::PendingTimeout { .. } => "pending_timeout",
+                    };
+                    let mut payload = serde_json::json!({
+                        "slug": event_slug,
+                        "kind": kind,
+                    });
+                    match &evt {
+                        PluginBridgeEvent::SlotOccupied { role }
+                        | PluginBridgeEvent::EvictedOlder { role }
+                        | PluginBridgeEvent::PendingTimeout { role } => {
+                            payload["role"] = serde_json::Value::String(role.clone());
+                        }
+                        PluginBridgeEvent::Paired { roles } => {
+                            payload["roles"] = serde_json::json!(roles);
+                        }
+                        PluginBridgeEvent::Disconnected { reason } => {
+                            payload["reason"] = serde_json::Value::String(reason.clone());
+                        }
+                        PluginBridgeEvent::PairBusy => {}
+                    }
+                    let _ = handle.emit("plugin_bridge_event", payload);
+                }));
+                if let Err(e) = bridge.start() {
+                    log::error!("plugin bridge[{slug}] start error: {e}");
+                    continue;
+                }
+                log::info!("plugin bridge[{slug}] started on port {}", bridge.port());
+                if let Ok(mut map) = plugin_bridges.lock() {
+                    map.insert(slug, bridge);
+                }
+            }
+            Err(e) => {
+                log::error!("plugin bridge[{slug}] init error: {e}");
+            }
+        }
+    }
+}
+
+/// Tauri command: credentials a host-side companion app (e.g. the Figma
+/// Desktop plugin UI) pastes into its connect dialog. URL uses
+/// `127.0.0.1` (loopback); the container-side URL using
+/// `host.docker.internal` is injected by `render_compose`.
+#[tauri::command]
+fn plugin_bridge_get_credentials(
+    slug: String,
+    plugin_bridges: tauri::State<SharedPluginBridges>,
+) -> Result<serde_json::Value, String> {
+    let guard = plugin_bridges
+        .lock()
+        .map_err(|e| format!("mutex poisoned: {e}"))?;
+    let bridge = guard
+        .get(&slug)
+        .ok_or_else(|| format!("plugin bridge '{slug}' not running"))?;
+    let creds = bridge.credentials_for_local_ui();
+    Ok(serde_json::json!({
+        "slug": slug,
+        "url": creds.local_ui_url,
+        "token": creds.token,
+    }))
+}
+
+/// Tauri command: status snapshot for the Plugin Detail UI (port +
+/// running state). Auth token is not returned here — use
+/// `plugin_bridge_get_credentials` when the user explicitly asks for it.
+#[tauri::command]
+fn plugin_bridge_get_status(
+    slug: String,
+    plugin_bridges: tauri::State<SharedPluginBridges>,
+) -> Result<serde_json::Value, String> {
+    let guard = plugin_bridges
+        .lock()
+        .map_err(|e| format!("mutex poisoned: {e}"))?;
+    match guard.get(&slug) {
+        Some(bridge) => Ok(serde_json::json!({
+            "slug": slug,
+            "running": true,
+            "port": bridge.port(),
+        })),
+        None => Ok(serde_json::json!({
+            "slug": slug,
+            "running": false,
+        })),
     }
 }
 
@@ -991,7 +1137,7 @@ fn ensure_mcp_os_running(
     let script = speedwave_runtime::build::resolve_mcp_os_script();
     if let Some(script_path) = script {
         let script_str = script_path.to_string_lossy().to_string();
-        match mcp_os_process::McpOsProcess::spawn(&script_str) {
+        match speedwave_runtime::mcp_os_process::McpOsProcess::spawn(&script_str) {
             Ok(proc) => {
                 log::info!("ensure_mcp_os_running: started (port {})", proc.port());
                 *guard = Some(proc);
@@ -1179,10 +1325,12 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     }
 }
 
-/// Decide which oauth workers in the map are unhealthy, respawn them, and
-/// return the names of those that should have their consumer containers
-/// recreated. Extracted from `start_oauth_watchdog` for unit-testability.
-fn sweep_oauth_workers<P>(
+/// Decide which per-project workers in the map are unhealthy, respawn them,
+/// and return the names of those that should have their consumer containers
+/// recreated. Generic over [`WatchdogWorker`] so the same selection logic
+/// drives both the oauth and host_exec watchdogs (and is unit-testable with
+/// a fake worker — see `FakeWorker` in this file's tests).
+fn sweep_per_project_workers<P>(
     workers: &mut std::collections::HashMap<String, P>,
     log_prefix: &str,
 ) -> Vec<String>
@@ -1215,9 +1363,10 @@ where
     respawned
 }
 
-/// Trait abstracting the watchdog's view of a managed worker.
-/// Implemented by `OauthProcess` / `HostExecProcess` in production and by a
-/// fake in tests so the sweep loop can be exercised without spawning subprocesses.
+/// Trait abstracting the watchdog's view of a managed worker. Implemented by
+/// every host-side worker manager that is supervised by a watchdog —
+/// `OauthProcess` and `HostExecProcess` are the per-project ones today.
+///
 pub(crate) trait WatchdogWorker {
     fn is_alive(&self) -> bool;
     fn respawn(&mut self) -> anyhow::Result<u16>;
@@ -1232,30 +1381,53 @@ impl WatchdogWorker for speedwave_runtime::oauth_process::OauthProcess {
     }
 }
 
-/// Per-project `oauth` watchdog — 30s checks, mirrors host_exec.
-fn start_oauth_watchdog(oauth_arc: SharedOauth) {
+impl WatchdogWorker for speedwave_runtime::host_exec_process::HostExecProcess {
+    fn is_alive(&self) -> bool {
+        speedwave_runtime::host_exec_process::HostExecProcess::is_alive(self)
+    }
+    fn respawn(&mut self) -> anyhow::Result<u16> {
+        speedwave_runtime::host_exec_process::HostExecProcess::respawn(self)
+    }
+}
+
+/// Shared watchdog loop for per-project host-side workers (oauth, host_exec).
+/// Polls every 30 s; under the map mutex, calls [`sweep_per_project_workers`]
+/// to respawn dead workers; releases the lock; then recreates each respawned
+/// project's hub containers so they observe the new worker port (e.g. a fresh
+/// `WORKER_OAUTH_URL` or `WORKER_HOST_EXEC_URL`).
+///
+/// Stops cleanly when `stop_flag` is set (used by app exit cleanup). Catches
+/// panics from `recreate_project_containers_if_running` so a single bad
+/// project does not kill the watchdog thread silently.
+fn start_per_project_watchdog<P>(
+    workers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, P>>>,
+    stop_flag: &'static std::sync::atomic::AtomicBool,
+    log_prefix: &'static str,
+) where
+    P: WatchdogWorker + Send + 'static,
+{
     std::thread::spawn(move || {
         use std::time::Duration;
         const CHECK_INTERVAL: Duration = Duration::from_secs(30);
         loop {
             std::thread::sleep(CHECK_INTERVAL);
-            if OAUTH_WATCHDOG_STOP.load(Ordering::Relaxed) {
+            if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
             // Respawn under the lock; defer container recreate until after we release it
-            // so OAuth-consuming workers see the new WORKER_OAUTH_URL.
+            // so consumer workers see the new WORKER_<name>_URL.
             let respawned: Vec<String> = {
-                let mut map = match oauth_arc.lock() {
+                let mut map = match workers.lock() {
                     Ok(g) => g,
                     Err(e) => {
-                        log::error!("oauth watchdog: map mutex poisoned: {e}");
+                        log::error!("{log_prefix}: map mutex poisoned: {e}");
                         break;
                     }
                 };
-                sweep_oauth_workers(&mut map, "oauth watchdog")
+                sweep_per_project_workers(&mut map, log_prefix)
             };
-            // Lock released — recreate containers so OAuth consumers pick up the new port.
-            // Catch panics so a single bad project doesn't kill the watchdog thread silently.
+            // Lock released — recreate containers so consumers pick up the new port.
+            // Catch panics so a single bad project does not kill the watchdog thread silently.
             for name in respawned {
                 let n = name.clone();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1263,76 +1435,22 @@ fn start_oauth_watchdog(oauth_arc: SharedOauth) {
                 }));
                 if let Err(payload) = result {
                     let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*payload);
-                    log::error!("oauth watchdog: recreate panicked for '{name}': {msg}");
+                    log::error!("{log_prefix}: recreate panicked for '{name}': {msg}");
                 }
             }
         }
-        log::info!("oauth watchdog: stopped");
+        log::info!("{log_prefix}: stopped");
     });
 }
 
-/// Per-project `host_exec` watchdog — 30s checks, mirrors `start_mcp_os_watchdog`.
+/// Per-project `oauth` watchdog — 30s checks, shared loop with host_exec.
+fn start_oauth_watchdog(oauth_arc: SharedOauth) {
+    start_per_project_watchdog(oauth_arc, &OAUTH_WATCHDOG_STOP, "oauth watchdog");
+}
+
+/// Per-project `host_exec` watchdog — 30s checks, shared loop with oauth.
 fn start_host_exec_watchdog(host_exec: SharedHostExec) {
-    std::thread::spawn(move || {
-        use std::time::Duration;
-        const CHECK_INTERVAL: Duration = Duration::from_secs(30);
-        loop {
-            std::thread::sleep(CHECK_INTERVAL);
-            if HOST_EXEC_WATCHDOG_STOP.load(Ordering::Relaxed) {
-                break;
-            }
-            // Respawn under the lock; defer container recreate until after we release it.
-            let respawned: Vec<String> = {
-                let mut map = match host_exec.lock() {
-                    Ok(g) => g,
-                    Err(e) => {
-                        log::error!("host_exec watchdog: map mutex poisoned: {e}");
-                        break;
-                    }
-                };
-                if map.is_empty() {
-                    continue; // a project may enable host_exec later
-                }
-                // Collect names first so we don't hold an iterator while mutating.
-                let names: Vec<String> = map.keys().cloned().collect();
-                let mut respawned = Vec::new();
-                for name in names {
-                    let alive = map.get(&name).map(|p| p.is_alive()).unwrap_or(false);
-                    if alive {
-                        continue;
-                    }
-                    if let Some(proc) = map.get_mut(&name) {
-                        log::warn!(
-                            "host_exec watchdog: worker for '{name}' unhealthy — respawning"
-                        );
-                        match proc.respawn() {
-                            Ok(port) => {
-                                log::info!("host_exec watchdog: respawned '{name}' (port {port})");
-                                respawned.push(name);
-                            }
-                            Err(e) => {
-                                log::error!("host_exec watchdog: respawn of '{name}' failed: {e}")
-                            }
-                        }
-                    }
-                }
-                respawned
-            };
-            // Lock released — recreate hub containers so they see the new port.
-            // Catch panics so a single bad project doesn't kill the watchdog thread silently.
-            for name in respawned {
-                let n = name.clone();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    host_exec_cmd::recreate_project_containers_if_running(&n);
-                }));
-                if let Err(payload) = result {
-                    let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*payload);
-                    log::error!("host_exec watchdog: recreate panicked for '{name}': {msg}");
-                }
-            }
-        }
-        log::info!("host_exec watchdog: stopped");
-    });
+    start_per_project_watchdog(host_exec, &HOST_EXEC_WATCHDOG_STOP, "host_exec watchdog");
 }
 
 /// Shows the audit-failure dialog and terminates the process. Returns
@@ -1437,13 +1555,19 @@ fn main() {
     let transcript_forwarders: transcription_cmd::ForwardersHandle =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
-    // Shared state: IDE Bridge, mcp-os, per-project host_exec workers, per-project
-    // oauth workers, auto-check handle. (Tray menu state is a managed `TrayMenuState`, below.)
+    // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project host_exec
+    // workers, per-project oauth workers, auto-check handle.
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
+    let plugin_bridges: SharedPluginBridges = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let host_exec: SharedHostExec = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
+
+    // Publish the plugin-bridges map globally so compose-render call sites
+    // in setup_wizard / containers_cmd can read it without taking tauri::State
+    // (they are free functions and reachable from CLI helpers too).
+    reconcile::set_global_plugin_bridges(plugin_bridges.clone());
 
     let tray_available = Arc::new(AtomicBool::new(false));
     let tray_available_setup = tray_available.clone();
@@ -1452,6 +1576,7 @@ fn main() {
     // One context struct → one clone per exit path instead of N parallel Arc clones.
     let cleanup_ctx = ExitCleanupContext {
         ide_bridge: ide_bridge.clone(),
+        plugin_bridges: plugin_bridges.clone(),
         mcp_os: mcp_os.clone(),
         host_exec: host_exec.clone(),
         oauth: oauth.clone(),
@@ -1559,6 +1684,7 @@ fn main() {
         .manage(initial_session)
         .manage(compose_lock.clone())
         .manage(ide_bridge.clone())
+        .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
         .manage(host_exec.clone())
         .manage(oauth.clone())
@@ -1638,11 +1764,18 @@ fn main() {
                 // Start IDE Bridge
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
 
+                // Start a `PluginHostBridge` for every verified plugin whose
+                // manifest declares a `host_bridge` block. Always on,
+                // mirroring IDE Bridge's "passive listener" behavior — when
+                // the corresponding plugin is disabled in a project the
+                // bridge sits idle on its loopback port.
+                init_and_start_plugin_bridges(&plugin_bridges, app.handle());
+
                 // Start mcp-os process
                 let script = speedwave_runtime::build::resolve_mcp_os_script();
                 if let Some(script_path) = script {
                     let script_str = script_path.to_string_lossy().to_string();
-                    match mcp_os_process::McpOsProcess::spawn(&script_str) {
+                    match speedwave_runtime::mcp_os_process::McpOsProcess::spawn(&script_str) {
                         Ok(proc) => {
                             let new_port = proc.port();
                             log::info!("mcp-os process started (port {new_port})");
@@ -1975,8 +2108,12 @@ fn main() {
             // IDE Bridge
             list_available_ides,
             select_ide,
+            disconnect_ide,
             get_selected_ide,
             get_bridge_status,
+            // Per-plugin host bridges (manifest-declared)
+            plugin_bridge_get_credentials,
+            plugin_bridge_get_status,
             // Container updates
             update_commands::update_containers,
             update_commands::rollback_containers,
@@ -2190,8 +2327,9 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // sweep_oauth_workers — covers the watchdog selection logic without
-    // spawning real subprocesses. The fake implements WatchdogWorker.
+    // sweep_per_project_workers — covers the watchdog selection logic without
+    // spawning real subprocesses. The fake implements WatchdogWorker; the
+    // helper is reused by both oauth and host_exec watchdogs in production.
     // ────────────────────────────────────────────────────────────────────
 
     struct FakeWorker {
@@ -2227,33 +2365,33 @@ mod tests {
     }
 
     #[test]
-    fn sweep_oauth_workers_empty_map_returns_empty() {
+    fn sweep_per_project_workers_empty_map_returns_empty() {
         let mut map: std::collections::HashMap<String, FakeWorker> = Default::default();
-        assert!(sweep_oauth_workers(&mut map, "test").is_empty());
+        assert!(sweep_per_project_workers(&mut map, "test").is_empty());
     }
 
     #[test]
-    fn sweep_oauth_workers_skips_alive_workers() {
+    fn sweep_per_project_workers_skips_alive_workers() {
         let mut map = std::collections::HashMap::new();
         map.insert("p".to_string(), FakeWorker::new(true, Ok(9999)));
-        let respawned = sweep_oauth_workers(&mut map, "test");
+        let respawned = sweep_per_project_workers(&mut map, "test");
         assert!(respawned.is_empty(), "alive worker must not be respawned");
         assert_eq!(map["p"].respawn_calls.get(), 0);
     }
 
     #[test]
-    fn sweep_oauth_workers_collects_all_unhealthy_in_one_pass() {
+    fn sweep_per_project_workers_collects_all_unhealthy_in_one_pass() {
         // Bug class: a break-early regression would skip the second project.
         let mut map = std::collections::HashMap::new();
         map.insert("a".to_string(), FakeWorker::new(false, Ok(1111)));
         map.insert("b".to_string(), FakeWorker::new(false, Ok(2222)));
-        let mut respawned = sweep_oauth_workers(&mut map, "test");
+        let mut respawned = sweep_per_project_workers(&mut map, "test");
         respawned.sort();
         assert_eq!(respawned, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
-    fn sweep_oauth_workers_failed_respawn_excluded_from_respawned() {
+    fn sweep_per_project_workers_failed_respawn_excluded_from_respawned() {
         // Bug class: caller would recreate containers for a project whose
         // worker actually didn't come back up — wasted compose churn.
         let mut map = std::collections::HashMap::new();
@@ -2262,18 +2400,18 @@ mod tests {
             FakeWorker::new(false, Err("spawn failed".into())),
         );
         map.insert("good".to_string(), FakeWorker::new(false, Ok(3333)));
-        let respawned = sweep_oauth_workers(&mut map, "test");
+        let respawned = sweep_per_project_workers(&mut map, "test");
         assert_eq!(respawned, vec!["good".to_string()]);
         // The failed worker WAS attempted (so we don't silently skip retries).
         assert_eq!(map["bad"].respawn_calls.get(), 1);
     }
 
     #[test]
-    fn sweep_oauth_workers_mixed_alive_and_dead() {
+    fn sweep_per_project_workers_mixed_alive_and_dead() {
         let mut map = std::collections::HashMap::new();
         map.insert("alive".to_string(), FakeWorker::new(true, Ok(0)));
         map.insert("dead".to_string(), FakeWorker::new(false, Ok(4444)));
-        let respawned = sweep_oauth_workers(&mut map, "test");
+        let respawned = sweep_per_project_workers(&mut map, "test");
         assert_eq!(respawned, vec!["dead".to_string()]);
         assert_eq!(map["alive"].respawn_calls.get(), 0);
         assert_eq!(map["dead"].respawn_calls.get(), 1);

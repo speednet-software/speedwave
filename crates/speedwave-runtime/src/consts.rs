@@ -26,22 +26,44 @@ pub const PORT_BASE: u16 = 4000;
 ///
 /// See ADR-038 for the rationale behind the single-internal-port model.
 pub const PORT_WORKER: u16 = 3000;
+/// mcp-os bind-mount token file. Hub mounts this at
+/// `/secrets/os-auth-token:ro`; compose reads the port from
+/// `MCP_OS_LOCK_FILE`. Dual-written by `mcp_os_process::spawn`
+/// alongside the lock so the container sees a token-only file
+/// (never the structured JSON).
 pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
-pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
-pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
+/// Legacy `mcp-os` port file. **Migration-only** — pre-lock.json
+/// builds (Speedwave ≤ 0.10) wrote this; `mcp_os_process::spawn`
+/// folds it into `mcp-os.lock.json` on the first start after upgrade
+/// and removes it. Slated for removal once every supported user has
+/// passed through one migration cycle.
+pub const MCP_OS_LEGACY_PORT_FILE: &str = "mcp-os-port";
+/// Legacy `mcp-os` PID file. **Migration-only** — see
+/// [`MCP_OS_LEGACY_PORT_FILE`].
+pub const MCP_OS_LEGACY_PID_FILE: &str = "mcp-os-pid";
+/// Single-file lock for the mcp-os singleton. Sits in `data_dir`
+/// alongside the audit log; carries `{service, pid, port, authToken,
+/// transport}` and is the SSOT for compose port injection + watchdog.
+pub const MCP_OS_LOCK_FILE: &str = "mcp-os.lock.json";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
+
+/// Per-project unified lock file (PR3). Sits next to the audit log
+/// inside each per-project state directory. SSOT — pre-PR3 callers used
+/// three separate `port`/`pid`/`auth-token` files (see deprecated
+/// per-worker consts below).
+pub const PER_PROJECT_LOCK_FILE: &str = "lock.json";
 
 /// Subdirectory under the data dir holding per-project `host_exec` state.
 /// SSOT — do not hard-code `"host-exec"` at call sites.
 pub const HOST_EXEC_SUBDIR: &str = "host-exec";
 /// Per-project worker snapshot, written `0o600` (may hold env-value secrets).
 pub const HOST_EXEC_CONFIG_FILE: &str = "config.json";
-/// Per-project bearer token (`0o600`).
+/// Per-project bind-mount token file. Hub mounts this at
+/// `/secrets/host_exec-auth-token:ro`; compose reads the port from
+/// `PER_PROJECT_LOCK_FILE`. Dual-written by
+/// `host_exec_process::spawn_in` alongside the lock so the container
+/// sees a token-only file (never the structured JSON).
 pub const HOST_EXEC_AUTH_TOKEN_FILE: &str = "auth-token";
-/// Per-project worker listening port file.
-pub const HOST_EXEC_PORT_FILE: &str = "port";
-/// Per-project worker PID file — used for stale-process cleanup.
-pub const HOST_EXEC_PID_FILE: &str = "pid";
 /// Per-project audit log; env values redacted (ADR-054 §"Security model").
 pub const HOST_EXEC_LOG_FILE: &str = "log";
 
@@ -109,12 +131,6 @@ pub const OAUTH_SUBDIR: &str = "oauth";
 /// Per-project bearer-token → service map (`0o600`). Lets the oauth worker
 /// derive `service` from the incoming bearer instead of trusting a model-controlled param.
 pub const OAUTH_BEARER_MAP_FILE: &str = ".bearer-map.json";
-/// Per-project worker supervisor's own auth-token (used by the supervisor for handshakes/diagnostics).
-pub const OAUTH_AUTH_TOKEN_FILE: &str = "auth-token";
-/// Per-project worker listening port file.
-pub const OAUTH_PORT_FILE: &str = "port";
-/// Per-project worker PID file — used for stale-process cleanup.
-pub const OAUTH_PID_FILE: &str = "pid";
 /// Per-project audit log; refresh / forget events are appended here (no token contents).
 pub const OAUTH_LOG_FILE: &str = "audit.log";
 /// Mode for the per-project oauth state directory (owner-only).
@@ -926,6 +942,11 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     // in ENABLED_SERVICES and the hub has no bearer for it. The reservation
     // exists purely to prevent slug collisions in plugin manifests.
     "oauth",
+    // Reserved for the IDE bridge: `HostBridge::new("ide", ...)` writes its
+    // lock files under `<data_dir>/ide-bridge/`. A plugin slug `"ide"` would
+    // collide on that directory (`PluginHostBridge::new(slug, ...)` uses the
+    // slug verbatim as the bridge name). No compose service — pure reservation.
+    "ide",
 ];
 
 /// Environment variable names that plugins are forbidden from setting via
@@ -984,6 +1005,33 @@ pub const PLUGIN_CPU_LIMIT_MAX: f32 = 4.0;
 /// settings are small key/value maps and schemas are hand-written — while
 /// still bounding what an attacker can wedge into the shared config file.
 pub const PLUGIN_SETTINGS_MAX_BYTES: usize = 64 * 1024;
+
+/// Max length of `host_bridge.url_env` / `host_bridge.token_env` env var
+/// names. POSIX env var names are typically &lt;64 chars; 128 leaves headroom
+/// for plugin authors without letting a manifest ship a megabyte-long name
+/// that the bridge would then echo into container env injection.
+pub const PLUGIN_BRIDGE_ENV_NAME_MAX_LEN: usize = 128;
+
+/// Max length of `host_bridge.display_name`. The value lands in the bridge
+/// lock file (`ideName` field) and Desktop UI; 256 chars covers any
+/// reasonable plugin name without bloating per-bridge state.
+pub const PLUGIN_BRIDGE_DISPLAY_NAME_MAX_LEN: usize = 256;
+
+/// Max length of a `host_bridge.roles` role key (`worker`, `plugin`, ...).
+/// Mirrors typical CLI tool naming caps and prevents a manifest from
+/// producing a multi-KB string that ends up in event-channel payloads
+/// emitted on every connection.
+pub const PLUGIN_BRIDGE_ROLE_NAME_MAX_LEN: usize = 128;
+
+/// Max length of a per-role auth scheme name — i.e. the `name` field on
+/// `HostBridgeRoleAuth::Header { name }` / `QueryParam { name }`.
+pub const PLUGIN_BRIDGE_AUTH_NAME_MAX_LEN: usize = 128;
+
+/// Max number of role entries in `host_bridge.roles`. Pairing mode pairs
+/// exactly two clients; even with extra observer roles, 16 is far more
+/// than any plausible plugin will need and prevents a hostile manifest
+/// from inflating bridge state with thousands of roles.
+pub const PLUGIN_BRIDGE_ROLES_MAX_COUNT: usize = 16;
 
 /// Pure, testable function for resolving the data directory.
 /// `env_val` = None or empty string → `home.join(DATA_DIR)` (empty string treated as unset)

@@ -112,6 +112,33 @@ In short: treat any enabled Host Exec recipe as "this repository's code, on my m
 
 All MCP workers listen on the same internal port (`PORT_WORKER`, see [ADR-038](../adr/ADR-038-single-internal-worker-port.md)) inside their own container namespaces; the hub disambiguates workers by DNS service name. Port numbers carry no security weight — the three pillars above (token, network, hardening) do not depend on per-worker port uniqueness.
 
+## Host Bridges
+
+Speedwave Desktop runs the IDE Bridge on the generic host-bridge
+skeleton (`desktop/src-tauri/src/bridges/host_bridge.rs`, see
+[ADR-063](../adr/ADR-063-host-bridge-generic.md)). It pairs Claude Code
+(in the container) with a local IDE on the host (Endpoint mode). Lock
+file: `~/.speedwave/ide-bridge/<port>.lock`. Mounted into the container
+as `/home/speedwave/.claude/ide/` (`:ro`).
+
+Security invariants:
+
+- **Bind only to `127.0.0.1`** (kernel-assigned port). Not reachable from
+  LAN.
+- **UUID v4 auth token per session** (regenerated on every Desktop
+  start; never persisted across restarts).
+- **Constant-time token comparison** prevents timing side channels.
+- **Origin header policy** rejects browser CSRF (`RejectIfPresent`).
+- **Lock file `0o600` in `0o700` parent dir** — token unreadable by other
+  users on the host. Atomic write via `tempfile::NamedTempFile::persist`
+  closes the partial-write window.
+- **Token never logged.** `HostBridge::Debug` redacts the token; the
+  Desktop event channel emits role + state only.
+
+Residual risk: a user-mode process running as the same UID as the
+Desktop can read the lock file. This matches the platform assumption
+that same-uid processes are inside the trust boundary.
+
 ## Executor Sandbox (MCP Hub)
 
 The MCP Hub executes model-generated JavaScript in a restricted `AsyncFunction` sandbox. Security is provided by multiple layers:
