@@ -188,6 +188,20 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
 
     let msg_type = parsed["type"].as_str().unwrap_or("");
 
+    // Skip Claude Code synthetic meta-entries (slash-command caveats, image
+    // attachment markers, …). They have `type:"user"` but are model-facing
+    // hints, never actual user input. Scoped to "user" so a future
+    // upstream `isMeta` on assistant/result rows isn't silently swallowed.
+    // `isMeta` lives at the top level today; we also probe `message.isMeta`
+    // defensively in case Anthropic nests it later.
+    if msg_type == "user"
+        && (parsed["isMeta"].as_bool().unwrap_or(false)
+            || parsed["message"]["isMeta"].as_bool().unwrap_or(false)
+            || is_synthetic_user_entry(&parsed))
+    {
+        return None;
+    }
+
     match msg_type {
         "user" => parse_user_message(&parsed),
         "assistant" => parse_assistant_message(&parsed),
@@ -197,6 +211,31 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
             None
         }
     }
+}
+
+/// Detects Claude Code synthetic `type:"user"` entries that aren't real user
+/// input: slash-command markers, slash-command stdout/stderr, and the
+/// SDK CLI's `Commands are in the form …` boilerplate. None of these are
+/// flagged with `isMeta`, so we sniff the content. Caller must ensure
+/// `parsed["type"] == "user"`.
+fn is_synthetic_user_entry(parsed: &serde_json::Value) -> bool {
+    let content = &parsed["message"]["content"];
+    let text = if let Some(s) = content.as_str() {
+        s.to_string()
+    } else if let Some(arr) = content.as_array() {
+        arr.iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        return false;
+    };
+    let trimmed = text.trim();
+    trimmed.starts_with("<command-name>")
+        || trimmed.starts_with("<command-message>")
+        || trimmed.starts_with("<local-command-stdout>")
+        || trimmed.starts_with("<local-command-stderr>")
+        || trimmed == "Commands are in the form `/command [args]`"
 }
 
 fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage> {
@@ -1184,6 +1223,135 @@ mod tests {
         let result = list_conversations_impl(tmp.path(), "proj").unwrap();
         assert_eq!(result[0].preview.len(), 203); // 200 + "..."
         assert!(result[0].preview.ends_with("..."));
+    }
+
+    #[test]
+    fn list_conversations_skips_is_meta_for_preview() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: …</local-command-caveat>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]},"timestamp":"2025-01-01T00:00:02Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].preview, "real question");
+        assert_eq!(result[0].message_count, 2);
+    }
+
+    #[test]
+    fn parse_jsonl_message_respects_nested_is_meta_under_message() {
+        // Defensive: should Claude Code ever move `isMeta` from top-level
+        // into `message.*`, the filter must still catch it.
+        let line = r#"{"type":"user","message":{"role":"user","isMeta":true,"content":"<local-command-caveat>x</local-command-caveat>"}}"#;
+        assert!(parse_jsonl_message(line).is_none());
+    }
+
+    #[test]
+    fn parse_jsonl_message_does_not_drop_is_meta_on_non_user_types() {
+        // The `isMeta` filter is intentionally scoped to user entries — an
+        // assistant row with isMeta:true must still parse, so future upstream
+        // tagging of legitimate assistant turns doesn't make them vanish.
+        let line = r#"{"type":"assistant","isMeta":true,"message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
+        let msg = parse_jsonl_message(line).expect("assistant with isMeta should parse");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content, "hi");
+    }
+
+    #[test]
+    fn list_conversations_drops_session_with_only_meta_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: …</local-command-caveat>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<command-name>/clear</command-name>"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn get_conversation_omits_is_meta_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: …</local-command-caveat>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]},"timestamp":"2025-01-01T00:00:02Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 2);
+        assert_eq!(transcript.messages[0].role, "user");
+        assert_eq!(transcript.messages[0].content, "real question");
+        assert_eq!(transcript.messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn list_conversations_skips_slash_command_markers() {
+        // Slash-command invocations carry no `isMeta` flag but are still
+        // synthetic — they should not surface as previews or get counted.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout></local-command-stdout>"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].preview, "real question");
+        assert_eq!(result[0].message_count, 2);
+    }
+
+    #[test]
+    fn list_conversations_drops_sdk_cli_boilerplate_session() {
+        // `claude -p "/cmd"` opens a session whose only user entry is the
+        // boilerplate `Commands are in the form …` (no `isMeta`). Such a
+        // session should never appear in the sidebar.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"Commands are in the form `/command [args]`"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert!(result.is_empty());
     }
 
     #[test]
