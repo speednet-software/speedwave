@@ -243,7 +243,6 @@ fn mcp_tool_error(text: &str) -> serde_json::Value {
     })
 }
 
-#[allow(clippy::unwrap_used)] // serde_json::to_string on json!() literals is infallible
 fn dispatch_tool_call(name: &str, _args: Option<&serde_json::Value>) -> serde_json::Value {
     use serde_json::json;
     match name {
@@ -251,24 +250,12 @@ fn dispatch_tool_call(name: &str, _args: Option<&serde_json::Value>) -> serde_js
             "No IDE connected — file not opened. Connect an IDE in Speedwave Health Dashboard.",
         ),
         "openDiff" => mcp_tool_error("No IDE connected — diff not opened."),
-        "getCurrentSelection" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"selection": null})).unwrap())
-        }
-        "getLatestSelection" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"selection": null})).unwrap())
-        }
-        "getOpenEditors" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"editors": []})).unwrap())
-        }
-        "getWorkspaceFolders" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"folders": ["/workspace"]})).unwrap())
-        }
-        "getDiagnostics" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"diagnostics": []})).unwrap())
-        }
-        "checkDocumentDirty" => {
-            mcp_tool_result(&serde_json::to_string(&json!({"dirty": false})).unwrap())
-        }
+        "getCurrentSelection" => mcp_tool_result(&json!({"selection": null}).to_string()),
+        "getLatestSelection" => mcp_tool_result(&json!({"selection": null}).to_string()),
+        "getOpenEditors" => mcp_tool_result(&json!({"editors": []}).to_string()),
+        "getWorkspaceFolders" => mcp_tool_result(&json!({"folders": ["/workspace"]}).to_string()),
+        "getDiagnostics" => mcp_tool_result(&json!({"diagnostics": []}).to_string()),
+        "checkDocumentDirty" => mcp_tool_result(&json!({"dirty": false}).to_string()),
         "saveDocument" => mcp_tool_error("No IDE connected — document not saved."),
         "close_tab" => mcp_tool_error("No IDE connected."),
         "closeAllDiffTabs" => mcp_tool_error("No IDE connected."),
