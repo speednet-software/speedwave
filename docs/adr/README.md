@@ -70,6 +70,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-061](ADR-061-windows-crt-runtime-alignment.md)                    | Windows CRT Runtime Alignment for sherpa-onnx + whisper.cpp                              | Accepted              |
 | [ADR-062](ADR-062-playwright-host-gateway-access.md)                   | Playwright Host-Gateway Access via Static `extra_hosts`                                  | Accepted              |
 | [ADR-063](ADR-063-host-bridge-generic.md)                              | Generic HostBridge skeleton for host-side WebSocket relays                               | Accepted              |
+| [ADR-064](ADR-064-canonicalize-bypass-for-wsl-unc.md)                  | Bypass `canonicalize()` for WSL UNC project paths on Windows                             | Accepted              |
 
 ## Creating a New ADR
 

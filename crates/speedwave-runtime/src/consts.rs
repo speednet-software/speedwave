@@ -266,6 +266,26 @@ pub const NESTED_VIRT_WARNING_MSG: &str = "\
     - Enable nested virtualization in VM settings (VT-x/EPT or AMD-V/RVI)\n\
     - Close other memory-intensive applications";
 
+/// Helpful error returned when a project is in a WSL distro other than Speedwave's own.
+/// Reused by `windows_to_wsl_path` and `project::add_project` for consistent messaging.
+pub fn wsl_other_distro_msg(other_distro: &str) -> String {
+    format!(
+        "Project is in WSL distribution '{other_distro}', but Speedwave runs in its own '{own}' \
+         distribution and cannot access files in other WSL distributions natively.\n\n\
+         To use this project, choose one of:\n\n\
+         1. Copy the project into Speedwave's distribution (recommended — native performance):\n\
+            From Windows PowerShell:\n\
+              Copy-Item -Recurse '\\\\wsl.localhost\\{other_distro}\\home\\<you>\\<project>' \
+         '\\\\wsl.localhost\\{own}\\projects\\<project>'\n\n\
+         2. Move the project to a Windows drive (slower NTFS access, accessible from both):\n\
+              mv ~/<project> /mnt/c/projects/<project>\n\n\
+         3. Use Claude Code natively in your '{other_distro}' distribution without Speedwave \
+         (loses MCP integrations).\n\n\
+         See https://github.com/speednet-software/speedwave/blob/dev/docs/getting-started/installation.md#wsl-native-workflow",
+        own = WSL_DISTRO_NAME,
+    )
+}
+
 /// Error prefix used by backend when SecurityCheck or OS prereqs fail.
 /// Frontend matches on this string to distinguish blocking (check_failed)
 /// from dismissable (error) failures.
