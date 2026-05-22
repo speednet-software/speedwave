@@ -169,6 +169,15 @@ impl Drop for PluginHostBridge {
     }
 }
 
+/// Translate manifest-parsed role strings into the `'static`-lifetime
+/// representation `PairingConfig` requires.
+///
+/// `Box::leak` is intentional: `init_and_start_plugin_bridges` calls
+/// this exactly once per plugin at Desktop startup, the resulting
+/// bridge lives for the entire process, and `validate_host_bridge_manifest`
+/// caps each plugin's leakable footprint at ≈ 4 KiB. The leak window
+/// equals the process lifetime — same constraint the IDE bridge
+/// satisfies with compile-time string literals.
 fn translate_roles(
     manifest_roles: &HashMap<String, HostBridgeRoleAuth>,
 ) -> HashMap<&'static str, AuthScheme> {

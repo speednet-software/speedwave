@@ -817,8 +817,22 @@ fn validate_host_bridge_manifest(bridge: &HostBridgeManifest) -> anyhow::Result<
     if bridge.roles.is_empty() {
         anyhow::bail!("host_bridge.roles must declare at least one role");
     }
+    if bridge.roles.len() > consts::PLUGIN_BRIDGE_ROLES_MAX_COUNT {
+        anyhow::bail!(
+            "host_bridge.roles must not exceed {} entries (got {})",
+            consts::PLUGIN_BRIDGE_ROLES_MAX_COUNT,
+            bridge.roles.len()
+        );
+    }
     if bridge.display_name.trim().is_empty() {
         anyhow::bail!("host_bridge.display_name must not be empty");
+    }
+    if bridge.display_name.len() > consts::PLUGIN_BRIDGE_DISPLAY_NAME_MAX_LEN {
+        anyhow::bail!(
+            "host_bridge.display_name must not exceed {} bytes (got {})",
+            consts::PLUGIN_BRIDGE_DISPLAY_NAME_MAX_LEN,
+            bridge.display_name.len()
+        );
     }
     validate_bridge_env_name("url_env", &bridge.url_env)?;
     validate_bridge_env_name("token_env", &bridge.token_env)?;
@@ -832,6 +846,13 @@ fn validate_host_bridge_manifest(bridge: &HostBridgeManifest) -> anyhow::Result<
         if role.is_empty() {
             anyhow::bail!("host_bridge.roles contains an empty role name");
         }
+        if role.len() > consts::PLUGIN_BRIDGE_ROLE_NAME_MAX_LEN {
+            anyhow::bail!(
+                "host_bridge.roles role name must not exceed {} bytes (got {})",
+                consts::PLUGIN_BRIDGE_ROLE_NAME_MAX_LEN,
+                role.len()
+            );
+        }
         if role.chars().any(|c| c.is_control()) {
             anyhow::bail!("host_bridge.roles role name '{role}' contains a control character");
         }
@@ -840,6 +861,13 @@ fn validate_host_bridge_manifest(bridge: &HostBridgeManifest) -> anyhow::Result<
         };
         if header_name.is_empty() {
             anyhow::bail!("host_bridge.roles['{role}']: auth scheme name must not be empty");
+        }
+        if header_name.len() > consts::PLUGIN_BRIDGE_AUTH_NAME_MAX_LEN {
+            anyhow::bail!(
+                "host_bridge.roles['{role}']: auth scheme name must not exceed {} bytes (got {})",
+                consts::PLUGIN_BRIDGE_AUTH_NAME_MAX_LEN,
+                header_name.len()
+            );
         }
         if header_name.chars().any(|c| c.is_control()) {
             anyhow::bail!(
@@ -853,6 +881,13 @@ fn validate_host_bridge_manifest(bridge: &HostBridgeManifest) -> anyhow::Result<
 fn validate_bridge_env_name(field: &str, name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
         anyhow::bail!("host_bridge.{field} must not be empty");
+    }
+    if name.len() > consts::PLUGIN_BRIDGE_ENV_NAME_MAX_LEN {
+        anyhow::bail!(
+            "host_bridge.{field} must not exceed {} bytes (got {})",
+            consts::PLUGIN_BRIDGE_ENV_NAME_MAX_LEN,
+            name.len()
+        );
     }
     if consts::RESERVED_ENV_KEYS
         .iter()
@@ -5206,6 +5241,110 @@ mod tests {
         assert!(
             err.to_string().contains("control character"),
             "expected control-char rejection, got: {err}"
+        );
+    }
+
+    // ── host_bridge oversize edge cases ─────────────────────────────────
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_url_env() {
+        let huge = "X".repeat(consts::PLUGIN_BRIDGE_ENV_NAME_MAX_LEN + 1);
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), &huge, "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize url_env must be rejected");
+        assert!(
+            err.to_string().contains("must not exceed"),
+            "expected oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_token_env() {
+        let huge = "Y".repeat(consts::PLUGIN_BRIDGE_ENV_NAME_MAX_LEN + 1);
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", &huge, "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize token_env must be rejected");
+        assert!(
+            err.to_string().contains("must not exceed"),
+            "expected oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_display_name() {
+        let huge = "D".repeat(consts::PLUGIN_BRIDGE_DISPLAY_NAME_MAX_LEN + 1);
+        let bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", &huge);
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize display_name must be rejected");
+        assert!(
+            err.to_string().contains("display_name must not exceed"),
+            "expected display_name oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_role_name() {
+        let huge_role = "r".repeat(consts::PLUGIN_BRIDGE_ROLE_NAME_MAX_LEN + 1);
+        let roles = HashMap::from([(
+            huge_role,
+            HostBridgeRoleAuth::Header {
+                name: "x-auth".to_string(),
+            },
+        )]);
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize role name must be rejected");
+        assert!(
+            err.to_string().contains("role name must not exceed"),
+            "expected role-name oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_oversize_auth_scheme_name() {
+        let huge_name = "h".repeat(consts::PLUGIN_BRIDGE_AUTH_NAME_MAX_LEN + 1);
+        let roles = HashMap::from([(
+            "worker".to_string(),
+            HostBridgeRoleAuth::Header { name: huge_name },
+        )]);
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("oversize auth scheme name must be rejected");
+        assert!(
+            err.to_string().contains("auth scheme name must not exceed"),
+            "expected auth-name oversize rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_host_bridge_with_too_many_roles() {
+        let mut roles = HashMap::new();
+        for i in 0..=consts::PLUGIN_BRIDGE_ROLES_MAX_COUNT {
+            roles.insert(
+                format!("role{i}"),
+                HostBridgeRoleAuth::Header {
+                    name: format!("x-auth-{i}"),
+                },
+            );
+        }
+        let bridge = fixture_host_bridge_manifest_with(roles, "X_URL", "X_TOKEN", "X");
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            validate_manifest(&manifest, tmp.path()).expect_err("too many roles must be rejected");
+        assert!(
+            err.to_string().contains("must not exceed"),
+            "expected roles-count rejection, got: {err}"
         );
     }
 

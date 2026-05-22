@@ -1006,6 +1006,33 @@ pub const PLUGIN_CPU_LIMIT_MAX: f32 = 4.0;
 /// still bounding what an attacker can wedge into the shared config file.
 pub const PLUGIN_SETTINGS_MAX_BYTES: usize = 64 * 1024;
 
+/// Max length of `host_bridge.url_env` / `host_bridge.token_env` env var
+/// names. POSIX env var names are typically &lt;64 chars; 128 leaves headroom
+/// for plugin authors without letting a manifest ship a megabyte-long name
+/// that the bridge would then echo into container env injection.
+pub const PLUGIN_BRIDGE_ENV_NAME_MAX_LEN: usize = 128;
+
+/// Max length of `host_bridge.display_name`. The value lands in the bridge
+/// lock file (`ideName` field) and Desktop UI; 256 chars covers any
+/// reasonable plugin name without bloating per-bridge state.
+pub const PLUGIN_BRIDGE_DISPLAY_NAME_MAX_LEN: usize = 256;
+
+/// Max length of a `host_bridge.roles` role key (`worker`, `plugin`, ...).
+/// Mirrors typical CLI tool naming caps and prevents a manifest from
+/// producing a multi-KB string that ends up in event-channel payloads
+/// emitted on every connection.
+pub const PLUGIN_BRIDGE_ROLE_NAME_MAX_LEN: usize = 128;
+
+/// Max length of a per-role auth scheme name — i.e. the `name` field on
+/// `HostBridgeRoleAuth::Header { name }` / `QueryParam { name }`.
+pub const PLUGIN_BRIDGE_AUTH_NAME_MAX_LEN: usize = 128;
+
+/// Max number of role entries in `host_bridge.roles`. Pairing mode pairs
+/// exactly two clients; even with extra observer roles, 16 is far more
+/// than any plausible plugin will need and prevents a hostile manifest
+/// from inflating bridge state with thousands of roles.
+pub const PLUGIN_BRIDGE_ROLES_MAX_COUNT: usize = 16;
+
 /// Pure, testable function for resolving the data directory.
 /// `env_val` = None or empty string → `home.join(DATA_DIR)` (empty string treated as unset)
 /// `env_val` = absolute path → returns that path
