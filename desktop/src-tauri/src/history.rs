@@ -199,6 +199,10 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
             || parsed["message"]["isMeta"].as_bool().unwrap_or(false)
             || is_synthetic_user_entry(&parsed))
     {
+        log::debug!(
+            "skipping synthetic user JSONL entry uuid={}",
+            parsed["uuid"].as_str().unwrap_or("?")
+        );
         return None;
     }
 
@@ -220,22 +224,29 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
 /// `parsed["type"] == "user"`.
 fn is_synthetic_user_entry(parsed: &serde_json::Value) -> bool {
     let content = &parsed["message"]["content"];
-    let text = if let Some(s) = content.as_str() {
-        s.to_string()
+    if let Some(s) = content.as_str() {
+        text_is_synthetic(s)
     } else if let Some(arr) = content.as_array() {
+        // Check each text block separately so a synthetic tag is caught even
+        // when it isn't the first block of a multi-block content array.
         arr.iter()
+            .filter(|b| b["type"].as_str() == Some("text"))
             .filter_map(|b| b["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+            .any(text_is_synthetic)
     } else {
-        return false;
-    };
-    let trimmed = text.trim();
+        false
+    }
+}
+
+fn text_is_synthetic(s: &str) -> bool {
+    let trimmed = s.trim();
     trimmed.starts_with("<command-name>")
         || trimmed.starts_with("<command-message>")
+        || trimmed.starts_with("<command-args>")
+        || trimmed.starts_with("<command-result>")
         || trimmed.starts_with("<local-command-stdout>")
         || trimmed.starts_with("<local-command-stderr>")
-        || trimmed == "Commands are in the form `/command [args]`"
+        || trimmed.starts_with("Commands are in the form `/command [args]`")
 }
 
 fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage> {
@@ -1352,6 +1363,39 @@ mod tests {
 
         let result = list_conversations_impl(tmp.path(), "proj").unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_jsonl_message_drops_command_args_and_command_result_prefixes() {
+        // Defensive: Claude Code today only emits <command-name> first, but
+        // these sibling tags belong to the same family and should they ever
+        // arrive as standalone user rows we still want them filtered.
+        for tag in ["<command-args>", "<command-result>"] {
+            let line = format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"{tag}foo</X>"}}}}"#
+            );
+            assert!(
+                parse_jsonl_message(&line).is_none(),
+                "expected {tag} to be filtered"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_jsonl_message_drops_boilerplate_with_trailing_punctuation() {
+        // `starts_with` (not `==`) means small upstream wording tweaks —
+        // trailing newline, period, additional context — don't leak the
+        // boilerplate back into the sidebar.
+        let line = r#"{"type":"user","message":{"role":"user","content":"Commands are in the form `/command [args]`\n\nMore context."}}"#;
+        assert!(parse_jsonl_message(line).is_none());
+    }
+
+    #[test]
+    fn parse_jsonl_message_drops_synthetic_tag_in_non_first_text_block() {
+        // Multi-block content where the synthetic marker isn't the first
+        // block — caught per-block instead of after `join("\n")`.
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"preamble"},{"type":"text","text":"<command-name>/clear</command-name>"}]}}"#;
+        assert!(parse_jsonl_message(line).is_none());
     }
 
     #[test]
