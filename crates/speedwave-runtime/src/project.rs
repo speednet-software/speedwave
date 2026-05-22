@@ -700,7 +700,14 @@ mod tests {
             unc_canonical_str.clone(),
             &data_dir,
         );
-        assert!(result.is_ok(), "registration must succeed: {result:?}");
+        // Avoid `{result:?}` in the assert message: anyhow::Error chains may
+        // include strings from upstream errors (apply_oauth_config /
+        // init_secrets_dir trace through the same anyhow::Error type),
+        // which CodeQL flags as cleartext logging of sensitive information
+        // even when those code paths are not reached in this test.
+        if let Err(e) = &result {
+            panic!("registration must succeed: {}", e);
+        }
 
         // Verify config persisted with the UNC-style dir string.
         let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
