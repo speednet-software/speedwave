@@ -258,5 +258,29 @@ describe('ConversationsSidebarComponent', () => {
       expect(q('[data-testid="conversation-confirm-s1"]')).toBeNull();
       expect(q('[data-testid="conversation-confirm-s2"]')).not.toBeNull();
     });
+
+    it('clears the confirm state when the drawer is closed and reopened', () => {
+      // Drive the child input directly so we can toggle `open` without going
+      // through the host wrapper's separate fixture lifecycle.
+      fixture.destroy();
+      const childFixture = TestBed.createComponent(ConversationsSidebarComponent);
+      childFixture.componentRef.setInput('conversations', sample);
+      childFixture.componentRef.setInput('open', true);
+      childFixture.detectChanges();
+      TestBed.tick();
+      (q('[data-testid="conversation-delete-s2"]') as HTMLButtonElement).click();
+      childFixture.detectChanges();
+      expect(q('[data-testid="conversation-confirm-s2"]')).not.toBeNull();
+
+      childFixture.componentRef.setInput('open', false);
+      childFixture.detectChanges();
+      TestBed.tick();
+      childFixture.componentRef.setInput('open', true);
+      childFixture.detectChanges();
+      TestBed.tick();
+      expect(q('[data-testid="conversation-confirm-s2"]')).toBeNull();
+      expect(q('[data-testid="conversation-resume-s2"]')).not.toBeNull();
+      childFixture.destroy();
+    });
   });
 });

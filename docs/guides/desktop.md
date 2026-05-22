@@ -84,6 +84,10 @@ claude-opus-4-7 │ CTX ██░░░ 2% │ 116k/1M │ Limit ░░░░░
 
 Settings invalidates the persisted layer by calling `ChatStateService.refreshLlmConfigCache()` after `update_llm_config` settles, so the footer reflects the new model's window immediately rather than waiting for the next session start.
 
+### Conversation history sidebar
+
+Opens with the **History** button in the chat header (or ⌘B). Lists past sessions for the active project, grouped by today / yesterday / older, with a search filter. Clicking a row resumes that session in live chat. The trash icon next to each row (visible on hover) deletes the underlying JSONL transcript file — a one-tap inline confirm asks **Sure?** before the file is removed. Deletion is irreversible; deleting the currently active session resets the chat to a fresh conversation.
+
 ### Stopping a conversation
 
 While Claude is responding, press **Esc** or click the red **Stop** button next to the message input to interrupt the current turn. The partial response is preserved in the conversation history, in-flight tools are stopped, and the input is immediately re-enabled so you can send the next message. **Esc is ignored while an "ask user" question is visible** — answer or dismiss that prompt first; the Stop button still works in that case and will drop the question.

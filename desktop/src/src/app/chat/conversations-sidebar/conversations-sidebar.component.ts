@@ -337,6 +337,7 @@ export class ConversationsSidebarComponent {
 
   private closeOverlay(): void {
     if (this.overlayRef === null) return;
+    this.pendingDeleteId.set(null);
     this.overlayRef.dispose();
     this.overlayRef = null;
   }
