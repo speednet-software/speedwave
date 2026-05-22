@@ -395,6 +395,80 @@ describe('ChatComponent', () => {
     });
   });
 
+  // ── deleteConversation ──────────────────────────────────────────────────────
+
+  describe('deleteConversation', () => {
+    it('calls delete_conversation and removes the row locally', async () => {
+      projectState.activeProject = 'test';
+      component.conversations = [
+        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's2', timestamp: null, preview: 'b', message_count: 1 },
+      ];
+      const calls: { cmd: string; args: unknown }[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args: unknown) => {
+        calls.push({ cmd, args });
+        return undefined;
+      };
+
+      await component.deleteConversation('s1');
+
+      expect(calls).toContainEqual({
+        cmd: 'delete_conversation',
+        args: { project: 'test', sessionId: 's1' },
+      });
+      expect(component.conversations.map((c) => c.session_id)).toEqual(['s2']);
+    });
+
+    it('does nothing when no active project', async () => {
+      projectState.activeProject = null;
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.deleteConversation('s1');
+      expect(invokeSpy).not.toHaveBeenCalled();
+    });
+
+    it('sets historyError when backend fails and keeps the row', async () => {
+      projectState.activeProject = 'test';
+      component.conversations = [
+        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
+      ];
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'delete_conversation') throw new Error('io error');
+        return undefined;
+      };
+
+      await component.deleteConversation('s1');
+
+      expect(component.historyError).toContain('Failed to delete conversation');
+      expect(component.conversations.length).toBe(1);
+      errorSpy.mockRestore();
+    });
+
+    it('resets live chat when deleting the active session', async () => {
+      projectState.activeProject = 'test';
+      chatState._setState({
+        messages: [],
+        currentBlocks: [],
+        sessionStats: {
+          session_id: 's1',
+          total_cost: 0,
+          context_window_size: null,
+          total_output_tokens: 0,
+        },
+      });
+      component.conversations = [
+        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
+      ];
+      const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
+      mockTauri.invokeHandler = async () => undefined;
+
+      await component.deleteConversation('s1');
+
+      expect(resetSpy).toHaveBeenCalled();
+      expect(component.conversations).toEqual([]);
+    });
+  });
+
   // ── newConversation ─────────────────────────────────────────────────────────
 
   describe('newConversation', () => {

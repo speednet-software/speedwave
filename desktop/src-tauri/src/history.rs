@@ -556,6 +556,26 @@ fn get_project_memory_impl(data_dir: &Path, project: &str) -> anyhow::Result<Str
     }
 }
 
+/// Delete a conversation's JSONL file. Idempotent: a missing file is treated
+/// as success so a double-click on the trash icon doesn't surface an error.
+pub fn delete_conversation(project: &str, session_id: &str) -> anyhow::Result<()> {
+    delete_conversation_impl(consts::data_dir(), project, session_id)
+}
+
+fn delete_conversation_impl(
+    data_dir: &Path,
+    project: &str,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    validate_session_id_impl(session_id)?;
+    let path = sessions_dir_impl(data_dir, project).join(format!("{session_id}.jsonl"));
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("cannot delete session {session_id}: {e}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Resume snapshot
 // ---------------------------------------------------------------------------
@@ -1623,5 +1643,62 @@ mod tests {
             Some("claude-opus-4-7"),
             "must pick the model with the highest outputTokens, not the alphabetically first key"
         );
+    }
+
+    // ── delete_conversation ────────────────────────────────────────
+
+    #[test]
+    fn delete_conversation_removes_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &[r#"{"type":"user"}"#]);
+        let path = dir.join(format!("{id}.jsonl"));
+        assert!(path.exists());
+
+        delete_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn delete_conversation_is_idempotent_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        let result = delete_conversation_impl(tmp.path(), "proj", id);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn delete_conversation_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_sessions_dir(tmp.path(), "proj");
+
+        let result = delete_conversation_impl(tmp.path(), "proj", "../escape");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_conversation_rejects_empty_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_sessions_dir(tmp.path(), "proj");
+
+        let result = delete_conversation_impl(tmp.path(), "proj", "");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_conversation_does_not_touch_other_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id_a = "abcdef01-2345-6789-abcd-ef0123456789";
+        let id_b = "abcdef01-2345-6789-abcd-ef012345678a";
+        write_session(&dir, id_a, &[r#"{"type":"user"}"#]);
+        write_session(&dir, id_b, &[r#"{"type":"user"}"#]);
+
+        delete_conversation_impl(tmp.path(), "proj", id_a).unwrap();
+        assert!(!dir.join(format!("{id_a}.jsonl")).exists());
+        assert!(dir.join(format!("{id_b}.jsonl")).exists());
     }
 }

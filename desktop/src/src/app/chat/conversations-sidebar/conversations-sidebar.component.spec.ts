@@ -15,6 +15,7 @@ import type { ConversationSummary } from '../../models/chat';
       [currentSessionId]="currentSessionId"
       (closed)="onClosed()"
       (resumeConversation)="onResume($event)"
+      (deleteConversation)="onDelete($event)"
     />
   `,
 })
@@ -24,12 +25,16 @@ class HostComponent {
   currentSessionId: string | null = null;
   closedCount = 0;
   resumedPayload: ConversationSummary | null = null;
+  deletedPayload: ConversationSummary | null = null;
 
   onClosed(): void {
     this.closedCount += 1;
   }
   onResume(payload: ConversationSummary): void {
     this.resumedPayload = payload;
+  }
+  onDelete(payload: ConversationSummary): void {
+    this.deletedPayload = payload;
   }
 }
 
@@ -200,6 +205,58 @@ describe('ConversationsSidebarComponent', () => {
       expect(row).not.toBeNull();
       row!.click();
       expect(host.resumedPayload?.session_id).toBe('s1');
+    });
+  });
+
+  describe('delete', () => {
+    it('shows the trash button for every row', () => {
+      host.conversations = sample;
+      fixture.detectChanges();
+      expect(q('[data-testid="conversation-delete-s1"]')).not.toBeNull();
+      expect(q('[data-testid="conversation-delete-s2"]')).not.toBeNull();
+      expect(q('[data-testid="conversation-delete-s3"]')).not.toBeNull();
+    });
+
+    it('trash click swaps the row into a confirm prompt; does not emit yet', () => {
+      host.conversations = sample;
+      fixture.detectChanges();
+      (q('[data-testid="conversation-delete-s2"]') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      expect(q('[data-testid="conversation-confirm-s2"]')).not.toBeNull();
+      expect(q('[data-testid="conversation-resume-s2"]')).toBeNull();
+      expect(host.deletedPayload).toBeNull();
+    });
+
+    it('confirm button emits deleteConversation with the row payload', () => {
+      host.conversations = sample;
+      fixture.detectChanges();
+      (q('[data-testid="conversation-delete-s2"]') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      (q('[data-testid="conversation-confirm-yes-s2"]') as HTMLButtonElement).click();
+      expect(host.deletedPayload?.session_id).toBe('s2');
+    });
+
+    it('cancel button reverts to the row without emitting', () => {
+      host.conversations = sample;
+      fixture.detectChanges();
+      (q('[data-testid="conversation-delete-s2"]') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      (q('[data-testid="conversation-confirm-no-s2"]') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      expect(q('[data-testid="conversation-confirm-s2"]')).toBeNull();
+      expect(q('[data-testid="conversation-resume-s2"]')).not.toBeNull();
+      expect(host.deletedPayload).toBeNull();
+    });
+
+    it('only one row can be in confirm state at a time', () => {
+      host.conversations = sample;
+      fixture.detectChanges();
+      (q('[data-testid="conversation-delete-s1"]') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      (q('[data-testid="conversation-delete-s2"]') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      expect(q('[data-testid="conversation-confirm-s1"]')).toBeNull();
+      expect(q('[data-testid="conversation-confirm-s2"]')).not.toBeNull();
     });
   });
 });

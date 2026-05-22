@@ -142,8 +142,9 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
               </div>
               @for (row of group.rows; track row.conv.session_id) {
                 @let active = row.conv.session_id === currentSessionId();
+                @let pendingDelete = row.conv.session_id === pendingDeleteId();
                 <div
-                  class="flex items-stretch border-l-2"
+                  class="group flex items-stretch border-l-2"
                   [class]="
                     active
                       ? 'border-[var(--accent)] bg-[var(--bg-2)]'
@@ -151,25 +152,63 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
                   "
                   data-testid="conversations-sidebar-row"
                 >
-                  <!-- Row click resumes directly — no "view → resume" two-step. -->
-                  <button
-                    type="button"
-                    class="min-w-0 flex-1 px-3 py-2 text-left"
-                    [attr.data-testid]="'conversation-resume-' + row.conv.session_id"
-                    [attr.aria-current]="active ? 'true' : null"
-                    aria-label="Resume conversation"
-                    (click)="resumeConversation.emit(row.conv)"
-                  >
+                  @if (pendingDelete) {
                     <div
-                      class="truncate text-[13px]"
-                      [class]="active ? 'text-[var(--ink)]' : 'text-[var(--ink-dim)]'"
+                      class="flex min-w-0 flex-1 items-center justify-between gap-2 px-3 py-2"
+                      [attr.data-testid]="'conversation-confirm-' + row.conv.session_id"
+                      role="alertdialog"
+                      aria-label="Confirm delete conversation"
                     >
-                      {{ row.preview }}
+                      <span class="mono truncate text-[11.5px] text-[var(--ink-dim)]"> Sure? </span>
+                      <div class="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          class="mono rounded border border-red-500/40 px-2 py-0.5 text-[11px] text-red-300 hover:bg-red-500/10"
+                          [attr.data-testid]="'conversation-confirm-yes-' + row.conv.session_id"
+                          (click)="confirmDelete(row.conv)"
+                        >
+                          delete
+                        </button>
+                        <button
+                          type="button"
+                          class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                          [attr.data-testid]="'conversation-confirm-no-' + row.conv.session_id"
+                          (click)="cancelDelete()"
+                        >
+                          cancel
+                        </button>
+                      </div>
                     </div>
-                    <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">
-                      {{ row.conv.message_count }} · {{ row.timestamp }}
-                    </div>
-                  </button>
+                  } @else {
+                    <!-- Row click resumes directly — no "view → resume" two-step. -->
+                    <button
+                      type="button"
+                      class="min-w-0 flex-1 px-3 py-2 text-left"
+                      [attr.data-testid]="'conversation-resume-' + row.conv.session_id"
+                      [attr.aria-current]="active ? 'true' : null"
+                      aria-label="Resume conversation"
+                      (click)="resumeConversation.emit(row.conv)"
+                    >
+                      <div
+                        class="truncate text-[13px]"
+                        [class]="active ? 'text-[var(--ink)]' : 'text-[var(--ink-dim)]'"
+                      >
+                        {{ row.preview }}
+                      </div>
+                      <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">
+                        {{ row.conv.message_count }} · {{ row.timestamp }}
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      class="flex shrink-0 items-center px-2 text-[var(--ink-mute)] opacity-0 hover:text-red-300 focus:opacity-100 group-hover:opacity-100"
+                      [attr.data-testid]="'conversation-delete-' + row.conv.session_id"
+                      [attr.aria-label]="'Delete conversation ' + row.preview"
+                      (click)="requestDelete(row.conv)"
+                    >
+                      <app-icon name="trash" class="h-4 w-4" />
+                    </button>
+                  }
                 </div>
               }
             }
@@ -191,9 +230,14 @@ export class ConversationsSidebarComponent {
   readonly closed = output<void>();
   /** Resume `conv` as the live session — emitted on row click (primary action). */
   readonly resumeConversation = output<ConversationSummary>();
+  /** Delete confirmed for `conv`; parent calls the backend + reloads. */
+  readonly deleteConversation = output<ConversationSummary>();
 
   /** Free-text filter applied to the buckets — narrows preview matches case-insensitively. */
   protected readonly query = signal('');
+
+  /** Session id pending confirm; `null` when no row is in the confirm state. */
+  protected readonly pendingDeleteId = signal<string | null>(null);
 
   /** Template containing the drawer content — handed to the CDK overlay portal. */
   protected readonly content = viewChild.required<TemplateRef<unknown>>('content');
@@ -253,6 +297,19 @@ export class ConversationsSidebarComponent {
   protected onQuery(event: Event): void {
     const target = event.target as HTMLInputElement | null;
     this.query.set(target?.value ?? '');
+  }
+
+  protected requestDelete(conv: ConversationSummary): void {
+    this.pendingDeleteId.set(conv.session_id);
+  }
+
+  protected confirmDelete(conv: ConversationSummary): void {
+    this.pendingDeleteId.set(null);
+    this.deleteConversation.emit(conv);
+  }
+
+  protected cancelDelete(): void {
+    this.pendingDeleteId.set(null);
   }
 
   private openOverlay(): void {
