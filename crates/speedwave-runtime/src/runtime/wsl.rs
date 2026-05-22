@@ -217,16 +217,29 @@ pub fn is_root_path(p: &Path) -> bool {
     depth == 0
 }
 
-/// Shared parser for the WSL UNC prefix surface. Strips `\\?\UNC\`,
-/// `\\?\unc\`, or `\\` from the front and returns the remainder. Returns
+/// Shared parser for the WSL UNC prefix surface. Strips `\\?\UNC\` (case-insensitive
+/// for the `UNC` segment) or `\\` from the front and returns the remainder. Returns
 /// `None` for paths that do not start with a UNC marker.
 ///
 /// SSOT for prefix handling — used by [`is_wsl_unc_path`] and
 /// [`looks_like_wsl_unc_prefix`] so the two cannot drift apart.
 fn strip_unc_prefix(s: &str) -> Option<&str> {
-    s.strip_prefix(r"\\?\UNC\")
-        .or_else(|| s.strip_prefix(r"\\?\unc\"))
-        .or_else(|| s.strip_prefix(r"\\"))
+    // `\\?\UNC\` extended-length prefix: first 4 bytes (`\\?\`) are case-stable,
+    // bytes 4..7 (`UNC`) are case-insensitive per the Win32 path normalization
+    // contract, byte 7 is the literal `\`. Check explicitly to also accept
+    // mixed-case (`\\?\Unc\`, `\\?\uNc\`, ...) that some tooling may emit.
+    let bytes = s.as_bytes();
+    if bytes.len() >= 8
+        && &bytes[0..4] == br"\\?\"
+        && bytes[4].eq_ignore_ascii_case(&b'U')
+        && bytes[5].eq_ignore_ascii_case(&b'N')
+        && bytes[6].eq_ignore_ascii_case(&b'C')
+        && bytes[7] == b'\\'
+    {
+        // Safe: first 8 bytes are all ASCII.
+        return Some(&s[8..]);
+    }
+    s.strip_prefix(r"\\")
 }
 
 /// Returns `true` if `server` is a WSL UNC server name (`wsl.localhost` or
@@ -1683,6 +1696,38 @@ mod tests {
     fn test_strip_unc_prefix_single_backslash_returns_none() {
         // Single `\` is not a UNC marker.
         assert_eq!(strip_unc_prefix(r"\foo"), None);
+    }
+
+    #[test]
+    fn test_strip_unc_prefix_mixed_case_extended() {
+        // Per Win32 path normalization, the `UNC` segment is case-insensitive.
+        // Mixed-case forms (not produced by canonicalize but possible from
+        // manual input or third-party tooling) must still be recognized.
+        assert_eq!(
+            strip_unc_prefix(r"\\?\Unc\wsl.localhost\Speedwave\foo"),
+            Some(r"wsl.localhost\Speedwave\foo")
+        );
+        assert_eq!(
+            strip_unc_prefix(r"\\?\uNc\wsl.localhost\Speedwave\foo"),
+            Some(r"wsl.localhost\Speedwave\foo")
+        );
+        assert_eq!(
+            strip_unc_prefix(r"\\?\UnC\wsl.localhost\Speedwave\foo"),
+            Some(r"wsl.localhost\Speedwave\foo")
+        );
+    }
+
+    #[test]
+    fn test_strip_unc_prefix_extended_takes_priority_over_double_backslash() {
+        // The `\\?\UNC\` branch MUST be tried before the plain `\\` branch.
+        // If the order were reversed, `\\?\UNC\wsl.localhost\...` would match
+        // `\\` first, leaving the bogus "server" `?\UNC\wsl.localhost`.
+        let result = strip_unc_prefix(r"\\?\UNC\wsl.localhost\Speedwave\foo");
+        assert_eq!(result, Some(r"wsl.localhost\Speedwave\foo"));
+        // Negative: result must NOT contain the `?\UNC\` fragment that the
+        // wrong order would produce.
+        assert!(!result.unwrap().contains("?"));
+        assert!(!result.unwrap().contains("UNC"));
     }
 
     #[test]

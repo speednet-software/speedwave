@@ -111,11 +111,7 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
         anyhow::bail!("Project directory must be an absolute path: {}", dir);
     }
 
-    // WSL UNC paths (e.g. \\wsl.localhost\Speedwave\projects\foo) bypass
-    // canonicalize — its behavior on UNC is unpredictable across Windows
-    // versions, and we already classify these paths precisely. Cross-distro
-    // paths bail here with a helpful message; bare-root paths bail to
-    // prevent mounting the entire distro / as /workspace.
+    // WSL UNC: bypass canonicalize (undocumented behavior on Windows — see ADR-064).
     let (canonical, canonical_str) = match runtime::wsl::is_wsl_unc_path(dir) {
         Some(info) => {
             if !info.is_runtime_distro() {
@@ -160,11 +156,7 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
     add_project_with_validated_dir(name, canonical, canonical_str, data_dir)
 }
 
-/// Phase 1b + Phase 2 of project registration, after the project directory
-/// has been classified (UNC vs drive-letter) and validated for existence.
-/// Both branches in `add_project_with_data_dir` converge here, ensuring the
-/// duplicate-name/path check, compose render, and side-effect commits run
-/// identically regardless of the path class (DRY).
+/// Phase 1b + 2: duplicate/compose/config pipeline, converged for both UNC and drive-letter paths.
 fn add_project_with_validated_dir(
     name: &str,
     canonical: std::path::PathBuf,
@@ -179,8 +171,12 @@ fn add_project_with_validated_dir(
         anyhow::bail!("Project '{}' already exists", name);
     }
 
-    // Duplicate path check (canonicalize stored paths for backward compat)
+    // Duplicate path check: exact-string fast path (catches UNC, which canonicalize
+    // can't resolve), then canonicalize fallback for drive-letter/Unix paths.
     if let Some(existing) = user_config.projects.iter().find(|p| {
+        if p.dir == canonical_str {
+            return true;
+        }
         std::fs::canonicalize(&p.dir)
             .map(|c| c == canonical)
             .unwrap_or(false)
