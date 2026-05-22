@@ -3362,8 +3362,14 @@ mod tests {
     }
 
     // ── verify_wsl_distro_origin tests ───────────────────────────────────
+    //
+    // All three tests below mutate the same path
+    // (`<data_dir>/wsl/Speedwave/ext4.vhdx`) — they create or check for the
+    // marker file. `#[serial]` prevents them from racing each other under
+    // `cargo test` parallel execution.
 
     #[test]
+    #[serial]
     fn verify_wsl_distro_origin_passes_when_vhdx_exists() {
         // Create the expected vhdx file under the real data_dir() (OnceLock-cached).
         let vhdx_dir = consts::data_dir().join("wsl").join(consts::WSL_DISTRO_NAME);
@@ -3388,6 +3394,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn verify_wsl_distro_origin_fails_when_vhdx_missing() {
         // Verify that verify_wsl_distro_origin fails when the vhdx doesn't exist.
         // Since data_dir() points to the real data dir, just ensure the vhdx
@@ -3411,6 +3418,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn verify_wsl_distro_origin_rejects_empty_directory() {
         // Create the wsl distro directory without the ext4.vhdx file.
         let vhdx_dir = consts::data_dir().join("wsl").join(consts::WSL_DISTRO_NAME);
