@@ -734,4 +734,36 @@ mod tests {
             .join("luke-helm")
             .is_dir());
     }
+
+    #[test]
+    fn duplicate_unc_path_detected_via_exact_string() {
+        // Covers the exact-string fast path added for UNC paths (project.rs:177).
+        // canonicalize cannot resolve UNC strings on non-Windows hosts, so
+        // the fast path is the only mechanism that catches this duplicate.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let canonical = std::fs::canonicalize(&project_dir).unwrap();
+        let unc_str = r"\\wsl.localhost\Speedwave\projects\foo".to_string();
+
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // First registration must succeed.
+        if let Err(e) =
+            add_project_with_validated_dir("first", canonical.clone(), unc_str.clone(), &data_dir)
+        {
+            panic!("first registration must succeed: {e}");
+        }
+
+        // Second registration with the same UNC string must hit the fast path.
+        let result =
+            add_project_with_validated_dir("second", canonical, unc_str, &data_dir);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("already registered"),
+            "expected 'already registered' error, got: {err}"
+        );
+    }
 }

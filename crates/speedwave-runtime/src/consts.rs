@@ -281,7 +281,7 @@ pub fn wsl_other_distro_msg(other_distro: &str) -> String {
               mv ~/<project> /mnt/c/projects/<project>\n\n\
          3. Use Claude Code natively in your '{other_distro}' distribution without Speedwave \
          (loses MCP integrations).\n\n\
-         See https://github.com/speednet-software/speedwave/blob/dev/docs/getting-started/installation.md#wsl-native-workflow",
+         See https://github.com/speednet-software/speedwave/blob/main/docs/getting-started/installation.md#wsl-native-workflow",
         own = WSL_DISTRO_NAME,
     )
 }
