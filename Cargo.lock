@@ -2416,6 +2416,7 @@ dependencies = [
  "url",
  "uuid",
  "whisper-rs",
+ "windows-sys 0.61.2",
  "zip 8.6.0",
 ]
 

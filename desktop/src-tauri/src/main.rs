@@ -23,6 +23,8 @@ mod history;
 mod host_exec_cmd;
 mod host_path;
 mod http_util;
+#[cfg(test)]
+mod installer_hooks;
 use bridges::ide_bridge;
 mod integrations_cmd;
 mod llm_cmd;
@@ -1558,7 +1560,8 @@ fn main() {
     // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project host_exec
     // workers, per-project oauth workers, auto-check handle.
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
-    let plugin_bridges: SharedPluginBridges = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let plugin_bridges: SharedPluginBridges =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let host_exec: SharedHostExec = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));

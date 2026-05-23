@@ -17,6 +17,7 @@
 
 pub mod drain;
 pub mod env_policy;
+pub mod job_object;
 pub mod lock;
 pub mod probe;
 pub mod process;

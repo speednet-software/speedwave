@@ -112,6 +112,19 @@ pub struct SpawnContext<'a> {
 pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) spec: S,
     pub(crate) child: Option<Child>,
+    /// Windows Job Object owning the child for kill-on-parent-close
+    /// (see `job_object` module). `None` on non-Windows and when
+    /// attach fails (best-effort — NSIS PRE-INSTALL hook is the
+    /// backup if a worker outlives its parent).
+    ///
+    /// **DO NOT REMOVE OR RENAME** this field — it is load-bearing
+    /// for the `Drop` side effect on `JobHandle`. The leading
+    /// underscore suppresses the `dead_code` lint (the field is
+    /// never read by name) without an `#[allow]` attribute, which
+    /// is forbidden by project rules. Dropping the field would
+    /// silently regress the v0.11+ invariant "parent crash kills
+    /// the worker" with no compile or test failure.
+    pub(crate) _job: Option<super::job_object::JobHandle>,
     pub(crate) drain_handles: Vec<JoinHandle<()>>,
     pub(crate) data_dir: PathBuf,
     pub(crate) state_dir: PathBuf,
@@ -186,6 +199,11 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 
         let mut child = cmd.spawn()?;
 
+        // Tie the child's lifetime to the parent process via a Windows
+        // Job Object so a parent crash kills the worker — no orphan
+        // node.exe to block the next installer. No-op on non-Windows.
+        let job = super::job_object::attach_to_kill_on_close_job(&child);
+
         let (port, drain_handles) = match drain_and_read_port(&mut child, &log_path, spec.log_tag())
         {
             Ok(p) => p,
@@ -206,6 +224,7 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
         Ok(Self {
             spec,
             child: Some(child),
+            _job: job,
             drain_handles,
             data_dir: data_dir.to_path_buf(),
             state_dir,
