@@ -384,10 +384,7 @@ fn is_service_configured_inner(data_dir: &std::path::Path, project: &str, servic
     };
 
     let oauth_state_json: Option<serde_json::Value> = if svc_desc.oauth_state_fields.is_some() {
-        let path = data_dir
-            .join(speedwave_runtime::consts::OAUTH_SUBDIR)
-            .join(project)
-            .join(format!("{}.json", service));
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, service);
         std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -427,12 +424,19 @@ fn snake_to_oauth_json_key(key: &str) -> &str {
         "tenant_id" => "tenantId",
         "refresh_token" => "refreshToken",
         // Drift catch: any new snake_case provider key must get an arm.
-        // No log/format of `key` — it can carry caller-supplied values.
+        // Never interpolate `other` — it carries caller-supplied values
+        // (CodeQL cleartext-logging false positive otherwise).
         other => {
             debug_assert!(
                 !other.contains('_'),
                 "snake_to_oauth_json_key: unknown snake_case key — add an arm",
             );
+            #[cfg(not(debug_assertions))]
+            if other.contains('_') {
+                log::warn!(
+                    "snake_to_oauth_json_key: unknown snake_case key — add an arm to this function"
+                );
+            }
             other
         }
     }

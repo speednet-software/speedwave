@@ -42,13 +42,6 @@ struct GhTokenErrorResponse {
 
 static FLOW_STATE: FlowRegistry = FlowRegistry::new(PROGRESS_EVENT);
 
-fn github_token_dir_for(project: &str) -> std::path::PathBuf {
-    speedwave_runtime::consts::data_dir()
-        .join("tokens")
-        .join(project)
-        .join("github")
-}
-
 /// `None` = keep polling (`authorization_pending` / `slow_down`).
 fn map_github_error(code: &str) -> Option<&'static str> {
     match code {
@@ -215,7 +208,21 @@ pub async fn start_github_oauth(
 
                     // GitHub returns 200 for both success and polling errors.
                     if let Ok(tokens) = serde_json::from_slice::<GhTokenResponse>(&body_bytes) {
-                        let svc_dir = github_token_dir_for(&poll_project);
+                        let svc_dir =
+                            match speedwave_runtime::plugin::token_dir(&poll_project, "github") {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    oauth_flow::emit_progress(
+                                        &poll_app,
+                                        &FLOW_STATE,
+                                        "error",
+                                        &format!("Failed to resolve token dir: {e}"),
+                                        &poll_request_id,
+                                    );
+                                    FLOW_STATE.clear_if_current(&poll_request_id);
+                                    return;
+                                }
+                            };
                         if let Err(e) =
                             save_credential_file(&svc_dir, "token", &tokens.access_token)
                         {
