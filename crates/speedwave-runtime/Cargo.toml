@@ -82,6 +82,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_JobObjects",
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds an IO_COUNTERS struct
+    # that lives under Win32_System_IO; without this feature the import
+    # of the parent struct fails on Windows (CI: desktop-windows-check).
+    "Win32_System_IO",
 ] }
 
 [features]
