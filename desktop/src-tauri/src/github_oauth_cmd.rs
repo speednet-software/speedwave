@@ -88,7 +88,9 @@ pub async fn start_github_oauth(
         .append_pair("scope", GITHUB_OAUTH_SCOPES)
         .finish();
 
-    let http_client = reqwest::Client::new();
+    let http_client = crate::http_util::build_hardened_client(None).inspect_err(|_| {
+        FLOW_STATE.clear_if_current(&request_id);
+    })?;
     let resp = http_client
         .post(DEVICE_CODE_URL)
         .header("Accept", "application/json")
@@ -103,10 +105,11 @@ pub async fn start_github_oauth(
         })?;
 
     let status = resp.status();
-    let body_bytes = resp.bytes().await.map_err(|e| {
-        FLOW_STATE.clear_if_current(&request_id);
-        format!("Failed to read device code response: {e}")
-    })?;
+    let body_bytes = crate::http_util::read_body_limited(resp, "device code")
+        .await
+        .inspect_err(|_| {
+            FLOW_STATE.clear_if_current(&request_id);
+        })?;
 
     if !status.is_success() {
         let preview = String::from_utf8_lossy(&body_bytes);
@@ -195,14 +198,14 @@ pub async fn start_github_oauth(
             match resp {
                 Ok(r) => {
                     let status = r.status();
-                    let body_bytes = match r.bytes().await {
+                    let body_bytes = match crate::http_util::read_body_limited(r, "token").await {
                         Ok(b) => b,
                         Err(e) => {
                             oauth_flow::emit_progress(
                                 &poll_app,
                                 &FLOW_STATE,
                                 "error",
-                                &format!("Failed to read response: {e}"),
+                                &e,
                                 &poll_request_id,
                             );
                             FLOW_STATE.clear_if_current(&poll_request_id);

@@ -263,15 +263,44 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             read_redmine_current_values(&svc_token_dir, &auth_fields)
         } else {
             let mut values = std::collections::HashMap::new();
+            let oauth_state_json: Option<serde_json::Value> =
+                if svc_desc.oauth_state_fields.is_some() {
+                    std::fs::read_to_string(plugin::oauth_state_file(&project, svc))
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                } else {
+                    None
+                };
             for field in &auth_fields {
                 if is_secret_field(&field.key) {
                     continue;
                 }
-                let path = svc_token_dir.join(&field.key);
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let trimmed = content.trim().to_string();
-                    if !trimmed.is_empty() {
-                        values.insert(field.key.clone(), trimmed);
+                let descriptor = svc_desc
+                    .auth_fields
+                    .iter()
+                    .find(|f| f.key == field.key)
+                    .map(|f| f.storage);
+                match descriptor {
+                    Some(
+                        storage @ (speedwave_runtime::consts::FieldStorage::OAuthState
+                        | speedwave_runtime::consts::FieldStorage::OAuthStateProviderData),
+                    ) => {
+                        if let Some(json) = &oauth_state_json {
+                            if let Some(v) = get_oauth_field(json, storage, &field.key) {
+                                if !v.is_empty() {
+                                    values.insert(field.key.clone(), v.to_string());
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        let path = svc_token_dir.join(&field.key);
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let trimmed = content.trim().to_string();
+                            if !trimmed.is_empty() {
+                                values.insert(field.key.clone(), trimmed);
+                            }
+                        }
                     }
                 }
             }
@@ -334,19 +363,18 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
 }
 
 pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
+    is_service_configured_inner(speedwave_runtime::consts::data_dir(), project, service)
+}
+
+fn is_service_configured_inner(data_dir: &std::path::Path, project: &str, service: &str) -> bool {
     let svc_desc = match speedwave_runtime::consts::find_mcp_service(service) {
         Some(d) => d,
         None => return false,
     };
-    // Services with no auth fields have nothing to configure — they're
-    // always "configured" (e.g. Playwright scrapes public URLs).
     if svc_desc.auth_fields.is_empty() {
         return true;
     }
-    let svc_token_dir = speedwave_runtime::consts::data_dir()
-        .join("tokens")
-        .join(project)
-        .join(service);
+    let svc_token_dir = data_dir.join("tokens").join(project).join(service);
 
     let has_config_fields = svc_desc.auth_fields.iter().any(|f| f.stored_in_config_json);
     let config_json = if has_config_fields {
@@ -355,12 +383,11 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         serde_json::json!({})
     };
 
-    // ADR-060: any service whose descriptor declares `oauth_state_fields` keeps
-    // those fields in `oauth/<project>/<service>.json` (off-mount). Today only
-    // SharePoint, but `svc_desc.oauth_state_fields.is_some()` is the SSOT so
-    // future OAuth-using services need no code change here.
     let oauth_state_json: Option<serde_json::Value> = if svc_desc.oauth_state_fields.is_some() {
-        let path = speedwave_runtime::plugin::oauth_state_file(project, service);
+        let path = data_dir
+            .join(speedwave_runtime::consts::OAUTH_SUBDIR)
+            .join(project)
+            .join(format!("{}.json", service));
         std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -368,7 +395,6 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         None
     };
 
-    // Skip optional fields (e.g. Redmine project_id)
     svc_desc
         .auth_fields
         .iter()
@@ -400,7 +426,19 @@ fn snake_to_oauth_json_key(key: &str) -> &str {
         "client_id" => "clientId",
         "tenant_id" => "tenantId",
         "refresh_token" => "refreshToken",
-        _ => key,
+        // Fallthrough catches descriptor-only keys (e.g. `scopes`) whose
+        // on-disk name already matches. A new snake_case provider key needs
+        // an explicit arm — otherwise it silently lands at the wrong path.
+        _ => {
+            debug_assert!(
+                !key.contains('_'),
+                "snake_to_oauth_json_key: unknown snake_case key '{key}' — add an arm",
+            );
+            if cfg!(not(debug_assertions)) && key.contains('_') {
+                log::warn!("snake_to_oauth_json_key: unknown snake_case key '{key}'");
+            }
+            key
+        }
     }
 }
 
@@ -410,73 +448,21 @@ fn get_oauth_field<'a>(
     key: &str,
 ) -> Option<&'a str> {
     use speedwave_runtime::consts::FieldStorage;
-    let prop = snake_to_oauth_json_key(key);
     let value = match storage {
-        FieldStorage::OAuthStateProviderData => json.get("providerData").and_then(|p| p.get(prop)),
-        FieldStorage::OAuthState => json.get(prop),
+        FieldStorage::OAuthStateProviderData => {
+            let prop = snake_to_oauth_json_key(key);
+            json.get("providerData").and_then(|p| p.get(prop))
+        }
+        FieldStorage::OAuthState => json.get(snake_to_oauth_json_key(key)),
         _ => return None,
     };
     value.and_then(|v| v.as_str())
 }
 
-/// Testable mirror of `is_service_configured` parameterised on `home`.
 #[cfg(test)]
 fn is_service_configured_with_home(home: &std::path::Path, project: &str, service: &str) -> bool {
-    let svc_desc = match speedwave_runtime::consts::find_mcp_service(service) {
-        Some(d) => d,
-        None => return false,
-    };
-    // Services with no auth fields have nothing to configure — they're
-    // always "configured" (e.g. Playwright scrapes public URLs).
-    if svc_desc.auth_fields.is_empty() {
-        return true;
-    }
     let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
-    let svc_token_dir = data_dir.join("tokens").join(project).join(service);
-
-    let has_config_fields = svc_desc.auth_fields.iter().any(|f| f.stored_in_config_json);
-    let config_json = if has_config_fields {
-        read_service_config(&svc_token_dir)
-    } else {
-        serde_json::json!({})
-    };
-
-    let oauth_state_json: Option<serde_json::Value> = if svc_desc.oauth_state_fields.is_some() {
-        let path = data_dir
-            .join(speedwave_runtime::consts::OAUTH_SUBDIR)
-            .join(project)
-            .join(format!("{}.json", service));
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-    } else {
-        None
-    };
-
-    // Skip optional fields (e.g. Redmine project_id)
-    svc_desc
-        .auth_fields
-        .iter()
-        .filter(|f| !f.optional)
-        .all(|f| match f.storage {
-            speedwave_runtime::consts::FieldStorage::OAuthState
-            | speedwave_runtime::consts::FieldStorage::OAuthStateProviderData => oauth_state_json
-                .as_ref()
-                .and_then(|j| get_oauth_field(j, f.storage, f.key))
-                .map(|s| !s.is_empty())
-                .unwrap_or(false),
-            speedwave_runtime::consts::FieldStorage::WorkerMountedConfig => config_json
-                .get(f.key)
-                .and_then(|v| v.as_str())
-                .map(|s| !s.is_empty())
-                .unwrap_or(false),
-            speedwave_runtime::consts::FieldStorage::WorkerMountedToken => {
-                let path = svc_token_dir.join(f.key);
-                std::fs::metadata(&path)
-                    .map(|m| m.len() > 0)
-                    .unwrap_or(false)
-            }
-        })
+    is_service_configured_inner(&data_dir, project, service)
 }
 
 #[tauri::command]

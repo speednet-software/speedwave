@@ -180,6 +180,28 @@ describe('oauth-state', () => {
       });
       await expect(loadOAuthState(dir, 'badsc')).rejects.toThrow(/`scopes`/);
     });
+
+    it('throws when grantedScopes is missing', async () => {
+      const { grantedScopes: _g, ...rest } = sample;
+      await writeFile(join(dir, 'nogs.json'), JSON.stringify(rest), { mode: 0o600 });
+      await expect(loadOAuthState(dir, 'nogs')).rejects.toThrow(/`grantedScopes`/);
+    });
+
+    it('throws when grantedScopes is not an array', async () => {
+      await writeFile(
+        join(dir, 'gsstr.json'),
+        JSON.stringify({ ...sample, grantedScopes: 'offline_access' }),
+        { mode: 0o600 }
+      );
+      await expect(loadOAuthState(dir, 'gsstr')).rejects.toThrow(/`grantedScopes`/);
+    });
+
+    it('throws when grantedScopes contains a non-string', async () => {
+      await writeFile(join(dir, 'gsint.json'), JSON.stringify({ ...sample, grantedScopes: [42] }), {
+        mode: 0o600,
+      });
+      await expect(loadOAuthState(dir, 'gsint')).rejects.toThrow(/`grantedScopes`/);
+    });
   });
 
   describe('saveOAuthState', () => {

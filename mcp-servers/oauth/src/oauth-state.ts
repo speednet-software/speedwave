@@ -127,16 +127,8 @@ export async function saveOAuthState(
 }
 
 /**
- * Load the bearer-map (one bearer per consumer service id).
- * Returns an empty map if the file does not exist (no consumers configured yet).
- * @param stateDir - the per-project state dir
- */
-/**
- * Defense-in-depth slug regex matching the Rust SSOT `plugin::validate_manifest`
- * (and `oauth_process::is_valid_service_slug`). A bearer-map entry whose
- * `service` value doesn't match would otherwise let `loadOAuthState` and
- * `accessTokenPathFor` escape the per-project tokens dir (ADR-060 §"Per-service
- * bearer", security audit P0-1).
+ * Slug regex mirroring `plugin::validate_manifest` — defense in depth against
+ * a bearer-map entry escaping the per-project tokens dir.
  */
 const SERVICE_SLUG_RE = /^[a-z][a-z0-9-]{0,63}$/;
 

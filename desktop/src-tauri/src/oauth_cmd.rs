@@ -137,6 +137,25 @@ fn save_oauth_state(
     Ok(())
 }
 
+/// Keeps the AADSTS trace code; drops free text (ADR-060 live-compromise).
+/// Mirror of `redactErrorDescription` in `mcp-servers/oauth/src/providers/microsoft.ts`.
+fn redact_ms_error_description(raw: &str) -> String {
+    if raw.is_empty() {
+        return "no description".to_string();
+    }
+    let bytes = raw.as_bytes();
+    if let Some(start) = raw.find("AADSTS") {
+        let mut end = start + "AADSTS".len();
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > start + "AADSTS".len() {
+            return raw[start..end].to_string();
+        }
+    }
+    "redacted".to_string()
+}
+
 fn iso8601_from_unix_ms(unix_ms: u64) -> String {
     let secs = (unix_ms / 1000) as i64;
     let ms = (unix_ms % 1000) as u32;
@@ -196,7 +215,9 @@ pub async fn start_sharepoint_oauth(
         .append_pair("scope", scopes)
         .finish();
 
-    let http_client = reqwest::Client::new();
+    let http_client = crate::http_util::build_hardened_client(None).inspect_err(|_| {
+        FLOW_STATE.clear_if_current(&request_id);
+    })?;
     let resp = http_client
         .post(&devicecode_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -210,10 +231,11 @@ pub async fn start_sharepoint_oauth(
         })?;
 
     let status = resp.status();
-    let body_bytes = resp.bytes().await.map_err(|e| {
-        FLOW_STATE.clear_if_current(&request_id);
-        format!("Failed to read device code response: {e}")
-    })?;
+    let body_bytes = crate::http_util::read_body_limited(resp, "device code")
+        .await
+        .inspect_err(|_| {
+            FLOW_STATE.clear_if_current(&request_id);
+        })?;
 
     if !status.is_success() {
         let preview = String::from_utf8_lossy(&body_bytes);
@@ -307,14 +329,14 @@ pub async fn start_sharepoint_oauth(
             match resp {
                 Ok(r) => {
                     let status = r.status();
-                    let body_bytes = match r.bytes().await {
+                    let body_bytes = match crate::http_util::read_body_limited(r, "token").await {
                         Ok(b) => b,
                         Err(e) => {
                             oauth_flow::emit_progress(
                                 &poll_app,
                                 &FLOW_STATE,
                                 "error",
-                                &format!("Failed to read response: {e}"),
+                                &e,
                                 &poll_request_id,
                             );
                             FLOW_STATE.clear_if_current(&poll_request_id);
@@ -388,8 +410,11 @@ pub async fn start_sharepoint_oauth(
                                 return;
                             }
                             other => {
-                                let msg =
-                                    err.error_description.unwrap_or_else(|| other.to_string());
+                                let msg = err
+                                    .error_description
+                                    .as_deref()
+                                    .map(redact_ms_error_description)
+                                    .unwrap_or_else(|| other.to_string());
                                 oauth_flow::emit_progress(
                                     &poll_app,
                                     &FLOW_STATE,
@@ -604,6 +629,31 @@ mod tests {
         let json = r#"{"error": "bad_verification_code", "error_description": "Bad code"}"#;
         let resp: MsTokenErrorResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.error, "bad_verification_code");
+    }
+
+    // -- redact_ms_error_description --
+
+    #[test]
+    fn redact_keeps_aadsts_code_and_drops_free_text() {
+        let raw = "AADSTS50158: External challenge; UPN=alice@contoso.com; tenant=11111111-2222-3333-4444-555555555555; policy=\"Require Compliant Device\"";
+        let out = redact_ms_error_description(raw);
+        assert_eq!(out, "AADSTS50158");
+        assert!(!out.contains("alice@contoso.com"));
+        assert!(!out.contains("contoso"));
+        assert!(!out.contains("Require Compliant Device"));
+    }
+
+    #[test]
+    fn redact_returns_placeholder_for_non_aadsts() {
+        assert_eq!(
+            redact_ms_error_description("unexpected free-form leak"),
+            "redacted"
+        );
+    }
+
+    #[test]
+    fn redact_returns_no_description_for_empty() {
+        assert_eq!(redact_ms_error_description(""), "no description");
     }
 
     // -- save_oauth_state (ADR-060 split) --
