@@ -32,7 +32,7 @@ if [ "$is_read" -eq 1 ]; then
             exit 1
             ;;
         image/png|"")
-            if [ -s "$CLIP_FILE" ]; then exec cat "$CLIP_FILE"; fi
+            if [ -s "$CLIP_FILE" ]; then exec cat -- "$CLIP_FILE"; fi
             echo "osc52-copy: no image in host clipboard ($CLIP_FILE)" >&2
             exit 1
             ;;

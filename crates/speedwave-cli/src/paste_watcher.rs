@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use arboard::Clipboard;
 use image::{ColorType, ImageEncoder};
+use speedwave_runtime::consts::DATA_DIR;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -18,9 +19,9 @@ use std::time::Duration;
 
 const POLL_MS: u64 = 250;
 
-/// Returns the target clip path under `project_dir`.
+/// `<project>/<DATA_DIR>/pastes/clip.png` — composed from SSOT.
 pub fn clip_path(project_dir: &Path) -> PathBuf {
-    project_dir.join(".speedwave/pastes/clip.png")
+    project_dir.join(DATA_DIR).join("pastes").join("clip.png")
 }
 
 /// Owned watcher handle — drop or call `stop()` to terminate.

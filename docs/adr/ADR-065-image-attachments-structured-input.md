@@ -136,16 +136,24 @@ across model versions is unstable enough (some snapshot images as
 dedicated host-side image store is future work; surfacing a placeholder
 keeps v1 honest about the data we have.
 
-### 7. v1 = Desktop only; CLI = future spike
+### 7. CLI parity via host watcher + `xclip` read shim
 
-The CLI variant (`speedwave run`) launches Claude Code's TUI directly in
-the container — there is no Angular composer to attach to. A host-side
-clipboard watcher writing into a `:ro` mount would let the user paste
-images into the TUI via filename, but choosing a polling vs event-driven
-backend that works on both macOS (NSPasteboard) and Windows
-(`AddClipboardFormatListener`) without an unmaintained dependency
-requires a real spike. The CLI path is deferred to a separate issue and
-PR.
+`speedwave run` spawns `paste_watcher::PasteWatcher` (host-side, `arboard`
+polling 250 ms) which writes `<project>/.speedwave/pastes/clip.png` (chmod
+0600). Inside the container, `containers/osc52-copy.sh` — symlinked as
+`xclip`/`xsel`/`wl-copy`/`wl-paste`/`pbcopy`/`clip.exe` — serves that file
+on `-o`/`--out`/`--paste` reads so Claude Code TUI's own paste path
+(`xclip -t image/png -o`) gets the bytes without changing claude.
+
+`arboard` works cross-platform (macOS NSPasteboard, Windows OpenClipboard,
+no event-driven backend needed); polling cost is negligible because
+arboard short-circuits when the clipboard hasn't changed. The watcher
+quits when `speedwave run` exits, so it's scoped to the user's session.
+
+`SPEEDWAVE_CLIP_FILE` env var overrides the read-side path inside the
+container (defaults to `/workspace/.speedwave/pastes/clip.png`) — used by
+the bats test suite, surfaced here as a documented escape hatch for
+operators debugging the read shim.
 
 ## Consequences
 

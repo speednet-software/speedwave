@@ -3,12 +3,14 @@
 
 use serde::Serialize;
 use speedwave_runtime::config;
-#[cfg(test)]
-use std::path::Path;
-use std::path::PathBuf;
+use speedwave_runtime::consts::DATA_DIR;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) const PASTES_SUBDIR: &str = ".speedwave/pastes";
+/// `<project>/<DATA_DIR>/pastes` — composed from SSOT so a rename of the
+/// data-dir literal stays in sync without a separate alignment entry.
+pub(crate) static PASTES_SUBDIR: LazyLock<String> = LazyLock::new(|| format!("{DATA_DIR}/pastes"));
 
 /// Defence-in-depth host-side cap. Renderer enforces a stricter 3 MB cap
 /// post-resample (`MAX_IMAGE_BYTES`); this catches a malicious renderer or
@@ -67,6 +69,19 @@ pub async fn save_pasted_image(
 }
 
 fn save_blocking(project: &str, media_type: &str, bytes: &[u8]) -> Result<SavedPaste, String> {
+    let project_dir = resolve_project_dir(project)?;
+    let saved = save_to_dir(&project_dir, media_type, bytes)?;
+    log::info!(
+        "save_pasted_image: project={project}, host={}, container={}, bytes={}",
+        saved.host_path,
+        saved.container_path,
+        bytes.len()
+    );
+    Ok(saved)
+}
+
+/// Shared write path used by `save_blocking` (prod) and `save_blocking_at` (tests).
+fn save_to_dir(project_dir: &Path, media_type: &str, bytes: &[u8]) -> Result<SavedPaste, String> {
     let extension =
         extension_for(media_type).ok_or_else(|| format!("unsupported media type: {media_type}"))?;
     if bytes.len() > MAX_PASTE_BYTES {
@@ -78,8 +93,8 @@ fn save_blocking(project: &str, media_type: &str, bytes: &[u8]) -> Result<SavedP
     }
     validate_magic(media_type, bytes)?;
 
-    let project_dir = resolve_project_dir(project)?;
-    let pastes_dir = project_dir.join(PASTES_SUBDIR);
+    let subdir = PASTES_SUBDIR.as_str();
+    let pastes_dir = project_dir.join(subdir);
     std::fs::create_dir_all(&pastes_dir)
         .map_err(|e| format!("failed to create {}: {e}", pastes_dir.display()))?;
 
@@ -89,14 +104,7 @@ fn save_blocking(project: &str, media_type: &str, bytes: &[u8]) -> Result<SavedP
         .map_err(|e| format!("failed to write {}: {e}", host_path.display()))?;
     crate::fs_perms::set_owner_only(&host_path)?;
 
-    let container_path = format!("/workspace/{}/{}", PASTES_SUBDIR, filename);
-
-    log::info!(
-        "save_pasted_image: project={project}, host={}, container={container_path}, bytes={}",
-        host_path.display(),
-        bytes.len()
-    );
-
+    let container_path = format!("/workspace/{subdir}/{filename}");
     Ok(SavedPaste {
         container_path,
         host_path: host_path.to_string_lossy().to_string(),
@@ -165,8 +173,9 @@ mod tests {
     }
 
     #[test]
-    fn save_blocking_rejects_unknown_mime() {
-        let err = save_blocking("any-project", "application/octet-stream", b"\0\0\0").unwrap_err();
+    fn save_to_dir_rejects_unknown_mime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = save_to_dir(tmp.path(), "application/octet-stream", b"\0\0\0").unwrap_err();
         assert!(err.contains("unsupported media type"));
     }
 
@@ -195,11 +204,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path().join("fresh-project");
         std::fs::create_dir_all(&project_dir).unwrap();
-        assert!(!project_dir.join(PASTES_SUBDIR).exists());
+        assert!(!project_dir.join(PASTES_SUBDIR.as_str()).exists());
 
         save_blocking_at(&project_dir, "image/jpeg", JPEG_MAGIC).unwrap();
 
-        assert!(project_dir.join(PASTES_SUBDIR).is_dir());
+        assert!(project_dir.join(PASTES_SUBDIR.as_str()).is_dir());
     }
 
     #[test]
@@ -251,22 +260,5 @@ fn save_blocking_at(
     media_type: &str,
     bytes: &[u8],
 ) -> Result<SavedPaste, String> {
-    let extension =
-        extension_for(media_type).ok_or_else(|| format!("unsupported media type: {media_type}"))?;
-    if bytes.len() > MAX_PASTE_BYTES {
-        return Err(format!("paste too large: {} bytes", bytes.len()));
-    }
-    validate_magic(media_type, bytes)?;
-    let pastes_dir = project_dir.join(PASTES_SUBDIR);
-    std::fs::create_dir_all(&pastes_dir).map_err(|e| e.to_string())?;
-    let filename = generate_filename(extension);
-    let host_path = pastes_dir.join(&filename);
-    std::fs::write(&host_path, bytes).map_err(|e| e.to_string())?;
-    crate::fs_perms::set_owner_only(&host_path)?;
-    let container_path = format!("/workspace/{}/{}", PASTES_SUBDIR, filename);
-    Ok(SavedPaste {
-        container_path,
-        host_path: host_path.to_string_lossy().to_string(),
-        filename,
-    })
+    save_to_dir(project_dir, media_type, bytes)
 }

@@ -67,6 +67,12 @@ export class ImagePreprocessorService {
     const mediaType = file.type as SupportedMediaType;
 
     if (file.type === 'image/gif') {
+      // GIFs are not resampled (would lose animation). Size guard before
+      // hitting the host-side `MAX_PASTE_BYTES` so the user sees
+      // ERROR_TOO_LARGE instead of a raw backend error.
+      if (file.size > MAX_IMAGE_BYTES) {
+        throw new Error(ERROR_TOO_LARGE);
+      }
       return this.persist(file, mediaType, project, file.size, undefined);
     }
 
@@ -79,7 +85,9 @@ export class ImagePreprocessorService {
 
     const targetLongEdge = Math.min(longEdge, MAX_DIMENSION);
     let blob = await this.resample(file, dims, targetLongEdge);
-    if (blob.size > MAX_IMAGE_BYTES) {
+    if (blob.size > MAX_IMAGE_BYTES && targetLongEdge !== NATIVE_LONG_EDGE.sonnet) {
+      // Second attempt only helps when the first pass used a larger edge
+      // (Opus → 2576 → 1568). Sonnet/Haiku already hit 1568 on attempt 1.
       blob = await this.resample(file, dims, NATIVE_LONG_EDGE.sonnet);
     }
     if (blob.size > MAX_IMAGE_BYTES) {

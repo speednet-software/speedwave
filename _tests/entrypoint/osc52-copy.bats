@@ -172,6 +172,16 @@ teardown() {
     [ "$output" = "PNG" ]
 }
 
+@test "cat uses -- delimiter so dash-prefixed CLIP_FILE is not parsed as option" {
+    # Adversarial CLIP_FILE override: filename starts with `-`. Without
+    # `cat -- "$file"` this would be interpreted as an unknown cat option.
+    local f="$TMP_HOME/-rfile"
+    printf 'OK' > "$f"
+    run bash -c "SPEEDWAVE_CLIP_FILE='$f' bash '$OSC52' -t image/png -o"
+    [ "$status" -eq 0 ]
+    [ "$output" = "OK" ]
+}
+
 # ── Security ────────────────────────────────────────────────────────────────
 
 @test "script has no curl, wget, secrets, or anthropic touchpoints" {

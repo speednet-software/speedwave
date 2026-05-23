@@ -1497,6 +1497,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'error':
         out.push({ type: 'error', content: b.content });
         break;
+      case 'image':
+        out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
+        break;
     }
   }
   return out;
@@ -1550,11 +1553,11 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
       case 'error':
         out.push({ kind: 'error', content: b.content });
         break;
+      case 'image':
+        out.push({ kind: 'image', media_type: b.media_type, alt: b.alt ?? null });
+        break;
       case 'permission_prompt':
-        // Permission prompts are not part of the patch state-tree shape;
-        // they're an in-flight UI affordance not persisted as conversation.
-        // Skipping is consistent with how the backend never emits them as
-        // state — they're surfaced via control-request channel.
+        // In-flight UI affordance; never persisted to the state-tree.
         break;
     }
   }

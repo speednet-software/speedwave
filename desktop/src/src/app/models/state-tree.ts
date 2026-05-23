@@ -94,7 +94,8 @@ export type MessageBlockState =
       current_index: number;
       answers: ReadonlyArray<string | null>;
     }
-  | { kind: 'error'; content: string };
+  | { kind: 'error'; content: string }
+  | { kind: 'image'; media_type: string; alt: string | null };
 
 /** One entry in the conversation — user or assistant. */
 export interface ConversationEntryState {
