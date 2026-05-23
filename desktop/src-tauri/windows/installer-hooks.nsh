@@ -35,7 +35,7 @@ Var SpeedwaveDataDirOverride
 ;     (C:\Users\O'Brien\…) would open an unclosed string literal and
 ;     cause pwsh to exit 1 silently. Env var keeps the path opaque to
 ;     the parser. Empirically verified on pwsh 7.6.2.
-;   * The sweep itself is materialized to $PLUGINSDIR\sweep.ps1 and
+;   * The sweep itself is materialized to $PLUGINSDIR\speedwave-sweep.ps1 and
 ;     invoked with `powershell.exe -File` — eliminates -Command
 ;     quoting fragility entirely. NSIS auto-deletes $PLUGINSDIR
 ;     after the install completes.
