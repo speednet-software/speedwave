@@ -8,6 +8,9 @@
  * `tenantId`).
  */
 
+/** SSOT — widen this union when adding an IdP. */
+export type ProviderId = 'microsoft';
+
 /** Inputs for an OAuth refresh round-trip. */
 export interface RefreshRequest {
   /** Long-lived refresh token issued by the IdP. */
@@ -42,16 +45,8 @@ export type RefreshResult =
 
 /** One IdP implementation registered in the provider registry. */
 export interface OAuthProvider {
-  /** Stable id stored in `OAuthState.provider`. */
-  readonly id: string;
-  /** User-facing IdP name for audit log + error messages. */
-  readonly displayName: string;
-  /**
-   * Keys of {@link RefreshRequest.providerData} the implementation requires.
-   * The dispatcher validates presence + non-empty string PRIOR to calling
-   * `refresh()` so a missing field surfaces as `missing_field` with an audit
-   * entry rather than as an `URLSearchParams`-shaped HTTP error.
-   */
+  readonly id: ProviderId;
+  /** Required keys of `providerData`; dispatcher validates pre-call. */
   readonly requiredFields: readonly string[];
   refresh(req: RefreshRequest): Promise<RefreshResult>;
 }

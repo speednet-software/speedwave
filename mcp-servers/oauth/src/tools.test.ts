@@ -34,10 +34,8 @@ describe('oauth tools', () => {
     lastRefreshAt: new Date(0).toISOString(),
   };
 
-  /** Spy provider used to assert dispatcher behavior without hitting Microsoft. */
   const microsoftSpy: OAuthProvider = {
     id: 'microsoft',
-    displayName: 'Microsoft (spy)',
     requiredFields: ['clientId', 'tenantId'],
     refresh: async (req: RefreshRequest): Promise<RefreshResult> => {
       refreshCalls.push({ ...req, providerData: { ...req.providerData } });
@@ -84,7 +82,10 @@ describe('oauth tools', () => {
     await rm(tokensBase, { recursive: true, force: true });
   });
 
-  async function seedState(state: OAuthState, service = 'sharepoint'): Promise<void> {
+  async function seedState(
+    state: OAuthState | Record<string, unknown>,
+    service = 'sharepoint'
+  ): Promise<void> {
     const path = join(stateDir, `${service}.json`);
     await writeFile(path, JSON.stringify(state), { mode: 0o600 });
     await chmod(path, 0o600);

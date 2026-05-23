@@ -59,7 +59,7 @@ The existing SharePoint flow is device code (`desktop/src-tauri/src/oauth_cmd.rs
 
 - `SharepointTokenMountMode` rule and the `:rw` exception are removed in PR3. The token-mount invariant ("`/tokens` is `:ro` everywhere") is restored systemically rather than by convention.
 - `client_id` and `tenant_id` are no longer mounted into the SharePoint container.
-- Future OAuth integrations (Google Workspace, Atlassian Cloud, etc.) reuse the same shape: register a provider module under `mcp-servers/oauth/src/providers/<provider>.ts`, declare the service in the oauth descriptor, compose injects `WORKER_OAUTH_URL` + per-service bearer. No new `:rw` exception per provider.
+- Future OAuth integrations (Google Workspace, Atlassian Cloud, etc.) reuse the same shape: widen the `ProviderId` discriminated union in `mcp-servers/oauth/src/providers/types.ts`, register a provider module under `providers/<id>.ts` with its own `requiredFields` list, declare the service in the oauth descriptor, compose injects `WORKER_OAUTH_URL` + per-service bearer. IdP-specific identity nests under `providerData` in oauth.json (driven by `FieldStorage::OAuthStateProviderData` in `consts.rs`). No new `:rw` exception per provider; no Rust edits to add a new provider's identity field — just one descriptor entry.
 
 ### Negative
 
@@ -81,6 +81,24 @@ The existing SharePoint flow is device code (`desktop/src-tauri/src/oauth_cmd.rs
 - Spawn lifecycle: spawned by Tauri (`desktop/src-tauri/src/main.rs`) and CLI (`crates/speedwave-cli/src/run.rs`) on project switch / `compose_up` when at least one OAuth-using service is enabled in the project.
 - `oauth.json` schema: `{ provider, providerData: { /* IdP-specific keys */ }, scopes, grantedScopes, refreshToken, expiresAt, lastRefreshAt }`. For Microsoft, `providerData` holds `{ clientId, tenantId }`. The dispatcher (`mcp-servers/oauth/src/tools.ts`) reads `provider` from this file and routes the refresh through `providers/registry.ts` — adding a new IdP is one new file under `providers/<id>.ts` plus one entry in the registry. Written atomically via `writeRestrictedSecret` from PR1.
 - Audit log: `~/.speedwave/oauth/<project>/audit.log`, append-only, mode 0o600. Entries: ISO-8601 timestamp, project, service, action (`refresh` | `forget`), outcome (`ok` | `error:<code>`). No token contents in the log. Rotated to `audit.log.1` past ~1 MiB; one historical copy retained.
+
+### Audit log error codes (post-OAuthProvider refactor)
+
+The dispatcher emits the following `error:<code>` values into `audit.log`. Operators and `speedwave check` use them as stable strings — renaming requires a deprecation pass.
+
+| Code               | Surface                                                | Meaning                                                                                                                                                                                                         |
+| ------------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `malformed_state`  | `loadOAuthState` threw (post-OAuthProvider validation) | The on-disk `oauth/<project>/<service>.json` does not match the documented shape: not an object, missing `provider`, `providerData` not a plain object, non-string `refreshToken` / `expiresAt`, etc.           |
+| `no_state`         | File absent                                            | No oauth.json on disk for the caller's service — initial flow never completed or `forget` ran.                                                                                                                  |
+| `unknown_provider` | `getProvider` returned `undefined`                     | The stored `provider` id is not in `providers/registry.ts`. Indicates a downgraded build or a hand-edited file. Same fix as `malformed_state`: re-authorize.                                                    |
+| `missing_field`    | Pre-call validation against `provider.requiredFields`  | A field the IdP requires (Microsoft: `clientId` / `tenantId`) is missing or empty in `providerData`. Surfaces before the HTTP call so a misshapen request never reaches the IdP.                                |
+| `rate_limited`     | `refresh` called while access token still valid        | Defense against refresh-in-a-loop after worker compromise. See the live-compromise row of the threat-model table.                                                                                               |
+| `scope_mismatch`   | Microsoft 200 with strict subset of granted scopes     | The user granted fewer scopes than requested OR consent was withdrawn at the IdP. UI surfaces the re-authorize banner.                                                                                          |
+| `invalid_grant`    | Microsoft 400 / `invalid_grant` without scope wording  | Refresh token revoked or expired. Same UI as `scope_mismatch` — re-authorize.                                                                                                                                   |
+| `http`             | Any other non-2xx Microsoft response                   | Includes 5xx, throttling, and unknown error codes. Free-text `error_description` is redacted to its `AADSTSnnnnn` trace prefix to avoid leaking UPN / tenant / Conditional Access policy names post-compromise. |
+| `network`          | `fetch` rejected (DNS, TCP, TLS, timeout abort)        | No HTTP response was received. Includes the 30s timeout firing on a hung Microsoft endpoint.                                                                                                                    |
+| `malformed`        | Response was not valid JSON or required fields missing | Indicates either a network mid-stream truncation or an upstream incident. Transient retry-by-rate-limit is appropriate.                                                                                         |
+| `unlink_failed`    | `forget` couldn't delete state / access-token file     | EPERM / EBUSY when removing `oauth/<project>/<service>.json` or the worker-mounted access-token file. The tool now returns an error to the caller instead of falsely reporting `forgotten`.                     |
 
 ## References
 

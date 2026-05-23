@@ -1,20 +1,6 @@
-//! Best-effort cleanup of legacy v1 SharePoint secrets that, post-ADR-060,
-//! must not live in `tokens/<project>/sharepoint/` (which is `:ro`-mounted into
-//! the worker container). Runs at startup. Idempotent.
-//!
-//! Pre-ADR-060 layout left `refresh_token`, `client_id`, `tenant_id` in the
-//! worker-mounted token dir; ADR-060 moved them to `oauth/<project>/<service>.json`.
-//! After dropping data migration from v1 → v2 (post-OAuthProvider refactor),
-//! we still must remove these files so a v1 user does not ship long-lived
-//! secrets into the SharePoint worker. Users without `oauth/<project>/sharepoint.json`
-//! see the "Re-authorize SharePoint" banner and re-grant; this module's job
-//! is purely the sanitation.
-//!
-//! Files cleaned (SharePoint only — the only v1 OAuth integration):
-//!   tokens/<project>/sharepoint/{refresh_token, client_id, tenant_id}
-//!
-//! Files preserved: `access_token`, `site_id`, `base_path`, and any other
-//! worker-mounted state in the same dir.
+//! Startup sanitation of v1 SharePoint secrets (refresh_token / client_id /
+//! tenant_id) left over in the worker-mounted token dir. ADR-060 moved them
+//! off-mount; this module deletes the stragglers. Best-effort, idempotent.
 
 use std::path::Path;
 
@@ -51,7 +37,17 @@ fn run_with_data_dir(data_dir: &Path) -> usize {
         }
     };
     let mut cleaned = 0usize;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!(
+                    "legacy_token_cleanup: skipping unreadable entry under {}: {e}",
+                    tokens_root.display()
+                );
+                continue;
+            }
+        };
         let project_path = entry.path();
         if !project_path.is_dir() {
             continue;
@@ -241,6 +237,29 @@ mod tests {
 
         // Restore writable perms so tempdir cleanup can recurse.
         std::fs::set_permissions(&sp_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    // macOS APFS rejects non-UTF-8 names at mkdir (`EILSEQ`); Linux-only.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn skips_project_dir_with_non_utf8_name() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = make_tmp_data_dir();
+        let data_dir = tmp.path();
+        let tokens_root = data_dir.join("tokens");
+        std::fs::create_dir_all(&tokens_root).unwrap();
+
+        let bad_dir = tokens_root.join(OsStr::from_bytes(&[0xff, b'x']));
+        std::fs::create_dir(&bad_dir).unwrap();
+        let ok_sp = tokens_root.join("good").join("sharepoint");
+        std::fs::create_dir_all(&ok_sp).unwrap();
+        write(&ok_sp.join("refresh_token"), "rt");
+
+        let n = run_with_data_dir(data_dir);
+        assert_eq!(n, 1, "non-UTF-8 dir skipped, normal project still cleaned");
+        assert!(!ok_sp.join("refresh_token").exists());
     }
 
     #[test]

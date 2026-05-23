@@ -15,10 +15,11 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeRestrictedSecret } from '@speedwave/mcp-shared';
+import type { ProviderId } from './providers/types.js';
 
 /** Per-service OAuth state on disk. See ADR-060 for field semantics. */
 export interface OAuthState {
-  provider: string;
+  provider: ProviderId;
   providerData: Record<string, string>;
   scopes: string[];
   grantedScopes: string[];
@@ -60,12 +61,10 @@ export async function loadOAuthState(
 }
 
 /**
- * Structural validation for {@link OAuthState}. Throws on any deviation from
- * the documented shape. Extracted so corruption surfaces uniformly through
- * `loadOAuthState`.
+ * Structural-only validation; provider id semantics are the dispatcher's job.
  * @param value - parsed JSON to validate
  */
-function assertOAuthState(value: unknown): OAuthState {
+export function assertOAuthState(value: unknown): OAuthState {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('oauth state must be a JSON object');
   }
@@ -85,12 +84,35 @@ function assertOAuthState(value: unknown): OAuthState {
       throw new Error(`oauth state: providerData['${k}'] must be a string`);
     }
   }
-  return obj as unknown as OAuthState;
+  if (typeof obj.refreshToken !== 'string' || !obj.refreshToken) {
+    throw new Error('oauth state: `refreshToken` must be a non-empty string');
+  }
+  if (typeof obj.expiresAt !== 'string' || Number.isNaN(Date.parse(obj.expiresAt))) {
+    throw new Error('oauth state: `expiresAt` must be an ISO-8601 string');
+  }
+  if (typeof obj.lastRefreshAt !== 'string' || Number.isNaN(Date.parse(obj.lastRefreshAt))) {
+    throw new Error('oauth state: `lastRefreshAt` must be an ISO-8601 string');
+  }
+  if (!Array.isArray(obj.scopes) || !obj.scopes.every((s) => typeof s === 'string')) {
+    throw new Error('oauth state: `scopes` must be an array of strings');
+  }
+  if (!Array.isArray(obj.grantedScopes) || !obj.grantedScopes.every((s) => typeof s === 'string')) {
+    throw new Error('oauth state: `grantedScopes` must be an array of strings');
+  }
+  return {
+    provider: obj.provider as ProviderId,
+    providerData: obj.providerData as Record<string, string>,
+    scopes: obj.scopes as string[],
+    grantedScopes: obj.grantedScopes as string[],
+    refreshToken: obj.refreshToken,
+    expiresAt: obj.expiresAt,
+    lastRefreshAt: obj.lastRefreshAt,
+  };
 }
 
 /**
- * Write OAuth state atomically with mode 0o600. Parent dir must be owner-only.
- * @param stateDir - the per-project state dir
+ * Atomic 0o600 write; validates the shape first.
+ * @param stateDir - per-project state dir
  * @param service - service id
  * @param state - state to persist
  */
@@ -99,8 +121,9 @@ export async function saveOAuthState(
   service: string,
   state: OAuthState
 ): Promise<void> {
+  const validated = assertOAuthState(state);
   const path = join(stateDir, `${service}.json`);
-  await writeRestrictedSecret(path, JSON.stringify(state, null, 2) + '\n');
+  await writeRestrictedSecret(path, JSON.stringify(validated, null, 2) + '\n');
 }
 
 /**

@@ -352,26 +352,17 @@ pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 // watchdog fires, otherwise the watchdog kills the process mid-stop.
 const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);
 
-/// Where an auth/credential field is physically stored on disk (plan §PR3:290-299).
-///
-/// Before ADR-060/PR3 every field lived in `~/.speedwave/tokens/<project>/<service>/`.
-/// PR3 split SharePoint's OAuth state off-mount so a SharePoint container compromise
-/// no longer leaks `refresh_token`. `FieldStorage` is the explicit per-field tag
-/// that drives `save_integration_credentials`, `is_service_configured`, and
-/// `delete_integration_credentials` instead of branching on `service == "sharepoint"`.
+/// Physical storage tier per auth field (ADR-060).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldStorage {
-    /// Individual file under `~/.speedwave/tokens/<project>/<service>/<key>`,
-    /// mounted as `/tokens/<key>` (read-only since ADR-060) into the worker
-    /// container.
+    /// `~/.speedwave/tokens/<project>/<service>/<key>`, :ro into worker.
     WorkerMountedToken,
-    /// Stored inside the per-service `config.json` (Redmine's `host_url`,
-    /// `project_id`), still mounted into the worker as part of `/tokens`.
+    /// Inside per-service `config.json`, :ro into worker.
     WorkerMountedConfig,
-    /// Stored in `~/.speedwave/oauth/<project>/<service>.json` (ADR-060) and
-    /// NEVER mounted into the worker container. Only the host-side `oauth`
-    /// worker reads it.
+    /// Top-level key in host-only `oauth/<project>/<service>.json`.
     OAuthState,
+    /// Nested under `providerData` in the same oauth.json.
+    OAuthStateProviderData,
 }
 
 /// Descriptor for a single auth/credential field of an MCP service.
@@ -421,6 +412,20 @@ pub struct McpAuthFieldDescriptor {
 pub const SHAREPOINT_OAUTH_SCOPES: &str = "https://graph.microsoft.com/Sites.Manage.All \
      https://graph.microsoft.com/Files.ReadWrite.All \
      https://graph.microsoft.com/User.Read offline_access";
+
+/// GitHub OAuth App client ID (public identifier — not a secret). Registered
+/// at <https://github.com/settings/developers> by Speednet. Device Flow is
+/// enabled on this app; the same client_id is shared across all Speedwave
+/// users (standard "public confidential client" pattern — same as `gh` CLI).
+pub const GITHUB_OAUTH_CLIENT_ID: &str = "Ov23lifyXPigAcJ0d4tK";
+
+/// GitHub OAuth scopes requested by Speedwave. Derived from the Octokit
+/// surface of the `mcp-github` worker (see `mcp-servers/github/src/client.ts`).
+/// `repo` covers private/public repo R/W including issues, pulls, releases,
+/// Actions; `read:user` is used by `testConnection()` (`GET /user`).
+/// Org/gist scopes intentionally NOT requested — the worker does not call
+/// those endpoints.
+pub const GITHUB_OAUTH_SCOPES: &str = "repo read:user";
 
 /// Descriptor for a toggleable MCP service.
 pub struct McpServiceDescriptor {
@@ -546,10 +551,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
-                // Application credentials (client_id, tenant_id) live in
-                // `oauth/<project>/sharepoint.json` together with the refresh
-                // token; only the host-side `oauth` worker reads them.
-                storage: FieldStorage::OAuthState,
+                storage: FieldStorage::OAuthStateProviderData,
                 hint: None,
             },
             McpAuthFieldDescriptor {
@@ -561,7 +563,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
-                storage: FieldStorage::OAuthState,
+                storage: FieldStorage::OAuthStateProviderData,
                 hint: None,
             },
             McpAuthFieldDescriptor {
@@ -715,17 +717,23 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         description: "Code hosting and CI/CD platform",
         auth_fields: &[McpAuthFieldDescriptor {
             key: "token",
-            label: "Personal Access Token (fine-grained)",
+            // Populated by the OAuth App device flow (`start_github_oauth`
+            // Tauri command); no manual entry. The UI shows a "Connect to
+            // GitHub" button instead of a text input because `oauth_flow: true`.
+            label: "GitHub Access Token",
             field_type: "password",
-            placeholder: "github_pat_...",
+            placeholder: "gho_...",
             is_secret: true,
             stored_in_config_json: false,
-            oauth_flow: false,
+            oauth_flow: true,
             optional: false,
             storage: FieldStorage::WorkerMountedToken,
             hint: None,
         }],
         credential_files: &["token"],
+        // GitHub OAuth App access tokens are long-lived (no `refresh_token`),
+        // so we keep oauth_state_fields = None and uses_oauth_refresh = false.
+        // Reconnect path (UI "Reconnect to GitHub") covers token revocation.
         oauth_state_fields: None,
         badge: None,
         egress_less: false,
@@ -1451,16 +1459,34 @@ mod tests {
                             svc.config_key, field.key
                         );
                     }
-                    FieldStorage::OAuthState => {
+                    FieldStorage::OAuthState | FieldStorage::OAuthStateProviderData => {
                         assert!(
                             in_oauth,
-                            "service '{}': field '{}' tagged OAuthState but missing from oauth_state_fields",
+                            "service '{}': field '{}' tagged OAuthState* but missing from oauth_state_fields",
                             svc.config_key, field.key
                         );
                     }
                 }
             }
         }
+    }
+
+    /// Pinned against TS `microsoftProvider.requiredFields`.
+    #[test]
+    fn microsoft_provider_data_fields_match_ts_required_fields() {
+        let sharepoint = find_mcp_service("sharepoint").expect("sharepoint descriptor exists");
+        let mut got: Vec<&str> = sharepoint
+            .auth_fields
+            .iter()
+            .filter(|f| f.storage == FieldStorage::OAuthStateProviderData)
+            .map(|f| f.key)
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            ["client_id", "tenant_id"],
+            "SharePoint providerData fields drifted from microsoftProvider.requiredFields"
+        );
     }
 
     #[test]
@@ -1536,12 +1562,22 @@ mod tests {
         assert_eq!(
             oauth_fields,
             vec!["access_token", "refresh_token"],
-            "only SharePoint's access_token and refresh_token should have oauth_flow=true"
+            "SharePoint's oauth_flow fields drifted from the device-code contract"
         );
 
-        // No other service should have oauth_flow fields
+        let github = find_mcp_service("github").unwrap();
+        let gh_oauth_fields: Vec<&str> = github
+            .auth_fields
+            .iter()
+            .filter(|f| f.oauth_flow)
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(gh_oauth_fields, vec!["token"]);
+
+        let oauth_services: std::collections::HashSet<&str> =
+            ["sharepoint", "github"].into_iter().collect();
         for svc in TOGGLEABLE_MCP_SERVICES {
-            if svc.config_key == "sharepoint" {
+            if oauth_services.contains(svc.config_key) {
                 continue;
             }
             for field in svc.auth_fields {

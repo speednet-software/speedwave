@@ -131,6 +131,55 @@ describe('oauth-state', () => {
       const result = await loadOAuthState(dir, 'pdempty');
       expect(result?.providerData).toEqual({});
     });
+
+    it('throws when providerData is entirely missing', async () => {
+      const { providerData: _pd, ...rest } = sample;
+      await writeFile(join(dir, 'nopd.json'), JSON.stringify(rest), { mode: 0o600 });
+      await expect(loadOAuthState(dir, 'nopd')).rejects.toThrow(
+        /`providerData` must be a plain object/
+      );
+    });
+
+    it('accepts an unknown provider id at the structural layer', async () => {
+      await writeFile(
+        join(dir, 'unknownprov.json'),
+        JSON.stringify({ ...sample, provider: 'totally-unknown' }),
+        { mode: 0o600 }
+      );
+      const result = await loadOAuthState(dir, 'unknownprov');
+      expect(result?.provider).toBe('totally-unknown');
+    });
+
+    it('throws when refreshToken is missing', async () => {
+      const { refreshToken: _rt, ...rest } = sample;
+      await writeFile(join(dir, 'nort.json'), JSON.stringify(rest), { mode: 0o600 });
+      await expect(loadOAuthState(dir, 'nort')).rejects.toThrow(/`refreshToken`/);
+    });
+
+    it('throws when expiresAt is not a valid ISO-8601 string', async () => {
+      await writeFile(
+        join(dir, 'badexp.json'),
+        JSON.stringify({ ...sample, expiresAt: 'not-a-date' }),
+        { mode: 0o600 }
+      );
+      await expect(loadOAuthState(dir, 'badexp')).rejects.toThrow(/`expiresAt`/);
+    });
+
+    it('throws when lastRefreshAt is not a valid ISO-8601 string', async () => {
+      await writeFile(
+        join(dir, 'badlast.json'),
+        JSON.stringify({ ...sample, lastRefreshAt: 'whenever' }),
+        { mode: 0o600 }
+      );
+      await expect(loadOAuthState(dir, 'badlast')).rejects.toThrow(/`lastRefreshAt`/);
+    });
+
+    it('throws when scopes is not an array of strings', async () => {
+      await writeFile(join(dir, 'badsc.json'), JSON.stringify({ ...sample, scopes: [42, 'x'] }), {
+        mode: 0o600,
+      });
+      await expect(loadOAuthState(dir, 'badsc')).rejects.toThrow(/`scopes`/);
+    });
   });
 
   describe('saveOAuthState', () => {
@@ -148,6 +197,12 @@ describe('oauth-state', () => {
       await saveOAuthState(dir, 'sharepoint', sample);
       const result = await loadOAuthState(dir, 'sharepoint');
       expect(result).toEqual(sample);
+    });
+
+    it('rejects a partially-formed state before writing to disk', async () => {
+      const broken = { ...sample, refreshToken: '' };
+      await expect(saveOAuthState(dir, 'sharepoint', broken)).rejects.toThrow(/`refreshToken`/);
+      await expect(loadOAuthState(dir, 'sharepoint')).resolves.toBeNull();
     });
   });
 

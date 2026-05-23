@@ -26,11 +26,14 @@ mod http_util;
 #[cfg(test)]
 mod installer_hooks;
 use bridges::ide_bridge;
+mod github_oauth_cmd;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
 mod oauth_cmd;
+mod oauth_flow;
 mod oauth_login_cmd;
+mod oauth_providers;
 mod paste_cmd;
 mod patch_emitter;
 // `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
@@ -2173,6 +2176,8 @@ fn main() {
             // OAuth
             oauth_cmd::start_sharepoint_oauth,
             oauth_cmd::cancel_sharepoint_oauth,
+            github_oauth_cmd::start_github_oauth,
+            github_oauth_cmd::cancel_github_oauth,
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,

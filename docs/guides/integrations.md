@@ -107,15 +107,29 @@ If the build fails (network, disk), the integration row reverts to disabled — 
 
 The GitHub integration is a built-in MCP worker that talks to **GitHub.com** through the official Octokit REST client. It is the GitHub-side counterpart to the GitLab worker — repositories, pull requests, branches, commits, GitHub Actions, issues, labels, tags, and releases.
 
-#### Authentication — fine-grained Personal Access Token
+#### Authentication — OAuth App device flow
 
-GitHub uses a single credential: a **fine-grained Personal Access Token**. Create one in GitHub under **Settings → Developer settings → Fine-grained tokens → Generate new token**, then scope it to exactly the repositories you want Claude to reach (or "All repositories" if you trust the worker with your whole account — not recommended). Paste the `github_pat_...` value into the GitHub integration's `token` field in the Desktop app; it is stored at `~/.speedwave/tokens/<project>/github/token` with `0o600` permissions and mounted read-only into the worker.
+The Desktop app authorizes GitHub via the **Speedwave GitHub OAuth App** (registered by Speednet on github.com) using the **device flow** — the same UX as `gh auth login`:
 
-Classic (`ghp_...`) tokens also work, but fine-grained tokens are strongly preferred because they let you grant the minimum permission per repository.
+1. Click **Sign in with GitHub** on the integration card.
+2. The Desktop app shows a short user code (e.g. `ABCD-1234`) and a link to `https://github.com/login/device`.
+3. Open the link, paste the code, click **Authorize Speedwave**.
+4. The Desktop app stores the resulting `gho_...` access token at `~/.speedwave/tokens/<project>/github/token` (`0o600` permissions) and mounts it read-only into the worker.
 
-#### Per-tool permission matrix
+The token is **long-lived** (no expiration window in the OAuth App device flow — GitHub does not publish a precise inactivity TTL, but it is on the order of a year of unused; reconnect manually if a tool call returns `401`). Speedwave does **not** persist a refresh token (there is none for OAuth App device flow), and the access token never crosses the Tauri ↔ Angular boundary — the polling task writes it to disk directly.
 
-A fine-grained token only carries the repository permissions you tick when creating it. Map the tools you want Claude to use to the permissions the token needs:
+The scopes requested are `repo read:user`:
+
+- **`repo`** — full control of private and public repos. Covers Issues, Pull requests, Contents, Releases, branches, commits, and GitHub Actions (runs, logs, artifacts, workflow dispatch).
+- **`read:user`** — used by the connection health probe (`GET /user`).
+
+Org and gist scopes are intentionally not requested — the worker does not call those endpoints.
+
+##### Advanced: PAT fallback
+
+For headless setups or environments where the OAuth flow is unavailable (e.g. GitHub org admins who disable OAuth Apps), you can drop a Personal Access Token (classic `ghp_...` or fine-grained `github_pat_...`) directly into the token file. The worker does not inspect the prefix — any token GitHub accepts works.
+
+If you go this route, the per-tool permissions matrix below maps Claude capabilities to the fine-grained permissions you need:
 
 | Capability                                                     | Token permission                                                 |
 | -------------------------------------------------------------- | ---------------------------------------------------------------- |
@@ -128,7 +142,7 @@ A fine-grained token only carries the repository permissions you tick when creat
 | Read GitHub Actions runs, logs, artifacts, CI status           | Actions: Read **and** Checks: Read **and** Commit statuses: Read |
 | Trigger / re-run workflows                                     | Actions: Read and write                                          |
 
-If a token is missing a permission, the worker returns the GitHub `403` body verbatim along with a hint naming the permission to add — so a failed call tells you exactly which checkbox to tick rather than failing silently.
+When a tool call hits a permission gap, the worker surfaces a generic "token is missing a required scope" message that points users at either the OAuth reconnect path or the PAT permission they need to add.
 
 #### Scope and limitations vs GitLab
 
@@ -189,10 +203,9 @@ Confluence: `listSpaces`, `getSpace`, `searchPages`, `getPage`, `getPageByTitle`
 
 SharePoint integration combines two Microsoft Graph surfaces: a SharePoint document library (files) and SharePoint Pages (the modern wiki / site content). The worker runs in a hardened container with `/tokens:ro` (per ADR-060) and refresh tokens are kept on the host inside the `oauth` worker — see the OAuth flow below.
 
-**Configuration.** The Desktop integration form collects `client_id`, `tenant_id`, `site_id`. The OAuth device-code flow runs once at setup and writes:
+**Configuration.** The Desktop integration form collects `client_id`, `tenant_id`, `site_id`. The OAuth device-code flow runs once at setup and writes two locations: the worker-mounted token directory (read-only mount) holds `access_token` and `site_id`; the host-only OAuth state directory holds `{ provider, providerData: { clientId, tenantId }, refreshToken, scopes, grantedScopes, expiresAt, lastRefreshAt }`. The `provider` field selects the IdP implementation registered in the worker; IdP-specific keys live under `providerData` so future OAuth integrations (e.g. Atlassian) plug in without touching this schema.
 
-- `~/.speedwave/tokens/<project>/sharepoint/` (mounted into the worker as `/tokens:ro`): `access_token`, `site_id`.
-- `~/.speedwave/oauth/<project>/sharepoint.json` (host-only, NOT mounted into the worker): `{ provider: "microsoft", providerData: { clientId, tenantId }, refreshToken, scopes, grantedScopes, expiresAt, lastRefreshAt }`. The `provider` field selects the IdP implementation in `mcp-servers/oauth/src/providers/registry.ts`; IdP-specific keys live under `providerData` so future OAuth integrations (e.g. Atlassian) plug in without touching this schema.
+**Upgrading from a v1 SharePoint setup.** Pre-ADR-060 builds (and the first pass of ADR-060 before the OAuthProvider refactor) stored `clientId` / `tenantId` at the top level of `oauth/<project>/sharepoint.json` instead of under `providerData`. The new validator surfaces such files as `malformed_state` and the Integrations page shows the "Re-authorize SharePoint" banner — clicking "Sign in" reruns the device-code flow and writes the file in the new shape. The startup cleanup also removes any legacy `refresh_token` / `client_id` / `tenant_id` files left over inside the worker-mounted token directory. No manual migration steps are required.
 
 **Site ID format.** `site_id` must be a Graph site id — either path form (e.g. `acme.sharepoint.com:/sites/Marketing:` — note both colons: one after the hostname and one at the end) or composite form (`{hostname},{site-guid},{web-guid}`, obtained by calling `GET /sites/{hostname}:/sites/{path}` in Graph Explorer and copying the `id` field). A raw SharePoint URL (`https://{tenant}.sharepoint.com/sites/{name}`) is rejected at worker startup with a guidance message; the worker reports `configured: false` until a valid value is provided. Validation is fail-closed (no URL normalization in the worker) to keep the token mount at a clear trust boundary.
 

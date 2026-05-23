@@ -1,26 +1,28 @@
-/**
- * Provider registry — single point where {@link OAuthProvider} implementations
- * are registered. Adding a new IdP = one entry here + one file under
- * `providers/<id>.ts`.
- */
-import type { OAuthProvider } from './types.js';
+import type { OAuthProvider, ProviderId } from './types.js';
 import { microsoftProvider } from './microsoft.js';
 
-const REGISTRY: Record<string, OAuthProvider> = {
-  [microsoftProvider.id]: microsoftProvider,
+const REGISTRY: Record<ProviderId, OAuthProvider> = {
+  microsoft: microsoftProvider,
 };
 
 /**
- * Look up a provider by its id (as stored in `OAuthState.provider`).
- * @param id - provider id
- * @returns the provider, or `undefined` if no implementation is registered
+ * Look up by id; `undefined` when not registered.
+ * @param id - provider id as stored in `OAuthState.provider`
  */
 export function getProvider(id: string): OAuthProvider | undefined {
   if (!id) return undefined;
-  return REGISTRY[id];
+  return REGISTRY[id as ProviderId];
 }
 
-/** List the ids of every registered provider — used in error messages. */
-export function knownProviderIds(): readonly string[] {
-  return Object.keys(REGISTRY);
+/**
+ * Type-guard narrowing `string → ProviderId`.
+ * @param id - provider id to check
+ */
+export function isKnownProviderId(id: string): id is ProviderId {
+  return Object.prototype.hasOwnProperty.call(REGISTRY, id);
+}
+
+/** Registered ids, for error messages. */
+export function knownProviderIds(): readonly ProviderId[] {
+  return Object.keys(REGISTRY) as ProviderId[];
 }

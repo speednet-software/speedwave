@@ -31,15 +31,9 @@ import { splitPath } from './path-utils.js';
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Configuration for SharePoint client with OAuth credentials and site details
-/**
  * SharePoint worker runtime config. Post-ADR-060 the worker holds only the
  * mount-resident state (`accessToken` + `siteId`); refresh is delegated to
- * the host-side `oauth` worker, and the application identity (`clientId`,
- * `tenantId`) + refresh token live off-mount in `oauth/<project>/sharepoint.json`.
- * @interface SharePointConfig
- * @property {string} siteId - SharePoint site ID
- * @property {string} accessToken - OAuth access token (worker-mounted)
+ * the host-side `oauth` worker.
  */
 export interface SharePointConfig {
   siteId: string;

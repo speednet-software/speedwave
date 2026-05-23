@@ -239,8 +239,20 @@ async function handleForget(
   const statePath = join(deps.stateDir, `${service}.json`);
   const accessTokenPath = deps.accessTokenPathFor(service);
 
-  await unlink(statePath).catch(() => {});
-  await unlink(accessTokenPath).catch(() => {});
+  const stateErr = await safeUnlink(statePath);
+  const tokenErr = await safeUnlink(accessTokenPath);
+
+  if (stateErr || tokenErr) {
+    const detail = [stateErr, tokenErr].filter((s): s is string => Boolean(s)).join('; ');
+    await appendAuditEvent(deps.auditLogPath, {
+      ts,
+      project: deps.project,
+      service,
+      action: 'forget',
+      outcome: { error: 'unlink_failed' },
+    });
+    return errorResult(`unlink_failed: ${detail}`);
+  }
 
   await appendAuditEvent(deps.auditLogPath, {
     ts,
@@ -250,4 +262,20 @@ async function handleForget(
     outcome: 'ok',
   });
   return jsonResult({ forgotten: service });
+}
+
+/**
+ * ENOENT → null (idempotent); other errors are surfaced.
+ * @param path - file to remove
+ */
+async function safeUnlink(path: string): Promise<string | null> {
+  try {
+    await unlink(path);
+    return null;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    const msg = err instanceof Error ? err.message : String(err);
+    return `${path}: ${msg}`;
+  }
 }
