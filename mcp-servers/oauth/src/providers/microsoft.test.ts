@@ -88,6 +88,35 @@ describe('refreshMicrosoftToken', () => {
     }
   });
 
+  it('uses String(err) fallback when fetch throws a non-Error value', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue('socket hang up'));
+    const result = await refreshMicrosoftToken(baseReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('network');
+      expect(result.error.message).toBe('socket hang up');
+    }
+  });
+
+  it('uses String(err) fallback when json() throws a non-Error value', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        status: 200,
+        ok: true,
+        json: async () => {
+          throw 'truncated body';
+        },
+      })
+    );
+    const result = await refreshMicrosoftToken(baseReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('malformed');
+      expect(result.error.message).toContain('truncated body');
+    }
+  });
+
   it('returns network error when fetch is aborted (30s timeout)', async () => {
     // AbortController fires after 30s on a hung Microsoft token endpoint —
     // surfaces as the same `network` error path. Explicit test so the

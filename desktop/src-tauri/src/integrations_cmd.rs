@@ -426,18 +426,14 @@ fn snake_to_oauth_json_key(key: &str) -> &str {
         "client_id" => "clientId",
         "tenant_id" => "tenantId",
         "refresh_token" => "refreshToken",
-        // Fallthrough catches descriptor-only keys (e.g. `scopes`) whose
-        // on-disk name already matches. A new snake_case provider key needs
-        // an explicit arm — otherwise it silently lands at the wrong path.
-        _ => {
+        // Drift catch: any new snake_case provider key must get an arm.
+        // No log/format of `key` — it can carry caller-supplied values.
+        other => {
             debug_assert!(
-                !key.contains('_'),
-                "snake_to_oauth_json_key: unknown snake_case key '{key}' — add an arm",
+                !other.contains('_'),
+                "snake_to_oauth_json_key: unknown snake_case key — add an arm",
             );
-            if cfg!(not(debug_assertions)) && key.contains('_') {
-                log::warn!("snake_to_oauth_json_key: unknown snake_case key '{key}'");
-            }
-            key
+            other
         }
     }
 }

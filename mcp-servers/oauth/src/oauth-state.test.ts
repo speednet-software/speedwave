@@ -37,6 +37,20 @@ describe('oauth-state', () => {
       expect(result).toBeNull();
     });
 
+    it.runIf(process.platform !== 'win32' && process.getuid?.() !== 0)(
+      'rethrows non-ENOENT read errors (e.g. EACCES)',
+      async () => {
+        const path = join(dir, 'denied.json');
+        await writeFile(path, JSON.stringify(sample), { mode: 0o600 });
+        await chmod(path, 0o000);
+        try {
+          await expect(loadOAuthState(dir, 'denied')).rejects.toThrow();
+        } finally {
+          await chmod(path, 0o600);
+        }
+      }
+    );
+
     it('returns parsed state when file exists', async () => {
       await writeFile(join(dir, 'sharepoint.json'), JSON.stringify(sample), {
         mode: 0o600,

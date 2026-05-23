@@ -14,14 +14,6 @@ export function getProvider(id: string): OAuthProvider | undefined {
   return REGISTRY[id as ProviderId];
 }
 
-/**
- * Type-guard narrowing `string → ProviderId`.
- * @param id - provider id to check
- */
-export function isKnownProviderId(id: string): id is ProviderId {
-  return Object.prototype.hasOwnProperty.call(REGISTRY, id);
-}
-
 /** Registered ids, for error messages. */
 export function knownProviderIds(): readonly ProviderId[] {
   return Object.keys(REGISTRY) as ProviderId[];

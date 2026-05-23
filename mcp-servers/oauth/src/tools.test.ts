@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, mkdir, readFile, chmod, writeFile, stat } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readFile, chmod, writeFile, stat, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ToolHandlerContext, ToolsCallResult } from '@speedwave/mcp-shared';
@@ -428,5 +428,31 @@ describe('oauth tools', () => {
       expect(result1.isError).toBeFalsy();
       expect(result2.isError).toBeFalsy();
     });
+
+    it.runIf(process.platform !== 'win32' && process.getuid?.() !== 0)(
+      'returns unlink_failed when unlink errors with non-ENOENT',
+      async () => {
+        await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+        await seedState(sharepointState);
+        const stateFile = join(stateDir, 'sharepoint.json');
+        // Read-only parent dir → unlink fails with EACCES (non-ENOENT).
+        // Keep the audit log outside the locked dir so the error path can
+        // still record the outcome.
+        const isolatedAudit = join(tokensBase, 'audit.log');
+        await chmod(stateDir, 0o500);
+        try {
+          const tools = buildTools({ ...deps, auditLogPath: isolatedAudit });
+          const forget = tools.find((t) => t.tool.name === 'forget')!;
+          const result = await forget.handler({}, ctxFor('sharepoint'));
+          expect(result.isError).toBe(true);
+          expect(getTextResult(result)).toContain('unlink_failed');
+          const audit = await readFile(isolatedAudit, 'utf8');
+          expect(audit).toContain('action=forget outcome=error:unlink_failed');
+        } finally {
+          await chmod(stateDir, 0o700);
+          await unlink(stateFile).catch(() => {});
+        }
+      }
+    );
   });
 });
