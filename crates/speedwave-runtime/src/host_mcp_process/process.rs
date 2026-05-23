@@ -519,12 +519,8 @@ mod tests {
         );
     }
 
-    /// Structural assertion: `attach_to_kill_on_close_job` must be called
-    /// AFTER `cmd.spawn()?` and BEFORE `drain_and_read_port`, so a drain
-    /// failure causes the local `job` binding to drop (closing the Job
-    /// handle and protecting against an orphan if `child.kill()` races).
-    /// Moving the attach below `drain_and_read_port` would silently leak
-    /// the protection guarantee on the error path.
+    /// Pin spawn → attach → drain ordering — see ADR-048 §"PRE-INSTALL
+    /// orphan worker sweep". Reordering breaks error-path cleanup.
     #[test]
     fn attach_runs_before_drain_so_failure_cleanup_drops_job() {
         const SRC: &str = include_str!("process.rs");

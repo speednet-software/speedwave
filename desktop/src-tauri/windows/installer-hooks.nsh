@@ -20,50 +20,17 @@
 Var SpeedwaveCleanData
 Var SpeedwaveDataDirOverride
 
-; PRE-INSTALL: release every $INSTDIR\Speedwave.exe + $INSTDIR\nodejs\*
-; process holding a file lock before the installer tries to overwrite
-; them. Without this, upgrading from an earlier version fails with
-; "Error opening file for writing" when an old node.exe (mcp-os /
-; host_exec / oauth worker) is still running.
-;
-; Design:
-;   * $INSTDIR is passed to the sweep via the SPW_INSTDIR environment
-;     variable, NOT as a cmd-line argument. PowerShell's -Command flag
-;     concatenates trailing argv into the command text (per MSDN
-;     about_pwsh: "all arguments following it are interpreted as part
-;     of the command to execute"), so an apostrophe in the path
-;     (C:\Users\O'Brien\…) would open an unclosed string literal and
-;     cause pwsh to exit 1 silently. Env var keeps the path opaque to
-;     the parser. Empirically verified on pwsh 7.6.2.
-;   * The sweep itself is materialized to $PLUGINSDIR\speedwave-sweep.ps1 and
-;     invoked with `powershell.exe -File` — eliminates -Command
-;     quoting fragility entirely. NSIS auto-deletes $PLUGINSDIR
-;     after the install completes.
-;   * Process enumeration uses Get-CimInstance Win32_Process (not
-;     Get-Process). Get-Process is session-scoped; CIM enumerates
-;     across all sessions, and additionally crosses elevation
-;     boundaries when the installer itself runs elevated. Filter is
-;     `ExecutablePath.StartsWith($pattern, OrdinalIgnoreCase)` —
-;     uses ordinal comparison so brackets / wildcards in the path
-;     do not become character-class metacharacters (-like would).
-;   * Both Speedwave.exe and node.exe sweeps are scoped to $INSTDIR;
-;     unrelated processes named "Speedwave.exe" or "node.exe" outside
-;     $INSTDIR are never touched.
-;   * After the kill, the script polls each target file for write
-;     access (1 s × 20 tries = 20 s) — covers slow AV scan / EDR
-;     post-close hold. Replaces the previous fixed `Sleep 500`.
-;   * Sweep exits 0 on success, non-zero on hard failure (PowerShell
-;     missing, AppLocker block, parse error). NSIS checks the exit
-;     code and emits DetailPrint so the install log shows the cause
-;     instead of a downstream "Error opening file for writing".
+; PRE-INSTALL: release $INSTDIR\Speedwave.exe + $INSTDIR\nodejs\* before
+; the installer overwrites them. Without this, upgrades fail with
+; "Error opening file for writing" on stale workers.
+; See ADR-048 §"PRE-INSTALL orphan worker sweep" for the full design
+; (env-var passing, CIM enumeration, ordinal path filter, file-lock poll).
 !macro NSIS_HOOK_PREINSTALL
   ; Materialize the sweep script into $PLUGINSDIR (auto-cleaned by NSIS).
   InitPluginsDir
   ClearErrors
   FileOpen $0 "$PLUGINSDIR\speedwave-sweep.ps1" w
-  ; Without IfErrors, a failed FileOpen leaves $0 = "" and subsequent
-  ; FileWrite calls silently no-op. The sweep would then run an empty
-  ; .ps1 (exit 0) and the install would still fail on the locked node.exe.
+  ; Without IfErrors, failed FileOpen leaves $0 empty and FileWrite silently no-ops.
   IfErrors 0 sw_sweep_write_ok
     DetailPrint "Speedwave PRE-INSTALL: could not create sweep script in $PLUGINSDIR — skipping process sweep."
     Goto sw_preinstall_done
@@ -71,10 +38,7 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `$$ErrorActionPreference = 'Stop'$\r$\n`
   FileWrite $0 `$$instDir = $$env:SPW_INSTDIR$\r$\n`
   FileWrite $0 `if (-not $$instDir) { Write-Error 'SPW_INSTDIR not set'; exit 2 }$\r$\n`
-  ; String concat instead of Join-Path: Join-Path can throw "Cannot
-  ; find drive" terminating errors under -ErrorAction Stop, and treats
-  ; brackets / wildcards in $instDir as path-set metacharacters. Plain
-  ; concat is exact and locale/PS-version independent.
+  ; String concat instead of Join-Path — see ADR-048.
   FileWrite $0 `$$instDir = $$instDir.TrimEnd('\')$\r$\n`
   FileWrite $0 `$$nodePrefix = $$instDir + '\nodejs\'$\r$\n`
   FileWrite $0 `$$desktopExe = $$instDir + '\Speedwave.exe'$\r$\n`
@@ -113,10 +77,7 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `exit 4$\r$\n`
   FileClose $0
 
-  ; Pass $INSTDIR to the script via env var — avoids cmd-line parsing
-  ; hazards (apostrophes, brackets) entirely. SetEnvironmentVariable
-  ; is process-scoped, so this only affects the installer + its
-  ; powershell.exe child.
+  ; $INSTDIR via env var (process-scoped) — see ADR-048.
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", t "$INSTDIR")i'
 
   nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\speedwave-sweep.ps1"`

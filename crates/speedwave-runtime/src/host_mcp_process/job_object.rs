@@ -38,9 +38,7 @@ mod imp {
         }
     }
 
-    // Compile-time guarantee that the struct fits in a u32 length argument
-    // to SetInformationJobObject; the `as u32` cast below would otherwise
-    // silently truncate.
+    // Guard the `as u32` cast in SetInformationJobObject below.
     const _: () =
         assert!(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() <= u32::MAX as usize);
 
@@ -59,9 +57,7 @@ mod imp {
         let handle = JobHandle(job);
 
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        // KILL_ON_JOB_CLOSE: child dies when last job handle closes.
-        // BREAKAWAY_OK: lets `host_exec` recipes spawn with CREATE_BREAKAWAY_FROM_JOB
-        // (UAC prompts, MSI subprocesses) — without it those spawns fail with ACCESS_DENIED.
+        // KILL_ON_JOB_CLOSE + BREAKAWAY_OK — see ADR-048 for rationale.
         info.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
 
@@ -88,9 +84,7 @@ mod imp {
         let ok = unsafe { AssignProcessToJobObject(job, child_handle) };
         if ok == 0 {
             let err = std::io::Error::last_os_error();
-            // ACCESS_DENIED here = Speedwave.exe is inside a non-breakaway parent
-            // job (debugger, Windows Sandbox, MSIX, PCA). Promote to error so the
-            // diagnostic is visible — NSIS PRE-INSTALL sweep is the only fallback.
+            // ACCESS_DENIED = nested non-breakaway parent job; see ADR-048.
             if err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
                 log::error!(
                     "Job Object: AssignProcessToJobObject denied — Speedwave.exe appears to be \
@@ -148,9 +142,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn attach_to_live_child_kills_on_handle_drop() {
-        // `timeout /t 30 /nobreak` ignores Ctrl+C and won't exit naturally
-        // during the 2 s test window — an early exit can only come from
-        // the Job Object kill.
+        // `timeout /t 30 /nobreak` cannot exit naturally in the 2 s window.
         let mut child = std::process::Command::new("timeout")
             .args(["/t", "30", "/nobreak"])
             .stdout(std::process::Stdio::null())
@@ -161,9 +153,7 @@ mod tests {
         let job = match attach_to_kill_on_close_job(&child) {
             Some(j) => j,
             None => {
-                // Skip gracefully when running inside a non-breakaway parent
-                // job (CI sandbox / MSIX / debugger). The production code
-                // already logs an error; panicking would mislead reviewers.
+                // Skip when inside a non-breakaway parent job (CI / MSIX / debugger).
                 let _ = child.kill();
                 let _ = child.wait();
                 eprintln!("skipping: attach_to_kill_on_close_job returned None (likely a non-breakaway parent job)");
