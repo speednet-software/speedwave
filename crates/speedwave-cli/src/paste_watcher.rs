@@ -153,7 +153,10 @@ mod tests {
     #[test]
     fn clip_path_is_under_project_pastes_dir() {
         let p = clip_path(Path::new("/tmp/proj"));
-        assert_eq!(p, PathBuf::from("/tmp/proj/.speedwave/pastes/clip.png"));
+        assert_eq!(
+            p,
+            PathBuf::from(format!("/tmp/proj/{DATA_DIR}/pastes/clip.png"))
+        );
     }
 
     #[test]
