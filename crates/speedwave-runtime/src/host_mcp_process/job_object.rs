@@ -251,8 +251,6 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn attach_to_live_child_kills_on_handle_drop() {
-        use std::os::windows::process::ExitStatusExt;
-
         // `timeout /t 30 /nobreak` runs 30 s and ignores Ctrl+C — it
         // will not exit naturally during the test window, so an early
         // exit can only be caused by the Job Object kill. `ping` was
@@ -283,12 +281,14 @@ mod tests {
             }
         };
 
-        // Job-terminated processes get a non-zero exit code. A clean
-        // exit (code == 0) would mean the child exited naturally
-        // before drop(job) — which shouldn't happen with
-        // `timeout /t 30`. Asserting non-zero distinguishes
-        // "killed by job" from "exited for unrelated reason".
-        let code = exit.code().or_else(|| exit.signal());
+        // Job-terminated processes get a non-zero exit code on Windows
+        // (typically the Job's `CompletionKey` or the value passed to
+        // TerminateJobObject; never 0). A clean exit (code == 0) would
+        // mean the child exited naturally before drop(job) — which
+        // cannot happen with `timeout /t 30 /nobreak` in 2 s. Asserting
+        // non-zero distinguishes "killed by job" from "exited for
+        // unrelated reason".
+        let code = exit.code();
         assert!(
             code != Some(0),
             "expected non-zero exit (job termination); got {code:?}"
