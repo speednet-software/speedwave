@@ -82,10 +82,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_JobObjects",
-    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds an IO_COUNTERS struct
-    # that lives under Win32_System_IO; without this feature the import
-    # of the parent struct fails on Windows (CI: desktop-windows-check).
-    "Win32_System_IO",
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION is gated behind
+    # Win32_System_Threading in windows-sys 0.61 (compiler hint:
+    # "the item is gated behind the `Win32_System_Threading` feature").
+    # Without it, the import of the parent struct fails on Windows.
+    "Win32_System_Threading",
 ] }
 
 [features]
