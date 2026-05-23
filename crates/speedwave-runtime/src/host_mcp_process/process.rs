@@ -112,18 +112,9 @@ pub struct SpawnContext<'a> {
 pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) spec: S,
     pub(crate) child: Option<Child>,
-    /// Windows Job Object owning the child for kill-on-parent-close
-    /// (see `job_object` module). `None` on non-Windows and when
-    /// attach fails (best-effort — NSIS PRE-INSTALL hook is the
-    /// backup if a worker outlives its parent).
-    ///
-    /// **DO NOT REMOVE OR RENAME** this field — it is load-bearing
-    /// for the `Drop` side effect on `JobHandle`. The leading
-    /// underscore suppresses the `dead_code` lint (the field is
-    /// never read by name) without an `#[allow]` attribute, which
-    /// is forbidden by project rules. Dropping the field would
-    /// silently regress the v0.11+ invariant "parent crash kills
-    /// the worker" with no compile or test failure.
+    /// Job Object handle — load-bearing `Drop` side effect (kill-on-close).
+    /// `_` prefix suppresses dead_code; field MUST live as long as `child`.
+    /// `None` on non-Windows and on attach failure. See `job_object` + ADR-048.
     pub(crate) _job: Option<super::job_object::JobHandle>,
     pub(crate) drain_handles: Vec<JoinHandle<()>>,
     pub(crate) data_dir: PathBuf,
@@ -199,9 +190,7 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 
         let mut child = cmd.spawn()?;
 
-        // Tie the child's lifetime to the parent process via a Windows
-        // Job Object so a parent crash kills the worker — no orphan
-        // node.exe to block the next installer. No-op on non-Windows.
+        // Attach child to Windows Job Object (no-op on non-Windows).
         let job = super::job_object::attach_to_kill_on_close_job(&child);
 
         let (port, drain_handles) = match drain_and_read_port(&mut child, &log_path, spec.log_tag())
@@ -527,6 +516,34 @@ mod tests {
                 .as_deref(),
             Some("abc"),
             "WorkerSpec::apply_env must inject worker-specific vars"
+        );
+    }
+
+    /// Structural assertion: `attach_to_kill_on_close_job` must be called
+    /// AFTER `cmd.spawn()?` and BEFORE `drain_and_read_port`, so a drain
+    /// failure causes the local `job` binding to drop (closing the Job
+    /// handle and protecting against an orphan if `child.kill()` races).
+    /// Moving the attach below `drain_and_read_port` would silently leak
+    /// the protection guarantee on the error path.
+    #[test]
+    fn attach_runs_before_drain_so_failure_cleanup_drops_job() {
+        const SRC: &str = include_str!("process.rs");
+        let attach_pos = SRC
+            .find("attach_to_kill_on_close_job(&child)")
+            .expect("attach call must exist in spawn_with_spec");
+        let drain_pos = SRC
+            .find("drain_and_read_port(&mut child")
+            .expect("drain call must exist in spawn_with_spec");
+        let assign_pos = SRC.find("_job: job,").expect("_job assignment must exist");
+        assert!(
+            attach_pos < drain_pos,
+            "attach_to_kill_on_close_job must run BEFORE drain_and_read_port \
+             so the local `job` binding drops on drain failure"
+        );
+        assert!(
+            drain_pos < assign_pos,
+            "_job: job assignment must come AFTER drain success — otherwise \
+             the error path moves `job` into a non-existent Self and leaks"
         );
     }
 }

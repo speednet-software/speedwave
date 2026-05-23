@@ -80,10 +80,9 @@ mod tests {
 
     #[test]
     fn enumerates_via_cim_for_cross_session_visibility() {
-        // Get-Process is scoped to the invoking user/session and misses
-        // orphans owned by another user or by an elevated session when
-        // the installer runs unelevated. Get-CimInstance crosses those
-        // boundaries when the installer has the right privileges.
+        // Get-Process is session-scoped; CIM enumerates across all
+        // sessions, and additionally crosses elevation boundaries
+        // when the installer itself runs elevated.
         assert!(
             HOOKS.contains("Get-CimInstance") && HOOKS.contains("Win32_Process"),
             "process enumeration must use Get-CimInstance Win32_Process, not Get-Process"
@@ -114,7 +113,7 @@ mod tests {
 
     #[test]
     fn checks_sweep_exit_code_and_emits_detailprint() {
-        // nsExec::Exec pushes the exit code; ignoring it makes
+        // nsExec::ExecToLog pushes the exit code; ignoring it makes
         // PowerShell launch failures (AppLocker, WDAC, missing PS,
         // parse error) silent. Surface them via DetailPrint.
         assert!(
@@ -162,6 +161,41 @@ mod tests {
         assert!(
             HOOKS.contains("Speedwave.exe") && HOOKS.contains("nodejs"),
             "both Speedwave.exe and the nodejs prefix must be in the sweep"
+        );
+    }
+
+    #[test]
+    fn clears_spw_instdir_env_var_after_sweep() {
+        // SPW_INSTDIR must be cleared after the sweep so it does not
+        // leak into POSTINSTALL or uninstaller logic. The cleanup is
+        // a `SetEnvironmentVariable(..., NULL)` call (NULL = delete).
+        assert!(
+            HOOKS.contains(r#"SetEnvironmentVariable(t "SPW_INSTDIR", i 0)"#),
+            "SPW_INSTDIR must be cleared after sweep (SetEnvironmentVariable with NULL)"
+        );
+    }
+
+    #[test]
+    fn file_existence_check_uses_literal_path() {
+        // Bracketed install paths (`C:\Tools[v0.11]\…`) silently skip
+        // the lock probe if `Test-Path` does wildcard matching. The
+        // `-LiteralPath` parameter forces literal byte comparison.
+        assert!(
+            HOOKS.contains("Test-Path -LiteralPath"),
+            "Test-Path must use -LiteralPath to handle brackets/wildcards in $INSTDIR"
+        );
+    }
+
+    #[test]
+    fn fileopen_failure_is_handled_with_iferrors() {
+        // Without IfErrors, a failed FileOpen leaves $0 = "" and
+        // subsequent FileWrite calls silently no-op. The sweep would
+        // then run an empty .ps1 (exit 0) and the install would still
+        // fail on the locked node.exe — but with no diagnostic at all.
+        assert!(
+            HOOKS.contains("IfErrors"),
+            "FileOpen must be guarded by IfErrors so disk-full / ACL failures \
+             surface via DetailPrint instead of silently writing an empty sweep"
         );
     }
 

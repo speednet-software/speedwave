@@ -40,8 +40,9 @@ Var SpeedwaveDataDirOverride
 ;     quoting fragility entirely. NSIS auto-deletes $PLUGINSDIR
 ;     after the install completes.
 ;   * Process enumeration uses Get-CimInstance Win32_Process (not
-;     Get-Process), which crosses session and elevation boundaries
-;     when the installer runs elevated. Filter is
+;     Get-Process). Get-Process is session-scoped; CIM enumerates
+;     across all sessions, and additionally crosses elevation
+;     boundaries when the installer itself runs elevated. Filter is
 ;     `ExecutablePath.StartsWith($pattern, OrdinalIgnoreCase)` —
 ;     uses ordinal comparison so brackets / wildcards in the path
 ;     do not become character-class metacharacters (-like would).
@@ -58,7 +59,15 @@ Var SpeedwaveDataDirOverride
 !macro NSIS_HOOK_PREINSTALL
   ; Materialize the sweep script into $PLUGINSDIR (auto-cleaned by NSIS).
   InitPluginsDir
+  ClearErrors
   FileOpen $0 "$PLUGINSDIR\speedwave-sweep.ps1" w
+  ; Without IfErrors, a failed FileOpen leaves $0 = "" and subsequent
+  ; FileWrite calls silently no-op. The sweep would then run an empty
+  ; .ps1 (exit 0) and the install would still fail on the locked node.exe.
+  IfErrors 0 sw_sweep_write_ok
+    DetailPrint "Speedwave PRE-INSTALL: could not create sweep script in $PLUGINSDIR — skipping process sweep."
+    Goto sw_preinstall_done
+  sw_sweep_write_ok:
   FileWrite $0 `$$ErrorActionPreference = 'Stop'$\r$\n`
   FileWrite $0 `$$instDir = $$env:SPW_INSTDIR$\r$\n`
   FileWrite $0 `if (-not $$instDir) { Write-Error 'SPW_INSTDIR not set'; exit 2 }$\r$\n`
@@ -119,6 +128,8 @@ Var SpeedwaveDataDirOverride
 
   ; Clear the env var so it does not leak into other installer phases.
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", i 0)i'
+
+  sw_preinstall_done:
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

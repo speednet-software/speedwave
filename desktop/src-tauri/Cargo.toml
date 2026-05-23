@@ -52,6 +52,10 @@ json-patch = "4"
 jsonschema = { version = "0.46", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+# SSOT-alignment with crates/speedwave-runtime/Cargo.toml — version must
+# stay in sync across the two workspaces (separate Cargo.lock files
+# prevent workspace.dependencies). See CLAUDE.md "windows-sys version"
+# SSOT-alignment row.
 windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",

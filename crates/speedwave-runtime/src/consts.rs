@@ -2030,6 +2030,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nodejs_subdir_appears_in_installer_hooks() {
+        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
+        // NODEJS_SUBDIR = "nodejs"; the NSIS PRE-INSTALL sweep filters
+        // processes whose ExecutablePath starts with $INSTDIR\nodejs\.
+        assert!(
+            src.contains(NODEJS_SUBDIR),
+            "NODEJS_SUBDIR ({NODEJS_SUBDIR}) not found in installer-hooks.nsh; \
+             rename it there too (ADR-048 SSOT alignment)"
+        );
+    }
+
     // Cross-language SSOT for the single host-gateway alias. The TypeScript
     // MCP-shared module mirrors `HOST_GATEWAY_ALIAS` as `export const`; the
     // compose template references it as a literal in `extra_hosts`. These

@@ -78,6 +78,10 @@ cpal = { version = "0.16", optional = true }
 # (`host_mcp_process::job_object`). `Win32_Security` is required to gate
 # `CreateJobObjectW` in windows-sys 0.61.x. Same major version as in
 # `desktop/src-tauri/Cargo.toml` for workspace coherence.
+# SSOT-alignment with desktop/src-tauri/Cargo.toml — version must stay
+# in sync across the two workspaces (they have separate Cargo.lock files
+# so workspace.dependencies cannot be used). See CLAUDE.md "windows-sys
+# version" SSOT-alignment row.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -85,7 +89,6 @@ windows-sys = { version = "0.61", features = [
     # JOBOBJECT_EXTENDED_LIMIT_INFORMATION is gated behind
     # Win32_System_Threading in windows-sys 0.61 (compiler hint:
     # "the item is gated behind the `Win32_System_Threading` feature").
-    # Without it, the import of the parent struct fails on Windows.
     "Win32_System_Threading",
 ] }
 
