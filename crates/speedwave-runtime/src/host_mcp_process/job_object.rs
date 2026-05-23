@@ -162,10 +162,13 @@ mod tests {
         };
         drop(job);
 
+        // Child must die within 2 s of dropping the job; the 30 s sleep
+        // cannot exit naturally in that window. Windows exit codes from
+        // job termination vary, so we only assert "no longer running".
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let exit = loop {
+        loop {
             match child.try_wait() {
-                Ok(Some(status)) => break status,
+                Ok(Some(_)) => break,
                 Ok(None) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
@@ -175,14 +178,6 @@ mod tests {
                 }
                 Err(e) => panic!("try_wait failed: {e}"),
             }
-        };
-
-        // Windows assigns a non-zero exit code to job-terminated processes;
-        // code == 0 would mean the child exited naturally before drop(job).
-        let code = exit.code();
-        assert!(
-            code != Some(0),
-            "expected non-zero exit (job termination); got {code:?}"
-        );
+        }
     }
 }
