@@ -88,6 +88,29 @@ Settings invalidates the persisted layer by calling `ChatStateService.refreshLlm
 
 While Claude is responding, press **Esc** or click the red **Stop** button next to the message input to interrupt the current turn. The partial response is preserved in the conversation history, in-flight tools are stopped, and the input is immediately re-enabled so you can send the next message. **Esc is ignored while an "ask user" question is visible** — answer or dismiss that prompt first; the Stop button still works in that case and will drop the question.
 
+### Image attachments
+
+The chat composer accepts image attachments two ways: **paste** (Cmd/Ctrl+V with an image in the clipboard — typed text in the same paste still drops into the textarea) and **drag-and-drop** from Finder/Explorer onto the composer. Multi-drop is supported (drop a Finder selection of several files at once).
+
+Accepted formats: **JPEG, PNG, GIF, WebP**. Other types (PDF, SVG, plain text drops) are silently ignored.
+
+Per-image cap: **3 MB binary** after preprocessing (Anthropic accepts up to 5 MB, but Claude Code's stream-json parser buffers the whole message before send and payloads near the API ceiling have been observed to OOM-kill the in-container process). Per-request cap: **32 MB JSON payload** (base64 expands the binary by 4/3). Above 20 images per request Anthropic drops the dimension cap from 8000×8000 to 2000×2000.
+
+Speedwave preprocesses with [pica](https://github.com/nodeca/pica) before send:
+
+- **PNG** stays PNG (transparency preserved).
+- **JPEG / WebP** resamples to JPEG q=0.92 (text OCR remains comfortable).
+- **GIF** passes through (Anthropic processes only the first frame; the file on disk keeps the animation).
+- Tiny PNGs below the model's native long edge (2576 px for Opus 4.7, 1568 px for Sonnet/Haiku) and below 2 MB skip pica entirely.
+
+There is no client-side gate on the active model — every provider gets a chance to accept the attachment. If the active model can't handle images (text-only Anthropic snapshot, local model loaded without vision, BYOK provider that ignores image blocks), the chat shows the provider's API error as a regular error block. See [ADR-065](../adr/ADR-065-image-attachments-structured-input.md) for the rationale (no client-side capability matrix to keep stale).
+
+**Queue + attachments**: image attachments are mutually exclusive with the one-slot queued message (ADR-045). While a turn is streaming, **Send is disabled** for any input that carries attachments; text-only submits still queue normally. The composer surfaces "Poczekaj na zakończenie odpowiedzi przed wysłaniem obrazka" when this gate fires.
+
+**Known limitation — no persistence**: attachment bytes live in the composer for the live session only. After a Desktop reload the chat history shows an `🖼 (filename)` placeholder pill instead of the thumbnail — the bytes themselves are not stored to disk (Claude Code's session JSONL is read-only per ADR-046, and a dedicated image store is future work).
+
+The CLI (`speedwave run`, which launches Claude Code's TUI in the container) does **not** yet support image paste — the TUI's native paste reads the host clipboard, which the container cannot see. A host-side clipboard watcher is planned in a separate spike + PR.
+
 ## System Tray
 
 ## Logs & system health

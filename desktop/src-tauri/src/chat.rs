@@ -1067,13 +1067,28 @@ fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
     }
 }
 
-/// Build the JSON value for a user message in Claude's stream-json input format.
-pub fn build_user_message(message: &str) -> serde_json::Value {
+/// 1 MiB cap on serialized user-message JSON — wire is text-only after
+/// ADR-065; images go through `<project>/.speedwave/pastes/` + `@…` refs.
+pub const MAX_WIRE_BYTES: usize = 1024 * 1024;
+
+/// Text-only wire content block (ADR-065). `@/workspace/...` refs are inlined as text.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireContentBlock {
+    Text { text: String },
+}
+
+pub fn text_only(text: impl Into<String>) -> Vec<WireContentBlock> {
+    vec![WireContentBlock::Text { text: text.into() }]
+}
+
+/// Stream-json user envelope: `{"type":"user","message":{"role":"user","content":[...]}}`.
+pub fn build_user_message(blocks: &[WireContentBlock]) -> serde_json::Value {
     serde_json::json!({
         "type": "user",
         "message": {
             "role": "user",
-            "content": [{"type": "text", "text": message}]
+            "content": blocks,
         }
     })
 }
@@ -1671,7 +1686,7 @@ impl ChatSession {
     ///
     /// Returns an error if the subprocess has exited (broken pipe).
     /// The caller should restart the session and retry.
-    pub fn send_message(&mut self, message: &str) -> anyhow::Result<()> {
+    pub fn send_message(&mut self, blocks: &[WireContentBlock]) -> anyhow::Result<()> {
         let child = self
             .child
             .as_mut()
@@ -1690,11 +1705,24 @@ impl ChatSession {
             .shared_stdin
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no active session"))?;
-        let input = build_user_message(message);
+        let input = build_user_message(blocks);
+        let serialized = input.to_string();
+        if serialized.len() > MAX_WIRE_BYTES {
+            anyhow::bail!(
+                "user message too large: {} bytes exceeds {} byte limit",
+                serialized.len(),
+                MAX_WIRE_BYTES
+            );
+        }
+        log::info!(
+            "ChatSession::send_message: serialized={} bytes, blocks={}",
+            serialized.len(),
+            blocks.len()
+        );
         let mut stdin = shared
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
-        writeln!(stdin, "{}", input)?;
+        writeln!(stdin, "{}", serialized)?;
         stdin.flush()?;
         Ok(())
     }
@@ -1978,7 +2006,8 @@ fn drain_queued_message(
         Some(m) => m,
         None => return,
     };
-    let payload = build_user_message(&drained.text);
+    // Queue is text-only (ADR-065).
+    let payload = build_user_message(&text_only(&drained.text));
     match stdin.lock() {
         Ok(mut handle) => {
             if let Err(e) = writeln!(handle, "{}", payload) {
@@ -2312,10 +2341,13 @@ mod tests {
 
     #[test]
     fn build_user_message_produces_correct_json_structure() {
-        let msg = build_user_message("test msg");
+        let msg = build_user_message(&text_only("test msg"));
 
         assert_eq!(msg["type"], "user");
         assert_eq!(msg["message"]["role"], "user");
+        // No `parent_tool_use_id` on user-input envelope — that field is
+        // an output-side correlation tag for tool_use, never appears here.
+        assert!(msg.get("parent_tool_use_id").is_none());
 
         let content = &msg["message"]["content"];
         assert!(content.is_array());
@@ -2328,9 +2360,78 @@ mod tests {
 
     #[test]
     fn build_user_message_preserves_special_characters() {
-        let msg = build_user_message("hello \"world\" \n\ttab");
+        let msg = build_user_message(&text_only("hello \"world\" \n\ttab"));
         let text = msg["message"]["content"][0]["text"].as_str().unwrap();
         assert_eq!(text, "hello \"world\" \n\ttab");
+    }
+
+    #[test]
+    fn build_user_message_with_paste_reference_in_text() {
+        // After ADR-065: the composer writes pasted bytes to
+        // `<project>/.speedwave/pastes/` and inlines an `@…` reference at
+        // the end of the text block. The wire format is purely text — no
+        // `image` content block crosses stdin.
+        let blocks = text_only("Co tu widać?\n\n@/workspace/.speedwave/pastes/paste-123.png");
+        let msg = build_user_message(&blocks);
+        let items = msg["message"]["content"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "text");
+        let text = items[0]["text"].as_str().unwrap();
+        assert!(text.contains("@/workspace/.speedwave/pastes/paste-123.png"));
+    }
+
+    #[test]
+    fn build_user_message_snapshot_wire_format() {
+        // Contract snapshot — pins the wire shape so a regression that
+        // re-introduces inline base64 image blocks (the OOM-killing path
+        // ADR-065 removed) fails loudly. `media_type` flipping to
+        // `mimeType` or a new `parent_tool_use_id` sneaking in would also
+        // trip this test.
+        let blocks = text_only(
+            "review these\n\n@/workspace/.speedwave/pastes/paste-1.png\n@/workspace/.speedwave/pastes/paste-2.jpg",
+        );
+        let msg = build_user_message(&blocks);
+        let expected = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "review these\n\n@/workspace/.speedwave/pastes/paste-1.png\n@/workspace/.speedwave/pastes/paste-2.jpg"
+                    }
+                ]
+            }
+        });
+        assert_eq!(msg, expected);
+        // Defence-in-depth: ensure no `image` block ever appears in this
+        // snapshot — that path is gone for good.
+        assert!(!serde_json::to_string(&msg).unwrap().contains("\"image\""));
+    }
+
+    #[test]
+    fn wire_content_block_roundtrip_text_only() {
+        let blocks = text_only("hi");
+        let encoded = serde_json::to_value(&blocks).unwrap();
+        let decoded: Vec<WireContentBlock> = serde_json::from_value(encoded).unwrap();
+        assert_eq!(blocks, decoded);
+    }
+
+    #[test]
+    fn text_only_helper_wraps_into_text_block() {
+        let blocks = text_only("hello");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            WireContentBlock::Text { text } => assert_eq!(text, "hello"),
+        }
+    }
+
+    #[test]
+    fn max_wire_bytes_is_1_mib() {
+        // ADR-065: image bytes no longer cross the wire — the cap is sized
+        // for text + paste-path references only. Bumping it would invite a
+        // regression that reintroduces inline base64.
+        assert_eq!(MAX_WIRE_BYTES, 1024 * 1024);
     }
 
     // ── StreamParser: text delta ─────────────────────────────────────

@@ -14,6 +14,8 @@ use strum::IntoEnumIterator;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod paste_watcher;
+
 #[derive(Debug, PartialEq)]
 enum CliAction {
     PluginInstall(String), // zip path
@@ -870,6 +872,9 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(if status.success() { 0 } else { 1 }),
         );
     }
+
+    // Host clipboard → /workspace/.speedwave/pastes/clip.png (ADR-065).
+    let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
 
     // exec -it -> interactive Claude terminal inside container
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];

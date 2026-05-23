@@ -222,7 +222,10 @@ describe('ChatComponent', () => {
       expect(chatState.messages[0].role).toBe('user');
       expect(chatState.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Hello Claude' });
       expect(chatState.isStreaming).toBe(true);
-      expect(invokeSpy).toHaveBeenCalledWith('send_message', { message: 'Hello Claude' });
+      expect(invokeSpy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: 'Hello Claude' }],
+        displayText: 'Hello Claude',
+      });
     });
 
     it('handles invoke failure by adding error message and stopping streaming', async () => {

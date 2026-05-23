@@ -33,10 +33,30 @@ async function flushMicrotasks(cycles = 10): Promise<void> {
  * Keep `context_tokens` values in sync with `crates/speedwave-runtime/src/defaults.rs`.
  */
 const TEST_ANTHROPIC_MODELS = [
-  { id: 'claude-opus-4-7', family: 'Opus 4.7', context_tokens: 1_000_000, latest: true },
-  { id: 'claude-sonnet-4-6', family: 'Sonnet 4.6', context_tokens: 1_000_000, latest: true },
-  { id: 'claude-haiku-4-5', family: 'Haiku 4.5', context_tokens: 200_000, latest: true },
-  { id: 'claude-opus-4-6', family: 'Opus 4.6', context_tokens: 1_000_000, latest: false },
+  {
+    id: 'claude-opus-4-7',
+    family: 'Opus 4.7',
+    context_tokens: 1_000_000,
+    latest: true,
+  },
+  {
+    id: 'claude-sonnet-4-6',
+    family: 'Sonnet 4.6',
+    context_tokens: 1_000_000,
+    latest: true,
+  },
+  {
+    id: 'claude-haiku-4-5',
+    family: 'Haiku 4.5',
+    context_tokens: 200_000,
+    latest: true,
+  },
+  {
+    id: 'claude-opus-4-6',
+    family: 'Opus 4.6',
+    context_tokens: 1_000_000,
+    latest: false,
+  },
 ];
 
 function setupMockTauri(mockTauri: MockTauriService, provider = 'anthropic'): void {

@@ -241,6 +241,12 @@ pub enum MessageBlock {
         /// Error payload content suitable for display.
         content: String,
     },
+    /// User-attached image (metadata only; bytes live on disk per ADR-065).
+    Image {
+        media_type: String,
+        #[serde(default)]
+        alt: Option<String>,
+    },
 }
 
 /// Maximum number of questions accepted in a single `AskUserQuestion`
@@ -394,10 +400,47 @@ mod tests {
             MessageBlock::Error {
                 content: "boom".into(),
             },
+            MessageBlock::Image {
+                media_type: "image/png".into(),
+                alt: Some("screenshot.png".into()),
+            },
         ];
         let encoded = serde_json::to_value(&blocks).unwrap();
         let decoded: Vec<MessageBlock> = serde_json::from_value(encoded).unwrap();
         assert_eq!(blocks, decoded);
+    }
+
+    #[test]
+    fn image_block_serializes_with_snake_case_kind() {
+        let block = MessageBlock::Image {
+            media_type: "image/jpeg".into(),
+            alt: Some("diagram.jpg".into()),
+        };
+        let encoded = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            encoded,
+            json!({
+                "kind": "image",
+                "media_type": "image/jpeg",
+                "alt": "diagram.jpg",
+            })
+        );
+    }
+
+    #[test]
+    fn image_block_alt_defaults_to_none_when_missing() {
+        let decoded: MessageBlock = serde_json::from_value(json!({
+            "kind": "image",
+            "media_type": "image/png",
+        }))
+        .unwrap();
+        match decoded {
+            MessageBlock::Image { media_type, alt } => {
+                assert_eq!(media_type, "image/png");
+                assert!(alt.is_none());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     #[test]
