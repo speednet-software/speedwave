@@ -142,13 +142,13 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn attach_to_live_child_kills_on_handle_drop() {
-        // `timeout /t 30 /nobreak` cannot exit naturally in the 2 s window.
-        let mut child = std::process::Command::new("timeout")
-            .args(["/t", "30", "/nobreak"])
+        // PS Start-Sleep blocks 30 s ignoring stdio (timeout.exe exits early on null stdout).
+        let mut child = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("timeout.exe must be available on Windows test hosts");
+            .expect("powershell.exe must be available on Windows test hosts");
 
         let job = match attach_to_kill_on_close_job(&child) {
             Some(j) => j,

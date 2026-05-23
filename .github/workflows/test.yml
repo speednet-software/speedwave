@@ -331,10 +331,7 @@ jobs:
         run: cargo test -p speedwave-runtime --lib "build::"
 
       - name: cargo test host_mcp_process::job_object
-        # Windows-only kill-on-close end-to-end test (drops Job handle,
-        # asserts the child is killed within 2 s). Without this step
-        # the central invariant of the orphan-prevention fix would never
-        # run in PR CI — only on a Windows dev host.
+        # Windows-only kill-on-close end-to-end — see ADR-048.
         shell: bash
         run: cargo test -p speedwave-runtime --lib "host_mcp_process::job_object"
 
@@ -393,12 +390,6 @@ jobs:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo check --all-targets
 
-      - name: cargo test installer_hooks
-        # NSIS regression tests pin security/correctness invariants of
-        # the PRE-INSTALL sweep. Tests are pure include_str! string
-        # asserts (no Windows-only API), but the .nsh file is
-        # Windows-only — running here keeps the platform coherent.
-        working-directory: desktop/src-tauri
-        env:
-          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
-        run: cargo test --bin speedwave-desktop installer_hooks
+      # installer_hooks tests run on macOS (cargo check above already
+      # validates Windows compile); linking the test bin here clashes
+      # with sherpa-onnx/whisper-rs CRT (ADR-061).
