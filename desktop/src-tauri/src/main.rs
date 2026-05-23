@@ -23,6 +23,8 @@ mod history;
 mod host_exec_cmd;
 mod host_path;
 mod http_util;
+#[cfg(test)]
+mod installer_hooks;
 use bridges::ide_bridge;
 mod integrations_cmd;
 mod llm_cmd;

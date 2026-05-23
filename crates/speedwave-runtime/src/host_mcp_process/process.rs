@@ -112,6 +112,10 @@ pub struct SpawnContext<'a> {
 pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) spec: S,
     pub(crate) child: Option<Child>,
+    /// Job Object handle — load-bearing `Drop` side effect (kill-on-close).
+    /// `_` prefix suppresses dead_code; field MUST live as long as `child`.
+    /// `None` on non-Windows and on attach failure. See `job_object` + ADR-048.
+    pub(crate) _job: Option<super::job_object::JobHandle>,
     pub(crate) drain_handles: Vec<JoinHandle<()>>,
     pub(crate) data_dir: PathBuf,
     pub(crate) state_dir: PathBuf,
@@ -186,6 +190,9 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 
         let mut child = cmd.spawn()?;
 
+        // Attach child to Windows Job Object (no-op on non-Windows).
+        let job = super::job_object::attach_to_kill_on_close_job(&child);
+
         let (port, drain_handles) = match drain_and_read_port(&mut child, &log_path, spec.log_tag())
         {
             Ok(p) => p,
@@ -206,6 +213,7 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
         Ok(Self {
             spec,
             child: Some(child),
+            _job: job,
             drain_handles,
             data_dir: data_dir.to_path_buf(),
             state_dir,
@@ -508,6 +516,30 @@ mod tests {
                 .as_deref(),
             Some("abc"),
             "WorkerSpec::apply_env must inject worker-specific vars"
+        );
+    }
+
+    /// Pin spawn → attach → drain ordering — see ADR-048 §"PRE-INSTALL
+    /// orphan worker sweep". Reordering breaks error-path cleanup.
+    #[test]
+    fn attach_runs_before_drain_so_failure_cleanup_drops_job() {
+        const SRC: &str = include_str!("process.rs");
+        let attach_pos = SRC
+            .find("attach_to_kill_on_close_job(&child)")
+            .expect("attach call must exist in spawn_with_spec");
+        let drain_pos = SRC
+            .find("drain_and_read_port(&mut child")
+            .expect("drain call must exist in spawn_with_spec");
+        let assign_pos = SRC.find("_job: job,").expect("_job assignment must exist");
+        assert!(
+            attach_pos < drain_pos,
+            "attach_to_kill_on_close_job must run BEFORE drain_and_read_port \
+             so the local `job` binding drops on drain failure"
+        );
+        assert!(
+            drain_pos < assign_pos,
+            "_job: job assignment must come AFTER drain success — otherwise \
+             the error path moves `job` into a non-existent Self and leaks"
         );
     }
 }

@@ -466,9 +466,20 @@ Compromising the **Apple Developer ID key alone** is sufficient to ship malware 
 
 Treat the Apple Developer ID as the primary secret. The Tauri key is a defense-in-depth layer against compromises of the GitHub release infrastructure, not a substitute for Apple Developer ID protection.
 
+## Windows Host MCP Worker Lifecycle (Job Object)
+
+On Windows, every host MCP worker (`mcp-os`, `host_exec`, `oauth`) is attached at spawn to a Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK`. Parent (`Speedwave.exe`) crash → kernel closes the Job handle → child `node.exe` terminates automatically. The NSIS `NSIS_HOOK_PREINSTALL` sweep is the fallback for orphans that survive the parent (e.g. v0.10.x workers spawned before Job Object support shipped). See [ADR-048](../adr/ADR-048-windows-uninstall-cleanup.md) §"PRE-INSTALL orphan worker sweep" for the architectural decision.
+
+### Accepted residual risks
+
+- **`JOB_OBJECT_LIMIT_BREAKAWAY_OK` permits descendants to escape the job.** A `host_exec` recipe that runs a tool which spawns with `CREATE_BREAKAWAY_FROM_JOB` (UAC elevation prompts, MSI subprocesses, some `cmd /c start /b` patterns) produces a descendant that survives a parent crash. This is intentional — without the flag those legitimate spawns fail with `ERROR_ACCESS_DENIED` and `host_exec` recipes silently break. The NSIS PRE-INSTALL sweep is the safety net: it kills any orphan whose `ExecutablePath` is under `$INSTDIR\nodejs\` regardless of how it escaped.
+- **TOCTOU window between `Command::spawn` and `AssignProcessToJobObject`** (~microseconds, unbounded under heavy scheduler load). Grandchildren spawned in that window inherit no job and survive parent crash. The atomic fix (`PROC_THREAD_ATTRIBUTE_JOB_LIST` in `STARTUPINFOEX`, or `CREATE_SUSPENDED` + `ResumeThread`) requires bypassing `std::process::Command` and is deferred. Mitigations: (a) host MCP workers do not spawn grandchildren during their synchronous startup phase, (b) the NSIS sweep catches any orphan that does slip through.
+- **`AssignProcessToJobObject` failure in nested-job environments** (debugger, Windows Sandbox, MSIX container, PCA compatibility job) returns `ERROR_ACCESS_DENIED`. Parent-crash protection is disabled for that worker; the code logs at error level and the NSIS sweep remains the only orphan defence on next install.
+
 ## See Also
 
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)
+- [ADR-048: Windows Uninstall Cleanup (incl. PRE-INSTALL orphan sweep)](../adr/ADR-048-windows-uninstall-cleanup.md)
 - [ADR-059: Drop Linux Support](../adr/ADR-059-drop-linux-support.md)
 - [ADR-037: Code Signing and Bundled Binary Signing](../adr/ADR-037-code-signing-and-bundled-binary-signing.md)
 - [ADR-051: Plugin Signature Runtime Verification](../adr/ADR-051-plugin-signature-runtime-verification.md)
