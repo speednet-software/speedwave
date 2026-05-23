@@ -357,6 +357,20 @@ async fn get_conversation(
 }
 
 #[tauri::command]
+async fn delete_conversation(project: String, session_id: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        check_project(&project)?;
+        log::info!("delete_conversation: project={project}");
+        history::delete_conversation(&project, &session_id).map_err(|e| {
+            log::error!("delete_conversation: error: {e}");
+            e.to_string()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn get_project_memory(project: String) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
@@ -1558,7 +1572,8 @@ fn main() {
     // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project host_exec
     // workers, per-project oauth workers, auto-check handle.
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
-    let plugin_bridges: SharedPluginBridges = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let plugin_bridges: SharedPluginBridges =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let host_exec: SharedHostExec = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
@@ -2090,6 +2105,7 @@ fn main() {
             // Chat history
             list_conversations,
             get_conversation,
+            delete_conversation,
             get_project_memory,
             resume_conversation,
             // Project management

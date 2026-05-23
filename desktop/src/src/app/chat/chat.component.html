@@ -9,6 +9,7 @@
       [currentSessionId]="currentViewSessionId"
       (closed)="ui.closeSidebar()"
       (resumeConversation)="resumeConversation($event.session_id)"
+      (deleteConversation)="deleteConversation($event.session_id)"
     />
 
     <!-- Main column: header + body (messages or transcript) + composer. -->

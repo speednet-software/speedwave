@@ -405,6 +405,33 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
+  /**
+   * Deletes a conversation's transcript file. If the active session is the one
+   * being deleted, we reset live chat too — the underlying JSONL is gone, so
+   * resume/retry would fail.
+   * @param sessionId - session UUID to delete.
+   */
+  async deleteConversation(sessionId: string): Promise<void> {
+    const project = this.projectState.activeProject;
+    if (!project) return;
+    const wasActive = this.currentViewSessionId === sessionId;
+    this.historyError = '';
+    try {
+      await this.tauri.invoke('delete_conversation', { project, sessionId });
+      this.conversations = this.conversations.filter((c) => c.session_id !== sessionId);
+      if (wasActive) {
+        this.optimisticSessionId = null;
+        this.chat.resetForNewConversation();
+        await this.chat.init();
+      }
+    } catch (err) {
+      console.error('[chat] deleteConversation failed:', err);
+      this.historyError = `Failed to delete conversation: ${err}`;
+    } finally {
+      this.cdr.markForCheck();
+    }
+  }
+
   /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
   async newConversation(): Promise<void> {
     this.ui.closeSidebar();
