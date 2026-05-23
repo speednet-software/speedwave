@@ -194,7 +194,7 @@ mod tests {
         assert!(saved.filename.ends_with(".png"));
         assert!(saved
             .container_path
-            .starts_with("/workspace/.speedwave/pastes/paste-"));
+            .starts_with(&format!("/workspace/{}/paste-", PASTES_SUBDIR.as_str())));
         assert!(Path::new(&saved.host_path).is_file());
         assert_eq!(std::fs::read(&saved.host_path).unwrap(), PNG_MAGIC);
     }

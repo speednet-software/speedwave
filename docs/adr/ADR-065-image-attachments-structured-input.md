@@ -177,9 +177,10 @@ operators debugging the read shim.
   thumbnail. The original blob URL was the only owner of the bytes;
   re-creating it post-reload would require a host-side image store
   (out of scope for v1).
-- CLI users can't paste images yet. The TUI ships its own paste path
-  upstream[^1] but it reads the host clipboard — unreachable from the
-  isolated container.
+- CLI paste latency: `arboard` polling 250 ms (`POLL_MS` in
+  `paste_watcher.rs`). A freshly-copied image is visible to Claude
+  within one poll tick; faster intervals burn battery without
+  user-visible gain.
 - `pica` adds ~50 KB gzipped to the renderer bundle. The Lanczos
   resampler runs in a Web Worker, so the main thread stays
   responsive during paste of a 4K screenshot.
