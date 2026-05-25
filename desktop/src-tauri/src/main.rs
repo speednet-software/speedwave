@@ -952,6 +952,7 @@ struct PluginBridgeCredentialsResponse {
 enum PluginBridgeStatusResponse {
     Running {
         slug: String,
+        /// Always `true` — TS discriminant. Pinned by wire-format test.
         running: bool,
         port: u16,
         paired: bool,
@@ -960,6 +961,7 @@ enum PluginBridgeStatusResponse {
     },
     NotRunning {
         slug: String,
+        /// Always `false` — TS discriminant. Pinned by wire-format test.
         running: bool,
     },
 }

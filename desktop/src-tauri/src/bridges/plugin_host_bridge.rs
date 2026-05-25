@@ -273,15 +273,12 @@ fn translate_pairing_event(evt: PairingEvent) -> Option<PluginBridgeEvent> {
         }),
         PairingEvent::PairClosed { reason } => Some(PluginBridgeEvent::Disconnected { reason }),
         PairingEvent::PairBusy { .. } => Some(PluginBridgeEvent::PairBusy),
-        PairingEvent::SameRoleCollision { role, policy, .. } => {
-            if policy == RoleCollisionPolicy::EvictOlder {
-                Some(PluginBridgeEvent::EvictedOlder {
-                    role: role.to_string(),
-                })
-            } else {
-                None
-            }
-        }
+        PairingEvent::SameRoleCollision { role, policy, .. } => match policy {
+            RoleCollisionPolicy::EvictOlder => Some(PluginBridgeEvent::EvictedOlder {
+                role: role.to_string(),
+            }),
+            RoleCollisionPolicy::Reject => Some(PluginBridgeEvent::PairBusy),
+        },
         PairingEvent::PendingSlotTimeout { role } => Some(PluginBridgeEvent::PendingTimeout {
             role: role.to_string(),
         }),
