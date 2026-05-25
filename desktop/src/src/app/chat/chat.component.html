@@ -46,6 +46,7 @@
             #composer
             [streaming]="chat.isStreaming"
             [queuedText]="chat.pendingQueue?.text ?? ''"
+            [model]="chat.sessionStats?.model ?? ''"
             (submitted)="sendMessage($event)"
             (queueRequested)="onQueueRequested($event)"
             (queueCancelled)="onQueueCancelled()"

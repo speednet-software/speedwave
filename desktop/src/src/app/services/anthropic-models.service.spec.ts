@@ -6,9 +6,24 @@ import { MockTauriService } from '../testing/mock-tauri.service';
 import { DEFAULT_CONTEXT_TOKENS, type AnthropicModel } from '../models/llm';
 
 const FIXTURE: AnthropicModel[] = [
-  { id: 'claude-opus-4-7', family: 'Opus 4.7', context_tokens: 1_000_000, latest: true },
-  { id: 'claude-sonnet-4-6', family: 'Sonnet 4.6', context_tokens: 1_000_000, latest: true },
-  { id: 'claude-haiku-4-5', family: 'Haiku 4.5', context_tokens: 200_000, latest: true },
+  {
+    id: 'claude-opus-4-7',
+    family: 'Opus 4.7',
+    context_tokens: 1_000_000,
+    latest: true,
+  },
+  {
+    id: 'claude-sonnet-4-6',
+    family: 'Sonnet 4.6',
+    context_tokens: 1_000_000,
+    latest: true,
+  },
+  {
+    id: 'claude-haiku-4-5',
+    family: 'Haiku 4.5',
+    context_tokens: 200_000,
+    latest: true,
+  },
 ];
 
 describe('AnthropicModelsService', () => {

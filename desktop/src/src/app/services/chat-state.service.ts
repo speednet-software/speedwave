@@ -14,23 +14,28 @@ import {
   type LogMsgEnvelope,
   type MessageBlockState,
 } from '../models/state-tree';
-import type {
-  ChatMessage,
-  MessageBlock,
-  SessionStats,
-  StreamChunk,
-  ToolUseBlock,
-  AskUserQuestionBlock,
-  AskUserQuestionItem,
-  ProjectList,
-  RateLimitInfo,
-  EntryMeta,
-  TurnUsage,
-  QueuedMessage,
+import {
+  chatInputFromText,
+  chatInputToBlocks,
+  type ChatInput,
+  type ChatMessage,
+  type MessageBlock,
+  type SessionStats,
+  type StreamChunk,
+  type ToolUseBlock,
+  type AskUserQuestionBlock,
+  type AskUserQuestionItem,
+  type ProjectList,
+  type RateLimitInfo,
+  type EntryMeta,
+  type TurnUsage,
+  type QueuedMessage,
+  type WireContentBlock,
 } from '../models/chat';
 
 // Re-export types consumed by components
 export type {
+  ChatInput,
   ChatMessage,
   MessageBlock,
   StreamChunk,
@@ -314,23 +319,31 @@ export class ChatStateService {
   }
 
   /**
-   * Sends a user message to Claude via the backend.
-   * @param text - The message text to send. May be the user's raw input or
-   *   a prefixed payload (e.g. plan-mode prefix); when `displayText` is
-   *   provided it is used for the local bubble while `text` is what the
-   *   backend receives.
-   * @param displayText - Optional surface-level text rendered in the chat
-   *   list. Falls back to `text` when omitted.
+   * Accepts a plain string (text-only) or `ChatInput` with attachments.
+   * @param input - Raw text or composer bundle.
+   * @param displayText - Overrides the bubble's surface text (plan-mode prefix flow).
    */
-  async sendMessage(text: string, displayText?: string): Promise<void> {
-    if (!text || this.isStreaming) return;
+  async sendMessage(input: string | ChatInput, displayText?: string): Promise<void> {
+    const chatInput: ChatInput = typeof input === 'string' ? chatInputFromText(input) : input;
+    const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
+    const hasContent = wireBlocks.length > 0;
+    if (!hasContent || this.isStreaming) return;
     console.debug('[chat-state] sendMessage: isStreaming=%s', this.isStreaming);
 
+    const displayBlocks: MessageBlock[] = [];
+    const surfaceText = displayText ?? chatInput.text;
+    if (surfaceText.length > 0) {
+      displayBlocks.push({ type: 'text', content: surfaceText });
+    }
+    for (const att of chatInput.attachments) {
+      // State-tree carries metadata only (ADR-065); bytes live on disk.
+      displayBlocks.push({ type: 'image', media_type: att.mediaType, alt: att.filename });
+    }
     this._messages = [
       ...this._messages,
       {
         role: 'user',
-        blocks: [{ type: 'text', content: displayText ?? text }],
+        blocks: displayBlocks,
         timestamp: Date.now(),
       },
     ];
@@ -339,8 +352,9 @@ export class ChatStateService {
     this._currentBlocks = [];
     this.notifyChange();
 
+    const invokeArgs = { blocks: wireBlocks, displayText: surfaceText };
     try {
-      await this.tauri.invoke('send_message', { message: text });
+      await this.tauri.invoke('send_message', invokeArgs);
     } catch (err) {
       const errStr = String(err);
       // Session died (broken pipe, exited) — restart transparently
@@ -380,7 +394,7 @@ export class ChatStateService {
             }
             // After waiting, try to send — session should be ready now
             try {
-              await this.tauri.invoke('send_message', { message: text });
+              await this.tauri.invoke('send_message', invokeArgs);
             } catch (postWaitErr) {
               this.isStreaming = false;
               this._messages = [
@@ -408,7 +422,7 @@ export class ChatStateService {
             } finally {
               this.startingSession = false;
             }
-            await this.tauri.invoke('send_message', { message: text });
+            await this.tauri.invoke('send_message', invokeArgs);
             return;
           }
           // No active project — surface actionable error
@@ -1483,6 +1497,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'error':
         out.push({ type: 'error', content: b.content });
         break;
+      case 'image':
+        out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
+        break;
     }
   }
   return out;
@@ -1536,11 +1553,11 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
       case 'error':
         out.push({ kind: 'error', content: b.content });
         break;
+      case 'image':
+        out.push({ kind: 'image', media_type: b.media_type, alt: b.alt ?? null });
+        break;
       case 'permission_prompt':
-        // Permission prompts are not part of the patch state-tree shape;
-        // they're an in-flight UI affordance not persisted as conversation.
-        // Skipping is consistent with how the backend never emits them as
-        // state — they're surfaced via control-request channel.
+        // In-flight UI affordance; never persisted to the state-tree.
         break;
     }
   }

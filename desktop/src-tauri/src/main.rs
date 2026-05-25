@@ -31,6 +31,7 @@ mod llm_cmd;
 mod logging_cmd;
 mod oauth_cmd;
 mod oauth_login_cmd;
+mod paste_cmd;
 mod patch_emitter;
 // `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
 // which is Windows-only (gnome-terminal / xterm spawning was removed with the
@@ -263,13 +264,19 @@ async fn start_chat(
 
 #[tauri::command]
 async fn send_message(
-    message: String,
+    blocks: Vec<chat::WireContentBlock>,
+    display_text: String,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
-    if message.len() > chat::MAX_MESSAGE_LEN {
+    // `display_text` is the local-bubble preview; wire-size guard is in `send_message`.
+    if display_text.len() > chat::MAX_MESSAGE_LEN {
         return Err("Message too long".to_string());
     }
-    log::info!("send_message: len={}", message.len());
+    log::info!(
+        "send_message: blocks={}, display_len={}",
+        blocks.len(),
+        display_text.len()
+    );
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let mut session = session_arc.try_lock().map_err(|_| {
@@ -277,7 +284,7 @@ async fn send_message(
             "no active session (session is being started)".to_string()
         })?;
         log::info!("send_message: lock acquired, sending");
-        session.send_message(&message).map_err(|e| e.to_string())
+        session.send_message(&blocks).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2076,6 +2083,7 @@ fn main() {
             // Chat
             start_chat,
             send_message,
+            paste_cmd::save_pasted_image,
             submit_question_answer,
             stop_chat,
             retry_cmd::retry_last_turn,
@@ -2661,14 +2669,14 @@ mod tests {
         let source = include_str!("main.rs");
         let body = extract_fn_body(source, "async fn send_message(");
         let len_pos = body
-            .find("message.len()")
-            .expect("send_message must check message length");
+            .find("display_text.len()")
+            .expect("send_message must check display_text length");
         let spawn_pos = body
             .find("spawn_blocking")
             .expect("send_message must use spawn_blocking");
         assert!(
             len_pos < spawn_pos,
-            "message length check must come BEFORE spawn_blocking for fail-fast validation"
+            "display_text length check must come BEFORE spawn_blocking for fail-fast validation"
         );
     }
 
