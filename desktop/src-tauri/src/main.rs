@@ -1049,6 +1049,9 @@ fn plugin_bridge_get_status(
             "slug": slug,
             "running": true,
             "port": bridge.port(),
+            "paired": bridge.is_paired(),
+            "display_name": bridge.manifest().display_name,
+            "token_is_persistent": bridge.manifest().persistent_token,
         })),
         None => Ok(serde_json::json!({
             "slug": slug,

@@ -33,6 +33,7 @@ function makeMcpPlugin(): PluginStatusEntry {
     settings_schema: null,
     requires_integrations: [],
     verification_status: 'verified',
+    has_host_bridge: false,
   };
 }
 
@@ -51,6 +52,7 @@ function makeResourcePlugin(): PluginStatusEntry {
     settings_schema: null,
     requires_integrations: [],
     verification_status: 'verified',
+    has_host_bridge: false,
   };
 }
 

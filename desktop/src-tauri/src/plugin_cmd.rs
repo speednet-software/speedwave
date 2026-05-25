@@ -36,6 +36,9 @@ pub(crate) struct PluginStatusEntry {
     /// Human-readable diagnostic when `verification_status != Verified`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) verification_error: Option<String>,
+    /// True when the manifest declares `host_bridge`. Drives the
+    /// frontend "Bridge connection" section visibility.
+    pub(crate) has_host_bridge: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -113,6 +116,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
                 requires_integrations: Vec::new(),
                 verification_status: ui.verification_status.clone(),
                 verification_error: ui.verification_error.clone(),
+                has_host_bridge: false,
             });
             continue;
         };
@@ -170,6 +174,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             requires_integrations: manifest.requires_integrations.clone(),
             verification_status: ui.verification_status.clone(),
             verification_error: ui.verification_error.clone(),
+            has_host_bridge: manifest.host_bridge.is_some(),
         });
     }
 
@@ -712,6 +717,7 @@ mod tests {
             requires_integrations: vec![],
             verification_status: plugin::VerificationStatus::Verified,
             verification_error: None,
+            has_host_bridge: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("test-plugin"));
@@ -750,6 +756,7 @@ mod tests {
             requires_integrations: vec!["sharepoint".into()],
             verification_status: plugin::VerificationStatus::Verified,
             verification_error: None,
+            has_host_bridge: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("settings_schema"));

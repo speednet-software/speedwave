@@ -36,6 +36,7 @@ const MOCK_PLUGINS = {
       settings_schema: MOCK_SCHEMA,
       requires_integrations: ['sharepoint'],
       verification_status: 'verified',
+      has_host_bridge: false,
     },
   ],
 };
@@ -56,6 +57,7 @@ const MOCK_PLUGINS_NO_SP = {
       settings_schema: null,
       requires_integrations: [],
       verification_status: 'verified',
+      has_host_bridge: false,
     },
   ],
 };

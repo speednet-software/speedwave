@@ -5,11 +5,13 @@ import {
   OnDestroy,
   OnInit,
   inject,
+  signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { PluginBridgeService } from '../../services/plugin-bridge.service';
 import { PluginStatusEntry, PluginsResponse } from '../../models/plugin';
 import { IntegrationsResponse } from '../../models/integration';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
@@ -303,6 +305,107 @@ interface ExposedTool {
                 </p>
               }
 
+              @if (plugin.has_host_bridge) {
+                <section
+                  class="mt-6 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4"
+                  data-testid="bridge-connection"
+                >
+                  <div
+                    class="mono mb-3 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  >
+                    Bridge connection
+                    <span
+                      class="dot"
+                      [style.background]="
+                        bridgeStatus()?.paired ? 'var(--green)' : 'var(--ink-mute)'
+                      "
+                      data-testid="bridge-status-dot"
+                    ></span>
+                    <span data-testid="bridge-status-label">
+                      {{ bridgeStatus()?.paired ? 'connected' : 'waiting for client' }}
+                    </span>
+                  </div>
+
+                  @if (bridgeError()) {
+                    <p class="mono mb-2 text-[12px] text-red-300" data-testid="bridge-error">
+                      {{ bridgeError() }}
+                    </p>
+                  } @else {
+                    <p class="mb-2 text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                      Paste these into your companion app (e.g. the Figma Desktop plugin). The
+                      worker container uses an internal address; this URL is for external clients on
+                      the same host.
+                    </p>
+
+                    <label
+                      for="bridge-url-input"
+                      class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    >
+                      Connect URL
+                    </label>
+                    <div class="mb-3 flex items-center gap-2">
+                      <input
+                        id="bridge-url-input"
+                        readonly
+                        class="mono flex-1 rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                        [value]="bridgeUrl() ?? ''"
+                        data-testid="bridge-url-input"
+                      />
+                      <button
+                        type="button"
+                        class="mono rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                        data-testid="bridge-url-copy"
+                        (click)="copyBridgeField('url')"
+                      >
+                        {{ bridgeCopiedField() === 'url' ? 'copied' : 'copy' }}
+                      </button>
+                    </div>
+
+                    <label
+                      for="bridge-token-input"
+                      class="mono mb-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    >
+                      Token
+                      @if (bridgeStatus()?.token_is_persistent) {
+                        <span class="pill green" data-testid="bridge-token-persistent"
+                          >persistent</span
+                        >
+                      } @else {
+                        <span class="pill" data-testid="bridge-token-transient"
+                          >regenerated each startup</span
+                        >
+                      }
+                    </label>
+                    <div class="flex items-center gap-2">
+                      <input
+                        id="bridge-token-input"
+                        readonly
+                        class="mono flex-1 rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                        [type]="bridgeTokenRevealed() ? 'text' : 'password'"
+                        [value]="bridgeToken() ?? ''"
+                        data-testid="bridge-token-input"
+                      />
+                      <button
+                        type="button"
+                        class="mono rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                        data-testid="bridge-token-reveal"
+                        (click)="toggleBridgeTokenReveal()"
+                      >
+                        {{ bridgeTokenRevealed() ? 'hide' : 'reveal' }}
+                      </button>
+                      <button
+                        type="button"
+                        class="mono rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                        data-testid="bridge-token-copy"
+                        (click)="copyBridgeField('token')"
+                      >
+                        {{ bridgeCopiedField() === 'token' ? 'copied' : 'copy' }}
+                      </button>
+                    </div>
+                  }
+                </section>
+              }
+
               <div
                 class="mt-8 rounded border border-red-500/30 bg-red-500/[0.04] p-4"
                 data-testid="danger-zone"
@@ -434,8 +537,16 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+  private bridgeService = inject(PluginBridgeService);
   private activeProject: string | null = null;
   private unsubProjectReady: (() => void) | null = null;
+
+  bridgeToken = signal<string | null>(null);
+  bridgeUrl = signal<string | null>(null);
+  bridgeTokenRevealed = signal(false);
+  bridgeCopiedField = signal<'url' | 'token' | null>(null);
+  bridgeError = signal<string | null>(null);
+  bridgeStatus = signal<import('../../models/plugin').PluginBridgeStatus | null>(null);
 
   /** Returns integration names that are not yet configured. */
   get missingIntegrations(): string[] {
@@ -454,6 +565,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     await this.loadPlugin(slug);
     await this.loadSettings(slug);
     await this.loadIntegrationStatuses();
+    await this.loadBridge(slug);
     this.cdr.markForCheck();
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
@@ -466,8 +578,49 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
       await this.loadPlugin(currentSlug);
       await this.loadSettings(currentSlug);
       await this.loadIntegrationStatuses();
+      await this.loadBridge(currentSlug);
       this.cdr.markForCheck();
     });
+  }
+
+  private async loadBridge(slug: string): Promise<void> {
+    if (!this.plugin?.has_host_bridge) {
+      this.bridgeStatus.set(null);
+      return;
+    }
+    try {
+      await this.bridgeService.refresh(slug);
+      this.bridgeStatus = this.bridgeService.status(slug) as typeof this.bridgeStatus;
+      const creds = await this.bridgeService.credentials(slug);
+      this.bridgeUrl.set(creds.url);
+      this.bridgeToken.set(creds.token);
+      this.bridgeError.set(null);
+    } catch (err) {
+      this.bridgeError.set(String(err));
+    }
+  }
+
+  /**
+   * Copies the bridge URL or token to the clipboard and flashes "copied".
+   * @param field - Which field to copy.
+   */
+  async copyBridgeField(field: 'url' | 'token'): Promise<void> {
+    const value = field === 'url' ? this.bridgeUrl() : this.bridgeToken();
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      this.bridgeCopiedField.set(field);
+      setTimeout(() => {
+        if (this.bridgeCopiedField() === field) this.bridgeCopiedField.set(null);
+      }, 1500);
+    } catch {
+      // Clipboard API not available — silently ignore.
+    }
+  }
+
+  /** Toggles between masked password and revealed plaintext for the bridge token. */
+  toggleBridgeTokenReveal(): void {
+    this.bridgeTokenRevealed.update((v) => !v);
   }
 
   /** Cleans up the project ready listener. */
