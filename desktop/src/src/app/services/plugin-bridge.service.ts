@@ -25,6 +25,7 @@ export class PluginBridgeService implements OnDestroy {
   private readonly statuses = new Map<string, WritableSignal<PluginBridgeStatus | null>>();
   private unlisten: UnlistenFn | null = null;
   private listening = false;
+  private pendingListen: Promise<void> | null = null;
 
   /**
    * Reactive status for a given plugin slug. `null` until first refresh.
@@ -51,6 +52,7 @@ export class PluginBridgeService implements OnDestroy {
    * @param slug - Plugin slug to query.
    */
   async credentials(slug: string): Promise<PluginBridgeCredentials> {
+    await this.ensureListening();
     return this.tauri.invoke<PluginBridgeCredentials>('plugin_bridge_get_credentials', { slug });
   }
 
@@ -59,6 +61,7 @@ export class PluginBridgeService implements OnDestroy {
     this.unlisten?.();
     this.unlisten = null;
     this.listening = false;
+    this.pendingListen = null;
   }
 
   private getOrCreateSig(slug: string): WritableSignal<PluginBridgeStatus | null> {
@@ -70,17 +73,20 @@ export class PluginBridgeService implements OnDestroy {
     return sig;
   }
 
-  private async ensureListening(): Promise<void> {
-    if (this.listening) return;
-    try {
-      this.unlisten = await this.tauri.listen<BridgeEventPayload>(
-        'plugin_bridge_event',
-        ({ payload }) => this.applyEvent(payload)
-      );
-      this.listening = true;
-    } catch (err) {
-      console.error('PluginBridgeService: failed to subscribe to plugin_bridge_event', err);
-    }
+  private ensureListening(): Promise<void> {
+    if (this.listening) return Promise.resolve();
+    if (this.pendingListen) return this.pendingListen;
+    this.pendingListen = this.tauri
+      .listen<BridgeEventPayload>('plugin_bridge_event', ({ payload }) => this.applyEvent(payload))
+      .then((fn) => {
+        this.unlisten = fn;
+        this.listening = true;
+      })
+      .catch((err) => {
+        console.error('PluginBridgeService: failed to subscribe to plugin_bridge_event', err);
+        this.pendingListen = null;
+      });
+    return this.pendingListen;
   }
 
   private applyEvent(payload: BridgeEventPayload): void {
@@ -102,6 +108,7 @@ export class PluginBridgeService implements OnDestroy {
         sig.set({ ...current, paired: false, partner_connected: false });
         return;
       default:
+        console.warn(`PluginBridgeService: bridge ${payload.slug} ${payload.kind}`);
         return;
     }
   }

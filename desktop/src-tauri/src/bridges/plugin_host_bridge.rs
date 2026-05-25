@@ -187,7 +187,7 @@ impl PluginHostBridge {
         self.paired
             .store(false, std::sync::atomic::Ordering::Release);
         self.partner_connected
-            .store(false, std::sync::atomic::Ordering::Release);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.inner.stop()
     }
 
@@ -212,28 +212,30 @@ impl Drop for PluginHostBridge {
     }
 }
 
-/// Translate manifest-parsed role strings into the `'static`-lifetime
-/// representation `PairingConfig` requires.
-///
-/// `Box::leak` is intentional: `init_and_start_plugin_bridges` calls
-/// this exactly once per plugin at Desktop startup, the resulting
-/// bridge lives for the entire process, and `validate_host_bridge_manifest`
-/// caps each plugin's leakable footprint at ≈ 4 KiB. The leak window
-/// equals the process lifetime — same constraint the IDE bridge
-/// satisfies with compile-time string literals.
+/// Intern table: each unique string leaks once, reused across respawns.
+static STRING_INTERN: std::sync::Mutex<Option<HashMap<String, &'static str>>> =
+    std::sync::Mutex::new(None);
+
+fn intern_static(s: &str) -> &'static str {
+    let mut guard = STRING_INTERN.lock().expect("string intern table poisoned");
+    let table = guard.get_or_insert_with(HashMap::new);
+    if let Some(&existing) = table.get(s) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
+    table.insert(s.to_string(), leaked);
+    leaked
+}
+
 fn translate_roles(
     manifest_roles: &HashMap<String, HostBridgeRoleAuth>,
 ) -> HashMap<&'static str, AuthScheme> {
     let mut out = HashMap::with_capacity(manifest_roles.len());
     for (role_name, auth) in manifest_roles {
-        let role_static: &'static str = Box::leak(role_name.clone().into_boxed_str());
+        let role_static = intern_static(role_name);
         let scheme = match auth {
-            HostBridgeRoleAuth::Header { name } => {
-                AuthScheme::Header(Box::leak(name.clone().into_boxed_str()))
-            }
-            HostBridgeRoleAuth::QueryParam { name } => {
-                AuthScheme::QueryParam(Box::leak(name.clone().into_boxed_str()))
-            }
+            HostBridgeRoleAuth::Header { name } => AuthScheme::Header(intern_static(name)),
+            HostBridgeRoleAuth::QueryParam { name } => AuthScheme::QueryParam(intern_static(name)),
         };
         out.insert(role_static, scheme);
     }

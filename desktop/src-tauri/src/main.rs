@@ -2278,6 +2278,55 @@ mod tests {
     use config::{ProjectUserEntry, SpeedwaveUserConfig};
 
     #[test]
+    fn plugin_bridge_credentials_response_wire_format() {
+        let resp = PluginBridgeCredentialsResponse {
+            slug: "figma".into(),
+            url: "ws://127.0.0.1:60123/".into(),
+            token: "uuid-token".into(),
+        };
+        let expected = serde_json::json!({
+            "slug": "figma",
+            "url": "ws://127.0.0.1:60123/",
+            "token": "uuid-token",
+        });
+        assert_eq!(serde_json::to_value(&resp).unwrap(), expected);
+    }
+
+    #[test]
+    fn plugin_bridge_status_response_running_wire_format() {
+        let resp = PluginBridgeStatusResponse::Running {
+            slug: "figma".into(),
+            running: true,
+            port: 60123,
+            paired: true,
+            partner_connected: true,
+            display_name: "Figma Bridge".into(),
+        };
+        let expected = serde_json::json!({
+            "slug": "figma",
+            "running": true,
+            "port": 60123,
+            "paired": true,
+            "partner_connected": true,
+            "display_name": "Figma Bridge",
+        });
+        assert_eq!(serde_json::to_value(&resp).unwrap(), expected);
+    }
+
+    #[test]
+    fn plugin_bridge_status_response_not_running_wire_format() {
+        let resp = PluginBridgeStatusResponse::NotRunning {
+            slug: "figma".into(),
+            running: false,
+        };
+        let expected = serde_json::json!({
+            "slug": "figma",
+            "running": false,
+        });
+        assert_eq!(serde_json::to_value(&resp).unwrap(), expected);
+    }
+
+    #[test]
     fn format_audit_failure_message_lists_every_failure_and_recovery_steps() {
         let failures = vec![
             (

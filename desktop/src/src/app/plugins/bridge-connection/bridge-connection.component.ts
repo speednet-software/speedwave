@@ -94,6 +94,11 @@ import { PluginBridgeService } from '../../services/plugin-bridge.service';
             {{ copiedField() === 'token' ? 'copied' : 'copy' }}
           </button>
         </div>
+        @if (copyError()) {
+          <p class="mono mt-2 text-[11px] text-red-300" data-testid="bridge-copy-error">
+            {{ copyError() }}
+          </p>
+        }
       }
     </section>
   `,
@@ -108,6 +113,7 @@ export class BridgeConnectionComponent implements OnInit {
   readonly tokenRevealed = signal(false);
   readonly copiedField = signal<'url' | 'token' | null>(null);
   readonly error = signal<string | null>(null);
+  readonly copyError = signal<string | null>(null);
 
   readonly status = computed(() => this.bridgeService.status(this.slug())());
 
@@ -155,7 +161,10 @@ export class BridgeConnectionComponent implements OnInit {
       }, 1500);
     } catch (err) {
       console.warn('BridgeConnectionComponent: clipboard write failed', err);
-      this.error.set('Could not copy to clipboard');
+      this.copyError.set('Could not copy to clipboard');
+      setTimeout(() => {
+        if (this.copyError() === 'Could not copy to clipboard') this.copyError.set(null);
+      }, 3000);
     }
   }
 

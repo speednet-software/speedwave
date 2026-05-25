@@ -119,6 +119,9 @@ describe('BridgeConnectionComponent', () => {
     const cmp = fixture.componentInstance;
     await cmp.ngOnInit();
     await cmp.copy('token');
-    expect(cmp.error()).toBe('Could not copy to clipboard');
+    expect(cmp.copyError()).toBe('Could not copy to clipboard');
+    expect(cmp.error()).toBeNull();
+    expect(cmp.url()).toBe('ws://127.0.0.1:60123/');
+    expect(cmp.token()).toBe('uuid-token');
   });
 });
