@@ -55,7 +55,6 @@ export interface PluginBridgeStatus {
   port?: number;
   paired?: boolean;
   display_name?: string;
-  token_is_persistent?: boolean;
 }
 
 /** Credentials returned by `plugin_bridge_get_credentials`. */

@@ -363,18 +363,9 @@ interface ExposedTool {
 
                     <label
                       for="bridge-token-input"
-                      class="mono mb-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                      class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
                     >
                       Token
-                      @if (bridgeStatus()?.token_is_persistent) {
-                        <span class="pill green" data-testid="bridge-token-persistent"
-                          >persistent</span
-                        >
-                      } @else {
-                        <span class="pill" data-testid="bridge-token-transient"
-                          >regenerated each startup</span
-                        >
-                      }
                     </label>
                     <div class="flex items-center gap-2">
                       <input
