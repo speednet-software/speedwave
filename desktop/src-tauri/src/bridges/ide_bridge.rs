@@ -15,9 +15,9 @@ use super::host_bridge::{
 
 // Re-export internals used by tests (and historical callers expecting
 // them through `crate::ide_bridge::*`).
-pub(crate) use super::host_bridge::AuthState;
 #[cfg(test)]
 pub(crate) use super::host_bridge::constant_time_eq;
+pub(crate) use super::host_bridge::AuthState;
 
 /// Header name Claude Code uses to authenticate with the IDE Bridge.
 pub(crate) const IDE_BRIDGE_AUTH_HEADER: &str = "x-claude-code-ide-authorization";
@@ -490,11 +490,7 @@ impl IdeBridge {
     /// Test-only constructor for tests that write lock files directly
     /// without a live listener. Does **not** spin up `HostBridge`.
     #[cfg(test)]
-    pub(crate) fn new_with_paths(
-        auth_token: &str,
-        lock_file_path: PathBuf,
-        tcp_port: u16,
-    ) -> Self {
+    pub(crate) fn new_with_paths(auth_token: &str, lock_file_path: PathBuf, tcp_port: u16) -> Self {
         let (upstream_changed_tx, _) = tokio::sync::broadcast::channel(4);
         Self {
             inner: None,
@@ -510,10 +506,11 @@ impl IdeBridge {
     /// Start the bridge: bind, write lock file, accept connections,
     /// proxy to the configured upstream IDE (or use stubs).
     pub fn start(&mut self) -> anyhow::Result<()> {
-        let inner = self
-            .inner
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("IdeBridge::start() requires inner HostBridge (test-only constructor cannot start)"))?;
+        let inner = self.inner.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "IdeBridge::start() requires inner HostBridge (test-only constructor cannot start)"
+            )
+        })?;
 
         let upstream = self.upstream.clone();
         let upstream_changed_tx = self.upstream_changed_tx.clone();
@@ -1104,11 +1101,7 @@ mod tests {
 
     #[test]
     fn test_dispatch_notifications_initialized() {
-        let resp = dispatch_method(
-            "notifications/initialized",
-            None,
-            serde_json::Value::Null,
-        );
+        let resp = dispatch_method("notifications/initialized", None, serde_json::Value::Null);
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
     }

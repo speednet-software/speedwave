@@ -563,7 +563,7 @@ export class GitHubClient {
         if (err.response?.headers?.['x-ratelimit-remaining'] === '0') {
           return 'GitHub API rate limit exceeded. Try again later.';
         }
-        return "Permission denied. Your GitHub fine-grained PAT may be missing a required permission (e.g. Issues, Pull requests, Contents, or Actions: Read/Write). Check the token's repository permissions.";
+        return 'Permission denied. Your GitHub token is missing a required scope. If you authorized Speedwave via the GitHub OAuth flow, reconnect to re-grant scopes; if you provided a PAT directly, check its repository permissions.';
       }
       case 'not_found':
         return 'Resource not found in GitHub. Check the owner/repo and that your token has access.';

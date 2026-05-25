@@ -1,7 +1,8 @@
 /**
  * `oauth` MCP worker — host-side, per-project (ADR-060).
  *
- * Holds OAuth refresh tokens, client_id, tenant_id for each configured
+ * Holds per-service OAuth state (refresh token + provider-specific data such
+ * as Microsoft `clientId` / `tenantId` in `providerData`) for each configured
  * OAuth-using service in the project. Exposes `refresh` and `forget` tools to
  * authenticated consumers (today: SharePoint). NOT visible to Claude — not in
  * ENABLED_SERVICES, the hub has no bearer for it.

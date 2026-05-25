@@ -201,9 +201,9 @@ impl HostBridgeConfigBuilder {
                 self.name
             );
         }
-        let mode = self
-            .mode
-            .ok_or_else(|| anyhow::anyhow!("bridge mode not set (call .endpoint() or .pairing())"))?;
+        let mode = self.mode.ok_or_else(|| {
+            anyhow::anyhow!("bridge mode not set (call .endpoint() or .pairing())")
+        })?;
         let origin_policy = self
             .origin_policy
             .ok_or_else(|| anyhow::anyhow!("origin_policy not set"))?;
@@ -464,10 +464,7 @@ impl HostBridge {
 
     /// Start the bridge in Pairing mode. Bails if the config was built
     /// for Endpoint.
-    pub fn start_pairing(
-        &mut self,
-        event_cb: Option<PairingEventCallback>,
-    ) -> anyhow::Result<()> {
+    pub fn start_pairing(&mut self, event_cb: Option<PairingEventCallback>) -> anyhow::Result<()> {
         if !matches!(self.config.mode, ConnectionMode::Pairing(_)) {
             anyhow::bail!("start_pairing() requires ConnectionMode::Pairing");
         }
@@ -1261,11 +1258,8 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration) {
                 continue;
             }
         };
-        if StdTcpStream::connect_timeout(
-            &SocketAddr::from(([127, 0, 0, 1], port)),
-            probe_timeout,
-        )
-        .is_err()
+        if StdTcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), probe_timeout)
+            .is_err()
         {
             log::debug!(
                 target: "host_bridge",
@@ -1485,7 +1479,11 @@ mod tests {
 
     // --- Origin policy ---
 
-    fn req_with_origin(origin: Option<&str>, query: Option<&str>, header: Option<(&str, &str)>) -> Request<()> {
+    fn req_with_origin(
+        origin: Option<&str>,
+        query: Option<&str>,
+        header: Option<(&str, &str)>,
+    ) -> Request<()> {
         let mut b = Request::builder();
         let uri = match query {
             Some(q) => format!("/?{}", q),
@@ -1503,7 +1501,11 @@ mod tests {
 
     #[test]
     fn origin_reject_if_present_blocks_browser() {
-        let req = req_with_origin(Some("https://figma.com"), None, Some(("x-test-auth", "tok")));
+        let req = req_with_origin(
+            Some("https://figma.com"),
+            None,
+            Some(("x-test-auth", "tok")),
+        );
         let auth = AuthState::new("tok".to_string());
         let matched = validate_request_auth_single(&req, &auth, &AuthScheme::Header("x-test-auth"))
             .expect("auth must match");
@@ -1536,12 +1538,9 @@ mod tests {
             Some(("x-test-worker-auth", "tok")),
         );
         let auth = AuthState::new("tok".to_string());
-        let matched = validate_request_auth_single(
-            &req,
-            &auth,
-            &AuthScheme::Header("x-test-worker-auth"),
-        )
-        .expect("auth must match via header");
+        let matched =
+            validate_request_auth_single(&req, &auth, &AuthScheme::Header("x-test-worker-auth"))
+                .expect("auth must match via header");
         assert!(!check_origin(
             &req,
             &OriginPolicy::AcceptIfAuthIsQueryParam,
@@ -1773,12 +1772,12 @@ mod tests {
     fn endpoint_context_exposes_path_query_matched_auth() {
         let cfg = endpoint_config("ide");
         type Snapshot = (
-            String,            // bridge_name
-            SocketAddr,        // peer_addr
-            String,            // path
-            Option<String>,    // query
-            Option<String>,    // selected_subprotocol
-            AuthMatch,         // matched_auth
+            String,         // bridge_name
+            SocketAddr,     // peer_addr
+            String,         // path
+            Option<String>, // query
+            Option<String>, // selected_subprotocol
+            AuthMatch,      // matched_auth
         );
         let observed: Arc<Mutex<Option<Snapshot>>> = Arc::new(Mutex::new(None));
         let observed_clone = observed.clone();
@@ -1806,12 +1805,8 @@ mod tests {
 
         let rt = tokio_rt();
         rt.block_on(async move {
-            let req = make_client_request(
-                port,
-                Some("foo=bar"),
-                Some(("x-test-auth", &token)),
-                None,
-            );
+            let req =
+                make_client_request(port, Some("foo=bar"), Some(("x-test-auth", &token)), None);
             let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
             ws.close(None).await.ok();
             // Give the handler a moment to record the context.
@@ -1824,7 +1819,10 @@ mod tests {
         assert!(peer_addr.ip().is_loopback());
         assert_eq!(path, "/");
         assert_eq!(query.as_deref(), Some("foo=bar"));
-        assert!(selected_sub.is_none(), "no subprotocol policy → none echoed");
+        assert!(
+            selected_sub.is_none(),
+            "no subprotocol policy → none echoed"
+        );
         assert_eq!(matched, AuthMatch::Header("x-test-auth"));
     }
 
@@ -1849,18 +1847,20 @@ mod tests {
 
         let rt = tokio_rt();
         rt.block_on(async move {
-            let mut req = format!("ws://127.0.0.1:{port}/").into_client_request().unwrap();
-            req.headers_mut().insert(
-                "x-test-auth",
-                http::HeaderValue::from_str(&token).unwrap(),
-            );
+            let mut req = format!("ws://127.0.0.1:{port}/")
+                .into_client_request()
+                .unwrap();
+            req.headers_mut()
+                .insert("x-test-auth", http::HeaderValue::from_str(&token).unwrap());
             req.headers_mut().insert(
                 "sec-websocket-protocol",
                 http::HeaderValue::from_static("mcp"),
             );
             let (_ws, resp) = tokio_tungstenite::connect_async(req).await.unwrap();
             assert_eq!(
-                resp.headers().get("sec-websocket-protocol").map(|v| v.to_str().unwrap()),
+                resp.headers()
+                    .get("sec-websocket-protocol")
+                    .map(|v| v.to_str().unwrap()),
                 Some("mcp")
             );
         });
@@ -1917,12 +1917,8 @@ mod tests {
         let rt = tokio_rt();
         rt.block_on(async move {
             // Worker uses header auth.
-            let worker_req = make_client_request(
-                port,
-                None,
-                Some(("x-test-worker-auth", &token)),
-                None,
-            );
+            let worker_req =
+                make_client_request(port, None, Some(("x-test-worker-auth", &token)), None);
             let (mut worker, _) = tokio_tungstenite::connect_async(worker_req).await.unwrap();
             // Plugin uses query param.
             let plugin_req = make_client_request(
@@ -1934,12 +1930,18 @@ mod tests {
             let (mut plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
 
             // Worker → Plugin
-            worker.send(Message::Text("from-worker".into())).await.unwrap();
+            worker
+                .send(Message::Text("from-worker".into()))
+                .await
+                .unwrap();
             let got = plugin.next().await.unwrap().unwrap();
             assert_eq!(got.into_text().unwrap(), "from-worker");
 
             // Plugin → Worker
-            plugin.send(Message::Text("from-plugin".into())).await.unwrap();
+            plugin
+                .send(Message::Text("from-plugin".into()))
+                .await
+                .unwrap();
             let got = worker.next().await.unwrap().unwrap();
             assert_eq!(got.into_text().unwrap(), "from-plugin");
 
@@ -1972,12 +1974,8 @@ mod tests {
 
         let rt = tokio_rt();
         rt.block_on(async move {
-            let worker_req = make_client_request(
-                port,
-                None,
-                Some(("x-test-worker-auth", &token)),
-                None,
-            );
+            let worker_req =
+                make_client_request(port, None, Some(("x-test-worker-auth", &token)), None);
             let (mut worker, _) = tokio_tungstenite::connect_async(worker_req).await.unwrap();
             let plugin_req = make_client_request(
                 port,
@@ -2015,12 +2013,8 @@ mod tests {
         let rt = tokio_rt();
         rt.block_on(async move {
             // Fill the pair: worker + plugin.
-            let worker_req = make_client_request(
-                port,
-                None,
-                Some(("x-test-worker-auth", &token)),
-                None,
-            );
+            let worker_req =
+                make_client_request(port, None, Some(("x-test-worker-auth", &token)), None);
             let (_worker, _) = tokio_tungstenite::connect_async(worker_req).await.unwrap();
             let plugin_req = make_client_request(
                 port,
@@ -2033,12 +2027,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Third connection: must be rejected with HTTP 409.
-            let third_req = make_client_request(
-                port,
-                None,
-                Some(("x-test-worker-auth", &token)),
-                None,
-            );
+            let third_req =
+                make_client_request(port, None, Some(("x-test-worker-auth", &token)), None);
             let res = tokio_tungstenite::connect_async(third_req).await;
             assert!(res.is_err(), "third connection must be rejected");
             // It must be an HTTP 409 (pre-handshake) — not a WS close frame.
@@ -2074,12 +2064,8 @@ mod tests {
 
         let rt = tokio_rt();
         rt.block_on(async move {
-            let worker_req = make_client_request(
-                port,
-                None,
-                Some(("x-test-worker-auth", &token)),
-                None,
-            );
+            let worker_req =
+                make_client_request(port, None, Some(("x-test-worker-auth", &token)), None);
             let (mut worker, _) = tokio_tungstenite::connect_async(worker_req).await.unwrap();
             let plugin_req = make_client_request(
                 port,
@@ -2113,8 +2099,7 @@ mod tests {
             .endpoint(AuthScheme::Header("h"))
             .origin_policy(OriginPolicy::RejectIfPresent)
             .lock_body(move |ctx| {
-                *captured_clone.lock().unwrap() =
-                    Some((ctx.port, ctx.auth_token.to_string()));
+                *captured_clone.lock().unwrap() = Some((ctx.port, ctx.auth_token.to_string()));
                 serde_json::json!({})
             })
             .build()
@@ -2232,14 +2217,11 @@ mod tests {
             for i in 0..2 {
                 let token = token.clone();
                 handles.push(tokio::spawn(async move {
-                    let req = make_client_request(
-                        port,
-                        None,
-                        Some(("x-test-auth", &token)),
-                        None,
-                    );
+                    let req = make_client_request(port, None, Some(("x-test-auth", &token)), None);
                     let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
-                    ws.send(Message::Text(format!("client {i}").into())).await.unwrap();
+                    ws.send(Message::Text(format!("client {i}").into()))
+                        .await
+                        .unwrap();
                     let echo = ws.next().await.unwrap().unwrap();
                     assert_eq!(echo.into_text().unwrap(), format!("client {i}"));
                 }));
@@ -2324,12 +2306,7 @@ mod tests {
 
         let rt = tokio_rt();
         rt.block_on(async move {
-            let req = make_client_request(
-                port,
-                None,
-                Some(("x-test-worker-auth", &token)),
-                None,
-            );
+            let req = make_client_request(port, None, Some(("x-test-worker-auth", &token)), None);
             let (_ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
         });
@@ -2345,9 +2322,8 @@ mod tests {
                 None
             }
         });
-        let addr = worker_addr.unwrap_or_else(|| {
-            panic!("worker role must match via header, got events {evts:?}")
-        });
+        let addr = worker_addr
+            .unwrap_or_else(|| panic!("worker role must match via header, got events {evts:?}"));
         assert!(addr.ip().is_loopback());
     }
 
@@ -2376,10 +2352,8 @@ mod tests {
         });
         let evts = events.lock().unwrap().clone();
         assert!(
-            evts.iter().any(|e| matches!(
-                e,
-                PairingEvent::SlotOccupied { role: "plugin", .. }
-            )),
+            evts.iter()
+                .any(|e| matches!(e, PairingEvent::SlotOccupied { role: "plugin", .. })),
             "plugin role must match via query param, got events {evts:?}"
         );
     }
@@ -2411,7 +2385,10 @@ mod tests {
             .await
             .unwrap();
 
-            worker.send(Message::Text("ping-text".into())).await.unwrap();
+            worker
+                .send(Message::Text("ping-text".into()))
+                .await
+                .unwrap();
             let got = plugin.next().await.unwrap().unwrap();
             assert_eq!(got.into_text().unwrap(), "ping-text");
         });
@@ -2581,9 +2558,8 @@ mod tests {
                 None
             }
         });
-        let addr = reject_addr.unwrap_or_else(|| {
-            panic!("expected SameRoleCollision(Reject), got {evts:?}")
-        });
+        let addr = reject_addr
+            .unwrap_or_else(|| panic!("expected SameRoleCollision(Reject), got {evts:?}"));
         assert!(addr.ip().is_loopback());
     }
 
@@ -2621,15 +2597,20 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         });
         let evts = events.lock().unwrap().clone();
-        let has_evict = evts.iter().any(|e| matches!(
-            e,
-            PairingEvent::SameRoleCollision {
-                policy: RoleCollisionPolicy::EvictOlder,
-                role: "worker",
-                ..
-            }
-        ));
-        assert!(has_evict, "expected SameRoleCollision(EvictOlder), got {evts:?}");
+        let has_evict = evts.iter().any(|e| {
+            matches!(
+                e,
+                PairingEvent::SameRoleCollision {
+                    policy: RoleCollisionPolicy::EvictOlder,
+                    role: "worker",
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_evict,
+            "expected SameRoleCollision(EvictOlder), got {evts:?}"
+        );
     }
 
     #[test]
@@ -2737,9 +2718,15 @@ mod tests {
                 None,
             ))
             .await;
-            assert!(res.is_err(), "third connection must be rejected (pair active)");
+            assert!(
+                res.is_err(),
+                "third connection must be rejected (pair active)"
+            );
             let err = format!("{:?}", res.err().unwrap());
-            assert!(err.contains("409"), "must be HTTP 409 (pair busy), got: {err}");
+            assert!(
+                err.contains("409"),
+                "must be HTTP 409 (pair busy), got: {err}"
+            );
         });
     }
 
@@ -2846,10 +2833,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(2500)).await;
         });
         let evts = events.lock().unwrap().clone();
-        let timed_out = evts.iter().any(|e| matches!(
-            e,
-            PairingEvent::PendingSlotTimeout { role: "worker" }
-        ));
+        let timed_out = evts
+            .iter()
+            .any(|e| matches!(e, PairingEvent::PendingSlotTimeout { role: "worker" }));
         assert!(
             timed_out,
             "expected PendingSlotTimeout(worker), got {evts:?}"
@@ -2881,7 +2867,10 @@ mod tests {
         // Watchdog loop calls write_lock_file_atomic on every tick where
         // path.exists() is false. Exercising the same call path here:
         write_lock_file_atomic(&path, &body).unwrap();
-        assert!(path.exists(), "watchdog recovery path must recreate lock file");
+        assert!(
+            path.exists(),
+            "watchdog recovery path must recreate lock file"
+        );
 
         // Verify perms still 0o600 on Unix (atomic-write preserves mode).
         #[cfg(unix)]
@@ -2891,5 +2880,4 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
     }
-
 }

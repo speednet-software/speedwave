@@ -12,7 +12,7 @@
  * @interface GitHubConfig
  */
 export interface GitHubConfig {
-  /** GitHub Personal Access Token (fine-grained or classic) used for API authentication */
+  /** GitHub access token — OAuth App user token (from device flow) or PAT (advanced fallback). */
   token: string;
   /** Optional API base URL. Defaults to https://api.github.com for github.com. GHES not supported in v1. */
   baseUrl?: string;

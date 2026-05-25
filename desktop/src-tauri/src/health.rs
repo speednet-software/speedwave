@@ -267,7 +267,10 @@ pub fn is_ide_port_alive(port: u16) -> bool {
     let Some(home) = dirs::home_dir() else {
         return false;
     };
-    let lock_path = home.join(".claude").join("ide").join(format!("{port}.lock"));
+    let lock_path = home
+        .join(".claude")
+        .join("ide")
+        .join(format!("{port}.lock"));
     is_ide_lock_alive(&lock_path)
 }
 

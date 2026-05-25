@@ -26,11 +26,14 @@ mod http_util;
 #[cfg(test)]
 mod installer_hooks;
 use bridges::ide_bridge;
+mod github_oauth_cmd;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
 mod oauth_cmd;
+mod oauth_flow;
 mod oauth_login_cmd;
+mod oauth_providers;
 mod paste_cmd;
 mod patch_emitter;
 // `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
@@ -1775,14 +1778,14 @@ fn main() {
             std::thread::spawn(host_path::init_recovered_host_path);
 
             if setup_started {
-                // Run one-shot OAuth state migration (ADR-060 / PR3) before any
-                // worker spawns. Migrates legacy SharePoint credentials from
-                // `tokens/<project>/sharepoint/` to `oauth/<project>/sharepoint.json`
-                // so the oauth worker sees the new layout when it first runs.
-                let migrated =
-                    speedwave_runtime::migration_oauth::run_oauth_migration_at_startup();
-                if migrated > 0 {
-                    log::info!("oauth migration: {migrated} project(s) migrated to new layout");
+                // Sanitise any v1 SharePoint secrets still in the worker-mounted
+                // token dir (refresh_token / client_id / tenant_id). Best-effort,
+                // idempotent. Users with v1 state see the "Re-authorize SharePoint"
+                // banner — see legacy_token_cleanup module docs.
+                let cleaned =
+                    speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
+                if cleaned > 0 {
+                    log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
                 }
 
                 // Start IDE Bridge
@@ -2173,6 +2176,8 @@ fn main() {
             // OAuth
             oauth_cmd::start_sharepoint_oauth,
             oauth_cmd::cancel_sharepoint_oauth,
+            github_oauth_cmd::start_github_oauth,
+            github_oauth_cmd::cancel_github_oauth,
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,

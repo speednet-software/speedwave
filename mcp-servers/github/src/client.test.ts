@@ -240,7 +240,9 @@ describe('GitHubClient', () => {
     it('formats 403 without rate-limit header as permission error', () => {
       const msg = GitHubClientClass.formatError({ status: 403 });
       expect(msg).toContain('Permission denied');
-      expect(msg).toContain('fine-grained PAT');
+      // Generic post-OAuth-cutover message: mentions both reconnect (OAuth) and PAT.
+      expect(msg).toContain('reconnect');
+      expect(msg).toContain('PAT');
     });
 
     it('formats 403 with remaining > 0 as permission error', () => {

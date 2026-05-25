@@ -30,18 +30,18 @@ Isolated GitHub MCP server with per-service token isolation for Speedwave.
 
 ## Tools (45 total)
 
-| Domain               | Count | Tools                                                                                                            |
-| -------------------- | ----- | ---------------------------------------------------------------------------------------------------------------- |
-| Repos                | 3     | list repos / search repos, get repo, search code                                                                 |
-| Pull Requests        | 7     | list, get, create, merge, update, get diff, get files                                                            |
-| PR Review            | 6     | list commits, list reviews, create review, list comments, create comment, create review (line) comment           |
-| Branches             | 5     | list, get, create, delete, compare                                                                               |
-| Commits              | 4     | list, list branch commits, search, get diff                                                                      |
-| Repository content   | 3     | get tree, get file contents, create/update file                                                                  |
-| Actions              | 7     | list runs, get run, get run logs (URL), rerun, trigger (`workflow_dispatch`), list run artifacts, download artifact (URL) |
-| Issues               | 5     | list, get, create, update, close                                                                                 |
-| Labels               | 2     | list, create                                                                                                     |
-| Releases             | 3     | create tag, delete tag, create release                                                                           |
+| Domain             | Count | Tools                                                                                                                     |
+| ------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------- |
+| Repos              | 3     | list repos / search repos, get repo, search code                                                                          |
+| Pull Requests      | 7     | list, get, create, merge, update, get diff, get files                                                                     |
+| PR Review          | 6     | list commits, list reviews, create review, list comments, create comment, create review (line) comment                    |
+| Branches           | 5     | list, get, create, delete, compare                                                                                        |
+| Commits            | 4     | list, list branch commits, search, get diff                                                                               |
+| Repository content | 3     | get tree, get file contents, create/update file                                                                           |
+| Actions            | 7     | list runs, get run, get run logs (URL), rerun, trigger (`workflow_dispatch`), list run artifacts, download artifact (URL) |
+| Issues             | 5     | list, get, create, update, close                                                                                          |
+| Labels             | 2     | list, create                                                                                                              |
+| Releases           | 3     | create tag, delete tag, create release                                                                                    |
 
 Workflow-run logs and artifacts are returned as short-lived download URLs (GitHub serves them as ZIP archives) — the worker does not download or unpack them.
 
@@ -64,11 +64,17 @@ github/
 
 ### Token File (`/tokens/token`)
 
+The worker reads a single line containing a GitHub access token. The Speedwave Desktop UI populates this file via the GitHub OAuth App device flow — user clicks **Sign in with GitHub**, enters the user code on `github.com/login/device`, and the token is written automatically. Manual PAT entry remains as an advanced fallback (e.g. for headless setups).
+
+Token formats accepted by the worker (interchangeable — `loadToken()` does not inspect the prefix):
+
 ```
-# GitHub Personal Access Token (fine-grained PAT recommended)
-# Repository permissions: Contents, Issues, Pull requests, Actions (Read/Write as needed), Metadata (Read)
-github_pat_xxxxxxxxxxxxxxxxxxxx
+gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx    # OAuth App user token (Speedwave device flow)
+github_pat_xxxxxxxxxxxxxxxxxxxx              # fine-grained PAT (advanced)
+ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx    # classic PAT (advanced)
 ```
+
+OAuth scopes requested by the Speedwave OAuth App: `repo read:user` (covers private/public repo R/W, issues, pulls, releases, Actions, and `GET /user` for the connection test).
 
 The worker uses github.com (`https://api.github.com`) by default. GitHub Enterprise Server is not supported in v1.
 

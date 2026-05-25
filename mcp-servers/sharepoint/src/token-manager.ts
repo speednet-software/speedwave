@@ -12,32 +12,13 @@
  */
 
 /**
- * Token management configuration. After ADR-060 `clientId`/`tenantId` are no
- * longer mounted into the worker — they live in the host-only oauth.json. The
- * fields are kept as empty strings in the SharePoint config to preserve API
- * shape for callers; they are not consulted here.
- * @interface TokenManagerConfig
- */
-export interface TokenManagerConfig {
-  clientId: string;
-  tenantId: string;
-  tokensDir: string;
-}
-
-/**
- * Manages OAuth health reporting for the SharePoint worker. Refresh is now
- * delegated to the host-side `oauth` worker; this class only tracks the most
- * recent refresh-side error so the worker's health endpoint can expose it.
+ * Tracks OAuth refresh-side errors for the SharePoint worker's health endpoint.
+ * Post-ADR-060 the worker no longer performs the refresh itself (the host-side
+ * `oauth` worker does); this class just remembers the most recent error so
+ * the health endpoint can surface it.
  */
 export class TokenManager {
   private lastTokenSaveError: Error | null = null;
-
-  /**
-   * Create a TokenManager. The `config` is accepted for API compatibility
-   * with v1; only `tokensDir` is used today.
-   * @param _config - token manager configuration (unused after ADR-060)
-   */
-  constructor(_config: TokenManagerConfig) {}
 
   /**
    * Get the last refresh-side error (if any). Set by callers (e.g. SharePoint
