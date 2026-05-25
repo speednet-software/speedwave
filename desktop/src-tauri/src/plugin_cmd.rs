@@ -36,6 +36,9 @@ pub(crate) struct PluginStatusEntry {
     /// Human-readable diagnostic when `verification_status != Verified`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) verification_error: Option<String>,
+    /// True when the manifest declares `host_bridge`. Drives the
+    /// frontend "Bridge connection" section visibility.
+    pub(crate) has_host_bridge: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -113,6 +116,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
                 requires_integrations: Vec::new(),
                 verification_status: ui.verification_status.clone(),
                 verification_error: ui.verification_error.clone(),
+                has_host_bridge: false,
             });
             continue;
         };
@@ -170,6 +174,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             requires_integrations: manifest.requires_integrations.clone(),
             verification_status: ui.verification_status.clone(),
             verification_error: ui.verification_error.clone(),
+            has_host_bridge: manifest.host_bridge.is_some(),
         });
     }
 
@@ -182,7 +187,10 @@ fn is_plugin_configured(
     requires_integrations: &[String],
     project: &str,
 ) -> bool {
-    let secret_fields: Vec<_> = auth_fields.iter().filter(|f| f.is_secret).collect();
+    let secret_fields: Vec<_> = auth_fields
+        .iter()
+        .filter(|f| plugin::blocks_plugin_readiness(f))
+        .collect();
     // Check secret fields if any exist
     if !secret_fields.is_empty() {
         let all_present = secret_fields.iter().all(|f| {
@@ -252,10 +260,15 @@ pub async fn install_plugin(
         plugin::InstallOutcome::InstalledPendingBuild(m) => m,
     };
 
-    // Auto-enable only when image is ready. MCP plugins with auth_fields are
-    // auto-enabled after credential save in the UI.
+    // Auto-enable only when image is ready and no required secret is missing.
+    // Plugins with optional secret fields (e.g. tokens that unlock extra
+    // capabilities but are not needed for the baseline) can run right away;
+    // the user fills them later if needed.
     let should_auto_enable = matches!(outcome, plugin::InstallOutcome::Installed(_))
-        && !manifest.auth_fields.iter().any(|f| f.is_secret);
+        && !manifest
+            .auth_fields
+            .iter()
+            .any(plugin::blocks_plugin_readiness);
     if should_auto_enable {
         let plugin_key = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
         let plugin_key = plugin_key.to_string();
@@ -273,6 +286,8 @@ pub async fn install_plugin(
         .map_err(|e| e.to_string())?;
     }
 
+    crate::bridges::plugin_bridge_manager::respawn_for(&manifest.slug, &app_handle);
+
     Ok(match outcome {
         plugin::InstallOutcome::Installed(m) => {
             format!("Plugin '{}' v{} installed successfully", m.name, m.version)
@@ -287,6 +302,7 @@ pub async fn install_plugin(
 #[tauri::command]
 pub fn remove_plugin(slug: String) -> Result<(), String> {
     log::info!("remove_plugin: slug={slug}");
+    crate::bridges::plugin_bridge_manager::stop_for(&slug);
 
     // Recovery action: removal must work for tampered plugins too.
     // Use the tolerant lister so an unparseable manifest still gives us
@@ -705,6 +721,7 @@ mod tests {
                 field_type: "password".into(),
                 placeholder: "Enter key".into(),
                 is_secret: true,
+                required: true,
             }],
             current_values: HashMap::new(),
             token_mount: "ro".into(),
@@ -712,6 +729,7 @@ mod tests {
             requires_integrations: vec![],
             verification_status: plugin::VerificationStatus::Verified,
             verification_error: None,
+            has_host_bridge: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("test-plugin"));
@@ -750,6 +768,7 @@ mod tests {
             requires_integrations: vec!["sharepoint".into()],
             verification_status: plugin::VerificationStatus::Verified,
             verification_error: None,
+            has_host_bridge: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("settings_schema"));
@@ -830,6 +849,7 @@ mod tests {
             field_type: "text".into(),
             placeholder: "".into(),
             is_secret: false,
+            required: true,
         }];
         assert!(is_plugin_configured(
             std::path::Path::new("/nonexistent"),
@@ -857,6 +877,7 @@ mod tests {
             field_type: "password".into(),
             placeholder: "".into(),
             is_secret: true,
+            required: true,
         }];
         assert!(!is_plugin_configured(
             std::path::Path::new("/nonexistent/path"),
@@ -878,6 +899,7 @@ mod tests {
             field_type: "password".into(),
             placeholder: "".into(),
             is_secret: true,
+            required: true,
         }];
         assert!(is_plugin_configured(
             dir.path(),
@@ -899,7 +921,56 @@ mod tests {
             field_type: "password".into(),
             placeholder: "".into(),
             is_secret: true,
+            required: true,
         }];
+        assert!(!is_plugin_configured(
+            dir.path(),
+            &fields,
+            &[],
+            "any-project"
+        ));
+    }
+
+    #[test]
+    fn is_plugin_configured_true_when_only_secret_is_optional_and_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let fields = vec![plugin::AuthFieldDef {
+            key: "api_key".into(),
+            label: "API Key".into(),
+            field_type: "password".into(),
+            placeholder: "".into(),
+            is_secret: true,
+            required: false,
+        }];
+        assert!(is_plugin_configured(
+            dir.path(),
+            &fields,
+            &[],
+            "any-project"
+        ));
+    }
+
+    #[test]
+    fn is_plugin_configured_false_when_required_secret_missing_alongside_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        let fields = vec![
+            plugin::AuthFieldDef {
+                key: "api_key".into(),
+                label: "API Key".into(),
+                field_type: "password".into(),
+                placeholder: "".into(),
+                is_secret: true,
+                required: true,
+            },
+            plugin::AuthFieldDef {
+                key: "extra_token".into(),
+                label: "Extra".into(),
+                field_type: "password".into(),
+                placeholder: "".into(),
+                is_secret: true,
+                required: false,
+            },
+        ];
         assert!(!is_plugin_configured(
             dir.path(),
             &fields,
@@ -1310,46 +1381,55 @@ mod tests {
         );
     }
 
+    fn blocks_auto_enable(auth_fields: &[plugin::AuthFieldDef]) -> bool {
+        auth_fields.iter().any(plugin::blocks_plugin_readiness)
+    }
+
     #[test]
-    fn auto_enable_skips_plugins_needing_credentials() {
+    fn auto_enable_skips_plugins_with_required_secret() {
         let auth_fields = vec![plugin::AuthFieldDef {
             key: "api_key".into(),
             label: "API Key".into(),
             field_type: "password".into(),
             placeholder: "".into(),
             is_secret: true,
+            required: true,
         }];
-        let needs_credentials = auth_fields.iter().any(|f| f.is_secret);
+        assert!(blocks_auto_enable(&auth_fields));
+    }
+
+    #[test]
+    fn auto_enable_proceeds_when_secret_is_optional() {
+        let auth_fields = vec![plugin::AuthFieldDef {
+            key: "api_key".into(),
+            label: "API Key".into(),
+            field_type: "password".into(),
+            placeholder: "".into(),
+            is_secret: true,
+            required: false,
+        }];
         assert!(
-            needs_credentials,
-            "plugin with secret auth_field needs credentials"
+            !blocks_auto_enable(&auth_fields),
+            "optional secret should not block auto-enable"
         );
     }
 
     #[test]
     fn auto_enable_triggers_for_plugins_without_secret_fields() {
-        let auth_fields: Vec<plugin::AuthFieldDef> = vec![plugin::AuthFieldDef {
+        let auth_fields = vec![plugin::AuthFieldDef {
             key: "host_url".into(),
             label: "Host".into(),
             field_type: "text".into(),
             placeholder: "".into(),
             is_secret: false,
+            required: true,
         }];
-        let needs_credentials = auth_fields.iter().any(|f| f.is_secret);
-        assert!(
-            !needs_credentials,
-            "plugin with only non-secret fields should auto-enable"
-        );
+        assert!(!blocks_auto_enable(&auth_fields));
     }
 
     #[test]
     fn auto_enable_triggers_for_plugins_without_auth_fields() {
-        let auth_fields: Vec<plugin::AuthFieldDef> = vec![];
-        let needs_credentials = auth_fields.iter().any(|f| f.is_secret);
-        assert!(
-            !needs_credentials,
-            "plugin with no auth_fields should auto-enable"
-        );
+        assert!(!blocks_auto_enable(&[]));
     }
 
     #[test]
@@ -1386,6 +1466,7 @@ mod tests {
                 field_type: "password".to_string(),
                 placeholder: "".to_string(),
                 is_secret: true,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,

@@ -31,6 +31,7 @@ The differences between bridges live in the connection handler:
   between them verbatim.
 
 We also need to support two authentication transports:
+
 - **Header** (`x-claude-code-ide-authorization`, `x-figma-bridge-auth`) —
   workers / Node clients that can set arbitrary headers on the
   WebSocket upgrade.
@@ -109,7 +110,7 @@ existing behaviour.
 ### Pre-handshake collision response: HTTP 409
 
 Pairing-mode `accept_hdr_async` callback rejects with HTTP 409 Conflict
-*before* the WebSocket upgrade when a pair is already active or when a
+_before_ the WebSocket upgrade when a pair is already active or when a
 same-role collision must be denied. WebSocket Close frames cannot be
 sent until the upgrade is accepted, so the only protocol-compliant way
 to refuse the third connection is at the HTTP layer.[^3]
@@ -126,23 +127,48 @@ bridge still cleans up.
 
 ### Pair-id race fix
 
-In Pairing mode, the relay task is `tokio::spawn`-ed *after* the bridge
+In Pairing mode, the relay task is `tokio::spawn`-ed _after_ the bridge
 state records the pair as active. The state stores a `pair_id: u64`
 generation counter, and the relay task only clears `active` if the
 recorded id still matches. This avoids the race where a very fast pair
-disconnect would clear `active` *after* the main loop wrote a new
+disconnect would clear `active` _after_ the main loop wrote a new
 `Some(...)` value.
+
+### Manifest options: stable port and persistent token
+
+Two optional `host_bridge` fields refine the lifecycle for plugins
+that pair a worker with an external app the user configures once:
+
+- `preferred_port: Option<u16>` (must be > 1023) — `HostBridge::new_with_options`
+  binds `127.0.0.1:<p>` and hard-fails if the port is busy. No random-port
+  fallback: a silent port change would invalidate the external app's
+  saved URL with no signal to the user.
+- `persistent_token: bool` — when `true`, the UUID is loaded from
+  `<data_dir>/plugin-state/<slug>/bridge-token` (chmod 0o600). First
+  startup generates and writes it via `runtime_fs_perms::write_restricted_file`;
+  later startups reuse it. `remove_plugin` deletes the whole
+  `plugin-state/<slug>/` so reinstall regenerates the token.
+
+The user-facing flow lives in `docs/guides/integrations.md` →
+"Bridge plugins — dev UX".
+
+Threat model delta for `persistent_token: true`: the secret's lifetime
+extends from one Speedwave session to "until plugin uninstall". The
+file is chmod 0o600 inside an owner-only-700 directory; an attacker
+with read access to `~/.speedwave/` already has read access to the
+user's home, so persistence does not meaningfully widen the practical
+attack surface.
 
 ## Files touched
 
-| File | Change |
-|---|---|
-| `desktop/src-tauri/src/bridges/mod.rs` | NEW |
-| `desktop/src-tauri/src/bridges/host_bridge.rs` | NEW (~1100 LOC + ~40 tests) |
-| `desktop/src-tauri/src/bridges/ide_bridge.rs` | MOVED + REFACTORED to use HostBridge::Endpoint |
-| `desktop/src-tauri/src/ide_bridge.rs` | DELETED |
-| `desktop/src-tauri/src/fs_perms.rs` | + `set_owner_only_dir()` for 0o700 dir perms |
-| `desktop/src-tauri/src/main.rs`, `reconcile.rs` | import paths + cleanup integration |
+| File                                            | Change                                         |
+| ----------------------------------------------- | ---------------------------------------------- |
+| `desktop/src-tauri/src/bridges/mod.rs`          | NEW                                            |
+| `desktop/src-tauri/src/bridges/host_bridge.rs`  | NEW (~1100 LOC + ~40 tests)                    |
+| `desktop/src-tauri/src/bridges/ide_bridge.rs`   | MOVED + REFACTORED to use HostBridge::Endpoint |
+| `desktop/src-tauri/src/ide_bridge.rs`           | DELETED                                        |
+| `desktop/src-tauri/src/fs_perms.rs`             | + `set_owner_only_dir()` for 0o700 dir perms   |
+| `desktop/src-tauri/src/main.rs`, `reconcile.rs` | import paths + cleanup integration             |
 
 ## Consequences
 
@@ -162,7 +188,7 @@ disconnect would clear `active` *after* the main loop wrote a new
 
 ### Negative
 
-- `HostBridge` is *not* a perfect zero-cost abstraction: the
+- `HostBridge` is _not_ a perfect zero-cost abstraction: the
   per-connection handler is `Arc<dyn Fn>` and the relay path does an
   extra task spawn per pair. Both are measured against the dominant
   cost (TCP accept + TLS-free WebSocket handshake + tungstenite frame
@@ -187,11 +213,16 @@ disconnect would clear `active` *after* the main loop wrote a new
 
 ## Footnotes
 
-[^1]: WebSocket API standard does not expose a way to set custom
-  request headers on the upgrade.
-  https://html.spec.whatwg.org/multipage/web-sockets.html#the-websocket-interface
-[^2]: `tempfile::NamedTempFile::persist` documentation describes the
-  Unix `rename(2)` and Windows `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`
-  guarantees. https://docs.rs/tempfile/latest/tempfile/struct.NamedTempFile.html#method.persist
-[^3]: RFC 6455 §4.4 — close codes are only meaningful after a
-  successful opening handshake. https://www.rfc-editor.org/rfc/rfc6455#section-4.4
+[^1]:
+    WebSocket API standard does not expose a way to set custom
+    request headers on the upgrade.
+    https://html.spec.whatwg.org/multipage/web-sockets.html#the-websocket-interface
+
+[^2]:
+    `tempfile::NamedTempFile::persist` documentation describes the
+    Unix `rename(2)` and Windows `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`
+    guarantees. https://docs.rs/tempfile/latest/tempfile/struct.NamedTempFile.html#method.persist
+
+[^3]:
+    RFC 6455 §4.4 — close codes are only meaningful after a
+    successful opening handshake. https://www.rfc-editor.org/rfc/rfc6455#section-4.4

@@ -6,4 +6,5 @@
 
 pub mod host_bridge;
 pub mod ide_bridge;
+pub mod plugin_bridge_manager;
 pub mod plugin_host_bridge;

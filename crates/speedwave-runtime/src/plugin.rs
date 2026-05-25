@@ -41,6 +41,22 @@ pub struct AuthFieldDef {
     pub field_type: String,
     pub placeholder: String,
     pub is_secret: bool,
+    /// Whether the user must provide a value before the plugin can run.
+    /// Defaults to `true` so manifests that omit the field keep the
+    /// pre-existing strict behavior (auto-enable blocked on any secret).
+    #[serde(default = "default_required")]
+    pub required: bool,
+}
+
+fn default_required() -> bool {
+    true
+}
+
+/// SSOT predicate: does this field block the plugin from running until the
+/// user provides a value? Used by auto-enable, configured-status, and
+/// token-status checks so the three answers cannot diverge.
+pub fn blocks_plugin_readiness(field: &AuthFieldDef) -> bool {
+    field.is_secret && field.required
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -125,6 +141,12 @@ pub struct HostBridgeManifest {
     pub pending_slot_timeout_secs: Option<u64>,
     /// Display name written into the lock file's `ideName` field.
     pub display_name: String,
+    /// Preferred loopback port. Hard-fails if busy. `None` → kernel picks.
+    #[serde(default)]
+    pub preferred_port: Option<u16>,
+    /// Persist token in `plugin-state/<slug>/bridge-token` (chmod 0600).
+    #[serde(default)]
+    pub persistent_token: bool,
 }
 
 /// Per-role auth scheme declaration.
@@ -227,6 +249,19 @@ fn plugin_state_base_for(plugins_dir: &Path) -> PathBuf {
 
 fn plugin_state_dir_for(plugins_dir: &Path, slug: &str) -> PathBuf {
     plugin_state_base_for(plugins_dir).join(slug)
+}
+
+/// Public SSOT for a plugin's mutable state directory.
+pub fn plugin_state_dir(slug: &str) -> PathBuf {
+    match plugins_base_dir() {
+        Ok(p) => plugin_state_dir_for(&p, slug),
+        Err(e) => {
+            log::warn!(
+                "plugin_state_dir[{slug}]: plugins_base_dir failed ({e}); using data_dir fallback"
+            );
+            consts::data_dir().join("plugin-state").join(slug)
+        }
+    }
 }
 
 fn image_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
@@ -478,7 +513,7 @@ fn get_plugin_token_status_in(
     let secret_fields: Vec<&AuthFieldDef> = manifest
         .auth_fields
         .iter()
-        .filter(|f| f.is_secret)
+        .filter(|f| blocks_plugin_readiness(f))
         .collect();
 
     if secret_fields.is_empty() {
@@ -874,6 +909,16 @@ fn validate_host_bridge_manifest(bridge: &HostBridgeManifest) -> anyhow::Result<
                 "host_bridge.roles['{role}']: auth scheme name '{header_name}' contains a control character"
             );
         }
+    }
+    if let Some(port) = bridge.preferred_port {
+        if port <= 1023 {
+            anyhow::bail!("host_bridge.preferred_port must be > 1023, got {port}");
+        }
+    }
+    if bridge.persistent_token && bridge.preferred_port.is_none() {
+        log::warn!(
+            "host_bridge: persistent_token=true without preferred_port — companion app's saved URL becomes stale on every Speedwave restart"
+        );
     }
     Ok(())
 }
@@ -1600,16 +1645,18 @@ fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry 
         let mismatch_err = format!("directory name does not match manifest slug '{}'", m.slug);
         return failed(VerificationStatus::DirSlugMismatch, mismatch_err, Some(m));
     }
-    if !plugin_dir.join("SIGNATURE").exists() {
-        return failed(
-            VerificationStatus::MissingSignature,
-            "SIGNATURE file not present".into(),
-            Some(m),
-        );
-    }
+    // Delegate to verify_plugin_signature first — it honors the debug-only
+    // SPEEDWAVE_ALLOW_UNSIGNED bypass and returns Ok without touching the
+    // SIGNATURE file. A pre-existence check here would short-circuit the
+    // bypass and make unsigned plugins unusable in dev despite the env var.
     if let Err(e) = signing::verify_plugin_signature(plugin_dir) {
+        let status = if !plugin_dir.join("SIGNATURE").exists() {
+            VerificationStatus::MissingSignature
+        } else {
+            VerificationStatus::InvalidSignature
+        };
         return failed(
-            VerificationStatus::InvalidSignature,
+            status,
             crate::log_sanitizer::sanitize(&e.to_string()),
             Some(m),
         );
@@ -2155,6 +2202,7 @@ mod tests {
                 field_type: "password".to_string(),
                 placeholder: "sk-...".to_string(),
                 is_secret: true,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: Some(">=0.1.0".to_string()),
@@ -2796,6 +2844,7 @@ mod tests {
                     field_type: "password".to_string(),
                     placeholder: "sk-...".to_string(),
                     is_secret: true,
+                    required: true,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -2803,6 +2852,7 @@ mod tests {
                     field_type: "password".to_string(),
                     placeholder: "tok-...".to_string(),
                     is_secret: true,
+                    required: true,
                 },
                 AuthFieldDef {
                     key: "label".to_string(),
@@ -2810,6 +2860,7 @@ mod tests {
                     field_type: "text".to_string(),
                     placeholder: "My Label".to_string(),
                     is_secret: false,
+                    required: true,
                 },
             ],
             settings_schema: None,
@@ -2857,6 +2908,7 @@ mod tests {
                     field_type: "password".to_string(),
                     placeholder: "sk-...".to_string(),
                     is_secret: true,
+                    required: true,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -2864,6 +2916,7 @@ mod tests {
                     field_type: "password".to_string(),
                     placeholder: "tok-...".to_string(),
                     is_secret: true,
+                    required: true,
                 },
             ],
             settings_schema: None,
@@ -2934,6 +2987,7 @@ mod tests {
                 field_type: "url".to_string(),
                 placeholder: "https://...".to_string(),
                 is_secret: false,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -2978,6 +3032,7 @@ mod tests {
                 field_type: "password".to_string(),
                 placeholder: "sk-...".to_string(),
                 is_secret: true,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -3335,6 +3390,34 @@ mod tests {
         let failures =
             audit_all_in_dir(&plugins).expect_err("audit must report the unsigned plugin");
         assert!(failures.iter().any(|(slug, _)| slug == "pasted"));
+    }
+
+    /// `SPEEDWAVE_ALLOW_UNSIGNED=1` must let an unsigned plugin list as Verified.
+    #[test]
+    fn test_unsigned_plugin_is_verified_when_bypass_active() {
+        let _g = unsigned_env_lock();
+        std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("devplugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"x","slug":"devplugin","version":"1.0.0","description":"x"}"#,
+        )
+        .unwrap();
+        // No SIGNATURE — bypass must accept it anyway.
+        signing::invalidate_cache(&plugin_dir);
+
+        let entries = list_for_ui_from_dir(&plugins);
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].slug, "devplugin");
+        assert_eq!(
+            entries[0].verification_status,
+            VerificationStatus::Verified,
+            "SPEEDWAVE_ALLOW_UNSIGNED must let an unsigned plugin list as Verified"
+        );
     }
 
     /// A plugin dir that *has* a `SIGNATURE` file, but one that was
@@ -4453,6 +4536,7 @@ mod tests {
                 field_type: "text".to_string(),
                 placeholder: "".to_string(),
                 is_secret: false,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4484,6 +4568,7 @@ mod tests {
                 field_type: "dropdown".to_string(),
                 placeholder: "".to_string(),
                 is_secret: true,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4694,6 +4779,7 @@ mod tests {
                 field_type: "text".to_string(),
                 placeholder: "".to_string(),
                 is_secret: false,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -5055,6 +5141,8 @@ mod tests {
             collision_policy: HostBridgeCollisionPolicy::default(),
             pending_slot_timeout_secs: None,
             display_name: display_name.to_string(),
+            preferred_port: None,
+            persistent_token: false,
         }
     }
 
@@ -5108,6 +5196,58 @@ mod tests {
         let manifest = fixture_manifest_with_host_bridge(bridge);
         let tmp = tempfile::tempdir().unwrap();
         validate_manifest(&manifest, tmp.path()).expect("valid host_bridge must pass");
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_preferred_port_60123() {
+        let mut bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "X");
+        bridge.preferred_port = Some(60123);
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        validate_manifest(&manifest, tmp.path()).expect("preferred_port 60123 must pass");
+    }
+
+    #[test]
+    fn test_plugin_state_dir_returns_plugin_state_path_for_slug() {
+        let dir = plugin_state_dir("my-plugin");
+        assert!(
+            dir.to_string_lossy().contains("plugin-state"),
+            "expected 'plugin-state' in path, got {}",
+            dir.display()
+        );
+        assert!(dir.ends_with("my-plugin"));
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_preferred_port_1024() {
+        let mut bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "X");
+        bridge.preferred_port = Some(1024);
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        validate_manifest(&manifest, tmp.path()).expect("preferred_port 1024 boundary must pass");
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_preferred_port_below_1024() {
+        let mut bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "X");
+        bridge.preferred_port = Some(80);
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("preferred_port 80 must be rejected");
+        assert!(
+            err.to_string().contains("> 1023"),
+            "expected port-range rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_persistent_token_true() {
+        let mut bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "X");
+        bridge.persistent_token = true;
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        validate_manifest(&manifest, tmp.path()).expect("persistent_token true must pass");
     }
 
     #[test]

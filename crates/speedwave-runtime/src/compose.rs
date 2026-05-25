@@ -10850,6 +10850,8 @@ services:
             collision_policy: plugin::HostBridgeCollisionPolicy::default(),
             pending_slot_timeout_secs: None,
             display_name: "Fixture".into(),
+            preferred_port: None,
+            persistent_token: false,
         }
     }
 

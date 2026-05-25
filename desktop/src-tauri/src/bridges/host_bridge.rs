@@ -20,6 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use speedwave_runtime::consts;
+use speedwave_runtime::fs_perms as runtime_fs_perms;
 
 use crate::fs_perms;
 
@@ -412,15 +413,38 @@ pub struct HostBridge {
     watchdog_thread: Option<JoinHandle<()>>,
 }
 
+/// Optional knobs for [`HostBridge::new_with_options`]: stable port and
+/// persistent auth token. Both `None`/`false` reproduce legacy behavior.
+#[derive(Default, Debug)]
+pub struct HostBridgeNewOptions {
+    pub preferred_port: Option<u16>,
+    pub persistent_token_path: Option<PathBuf>,
+}
+
 impl HostBridge {
     /// Bind a fresh 127.0.0.1 port, mint a UUID v4 token, and stash both
     /// for later. The lock file is **not** written yet — callers can drop
     /// the bridge without leaving a stale lock on disk.
     pub fn new(config: HostBridgeConfig) -> anyhow::Result<Self> {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .context("HostBridge: failed to bind 127.0.0.1:0")?;
+        Self::new_with_options(config, HostBridgeNewOptions::default())
+    }
+
+    pub fn new_with_options(
+        config: HostBridgeConfig,
+        opts: HostBridgeNewOptions,
+    ) -> anyhow::Result<Self> {
+        let listener = match opts.preferred_port {
+            Some(p) => std::net::TcpListener::bind(("127.0.0.1", p)).with_context(|| {
+                format!(
+                    "HostBridge '{}': preferred_port {p} unavailable",
+                    &config.name
+                )
+            })?,
+            None => std::net::TcpListener::bind("127.0.0.1:0")
+                .context("HostBridge: failed to bind 127.0.0.1:0")?,
+        };
         let port = listener.local_addr()?.port();
-        let token = uuid::Uuid::new_v4().to_string();
+        let token = load_or_create_persistent_token(opts.persistent_token_path.as_deref())?;
 
         let data_dir = consts::data_dir();
         let lock_dir = data_dir.join(format!("{}-bridge", &config.name));
@@ -617,6 +641,33 @@ impl HostBridge {
         }
         Ok(())
     }
+}
+
+fn load_or_create_persistent_token(path: Option<&Path>) -> anyhow::Result<String> {
+    let Some(p) = path else {
+        return Ok(uuid::Uuid::new_v4().to_string());
+    };
+    if p.exists() {
+        let raw = std::fs::read_to_string(p)
+            .with_context(|| format!("read persistent token at {}", p.display()))?;
+        let token = raw.trim().to_string();
+        if uuid::Uuid::parse_str(&token).is_ok() {
+            return Ok(token);
+        }
+        log::warn!(
+            target: "host_bridge",
+            "persistent token at {} is not a UUID; regenerating",
+            p.display()
+        );
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    if let Some(parent) = p.parent() {
+        runtime_fs_perms::ensure_owner_only_dir(parent)
+            .with_context(|| format!("ensure 0700 on {}", parent.display()))?;
+    }
+    runtime_fs_perms::write_restricted_file(p, &token)
+        .with_context(|| format!("write persistent token to {}", p.display()))?;
+    Ok(token)
 }
 
 impl Drop for HostBridge {
@@ -833,6 +884,7 @@ async fn run_pairing_loop(
                         continue;
                     }
                 };
+                log::debug!(target: "host_bridge", "pairing[{}] tcp accept from {peer_addr}", config.name);
 
                 let auth_for_cb = auth.clone();
                 let pairing_for_cb = pairing_cfg.clone();
@@ -840,6 +892,7 @@ async fn run_pairing_loop(
                 let subprotocol = config.subprotocol.clone();
                 let state_for_cb = state.clone();
                 let event_cb_for_cb = event_cb.clone();
+                let bridge_name_for_cb = config.name.clone();
 
                 let outcome = Arc::new(Mutex::new(None::<PairingHandshakeOutcome>));
                 let outcome_cb = outcome.clone();
@@ -862,10 +915,24 @@ async fn run_pairing_loop(
                         drop(auth_guard);
                         let (role, matched_auth) = match role_and_match {
                             Some(x) => x,
-                            None => return Err(http_response(401, "Unauthorized")),
+                            None => {
+                                log::warn!(
+                                    target: "host_bridge",
+                                    "pairing[{bridge_name_for_cb}] reject {peer_addr}: 401 auth (no role matched)"
+                                );
+                                return Err(http_response(401, "Unauthorized"));
+                            }
                         };
+                        log::info!(
+                            target: "host_bridge",
+                            "pairing[{bridge_name_for_cb}] accept {peer_addr} as role '{role}'"
+                        );
                         // 2. Origin
                         if !check_origin(req, &origin_policy, &matched_auth) {
+                            log::warn!(
+                                target: "host_bridge",
+                                "pairing[{bridge_name_for_cb}] reject {peer_addr}: 403 origin"
+                            );
                             return Err(http_response(403, "Forbidden origin"));
                         }
                         // 3. Subprotocol
@@ -1475,6 +1542,116 @@ mod tests {
             "token must not appear in Debug output: {dbg}"
         );
         assert!(dbg.contains("REDACTED"));
+    }
+
+    // --- HostBridge::new_with_options ---
+
+    /// Reserve a free port. Caller drops the guard listener immediately
+    /// before binding the bridge to minimize the TOCTOU window.
+    fn reserve_free_port() -> (std::net::TcpListener, u16) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        (l, port)
+    }
+
+    #[test]
+    fn new_with_preferred_port_uses_it_when_free() {
+        let (guard, port) = reserve_free_port();
+        drop(guard);
+        let opts = HostBridgeNewOptions {
+            preferred_port: Some(port),
+            persistent_token_path: None,
+        };
+        let bridge = HostBridge::new_with_options(endpoint_config("ide"), opts).unwrap();
+        assert_eq!(bridge.port(), port);
+    }
+
+    #[test]
+    fn new_with_preferred_port_fails_when_busy() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let opts = HostBridgeNewOptions {
+            preferred_port: Some(port),
+            persistent_token_path: None,
+        };
+        let err = HostBridge::new_with_options(endpoint_config("ide"), opts)
+            .expect_err("busy preferred_port must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&format!("preferred_port {port} unavailable")),
+            "expected port-busy error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn new_with_persistent_token_creates_file_first_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp
+            .path()
+            .join("plugin-state")
+            .join("xyz")
+            .join(crate::bridges::plugin_host_bridge::BRIDGE_TOKEN_FILENAME);
+        let opts = HostBridgeNewOptions {
+            preferred_port: None,
+            persistent_token_path: Some(token_path.clone()),
+        };
+        let bridge = HostBridge::new_with_options(endpoint_config("ide"), opts).unwrap();
+        let written = std::fs::read_to_string(&token_path).unwrap();
+        assert_eq!(written.trim(), bridge.auth_token());
+        assert!(uuid::Uuid::parse_str(written.trim()).is_ok());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "token file must be chmod 0600, got {mode:o}");
+        }
+    }
+
+    #[test]
+    fn new_with_persistent_token_reuses_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp
+            .path()
+            .join("plugin-state")
+            .join("xyz")
+            .join(crate::bridges::plugin_host_bridge::BRIDGE_TOKEN_FILENAME);
+        let opts = HostBridgeNewOptions {
+            preferred_port: None,
+            persistent_token_path: Some(token_path.clone()),
+        };
+        let first = HostBridge::new_with_options(endpoint_config("ide"), opts).unwrap();
+        let first_token = first.auth_token();
+        drop(first);
+        let opts2 = HostBridgeNewOptions {
+            preferred_port: None,
+            persistent_token_path: Some(token_path),
+        };
+        let second = HostBridge::new_with_options(endpoint_config("ide"), opts2).unwrap();
+        assert_eq!(second.auth_token(), first_token);
+    }
+
+    #[test]
+    fn new_with_persistent_token_regenerates_on_malformed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_dir = tmp.path().join("plugin-state").join("xyz");
+        std::fs::create_dir_all(&token_dir).unwrap();
+        let token_path = token_dir.join(crate::bridges::plugin_host_bridge::BRIDGE_TOKEN_FILENAME);
+        std::fs::write(&token_path, "not-a-uuid\n").unwrap();
+        let opts = HostBridgeNewOptions {
+            preferred_port: None,
+            persistent_token_path: Some(token_path.clone()),
+        };
+        let bridge = HostBridge::new_with_options(endpoint_config("ide"), opts).unwrap();
+        let written = std::fs::read_to_string(&token_path).unwrap();
+        assert_eq!(written.trim(), bridge.auth_token());
+        assert!(uuid::Uuid::parse_str(written.trim()).is_ok());
+    }
+
+    #[test]
+    fn new_without_opts_regenerates_token_per_call() {
+        let a = HostBridge::new(endpoint_config("ide")).unwrap();
+        let b = HostBridge::new(endpoint_config("ide")).unwrap();
+        assert_ne!(a.auth_token(), b.auth_token());
     }
 
     // --- Origin policy ---

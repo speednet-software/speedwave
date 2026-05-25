@@ -5,6 +5,7 @@ export interface PluginAuthField {
   field_type: string;
   placeholder: string;
   is_secret: boolean;
+  required: boolean;
 }
 
 /**
@@ -44,6 +45,27 @@ export interface PluginStatusEntry {
   verification_status: PluginVerificationStatus;
   /** Diagnostic when `verification_status !== 'verified'`. */
   verification_error?: string;
+  /** True when the manifest declares `host_bridge`. */
+  has_host_bridge: boolean;
+}
+
+/** Snapshot returned by the `plugin_bridge_get_status` Tauri command. */
+export type PluginBridgeStatus =
+  | { slug: string; running: false }
+  | {
+      slug: string;
+      running: true;
+      port: number;
+      paired: boolean;
+      partner_connected: boolean;
+      display_name: string;
+    };
+
+/** Credentials returned by `plugin_bridge_get_credentials`. */
+export interface PluginBridgeCredentials {
+  slug: string;
+  url: string;
+  token: string;
 }
 
 /** A single property within a JSON Schema. */
