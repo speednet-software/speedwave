@@ -16,8 +16,8 @@ use speedwave_runtime::plugin::{
 };
 
 use super::host_bridge::{
-    AuthScheme, HostBridge, HostBridgeConfig, OriginPolicy, PairingConfig, PairingEvent,
-    PairingEventCallback, RoleCollisionPolicy, SubprotocolPolicy,
+    AuthScheme, HostBridge, HostBridgeConfig, HostBridgeNewOptions, OriginPolicy, PairingConfig,
+    PairingEvent, PairingEventCallback, RoleCollisionPolicy, SubprotocolPolicy,
 };
 
 const DEFAULT_PENDING_SLOT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -67,6 +67,7 @@ pub struct PluginHostBridge {
     manifest: HostBridgeManifest,
     inner: HostBridge,
     event_cb: Arc<Mutex<Option<PluginBridgeEventCallback>>>,
+    paired: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PluginHostBridge {
@@ -105,10 +106,17 @@ impl PluginHostBridge {
             })
             .build()?;
 
+        let opts = HostBridgeNewOptions {
+            preferred_port: manifest.preferred_port,
+            persistent_token_path: manifest
+                .persistent_token
+                .then(|| speedwave_runtime::plugin::plugin_state_dir(slug).join("bridge-token")),
+        };
         Ok(Self {
             manifest,
-            inner: HostBridge::new(config)?,
+            inner: HostBridge::new_with_options(config, opts)?,
             event_cb: Arc::new(Mutex::new(None)),
+            paired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -124,6 +132,10 @@ impl PluginHostBridge {
         self.inner.auth_token()
     }
 
+    pub fn is_paired(&self) -> bool {
+        self.paired.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn set_event_callback(&mut self, cb: PluginBridgeEventCallback) {
         if let Ok(mut guard) = self.event_cb.lock() {
             *guard = Some(cb);
@@ -132,8 +144,18 @@ impl PluginHostBridge {
 
     pub fn start(&mut self) -> anyhow::Result<()> {
         let event_cb = self.event_cb.clone();
+        let paired = self.paired.clone();
         let pairing_cb: PairingEventCallback = Arc::new(move |evt| {
             if let Some(translated) = translate_pairing_event(evt) {
+                match &translated {
+                    PluginBridgeEvent::Paired { .. } => {
+                        paired.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    PluginBridgeEvent::Disconnected { .. } => {
+                        paired.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
                 if let Ok(guard) = event_cb.lock() {
                     if let Some(cb) = guard.as_ref() {
                         cb(translated);
@@ -268,6 +290,8 @@ mod tests {
             collision_policy: HostBridgeCollisionPolicy::EvictOlder,
             pending_slot_timeout_secs: Some(60),
             display_name: "Test Bridge".into(),
+            preferred_port: None,
+            persistent_token: false,
         }
     }
 

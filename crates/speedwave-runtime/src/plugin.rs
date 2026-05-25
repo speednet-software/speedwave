@@ -125,6 +125,12 @@ pub struct HostBridgeManifest {
     pub pending_slot_timeout_secs: Option<u64>,
     /// Display name written into the lock file's `ideName` field.
     pub display_name: String,
+    /// Preferred loopback port. Hard-fails if busy. `None` → kernel picks.
+    #[serde(default)]
+    pub preferred_port: Option<u16>,
+    /// Persist token in `plugin-state/<slug>/bridge-token` (chmod 0600).
+    #[serde(default)]
+    pub persistent_token: bool,
 }
 
 /// Per-role auth scheme declaration.
@@ -227,6 +233,14 @@ fn plugin_state_base_for(plugins_dir: &Path) -> PathBuf {
 
 fn plugin_state_dir_for(plugins_dir: &Path, slug: &str) -> PathBuf {
     plugin_state_base_for(plugins_dir).join(slug)
+}
+
+/// Public SSOT for a plugin's mutable state directory.
+pub fn plugin_state_dir(slug: &str) -> PathBuf {
+    match plugins_base_dir() {
+        Ok(p) => plugin_state_dir_for(&p, slug),
+        Err(_) => consts::data_dir().join("plugin-state").join(slug),
+    }
 }
 
 fn image_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
@@ -873,6 +887,11 @@ fn validate_host_bridge_manifest(bridge: &HostBridgeManifest) -> anyhow::Result<
             anyhow::bail!(
                 "host_bridge.roles['{role}']: auth scheme name '{header_name}' contains a control character"
             );
+        }
+    }
+    if let Some(port) = bridge.preferred_port {
+        if port <= 1023 {
+            anyhow::bail!("host_bridge.preferred_port must be > 1023, got {port}");
         }
     }
     Ok(())
@@ -5090,6 +5109,8 @@ mod tests {
             collision_policy: HostBridgeCollisionPolicy::default(),
             pending_slot_timeout_secs: None,
             display_name: display_name.to_string(),
+            preferred_port: None,
+            persistent_token: false,
         }
     }
 
@@ -5143,6 +5164,38 @@ mod tests {
         let manifest = fixture_manifest_with_host_bridge(bridge);
         let tmp = tempfile::tempdir().unwrap();
         validate_manifest(&manifest, tmp.path()).expect("valid host_bridge must pass");
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_preferred_port_60123() {
+        let mut bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "X");
+        bridge.preferred_port = Some(60123);
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        validate_manifest(&manifest, tmp.path()).expect("preferred_port 60123 must pass");
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_preferred_port_below_1024() {
+        let mut bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "X");
+        bridge.preferred_port = Some(80);
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("preferred_port 80 must be rejected");
+        assert!(
+            err.to_string().contains("> 1023"),
+            "expected port-range rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_persistent_token_true() {
+        let mut bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "X");
+        bridge.persistent_token = true;
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        validate_manifest(&manifest, tmp.path()).expect("persistent_token true must pass");
     }
 
     #[test]
