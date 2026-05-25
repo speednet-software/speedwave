@@ -41,6 +41,15 @@ pub struct AuthFieldDef {
     pub field_type: String,
     pub placeholder: String,
     pub is_secret: bool,
+    /// Whether the user must provide a value before the plugin can run.
+    /// Defaults to `true` so manifests that omit the field keep the
+    /// pre-existing strict behavior (auto-enable blocked on any secret).
+    #[serde(default = "default_required")]
+    pub required: bool,
+}
+
+fn default_required() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -2176,6 +2185,7 @@ mod tests {
                 field_type: "password".to_string(),
                 placeholder: "sk-...".to_string(),
                 is_secret: true,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: Some(">=0.1.0".to_string()),
@@ -2817,6 +2827,7 @@ mod tests {
                     field_type: "password".to_string(),
                     placeholder: "sk-...".to_string(),
                     is_secret: true,
+                    required: true,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -2824,6 +2835,7 @@ mod tests {
                     field_type: "password".to_string(),
                     placeholder: "tok-...".to_string(),
                     is_secret: true,
+                    required: true,
                 },
                 AuthFieldDef {
                     key: "label".to_string(),
@@ -2831,6 +2843,7 @@ mod tests {
                     field_type: "text".to_string(),
                     placeholder: "My Label".to_string(),
                     is_secret: false,
+                    required: true,
                 },
             ],
             settings_schema: None,
@@ -2878,6 +2891,7 @@ mod tests {
                     field_type: "password".to_string(),
                     placeholder: "sk-...".to_string(),
                     is_secret: true,
+                    required: true,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -2885,6 +2899,7 @@ mod tests {
                     field_type: "password".to_string(),
                     placeholder: "tok-...".to_string(),
                     is_secret: true,
+                    required: true,
                 },
             ],
             settings_schema: None,
@@ -2955,6 +2970,7 @@ mod tests {
                 field_type: "url".to_string(),
                 placeholder: "https://...".to_string(),
                 is_secret: false,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -2999,6 +3015,7 @@ mod tests {
                 field_type: "password".to_string(),
                 placeholder: "sk-...".to_string(),
                 is_secret: true,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4507,6 +4524,7 @@ mod tests {
                 field_type: "text".to_string(),
                 placeholder: "".to_string(),
                 is_secret: false,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4538,6 +4556,7 @@ mod tests {
                 field_type: "dropdown".to_string(),
                 placeholder: "".to_string(),
                 is_secret: true,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4748,6 +4767,7 @@ mod tests {
                 field_type: "text".to_string(),
                 placeholder: "".to_string(),
                 is_secret: false,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,

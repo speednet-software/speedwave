@@ -257,10 +257,15 @@ pub async fn install_plugin(
         plugin::InstallOutcome::InstalledPendingBuild(m) => m,
     };
 
-    // Auto-enable only when image is ready. MCP plugins with auth_fields are
-    // auto-enabled after credential save in the UI.
+    // Auto-enable only when image is ready and no required secret is missing.
+    // Plugins with optional secret fields (e.g. tokens that unlock extra
+    // capabilities but are not needed for the baseline) can run right away;
+    // the user fills them later if needed.
     let should_auto_enable = matches!(outcome, plugin::InstallOutcome::Installed(_))
-        && !manifest.auth_fields.iter().any(|f| f.is_secret);
+        && !manifest
+            .auth_fields
+            .iter()
+            .any(|f| f.is_secret && f.required);
     if should_auto_enable {
         let plugin_key = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
         let plugin_key = plugin_key.to_string();
@@ -710,6 +715,7 @@ mod tests {
                 field_type: "password".into(),
                 placeholder: "Enter key".into(),
                 is_secret: true,
+                required: true,
             }],
             current_values: HashMap::new(),
             token_mount: "ro".into(),
@@ -837,6 +843,7 @@ mod tests {
             field_type: "text".into(),
             placeholder: "".into(),
             is_secret: false,
+            required: true,
         }];
         assert!(is_plugin_configured(
             std::path::Path::new("/nonexistent"),
@@ -864,6 +871,7 @@ mod tests {
             field_type: "password".into(),
             placeholder: "".into(),
             is_secret: true,
+            required: true,
         }];
         assert!(!is_plugin_configured(
             std::path::Path::new("/nonexistent/path"),
@@ -885,6 +893,7 @@ mod tests {
             field_type: "password".into(),
             placeholder: "".into(),
             is_secret: true,
+            required: true,
         }];
         assert!(is_plugin_configured(
             dir.path(),
@@ -906,6 +915,7 @@ mod tests {
             field_type: "password".into(),
             placeholder: "".into(),
             is_secret: true,
+            required: true,
         }];
         assert!(!is_plugin_configured(
             dir.path(),
@@ -1317,46 +1327,55 @@ mod tests {
         );
     }
 
+    fn blocks_auto_enable(auth_fields: &[plugin::AuthFieldDef]) -> bool {
+        auth_fields.iter().any(|f| f.is_secret && f.required)
+    }
+
     #[test]
-    fn auto_enable_skips_plugins_needing_credentials() {
+    fn auto_enable_skips_plugins_with_required_secret() {
         let auth_fields = vec![plugin::AuthFieldDef {
             key: "api_key".into(),
             label: "API Key".into(),
             field_type: "password".into(),
             placeholder: "".into(),
             is_secret: true,
+            required: true,
         }];
-        let needs_credentials = auth_fields.iter().any(|f| f.is_secret);
+        assert!(blocks_auto_enable(&auth_fields));
+    }
+
+    #[test]
+    fn auto_enable_proceeds_when_secret_is_optional() {
+        let auth_fields = vec![plugin::AuthFieldDef {
+            key: "api_key".into(),
+            label: "API Key".into(),
+            field_type: "password".into(),
+            placeholder: "".into(),
+            is_secret: true,
+            required: false,
+        }];
         assert!(
-            needs_credentials,
-            "plugin with secret auth_field needs credentials"
+            !blocks_auto_enable(&auth_fields),
+            "optional secret should not block auto-enable"
         );
     }
 
     #[test]
     fn auto_enable_triggers_for_plugins_without_secret_fields() {
-        let auth_fields: Vec<plugin::AuthFieldDef> = vec![plugin::AuthFieldDef {
+        let auth_fields = vec![plugin::AuthFieldDef {
             key: "host_url".into(),
             label: "Host".into(),
             field_type: "text".into(),
             placeholder: "".into(),
             is_secret: false,
+            required: true,
         }];
-        let needs_credentials = auth_fields.iter().any(|f| f.is_secret);
-        assert!(
-            !needs_credentials,
-            "plugin with only non-secret fields should auto-enable"
-        );
+        assert!(!blocks_auto_enable(&auth_fields));
     }
 
     #[test]
     fn auto_enable_triggers_for_plugins_without_auth_fields() {
-        let auth_fields: Vec<plugin::AuthFieldDef> = vec![];
-        let needs_credentials = auth_fields.iter().any(|f| f.is_secret);
-        assert!(
-            !needs_credentials,
-            "plugin with no auth_fields should auto-enable"
-        );
+        assert!(!blocks_auto_enable(&[]));
     }
 
     #[test]
@@ -1393,6 +1412,7 @@ mod tests {
                 field_type: "password".to_string(),
                 placeholder: "".to_string(),
                 is_secret: true,
+                required: true,
             }],
             settings_schema: None,
             speedwave_compat: None,

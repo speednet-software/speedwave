@@ -28,6 +28,7 @@ const MOCK_PLUGINS = {
           field_type: 'password',
           placeholder: 'Enter key',
           is_secret: true,
+          required: true,
         },
       ],
       current_values: {},

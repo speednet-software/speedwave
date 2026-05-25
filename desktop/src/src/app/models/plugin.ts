@@ -5,6 +5,7 @@ export interface PluginAuthField {
   field_type: string;
   placeholder: string;
   is_secret: boolean;
+  required: boolean;
 }
 
 /**
