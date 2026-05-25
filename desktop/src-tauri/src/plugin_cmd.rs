@@ -187,7 +187,10 @@ fn is_plugin_configured(
     requires_integrations: &[String],
     project: &str,
 ) -> bool {
-    let secret_fields: Vec<_> = auth_fields.iter().filter(|f| f.is_secret).collect();
+    let secret_fields: Vec<_> = auth_fields
+        .iter()
+        .filter(|f| plugin::blocks_plugin_readiness(f))
+        .collect();
     // Check secret fields if any exist
     if !secret_fields.is_empty() {
         let all_present = secret_fields.iter().all(|f| {
@@ -265,7 +268,7 @@ pub async fn install_plugin(
         && !manifest
             .auth_fields
             .iter()
-            .any(|f| f.is_secret && f.required);
+            .any(plugin::blocks_plugin_readiness);
     if should_auto_enable {
         let plugin_key = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
         let plugin_key = plugin_key.to_string();
@@ -283,6 +286,8 @@ pub async fn install_plugin(
         .map_err(|e| e.to_string())?;
     }
 
+    crate::bridges::plugin_bridge_manager::respawn_for(&manifest.slug, &app_handle);
+
     Ok(match outcome {
         plugin::InstallOutcome::Installed(m) => {
             format!("Plugin '{}' v{} installed successfully", m.name, m.version)
@@ -297,6 +302,7 @@ pub async fn install_plugin(
 #[tauri::command]
 pub fn remove_plugin(slug: String) -> Result<(), String> {
     log::info!("remove_plugin: slug={slug}");
+    crate::bridges::plugin_bridge_manager::stop_for(&slug);
 
     // Recovery action: removal must work for tampered plugins too.
     // Use the tolerant lister so an unparseable manifest still gives us
@@ -926,6 +932,54 @@ mod tests {
     }
 
     #[test]
+    fn is_plugin_configured_true_when_only_secret_is_optional_and_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let fields = vec![plugin::AuthFieldDef {
+            key: "api_key".into(),
+            label: "API Key".into(),
+            field_type: "password".into(),
+            placeholder: "".into(),
+            is_secret: true,
+            required: false,
+        }];
+        assert!(is_plugin_configured(
+            dir.path(),
+            &fields,
+            &[],
+            "any-project"
+        ));
+    }
+
+    #[test]
+    fn is_plugin_configured_false_when_required_secret_missing_alongside_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        let fields = vec![
+            plugin::AuthFieldDef {
+                key: "api_key".into(),
+                label: "API Key".into(),
+                field_type: "password".into(),
+                placeholder: "".into(),
+                is_secret: true,
+                required: true,
+            },
+            plugin::AuthFieldDef {
+                key: "extra_token".into(),
+                label: "Extra".into(),
+                field_type: "password".into(),
+                placeholder: "".into(),
+                is_secret: true,
+                required: false,
+            },
+        ];
+        assert!(!is_plugin_configured(
+            dir.path(),
+            &fields,
+            &[],
+            "any-project"
+        ));
+    }
+
+    #[test]
     fn plugin_save_and_load_settings_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
@@ -1328,7 +1382,7 @@ mod tests {
     }
 
     fn blocks_auto_enable(auth_fields: &[plugin::AuthFieldDef]) -> bool {
-        auth_fields.iter().any(|f| f.is_secret && f.required)
+        auth_fields.iter().any(plugin::blocks_plugin_readiness)
     }
 
     #[test]

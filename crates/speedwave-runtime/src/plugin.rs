@@ -52,6 +52,13 @@ fn default_required() -> bool {
     true
 }
 
+/// SSOT predicate: does this field block the plugin from running until the
+/// user provides a value? Used by auto-enable, configured-status, and
+/// token-status checks so the three answers cannot diverge.
+pub fn blocks_plugin_readiness(field: &AuthFieldDef) -> bool {
+    field.is_secret && field.required
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum TokenMount {
@@ -248,7 +255,12 @@ fn plugin_state_dir_for(plugins_dir: &Path, slug: &str) -> PathBuf {
 pub fn plugin_state_dir(slug: &str) -> PathBuf {
     match plugins_base_dir() {
         Ok(p) => plugin_state_dir_for(&p, slug),
-        Err(_) => consts::data_dir().join("plugin-state").join(slug),
+        Err(e) => {
+            log::warn!(
+                "plugin_state_dir[{slug}]: plugins_base_dir failed ({e}); using data_dir fallback"
+            );
+            consts::data_dir().join("plugin-state").join(slug)
+        }
     }
 }
 
@@ -501,7 +513,7 @@ fn get_plugin_token_status_in(
     let secret_fields: Vec<&AuthFieldDef> = manifest
         .auth_fields
         .iter()
-        .filter(|f| f.is_secret)
+        .filter(|f| blocks_plugin_readiness(f))
         .collect();
 
     if secret_fields.is_empty() {
@@ -902,6 +914,11 @@ fn validate_host_bridge_manifest(bridge: &HostBridgeManifest) -> anyhow::Result<
         if port <= 1023 {
             anyhow::bail!("host_bridge.preferred_port must be > 1023, got {port}");
         }
+    }
+    if bridge.persistent_token && bridge.preferred_port.is_none() {
+        log::warn!(
+            "host_bridge: persistent_token=true without preferred_port — companion app's saved URL becomes stale on every Speedwave restart"
+        );
     }
     Ok(())
 }
@@ -3375,12 +3392,7 @@ mod tests {
         assert!(failures.iter().any(|(slug, _)| slug == "pasted"));
     }
 
-    /// With the debug-only `SPEEDWAVE_ALLOW_UNSIGNED` bypass active, a
-    /// plugin without a `SIGNATURE` file must list as `Verified` — that is
-    /// the whole point of the bypass (testing unpublished plugins in dev).
-    /// Regression guard for a bug where `classify_plugin_for_ui` pre-checked
-    /// file existence and short-circuited before delegating to
-    /// `verify_plugin_signature` (which honors the bypass).
+    /// `SPEEDWAVE_ALLOW_UNSIGNED=1` must let an unsigned plugin list as Verified.
     #[test]
     fn test_unsigned_plugin_is_verified_when_bypass_active() {
         let _g = unsigned_env_lock();
@@ -5193,6 +5205,26 @@ mod tests {
         let manifest = fixture_manifest_with_host_bridge(bridge);
         let tmp = tempfile::tempdir().unwrap();
         validate_manifest(&manifest, tmp.path()).expect("preferred_port 60123 must pass");
+    }
+
+    #[test]
+    fn test_plugin_state_dir_returns_plugin_state_path_for_slug() {
+        let dir = plugin_state_dir("my-plugin");
+        assert!(
+            dir.to_string_lossy().contains("plugin-state"),
+            "expected 'plugin-state' in path, got {}",
+            dir.display()
+        );
+        assert!(dir.ends_with("my-plugin"));
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_preferred_port_1024() {
+        let mut bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "X_TOKEN", "X");
+        bridge.preferred_port = Some(1024);
+        let manifest = fixture_manifest_with_host_bridge(bridge);
+        let tmp = tempfile::tempdir().unwrap();
+        validate_manifest(&manifest, tmp.path()).expect("preferred_port 1024 boundary must pass");
     }
 
     #[test]
