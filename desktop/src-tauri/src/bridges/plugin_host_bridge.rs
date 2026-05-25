@@ -217,14 +217,21 @@ static STRING_INTERN: std::sync::Mutex<Option<HashMap<String, &'static str>>> =
     std::sync::Mutex::new(None);
 
 fn intern_static(s: &str) -> &'static str {
-    let mut guard = STRING_INTERN.lock().expect("string intern table poisoned");
-    let table = guard.get_or_insert_with(HashMap::new);
-    if let Some(&existing) = table.get(s) {
-        return existing;
+    match STRING_INTERN.lock() {
+        Ok(mut guard) => {
+            let table = guard.get_or_insert_with(HashMap::new);
+            if let Some(&existing) = table.get(s) {
+                return existing;
+            }
+            let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
+            table.insert(s.to_string(), leaked);
+            leaked
+        }
+        Err(e) => {
+            log::warn!("string intern table poisoned ({e}); leaking uncached");
+            Box::leak(s.to_string().into_boxed_str())
+        }
     }
-    let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
-    table.insert(s.to_string(), leaked);
-    leaked
 }
 
 fn translate_roles(
