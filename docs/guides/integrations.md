@@ -426,6 +426,34 @@ After cleanup, restart Speedwave. The Desktop app will start normally if no othe
 
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design and [ADR-036](../adr/ADR-036-self-declaring-worker-policy.md) for the tool policy model.
 
+### Bridge plugins — dev UX
+
+Plugins that pair a containerized worker with an external host application (e.g. a Figma Desktop plugin, an editor extension) declare a `host_bridge` block in `plugin.json` — see [ADR-063](../adr/ADR-063-host-bridge-generic.md). Speedwave Desktop spawns a loopback WebSocket relay per such plugin and injects the bridge URL + auth token into the worker's container.
+
+Two optional manifest fields make the user-facing flow smoother:
+
+- `preferred_port: <u16>` — bind the relay on a stable port. If the port is busy at startup, the bridge fails hard (no random fallback) so the external app's saved URL never silently breaks. Must be > 1023.
+- `persistent_token: true` — generate the auth token once and persist it at `~/.speedwave/plugin-state/<slug>/bridge-token` (chmod 0600). Subsequent Speedwave restarts reuse the same token; without this, the token rotates on every restart and external apps must re-paste it.
+
+Example manifest fragment:
+
+```json
+"host_bridge": {
+  "url_env": "MY_BRIDGE_URL",
+  "token_env": "MY_BRIDGE_TOKEN",
+  "display_name": "My Bridge",
+  "roles": { "worker": { "scheme": "header", "name": "x-my-auth" } },
+  "preferred_port": 60123,
+  "persistent_token": true
+}
+```
+
+**User flow** (any bridge plugin): the plugin detail page in Speedwave Desktop shows a _Bridge connection_ card with the connect URL, the auth token (masked, with Reveal/Copy), and a live status dot. Users copy these into their external app once; with `persistent_token: true`, restarts of Speedwave do not invalidate the credentials.
+
+**Recovery from a port collision**: free the port (`lsof -nP -iTCP:<port> -sTCP:LISTEN`), or change `preferred_port` in the manifest, or remove the field to let the kernel pick a random one. Reload the plugin (toggle off/on) to retry.
+
+**Threat model for persistent tokens**: persisting the UUID to a 0600 file extends the secret's lifetime from one Speedwave session to "until the plugin is uninstalled". `plugin::remove_plugin` deletes `plugin-state/<slug>/` entirely, including the token file. An attacker with read/write access to `~/.speedwave/` already has read/write access to the user's home directory and can compromise the bridge regardless of token rotation — persistence does not meaningfully widen the practical attack surface.
+
 ### Tool Policy via `_meta`
 
 Workers (both built-in and plugins) control how the hub presents their tools by declaring a `_meta` field on each tool definition:
