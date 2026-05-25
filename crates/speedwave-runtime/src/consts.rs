@@ -936,6 +936,10 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-context7",
 ];
 
+/// Host-side worker reached via WORKER_HOST_EXEC_URL on the hub (ADR-054).
+/// Single SSOT for the literal — referenced by BUILT_IN_SERVICE_IDS and integration tests.
+pub const HOST_EXEC_CONFIG_KEY: &str = "host_exec";
+
 /// Built-in service IDs (logical names, not compose names).
 /// Used by plugin install to prevent slug collisions.
 ///
@@ -956,7 +960,7 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "playwright",
     "context7",
     "os",
-    "host_exec",
+    HOST_EXEC_CONFIG_KEY,
     // Host-side OAuth refresh worker (ADR-060). Reserved so plugins cannot
     // shadow it. The oauth worker is NEVER enumerated to Claude — it is not
     // in ENABLED_SERVICES and the hub has no bearer for it. The reservation
@@ -2075,6 +2079,55 @@ mod tests {
                     field.key,
                     field.hint,
                     expected_some
+                );
+            }
+        }
+    }
+
+    // Guard: every directory under `containers/claude-resources/<type>/integrations/`
+    // must correspond to a recognised service key. A mismatched directory name
+    // would never be linked into the Claude container (entrypoint gates on the
+    // exact config_key) and the bug would silently regress integration discovery.
+    #[test]
+    fn integrations_directories_match_known_service_keys() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("repo root resolves three levels above the runtime crate");
+        let resources_root = repo_root.join("containers").join("claude-resources");
+
+        // Allowed integration directory names: TOGGLEABLE_MCP_SERVICES.config_key + OS sub-services
+        // + host_exec. `oauth` and `ide` from BUILT_IN_SERVICE_IDS are intentionally excluded:
+        // they are not user-toggleable and never have per-integration claude-resources.
+        let mut allowed: std::collections::HashSet<&str> = TOGGLEABLE_MCP_SERVICES
+            .iter()
+            .map(|s| s.config_key)
+            .collect();
+        for sub in TOGGLEABLE_OS_SERVICES {
+            allowed.insert(sub.config_key);
+        }
+        allowed.insert(HOST_EXEC_CONFIG_KEY);
+
+        for resource_type in ["skills", "commands", "agents", "hooks"] {
+            let integrations_dir = resources_root.join(resource_type).join("integrations");
+            if !integrations_dir.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&integrations_dir).expect("read integrations directory")
+            {
+                let entry = entry.expect("dir entry");
+                if !entry.file_type().expect("file type").is_dir() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let key = name.to_str().expect("non-UTF8 directory name");
+                assert!(
+                    allowed.contains(key),
+                    "containers/claude-resources/{resource_type}/integrations/{key}/ \
+                     does not match any TOGGLEABLE_MCP_SERVICES.config_key, \
+                     TOGGLEABLE_OS_SERVICES.config_key, or 'host_exec' — the \
+                     entrypoint would never link it. Rename the directory or \
+                     add a corresponding descriptor."
                 );
             }
         }

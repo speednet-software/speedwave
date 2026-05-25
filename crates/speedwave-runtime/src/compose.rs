@@ -922,9 +922,9 @@ pub(crate) fn apply_auth_config_in(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Adds an environment variable to a named service. Fails loudly if the service
-/// does not exist in the YAML — unlike `inject_worker_env()` which silently no-ops.
-/// Creates the `environment` key as a sequence if it does not exist.
+/// Adds an environment variable to a named service. Returns `Err` if the service is absent;
+/// `inject_env_into()` logs a warning and returns instead. Both create the `environment` key
+/// as a sequence if it does not exist.
 fn add_service_env_var(
     doc: &mut serde_yaml_ng::Value,
     service_name: &str,
@@ -1127,8 +1127,12 @@ pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec
 /// Filters compose services based on integrations config.
 /// - Removes disabled MCP service containers from the `services` map
 /// - Removes corresponding WORKER_*_URL from hub environment
-/// - Injects ENABLED_SERVICES env var into hub (comma-separated) — see [`enabled_hub_service_ids`]
-/// - Injects DISABLED_OS_SERVICES env var into hub if any OS sub-integrations are disabled
+/// - Injects ENABLED_SERVICES (comma-separated, see [`enabled_hub_service_ids`])
+///   into both the `mcp-hub` (for tool routing) and the `claude` container
+///   (so `entrypoint.sh` can gate per-integration claude-resources)
+/// - Injects DISABLED_OS_SERVICES into both `mcp-hub` (for sub-tool routing) and
+///   `claude` (so `entrypoint.sh` can gate per-OS-sub-service claude-resources)
+///   when any OS sub-integrations are disabled
 fn apply_integrations_filter(
     yaml: &str,
     integrations: &ResolvedIntegrationsConfig,
@@ -1156,7 +1160,7 @@ fn apply_integrations_filter(
                 services_map.remove(serde_yaml_ng::Value::String(svc.compose_name.to_string()));
             }
         }
-        remove_hub_env_var(&mut doc, svc.worker_env);
+        remove_env_from(&mut doc, "mcp-hub", svc.worker_env);
         // An egress-less worker (e.g. office, ADR-055) has its own internal network
         // `{NETWORK_NAME}_{config_key}`; when it is disabled, drop that network and the
         // hub's attachment to it so the rendered compose has no dangling internal network.
@@ -1176,12 +1180,13 @@ fn apply_integrations_filter(
         }
     }
 
-    // Inject ENABLED_SERVICES into hub (same predicate as build::enabled_images).
+    // Hub uses ENABLED_SERVICES for tool routing; claude entrypoint uses it to gate claude-resources.
     let enabled_csv = enabled_hub_service_ids(integrations).join(",");
     log::debug!("integrations filter: enabled_services={}", enabled_csv);
-    inject_worker_env(&mut doc, "ENABLED_SERVICES", &enabled_csv);
+    inject_env_into(&mut doc, "mcp-hub", "ENABLED_SERVICES", &enabled_csv);
+    inject_env_into(&mut doc, "claude", "ENABLED_SERVICES", &enabled_csv);
 
-    // Inject DISABLED_OS_SERVICES if any OS sub-integrations are disabled
+    // Hub uses DISABLED_OS_SERVICES for sub-tool routing; claude entrypoint uses it to gate OS sub-service skills.
     let disabled_os: Vec<&str> = consts::TOGGLEABLE_OS_SERVICES
         .iter()
         .filter(|svc| {
@@ -1192,28 +1197,44 @@ fn apply_integrations_filter(
         .map(|svc| svc.config_key)
         .collect();
     if !disabled_os.is_empty() {
-        log::debug!("integrations filter: disabled_os={}", disabled_os.join(","));
-        inject_worker_env(&mut doc, "DISABLED_OS_SERVICES", &disabled_os.join(","));
+        let disabled_csv = disabled_os.join(",");
+        log::debug!("integrations filter: disabled_os={}", disabled_csv);
+        inject_env_into(&mut doc, "mcp-hub", "DISABLED_OS_SERVICES", &disabled_csv);
+        inject_env_into(&mut doc, "claude", "DISABLED_OS_SERVICES", &disabled_csv);
     }
+
+    // OS_AVAILABLE_SUBS lets entrypoint.sh iterate sub-services without hardcoding the list.
+    let os_available_csv = consts::TOGGLEABLE_OS_SERVICES
+        .iter()
+        .map(|svc| svc.config_key)
+        .collect::<Vec<_>>()
+        .join(",");
+    inject_env_into(&mut doc, "claude", "OS_AVAILABLE_SUBS", &os_available_csv);
 
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Removes an environment variable from the mcp-hub service.
-fn remove_hub_env_var(doc: &mut serde_yaml_ng::Value, env_var_name: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(hub) = services.get_mut("mcp-hub") {
-            if let Some(environment) = hub.get_mut("environment") {
-                if let Some(env_seq) = environment.as_sequence_mut() {
-                    env_seq.retain(|item| {
-                        item.as_str()
-                            .map(|s| !s.starts_with(&format!("{}=", env_var_name)))
-                            .unwrap_or(true)
-                    });
-                }
-            }
-        }
-    }
+/// Removes an environment variable from an arbitrary service's `environment`
+/// sequence. No-op if the service or its `environment` sequence is absent —
+/// same posture as [`inject_env_into`].
+fn remove_env_from(doc: &mut serde_yaml_ng::Value, service: &str, env_name: &str) {
+    let Some(services) = doc.get_mut("services") else {
+        return;
+    };
+    let Some(svc) = services.get_mut(service) else {
+        return;
+    };
+    let Some(environment) = svc.get_mut("environment") else {
+        return;
+    };
+    let Some(env_seq) = environment.as_sequence_mut() else {
+        return;
+    };
+    env_seq.retain(|item| {
+        item.as_str()
+            .map(|s| s.split('=').next() != Some(env_name))
+            .unwrap_or(true)
+    });
 }
 
 /// Injects mcp-os configuration into the mcp-hub container if the
@@ -1548,26 +1569,47 @@ fn walk_reject_symlinks(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Injects a WORKER_*_URL environment variable into the mcp-hub service.
+/// Injects an env var into the `mcp-hub` service. Thin wrapper over
+/// [`inject_env_into`] — idempotent (replaces an existing entry).
 fn inject_worker_env(doc: &mut serde_yaml_ng::Value, env_name: &str, url: &str) {
     inject_env_into(doc, "mcp-hub", env_name, url)
 }
 
-/// Inject `<env_name>=<value>` into an arbitrary service's `environment` sequence.
-/// No-op if the service or its `environment` sequence is absent — same TOCTOU-friendly
-/// posture as `inject_worker_env`.
+/// Inject `<env_name>=<value>` into a service's `environment` sequence.
+/// Idempotent: replaces existing entry; creates `environment` if absent. Warns and returns
+/// only when the service itself is missing (mirrors `add_service_env_var`).
 fn inject_env_into(doc: &mut serde_yaml_ng::Value, service: &str, env_name: &str, value: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(svc) = services.get_mut(service) {
-            if let Some(environment) = svc.get_mut("environment") {
-                if let Some(env_seq) = environment.as_sequence_mut() {
-                    env_seq.push(serde_yaml_ng::Value::String(format!(
-                        "{}={}",
-                        env_name, value
-                    )));
-                }
-            }
-        }
+    let Some(services) = doc.get_mut("services").and_then(|s| s.as_mapping_mut()) else {
+        log::warn!(
+            "inject_env_into: 'services' key absent or not a mapping — cannot inject {env_name} into '{service}'"
+        );
+        return;
+    };
+    let Some(svc) = services
+        .get_mut(serde_yaml_ng::Value::String(service.to_string()))
+        .and_then(|s| s.as_mapping_mut())
+    else {
+        log::warn!("inject_env_into: service '{service}' absent — cannot inject {env_name}");
+        return;
+    };
+
+    let env_key = serde_yaml_ng::Value::String("environment".to_string());
+    let env_entry = svc
+        .entry(env_key)
+        .or_insert_with(|| serde_yaml_ng::Value::Sequence(Vec::new()));
+    let Some(env_seq) = env_entry.as_sequence_mut() else {
+        log::warn!("inject_env_into: service '{service}' 'environment' is not a sequence — cannot inject {env_name}");
+        return;
+    };
+
+    let new_entry = format!("{}={}", env_name, value);
+    let existing = env_seq.iter().position(|v| {
+        v.as_str()
+            .is_some_and(|s| s.split('=').next() == Some(env_name))
+    });
+    match existing {
+        Some(idx) => env_seq[idx] = serde_yaml_ng::Value::String(new_entry),
+        None => env_seq.push(serde_yaml_ng::Value::String(new_entry)),
     }
 }
 
@@ -1639,17 +1681,10 @@ fn add_service_volume(doc: &mut serde_yaml_ng::Value, service: &str, mount: &str
     }
 }
 
-/// Adds an environment variable to the claude service.
+/// Adds an environment variable to the claude service. Thin wrapper over
+/// [`inject_env_into`] — idempotent (replaces an existing entry).
 fn add_claude_env_var(doc: &mut serde_yaml_ng::Value, key: &str, value: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(claude) = services.get_mut("claude") {
-            if let Some(environment) = claude.get_mut("environment") {
-                if let Some(env_seq) = environment.as_sequence_mut() {
-                    env_seq.push(serde_yaml_ng::Value::String(format!("{}={}", key, value)));
-                }
-            }
-        }
-    }
+    inject_env_into(doc, "claude", key, value)
 }
 
 // --- SecurityCheck ---
@@ -3140,16 +3175,7 @@ mod tests {
     }
 
     fn get_hub_env_seq(doc: &serde_yaml_ng::Value) -> Vec<String> {
-        doc.get("services")
-            .and_then(|s| s.get("mcp-hub"))
-            .and_then(|h| h.get("environment"))
-            .and_then(|e| e.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default()
+        get_service_env_seq(doc, "mcp-hub")
     }
 
     fn find_env_value(env: &[String], prefix: &str) -> Option<String> {
@@ -4538,6 +4564,123 @@ services:
                 .is_some_and(|s| s == "WORKER_PRESALE_URL=http://mcp-presale:4006")
         });
         assert!(has_presale, "WORKER_PRESALE_URL should be in mcp-hub env");
+    }
+
+    /// Second call with the same key must REPLACE, not duplicate. Both claude and
+    /// hub receive ENABLED_SERVICES via this helper; re-renders would otherwise
+    /// accumulate stale entries in env sequences. Test both services so a future
+    /// regression that breaks the replace-path for one container is caught.
+    #[test]
+    fn test_inject_env_into_idempotent() {
+        for service in ["mcp-hub", "claude"] {
+            let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+
+            inject_env_into(&mut doc, service, "ENABLED_SERVICES", "slack");
+            inject_env_into(&mut doc, service, "ENABLED_SERVICES", "slack,office");
+
+            let svc = doc.get("services").unwrap().get(service).unwrap();
+            let env_seq = svc.get("environment").unwrap().as_sequence().unwrap();
+            let occurrences = env_seq
+                .iter()
+                .filter(|v| {
+                    v.as_str()
+                        .is_some_and(|s| s.starts_with("ENABLED_SERVICES="))
+                })
+                .count();
+            assert_eq!(
+                occurrences, 1,
+                "service '{service}': ENABLED_SERVICES must appear exactly once after repeated injection"
+            );
+            let final_value = env_seq
+                .iter()
+                .find_map(|v| v.as_str().and_then(|s| s.strip_prefix("ENABLED_SERVICES=")));
+            assert_eq!(final_value, Some("slack,office"), "service '{service}'");
+        }
+    }
+
+    /// `remove_env_from` removes the named key from an arbitrary service and no-ops on absent paths.
+    #[test]
+    fn test_remove_env_from() {
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+
+        inject_env_into(&mut doc, "claude", "TEST_KEY", "value");
+        assert!(find_env_value(&get_service_env_seq(&doc, "claude"), "TEST_KEY=").is_some());
+
+        remove_env_from(&mut doc, "claude", "TEST_KEY");
+        assert!(find_env_value(&get_service_env_seq(&doc, "claude"), "TEST_KEY=").is_none());
+
+        // No-op on absent service / env name.
+        remove_env_from(&mut doc, "nonexistent-service", "ANY");
+        remove_env_from(&mut doc, "claude", "NEVER_INJECTED");
+
+        // Removing only matches by exact key, not prefix.
+        inject_env_into(&mut doc, "claude", "FOO", "1");
+        inject_env_into(&mut doc, "claude", "FOO_BAR", "2");
+        remove_env_from(&mut doc, "claude", "FOO");
+        let env = get_service_env_seq(&doc, "claude");
+        assert!(find_env_value(&env, "FOO=").is_none());
+        assert_eq!(find_env_value(&env, "FOO_BAR=").as_deref(), Some("2"));
+    }
+
+    /// The claude container needs ENABLED_SERVICES so entrypoint.sh can gate
+    /// per-integration claude-resources (skills/commands/agents/hooks).
+    #[test]
+    fn test_apply_integrations_filter_injects_enabled_services_into_claude() {
+        let resolved = ResolvedIntegrationsConfig {
+            slack: true,
+            office: true,
+            ..Default::default()
+        };
+        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net").unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+
+        let claude_env = find_env_value(&get_service_env_seq(&doc, "claude"), "ENABLED_SERVICES=")
+            .expect("claude must have ENABLED_SERVICES");
+        let hub_env = find_env_value(&get_service_env_seq(&doc, "mcp-hub"), "ENABLED_SERVICES=")
+            .expect("mcp-hub must have ENABLED_SERVICES");
+        assert_eq!(
+            claude_env, hub_env,
+            "claude and mcp-hub must see identical ENABLED_SERVICES"
+        );
+        assert!(claude_env.contains("slack"));
+        assert!(claude_env.contains("office"));
+    }
+
+    /// claude container needs DISABLED_OS_SERVICES so entrypoint.sh can gate OS sub-service skills.
+    #[test]
+    fn test_apply_integrations_filter_injects_disabled_os_services_into_claude() {
+        let resolved = ResolvedIntegrationsConfig {
+            os_calendar: true,
+            ..Default::default()
+        };
+        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net").unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+
+        let claude_disabled = find_env_value(
+            &get_service_env_seq(&doc, "claude"),
+            "DISABLED_OS_SERVICES=",
+        )
+        .expect("DISABLED_OS_SERVICES must be injected into claude");
+        let hub_disabled = find_env_value(
+            &get_service_env_seq(&doc, "mcp-hub"),
+            "DISABLED_OS_SERVICES=",
+        )
+        .expect("DISABLED_OS_SERVICES must be injected into mcp-hub");
+        assert_eq!(claude_disabled, hub_disabled);
+        for sub in ["reminders", "mail", "notes"] {
+            assert!(
+                claude_disabled.contains(sub),
+                "missing {sub}: {claude_disabled}"
+            );
+        }
+        assert!(!claude_disabled.contains("calendar"));
+
+        let os_available =
+            find_env_value(&get_service_env_seq(&doc, "claude"), "OS_AVAILABLE_SUBS=")
+                .expect("OS_AVAILABLE_SUBS must be injected into claude");
+        for sub in ["reminders", "calendar", "mail", "notes"] {
+            assert!(os_available.contains(sub), "missing {sub}: {os_available}");
+        }
     }
 
     #[test]
@@ -7549,6 +7692,20 @@ services:
             enabled_var.is_empty(),
             "ENABLED_SERVICES should be empty when all integrations disabled, got: '{}'",
             enabled_var
+        );
+
+        // claude must also receive ENABLED_SERVICES (even empty) so entrypoint links zero integrations.
+        let claude_env_seq = get_service_env_seq(&doc, "claude");
+        assert!(
+            !claude_env_seq.is_empty(),
+            "claude.environment must be present"
+        );
+        let claude_enabled_var = find_env_value(&claude_env_seq, "ENABLED_SERVICES=")
+            .expect("ENABLED_SERVICES must be injected into the claude container");
+        assert!(
+            claude_enabled_var.is_empty(),
+            "claude ENABLED_SERVICES should be empty when all integrations disabled, got: '{}'",
+            claude_enabled_var
         );
 
         // All WORKER_*_URL vars should be removed from hub env

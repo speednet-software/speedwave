@@ -150,7 +150,7 @@ Available globals:
 - slack: listChannelIds, getChannelMessages, sendChannel
 - sharepoint: listFileIds, getFileFull, downloadFile, uploadFile
 - os: listReminders, createReminder, listEvents, createEvent, listEmails, sendEmail, listNotes, createNote, ...
-- context7: resolve_library_id, query_docs (up-to-date library documentation)
+- context7: resolveLibraryId, queryDocs (up-to-date library documentation)
 - batch(promises): Parallel execution with partial failure support
   ⚠️ Returns { results: T[], errors: [{index, error}] } - ALWAYS destructure!
   ✅ const { results } = await batch([...])

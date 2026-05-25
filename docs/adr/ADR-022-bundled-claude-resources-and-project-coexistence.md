@@ -19,39 +19,61 @@ Speedwave places bundled resources at the **user level** (`/home/speedwave/.clau
 
 ### Mechanism
 
-`entrypoint.sh` uses symlinks to place all bundled resources at user-level:[^1]
-
-**Symlink** — all resources (both directories and individual files) are symlinked from the read-only mount. Symlinks are re-created on every container start, so they always reflect the latest version shipped with Speedwave:
+`entrypoint.sh` places all bundled resources at user-level via symlinks. Top-level files use a single `ln -sf` each; the four resource-type directories (`skills/`, `commands/`, `agents/`, `hooks/`) are real directories of per-entry symlinks, with integration-bound entries gated by `ENABLED_SERVICES` and tracked in a state file:[^1]
 
 ```bash
-# Resource directories: when plugins are present, create a real directory and
-# symlink each entry individually so plugin entries can coexist alongside core
-# entries. Without plugins, symlink the whole directory (simpler).
-for resource_type in skills commands agents hooks; do
-    if [ -d "${SPEEDWAVE_RESOURCES}/${resource_type}" ]; then
-        if [ "${HAS_PLUGINS}" = true ]; then
-            mkdir -p "${HOME}/.claude/${resource_type}"
-            for entry in "${SPEEDWAVE_RESOURCES}/${resource_type}"/*; do
-                [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
-            done
-        else
-            ln -sfn "${SPEEDWAVE_RESOURCES}/${resource_type}" "${HOME}/.claude/${resource_type}"
-        fi
-    fi
-done
-
-# Individual files: ln -sf
-for resource_file in statusline.sh settings.json CLAUDE.md; do
-    if [ -f "${SPEEDWAVE_RESOURCES}/${resource_file}" ]; then
-        ln -sf "${SPEEDWAVE_RESOURCES}/${resource_file}" "${HOME}/.claude/${resource_file}"
-    fi
-done
-
-# output-styles: symlink individual file (not directory) to preserve user's custom styles
-if [ -f "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" ]; then
-    mkdir -p "${HOME}/.claude/output-styles"
-    ln -sf "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" "${HOME}/.claude/output-styles/Speedwave.md"
+# Cleanup links the previous run owned (toggle-off semantics).
+state_file="${HOME}/.claude/.speedwave-managed-links"
+if [ -f "${state_file}" ]; then
+    while IFS= read -r link; do
+        [ -L "${link}" ] && rm -f "${link}"
+    done < "${state_file}"
 fi
+
+new_state="$(mktemp)"
+trap 'rm -f "${new_state}"' EXIT
+
+for resource_type in skills commands agents hooks; do
+    src_dir="${SPEEDWAVE_RESOURCES}/${resource_type}"
+    [ -d "${src_dir}" ] || continue
+
+    # Core entries — always-on (skip the integrations/ bucket).
+    for entry in "${src_dir}"/*; do
+        [ -e "${entry}" ] || continue
+        name="$(basename "${entry}")"
+        [ "${name}" = "integrations" ] && continue
+        link="${HOME}/.claude/${resource_type}/${name}"
+        ln -sfn "${entry}" "${link}"
+        echo "${link}" >> "${new_state}"
+    done
+
+    # Integration-bound entries — only linked when in ENABLED_SERVICES.
+    integrations_dir="${src_dir}/integrations"
+    if [ -d "${integrations_dir}" ] && [ -n "${ENABLED_SERVICES:-}" ]; then
+        IFS=',' read -ra services <<< "${ENABLED_SERVICES}"
+        for svc in "${services[@]}"; do
+            svc="${svc//[[:space:]]/}"
+            [ -z "${svc}" ] && continue
+            [ "${svc}" = "os" ] && continue  # OS sub-services handled below.
+            src="${integrations_dir}/${svc}"
+            [ -d "${src}" ] || continue
+            link="${HOME}/.claude/${resource_type}/${svc}"
+            ln -sfn "${src}" "${link}"
+            echo "${link}" >> "${new_state}"
+        done
+    fi
+
+    # OS sub-services (reminders, calendar, mail, notes) are gated jointly: `os` must be in
+    # ENABLED_SERVICES AND the sub-service must NOT appear in DISABLED_OS_SERVICES. The available
+    # sub-service list is injected as OS_AVAILABLE_SUBS from TOGGLEABLE_OS_SERVICES (the Rust SSOT).
+done
+
+# Plugin entries are layered on top using the same per-entry mechanism and
+# tracked in the same state file (so plugin toggle-off cleans up too).
+# Individual top-level files (statusline.sh, settings.json, CLAUDE.md, output-styles/Speedwave.md)
+# use plain `ln -sf` — they are not tracked in the state file because they never go away.
+sort -u "${new_state}" -o "${new_state}"
+mv "${new_state}" "${state_file}"
 ```
 
 The only exception is `mcp-config.json`, which is **generated inline** by `entrypoint.sh` on every start because it depends on the runtime `MCP_HUB_PORT` variable. See [Bundled Resources](../architecture/bundled-resources.md) for the complete resource catalog.
@@ -65,10 +87,14 @@ This produces the following filesystem layout inside the container:
 ├── statusline.sh    → /speedwave/resources/statusline.sh
 ├── settings.json    → /speedwave/resources/settings.json
 ├── CLAUDE.md        → /speedwave/resources/CLAUDE.md
-├── skills/    → /speedwave/resources/skills/
-├── commands/  → /speedwave/resources/commands/
-├── agents/    → /speedwave/resources/agents/
-├── hooks/     → /speedwave/resources/hooks/
+├── .speedwave-managed-links       ← state file: links the entrypoint owns
+├── skills/                        ← real dir of per-entry symlinks
+│   ├── code-review-basic    → /speedwave/resources/skills/code-review-basic                ← core, always linked
+│   ├── code-review-…        → …
+│   └── office               → /speedwave/resources/skills/integrations/office              ← gated by ENABLED_SERVICES
+├── commands/                      ← real dir of per-entry symlinks (same gating model)
+├── agents/                        ← real dir of per-entry symlinks (same gating model)
+├── hooks/                         ← real dir of per-entry symlinks (same gating model)
 ├── mcp-config.json                ← generated by entrypoint.sh
 └── ide/                           ← read-only mount (IDE Bridge lock files)
 
@@ -105,15 +131,18 @@ This means teams can:
 
 ### Plugin Resources
 
-Plugin resources (lines 82–96 of `entrypoint.sh`) use a finer-grained approach — individual files and directories are symlinked into the user-level directories rather than replacing entire directories:[^1]
+Plugins use the same per-entry symlink mechanism as core/integration resources — every plugin entry is symlinked individually into `~/.claude/<type>/` and recorded in the managed-links state file:[^1]
 
 ```bash
 for entry in "${plugin_path}/${resource_type}"/*; do
-    [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+    [ -e "${entry}" ] || continue
+    target="${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+    ln -sfn "${entry}" "${target}"
+    echo "${target}" >> "${new_state}"
 done
 ```
 
-This allows core Speedwave resources and plugin resources to coexist within the same user-level directory. The `[ -e ]` guard and `ln -sfn` support both files and directories. Plugin resources support all four resource types: `commands`, `agents`, `skills`, and `hooks`. Plugins run inside the container (sandboxed with `cap_drop: ALL`, `no-new-privileges`, `read_only`), so plugin hooks have the same trust boundary as plugin skills and commands.
+This lets core, integration-gated, and plugin resources coexist within the same user-level directory. The state-file tracking means disabling a plugin on the next run removes its links — the same toggle-off semantics that apply to integrations. Plugin resources support all four resource types: `commands`, `agents`, `skills`, and `hooks`. Plugins run inside the container (sandboxed with `cap_drop: ALL`, `no-new-privileges`, `read_only`), so plugin hooks have the same trust boundary as plugin skills and commands.
 
 ### Container Isolation
 
