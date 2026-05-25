@@ -1600,16 +1600,18 @@ fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry 
         let mismatch_err = format!("directory name does not match manifest slug '{}'", m.slug);
         return failed(VerificationStatus::DirSlugMismatch, mismatch_err, Some(m));
     }
-    if !plugin_dir.join("SIGNATURE").exists() {
-        return failed(
-            VerificationStatus::MissingSignature,
-            "SIGNATURE file not present".into(),
-            Some(m),
-        );
-    }
+    // Delegate to verify_plugin_signature first — it honors the debug-only
+    // SPEEDWAVE_ALLOW_UNSIGNED bypass and returns Ok without touching the
+    // SIGNATURE file. A pre-existence check here would short-circuit the
+    // bypass and make unsigned plugins unusable in dev despite the env var.
     if let Err(e) = signing::verify_plugin_signature(plugin_dir) {
+        let status = if !plugin_dir.join("SIGNATURE").exists() {
+            VerificationStatus::MissingSignature
+        } else {
+            VerificationStatus::InvalidSignature
+        };
         return failed(
-            VerificationStatus::InvalidSignature,
+            status,
             crate::log_sanitizer::sanitize(&e.to_string()),
             Some(m),
         );
@@ -3335,6 +3337,39 @@ mod tests {
         let failures =
             audit_all_in_dir(&plugins).expect_err("audit must report the unsigned plugin");
         assert!(failures.iter().any(|(slug, _)| slug == "pasted"));
+    }
+
+    /// With the debug-only `SPEEDWAVE_ALLOW_UNSIGNED` bypass active, a
+    /// plugin without a `SIGNATURE` file must list as `Verified` — that is
+    /// the whole point of the bypass (testing unpublished plugins in dev).
+    /// Regression guard for a bug where `classify_plugin_for_ui` pre-checked
+    /// file existence and short-circuited before delegating to
+    /// `verify_plugin_signature` (which honors the bypass).
+    #[test]
+    fn test_unsigned_plugin_is_verified_when_bypass_active() {
+        let _g = unsigned_env_lock();
+        std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("devplugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"x","slug":"devplugin","version":"1.0.0","description":"x"}"#,
+        )
+        .unwrap();
+        // No SIGNATURE — bypass must accept it anyway.
+        signing::invalidate_cache(&plugin_dir);
+
+        let entries = list_for_ui_from_dir(&plugins);
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].slug, "devplugin");
+        assert_eq!(
+            entries[0].verification_status,
+            VerificationStatus::Verified,
+            "SPEEDWAVE_ALLOW_UNSIGNED must let an unsigned plugin list as Verified"
+        );
     }
 
     /// A plugin dir that *has* a `SIGNATURE` file, but one that was
