@@ -936,89 +936,39 @@ fn init_and_start_ide_bridge_inner(app_handle: &tauri::AppHandle) -> Option<ide_
     }
 }
 
-/// Iterate every verified plugin whose manifest declares a `host_bridge`
-/// block and spawn a `PluginHostBridge` for it. Each bridge listens for
-/// the lifetime of the Desktop process — the worker container connects
-/// only after the plugin is enabled in a project, but the lock file +
-/// listener are available from startup so the user can paste credentials
-/// into the host-side plugin UI any time (see ADR-063).
-fn init_and_start_plugin_bridges(
-    plugin_bridges: &SharedPluginBridges,
-    app_handle: &tauri::AppHandle,
-) {
-    let plugins = match speedwave_runtime::plugin::list_verified_plugins() {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("plugin bridges init: list_verified_plugins failed: {e}");
-            return;
-        }
-    };
-    for vp in plugins {
-        let manifest = match vp.manifest.host_bridge.clone() {
-            Some(m) => m,
-            None => continue,
-        };
-        let slug = vp.manifest.slug.clone();
-        match crate::bridges::plugin_host_bridge::PluginHostBridge::new(&slug, manifest) {
-            Ok(mut bridge) => {
-                let handle = app_handle.clone();
-                let event_slug = slug.clone();
-                bridge.set_event_callback(std::sync::Arc::new(move |evt| {
-                    use crate::bridges::plugin_host_bridge::PluginBridgeEvent;
-                    use tauri::Emitter;
-                    let kind = match &evt {
-                        PluginBridgeEvent::SlotOccupied { .. } => "slot_occupied",
-                        PluginBridgeEvent::Paired { .. } => "paired",
-                        PluginBridgeEvent::Disconnected { .. } => "disconnected",
-                        PluginBridgeEvent::PairBusy => "pair_busy",
-                        PluginBridgeEvent::EvictedOlder { .. } => "evicted_older",
-                        PluginBridgeEvent::PendingTimeout { .. } => "pending_timeout",
-                    };
-                    let mut payload = serde_json::json!({
-                        "slug": event_slug,
-                        "kind": kind,
-                    });
-                    match &evt {
-                        PluginBridgeEvent::SlotOccupied { role }
-                        | PluginBridgeEvent::EvictedOlder { role }
-                        | PluginBridgeEvent::PendingTimeout { role } => {
-                            payload["role"] = serde_json::Value::String(role.clone());
-                        }
-                        PluginBridgeEvent::Paired { roles } => {
-                            payload["roles"] = serde_json::json!(roles);
-                        }
-                        PluginBridgeEvent::Disconnected { reason } => {
-                            payload["reason"] = serde_json::Value::String(reason.clone());
-                        }
-                        PluginBridgeEvent::PairBusy => {}
-                    }
-                    let _ = handle.emit("plugin_bridge_event", payload);
-                }));
-                if let Err(e) = bridge.start() {
-                    log::error!("plugin bridge[{slug}] start error: {e}");
-                    continue;
-                }
-                log::info!("plugin bridge[{slug}] started on port {}", bridge.port());
-                if let Ok(mut map) = plugin_bridges.lock() {
-                    map.insert(slug, bridge);
-                }
-            }
-            Err(e) => {
-                log::error!("plugin bridge[{slug}] init error: {e}");
-            }
-        }
-    }
+/// Wire-format for the `plugin_bridge_get_credentials` Tauri response. Mirror:
+/// `PluginBridgeCredentials` in `desktop/src/src/app/models/plugin.ts`.
+#[derive(serde::Serialize)]
+struct PluginBridgeCredentialsResponse {
+    slug: String,
+    url: String,
+    token: String,
 }
 
-/// Tauri command: credentials a host-side companion app (e.g. the Figma
-/// Desktop plugin UI) pastes into its connect dialog. URL uses
-/// `127.0.0.1` (loopback); the container-side URL using
-/// `host.docker.internal` is injected by `render_compose`.
+/// Wire-format for `plugin_bridge_get_status`. Discriminated on `running`.
+/// Mirror: `PluginBridgeStatus` in `desktop/src/src/app/models/plugin.ts`.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum PluginBridgeStatusResponse {
+    Running {
+        slug: String,
+        running: bool,
+        port: u16,
+        paired: bool,
+        partner_connected: bool,
+        display_name: String,
+    },
+    NotRunning {
+        slug: String,
+        running: bool,
+    },
+}
+
 #[tauri::command]
 fn plugin_bridge_get_credentials(
     slug: String,
     plugin_bridges: tauri::State<SharedPluginBridges>,
-) -> Result<serde_json::Value, String> {
+) -> Result<PluginBridgeCredentialsResponse, String> {
     let guard = plugin_bridges
         .lock()
         .map_err(|e| format!("mutex poisoned: {e}"))?;
@@ -1026,37 +976,35 @@ fn plugin_bridge_get_credentials(
         .get(&slug)
         .ok_or_else(|| format!("plugin bridge '{slug}' not running"))?;
     let creds = bridge.credentials_for_local_ui();
-    Ok(serde_json::json!({
-        "slug": slug,
-        "url": creds.local_ui_url,
-        "token": creds.token,
-    }))
+    Ok(PluginBridgeCredentialsResponse {
+        slug,
+        url: creds.local_ui_url,
+        token: creds.token,
+    })
 }
 
-/// Tauri command: status snapshot for the Plugin Detail UI (port +
-/// running state). Auth token is not returned here — use
-/// `plugin_bridge_get_credentials` when the user explicitly asks for it.
 #[tauri::command]
 fn plugin_bridge_get_status(
     slug: String,
     plugin_bridges: tauri::State<SharedPluginBridges>,
-) -> Result<serde_json::Value, String> {
+) -> Result<PluginBridgeStatusResponse, String> {
     let guard = plugin_bridges
         .lock()
         .map_err(|e| format!("mutex poisoned: {e}"))?;
-    match guard.get(&slug) {
-        Some(bridge) => Ok(serde_json::json!({
-            "slug": slug,
-            "running": true,
-            "port": bridge.port(),
-            "paired": bridge.is_paired(),
-            "display_name": bridge.manifest().display_name,
-        })),
-        None => Ok(serde_json::json!({
-            "slug": slug,
-            "running": false,
-        })),
-    }
+    Ok(match guard.get(&slug) {
+        Some(bridge) => PluginBridgeStatusResponse::Running {
+            slug,
+            running: true,
+            port: bridge.port(),
+            paired: bridge.is_paired(),
+            partner_connected: bridge.has_partner(),
+            display_name: bridge.manifest().display_name.clone(),
+        },
+        None => PluginBridgeStatusResponse::NotRunning {
+            slug,
+            running: false,
+        },
+    })
 }
 
 /// Start mcp-os watchdog thread. Called from setup() and ensure_mcp_os_running().
@@ -1798,7 +1746,10 @@ fn main() {
                 // mirroring IDE Bridge's "passive listener" behavior — when
                 // the corresponding plugin is disabled in a project the
                 // bridge sits idle on its loopback port.
-                init_and_start_plugin_bridges(&plugin_bridges, app.handle());
+                crate::bridges::plugin_bridge_manager::init_and_start(
+                    &plugin_bridges,
+                    app.handle(),
+                );
 
                 // Start mcp-os process
                 let script = speedwave_runtime::build::resolve_mcp_os_script();

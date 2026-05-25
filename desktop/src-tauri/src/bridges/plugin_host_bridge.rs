@@ -22,6 +22,7 @@ use super::host_bridge::{
 
 const DEFAULT_PENDING_SLOT_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub const BRIDGE_TOKEN_FILENAME: &str = "bridge-token";
 
 /// Lock-file payload written under `~/.speedwave/<slug>-bridge/<port>.lock`.
 #[derive(Serialize)]
@@ -35,8 +36,11 @@ struct PluginBridgeLockFile {
     auth_token: String,
 }
 
-/// Generic pairing events surfaced to the Desktop UI.
-#[derive(Clone, Debug)]
+/// Generic pairing events surfaced to the Desktop UI. Serialized form is the
+/// SSOT for the `plugin_bridge_event` Tauri event; mirror is
+/// `BridgeEventPayload` in `desktop/src/src/app/services/plugin-bridge.service.ts`.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginBridgeEvent {
     SlotOccupied { role: String },
     Paired { roles: Vec<String> },
@@ -68,6 +72,7 @@ pub struct PluginHostBridge {
     inner: HostBridge,
     event_cb: Arc<Mutex<Option<PluginBridgeEventCallback>>>,
     paired: Arc<std::sync::atomic::AtomicBool>,
+    partner_connected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PluginHostBridge {
@@ -108,15 +113,16 @@ impl PluginHostBridge {
 
         let opts = HostBridgeNewOptions {
             preferred_port: manifest.preferred_port,
-            persistent_token_path: manifest
-                .persistent_token
-                .then(|| speedwave_runtime::plugin::plugin_state_dir(slug).join("bridge-token")),
+            persistent_token_path: manifest.persistent_token.then(|| {
+                speedwave_runtime::plugin::plugin_state_dir(slug).join(BRIDGE_TOKEN_FILENAME)
+            }),
         };
         Ok(Self {
             manifest,
             inner: HostBridge::new_with_options(config, opts)?,
             event_cb: Arc::new(Mutex::new(None)),
             paired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            partner_connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -133,7 +139,12 @@ impl PluginHostBridge {
     }
 
     pub fn is_paired(&self) -> bool {
-        self.paired.load(std::sync::atomic::Ordering::Relaxed)
+        self.paired.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn has_partner(&self) -> bool {
+        self.partner_connected
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn set_event_callback(&mut self, cb: PluginBridgeEventCallback) {
@@ -145,14 +156,20 @@ impl PluginHostBridge {
     pub fn start(&mut self) -> anyhow::Result<()> {
         let event_cb = self.event_cb.clone();
         let paired = self.paired.clone();
+        let partner = self.partner_connected.clone();
         let pairing_cb: PairingEventCallback = Arc::new(move |evt| {
             if let Some(translated) = translate_pairing_event(evt) {
                 match &translated {
+                    PluginBridgeEvent::SlotOccupied { .. } => {
+                        partner.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                     PluginBridgeEvent::Paired { .. } => {
-                        paired.store(true, std::sync::atomic::Ordering::Relaxed);
+                        partner.store(true, std::sync::atomic::Ordering::Relaxed);
+                        paired.store(true, std::sync::atomic::Ordering::Release);
                     }
                     PluginBridgeEvent::Disconnected { .. } => {
-                        paired.store(false, std::sync::atomic::Ordering::Relaxed);
+                        paired.store(false, std::sync::atomic::Ordering::Release);
+                        partner.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                     _ => {}
                 }
@@ -167,6 +184,10 @@ impl PluginHostBridge {
     }
 
     pub fn stop(&mut self) -> anyhow::Result<()> {
+        self.paired
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.partner_connected
+            .store(false, std::sync::atomic::Ordering::Release);
         self.inner.stop()
     }
 

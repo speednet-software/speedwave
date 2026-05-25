@@ -884,6 +884,7 @@ async fn run_pairing_loop(
                         continue;
                     }
                 };
+                log::debug!(target: "host_bridge", "pairing[{}] tcp accept from {peer_addr}", config.name);
 
                 let auth_for_cb = auth.clone();
                 let pairing_for_cb = pairing_cfg.clone();
@@ -891,6 +892,7 @@ async fn run_pairing_loop(
                 let subprotocol = config.subprotocol.clone();
                 let state_for_cb = state.clone();
                 let event_cb_for_cb = event_cb.clone();
+                let bridge_name_for_cb = config.name.clone();
 
                 let outcome = Arc::new(Mutex::new(None::<PairingHandshakeOutcome>));
                 let outcome_cb = outcome.clone();
@@ -913,10 +915,24 @@ async fn run_pairing_loop(
                         drop(auth_guard);
                         let (role, matched_auth) = match role_and_match {
                             Some(x) => x,
-                            None => return Err(http_response(401, "Unauthorized")),
+                            None => {
+                                log::warn!(
+                                    target: "host_bridge",
+                                    "pairing[{bridge_name_for_cb}] reject {peer_addr}: 401 auth (no role matched)"
+                                );
+                                return Err(http_response(401, "Unauthorized"));
+                            }
                         };
+                        log::info!(
+                            target: "host_bridge",
+                            "pairing[{bridge_name_for_cb}] accept {peer_addr} as role '{role}'"
+                        );
                         // 2. Origin
                         if !check_origin(req, &origin_policy, &matched_auth) {
+                            log::warn!(
+                                target: "host_bridge",
+                                "pairing[{bridge_name_for_cb}] reject {peer_addr}: 403 origin"
+                            );
                             return Err(http_response(403, "Forbidden origin"));
                         }
                         // 3. Subprotocol
@@ -1530,14 +1546,18 @@ mod tests {
 
     // --- HostBridge::new_with_options ---
 
-    fn pick_free_port() -> u16 {
+    /// Reserve a free port. Caller drops the guard listener immediately
+    /// before binding the bridge to minimize the TOCTOU window.
+    fn reserve_free_port() -> (std::net::TcpListener, u16) {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
+        let port = l.local_addr().unwrap().port();
+        (l, port)
     }
 
     #[test]
     fn new_with_preferred_port_uses_it_when_free() {
-        let port = pick_free_port();
+        let (guard, port) = reserve_free_port();
+        drop(guard);
         let opts = HostBridgeNewOptions {
             preferred_port: Some(port),
             persistent_token_path: None,
@@ -1570,7 +1590,7 @@ mod tests {
             .path()
             .join("plugin-state")
             .join("xyz")
-            .join("bridge-token");
+            .join(crate::bridges::plugin_host_bridge::BRIDGE_TOKEN_FILENAME);
         let opts = HostBridgeNewOptions {
             preferred_port: None,
             persistent_token_path: Some(token_path.clone()),
@@ -1594,7 +1614,7 @@ mod tests {
             .path()
             .join("plugin-state")
             .join("xyz")
-            .join("bridge-token");
+            .join(crate::bridges::plugin_host_bridge::BRIDGE_TOKEN_FILENAME);
         let opts = HostBridgeNewOptions {
             preferred_port: None,
             persistent_token_path: Some(token_path.clone()),
@@ -1615,7 +1635,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let token_dir = tmp.path().join("plugin-state").join("xyz");
         std::fs::create_dir_all(&token_dir).unwrap();
-        let token_path = token_dir.join("bridge-token");
+        let token_path = token_dir.join(crate::bridges::plugin_host_bridge::BRIDGE_TOKEN_FILENAME);
         std::fs::write(&token_path, "not-a-uuid\n").unwrap();
         let opts = HostBridgeNewOptions {
             preferred_port: None,
