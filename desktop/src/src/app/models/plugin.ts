@@ -50,13 +50,16 @@ export interface PluginStatusEntry {
 }
 
 /** Snapshot returned by the `plugin_bridge_get_status` Tauri command. */
-export interface PluginBridgeStatus {
-  slug: string;
-  running: boolean;
-  port?: number;
-  paired?: boolean;
-  display_name?: string;
-}
+export type PluginBridgeStatus =
+  | { slug: string; running: false }
+  | {
+      slug: string;
+      running: true;
+      port: number;
+      paired: boolean;
+      partner_connected: boolean;
+      display_name: string;
+    };
 
 /** Credentials returned by `plugin_bridge_get_credentials`. */
 export interface PluginBridgeCredentials {

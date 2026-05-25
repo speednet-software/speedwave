@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, type Signal } from '@angular/core';
+import { Injectable, OnDestroy, WritableSignal, inject, signal, type Signal } from '@angular/core';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from './tauri.service';
 import type { PluginBridgeCredentials, PluginBridgeStatus } from '../models/plugin';
@@ -15,17 +15,14 @@ interface BridgeEventPayload {
 }
 
 /**
- * Tracks one plugin's host-bridge status. Combines a `plugin_bridge_get_status`
- * snapshot with live updates from the `plugin_bridge_event` Tauri event so
- * the UI sees `paired` flip without polling.
+ * Tracks each host-bridge plugin's status via a `plugin_bridge_get_status`
+ * snapshot plus live `plugin_bridge_event` updates so the UI sees `paired` /
+ * `partner_connected` flip without polling. Other fields reflect the snapshot.
  */
 @Injectable({ providedIn: 'root' })
-export class PluginBridgeService {
+export class PluginBridgeService implements OnDestroy {
   private readonly tauri = inject(TauriService);
-  private readonly statuses = new Map<
-    string,
-    ReturnType<typeof signal<PluginBridgeStatus | null>>
-  >();
+  private readonly statuses = new Map<string, WritableSignal<PluginBridgeStatus | null>>();
   private unlisten: UnlistenFn | null = null;
   private listening = false;
 
@@ -34,12 +31,7 @@ export class PluginBridgeService {
    * @param slug - Plugin slug to track.
    */
   status(slug: string): Signal<PluginBridgeStatus | null> {
-    let sig = this.statuses.get(slug);
-    if (!sig) {
-      sig = signal<PluginBridgeStatus | null>(null);
-      this.statuses.set(slug, sig);
-    }
-    return sig.asReadonly();
+    return this.getOrCreateSig(slug).asReadonly();
   }
 
   /**
@@ -51,7 +43,7 @@ export class PluginBridgeService {
     const snapshot = await this.tauri.invoke<PluginBridgeStatus>('plugin_bridge_get_status', {
       slug,
     });
-    this.writeStatus(slug, snapshot);
+    this.getOrCreateSig(slug).set(snapshot);
   }
 
   /**
@@ -62,33 +54,55 @@ export class PluginBridgeService {
     return this.tauri.invoke<PluginBridgeCredentials>('plugin_bridge_get_credentials', { slug });
   }
 
-  private writeStatus(slug: string, snapshot: PluginBridgeStatus): void {
+  /** Releases the Tauri event subscription when the service is torn down. */
+  ngOnDestroy(): void {
+    this.unlisten?.();
+    this.unlisten = null;
+    this.listening = false;
+  }
+
+  private getOrCreateSig(slug: string): WritableSignal<PluginBridgeStatus | null> {
     let sig = this.statuses.get(slug);
     if (!sig) {
       sig = signal<PluginBridgeStatus | null>(null);
       this.statuses.set(slug, sig);
     }
-    sig.set(snapshot);
+    return sig;
   }
 
   private async ensureListening(): Promise<void> {
     if (this.listening) return;
-    this.listening = true;
-    this.unlisten = await this.tauri.listen<BridgeEventPayload>(
-      'plugin_bridge_event',
-      ({ payload }) => {
-        const sig = this.statuses.get(payload.slug);
-        if (!sig) return;
-        const current = sig();
-        if (!current) return;
-        const paired =
-          payload.kind === 'paired'
-            ? true
-            : payload.kind === 'disconnected'
-              ? false
-              : current.paired;
-        sig.set({ ...current, paired });
-      }
-    );
+    try {
+      this.unlisten = await this.tauri.listen<BridgeEventPayload>(
+        'plugin_bridge_event',
+        ({ payload }) => this.applyEvent(payload)
+      );
+      this.listening = true;
+    } catch (err) {
+      console.error('PluginBridgeService: failed to subscribe to plugin_bridge_event', err);
+    }
+  }
+
+  private applyEvent(payload: BridgeEventPayload): void {
+    const sig = this.statuses.get(payload.slug);
+    if (!sig) {
+      console.warn(`PluginBridgeService: dropped ${payload.kind} for unknown slug ${payload.slug}`);
+      return;
+    }
+    const current = sig();
+    if (!current || !current.running) return;
+    switch (payload.kind) {
+      case 'paired':
+        sig.set({ ...current, paired: true, partner_connected: true });
+        return;
+      case 'slot_occupied':
+        sig.set({ ...current, partner_connected: true });
+        return;
+      case 'disconnected':
+        sig.set({ ...current, paired: false, partner_connected: false });
+        return;
+      default:
+        return;
+    }
   }
 }
