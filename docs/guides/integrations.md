@@ -333,12 +333,12 @@ Removing the key returns to anonymous mode — the toggle stays enabled (unlike 
 
 #### Tool surface
 
-| Tool                 | Parameters                      | Description                                                                                                                         |
-| -------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `resolve_library_id` | `libraryName`, `query`          | Resolve a name (e.g. "react") to a Context7 ID (e.g. `/facebook/react`). Returns top 10 matches with `trustScore` and version list. |
-| `query_docs`         | `libraryId`, `query`, `tokens?` | Fetch documentation snippets for a known ID. `tokens` defaults to 5000, clamped to `[500, 15000]` to bound context-window usage.    |
+| Tool               | Parameters                      | Description                                                                                                                         |
+| ------------------ | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `resolveLibraryId` | `libraryName`, `query`          | Resolve a name (e.g. "react") to a Context7 ID (e.g. `/facebook/react`). Returns top 10 matches with `trustScore` and version list. |
+| `queryDocs`        | `libraryId`, `query`, `tokens?` | Fetch documentation snippets for a known ID. `tokens` defaults to 5000, clamped to `[500, 15000]` to bound context-window usage.    |
 
-The Hub exposes both tools through `execute_code` (preferred) — e.g. `await context7.resolve_library_id({libraryName: "react", query: "useState"})`.
+The Hub exposes both tools through `execute_code`: `await context7.resolveLibraryId({libraryName: "react", query: "useState"})` and `await context7.queryDocs({libraryId: "/facebook/react", query: "useState"})`.
 
 #### Example prompts
 
@@ -347,7 +347,7 @@ The Hub exposes both tools through `execute_code` (preferred) — e.g. `await co
 
 #### Skill
 
-Speedwave ships `context7/SKILL.md` (in `containers/claude-resources/skills/`) that teaches Claude to prefer Context7 over training data for library, framework, API, CLI, and cloud-service questions. The skill runs the standard `resolve_library_id` → `query_docs` workflow.
+Speedwave ships `containers/claude-resources/skills/integrations/context7/SKILL.md` that teaches Claude to prefer Context7 over training data for library, framework, API, CLI, and cloud-service questions. The skill runs the standard `resolveLibraryId` → `queryDocs` workflow. It is linked into `~/.claude/skills/context7` only when Context7 is enabled in project settings — see [Per-integration Claude resources](#per-integration-claude-resources) for the gating mechanism.
 
 #### Network and security
 
@@ -489,6 +489,51 @@ Plugin authors should set `speedwave_compat` in `plugin.json` to declare which S
 ```
 
 This prevents `core.autocrlf=true` (the default on Windows-hosted Git) from rewriting `*.sh` line endings to CRLF on checkout. A plugin `Containerfile` that runs a CRLF `*.sh` will fail with `exit code: 127` (`/bin/sh: 1: …: not found`) when Buildkit invokes the kernel's shebang resolver — see Speedwave issue #603 for context.
+
+## Per-integration Claude resources
+
+Some built-in integrations ship a companion Claude resource — a skill, command, agent, or hook that tells Claude when and how to call the integration's MCP tools (e.g. `office`'s decision-map skill, `playwright`'s automation skill). These resources are only useful when the underlying worker is running, so they are gated on the same per-project toggle as the worker itself.
+
+### Layout
+
+```
+containers/claude-resources/
+├── skills/
+│   ├── code-review-basic/        # core skill — always linked
+│   ├── code-review-…/            # 13 other code-review-* skills
+│   ├── speedwave-code-review/    # core orchestrator
+│   └── integrations/             # integration-bound bucket
+│       ├── office/               # MCP — linked when `office` ∈ ENABLED_SERVICES
+│       ├── playwright/           # MCP — linked when `playwright` ∈ ENABLED_SERVICES
+│       ├── context7/             # MCP — linked when `context7` ∈ ENABLED_SERVICES
+│       ├── slack/sharepoint/redmine/gitlab/github/atlassian/  # MCP — same pattern
+│       └── reminders/calendar/mail/notes/                     # OS sub-services (see Runtime behavior)
+├── commands/
+│   └── integrations/<config_key>/    # same convention for commands
+├── agents/
+│   └── integrations/<config_key>/
+└── hooks/
+    └── integrations/<config_key>/
+```
+
+The directory name under `integrations/` **must match `config_key`** from `crates/speedwave-runtime/src/consts.rs::TOGGLEABLE_MCP_SERVICES` — that is the value Speedwave passes in `ENABLED_SERVICES`. Anything top-level inside `skills/`, `commands/`, `agents/`, or `hooks/` is treated as a core resource and linked unconditionally.
+
+### Runtime behavior
+
+`containers/entrypoint.sh` builds `~/.claude/<type>/` as a real directory of per-entry symlinks on every container start:
+
+1. Core entries (everything outside `integrations/`) are linked unconditionally.
+2. Integration entries under `integrations/<svc>/` are linked only when `<svc>` appears in `ENABLED_SERVICES`. The variable is injected into both the `claude` and `mcp-hub` containers by `apply_integrations_filter` in `crates/speedwave-runtime/src/compose.rs` and reflects the integrations toggle from Settings.
+3. OS sub-service entries (`integrations/reminders/`, `calendar/`, `mail/`, `notes/`) are gated jointly: `os` must appear in `ENABLED_SERVICES` AND the sub-service must NOT appear in `DISABLED_OS_SERVICES`. The list of available sub-services is injected as `OS_AVAILABLE_SUBS` from `TOGGLEABLE_OS_SERVICES`, so adding a new sub-service requires no entrypoint change.
+4. Plugin entries (from `/speedwave/plugins/<slug>/<type>/`) are linked into the same directory, alongside core and integration entries.
+
+The entrypoint records every link it creates in `~/.claude/.speedwave-managed-links`. On the next start it removes those links before building the new set, so toggling an integration off in Settings reliably removes its skill from `~/.claude/skills/`. Files placed in `~/.claude/` by the user are never touched.
+
+### Adding a per-integration resource
+
+1. Place the resource (e.g. `SKILL.md`) under `containers/claude-resources/<type>/integrations/<config_key>/`. `<config_key>` must already exist in `TOGGLEABLE_MCP_SERVICES`.
+2. No Rust or Compose changes are needed — `ENABLED_SERVICES` is already wired up.
+3. Add a BATS test in `_tests/entrypoint/entrypoint.bats` exercising the on/off transition for the new directory.
 
 ## Host Exec
 

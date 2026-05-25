@@ -3,7 +3,7 @@
  * Markdown/HTML → document, charts, create/edit Office, Office→PDF / Office↔Office,
  * and PDF manipulation. Discoverability rests on `_meta.deferLoading` + `keywords`,
  * cross-referencing descriptions, and the decision-map skill at
- * `containers/claude-resources/skills/office/SKILL.md` (ADR-055).
+ * `containers/claude-resources/skills/integrations/office/SKILL.md` (ADR-055).
  * @module mcp-office/tools
  */
 
