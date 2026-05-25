@@ -4598,6 +4598,31 @@ services:
         }
     }
 
+    /// Missing service yields a warn and a no-op — nothing must mutate elsewhere.
+    #[test]
+    fn test_inject_env_into_absent_service_is_safe_no_op() {
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        let hub_before = get_service_env_seq(&doc, "mcp-hub");
+
+        inject_env_into(&mut doc, "nonexistent-service", "FOO", "bar");
+
+        assert!(doc
+            .get("services")
+            .and_then(|s| s.get("nonexistent-service"))
+            .is_none());
+        assert_eq!(get_service_env_seq(&doc, "mcp-hub"), hub_before);
+    }
+
+    /// Missing `environment` key on an existing service is created on the fly.
+    #[test]
+    fn test_inject_env_into_creates_missing_environment() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  bare-service:\n    image: example\n").unwrap();
+        inject_env_into(&mut doc, "bare-service", "FOO", "bar");
+        let env = get_service_env_seq(&doc, "bare-service");
+        assert_eq!(find_env_value(&env, "FOO=").as_deref(), Some("bar"));
+    }
+
     /// `remove_env_from` removes the named key from an arbitrary service and no-ops on absent paths.
     #[test]
     fn test_remove_env_from() {
@@ -4681,6 +4706,11 @@ services:
         for sub in ["reminders", "calendar", "mail", "notes"] {
             assert!(os_available.contains(sub), "missing {sub}: {os_available}");
         }
+        // OS_AVAILABLE_SUBS is consumed only by claude's entrypoint, never by the hub.
+        assert!(
+            find_env_value(&get_service_env_seq(&doc, "mcp-hub"), "OS_AVAILABLE_SUBS=").is_none(),
+            "OS_AVAILABLE_SUBS must not be injected into mcp-hub"
+        );
     }
 
     #[test]

@@ -703,7 +703,7 @@ EOF
 
     # No SPEEDWAVE_PLUGINS set — dirs are always real dirs of per-entry symlinks
     # (not whole-dir symlinks). This lets the integrations/ gate work and lets
-    # the entrypoint clean up stale links on toggle-off.
+    # the entrypoint cleans up stale links on toggle-off.
     unset SPEEDWAVE_PLUGINS
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
