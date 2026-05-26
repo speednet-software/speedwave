@@ -19,9 +19,11 @@
   "packages": {
     ".": {
       "extra-files": [
+        "package.json",
         "desktop/src/package.json",
         "desktop/src-tauri/tauri.conf.json",
         "desktop/src/package-lock.json",
+        "desktop/src-tauri/oauth/shared/package.json",
         "mcp-servers/hub/package.json",
         "mcp-servers/shared/package.json",
         "mcp-servers/slack/package.json",
@@ -33,6 +35,9 @@
         "mcp-servers/office/package.json",
         "mcp-servers/os/package.json",
         "mcp-servers/host_exec/package.json",
+        "mcp-servers/oauth/package.json",
+        "mcp-servers/context7/package.json",
+        "mcp-servers/playwright/package.json",
         {
           "type": "toml",
           "path": "crates/speedwave-runtime/Cargo.toml",
@@ -63,6 +68,10 @@
         {
           "type": "generic",
           "path": "native/macos/notes/Resources/Info.plist"
+        },
+        {
+          "type": "generic",
+          "path": "native/macos/audio-capture/Resources/Info.plist"
         }
       ]
     }

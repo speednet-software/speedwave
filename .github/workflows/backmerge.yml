@@ -70,6 +70,7 @@ jobs:
             ':!desktop/src/package.json' ':!desktop/src/package-lock.json'
             ':!desktop/src-tauri/tauri.conf.json'
             ':!desktop/src-tauri/Cargo.toml' ':!desktop/src-tauri/Cargo.lock'
+            ':!desktop/src-tauri/oauth/shared/package.json'
             ':!crates/speedwave-runtime/Cargo.toml'
             ':!crates/speedwave-cli/Cargo.toml'
             ':!Cargo.lock'
@@ -77,8 +78,16 @@ jobs:
             ':!mcp-servers/slack/package.json' ':!mcp-servers/sharepoint/package.json'
             ':!mcp-servers/redmine/package.json' ':!mcp-servers/gitlab/package.json'
             ':!mcp-servers/github/package.json' ':!mcp-servers/atlassian/package.json'
+            ':!mcp-servers/office/package.json'
             ':!mcp-servers/os/package.json' ':!mcp-servers/host_exec/package.json'
+            ':!mcp-servers/oauth/package.json' ':!mcp-servers/context7/package.json'
+            ':!mcp-servers/playwright/package.json'
             ':!mcp-servers/package-lock.json'
+            ':!native/macos/calendar/Resources/Info.plist'
+            ':!native/macos/reminders/Resources/Info.plist'
+            ':!native/macos/mail/Resources/Info.plist'
+            ':!native/macos/notes/Resources/Info.plist'
+            ':!native/macos/audio-capture/Resources/Info.plist'
           )
           CONTENT_DIFF=$(git diff --name-only origin/dev origin/main -- . "${VERSION_EXCLUDES[@]}")
 
@@ -123,6 +132,7 @@ jobs:
               desktop/src/package.json
               desktop/src/package-lock.json
               desktop/src-tauri/tauri.conf.json
+              desktop/src-tauri/oauth/shared/package.json
               crates/speedwave-runtime/Cargo.toml
               crates/speedwave-cli/Cargo.toml
               desktop/src-tauri/Cargo.toml
@@ -137,6 +147,9 @@ jobs:
               mcp-servers/office/package.json
               mcp-servers/os/package.json
               mcp-servers/host_exec/package.json
+              mcp-servers/oauth/package.json
+              mcp-servers/context7/package.json
+              mcp-servers/playwright/package.json
               mcp-servers/package-lock.json
               Cargo.lock
               desktop/src-tauri/Cargo.lock
@@ -145,6 +158,7 @@ jobs:
               native/macos/reminders/Resources/Info.plist
               native/macos/mail/Resources/Info.plist
               native/macos/notes/Resources/Info.plist
+              native/macos/audio-capture/Resources/Info.plist
             )
 
             for f in "${AUTO_RESOLVE_FILES[@]}"; do
