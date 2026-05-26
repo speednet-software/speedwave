@@ -227,6 +227,13 @@ if (\$installed) {
     if (\$LASTEXITCODE -ne 0) { Write-Error "Failed to install WSL2 distro \$distro"; exit 1 }
     Write-Host "WSL2 distro \$distro installed"
 }
+# bzip2 is required by scripts/lib/fetch-sherpa-onnx-md.sh (`tar -xjf` of the
+# sherpa-onnx MD-Release archive — ADR-061). Ubuntu minimal images ship
+# without it. Run as root via `-u root` so we don't hang on an interactive
+# sudo password prompt when the distro has a non-NOPASSWD default user.
+Write-Host "Ensuring bzip2 is available inside \$distro..."
+wsl.exe -d \$distro -u root -- bash -c "command -v bzip2 >/dev/null 2>&1 || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bzip2; }"
+if (\$LASTEXITCODE -ne 0) { Write-Error "Failed to install bzip2 in \$distro"; exit 1 }
 SCRIPT
 
     echo "[windows] Verifying installation..."
