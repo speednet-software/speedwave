@@ -422,7 +422,9 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         }
     }
 
-    let result: Vec<DetectedIde> = by_key
+    // HashMap iteration is hash-randomised; sort so the frontend's
+    // detected-IDE list does not jump around between 5-second polls.
+    let mut result: Vec<DetectedIde> = by_key
         .into_values()
         .map(|e| DetectedIde {
             ide_name: e.ide_name,
@@ -430,6 +432,7 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
             ws_url: e.ws_url,
         })
         .collect();
+    result.sort_by(|a, b| a.ide_name.cmp(&b.ide_name).then(a.port.cmp(&b.port)));
 
     let current = IdeScanState {
         live: live_fingerprint,
@@ -1524,13 +1527,16 @@ mod tests {
         for r in [&r1, &r2, &r3] {
             assert_eq!(r.len(), 2, "two IDEs must be detected consistently");
         }
-        let names = |r: &Vec<DetectedIde>| {
-            let mut n: Vec<_> = r.iter().map(|d| d.ide_name.clone()).collect();
-            n.sort();
-            n
+        // Compare full Vec in input order (no post-sort) — backend MUST return
+        // a stable order so the frontend's detected-IDE list doesn't jump.
+        let shape = |r: &Vec<DetectedIde>| -> Vec<(String, Option<u16>)> {
+            r.iter().map(|d| (d.ide_name.clone(), d.port)).collect()
         };
-        assert_eq!(names(&r1), names(&r2));
-        assert_eq!(names(&r2), names(&r3));
+        assert_eq!(shape(&r1), shape(&r2), "order must be stable across polls");
+        assert_eq!(shape(&r2), shape(&r3), "order must be stable across polls");
+        // And the order is sorted by (ide_name, port), so Cursor < Visual Studio Code.
+        assert_eq!(r1[0].ide_name, "Cursor");
+        assert_eq!(r1[1].ide_name, "Visual Studio Code");
         drop(l_a);
         drop(l_b);
     }
