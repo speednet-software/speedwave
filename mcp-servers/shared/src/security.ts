@@ -128,12 +128,9 @@ export function validateToolName(toolName: string): boolean {
 
 const CONTAINER_HOSTNAME_RE = /^mcp-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 
-const HOST_GATEWAY_ALLOWLIST = new Set([
-  'host.lima.internal',
-  'host.docker.internal',
-  'host.containers.internal',
-  'host.speedwave.internal',
-]);
+// SSOT mirror — synchronized with crates/speedwave-runtime/src/consts.rs::HOST_GATEWAY_ALIAS
+// via Rust regression test `host_gateway_alias_matches_mcp_shared_ts`.
+export const HOST_GATEWAY_ALIAS = 'host.docker.internal';
 
 /**
  * Validate that a worker URL matches canonical Speedwave internal endpoints.
@@ -141,7 +138,7 @@ const HOST_GATEWAY_ALLOWLIST = new Set([
  *
  * Accepted patterns:
  * - Container workers: http://mcp-{name}:{port} (Docker internal DNS)
- * - Host gateway (OS worker): http://host.{lima,docker,containers,speedwave}.internal:{port}
+ * - Host gateway (OS worker): http://host.docker.internal:{port}
  *
  * Rejects everything else (external hosts, IPs, wrong protocols, paths, query strings).
  * @param url - URL string to validate
@@ -169,7 +166,7 @@ export function validateWorkerUrl(url: string): boolean {
   if (rawHostname !== parsed.hostname) return false;
 
   const hostname = parsed.hostname;
-  if (!CONTAINER_HOSTNAME_RE.test(hostname) && !HOST_GATEWAY_ALLOWLIST.has(hostname)) {
+  if (!CONTAINER_HOSTNAME_RE.test(hostname) && hostname !== HOST_GATEWAY_ALIAS) {
     return false;
   }
 

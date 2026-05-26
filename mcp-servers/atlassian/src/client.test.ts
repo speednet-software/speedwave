@@ -415,10 +415,58 @@ describe('initializeAtlassianClient', () => {
     await expect(initializeAtlassianClient()).resolves.toBeNull();
   });
 
-  it('returns null when the connection test fails', async () => {
+  it('returns client + schedules background test when testConnection fails', async () => {
+    // Init no longer blocks on testConnection — it kicks the check into the
+    // background. The client is returned immediately; healthCheck reads the
+    // tracker to surface the failure.
     readCredentialsMock.mockResolvedValueOnce(CONFIG);
     requestMock.mockRejectedValueOnce(httpError(401));
-    await expect(initializeAtlassianClient()).resolves.toBeNull();
+    const client = await initializeAtlassianClient();
+    expect(client).not.toBeNull();
+    await vi.waitFor(() => expect(client!.statusTracker.getStatus()).toBe('failed'));
+  });
+
+  it('initializeAtlassianClient resolves quickly when testConnection hangs', async () => {
+    readCredentialsMock.mockResolvedValueOnce(CONFIG);
+    requestMock.mockImplementation(() => new Promise(() => {}));
+    const t0 = Date.now();
+    const client = await initializeAtlassianClient();
+    const elapsedMs = Date.now() - t0;
+    expect(client).not.toBeNull();
+    expect(elapsedMs).toBeLessThan(100);
+  });
+
+  it('status tracker drives makeStandardHealthCheck — bg failure makes hc throw', async () => {
+    const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
+    readCredentialsMock.mockResolvedValueOnce(CONFIG);
+    requestMock.mockRejectedValueOnce(httpError(401));
+
+    const client = await initializeAtlassianClient();
+    expect(client).not.toBeNull();
+    await vi.waitFor(() => expect(client!.statusTracker.getStatus()).toBe('failed'));
+
+    const hc = makeStandardHealthCheck(client!.statusTracker, 'Atlassian');
+    await expect(hc()).rejects.toThrow(/Atlassian connection failed/);
+  });
+
+  it('status tracker drives makeStandardHealthCheck — unknown during warmup is healthy', async () => {
+    const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
+    readCredentialsMock.mockResolvedValueOnce(CONFIG);
+    requestMock.mockImplementation(() => new Promise(() => {}));
+
+    const client = await initializeAtlassianClient();
+    expect(client).not.toBeNull();
+    expect(client!.statusTracker.getStatus()).toBe('unknown');
+
+    const hc = makeStandardHealthCheck(client!.statusTracker, 'Atlassian');
+    await expect(hc()).resolves.toBeUndefined();
+  });
+
+  it('getHealthStatus delegates to the shared statusTracker', () => {
+    const c = new AtlassianClient(CONFIG);
+    expect(c.getHealthStatus()).toEqual({ connection: 'unknown', connectionError: null });
+    c.statusTracker.setFailed(new Error('boom'));
+    expect(c.getHealthStatus()).toEqual({ connection: 'failed', connectionError: 'boom' });
   });
 
   it('returns the client on a successful connection test', async () => {

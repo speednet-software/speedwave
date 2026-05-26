@@ -166,6 +166,36 @@ describe('CreateProjectModalComponent', () => {
       expect(created).not.toHaveBeenCalled();
     });
 
+    it('preserves multi-line backend error formatting via whitespace-pre-wrap', async () => {
+      // Backend errors like `wsl_other_distro_msg` are multi-line with \n separating
+      // numbered options. The error pane must render them as multiple visible lines,
+      // not collapse them into a wall of text.
+      const multiLineError =
+        "Project is in WSL distribution 'Ubuntu'.\n\n" +
+        '1. Copy the project into Speedwave\n' +
+        '2. Move to /mnt/c/projects/\n' +
+        '3. Use Claude Code natively';
+      vi.spyOn(mockTauri, 'invoke').mockRejectedValue(new Error(multiLineError));
+
+      openMock.mockResolvedValue('\\\\wsl.localhost\\Ubuntu\\home\\luke\\foo');
+      await component.browse();
+      await component.submit();
+      fixture.detectChanges();
+
+      const err = fixture.nativeElement.querySelector('[data-testid="create-project-error"]');
+      expect(err).not.toBeNull();
+      // Newlines must survive into the rendered textContent.
+      expect(err?.textContent).toContain('\n');
+      // All 3 numbered options must be present (not truncated, not collapsed).
+      expect(err?.textContent).toContain('1. Copy the project');
+      expect(err?.textContent).toContain('2. Move to /mnt/c/');
+      expect(err?.textContent).toContain('3. Use Claude Code');
+      // The whitespace-pre-wrap class must be on the error pane so the browser
+      // honours `\n` in textContent at render time.
+      const classes = (err as HTMLElement | null)?.className ?? '';
+      expect(classes).toContain('whitespace-pre-wrap');
+    });
+
     it('trims whitespace around the project name before invoking', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
       openMock.mockResolvedValue('/Users/me/projects/demo');

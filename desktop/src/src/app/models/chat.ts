@@ -140,7 +140,9 @@ export type MessageBlock =
       command: string;
       description?: string;
       decided?: 'allow_once' | 'allow_always' | 'deny';
-    };
+    }
+  /** Image placeholder; bytes live on disk (ADR-065). */
+  | { type: 'image'; media_type: string; alt?: string };
 
 /**
  * State for an interactive AskUserQuestion block within a message.
@@ -249,7 +251,12 @@ export interface SessionStats {
   usage?: UsageInfo;
   model?: string;
   rate_limit?: RateLimitInfo;
-  context_window_size: number;
+  /**
+   * Context window in tokens; `null` for local providers when the discovery
+   * probe couldn't determine a value (ADR-041 "never guess"). UI hides the
+   * `used / max` ratio when this is null rather than fabricating a default.
+   */
+  context_window_size: number | null;
   /** Cumulative output tokens across all turns in the session. */
   total_output_tokens: number;
 }
@@ -283,4 +290,65 @@ export interface ConversationMessage {
    * become a retry target.
    */
   uuid?: string;
+}
+
+// Wire types — mirror `chat.rs::WireContentBlock` (ADR-065).
+
+/** Text segment of a wire user message. */
+export interface WireTextBlock {
+  type: 'text';
+  text: string;
+}
+
+/** One content block crossing the wire to Claude. */
+export type WireContentBlock = WireTextBlock;
+
+/** Image attachment persisted to `<project>/.speedwave/pastes/`. */
+export interface ChatAttachment {
+  filename: string;
+  mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+  /** `/workspace/...` path Claude sees. */
+  containerPath: string;
+  hostPath: string;
+}
+
+/** Composer-collected user input bundled with image attachments. */
+export interface ChatInput {
+  text: string;
+  attachments: ChatAttachment[];
+}
+
+/**
+ * Whether the input has no image attachments.
+ * @param input - Composer input bundle.
+ */
+export function chatInputIsTextOnly(input: ChatInput): boolean {
+  return input.attachments.length === 0;
+}
+
+/**
+ * Wraps a plain string into a text-only `ChatInput`.
+ * @param text - Raw user text.
+ */
+export function chatInputFromText(text: string): ChatInput {
+  return { text, attachments: [] };
+}
+
+/**
+ * Serializes a `ChatInput` into wire content blocks, inlining attachments as `@…` refs.
+ * @param input - Composer input bundle.
+ */
+export function chatInputToBlocks(input: ChatInput): WireContentBlock[] {
+  const lines: string[] = [];
+  if (input.text.length > 0) {
+    lines.push(input.text);
+  }
+  for (const att of input.attachments) {
+    lines.push(`@${att.containerPath}`);
+  }
+  if (lines.length === 0) {
+    return [];
+  }
+  const joiner = input.text.length > 0 && input.attachments.length > 0 ? '\n\n' : '\n';
+  return [{ type: 'text', text: lines.join(joiner) }];
 }

@@ -191,18 +191,38 @@ export async function refreshServiceTools(service: string): Promise<void> {
 let _refreshInProgress = false;
 
 /**
- * Fast catch-up interval for services whose initial discovery returned zero
- *  tools. Without this, an unlucky cold-start race left the registry empty
- *  for up to 5 minutes (the regular background refresh interval) — which
- *  shows up to the user as "SharePoint MCP is not enabled" even though the
- *  worker started successfully a second after the hub's discovery timeout.
- *  10 s is fast enough to feel instant in a Claude session, slow enough
- *  not to spam Graph with discovery requests when a worker is genuinely
- *  broken. Each catch-up tick only touches services with an empty
- *  registry — populated services skip until the next 5-minute pass.
+ * Per-service exponential backoff for empty-registry catch-up.
+ *
+ * Replaces the legacy single `setInterval(10s)` that polled every empty
+ * service on a fixed cadence. Now each service runs its own timer with
+ * 10s → 20s → 40s → 60s (cap) backoff, reset to 10s on every successful
+ * discovery. A perpetually broken worker no longer spams Graph every 10 s.
+ *
+ * - BASE: first retry delay (10 s).
+ * - MAX: cap on backoff (60 s) — chosen so that recovery from a real
+ *   restart never waits more than a minute, while a flapping worker is
+ *   not retried multiple times per second.
  */
-const EMPTY_REGISTRY_RECHECK_MS = 10 * 1000;
-let _emptyRecheckInterval: NodeJS.Timeout | number | null = null;
+let EMPTY_REGISTRY_RECHECK_BASE_MS = 10 * 1000;
+const EMPTY_REGISTRY_RECHECK_MAX_MS = 60 * 1000;
+
+/**
+ * Override the empty-recheck base delay (for testing only).
+ * Pass a small value (e.g. 5 ms) so the schedule-fire-reschedule chain
+ * completes in milliseconds rather than minutes.
+ * @param ms - Base delay in milliseconds.
+ * @internal
+ */
+export function _setEmptyRecheckBaseMsForTesting(ms: number): void {
+  EMPTY_REGISTRY_RECHECK_BASE_MS = ms;
+}
+
+/** Per-service timer + failure-count state. Cleared on successful discovery. */
+interface EmptyServiceState {
+  failures: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+const _emptyServiceTimers = new Map<string, EmptyServiceState>();
 
 /**
  * Start background refresh of all enabled services.
@@ -232,42 +252,76 @@ function _startBackgroundRefresh(): void {
     _refreshInterval.unref();
   }
 
-  // Faster catch-up loop for services that started with empty registries.
-  // Self-stops once every service has at least one tool — back to the 5-min
-  // schedule for ongoing maintenance. The setInterval callback is exercised
-  // end-to-end during cold-start; reproducing in unit tests would require
-  // fake-timer plumbing + production SERVICE_NAMES fixture — disproportionate
-  // for a recovery loop, hence the v8 ignore.
-  /* c8 ignore start */
-  _emptyRecheckInterval = setInterval(async () => {
-    if (_refreshInProgress) return;
-    const emptyServices = SERVICE_NAMES.filter((s) => Object.keys(_registry[s] ?? {}).length === 0);
-    if (emptyServices.length === 0) {
-      if (_emptyRecheckInterval !== null) {
-        clearInterval(_emptyRecheckInterval as NodeJS.Timeout);
-        _emptyRecheckInterval = null;
-      }
+  // Per-service catch-up timers for services that started with empty
+  // registries. Each service has its own setTimeout chain with exponential
+  // backoff (10s → 20s → 40s → 60s cap). On successful discovery the timer
+  // is dropped; on failure the next retry is rescheduled with a larger delay.
+  for (const service of SERVICE_NAMES) {
+    if (Object.keys(_registry[service] ?? {}).length === 0) {
+      _scheduleEmptyServiceRecheck(service, 0);
+    }
+  }
+}
+
+/**
+ * Compute backoff delay for the n-th consecutive empty-discovery failure.
+ *
+ * Exported with the `_` prefix so unit tests can assert the formula without
+ * the indirection of `setTimeout` mocking. Not part of the public API.
+ * @param failures - 0-based count of consecutive empty discoveries.
+ * @internal
+ */
+export function _emptyRecheckDelayMs(failures: number): number {
+  return Math.min(EMPTY_REGISTRY_RECHECK_BASE_MS * 2 ** failures, EMPTY_REGISTRY_RECHECK_MAX_MS);
+}
+
+/**
+ * Schedule the next catch-up discovery for an empty service.
+ *
+ * Idempotent: if a timer is already scheduled it is cleared first. After the
+ * timer fires we call {@link refreshServiceTools} and inspect the registry —
+ * non-empty drops the timer, empty schedules the next attempt with
+ * `failures + 1` so the backoff grows.
+ * @param service - Service name to recheck.
+ * @param failures - Number of preceding failed rechecks (drives backoff).
+ */
+function _scheduleEmptyServiceRecheck(service: string, failures: number): void {
+  const existing = _emptyServiceTimers.get(service);
+  if (existing?.timer) {
+    clearTimeout(existing.timer);
+  }
+  const delay = _emptyRecheckDelayMs(failures);
+  const timer = setTimeout(async () => {
+    // Don't run if another refresh is in flight — let it settle, then we
+    // re-check below whether we still need to schedule.
+    /* c8 ignore next 4 — race between this 1–60 s timer and the 5-min
+     * setInterval refresh that also sets _refreshInProgress. Reproducing
+     * in unit tests would require coordinating both schedulers across the
+     * same exact tick; fake-timer plumbing is disproportionate for the
+     * one-line defer-and-reschedule guard. */
+    if (_refreshInProgress) {
+      _scheduleEmptyServiceRecheck(service, failures);
       return;
     }
     _refreshInProgress = true;
     try {
-      for (const service of emptyServices) {
-        await refreshServiceTools(service);
-      }
+      await refreshServiceTools(service);
     } finally {
       _refreshInProgress = false;
     }
-  }, EMPTY_REGISTRY_RECHECK_MS);
-  /* c8 ignore stop */
-
-  /* c8 ignore next 3 — Node.js Timeout always has .unref() in production */
-  if (
-    _emptyRecheckInterval &&
-    typeof _emptyRecheckInterval === 'object' &&
-    'unref' in _emptyRecheckInterval
-  ) {
-    _emptyRecheckInterval.unref();
+    if (Object.keys(_registry[service] ?? {}).length > 0) {
+      // Success — drop the timer entirely. The 5-min background refresh
+      // covers ongoing maintenance.
+      _emptyServiceTimers.delete(service);
+      return;
+    }
+    _scheduleEmptyServiceRecheck(service, failures + 1);
+  }, delay);
+  // Don't keep the process alive for catch-up timers.
+  if (timer && typeof timer === 'object' && 'unref' in timer) {
+    timer.unref();
   }
+  _emptyServiceTimers.set(service, { failures, timer });
 }
 
 /**
@@ -278,10 +332,10 @@ export function stopBackgroundRefresh(): void {
     clearInterval(_refreshInterval);
     _refreshInterval = null;
   }
-  if (_emptyRecheckInterval !== null) {
-    clearInterval(_emptyRecheckInterval as NodeJS.Timeout);
-    _emptyRecheckInterval = null;
+  for (const { timer } of _emptyServiceTimers.values()) {
+    if (timer) clearTimeout(timer);
   }
+  _emptyServiceTimers.clear();
 }
 
 /**

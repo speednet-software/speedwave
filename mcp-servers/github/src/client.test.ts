@@ -240,7 +240,9 @@ describe('GitHubClient', () => {
     it('formats 403 without rate-limit header as permission error', () => {
       const msg = GitHubClientClass.formatError({ status: 403 });
       expect(msg).toContain('Permission denied');
-      expect(msg).toContain('fine-grained PAT');
+      // Generic post-OAuth-cutover message: mentions both reconnect (OAuth) and PAT.
+      expect(msg).toContain('reconnect');
+      expect(msg).toContain('PAT');
     });
 
     it('formats 403 with remaining > 0 as permission error', () => {
@@ -1950,7 +1952,10 @@ describe('initializeGitHubClient', () => {
     expect(console.warn).toHaveBeenCalled();
   });
 
-  it('returns null when the connection test fails', async () => {
+  it('returns client + schedules background test when testConnection fails', async () => {
+    // Init no longer blocks on testConnection — it kicks the check into the
+    // background. The client is returned immediately; healthCheck reads the
+    // tracker to surface the failure.
     mockLoadToken.mockResolvedValue('test-token');
     octokitHolder.instance = {
       rest: {
@@ -1960,8 +1965,70 @@ describe('initializeGitHubClient', () => {
       },
     };
     const result = await initializeGitHubClient();
-    expect(result).toBeNull();
-    expect(console.warn).toHaveBeenCalled();
+    expect(result).not.toBeNull();
+    await vi.waitFor(() => expect(result!.statusTracker.getStatus()).toBe('failed'));
+  });
+
+  it('initializeGitHubClient resolves quickly when testConnection hangs', async () => {
+    mockLoadToken.mockResolvedValue('test-token');
+    octokitHolder.instance = {
+      rest: {
+        users: {
+          getAuthenticated: vi.fn().mockImplementation(() => new Promise(() => {})),
+        },
+      },
+    };
+    const t0 = Date.now();
+    const result = await initializeGitHubClient();
+    const elapsedMs = Date.now() - t0;
+    expect(result).not.toBeNull();
+    expect(elapsedMs).toBeLessThan(100);
+  });
+
+  it('status tracker drives makeStandardHealthCheck — bg failure makes hc throw', async () => {
+    const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
+    mockLoadToken.mockResolvedValue('test-token');
+    octokitHolder.instance = {
+      rest: {
+        users: {
+          getAuthenticated: vi.fn().mockRejectedValue({ status: 401, message: 'Bad credentials' }),
+        },
+      },
+    };
+
+    const result = await initializeGitHubClient();
+    expect(result).not.toBeNull();
+    await vi.waitFor(() => expect(result!.statusTracker.getStatus()).toBe('failed'));
+
+    const hc = makeStandardHealthCheck(result!.statusTracker, 'GitHub');
+    await expect(hc()).rejects.toThrow(/GitHub connection failed/);
+  });
+
+  it('status tracker drives makeStandardHealthCheck — unknown during warmup is healthy', async () => {
+    const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
+    mockLoadToken.mockResolvedValue('test-token');
+    octokitHolder.instance = {
+      rest: {
+        users: {
+          getAuthenticated: vi.fn().mockImplementation(() => new Promise(() => {})),
+        },
+      },
+    };
+
+    const result = await initializeGitHubClient();
+    expect(result).not.toBeNull();
+    expect(result!.statusTracker.getStatus()).toBe('unknown');
+
+    const hc = makeStandardHealthCheck(result!.statusTracker, 'GitHub');
+    await expect(hc()).resolves.toBeUndefined();
+  });
+
+  it('getHealthStatus delegates to the shared statusTracker', async () => {
+    const { GitHubClient } = await import('./client.js');
+    const c = new GitHubClient({ token: 'x' });
+    expect(c.getHealthStatus()).toEqual({ connection: 'unknown', connectionError: null });
+    c.statusTracker.setFailed(new Error('boom'));
+    expect(c.getHealthStatus()).toEqual({ connection: 'failed', connectionError: 'boom' });
   });
 
   it('returns null when loadToken throws, logging the error detail', async () => {

@@ -47,6 +47,9 @@ EOF
     # Tests run outside the compose network, so there is no mcp-hub to wait
     # for. The startup gate is opt-in via this env var so tests stay fast.
     export SPEEDWAVE_SKIP_HUB_WAIT=1
+
+    # OS_AVAILABLE_SUBS is normally injected by compose.rs from TOGGLEABLE_OS_SERVICES.
+    export OS_AVAILABLE_SUBS="reminders,calendar,mail,notes"
 }
 
 teardown() {
@@ -158,20 +161,30 @@ EOF
 # Resource symlinking via SPEEDWAVE_RESOURCES
 # ---------------------------------------------------------------------------
 
-@test "symlinks skills directory when present in resources" {
+@test "symlinks skills entries when present in resources" {
     mkdir -p "$RESOURCES_DIR/skills"
     touch "$RESOURCES_DIR/skills/my-skill.md"
 
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ -L "$HOME/.claude/skills" ]
-    [ "$(readlink "$HOME/.claude/skills")" = "$RESOURCES_DIR/skills" ]
+    # skills is a real directory of per-entry symlinks (not a whole-directory
+    # symlink) so per-integration entries can be gated on/off without disturbing
+    # the core entries that share the directory.
+    [ -d "$HOME/.claude/skills" ]
+    [ ! -L "$HOME/.claude/skills" ]
+    [ -L "$HOME/.claude/skills/my-skill.md" ]
+    [ "$(readlink "$HOME/.claude/skills/my-skill.md")" = "$RESOURCES_DIR/skills/my-skill.md" ]
 }
 
-@test "does not create symlink when resource directory is absent" {
+@test "resource directory exists but is empty when source is absent" {
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ ! -e "$HOME/.claude/skills" ]
+    # The entrypoint always creates the four resource dirs (so plugin and
+    # integration links can be added per-entry); if the source mount has no
+    # skills/ then the directory just stays empty.
+    [ -d "$HOME/.claude/skills" ]
+    [ ! -L "$HOME/.claude/skills" ]
+    [ -z "$(ls -A "$HOME/.claude/skills")" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -259,34 +272,40 @@ EOF
 # Resource symlinks: commands, agents, hooks
 # ---------------------------------------------------------------------------
 
-@test "commands resource symlink created" {
+@test "commands entries are symlinked into a real dir" {
     mkdir -p "$RESOURCES_DIR/commands"
     touch "$RESOURCES_DIR/commands/my-command.md"
 
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ -L "$HOME/.claude/commands" ]
-    [ "$(readlink "$HOME/.claude/commands")" = "$RESOURCES_DIR/commands" ]
+    [ -d "$HOME/.claude/commands" ]
+    [ ! -L "$HOME/.claude/commands" ]
+    [ -L "$HOME/.claude/commands/my-command.md" ]
+    [ "$(readlink "$HOME/.claude/commands/my-command.md")" = "$RESOURCES_DIR/commands/my-command.md" ]
 }
 
-@test "agents resource symlink created" {
+@test "agents entries are symlinked into a real dir" {
     mkdir -p "$RESOURCES_DIR/agents"
     touch "$RESOURCES_DIR/agents/my-agent.md"
 
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ -L "$HOME/.claude/agents" ]
-    [ "$(readlink "$HOME/.claude/agents")" = "$RESOURCES_DIR/agents" ]
+    [ -d "$HOME/.claude/agents" ]
+    [ ! -L "$HOME/.claude/agents" ]
+    [ -L "$HOME/.claude/agents/my-agent.md" ]
+    [ "$(readlink "$HOME/.claude/agents/my-agent.md")" = "$RESOURCES_DIR/agents/my-agent.md" ]
 }
 
-@test "hooks resource symlink created" {
+@test "hooks entries are symlinked into a real dir" {
     mkdir -p "$RESOURCES_DIR/hooks"
     touch "$RESOURCES_DIR/hooks/my-hook.sh"
 
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ -L "$HOME/.claude/hooks" ]
-    [ "$(readlink "$HOME/.claude/hooks")" = "$RESOURCES_DIR/hooks" ]
+    [ -d "$HOME/.claude/hooks" ]
+    [ ! -L "$HOME/.claude/hooks" ]
+    [ -L "$HOME/.claude/hooks/my-hook.sh" ]
+    [ "$(readlink "$HOME/.claude/hooks/my-hook.sh")" = "$RESOURCES_DIR/hooks/my-hook.sh" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -316,7 +335,7 @@ EOF
 }
 
 @test "mcp-config has only hub when MCP_OS_URL set but MCP_OS_AUTH_TOKEN unset" {
-    export MCP_OS_URL="http://192.168.5.2:4007"
+    export MCP_OS_URL="http://host.docker.internal:4007"
     unset MCP_OS_AUTH_TOKEN
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
@@ -676,22 +695,27 @@ EOF
     rm -rf "$plugins_dir" "$patched"
 }
 
-@test "without plugins core resources are still directory symlinks" {
+@test "without plugins core resources are per-entry symlinks into a real dir" {
     mkdir -p "$RESOURCES_DIR/skills"
     mkdir -p "$RESOURCES_DIR/commands"
     echo "# Skill" > "$RESOURCES_DIR/skills/my-skill.md"
     echo "# Command" > "$RESOURCES_DIR/commands/my-command.md"
 
-    # No SPEEDWAVE_PLUGINS set
+    # No SPEEDWAVE_PLUGINS set — dirs are always real dirs of per-entry symlinks
+    # (not whole-dir symlinks). This lets the integrations/ gate work and lets
+    # the entrypoint cleans up stale links on toggle-off.
     unset SPEEDWAVE_PLUGINS
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
 
-    # Resource dirs must be symlinks to the resources mount (not real dirs)
-    [ -L "${TEST_HOME}/.claude/skills" ]
-    [ "$(readlink "${TEST_HOME}/.claude/skills")" = "$RESOURCES_DIR/skills" ]
-    [ -L "${TEST_HOME}/.claude/commands" ]
-    [ "$(readlink "${TEST_HOME}/.claude/commands")" = "$RESOURCES_DIR/commands" ]
+    [ -d "${TEST_HOME}/.claude/skills" ]
+    [ ! -L "${TEST_HOME}/.claude/skills" ]
+    [ -L "${TEST_HOME}/.claude/skills/my-skill.md" ]
+    [ "$(readlink "${TEST_HOME}/.claude/skills/my-skill.md")" = "$RESOURCES_DIR/skills/my-skill.md" ]
+
+    [ -d "${TEST_HOME}/.claude/commands" ]
+    [ ! -L "${TEST_HOME}/.claude/commands" ]
+    [ -L "${TEST_HOME}/.claude/commands/my-command.md" ]
 }
 
 @test "SPEEDWAVE_PLUGINS skips non-existent plugin directory" {
@@ -788,15 +812,16 @@ EOF
     rm -rf "$plugins_dir" "$patched"
 }
 
-@test "no-plugins mode replaces real directory left from previous plugin run" {
-    # Reverse migration: project was started with a plugin (skills became a
-    # real directory of per-entry symlinks), then the plugin was disabled.
-    # Without normalization `ln -sfn TARGET DIR` creates the link *inside*
-    # the directory, leaving stale entries and a useless skills/skills link.
+@test "no-plugins mode preserves real directory of per-entry symlinks" {
+    # The directory layout is always a real dir of per-entry symlinks (whether
+    # or not plugins are loaded), so subsequent no-plugin runs must leave the
+    # directory intact and continue to expose core entries.
     mkdir -p "$RESOURCES_DIR/skills/core-skill"
     echo "# Core" > "$RESOURCES_DIR/skills/core-skill/SKILL.md"
 
-    # Simulate the layout left by a previous plugin run
+    # Simulate a previous plugin run leaving a stale plugin link behind: it must
+    # NOT be tracked in the state file (we did not create it), so the entrypoint
+    # should leave it alone — only links it owns get cleaned up.
     mkdir -p "$HOME/.claude/skills"
     ln -sfn "/some/old/plugin/path/leftover" "$HOME/.claude/skills/leftover"
 
@@ -804,14 +829,14 @@ EOF
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
 
-    # ~/.claude/skills must now be a whole-directory symlink to resources
-    [ -L "$HOME/.claude/skills" ]
-    [ "$(readlink "$HOME/.claude/skills")" = "$RESOURCES_DIR/skills" ]
-
-    # No leftover entries inside (they would require a real dir, which is gone)
-    [ ! -e "$HOME/.claude/skills/leftover" ]
-    # Core entry visible through the symlink
-    [ -d "$HOME/.claude/skills/core-skill" ]
+    [ -d "$HOME/.claude/skills" ]
+    [ ! -L "$HOME/.claude/skills" ]
+    [ -L "$HOME/.claude/skills/core-skill" ]
+    [ "$(readlink "$HOME/.claude/skills/core-skill")" = "$RESOURCES_DIR/skills/core-skill" ]
+    # The pre-existing leftover link was not created by entrypoint, so it must
+    # not be tracked in the state file and must survive the run untouched.
+    [ -L "$HOME/.claude/skills/leftover" ]
+    [ "$(readlink "$HOME/.claude/skills/leftover")" = "/some/old/plugin/path/leftover" ]
 }
 
 
@@ -846,3 +871,291 @@ EOF
     rm -f "$patched"
 }
 
+
+# ---------------------------------------------------------------------------
+# Per-integration gating of claude-resources via ENABLED_SERVICES
+# ---------------------------------------------------------------------------
+
+setup_integrations_fixture() {
+    # Core skill (always-on) + three integration-bound skills.
+    mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
+    echo "# Core" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
+    mkdir -p "$RESOURCES_DIR/skills/integrations/office"
+    echo "# Office" > "$RESOURCES_DIR/skills/integrations/office/SKILL.md"
+    mkdir -p "$RESOURCES_DIR/skills/integrations/playwright"
+    echo "# Playwright" > "$RESOURCES_DIR/skills/integrations/playwright/SKILL.md"
+    mkdir -p "$RESOURCES_DIR/skills/integrations/context7"
+    echo "# Context7" > "$RESOURCES_DIR/skills/integrations/context7/SKILL.md"
+}
+
+@test "core skill is symlinked regardless of ENABLED_SERVICES" {
+    setup_integrations_fixture
+    ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
+    # `integrations` itself must never be linked as if it were a skill.
+    [ ! -e "${TEST_HOME}/.claude/skills/integrations" ]
+}
+
+@test "ENABLED_SERVICES=office links integration skill" {
+    setup_integrations_fixture
+    ENABLED_SERVICES="office" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/office" ]
+    [ "$(readlink "${TEST_HOME}/.claude/skills/office")" = "$RESOURCES_DIR/skills/integrations/office" ]
+    # The other two integration skills must NOT appear.
+    [ ! -e "${TEST_HOME}/.claude/skills/playwright" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/context7" ]
+}
+
+@test "core and integration skills coexist" {
+    setup_integrations_fixture
+    ENABLED_SERVICES="office,playwright" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
+    [ -L "${TEST_HOME}/.claude/skills/office" ]
+    [ -L "${TEST_HOME}/.claude/skills/playwright" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/context7" ]
+}
+
+@test "ENABLED_SERVICES tolerates whitespace around comma" {
+    setup_integrations_fixture
+    ENABLED_SERVICES=" office , playwright " run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/office" ]
+    [ -L "${TEST_HOME}/.claude/skills/playwright" ]
+}
+
+@test "missing integrations/ directory is not an error" {
+    # Only core entries; no integrations bucket.
+    mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
+    echo "# Core" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
+
+    ENABLED_SERVICES="office" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/office" ]
+}
+
+@test "gating works for all four resource types (skills/commands/agents/hooks)" {
+    for rt in skills commands agents hooks; do
+        mkdir -p "$RESOURCES_DIR/$rt/core-entry"
+        echo "# Core $rt" > "$RESOURCES_DIR/$rt/core-entry/README.md"
+        mkdir -p "$RESOURCES_DIR/$rt/integrations/office"
+        echo "# Office $rt" > "$RESOURCES_DIR/$rt/integrations/office/README.md"
+    done
+
+    ENABLED_SERVICES="office" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    for rt in skills commands agents hooks; do
+        [ -L "${TEST_HOME}/.claude/$rt/core-entry" ]
+        [ "$(readlink "${TEST_HOME}/.claude/$rt/core-entry")" = "$RESOURCES_DIR/$rt/core-entry" ]
+        [ -L "${TEST_HOME}/.claude/$rt/office" ]
+        [ "$(readlink "${TEST_HOME}/.claude/$rt/office")" = "$RESOURCES_DIR/$rt/integrations/office" ]
+    done
+
+    # Toggle off — all four must lose their office link.
+    ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    for rt in skills commands agents hooks; do
+        [ -L "${TEST_HOME}/.claude/$rt/core-entry" ]
+        [ ! -e "${TEST_HOME}/.claude/$rt/office" ]
+    done
+}
+
+# Regression guard for the toggle-off path: ~/.claude is persistent across
+# container restarts, so a once-linked integration skill must disappear when
+# the user toggles the integration off. Without state-file cleanup the link
+# would linger and Claude would call tools whose worker is no longer running.
+@test "toggle off removes previously-linked integration skill" {
+    setup_integrations_fixture
+
+    # Run 1 — Office enabled.
+    ENABLED_SERVICES="office" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/office" ]
+    [ -f "${TEST_HOME}/.claude/.speedwave-managed-links" ]
+    grep -q "skills/office$" "${TEST_HOME}/.claude/.speedwave-managed-links"
+
+    # Run 2 — Office disabled. The link MUST be gone.
+    ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -e "${TEST_HOME}/.claude/skills/office" ]
+    ! grep -q "skills/office$" "${TEST_HOME}/.claude/.speedwave-managed-links"
+    # Core entries survive the toggle.
+    [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
+}
+
+@test "swap: run 1 office, run 2 playwright — office gone, playwright present" {
+    setup_integrations_fixture
+
+    ENABLED_SERVICES="office" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/office" ]
+
+    ENABLED_SERVICES="playwright" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -e "${TEST_HOME}/.claude/skills/office" ]
+    [ -L "${TEST_HOME}/.claude/skills/playwright" ]
+}
+
+@test "idempotency: two identical runs produce identical state file" {
+    setup_integrations_fixture
+
+    local snapshot
+    snapshot="$(mktemp)"
+
+    ENABLED_SERVICES="office,playwright" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    cp "${TEST_HOME}/.claude/.speedwave-managed-links" "${snapshot}"
+
+    ENABLED_SERVICES="office,playwright" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    diff "${snapshot}" "${TEST_HOME}/.claude/.speedwave-managed-links"
+    [ -L "${TEST_HOME}/.claude/skills/office" ]
+    [ -L "${TEST_HOME}/.claude/skills/playwright" ]
+
+    rm -f "${snapshot}"
+}
+
+@test "reverse migration: pre-existing whole-dir symlink is replaced with real dir" {
+    setup_integrations_fixture
+    # Simulate an older install where skills was a whole-dir symlink.
+    rm -rf "${TEST_HOME}/.claude/skills"
+    ln -sfn "$RESOURCES_DIR/skills" "${TEST_HOME}/.claude/skills"
+    [ -L "${TEST_HOME}/.claude/skills" ]
+
+    ENABLED_SERVICES="office" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -d "${TEST_HOME}/.claude/skills" ]
+    [ ! -L "${TEST_HOME}/.claude/skills" ]
+    [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
+    [ -L "${TEST_HOME}/.claude/skills/office" ]
+}
+
+@test "plugin and integration symlinks coexist in a single run" {
+    setup_integrations_fixture
+
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    mkdir -p "${plugins_dir}/foo/skills/foo-skill"
+    echo "# Foo" > "${plugins_dir}/foo/skills/foo-skill/SKILL.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="foo" ENABLED_SERVICES="office" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    # Core stays.
+    [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
+    # Integration symlinked because ENABLED_SERVICES includes it.
+    [ -L "${TEST_HOME}/.claude/skills/office" ]
+    # Plugin symlinked because SPEEDWAVE_PLUGINS includes it.
+    [ -L "${TEST_HOME}/.claude/skills/foo-skill" ]
+    # The state file owns all three so the next toggle cleans them up.
+    grep -q "skills/office$" "${TEST_HOME}/.claude/.speedwave-managed-links"
+    grep -q "skills/foo-skill$" "${TEST_HOME}/.claude/.speedwave-managed-links"
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "plugin toggle off cleans up plugin link via state file" {
+    # Core skill so the run has something stable to compare.
+    mkdir -p "$RESOURCES_DIR/skills/core-skill"
+    echo "# Core" > "$RESOURCES_DIR/skills/core-skill/SKILL.md"
+
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    mkdir -p "${plugins_dir}/foo/skills/foo-skill"
+    echo "# Foo" > "${plugins_dir}/foo/skills/foo-skill/SKILL.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="foo" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/foo-skill" ]
+
+    # Plugin disabled on next run — link must be gone.
+    unset SPEEDWAVE_PLUGINS
+    run bash "$patched" true
+    [ "$status" -eq 0 ]
+    [ ! -e "${TEST_HOME}/.claude/skills/foo-skill" ]
+    [ -L "${TEST_HOME}/.claude/skills/core-skill" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+setup_os_subservice_fixture() {
+    # Core skill + integrations/ with each OS sub-service.
+    mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
+    echo "# Core" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
+    for sub in reminders calendar mail notes; do
+        mkdir -p "$RESOURCES_DIR/skills/integrations/$sub"
+        echo "# $sub" > "$RESOURCES_DIR/skills/integrations/$sub/SKILL.md"
+    done
+}
+
+@test "OS sub-service skills are gated jointly by ENABLED_SERVICES and DISABLED_OS_SERVICES" {
+    setup_os_subservice_fixture
+
+    # os enabled with mail and notes disabled — only reminders + calendar link.
+    ENABLED_SERVICES="os" DISABLED_OS_SERVICES="mail,notes" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/reminders" ]
+    [ -L "${TEST_HOME}/.claude/skills/calendar" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/mail" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/notes" ]
+}
+
+@test "no OS sub-service skill is linked when os is not in ENABLED_SERVICES" {
+    setup_os_subservice_fixture
+
+    # `os` absent — even with DISABLED_OS_SERVICES empty, none of the sub-services link.
+    ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -e "${TEST_HOME}/.claude/skills/reminders" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/calendar" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/mail" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/notes" ]
+    # Core entries still linked.
+    [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
+}
+
+@test "toggling a single OS sub-service off removes only that link" {
+    setup_os_subservice_fixture
+
+    # Run 1: everything enabled.
+    ENABLED_SERVICES="os" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    for sub in reminders calendar mail notes; do
+        [ -L "${TEST_HOME}/.claude/skills/$sub" ]
+    done
+
+    # Run 2: mail disabled — its symlink must go, the others must stay.
+    ENABLED_SERVICES="os" DISABLED_OS_SERVICES="mail" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/reminders" ]
+    [ -L "${TEST_HOME}/.claude/skills/calendar" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/mail" ]
+    [ -L "${TEST_HOME}/.claude/skills/notes" ]
+}
+
+@test "OS sub-services coexist with regular MCP integrations in ENABLED_SERVICES" {
+    setup_os_subservice_fixture
+    # Also add an MCP-integration-bound skill.
+    mkdir -p "$RESOURCES_DIR/skills/integrations/office"
+    echo "# Office" > "$RESOURCES_DIR/skills/integrations/office/SKILL.md"
+
+    ENABLED_SERVICES="office,os" DISABLED_OS_SERVICES="notes" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/office" ]
+    [ -L "${TEST_HOME}/.claude/skills/reminders" ]
+    [ -L "${TEST_HOME}/.claude/skills/calendar" ]
+    [ -L "${TEST_HOME}/.claude/skills/mail" ]
+    [ ! -e "${TEST_HOME}/.claude/skills/notes" ]
+    # `os` itself must NOT be linked as a skill — only its sub-services exist as skills.
+    [ ! -e "${TEST_HOME}/.claude/skills/os" ]
+}

@@ -14,6 +14,8 @@ use strum::IntoEnumIterator;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod paste_watcher;
+
 #[derive(Debug, PartialEq)]
 enum CliAction {
     PluginInstall(String), // zip path
@@ -734,11 +736,14 @@ fn main() -> anyhow::Result<()> {
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
 
-    // Run one-shot OAuth state migration (ADR-060 / PR3) before spawning the
-    // oauth worker. Idempotent — no-op if no project has the legacy layout.
-    let migrated = speedwave_runtime::migration_oauth::run_oauth_migration_at_startup();
-    if migrated > 0 {
-        log::info!("oauth migration: {migrated} project(s) migrated to new layout");
+    // Sanitise any v1 SharePoint secrets still sitting in the worker-mounted
+    // token dir (refresh_token / client_id / tenant_id). Idempotent — no-op
+    // when no project has the legacy layout. Users with v1 state see the
+    // "Re-authorize SharePoint" banner instead of getting a silent data
+    // migration (decision: post-OAuthProvider refactor, no backward compat).
+    let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
+    if cleaned > 0 {
+        log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
     }
 
     // Spawn host_exec BEFORE render_compose — hub needs port/auth-token files (ADR-054).
@@ -754,6 +759,7 @@ fn main() -> anyhow::Result<()> {
         &resolved,
         &integrations,
         Some(&*runtime),
+        &compose::HostBridgesInfo::default(),
     )?;
 
     let manifests = plugin::list_installed_plugins().unwrap_or_else(|e| {
@@ -869,6 +875,9 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(if status.success() { 0 } else { 1 }),
         );
     }
+
+    // Host clipboard → /workspace/.speedwave/pastes/clip.png (ADR-065).
+    let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
 
     // exec -it -> interactive Claude terminal inside container
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];

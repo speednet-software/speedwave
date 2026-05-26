@@ -35,11 +35,8 @@ export interface AtlassianConfig {
   confluenceSpaceKeys: string[];
 }
 
-/** Result of the lightweight connection test performed during client init. */
-export interface ConnectionTestResult {
-  success: boolean;
-  error?: string;
-}
+// ConnectionTestResult moved to @speedwave/mcp-shared (SSOT). Import directly
+// from the shared package; this worker no longer defines its own variant.
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Atlassian Document Format (minimal)

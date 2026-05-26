@@ -121,6 +121,19 @@ pub trait ContainerRuntime: Send + Sync {
         Ok(())
     }
 
+    /// Aggressive prune: removes ALL tagged images not used by a running
+    /// container, plus BuildKit cache. Recovery path for disk-full build
+    /// failures — frees images left behind by other worktrees / older bundles
+    /// that `prune_old_bundle_images` cannot see (it only knows this worktree's
+    /// last `applied_bundle_id`).
+    ///
+    /// Safe because containerd refuses to remove images backing live
+    /// containers. Running Speedwave projects survive.
+    fn prune_unused_images(&self) -> anyhow::Result<()> {
+        log::debug!("prune_unused_images: not implemented for this runtime, skipping");
+        Ok(())
+    }
+
     /// Restarts the container engine (containerd + buildkitd) and waits for readiness.
     ///
     /// Implementations MUST restart containerd, MUST restart buildkit (skip
@@ -160,6 +173,130 @@ pub trait ContainerRuntime: Send + Sync {
     fn reset_vm(&self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Executes a command **inside the VM (not a container)** and returns its
+    /// stdout + status. Used by host-side helpers that need the VM's network
+    /// stack — most notably the LLM discovery probe, which must run from
+    /// inside the VM to reach corporate-VPN-protected services (the host
+    /// often cannot, see `docs/architecture/platform-matrix.md`).
+    ///
+    /// - macOS: `limactl shell <vm> -- <cmd> <args...>`
+    /// - Windows: `wsl.exe -d <distro> -- <cmd> <args...>`
+    ///
+    /// `stdin` is fed to the command (empty slice for none). `timeout`
+    /// bounds the whole operation. Returns `Err` if the VM is not running
+    /// — callers that need a fallback should check `is_available()` first.
+    fn vm_exec(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        stdin: &[u8],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<VmExecOutput> {
+        let _ = (cmd, args, stdin, timeout);
+        anyhow::bail!("vm_exec not implemented for this runtime");
+    }
+}
+
+/// Output of a [`ContainerRuntime::vm_exec`] call.
+#[derive(Debug, Clone)]
+pub struct VmExecOutput {
+    pub status: std::process::ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl VmExecOutput {
+    pub fn ok(&self) -> bool {
+        self.status.success()
+    }
+    pub fn stdout_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.stdout)
+    }
+    pub fn stderr_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.stderr)
+    }
+}
+
+/// Shared implementation of `vm_exec` for both `LimaRuntime` and `WslRuntime`.
+/// Spawns the prepared command, pipes `stdin`, waits with a timeout, captures
+/// stdout+stderr. Kills the child on timeout.
+pub(crate) fn vm_exec_run(
+    mut command: Command,
+    stdin: &[u8],
+    timeout: std::time::Duration,
+) -> anyhow::Result<VmExecOutput> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::thread;
+
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let program = command.get_program().to_string_lossy().into_owned();
+    let mut child = command.spawn()?;
+
+    // Feed stdin (or close it immediately).
+    if let Some(mut sink) = child.stdin.take() {
+        if !stdin.is_empty() {
+            sink.write_all(stdin)?;
+        }
+        // Dropping `sink` closes the pipe — sends EOF to the child.
+    }
+
+    // Drain stdout/stderr in background threads to avoid pipe-buffer deadlock
+    // when output exceeds the OS pipe capacity (~64 KiB on macOS).
+    let Some(mut out_pipe) = child.stdout.take() else {
+        anyhow::bail!("vm_exec: stdout pipe missing on '{program}'");
+    };
+    let Some(mut err_pipe) = child.stderr.take() else {
+        anyhow::bail!("vm_exec: stderr pipe missing on '{program}'");
+    };
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+    let (err_tx, err_rx) = mpsc::channel::<Vec<u8>>();
+    let out_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        let _ = out_tx.send(buf);
+    });
+    let err_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        let _ = err_tx.send(buf);
+    });
+
+    // Wait with timeout, killing the child if it overruns.
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait()? {
+            Some(s) => break s,
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = out_thread.join();
+                    let _ = err_thread.join();
+                    anyhow::bail!(
+                        "vm_exec: '{}' timed out after {}s",
+                        program,
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    };
+
+    let _ = out_thread.join();
+    let _ = err_thread.join();
+    let stdout = out_rx.recv().unwrap_or_default();
+    let stderr = err_rx.recv().unwrap_or_default();
+    Ok(VmExecOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 pub trait CommandRunner: Send + Sync {

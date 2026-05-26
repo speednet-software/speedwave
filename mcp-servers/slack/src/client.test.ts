@@ -26,6 +26,13 @@ const mockWebClientInstance = {
   users: {
     lookupByEmail: vi.fn(),
   },
+  // `auth.test` is invoked by the background connection test that
+  // initializeSlackClients schedules after successful token load. The default
+  // resolves so that path is exercised in the happy-token test; specific
+  // tests can override via mockWebClientInstance.auth.test.mockResolvedValueOnce.
+  auth: {
+    test: vi.fn().mockResolvedValue({ ok: true }),
+  },
 };
 
 // Mock @slack/web-api - use class for vitest 4.x compatibility
@@ -154,46 +161,46 @@ describe('slack client', () => {
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining('✅ Slack: Tokens loaded'));
     });
 
-    it('returns null when bot token is empty', async () => {
+    it('returns clients with _tokensStatus=missing when bot token is empty', async () => {
       vi.mocked(fs.readFile)
         .mockResolvedValueOnce('  \n')
         .mockResolvedValueOnce('xoxp-user-token-456\n');
 
       const result = await initializeSlackClients();
-      expect(result).toBeNull();
+      expect(result._tokensStatus).toBe('missing');
       expect(console.warn).toHaveBeenCalledWith(
         expect.stringContaining('Slack tokens are empty or missing')
       );
     });
 
-    it('returns null when user token is empty', async () => {
+    it('returns clients with _tokensStatus=missing when user token is empty', async () => {
       vi.mocked(fs.readFile)
         .mockResolvedValueOnce('xoxb-bot-token-123\n')
         .mockResolvedValueOnce('  \n');
 
       const result = await initializeSlackClients();
-      expect(result).toBeNull();
+      expect(result._tokensStatus).toBe('missing');
       expect(console.warn).toHaveBeenCalledWith(
         expect.stringContaining('Slack tokens are empty or missing')
       );
     });
 
-    it('returns null when tokens cannot be read', async () => {
+    it('returns clients with _tokensStatus=missing when tokens cannot be read', async () => {
       vi.mocked(fs.readFile).mockRejectedValueOnce(new Error('ENOENT: no such file'));
 
       const result = await initializeSlackClients();
-      expect(result).toBeNull();
+      expect(result._tokensStatus).toBe('missing');
       expect(console.warn).toHaveBeenCalledWith(
         expect.stringContaining('Failed to load Slack tokens')
       );
     });
 
-    it('returns null and uses "Unknown error" when a non-Error value is thrown', async () => {
+    it('uses "Unknown error" when a non-Error value is thrown (still returns missing)', async () => {
       // Simulate a non-Error rejection (e.g., a plain string thrown)
       vi.mocked(fs.readFile).mockRejectedValueOnce('plain string failure');
 
       const result = await initializeSlackClients();
-      expect(result).toBeNull();
+      expect(result._tokensStatus).toBe('missing');
       expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Unknown error'));
     });
 
@@ -207,6 +214,34 @@ describe('slack client', () => {
       expect(clients).not.toBeNull();
       expect(WebClient).toHaveBeenCalledWith('xoxb-bot-token-123');
       expect(WebClient).toHaveBeenCalledWith('xoxp-user-token-456');
+    });
+
+    it('background bot.auth.test failure marks tracker failed (covers !res.ok throw path)', async () => {
+      // Both reads succeed → present path runs → backgroundConnectionTest fires.
+      vi.mocked(fs.readFile)
+        .mockResolvedValueOnce('xoxb-bot-token-123')
+        .mockResolvedValueOnce('xoxp-user-token-456');
+      mockWebClientInstance.auth.test.mockResolvedValueOnce({
+        ok: false,
+        error: 'invalid_auth',
+      });
+
+      const clients = await initializeSlackClients();
+      expect(clients._tokensStatus).toBe('present');
+      // Wait for the background promise to settle.
+      await vi.waitFor(() => expect(clients.statusTracker!.getStatus()).toBe('failed'));
+      expect(clients.statusTracker!.getError()).toContain('invalid_auth');
+    });
+
+    it('background bot.auth.test reporting not-ok without explicit error uses fallback message', async () => {
+      vi.mocked(fs.readFile)
+        .mockResolvedValueOnce('xoxb-bot-token-123')
+        .mockResolvedValueOnce('xoxp-user-token-456');
+      mockWebClientInstance.auth.test.mockResolvedValueOnce({ ok: false });
+
+      const clients = await initializeSlackClients();
+      await vi.waitFor(() => expect(clients.statusTracker!.getStatus()).toBe('failed'));
+      expect(clients.statusTracker!.getError()).toContain('auth.test reported not ok');
     });
   });
 
@@ -226,6 +261,7 @@ describe('slack client', () => {
           conversations: { list: vi.fn(), history: vi.fn() },
           users: { lookupByEmail: vi.fn() },
         } as any,
+        _tokensStatus: 'present',
       };
     });
 
@@ -419,6 +455,7 @@ describe('slack client', () => {
           conversations: { list: vi.fn(), history: vi.fn() },
           users: { lookupByEmail: vi.fn() },
         } as any,
+        _tokensStatus: 'present',
       };
     });
 
@@ -614,6 +651,7 @@ describe('slack client', () => {
           conversations: { list: vi.fn(), history: vi.fn() },
           users: { lookupByEmail: vi.fn() },
         } as any,
+        _tokensStatus: 'present',
       };
     });
 
@@ -802,6 +840,7 @@ describe('slack client', () => {
           conversations: { list: vi.fn(), history: vi.fn() },
           users: { lookupByEmail: vi.fn() },
         } as any,
+        _tokensStatus: 'present',
       };
     });
 

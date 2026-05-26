@@ -125,13 +125,70 @@ teardown() {
     [[ "$output" == *"failed to write clipboard bridge file"* ]]
 }
 
+# ── Read path (host → container paste, ADR-065) ─────────────────────────────
+
+@test "read -o without clip file → exit 1, empty stdout, stderr message" {
+    run bash -c "SPEEDWAVE_CLIP_FILE='$TMP_HOME/clip.png' bash '$OSC52' -o"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no image in host clipboard"* ]]
+}
+
+@test "read -t TARGETS -o → emits image/png when clip file exists" {
+    printf '\x89PNG\r\n\x1a\n' > "$TMP_HOME/clip.png"
+    run bash -c "SPEEDWAVE_CLIP_FILE='$TMP_HOME/clip.png' bash '$OSC52' -t TARGETS -o"
+    [ "$status" -eq 0 ]
+    [ "$output" = "image/png" ]
+}
+
+@test "read -t TARGETS -o → exit 1 when clip file absent" {
+    run bash -c "SPEEDWAVE_CLIP_FILE='$TMP_HOME/clip.png' bash '$OSC52' -t TARGETS -o"
+    [ "$status" -eq 1 ]
+}
+
+@test "read -t image/png -o → cats clip file bytes" {
+    printf 'BINARY\x00DATA' > "$TMP_HOME/clip.png"
+    local out="$TMP_HOME/out.bin"
+    SPEEDWAVE_CLIP_FILE="$TMP_HOME/clip.png" bash "$OSC52" -t image/png -o > "$out"
+    cmp -s "$TMP_HOME/clip.png" "$out"
+}
+
+@test "read with unsupported mime → exit 1 with diagnostic" {
+    run bash -c "SPEEDWAVE_CLIP_FILE='$TMP_HOME/clip.png' bash '$OSC52' -t image/jpeg -o"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"unsupported read mime"* ]]
+}
+
+@test "read direction does NOT touch ~/.clipboard-bridge" {
+    printf 'before' > "$BRIDGE"
+    printf 'PNG' > "$TMP_HOME/clip.png"
+    bash -c "SPEEDWAVE_CLIP_FILE='$TMP_HOME/clip.png' HOME='$TMP_HOME' bash '$OSC52' -t image/png -o" >/dev/null
+    [ "$(cat "$BRIDGE")" = "before" ]
+}
+
+@test "xsel-style --output flag is also recognised as read" {
+    printf 'PNG' > "$TMP_HOME/clip.png"
+    run bash -c "SPEEDWAVE_CLIP_FILE='$TMP_HOME/clip.png' bash '$OSC52' --output"
+    [ "$status" -eq 0 ]
+    [ "$output" = "PNG" ]
+}
+
+@test "cat uses -- delimiter so dash-prefixed CLIP_FILE is not parsed as option" {
+    # Adversarial CLIP_FILE override: filename starts with `-`. Without
+    # `cat -- "$file"` this would be interpreted as an unknown cat option.
+    local f="$TMP_HOME/-rfile"
+    printf 'OK' > "$f"
+    run bash -c "SPEEDWAVE_CLIP_FILE='$f' bash '$OSC52' -t image/png -o"
+    [ "$status" -eq 0 ]
+    [ "$output" = "OK" ]
+}
+
 # ── Security ────────────────────────────────────────────────────────────────
 
-@test "script is write-only — no curl, wget, secrets, or anthropic touchpoints" {
+@test "script has no curl, wget, secrets, or anthropic touchpoints" {
     ! grep -qE '\bcurl\b|\bwget\b|/tokens|\.credentials\.json|api\.anthropic' "$OSC52"
 }
 
-@test "script does not query terminal (OSC 52 paste/read explicitly out of scope)" {
+@test "script does not query terminal via OSC 52 ?" {
     ! grep -qE '52;c;\?' "$OSC52"
 }
 

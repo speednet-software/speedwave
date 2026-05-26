@@ -1,5 +1,5 @@
 /**
- * `resolve_library_id` tool — name → Context7-compatible library ID.
+ * `resolveLibraryId` tool — name → Context7-compatible library ID.
  * @module mcp-context7/tools/resolve_library_id
  */
 
@@ -16,14 +16,14 @@ import { Context7Client, Context7Error } from '../client.js';
 
 /** Tool metadata exposed to the hub. */
 export const resolveLibraryIdTool: Tool = {
-  name: 'resolve_library_id',
+  name: 'resolveLibraryId',
   description:
-    'Resolve a general library name into a Context7-compatible library ID. Call before query_docs unless the ID is already known.',
+    'Resolve a general library name into a Context7-compatible library ID. Call before queryDocs unless the ID is already known.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { deferLoading: false },
   keywords: ['context7', 'library', 'docs', 'documentation', 'resolve', 'search'],
   example:
-    'const { matches } = await context7.resolve_library_id({ libraryName: "react", query: "useState hook" })',
+    'const { matches } = await context7.resolveLibraryId({ libraryName: "react", query: "useState hook" })',
   inputSchema: {
     type: 'object',
     properties: {

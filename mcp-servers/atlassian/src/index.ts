@@ -9,7 +9,13 @@
  * @module mcp-atlassian
  */
 
-import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
+import {
+  createMCPServer,
+  ts,
+  notConfiguredMessage,
+  retryAsync,
+  makeStandardHealthCheck,
+} from '@speedwave/mcp-shared';
 import { initializeAtlassianClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
@@ -50,11 +56,11 @@ async function main(): Promise<void> {
     host: '0.0.0.0', // inside container — must be reachable from the container network
     tools,
     auth: { token: AUTH_TOKEN },
-    healthCheck: async () => {
-      if (!atlassianClient) {
-        throw new Error('Atlassian client not configured');
-      }
-    },
+    healthCheck: atlassianClient
+      ? makeStandardHealthCheck(atlassianClient.statusTracker, 'Atlassian')
+      : async () => {
+          throw new Error('Atlassian client not configured');
+        },
   });
 
   const actualPort = await server.start();

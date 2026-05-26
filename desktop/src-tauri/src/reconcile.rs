@@ -1,19 +1,69 @@
 // Compose port reconciliation, exit cleanup, and resource directory resolution.
 
-use crate::ide_bridge;
-use crate::mcp_os_process;
+use crate::bridges::ide_bridge;
+use crate::bridges::plugin_host_bridge::PluginHostBridge;
 use crate::types::BundleReconcileStatus;
+use speedwave_runtime::compose::{HostBridgeRegistration, HostBridgesInfo};
 use speedwave_runtime::host_exec_process::HostExecProcess;
+use speedwave_runtime::mcp_os_process;
 use speedwave_runtime::oauth_process::OauthProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::Emitter;
 
 /// Shared handle for the IDE Bridge instance.
 pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
+
+/// Per-slug handles for all host-bridged plugins started by Desktop.
+pub(crate) type SharedPluginBridges = Arc<Mutex<HashMap<String, PluginHostBridge>>>;
+
+/// Process-global handle to the active plugin bridges. Set once in
+/// `main.rs::setup()`; read from free functions like
+/// `compose::render_compose` callers in setup_wizard / containers_cmd
+/// which do not receive Tauri state. Empty until init.
+static GLOBAL_PLUGIN_BRIDGES: OnceLock<SharedPluginBridges> = OnceLock::new();
+
+/// Register the plugin-bridges map for global access. Called once at
+/// startup. Subsequent calls are no-ops (`OnceLock` semantics).
+pub(crate) fn set_global_plugin_bridges(handle: SharedPluginBridges) {
+    let _ = GLOBAL_PLUGIN_BRIDGES.set(handle);
+}
+
+/// Look up the global plugin-bridges map. Returns `None` before
+/// `set_global_plugin_bridges` has run.
+pub(crate) fn global_plugin_bridges() -> Option<&'static SharedPluginBridges> {
+    GLOBAL_PLUGIN_BRIDGES.get()
+}
+
+/// Collect compose-injection registrations for every running plugin
+/// bridge. Returns an empty `HostBridgesInfo` when nothing is registered
+/// yet (e.g. CLI-only contexts).
+pub(crate) fn current_bridges_info() -> HostBridgesInfo {
+    let registrations = global_plugin_bridges()
+        .and_then(|handle| handle.lock().ok())
+        .map(|guard| {
+            guard
+                .iter()
+                .map(|(slug, bridge)| {
+                    let info = bridge.compose_info();
+                    HostBridgeRegistration {
+                        plugin_slug: slug.clone(),
+                        port: info.port,
+                        auth_token: info.auth_token,
+                        url_env: bridge.manifest().url_env.clone(),
+                        token_env: bridge.manifest().token_env.clone(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    HostBridgesInfo {
+        bridges: registrations,
+    }
+}
 
 /// Shared handle for the mcp-os process.
 pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
@@ -31,6 +81,7 @@ pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::J
 #[derive(Clone)]
 pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
+    pub(crate) plugin_bridges: SharedPluginBridges,
     pub(crate) mcp_os: SharedMcpOs,
     /// Per-project `host_exec` workers — stopped + files cleaned on exit.
     pub(crate) host_exec: SharedHostExec,
@@ -56,10 +107,6 @@ pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project
         proc.cleanup_files();
     }
 }
-
-// `teardown_oauth_for_project` intentionally omitted — added in PR3 when the
-// SharePoint reconciler needs to tear down the oauth worker on integration disable.
-// Until then, cleanup happens only on process exit via `run_exit_cleanup`.
 
 /// Reconcile phase: nothing running.
 const RECONCILE_IDLE: u8 = 0;
@@ -396,13 +443,10 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             "reconcile_bundle: building images for bundle {}",
             manifest.bundle_id,
         );
-        if let Some(old_id) =
-            build::should_prune_bundle(state.applied_bundle_id.as_deref(), &manifest.bundle_id)
-        {
-            if let Err(e) = build::prune_old_bundle_images(rt.as_ref(), old_id) {
-                log::warn!("Failed to prune old bundle images: {e}");
-            }
-        }
+        // Old-bundle prune moved to the end of reconcile (after ProjectsRestored).
+        // Atomicity: if the build/restore sequence fails partway, the previous
+        // bundle's images remain on disk so the project can keep running with
+        // the last-known-good set and a retry has something to roll back to.
         // build.rs handles: build → fail → prune → retry → SnapshotterRecoveryFailed.
         // Here we escalate: restart engine → retry build. Safe because we are in the
         // pre-restore phase — no containers are running yet (see ContainerRuntime
@@ -498,6 +542,18 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         log::info!("reconcile_bundle: projects restored");
         emit_bundle_status(app_handle);
+    }
+
+    // Atomicity: only prune the previous bundle's images now that every
+    // earlier phase succeeded. If reconcile failed earlier (image build,
+    // project restore, ensure_ready), the previous images stay on disk so
+    // a restart resumes with a known-good state.
+    if let Some(old_id) =
+        build::should_prune_bundle(state.applied_bundle_id.as_deref(), &manifest.bundle_id)
+    {
+        if let Err(e) = build::prune_old_bundle_images(rt.as_ref(), old_id) {
+            log::warn!("Failed to prune old bundle images: {e}");
+        }
     }
 
     state.applied_bundle_id = Some(manifest.bundle_id.clone());
@@ -609,19 +665,16 @@ pub(crate) fn reconcile_compose_port(
             return;
         }
 
-        // Read current compose and check if WORKER_OS_URL matches the port file
+        // Read the current mcp-os port from its unified lock.json.
         let data_dir = speedwave_runtime::consts::data_dir();
-        let port_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PORT_FILE);
-        let current_port = match std::fs::read_to_string(&port_path) {
-            Ok(c) => match c.trim().parse::<u16>() {
-                Ok(p) => p,
-                Err(e) => {
-                    log::debug!("reconcile_compose_port: port parse error: {e}");
-                    return;
-                }
-            },
-            Err(e) => {
-                log::debug!("reconcile_compose_port: port file read error: {e}");
+        let lock_path = data_dir.join(speedwave_runtime::consts::MCP_OS_LOCK_FILE);
+        let current_port = match speedwave_runtime::host_mcp_process::lock::read(
+            &lock_path,
+            speedwave_runtime::host_mcp_process::lock::LockService::McpOs,
+        ) {
+            Some(lock) => lock.port,
+            None => {
+                log::debug!("reconcile_compose_port: lock.json missing/invalid");
                 return;
             }
         };
@@ -677,8 +730,13 @@ pub(crate) fn reconcile_compose_port(
         // env-var-only changes in `compose_up`, so force-recreate is needed
         // for correctness.  The compose lock prevents this from racing with
         // start_chat / resume_conversation.
-        // Images are guaranteed present — reconcile only runs after a
-        // successful mcp-os spawn, meaning containers were running.
+        // Block on bundle reconcile: mcp-os can respawn while bundle rebuild
+        // is in progress, in which case compose_up_recreate would hit a tag
+        // that has not been built yet.
+        if let Err(e) = crate::containers_cmd::ensure_images_ready() {
+            log::warn!("reconcile_compose_port: images not ready: {e}");
+            return;
+        }
         if let Err(e) = rt.compose_up_recreate(&project) {
             log::error!("reconcile_compose_port: compose_up_recreate failed: {e}");
             return;
@@ -774,6 +832,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let ide_bridge = ctx.ide_bridge.clone();
+    let plugin_bridges = ctx.plugin_bridges.clone();
     let mcp_os = ctx.mcp_os.clone();
     let host_exec = ctx.host_exec.clone();
     let oauth = ctx.oauth.clone();
@@ -802,6 +861,16 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 }
             }
             Err(e) => log::warn!("IDE Bridge cleanup skipped: mutex poisoned: {e}"),
+        }
+        match plugin_bridges.lock() {
+            Ok(mut map) => {
+                for (slug, mut bridge) in map.drain() {
+                    if let Err(e) = bridge.stop() {
+                        log::warn!("plugin bridge[{slug}] stop error: {e}");
+                    }
+                }
+            }
+            Err(e) => log::warn!("plugin bridges cleanup skipped: mutex poisoned: {e}"),
         }
         match mcp_os.lock() {
             Ok(mut guard) => {
@@ -901,6 +970,52 @@ mod tests {
         // No worker registered for "ghost" — must not panic.
         teardown_host_exec_for_project(&map, "ghost");
         assert!(map.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_compose_port_waits_for_image_readiness() {
+        // Race guard: mcp-os respawn may race with bundle image rebuild;
+        // compose_up_recreate against a missing tag emits image-not-available.
+        // Anchor the find on `pub(crate) fn` to skip the bare `fn ...` inside
+        // tests that quote the function name.
+        let source = include_str!("reconcile.rs");
+        let fn_body = extract_fn_body_braced(source, "pub(crate) fn reconcile_compose_port(");
+
+        let ensure_pos = fn_body
+            .find("ensure_images_ready(")
+            .expect("reconcile_compose_port must call ensure_images_ready");
+        let up_pos = fn_body
+            .find("compose_up_recreate(")
+            .expect("compose_up_recreate must exist in reconcile_compose_port");
+        assert!(
+            ensure_pos < up_pos,
+            "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    /// Returns the body of a function by signature: walks brace depth from
+    /// the signature's opening `{` to its matching `}`.
+    fn extract_fn_body_braced<'a>(source: &'a str, fn_signature: &'static str) -> &'a str {
+        let sig_pos = source
+            .find(fn_signature)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
+        let after = &source[sig_pos..];
+        let open = after.find('{').expect("opening brace not found");
+        let bytes = after.as_bytes();
+        let mut depth: i32 = 0;
+        for (i, &b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[..=i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("closing brace not found for {fn_signature}")
     }
 
     // stop_all_containers is compiled out on macOS (see its definition).
@@ -1589,6 +1704,7 @@ mod tests {
     fn cleanup_once_idempotency() {
         let ctx = ExitCleanupContext {
             ide_bridge: SharedIdeBridge::default(),
+            plugin_bridges: SharedPluginBridges::default(),
             mcp_os: SharedMcpOs::default(),
             host_exec: SharedHostExec::default(),
             oauth: SharedOauth::default(),
@@ -1667,11 +1783,65 @@ mod tests {
         );
     }
 
-    /// Structural test: `prune_old_bundle_images` must run BEFORE the image build
-    /// in `reconcile_bundle_update_inner`. Pruning first ensures old images are
-    /// cleaned up before new ones land — no data loss since new images aren't built yet.
+    /// Structural test: image-build errors return via `set_bundle_error`
+    /// before any code that mutates `applied_bundle_id`. This is the atomicity
+    /// guarantee for the partial-build-failure path: if build fails after the
+    /// prune-old block was moved to the end of reconcile, the old bundle id
+    /// must remain so the project keeps running with the previous images.
+    ///
+    /// We cannot run `reconcile_bundle_update_inner` behaviorally in a unit
+    /// test (it depends on `tauri::AppHandle`, `runtime::detect_runtime`,
+    /// `config::load_user_config`, ...) — instead we assert on the source
+    /// that the bail path is structurally correct.
     #[test]
-    fn reconcile_prunes_old_images_before_building_new_ones() {
+    fn reconcile_partial_build_failure_does_not_mutate_applied_bundle_id() {
+        let source = include_str!("reconcile.rs");
+        let inner_fn = source
+            .split("fn reconcile_bundle_update_inner(")
+            .nth(1)
+            .expect("reconcile_bundle_update_inner function should exist");
+
+        let bail_pos = inner_fn
+            .find("Image rebuild failed: {e}")
+            .expect("Image rebuild failed bail path must exist");
+        let applied_id_assignment_pos = inner_fn
+            .find("state.applied_bundle_id = Some(manifest.bundle_id.clone())")
+            .expect("applied_bundle_id assignment must exist");
+        let prune_pos = inner_fn
+            .find("prune_old_bundle_images")
+            .expect("prune_old_bundle_images must exist");
+
+        assert!(
+            bail_pos < applied_id_assignment_pos,
+            "Image rebuild failed bail (at byte {bail_pos}) must return BEFORE \
+             applied_bundle_id is set (at byte {applied_id_assignment_pos}) — \
+             otherwise a partial build failure overwrites the previous bundle id"
+        );
+        assert!(
+            bail_pos < prune_pos,
+            "Image rebuild failed bail (at byte {bail_pos}) must return BEFORE \
+             prune_old_bundle_images runs (at byte {prune_pos}) — otherwise a \
+             partial build failure prunes the previous bundle's images even \
+             though no new images replaced them"
+        );
+
+        // Spot-check that the failing branch is `return Err(set_bundle_error(...))`
+        // and not a silent log + continue.
+        let bail_context = &inner_fn[bail_pos..bail_pos.saturating_add(200)];
+        assert!(
+            bail_context.contains("return Err(set_bundle_error"),
+            "Image rebuild failure must `return Err(set_bundle_error(...))`, \
+             not log-and-continue; observed context: {bail_context}"
+        );
+    }
+
+    /// Structural test: `prune_old_bundle_images` must run AFTER the full
+    /// build/restore sequence (after `ProjectsRestored`) in
+    /// `reconcile_bundle_update_inner`. Atomicity: previous-bundle images stay
+    /// on disk until the new bundle has been built AND every project restored,
+    /// so a partial failure leaves the previous bundle intact.
+    #[test]
+    fn reconcile_prunes_old_images_after_full_restore() {
         let source = include_str!("reconcile.rs");
         let inner_fn = source
             .split("fn reconcile_bundle_update_inner(")
@@ -1684,11 +1854,19 @@ mod tests {
         let build_pos = inner_fn
             .find("build_images_for_bundle")
             .expect("build_images_for_bundle call must exist in reconcile_bundle_update_inner");
+        let restore_pos = inner_fn
+            .find("restore_projects(")
+            .expect("restore_projects call must exist in reconcile_bundle_update_inner");
 
         assert!(
-            prune_pos < build_pos,
-            "prune_old_bundle_images (at byte {prune_pos}) must appear before \
+            prune_pos > build_pos,
+            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
              build_images_for_bundle (at byte {build_pos}) in reconcile_bundle_update_inner"
+        );
+        assert!(
+            prune_pos > restore_pos,
+            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
+             restore_projects (at byte {restore_pos}) in reconcile_bundle_update_inner"
         );
     }
 

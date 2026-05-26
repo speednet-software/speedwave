@@ -70,6 +70,24 @@ const MOCK_INTEGRATIONS = {
       mappings: { tracker: 1 },
     },
     {
+      service: 'github',
+      enabled: false,
+      configured: false,
+      display_name: 'GitHub',
+      description: 'Code hosting and CI/CD platform',
+      auth_fields: [
+        {
+          key: 'token',
+          label: 'GitHub Access Token',
+          field_type: 'password',
+          placeholder: 'gho_...',
+          oauth_flow: true,
+        },
+      ],
+      current_values: {},
+      mappings: undefined,
+    },
+    {
       service: 'sharepoint',
       enabled: false,
       configured: false,
@@ -203,6 +221,8 @@ describe('IntegrationsComponent', () => {
   it('should load active project and integrations on init', async () => {
     await component.ngOnInit();
     expect(component.activeProject).toBe('test-project');
+    // GitHub is in BETA_ONLY_SERVICES, hidden unless beta is on (default off in tests).
+    // Visible services: gitlab, redmine, sharepoint.
     expect(component.services).toHaveLength(3);
     expect(component.osIntegrations).toHaveLength(1);
   });
@@ -1020,7 +1040,7 @@ describe('IntegrationsComponent', () => {
       invokeSpy.mockClear();
 
       await component.handleStartOAuth({
-        svc: component.services[2],
+        svc: component.services.find((s) => s.service === 'sharepoint')!,
         credentials: { client_id: 'uuid', tenant_id: 'common' },
       });
 
@@ -1034,7 +1054,7 @@ describe('IntegrationsComponent', () => {
       invokeSpy.mockClear();
 
       await component.handleStartOAuth({
-        svc: component.services[2],
+        svc: component.services.find((s) => s.service === 'sharepoint')!,
         credentials: { client_id: 'uuid', tenant_id: 'common' },
       });
 
@@ -1092,6 +1112,154 @@ describe('IntegrationsComponent', () => {
 
       // oauthProjectAtStart is private, but we can verify the behavior via project_switched test
       expect(component.activeOAuthRequestId).toBe('rid');
+    });
+  });
+
+  describe('GitHub OAuth flow', () => {
+    // GitHub is in BETA_ONLY_SERVICES (ADR-058). The OAuth refactor doesn't
+    // change that — beta gating is an orthogonal product decision. Tests flip
+    // beta on so the GitHub row is present in `component.services`.
+    beforeEach(() => {
+      betaEnabled.set(true);
+    });
+
+    it('invokes start_github_oauth with project (no client_id/tenant_id)', async () => {
+      await component.ngOnInit();
+      const githubSvc = component.services.find((s) => s.service === 'github')!;
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_github_oauth') {
+          return {
+            user_code: 'WDJB-MJHT',
+            verification_uri: 'https://github.com/login/device',
+            expires_in: 900,
+            request_id: 'gh-rid-1',
+          };
+        }
+        if (cmd === 'list_projects') {
+          return { projects: [], active_project: 'test-project' };
+        }
+        if (cmd === 'get_integrations') {
+          return cloneMockIntegrations();
+        }
+        return undefined;
+      };
+
+      await component.handleStartOAuth({ svc: githubSvc, credentials: {} });
+
+      // GitHub uses bundled client_id (consts.rs::GITHUB_OAUTH_CLIENT_ID);
+      // the Tauri command takes only `project`.
+      expect(invokeSpy).toHaveBeenCalledWith('start_github_oauth', {
+        project: 'test-project',
+      });
+      // Crucially, GitHub flow must NOT dispatch to the SharePoint command.
+      expect(invokeSpy).not.toHaveBeenCalledWith('start_sharepoint_oauth', expect.anything());
+      expect(component.oauthStatus).toBe('polling');
+      expect(component.oauthService).toBe('github');
+      expect(component.deviceCodeInfo).not.toBeNull();
+      expect(component.activeOAuthRequestId).toBe('gh-rid-1');
+    });
+
+    it('github_oauth_progress polling event sets device code info', async () => {
+      await component.ngOnInit();
+      component.activeOAuthRequestId = 'gh-rid-2';
+      component.oauthService = 'github';
+
+      mockTauri.dispatchEvent('github_oauth_progress', {
+        status: 'polling',
+        message: 'Waiting for sign-in',
+        request_id: 'gh-rid-2',
+      });
+
+      expect(component.oauthStatus).toBe('polling');
+      expect(component.oauthStatusMessage).toBe('Waiting for sign-in');
+    });
+
+    it('github_oauth_progress success clears device code + resets oauthService', async () => {
+      await component.ngOnInit();
+      component.activeOAuthRequestId = 'gh-rid-3';
+      component.oauthService = 'github';
+      component.deviceCodeInfo = {
+        user_code: 'X',
+        verification_uri: 'https://github.com/login/device',
+        expires_in: 900,
+        request_id: 'gh-rid-3',
+      };
+
+      // Need a polling response for handleStartOAuth-style success path. Here
+      // we dispatch directly to the listener registered in ngOnInit.
+      mockTauri.dispatchEvent('github_oauth_progress', {
+        status: 'success',
+        message: 'Authentication successful',
+        request_id: 'gh-rid-3',
+      });
+
+      // The listener is async — wait one microtask flush for state updates.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(component.deviceCodeInfo).toBeNull();
+      expect(component.activeOAuthRequestId).toBeNull();
+      expect(component.oauthService).toBeNull();
+    });
+
+    it('github_oauth_progress error clears device code + resets oauthService', async () => {
+      await component.ngOnInit();
+      component.activeOAuthRequestId = 'gh-rid-4';
+      component.oauthService = 'github';
+      component.deviceCodeInfo = {
+        user_code: 'X',
+        verification_uri: 'https://github.com/login/device',
+        expires_in: 900,
+        request_id: 'gh-rid-4',
+      };
+
+      mockTauri.dispatchEvent('github_oauth_progress', {
+        status: 'error',
+        message: 'Device flow not enabled on Speedwave GitHub OAuth App.',
+        request_id: 'gh-rid-4',
+      });
+
+      expect(component.oauthStatus).toBe('error');
+      expect(component.oauthStatusMessage).toContain('Device flow');
+      expect(component.deviceCodeInfo).toBeNull();
+      expect(component.activeOAuthRequestId).toBeNull();
+      expect(component.oauthService).toBeNull();
+    });
+
+    it('second click while polling early-returns for GitHub', async () => {
+      await component.ngOnInit();
+      const githubSvc = component.services.find((s) => s.service === 'github')!;
+      component.oauthStatus = 'polling';
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      invokeSpy.mockClear();
+
+      await component.handleStartOAuth({ svc: githubSvc, credentials: {} });
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('start_github_oauth', expect.anything());
+    });
+
+    it('handleCancelOAuth dispatches cancel_github_oauth when oauthService is github', async () => {
+      await component.ngOnInit();
+      component.activeOAuthRequestId = 'gh-rid-5';
+      component.oauthService = 'github';
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await component.handleCancelOAuth();
+
+      expect(invokeSpy).toHaveBeenCalledWith('cancel_github_oauth');
+      expect(invokeSpy).not.toHaveBeenCalledWith('cancel_sharepoint_oauth', expect.anything());
+      expect(component.activeOAuthRequestId).toBeNull();
+      expect(component.oauthService).toBeNull();
+    });
+
+    it('github_oauth_progress listener cleanup on destroy', async () => {
+      await component.ngOnInit();
+      expect(mockTauri.listenHandlers['github_oauth_progress']).toBeDefined();
+
+      component.ngOnDestroy();
+      expect(mockTauri.listenHandlers['github_oauth_progress']).toBeUndefined();
     });
   });
 
@@ -1281,7 +1449,7 @@ describe('IntegrationsComponent', () => {
       };
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.handleSaveCredentials({
-        svc: component.services[2], // sharepoint
+        svc: component.services.find((s) => s.service === 'sharepoint')!,
         credentials: { client_id: 'uuid', tenant_id: 'common', site_id: 'site' },
         mappings: null,
       });

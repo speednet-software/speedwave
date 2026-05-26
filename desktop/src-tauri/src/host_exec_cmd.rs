@@ -234,6 +234,12 @@ fn respawn_host_exec_worker(host_exec: &crate::reconcile::SharedHostExec, projec
 /// Re-render compose and recreate running containers so the hub re-discovers.
 /// Best-effort — failures are logged, not fatal. Also used by the watchdog.
 pub(crate) fn recreate_project_containers_if_running(project: &str) {
+    // Bundle reconcile may be rebuilding images. compose_up_recreate against a
+    // missing image tag emits "image not available" to the user. Wait first.
+    if let Err(e) = crate::containers_cmd::ensure_images_ready() {
+        log::warn!("recreate_project_containers_if_running: images not ready for '{project}': {e}");
+        return;
+    }
     let rt = speedwave_runtime::runtime::detect_runtime();
     if !rt.is_available() {
         log::debug!("recreate_project_containers_if_running: runtime not available — skipping");
@@ -267,6 +273,55 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recreate_project_containers_if_running_waits_for_image_readiness() {
+        // Race guard: this best-effort helper runs on host_exec / oauth respawn
+        // and on watchdog ticks, both of which can fire while bundle reconcile
+        // is rebuilding images. Without the gate, nerdctl emits
+        // image-not-available through the UI.
+        let source = include_str!("host_exec_cmd.rs");
+        let fn_body = extract_fn_body_braced(
+            source,
+            "pub(crate) fn recreate_project_containers_if_running(",
+        );
+
+        let ensure_pos = fn_body
+            .find("ensure_images_ready(")
+            .expect("recreate_project_containers_if_running must call ensure_images_ready");
+        let up_pos = fn_body
+            .find("compose_up_recreate(")
+            .expect("compose_up_recreate must exist in recreate_project_containers_if_running");
+        assert!(
+            ensure_pos < up_pos,
+            "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    /// Returns the body of a function by signature: locates the signature,
+    /// then walks brace depth from the next `{` to its matching `}`.
+    fn extract_fn_body_braced<'a>(source: &'a str, fn_signature: &str) -> &'a str {
+        let sig_pos = source
+            .find(fn_signature)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
+        let after = &source[sig_pos..];
+        let open = after.find('{').expect("opening brace not found");
+        let bytes = after.as_bytes();
+        let mut depth: i32 = 0;
+        for (i, &b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[..=i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("closing brace not found for {fn_signature}")
+    }
 
     #[test]
     fn host_exec_status_serde_round_trips() {

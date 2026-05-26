@@ -60,10 +60,17 @@ async function main(): Promise<void> {
     tools: createToolDefinitions(sharepointClient),
     auth: { token: AUTH_TOKEN },
     healthCheck: async () => {
-      const { tokenSaveError } = sharepointClient.getHealthStatus();
-      if (tokenSaveError) {
+      const health = sharepointClient.getHealthStatus();
+      if (health.tokenSaveError) {
         throw new Error('Token refresh failed');
       }
+      if (health.connection === 'failed') {
+        throw new Error(`SharePoint siteId resolve failed: ${health.connectionError ?? 'unknown'}`);
+      }
+      // `unknown` during warmup → healthy; SharePoint siteId resolve runs in
+      // the background after init and either succeeds (`ok`) or fails
+      // explicitly. We do not bounce on `unknown` because path-form siteId
+      // still works against most Graph endpoints during warm-up.
     },
   });
 

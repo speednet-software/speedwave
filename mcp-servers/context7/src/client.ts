@@ -283,7 +283,7 @@ function mapErrorStatus(
   }
   if (status === 404) {
     return new Context7Error(
-      'Library not found. Call resolve_library_id first.',
+      'Library not found. Call resolveLibraryId first.',
       status,
       tier,
       false

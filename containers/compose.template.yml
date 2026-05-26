@@ -14,10 +14,7 @@ services:
     security_opt:
       - no-new-privileges:true
     extra_hosts:
-      - "host.lima.internal:${HOST_GATEWAY}"
-      - "host.containers.internal:${HOST_GATEWAY}"
       - "host.docker.internal:${HOST_GATEWAY}"
-      - "host.speedwave.internal:${HOST_GATEWAY}"
     tmpfs:
       - /tmp:noexec,nosuid,size=512m
     volumes:
@@ -30,6 +27,7 @@ services:
       - MCP_HUB_PORT=${PORT_HUB}
       - CLAUDE_CODE_IDE_HOST_OVERRIDE=${IDE_HOST_OVERRIDE}
       - CLAUDE_CODE_EFFORT_LEVEL=max
+      - ANTHROPIC_LOG=debug
     working_dir: /workspace
     networks:
       - ${NETWORK_NAME}
@@ -274,6 +272,13 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Host gateway alias so Claude and plugins can navigate Playwright to
+    # local dev servers (e.g. `http://host.docker.internal:4200` for Angular).
+    # See ADR-062. The IP routing to the VM gateway already exists for every
+    # container in the project network; this extra_hosts entry only adds the
+    # canonical DNS name so callers don't need to know per-platform gateway IPs.
+    extra_hosts:
+      - "host.docker.internal:${HOST_GATEWAY}"
     # Chromium uses /tmp for page caches and screenshot compositing.
     # tmpfs lives in RAM — keep it lean. Heavy screenshots return inline
     # as base64, not via /tmp.

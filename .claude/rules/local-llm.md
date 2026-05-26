@@ -12,14 +12,14 @@ paths:
 
 # Local LLM Rules
 
-Speedwave is a **local-first** platform. Since ADR-040 LiteLLM is gone — Claude Code talks directly to a local LLM server (Ollama / LM Studio / llama.cpp) or to Anthropic. There is no proxy in between. ADR-040 and ADR-041 are mandatory reading before touching any code under the `paths:` above.
+Speedwave is a **local-first** platform. Since ADR-040 LiteLLM is gone — Claude Code talks directly to a local LLM server (any Anthropic Messages compatible) or to Anthropic. There is no proxy in between. ADR-040 and ADR-041 are mandatory reading before touching any code under the `paths:` above.
 
 ## Invariants (non-negotiable)
 
 Whether you are adding a feature, fixing a bug, or refactoring something adjacent, none of these may regress:
 
-1. **No cloud LLM providers other than Anthropic.** No OpenAI, Gemini, DeepSeek, OpenRouter, Together, etc. The supported set is `anthropic | ollama | lmstudio | llamacpp`. If a feature requires a fifth provider — write an ADR.
-2. **No external LLM API keys ever enter a container.** Local providers use the dummy `ANTHROPIC_AUTH_TOKEN=sk-no-key-required`. Anthropic uses the user's own OAuth/key. Neither path puts a third-party LLM credential inside the trust boundary.
+1. **Only Anthropic Messages servers.** The supported provider set is `anthropic | local` (legacy `ollama|lmstudio|llamacpp` aliases accepted on read for two release cycles, auto-migrated by Settings UI to `local`; planned removal in v0.X+2). The server must speak `POST /v1/messages` — pure OpenAI Chat Completions (vLLM stock, TGI, Triton) is out of scope; resurrecting a translation proxy would re-introduce the LiteLLM-shaped attack surface ADR-040 removed.
+2. **Local-LLM credentials live in token files, not config.json.** When the user configures an API key or custom headers, the _values_ land in `~/.speedwave/tokens/<project>/local-llm/{api_key,custom_headers}` (chmod 0600 / Windows owner-only ACL via `fs_perms`); only the `has_api_key`/`has_custom_headers` presence flags reach `LlmConfig`. `apply_llm_config` reads the files at compose-render time and injects values as `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_CUSTOM_HEADERS` env vars on the `claude` container. This is **deliberately different from the plugin token regime** (which file-mounts `:ro` into the worker) — Claude Code reads from env, not files. ADR-040 §"Threat model — env vs file mount" documents the accepted residual risk (secret visible in compose YAML, `/proc/<pid>/environ`).
 3. **`provider` and `base_url` are user-only configuration.** Repo `.speedwave.json` may set `model` only — `merge_llm_repo()` strips the rest. A malicious cloned repo must not be able to redirect the user's traffic. If you add a new LLM-related field to config, decide explicitly which side (user vs repo) may set it, and add the merge test.
 4. **Anthropic model strings have one SSOT** — `crates/speedwave-runtime/src/defaults.rs::ANTHROPIC_MODELS`. Frontend reads it via the `list_anthropic_models` Tauri command and `AnthropicModelsService`. Bumping a model = editing one const. Do not hard-code model strings in Angular, in compose injection, or in tests.
 
@@ -42,11 +42,11 @@ The HTTP probe itself runs through reqwest with: `redirect::Policy::none()`, 5-s
 
 ## Container-host alias rewrite
 
-`host.docker.internal`, `host.lima.internal`, `host.containers.internal`, `host.speedwave.internal` resolve **inside the container** but not from the Desktop host process — Speedwave does not bundle Docker Desktop. Host-side code that probes a base URL must call `speedwave_runtime::compose::rewrite_container_alias_to_loopback`. The four aliases live in `CONTAINER_HOST_ALIASES` (one SSOT). Do not introduce a fifth alias without updating the constant **and** the rewrite helper **and** the discovery tests.
+`host.docker.internal` resolves **inside the container** (injected via Compose `extra_hosts` per-service) but not from the Desktop host process — Speedwave does not bundle Docker Desktop. Host-side code that probes a base URL must call `speedwave_runtime::compose::rewrite_container_alias_to_loopback`. The single SSOT is `consts::HOST_GATEWAY_ALIAS`. Do not reintroduce per-platform aliases (`host.lima.internal`, `host.speedwave.internal`, `host.containers.internal`) — one canonical hostname; per-platform divergence is in the gateway IP only (`LIMA_VZ_HOST_IP` / `WSL_HOST_IP`).
 
 ## Authentication bypass
 
-`check_claude_auth` short-circuits to `Ok(true)` when provider is `ollama | lmstudio | llamacpp`. This is the **only** Anthropic auth check that may be bypassed for local providers. If you add another auth checkpoint (telemetry, model lookup, license check), it must follow the same pattern — local providers never reach Anthropic, so requiring an Anthropic token there blocks legitimate offline users.
+`check_claude_auth` short-circuits to `Ok(true)` when the provider is in `LOCAL_PROVIDERS` (`ollama | lmstudio | llamacpp | local`). This is the **only** Anthropic auth check that may be bypassed for local providers. If you add another auth checkpoint (telemetry, model lookup, license check), it must follow the same pattern — local providers never reach Anthropic, so requiring an Anthropic token there blocks legitimate offline users.
 
 ## When designing or fixing any feature, ask:
 
@@ -58,4 +58,4 @@ The HTTP probe itself runs through reqwest with: `redirect::Policy::none()`, 5-s
 
 ## Chat / context windows
 
-Local model context is reported by the discovery probe as `context_tokens: Option<u32>` (Ollama: `model_info.<arch>.context_length`; LM Studio: `max_context_length`; llama.cpp: `meta.n_ctx_train`). When `None`, fall back gracefully — never guess a default. Chat code that prunes history must read this value, not assume Anthropic's 200K / 1M.
+Local model context is reported by the discovery probe as `context_tokens: Option<u32>`. The `discover_local` path extracts it per-entry from `/v1/models` (inline `meta.n_ctx_train` for llama.cpp/Unsloth/vLLM, `max_context_length` for LM Studio 0.4.1+) with a single sanity `/api/show` fallback for Ollama. When `None`, **propagate `null` to the frontend** — `ChatStateService.resolveContextWindow` returns `null` for local providers and `session-stats.component` hides the `used / max` ratio. Never substitute `DEFAULT_CONTEXT_TOKENS` (200 K Anthropic baseline) for a local model — that is exactly the "guess" ADR-041 forbids.

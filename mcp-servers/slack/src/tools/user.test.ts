@@ -22,6 +22,15 @@ vi.mock('../client.js', async () => {
 
 import * as client from '../client.js';
 
+/** Helper: clients object representing "tokens missing" — replaces null. */
+function unconfiguredClients(): SlackClients {
+  return {
+    bot: {} as any,
+    user: {} as any,
+    _tokensStatus: 'missing',
+  };
+}
+
 describe('user-tools', () => {
   let mockClients: SlackClients;
 
@@ -30,6 +39,7 @@ describe('user-tools', () => {
     mockClients = {
       bot: {} as any,
       user: {} as any,
+      _tokensStatus: 'present',
     };
   });
 
@@ -227,13 +237,13 @@ describe('user-tools', () => {
 
 describe('createUserTools (null clients — not configured)', () => {
   it('returns one tool definition when clients are null', () => {
-    const tools = createUserTools(null);
+    const tools = createUserTools(unconfiguredClients());
     expect(tools).toHaveLength(1);
     expect(tools[0].tool.name).toBe('getUsers');
   });
 
   it('getUsers handler returns NOT_CONFIGURED error when clients are null', async () => {
-    const tools = createUserTools(null);
+    const tools = createUserTools(unconfiguredClients());
     const getUsersHandler = tools[0].handler;
 
     const result = await getUsersHandler({ email: 'alice@example.com' });
@@ -253,6 +263,7 @@ describe('createUserTools (with clients — configured path)', () => {
     mockClients = {
       bot: {} as any,
       user: {} as any,
+      _tokensStatus: 'present',
     };
   });
 

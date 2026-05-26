@@ -23,14 +23,9 @@ On Windows, `mapi-rs`[^14] (Microsoft-maintained, 21 releases) provides access t
 
 mcp-os is a **host process** — it binds to `127.0.0.1:4007` on the host. It never binds to `0.0.0.0` because it runs outside the container network and must not be exposed to the LAN.
 
-Containers cannot reach `127.0.0.1` on the host directly (that is the container's own loopback). Each platform provides a routing mechanism for container → host communication:
+Containers cannot reach `127.0.0.1` on the host directly (that is the container's own loopback). All platforms use the canonical gateway alias `host.docker.internal`, injected into each consuming container's `/etc/hosts` via Compose `extra_hosts`[^32] (statically for `claude`, dynamically for `mcp-hub` and OAuth-consumers via `ensure_host_gateway_extra_host`). The alias maps to the per-platform gateway IP — Lima vzNAT (192.168.5.2) on macOS, WSL2 NAT (192.168.65.1) on Windows. The "per-platform" in the title refers to the host-side process model (Lima VM vs WSL2), not the network alias.
 
-| Platform | mcp-os binds to  | Containers reach it via        | How it works                                                                                                    |
-| -------- | ---------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| macOS    | `127.0.0.1:4007` | `host.lima.internal:4007`      | Lima's hostagent registers this DNS name in gvproxy[^28]; resolves to host gateway IP                           |
-| Windows  | `127.0.0.1:4007` | `host.speedwave.internal:4007` | `extra_hosts: host.speedwave.internal:host-gateway` in compose; nerdctl resolves `host-gateway` to host IP[^32] |
-
-`render_compose()` injects `WORKER_OS_URL=http://<platform-dns>:4007` into the mcp-hub container environment. Claude never talks to mcp-os directly — requests go through the hub.
+`render_compose()` injects `WORKER_OS_URL=http://host.docker.internal:4007` into the mcp-hub container environment. Claude never talks to mcp-os directly — requests go through the hub.
 
 **Note:** containerized MCP servers (hub, slack, redmine, etc.) bind to `0.0.0.0` **inside their containers** — this is correct and necessary, because other containers on the same Docker bridge network need to reach them.[^29] Their ports are published to the host as `127.0.0.1:<port>` in `compose.template.yml`[^30], which prevents LAN exposure.[^31] The "never 0.0.0.0" rule applies only to mcp-os because it runs on the host network.
 

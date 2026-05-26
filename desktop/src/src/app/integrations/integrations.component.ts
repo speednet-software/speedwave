@@ -280,9 +280,9 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                   <app-service-card
                     [svc]="svc"
                     [expanded]="true"
-                    [oauthStatus]="svc.service === 'sharepoint' ? oauthStatus : null"
-                    [deviceCodeInfo]="svc.service === 'sharepoint' ? deviceCodeInfo : null"
-                    [oauthStatusMessage]="svc.service === 'sharepoint' ? oauthStatusMessage : ''"
+                    [oauthStatus]="oauthService === svc.service ? oauthStatus : null"
+                    [deviceCodeInfo]="oauthService === svc.service ? deviceCodeInfo : null"
+                    [oauthStatusMessage]="oauthService === svc.service ? oauthStatusMessage : ''"
                     (toggleExpand)="toggleExpand($event)"
                     (toggleService)="handleToggleService($event)"
                     (saveCredentials)="handleSaveCredentials($event)"
@@ -383,9 +383,12 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   deviceCodeInfo: DeviceCodeInfo | null = null;
   oauthStatusMessage = '';
   activeOAuthRequestId: string | null = null;
+  /** Which service the currently-running OAuth flow belongs to (`sharepoint` | `github`). */
+  oauthService: string | null = null;
   private oauthProjectAtStart: string | null = null;
   private oauthStartNonce = 0;
   private unlistenOAuth: (() => void) | null = null;
+  private unlistenGithubOAuth: (() => void) | null = null;
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
@@ -433,8 +436,27 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       void this.loadIntegrations();
     });
 
-    this.tauri
-      .listen<OAuthProgressEvent>('sharepoint_oauth_progress', async (event) => {
+    this.unlistenOAuth = await this.subscribeOAuthProgress(
+      'sharepoint_oauth_progress',
+      'sharepoint'
+    );
+    this.unlistenGithubOAuth = await this.subscribeOAuthProgress('github_oauth_progress', 'github');
+  }
+
+  /**
+   * Subscribe to an OAuth-progress event channel emitted by the Tauri side.
+   * Shared between SharePoint (`sharepoint_oauth_progress`) and GitHub
+   * (`github_oauth_progress`); the `service` arg drives autoEnableIfConfigured
+   * on success.
+   * @param eventName - the Tauri event channel to listen on
+   * @param service - the integration the events belong to
+   */
+  private subscribeOAuthProgress(
+    eventName: 'sharepoint_oauth_progress' | 'github_oauth_progress',
+    service: 'sharepoint' | 'github'
+  ): Promise<() => void> {
+    return this.tauri
+      .listen<OAuthProgressEvent>(eventName, async (event) => {
         try {
           const payload = (event as { payload: OAuthProgressEvent }).payload;
           if (payload.request_id !== this.activeOAuthRequestId) return;
@@ -446,25 +468,24 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
             this.deviceCodeInfo = null;
             this.activeOAuthRequestId = null;
             this.oauthProjectAtStart = null;
+            this.oauthService = null;
             if (flowProject !== this.activeProject) return;
             await this.loadIntegrations();
             if (flowProject !== this.activeProject) return;
-            await this.autoEnableIfConfigured('sharepoint');
+            await this.autoEnableIfConfigured(service);
             this.projectState.requestRestart();
           }
           if (['error', 'expired', 'cancelled'].includes(payload.status)) {
             this.deviceCodeInfo = null;
             this.activeOAuthRequestId = null;
+            this.oauthService = null;
           }
         } catch (e: unknown) {
           this.error = e instanceof Error ? e.message : String(e);
         }
         this.cdr.markForCheck();
       })
-      .then((unlisten) => {
-        this.unlistenOAuth = unlisten;
-      })
-      .catch(() => {});
+      .catch(() => () => {});
   }
 
   /** Cleans up event listeners. */
@@ -480,6 +501,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     if (this.unlistenOAuth) {
       this.unlistenOAuth();
       this.unlistenOAuth = null;
+    }
+    if (this.unlistenGithubOAuth) {
+      this.unlistenGithubOAuth();
+      this.unlistenGithubOAuth = null;
     }
   }
 
@@ -749,25 +774,12 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       }
     }
 
-    const clientId = payload.credentials['client_id'] ?? '';
-    const tenantId = payload.credentials['tenant_id'] ?? '';
-    if (!clientId || !tenantId) {
-      if (myNonce !== this.oauthStartNonce) return;
-      this.oauthStatus = null;
-      this.error = 'Client ID and Tenant ID are required to start OAuth';
-      this.cdr.markForCheck();
-      return;
-    }
-
     try {
-      const result = await this.tauri.invoke<DeviceCodeInfo>('start_sharepoint_oauth', {
-        project: this.activeProject,
-        clientId,
-        tenantId,
-      });
+      const result = await this.invokeOAuthStart(payload.svc.service, payload.credentials);
       if (myNonce !== this.oauthStartNonce) return;
       this.deviceCodeInfo = result;
       this.activeOAuthRequestId = result.request_id;
+      this.oauthService = payload.svc.service;
       this.oauthStatus = 'polling';
     } catch (e: unknown) {
       if (myNonce !== this.oauthStartNonce) return;
@@ -777,14 +789,46 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  /**
+   * Per-service dispatcher for the `start_*_oauth` Tauri commands. Keeps the
+   * service-specific argument shape (SharePoint needs client_id/tenant_id;
+   * GitHub uses a bundled client_id in `consts.rs`) out of `handleStartOAuth`.
+   * @param service - the integration to start OAuth for
+   * @param credentials - non-oauth field values from the form (used by SharePoint)
+   */
+  private invokeOAuthStart(
+    service: string,
+    credentials: Record<string, string>
+  ): Promise<DeviceCodeInfo> {
+    if (service === 'github') {
+      return this.tauri.invoke<DeviceCodeInfo>('start_github_oauth', {
+        project: this.activeProject,
+      });
+    }
+    // SharePoint (default).
+    const clientId = credentials['client_id'] ?? '';
+    const tenantId = credentials['tenant_id'] ?? '';
+    if (!clientId || !tenantId) {
+      return Promise.reject(new Error('Client ID and Tenant ID are required to start OAuth'));
+    }
+    return this.tauri.invoke<DeviceCodeInfo>('start_sharepoint_oauth', {
+      project: this.activeProject,
+      clientId,
+      tenantId,
+    });
+  }
+
   /** Cancels any active or starting OAuth flow. */
   async handleCancelOAuth(): Promise<void> {
     ++this.oauthStartNonce;
+    const cancelCommand =
+      this.oauthService === 'github' ? 'cancel_github_oauth' : 'cancel_sharepoint_oauth';
     try {
-      await this.tauri.invoke('cancel_sharepoint_oauth');
+      await this.tauri.invoke(cancelCommand);
     } catch {
       // Best-effort cancel
     }
+    this.oauthService = null;
     this.activeOAuthRequestId = null;
     this.oauthProjectAtStart = null;
     this.deviceCodeInfo = null;
