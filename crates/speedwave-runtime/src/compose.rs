@@ -276,10 +276,9 @@ pub fn compose_output_path_in(
     Ok(data_dir.join("compose").join(project).join("compose.yml"))
 }
 
-/// Atomic 0o600 write of the rendered compose YAML. Validates network refs
-/// pre-write and after read-back — bails on any undefined network reference.
-/// File is treated as a secret: may contain `ANTHROPIC_AUTH_TOKEN` when
-/// local-LLM auth is configured (ADR-040).
+/// Atomic 0o600 write. Validates network refs in-memory + post-read-back
+/// (catches macOS virtiofs lag; no-op on ext4/NTFS). 0o600 because YAML
+/// may carry `ANTHROPIC_AUTH_TOKEN` (ADR-040).
 #[cfg(test)]
 thread_local! {
     /// Test seam: when set, overrides the post-write read-back with this string

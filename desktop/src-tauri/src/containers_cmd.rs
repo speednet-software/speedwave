@@ -127,7 +127,8 @@ pub(crate) enum SwitchResult {
 }
 
 /// Tears down (partially-started) new project, then restores previous.
-/// Returns Ok if restore succeeded, Err with combined message if not.
+/// Each project takes its own per-project lock — intentional, not a bug:
+/// `new` and `previous` are different projects, no cross-project transaction.
 pub(crate) fn teardown_and_restore(
     new_project: &str,
     previous: &str,

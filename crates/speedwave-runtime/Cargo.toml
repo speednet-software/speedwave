@@ -126,3 +126,7 @@ required-features = ["test-support"]
 [[test]]
 name = "ssot_enforcement"
 # No required-features — pure source-parsing assertions, no runtime types.
+
+[[test]]
+name = "apply_transaction_behaviour"
+required-features = ["test-support"]

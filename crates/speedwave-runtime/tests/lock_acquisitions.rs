@@ -20,10 +20,6 @@ fn locked_methods_each_acquire_exactly_once() {
     let (rt, _) = MockRuntimeBuilder::new().build();
 
     let s = count();
-    rt.compose_ps("a").unwrap();
-    assert_eq!(count() - s, 1, "compose_ps");
-
-    let s = count();
     rt.compose_down("b").unwrap();
     assert_eq!(count() - s, 1, "compose_down");
 
@@ -34,10 +30,6 @@ fn locked_methods_each_acquire_exactly_once() {
     let s = count();
     rt.compose_up_recreate("d").unwrap();
     assert_eq!(count() - s, 1, "compose_up_recreate");
-
-    let s = count();
-    rt.compose_logs("e", 10).unwrap();
-    assert_eq!(count() - s, 1, "compose_logs");
 
     let s = count();
     rt.compose_validate("f").unwrap();
@@ -55,6 +47,8 @@ fn passthrough_methods_do_not_acquire() {
     let _ = rt.image_exists("tag:1");
     let _ = rt.build_image("t", "c", "Cf", &[]);
     let _ = rt.container_logs("ctr", 10);
+    let _ = rt.compose_ps("a");
+    let _ = rt.compose_logs("e", 10);
     let _ = rt.system_prune();
     let _ = rt.prune_buildkit_cache();
     let _ = rt.prune_unused_images();
@@ -72,7 +66,6 @@ fn transaction_with_many_inner_ops_acquires_once() {
 
     let s = count();
     rt.transaction("tx", |inner| {
-        inner.compose_ps("tx")?;
         inner.compose_down("tx")?;
         inner.compose_up_recreate("tx")?;
         inner.compose_validate("tx")?;
@@ -88,7 +81,7 @@ fn different_projects_acquire_independently() {
     let (rt, _) = MockRuntimeBuilder::new().build();
 
     let s = count();
-    rt.compose_ps("alpha").unwrap();
-    rt.compose_ps("beta").unwrap();
+    rt.compose_down("alpha").unwrap();
+    rt.compose_down("beta").unwrap();
     assert_eq!(count() - s, 2, "two different projects must acquire twice");
 }

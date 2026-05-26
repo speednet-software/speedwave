@@ -173,6 +173,94 @@ fn load_snapshot(project: &str) -> anyhow::Result<UpdateSnapshot> {
 // Update / rollback
 // ---------------------------------------------------------------------------
 
+/// Mutation core of `update_containers`. Caller preparation runs outside;
+/// this function owns the per-project compose lock.
+#[cfg(any(test, feature = "test-support"))]
+pub fn apply_update_transaction(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    compose_yml: &str,
+    enabled_images: &[&build::ImageDef],
+    bundle_id: &str,
+) -> anyhow::Result<u32> {
+    apply_update_transaction_inner(runtime, project, compose_yml, enabled_images, bundle_id)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn apply_update_transaction(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    compose_yml: &str,
+    enabled_images: &[&build::ImageDef],
+    bundle_id: &str,
+) -> anyhow::Result<u32> {
+    apply_update_transaction_inner(runtime, project, compose_yml, enabled_images, bundle_id)
+}
+
+fn apply_update_transaction_inner(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    compose_yml: &str,
+    enabled_images: &[&build::ImageDef],
+    bundle_id: &str,
+) -> anyhow::Result<u32> {
+    runtime.transaction(project, |runtime| -> anyhow::Result<u32> {
+        save_snapshot(project)?;
+        compose::save_compose(project, compose_yml)?;
+
+        let built =
+            build::build_images_for_bundle(runtime, enabled_images, bundle_id).map_err(|e| {
+                anyhow::anyhow!(
+                    "Image rebuild failed: {}. Containers are still running with the previous version.",
+                    e
+                )
+            })?;
+
+        runtime.compose_down(project)?;
+        crate::runtime::compose_validate_with_retry(runtime, project)?;
+        runtime.compose_up_recreate(project)?;
+        Ok(built)
+    })
+}
+
+/// Mutation core of `rollback_containers`. Restores snapshot YAML and
+/// recreates containers under the per-project compose lock.
+#[cfg(any(test, feature = "test-support"))]
+pub fn apply_rollback_transaction(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    snapshot_yml: &str,
+) -> anyhow::Result<()> {
+    apply_rollback_transaction_inner(runtime, project, snapshot_yml)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn apply_rollback_transaction(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    snapshot_yml: &str,
+) -> anyhow::Result<()> {
+    apply_rollback_transaction_inner(runtime, project, snapshot_yml)
+}
+
+fn apply_rollback_transaction_inner(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    snapshot_yml: &str,
+) -> anyhow::Result<()> {
+    runtime.transaction(project, |runtime| -> anyhow::Result<()> {
+        compose::save_compose(project, snapshot_yml)?;
+        crate::runtime::compose_validate_with_retry(runtime, project)?;
+        runtime.compose_up_recreate(project).map_err(|e| {
+            anyhow::anyhow!(
+                "Rollback failed: {}. Old compose.yml was restored. Run `speedwave` to start containers manually.",
+                e
+            )
+        })?;
+        Ok(())
+    })
+}
+
 pub fn update_containers(
     runtime: &crate::runtime::LockedRuntime,
     project: &str,
@@ -230,31 +318,15 @@ pub fn update_containers(
         );
     }
 
-    // Per-project compose lock covers the full transaction: snapshot, save,
-    // build, down, up. Prevents races with Desktop watchdog/restart paths.
     let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
-    let images_rebuilt = runtime.transaction(project, |runtime| -> anyhow::Result<u32> {
-        save_snapshot(project)?;
-        compose::save_compose(project, &compose_yml)?;
-
-        let built = build::build_images_for_bundle(
-            runtime,
-            &build::enabled_images(&integrations),
-            &new_manifest.bundle_id,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Image rebuild failed: {}. Containers are still running with the previous version.",
-                e
-            )
-        })?;
-
-        runtime.compose_down(project)?;
-        crate::runtime::compose_validate_with_retry(runtime, project)?;
-        runtime.compose_up_recreate(project)?;
-        Ok(built)
-    })?;
+    let images_rebuilt = apply_update_transaction(
+        runtime,
+        project,
+        &compose_yml,
+        &build::enabled_images(&integrations),
+        &new_manifest.bundle_id,
+    )?;
 
     // 9. Wait for containers to stabilize before health check.
     //    A crash-looping container may briefly show state=="running".
@@ -349,17 +421,7 @@ pub fn rollback_containers(
         );
     }
 
-    runtime.transaction(project, |runtime| -> anyhow::Result<()> {
-        compose::save_compose(project, &snapshot.compose_yml)?;
-        crate::runtime::compose_validate_with_retry(runtime, project)?;
-        runtime.compose_up_recreate(project).map_err(|e| {
-            anyhow::anyhow!(
-                "Rollback failed: {}. Old compose.yml was restored. Run `speedwave` to start containers manually.",
-                e
-            )
-        })?;
-        Ok(())
-    })
+    apply_rollback_transaction(runtime, project, &snapshot.compose_yml)
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +429,7 @@ pub fn rollback_containers(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -497,106 +559,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_build_before_compose_down_in_update_containers() {
-        // **Why a structural (source-code) test?**
-        //
-        // The key safety invariant: `build_images_for_bundle` must run BEFORE
-        // `compose_down`. Building first means a failed build leaves running
-        // containers untouched (containerd uses content-addressable storage,
-        // so new images don't affect running containers).
-        //
-        // A behavioral test would require mocking `build::build_images_for_bundle`
-        // (a free function, not a trait method) plus `config::load_user_config`,
-        // `compose::render_compose`, `SecurityCheck::run`, and filesystem I/O.
-        // That level of test infrastructure isn't justified for a single
-        // ordering invariant. Instead we verify the call order directly in
-        // the source text, scoped to the `update_containers` function body.
-        let source = include_str!("update.rs");
-
-        // Locate the function body to avoid false matches from
-        // rollback_containers or other functions that also call compose_down.
-        let fn_start = source
-            .find("fn update_containers(")
-            .expect("update_containers function must exist in update.rs");
-        let fn_body = &source[fn_start..];
-
-        let build_pos = fn_body
-            .find("build::build_images_for_bundle")
-            .expect("build_images_for_bundle call must exist in update_containers");
-        let down_pos = fn_body
-            .find("runtime.compose_down(project)")
-            .expect("compose_down call must exist in update_containers");
-
-        assert!(
-            build_pos < down_pos,
-            "Safety invariant violated: build_images_for_bundle (at byte offset {build_pos}) \
-             must appear before compose_down (at byte offset {down_pos}) in \
-             update_containers — building first ensures a failed build leaves \
-             running containers untouched",
-        );
-    }
-
-    #[test]
-    fn test_update_containers_wraps_full_sequence_in_transaction() {
-        // Structural test: update_containers must wrap snapshot+save+build+down+
-        // validate+up in a single `runtime.transaction(project, ...)` call so
-        // that the per-project compose lock covers the whole sequence.
-        let source = include_str!("update.rs");
-        let fn_start = source
-            .find("fn update_containers(")
-            .expect("update_containers must exist");
-        let fn_body = &source[fn_start..];
-
-        let tx_pos = fn_body
-            .find("runtime.transaction(")
-            .expect("update_containers must call runtime.transaction(project, ...)");
-        let validate_pos = fn_body
-            .find("compose_validate_with_retry")
-            .expect("update_containers must call compose_validate_with_retry between down and up");
-        let up_pos = fn_body
-            .find("runtime.compose_up_recreate(project)")
-            .expect("update_containers must call compose_up_recreate");
-        let down_pos = fn_body
-            .find("runtime.compose_down(project)")
-            .expect("compose_down call expected");
-
-        assert!(
-            tx_pos < down_pos
-                && down_pos < validate_pos
-                && validate_pos < up_pos,
-            "update_containers must follow order: transaction(...) {{ compose_down -> compose_validate_with_retry -> compose_up_recreate }} \
-             (tx={tx_pos}, down={down_pos}, validate={validate_pos}, up={up_pos})"
-        );
-    }
-
-    #[test]
-    fn test_rollback_containers_runs_validate_before_up_recreate_in_transaction() {
-        let source = include_str!("update.rs");
-        let fn_start = source
-            .find("pub fn rollback_containers(")
-            .expect("rollback_containers must exist");
-        let fn_body = &source[fn_start..];
-
-        let tx_pos = fn_body
-            .find("runtime.transaction(")
-            .expect("rollback_containers must call runtime.transaction(project, ...)");
-        let save_pos = fn_body
-            .find("compose::save_compose")
-            .expect("rollback_containers must call save_compose with snapshot YAML");
-        let validate_pos = fn_body
-            .find("compose_validate_with_retry")
-            .expect("rollback_containers must call compose_validate_with_retry");
-        let up_pos = fn_body
-            .find("runtime.compose_up_recreate(project)")
-            .expect("rollback_containers must call compose_up_recreate");
-
-        assert!(
-            tx_pos < save_pos && save_pos < validate_pos && validate_pos < up_pos,
-            "rollback_containers must follow order: transaction(...) {{ save_compose -> compose_validate_with_retry -> compose_up_recreate }} \
-             (tx={tx_pos}, save={save_pos}, validate={validate_pos}, up={up_pos})"
-        );
-    }
+    // Behavioural tests for `apply_update_transaction` and
+    // `apply_rollback_transaction` live in `tests/apply_transaction_behaviour.rs`
+    // — they need a fresh `OnceLock` for `data_dir()`, which is only possible
+    // in a separate integration-test binary.
 
     #[test]
     fn test_rollback_with_empty_plugin_manifests_is_valid() {
@@ -805,37 +771,25 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_after_recreate_in_update_containers() {
-        // Structural test: prune_old_bundle_images must appear AFTER the new
-        // containers are recreated and verified — atomicity guarantee. If
-        // anything earlier failed, the previous bundle's images stay on disk
-        // so rollback has a complete previous state to restore.
+    fn test_prune_after_apply_in_update_containers() {
+        // Atomicity invariant: previous-bundle prune runs only after the new
+        // containers are verified running. `apply_update_transaction` owns the
+        // build/recreate sequence; `prune_old_bundle_images` must follow it.
         let source = include_str!("update.rs");
-
         let fn_start = source
             .find("fn update_containers(")
-            .expect("update_containers function must exist in update.rs");
+            .expect("update_containers must exist");
         let fn_body = &source[fn_start..];
-
+        let apply_pos = fn_body
+            .find("apply_update_transaction(")
+            .expect("apply_update_transaction call expected");
         let prune_pos = fn_body
             .find("prune_old_bundle_images")
-            .expect("prune_old_bundle_images call must exist in update_containers");
-        let build_pos = fn_body
-            .find("build::build_images_for_bundle")
-            .expect("build_images_for_bundle call must exist in update_containers");
-        let recreate_pos = fn_body
-            .find("compose_up_recreate(project)")
-            .expect("compose_up_recreate call must exist in update_containers");
-
+            .expect("prune_old_bundle_images call expected");
         assert!(
-            prune_pos > build_pos,
-            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
-             build_images_for_bundle (at byte {build_pos}) in update_containers"
-        );
-        assert!(
-            prune_pos > recreate_pos,
-            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
-             compose_up_recreate (at byte {recreate_pos}) in update_containers"
+            prune_pos > apply_pos,
+            "prune_old_bundle_images ({prune_pos}) must appear AFTER \
+             apply_update_transaction ({apply_pos}) — atomic on-success prune"
         );
     }
 

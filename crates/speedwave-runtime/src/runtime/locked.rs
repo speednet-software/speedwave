@@ -63,11 +63,9 @@ where
     })
 }
 
-/// Public wrapper for `ContainerRuntime`. Every compose-touching call goes
-/// through `with_acquired`; non-compose ops are direct passthrough. ISP
-/// trade-off: monolithic façade by design — the SSOT enforcement (callers
-/// cannot bypass per-project locking) is more valuable than per-domain
-/// sub-traits. See ADR-066.
+/// Public wrapper for `ContainerRuntime`. Compose mutations lock via
+/// `with_acquired`; read-only queries (`ps`, `logs`) and non-compose ops
+/// are passthrough. See ADR-066.
 pub struct LockedRuntime {
     inner: Box<dyn ContainerRuntime>,
 }
@@ -87,16 +85,8 @@ impl LockedRuntime {
         with_acquired(project, || self.inner.compose_down(project))
     }
 
-    pub fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-        with_acquired(project, || self.inner.compose_ps(project))
-    }
-
     pub fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || self.inner.compose_up_recreate(project))
-    }
-
-    pub fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String> {
-        with_acquired(project, || self.inner.compose_logs(project, tail))
     }
 
     pub fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
@@ -104,6 +94,14 @@ impl LockedRuntime {
     }
 
     // ----- PASSTHROUGH: no lock, do not touch compose.yml -----
+
+    pub fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.inner.compose_ps(project)
+    }
+
+    pub fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String> {
+        self.inner.compose_logs(project, tail)
+    }
 
     pub fn is_available(&self) -> bool {
         self.inner.is_available()
@@ -294,7 +292,7 @@ mod tests {
         let snap = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let s = Arc::clone(&snap);
         rt.transaction("nested", |inner| {
-            inner.compose_ps("nested")?;
+            inner.compose_validate("nested")?;
             inner.compose_down("nested")?;
             inner.compose_up_recreate("nested")?;
             *s.lock().unwrap() = held_locks_snapshot();
@@ -393,7 +391,7 @@ mod tests {
         let snap = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let s = Arc::clone(&snap);
         rt.transaction("outer", |inner| {
-            inner.compose_ps("inner_diff_project")?;
+            inner.compose_validate("inner_diff_project")?;
             *s.lock().unwrap() = held_locks_snapshot();
             Ok(())
         })
