@@ -12,11 +12,8 @@ vi.mock('fs/promises');
 
 // Test configuration
 const mockConfig: SharePointConfig = {
-  clientId: 'test-client-id',
-  tenantId: 'test-tenant-id',
   siteId: 'test-site-id',
   accessToken: 'test-access-token',
-  refreshToken: 'test-refresh-token',
 };
 
 const mockTokensDir = '/test/tokens';

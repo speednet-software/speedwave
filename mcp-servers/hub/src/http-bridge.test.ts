@@ -18,7 +18,7 @@ import {
   buildWorkerHeaders,
   _clearWorkerSessionCacheForTesting,
 } from './http-bridge.js';
-import { LATEST_PROTOCOL_VERSION } from '@speedwave/mcp-shared';
+import { LATEST_PROTOCOL_VERSION, HOST_GATEWAY_ALIAS } from '@speedwave/mcp-shared';
 import {
   getServiceMethods,
   stopBackgroundRefresh,
@@ -1424,7 +1424,7 @@ describe('http-bridge', () => {
     });
 
     it('should accept host gateway URL for OS worker', async () => {
-      process.env.WORKER_OS_URL = 'http://host.lima.internal:4007';
+      process.env.WORKER_OS_URL = `http://${HOST_GATEWAY_ALIAS}:4007`;
 
       fetchMock.mockResolvedValue({
         ok: true,

@@ -8,7 +8,7 @@ Speedwave.app acts as an active MCP proxy between Claude (isolated in a Lima VM 
 
 1. **IDE Bridge binds** a random TCP port on `127.0.0.1` and writes a lock file to `~/.speedwave/ide-bridge/<port>.lock`.
 2. **Host directory is mounted** read-only into the Claude container as `~/.claude/ide/`.
-3. **Claude detects the lock file**, derives the port from the **filename** (e.g. `37100.lock` → port 37100), and connects via WebSocket using the platform-specific gateway DNS name (`host.lima.internal` on macOS, `host.speedwave.internal` on Windows; `host.docker.internal` and `host.containers.internal` are also injected as compatibility aliases).
+3. **Claude detects the lock file**, derives the port from the **filename** (e.g. `37100.lock` → port 37100), and connects via WebSocket to `host.docker.internal:<port>`. The alias is injected into the container's `/etc/hosts` via Compose `extra_hosts` and mapped to the platform's gateway IP (Lima vzNAT on macOS, WSL2 NAT on Windows).
 4. **IDE Bridge receives events** from Claude (e.g. `openFile`, `getDiagnostics`) and forwards them to the real IDE extension.
 5. **The IDE responds** — VS Code opens files automatically as Claude edits them.
 
@@ -65,12 +65,14 @@ The IDE Bridge uses the same MCP JSON-RPC 2.0 protocol as all editor extensions,
 
 ## Platform Specifics
 
-| Platform | Gateway DNS               | Isolation | Notes                                        |
-| -------- | ------------------------- | --------- | -------------------------------------------- |
-| macOS    | `host.lima.internal`      | Lima VM   | Lima's hostagent registers DNS in gvproxy    |
-| Windows  | `host.speedwave.internal` | WSL2      | `extra_hosts` in compose resolves to host IP |
+All platforms use the canonical gateway alias `host.docker.internal`, injected into containers via Compose `extra_hosts` and resolved to the per-platform gateway IP — Lima vzNAT (192.168.5.2) on macOS, WSL2 NAT (192.168.65.1) on Windows.
 
 On all platforms, the Bridge binds to `127.0.0.1` only — the port is never exposed to the LAN.
+
+A 127.0.0.1-only bind on the host is still reachable from inside the VM because both Lima and WSL2 install a default forwarder from their gateway → host loopback. Lima registers a catch-all rule for non-privileged ports on loopback when no explicit port forwards are configured ([Lima docs][lima-port]). WSL2 reaches the host loopback through the host gateway in both NAT and mirrored networking modes ([WSL networking][wsl-net]).
+
+[lima-port]: https://lima-vm.io/docs/config/port/
+[wsl-net]: https://learn.microsoft.com/en-us/windows/wsl/networking
 
 ## See Also
 

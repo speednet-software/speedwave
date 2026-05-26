@@ -8,6 +8,7 @@
  */
 
 import { TIMEOUTS } from '@speedwave/mcp-shared';
+import type { OAuthProvider, RefreshRequest, RefreshResult } from './types.js';
 
 /** Inputs for the Microsoft v2 refresh-token POST. */
 export interface MicrosoftTokenRequest {
@@ -32,6 +33,16 @@ export interface MicrosoftTokenResponse {
 export interface MicrosoftTokenError {
   code: 'scope_mismatch' | 'invalid_grant' | 'network' | 'http' | 'malformed';
   message: string;
+}
+
+/**
+ * Keeps the AADSTS trace code; drops free text (ADR-060 live-compromise).
+ * @param raw - Microsoft `error_description` body
+ */
+export function redactErrorDescription(raw: string): string {
+  if (!raw) return 'no description';
+  const trace = raw.match(/AADSTS\d+/);
+  return trace ? trace[0] : 'redacted';
 }
 
 /**
@@ -92,8 +103,6 @@ export async function refreshMicrosoftToken(
   if (!response.ok) {
     const errCode = typeof json.error === 'string' ? json.error : 'http';
     const errDesc = typeof json.error_description === 'string' ? json.error_description : '';
-    // Scope-related failures bubble up as scope_mismatch so the caller can
-    // surface a re-consent flow without parsing free-text error_description.
     const code: MicrosoftTokenError['code'] =
       errCode === 'invalid_grant' && /scope|consent|permission/i.test(errDesc)
         ? 'scope_mismatch'
@@ -102,7 +111,7 @@ export async function refreshMicrosoftToken(
           : 'http';
     return {
       ok: false,
-      error: { code, message: `${errCode}: ${errDesc || 'no description'}` },
+      error: { code, message: `${errCode}: ${redactErrorDescription(errDesc)}` },
     };
   }
 
@@ -160,3 +169,16 @@ export async function refreshMicrosoftToken(
     },
   };
 }
+
+/** Refresh-only adapter; initial device-code exchange runs on the Tauri host. */
+export const microsoftProvider: OAuthProvider = {
+  id: 'microsoft',
+  requiredFields: ['clientId', 'tenantId'],
+  refresh: (req: RefreshRequest): Promise<RefreshResult> =>
+    refreshMicrosoftToken({
+      clientId: req.providerData.clientId,
+      tenantId: req.providerData.tenantId,
+      scopes: req.scopes,
+      refreshToken: req.refreshToken,
+    }),
+};

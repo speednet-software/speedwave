@@ -129,7 +129,68 @@ describe('ChatStateService', () => {
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Hello' });
       expect(service.isStreaming).toBe(true);
-      expect(spy).toHaveBeenCalledWith('send_message', { message: 'Hello' });
+      // String input is wrapped via `chatInputFromText` into a text-only
+      // `ChatInput` and serialized to `WireContentBlock[]` for transport.
+      expect(spy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: 'Hello' }],
+        displayText: 'Hello',
+      });
+    });
+
+    it('inlines image attachments as @/workspace/... in the wire text (ADR-065)', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockResolvedValue(undefined);
+
+      await service.sendMessage({
+        text: 'Co tu widać?',
+        attachments: [
+          {
+            filename: 'paste-1.png',
+            mediaType: 'image/png',
+            containerPath: '/workspace/.speedwave/pastes/paste-1.png',
+            hostPath: '/Users/x/proj/.speedwave/pastes/paste-1.png',
+          },
+        ],
+      });
+
+      // Wire format: pure text with the `@…` reference — no `image`
+      // content block ever crosses stdin (avoids the OOM-killing path).
+      expect(spy).toHaveBeenCalledWith('send_message', {
+        blocks: [
+          {
+            type: 'text',
+            text: 'Co tu widać?\n\n@/workspace/.speedwave/pastes/paste-1.png',
+          },
+        ],
+        displayText: 'Co tu widać?',
+      });
+      // History entry holds a metadata-only image placeholder (no bytes).
+      expect(service.messages[0].blocks).toEqual([
+        { type: 'text', content: 'Co tu widać?' },
+        { type: 'image', media_type: 'image/png', alt: 'paste-1.png' },
+      ]);
+    });
+
+    it('accepts image-only ChatInput and emits a wire text block containing the @path only', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockResolvedValue(undefined);
+
+      await service.sendMessage({
+        text: '',
+        attachments: [
+          {
+            filename: 'paste-2.jpg',
+            mediaType: 'image/jpeg',
+            containerPath: '/workspace/.speedwave/pastes/paste-2.jpg',
+            hostPath: '/Users/x/proj/.speedwave/pastes/paste-2.jpg',
+          },
+        ],
+      });
+
+      expect(spy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: '@/workspace/.speedwave/pastes/paste-2.jpg' }],
+        displayText: '',
+      });
     });
 
     it('ignores empty text', async () => {

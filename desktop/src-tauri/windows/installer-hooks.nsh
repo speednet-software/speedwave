@@ -20,6 +20,79 @@
 Var SpeedwaveCleanData
 Var SpeedwaveDataDirOverride
 
+; PRE-INSTALL: release $INSTDIR\Speedwave.exe + $INSTDIR\nodejs\* before
+; the installer overwrites them. Without this, upgrades fail with
+; "Error opening file for writing" on stale workers.
+; See ADR-048 §"PRE-INSTALL orphan worker sweep" for the full design
+; (env-var passing, CIM enumeration, ordinal path filter, file-lock poll).
+!macro NSIS_HOOK_PREINSTALL
+  ; Materialize the sweep script into $PLUGINSDIR (auto-cleaned by NSIS).
+  InitPluginsDir
+  ClearErrors
+  FileOpen $0 "$PLUGINSDIR\speedwave-sweep.ps1" w
+  ; Without IfErrors, failed FileOpen leaves $0 empty and FileWrite silently no-ops.
+  IfErrors 0 sw_sweep_write_ok
+    DetailPrint "Speedwave PRE-INSTALL: could not create sweep script in $PLUGINSDIR — skipping process sweep."
+    Goto sw_preinstall_done
+  sw_sweep_write_ok:
+  FileWrite $0 `$$ErrorActionPreference = 'Stop'$\r$\n`
+  FileWrite $0 `$$instDir = $$env:SPW_INSTDIR$\r$\n`
+  FileWrite $0 `if (-not $$instDir) { Write-Error 'SPW_INSTDIR not set'; exit 2 }$\r$\n`
+  ; String concat instead of Join-Path — see ADR-048.
+  FileWrite $0 `$$instDir = $$instDir.TrimEnd('\')$\r$\n`
+  FileWrite $0 `$$nodePrefix = $$instDir + '\nodejs\'$\r$\n`
+  FileWrite $0 `$$desktopExe = $$instDir + '\Speedwave.exe'$\r$\n`
+  FileWrite $0 `try {$\r$\n`
+  FileWrite $0 `  $$procs = Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue$\r$\n`
+  FileWrite $0 `  $$victims = $$procs | Where-Object {$\r$\n`
+  FileWrite $0 `    $$_.ExecutablePath -and ($$_.ExecutablePath.StartsWith($$nodePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or $$_.ExecutablePath.Equals($$desktopExe, [System.StringComparison]::OrdinalIgnoreCase))$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `  foreach ($$v in $$victims) {$\r$\n`
+  FileWrite $0 `    Write-Output ('killing PID ' + $$v.ProcessId + ' ' + $$v.ExecutablePath)$\r$\n`
+  FileWrite $0 `    Stop-Process -Id $$v.ProcessId -Force -ErrorAction SilentlyContinue$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `} catch {$\r$\n`
+  FileWrite $0 `  Write-Error ('sweep enumeration failed: ' + $$_)$\r$\n`
+  FileWrite $0 `  exit 3$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  ; Poll file write access on the two binaries the installer is about
+  ; to overwrite. Returns when both unlock or after 20 s timeout.
+  FileWrite $0 `$$targets = @($$desktopExe, $$nodePrefix + 'node.exe')$\r$\n`
+  FileWrite $0 `for ($$i = 0; $$i -lt 20; $$i++) {$\r$\n`
+  FileWrite $0 `  $$locked = $$false$\r$\n`
+  FileWrite $0 `  foreach ($$t in $$targets) {$\r$\n`
+  FileWrite $0 `    if (-not (Test-Path -LiteralPath $$t)) { continue }$\r$\n`
+  FileWrite $0 `    try {$\r$\n`
+  FileWrite $0 `      $$fs = [System.IO.File]::Open($$t, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)$\r$\n`
+  FileWrite $0 `      $$fs.Close()$\r$\n`
+  FileWrite $0 `    } catch {$\r$\n`
+  FileWrite $0 `      $$locked = $$true$\r$\n`
+  FileWrite $0 `      break$\r$\n`
+  FileWrite $0 `    }$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `  if (-not $$locked) { Write-Output 'all targets unlocked'; exit 0 }$\r$\n`
+  FileWrite $0 `  Start-Sleep -Milliseconds 1000$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `Write-Error 'targets still locked after 20 s'$\r$\n`
+  FileWrite $0 `exit 4$\r$\n`
+  FileClose $0
+
+  ; $INSTDIR via env var (process-scoped) — see ADR-048.
+  System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", t "$INSTDIR")i'
+
+  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\speedwave-sweep.ps1"`
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "Speedwave PRE-INSTALL: sweep exited $0 — install may fail with 'file in use'."
+    DetailPrint "Common causes: PowerShell missing, AppLocker / WDAC blocking script execution, ExecutionPolicy enforced by GPO, or a worker process the sweep could not kill."
+  ${EndIf}
+
+  ; Clear the env var so it does not leak into other installer phases.
+  System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", i 0)i'
+
+  sw_preinstall_done:
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   ; ADR-031: SPEEDWAVE_DATA_DIR redirects ~/.speedwave to a custom path.
   ; If set, we display a different prompt that names the env var explicitly

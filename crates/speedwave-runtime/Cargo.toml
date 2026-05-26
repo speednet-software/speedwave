@@ -74,6 +74,23 @@ whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 # uses the bundled audio-capture-cli, so cpal is dead weight there. Still gated
 # behind `audio-transcription` so the CLI build stays lean.
 cpal = { version = "0.16", optional = true }
+# Job Object kill-on-parent-close for host MCP workers
+# (`host_mcp_process::job_object`). `Win32_Security` is required to gate
+# `CreateJobObjectW` in windows-sys 0.61.x. Same major version as in
+# `desktop/src-tauri/Cargo.toml` for workspace coherence.
+# SSOT-alignment with desktop/src-tauri/Cargo.toml — version must stay
+# in sync across the two workspaces (they have separate Cargo.lock files
+# so workspace.dependencies cannot be used). See CLAUDE.md "windows-sys
+# version" SSOT-alignment row.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION is gated behind
+    # Win32_System_Threading in windows-sys 0.61 (compiler hint:
+    # "the item is gated behind the `Win32_System_Threading` feature").
+    "Win32_System_Threading",
+] }
 
 [features]
 # Host-side meeting transcription: WAV I/O + the model downloader + the Whisper

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { refreshMicrosoftToken } from './microsoft.js';
+import { microsoftProvider, redactErrorDescription, refreshMicrosoftToken } from './microsoft.js';
 
 describe('refreshMicrosoftToken', () => {
   const baseReq = {
@@ -85,6 +85,35 @@ describe('refreshMicrosoftToken', () => {
     if (!result.ok) {
       expect(result.error.code).toBe('network');
       expect(result.error.message).toContain('DNS lookup failed');
+    }
+  });
+
+  it('uses String(err) fallback when fetch throws a non-Error value', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue('socket hang up'));
+    const result = await refreshMicrosoftToken(baseReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('network');
+      expect(result.error.message).toBe('socket hang up');
+    }
+  });
+
+  it('uses String(err) fallback when json() throws a non-Error value', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        status: 200,
+        ok: true,
+        json: async () => {
+          throw 'truncated body';
+        },
+      })
+    );
+    const result = await refreshMicrosoftToken(baseReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('malformed');
+      expect(result.error.message).toContain('truncated body');
     }
   });
 
@@ -239,6 +268,85 @@ describe('refreshMicrosoftToken', () => {
     const result = await refreshMicrosoftToken(baseReq);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.refreshToken).toBeUndefined();
+  });
+
+  it('does not leak Microsoft error_description verbatim — redacts free text', async () => {
+    mockFetchResponse({
+      status: 400,
+      body: {
+        error: 'invalid_grant',
+        error_description:
+          'AADSTS50158: External security challenge not satisfied; UPN=alice@contoso.com; tenant=11111111-2222-3333-4444-555555555555; policy="Require Compliant Device"',
+      },
+    });
+    const result = await refreshMicrosoftToken(baseReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toContain('AADSTS50158');
+      expect(result.error.message).not.toContain('alice@contoso.com');
+      expect(result.error.message).not.toContain('contoso');
+      expect(result.error.message).not.toContain('11111111-2222-3333-4444-555555555555');
+      expect(result.error.message).not.toContain('Require Compliant Device');
+    }
+  });
+
+  it('redacts non-AADSTS free text to a stable placeholder', async () => {
+    mockFetchResponse({
+      status: 400,
+      body: { error: 'invalid_grant', error_description: 'unexpected free-form leak text' },
+    });
+    const result = await refreshMicrosoftToken(baseReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toBe('invalid_grant: redacted');
+    }
+  });
+
+  it('redactErrorDescription falls back to "no description" for empty input', () => {
+    expect(redactErrorDescription('')).toBe('no description');
+  });
+
+  describe('microsoftProvider adapter', () => {
+    it('maps providerData.clientId/tenantId into refreshMicrosoftToken inputs', async () => {
+      const captured: Array<{ url: string; body: string }> = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((url: string, init: RequestInit) => {
+          captured.push({ url, body: String(init.body) });
+          return Promise.resolve({
+            status: 200,
+            ok: true,
+            json: async () => ({
+              access_token: 'a',
+              expires_in: 3600,
+              scope: 'https://graph.microsoft.com/Sites.Manage.All',
+            }),
+          });
+        })
+      );
+      const result = await microsoftProvider.refresh({
+        providerData: {
+          clientId: 'cid-99999999-9999-9999-9999-999999999999',
+          tenantId: 'tenant-abc.onmicrosoft.com',
+        },
+        scopes: ['https://graph.microsoft.com/Sites.Manage.All'],
+        refreshToken: 'rt-from-state',
+      });
+      expect(result.ok).toBe(true);
+      expect(captured[0].url).toContain('tenant-abc.onmicrosoft.com');
+      const params = new URLSearchParams(captured[0].body);
+      expect(params.get('client_id')).toBe('cid-99999999-9999-9999-9999-999999999999');
+      expect(params.get('refresh_token')).toBe('rt-from-state');
+      expect(params.get('grant_type')).toBe('refresh_token');
+    });
+
+    it('declares clientId and tenantId as required providerData fields', () => {
+      expect(microsoftProvider.requiredFields).toEqual(['clientId', 'tenantId']);
+    });
+
+    it('registers under the stable id "microsoft"', () => {
+      expect(microsoftProvider.id).toBe('microsoft');
+    });
   });
 
   it('encodes the tenant id in the URL path', async () => {

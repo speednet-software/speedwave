@@ -75,6 +75,7 @@ export {
   validateToolName,
   validateWorkerUrl,
   validateOrigin,
+  HOST_GATEWAY_ALIAS,
 } from './security.js';
 
 // Transport
@@ -121,3 +122,20 @@ export {
   PROACTIVE_REFRESH_SECONDS,
 } from './oauth-client.js';
 export type { OAuthRefreshOptions, OAuthRefreshCode } from './oauth-client.js';
+
+// Connection status tracking (workers with external dependencies)
+export {
+  ConnectionStatusTracker,
+  makeStandardHealthCheck,
+  backgroundConnectionTest,
+  DEFAULT_WARMUP_MS,
+} from './health-status.js';
+export type { ConnectionStatus, HealthStatus } from './health-status.js';
+
+// Promise memoization with cache-on-failure
+export { memoizedPromise } from './promise-memo.js';
+export type { MemoizedPromiseOptions } from './promise-memo.js';
+
+// Connection test result classification
+export { classifyConnectionError } from './connection-test.js';
+export type { ConnectionTestResult, ConnectionErrorType } from './connection-test.js';

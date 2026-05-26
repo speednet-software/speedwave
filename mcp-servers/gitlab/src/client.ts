@@ -13,7 +13,14 @@
  */
 
 import { Gitlab } from '@gitbeaker/rest';
-import { loadToken, ts, withSetupGuidance } from '@speedwave/mcp-shared';
+import {
+  loadToken,
+  ts,
+  withSetupGuidance,
+  ConnectionStatusTracker,
+  backgroundConnectionTest,
+} from '@speedwave/mcp-shared';
+import type { ConnectionTestResult, HealthStatus } from '@speedwave/mcp-shared';
 import fs from 'fs/promises';
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -73,13 +80,6 @@ export interface GitLabCommit {
   created_at: string;
 }
 
-/** Result of GitLab API connection test with error categorization */
-export interface ConnectionTestResult {
-  success: boolean;
-  error?: string;
-  errorType?: 'auth' | 'network' | 'permission' | 'not_found' | 'unknown';
-}
-
 //═══════════════════════════════════════════════════════════════════════════════
 // Client Class
 //═══════════════════════════════════════════════════════════════════════════════
@@ -88,13 +88,12 @@ export interface ConnectionTestResult {
  * GitLab API client providing methods for projects, merge requests, pipelines, commits, branches, and issues.
  * Wraps `@gitbeaker/rest` library with consistent error handling and type-safe response mapping.
  * Supports all major GitLab operations including CI/CD, code review, and repository management.
- *
- * TODO: Consider splitting GitLabClient into domain-specific clients (MRClient, PipelineClient, etc.)
- * Current monolithic design works but violates Single Responsibility Principle. See PR review for details.
  */
 export class GitLabClient {
   private gitlab: InstanceType<typeof Gitlab>;
   private config: GitLabConfig;
+  /** Connection status tracker. Updated by background test scheduled in init. */
+  public readonly statusTracker = new ConnectionStatusTracker();
 
   /**
    * Creates a new GitLab API client instance with authentication and host configuration.
@@ -107,6 +106,11 @@ export class GitLabClient {
       token: config.token,
       host: config.host,
     });
+  }
+
+  /** Shared health snapshot. Read by the index.ts healthCheck callback. */
+  getHealthStatus(): HealthStatus {
+    return this.statusTracker.getHealth();
   }
 
   //═════════════════════════════════════════════════════════════════════════════
@@ -1482,19 +1486,22 @@ export async function initializeGitLabClient(): Promise<GitLabClient | null> {
       }
     }
 
-    // Create client
+    // Create client. Connection test runs in the background — see comment
+    // on backgroundConnectionTest. The HTTP listener no longer waits on a
+    // slow or unreachable GitLab.
     const client = new GitLabClient({ token, host });
+    backgroundConnectionTest(
+      client.statusTracker,
+      async () => {
+        const result = await client.testConnection();
+        if (!result.success) {
+          throw new Error(result.error ?? 'connection test failed');
+        }
+      },
+      'GitLab'
+    );
 
-    // Test connection
-    const connectionResult = await client.testConnection();
-    if (!connectionResult.success) {
-      // Graceful degradation: log warning, return null, let server start
-      // DO NOT throw here - see JSDoc above for rationale
-      console.warn(`${ts()} GitLab connection test failed: ${connectionResult.error}`);
-      return null;
-    }
-
-    console.log(`${ts()} ✅ GitLab client initialized (host: ${host})`);
+    console.log(`${ts()} ✅ GitLab client initialized (host: ${host}), connection test scheduled`);
     return client;
   } catch (error) {
     // Graceful degradation: log warning, return null, let server start

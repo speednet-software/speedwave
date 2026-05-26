@@ -5,7 +5,7 @@ import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { calculateCost } from '../chat/pricing';
-import { DEFAULT_CONTEXT_TOKENS, type LlmConfigResponse } from '../models/llm';
+import { DEFAULT_CONTEXT_TOKENS, isLocalProvider, type LlmConfigResponse } from '../models/llm';
 import { applyPatch, type Patch } from './json-patch';
 import {
   DEFAULT_STATE_TREE,
@@ -14,23 +14,28 @@ import {
   type LogMsgEnvelope,
   type MessageBlockState,
 } from '../models/state-tree';
-import type {
-  ChatMessage,
-  MessageBlock,
-  SessionStats,
-  StreamChunk,
-  ToolUseBlock,
-  AskUserQuestionBlock,
-  AskUserQuestionItem,
-  ProjectList,
-  RateLimitInfo,
-  EntryMeta,
-  TurnUsage,
-  QueuedMessage,
+import {
+  chatInputFromText,
+  chatInputToBlocks,
+  type ChatInput,
+  type ChatMessage,
+  type MessageBlock,
+  type SessionStats,
+  type StreamChunk,
+  type ToolUseBlock,
+  type AskUserQuestionBlock,
+  type AskUserQuestionItem,
+  type ProjectList,
+  type RateLimitInfo,
+  type EntryMeta,
+  type TurnUsage,
+  type QueuedMessage,
+  type WireContentBlock,
 } from '../models/chat';
 
 // Re-export types consumed by components
 export type {
+  ChatInput,
   ChatMessage,
   MessageBlock,
   StreamChunk,
@@ -81,7 +86,20 @@ export class ChatStateService {
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
-  private _contextWindowSize = DEFAULT_CONTEXT_TOKENS;
+  /**
+   * Context window for the active model. `null` until populated from a
+   * stream value, SSOT lookup, persisted config, or the Anthropic default
+   * fallback. ADR-041 forbids guessing a value for local providers, so
+   * `null` propagates to the UI and the footer hides the `used / max` ratio
+   * rather than showing 200K.
+   */
+  private _contextWindowSize: number | null = null;
+  /**
+   * Active LLM provider id from `get_llm_config().provider`. Drives the
+   * "is local?" check in `resolveContextWindow` — Anthropic gets the
+   * DEFAULT_CONTEXT_TOKENS bottom fallback; local providers do not.
+   */
+  private _currentProvider: string | null = null;
 
   /**
    * Last-known persisted context window from `claude.llm.context_tokens`
@@ -301,23 +319,31 @@ export class ChatStateService {
   }
 
   /**
-   * Sends a user message to Claude via the backend.
-   * @param text - The message text to send. May be the user's raw input or
-   *   a prefixed payload (e.g. plan-mode prefix); when `displayText` is
-   *   provided it is used for the local bubble while `text` is what the
-   *   backend receives.
-   * @param displayText - Optional surface-level text rendered in the chat
-   *   list. Falls back to `text` when omitted.
+   * Accepts a plain string (text-only) or `ChatInput` with attachments.
+   * @param input - Raw text or composer bundle.
+   * @param displayText - Overrides the bubble's surface text (plan-mode prefix flow).
    */
-  async sendMessage(text: string, displayText?: string): Promise<void> {
-    if (!text || this.isStreaming) return;
+  async sendMessage(input: string | ChatInput, displayText?: string): Promise<void> {
+    const chatInput: ChatInput = typeof input === 'string' ? chatInputFromText(input) : input;
+    const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
+    const hasContent = wireBlocks.length > 0;
+    if (!hasContent || this.isStreaming) return;
     console.debug('[chat-state] sendMessage: isStreaming=%s', this.isStreaming);
 
+    const displayBlocks: MessageBlock[] = [];
+    const surfaceText = displayText ?? chatInput.text;
+    if (surfaceText.length > 0) {
+      displayBlocks.push({ type: 'text', content: surfaceText });
+    }
+    for (const att of chatInput.attachments) {
+      // State-tree carries metadata only (ADR-065); bytes live on disk.
+      displayBlocks.push({ type: 'image', media_type: att.mediaType, alt: att.filename });
+    }
     this._messages = [
       ...this._messages,
       {
         role: 'user',
-        blocks: [{ type: 'text', content: displayText ?? text }],
+        blocks: displayBlocks,
         timestamp: Date.now(),
       },
     ];
@@ -326,8 +352,9 @@ export class ChatStateService {
     this._currentBlocks = [];
     this.notifyChange();
 
+    const invokeArgs = { blocks: wireBlocks, displayText: surfaceText };
     try {
-      await this.tauri.invoke('send_message', { message: text });
+      await this.tauri.invoke('send_message', invokeArgs);
     } catch (err) {
       const errStr = String(err);
       // Session died (broken pipe, exited) — restart transparently
@@ -367,7 +394,7 @@ export class ChatStateService {
             }
             // After waiting, try to send — session should be ready now
             try {
-              await this.tauri.invoke('send_message', { message: text });
+              await this.tauri.invoke('send_message', invokeArgs);
             } catch (postWaitErr) {
               this.isStreaming = false;
               this._messages = [
@@ -395,7 +422,7 @@ export class ChatStateService {
             } finally {
               this.startingSession = false;
             }
-            await this.tauri.invoke('send_message', { message: text });
+            await this.tauri.invoke('send_message', invokeArgs);
             return;
           }
           // No active project — surface actionable error
@@ -795,7 +822,7 @@ export class ChatStateService {
     this._model = '';
     this._rateLimit = null;
     this._totalOutputTokens = 0;
-    this._contextWindowSize = DEFAULT_CONTEXT_TOKENS;
+    this._contextWindowSize = null;
     this._pendingQueue = null;
     this.initialized = false;
     this.startingSession = false;
@@ -1001,8 +1028,9 @@ export class ChatStateService {
         this._model = '';
         this._rateLimit = null;
         this._totalOutputTokens = 0;
-        this._contextWindowSize = DEFAULT_CONTEXT_TOKENS;
+        this._contextWindowSize = null;
         this._persistedContextTokens = null;
+        this._currentProvider = null;
         this.notifyChange();
       } else if (this.projectState.status === 'ready') {
         // Project just settled — re-pull the persisted context tokens so
@@ -1013,21 +1041,24 @@ export class ChatStateService {
   }
 
   /**
-   * Single fallback chain for the chat footer's context-window value.
+   * Fallback chain for the chat footer's context-window value.
    * Order: live stream value → Anthropic SSOT lookup → persisted
-   * `claude.llm.context_tokens` → previous `_contextWindowSize` →
-   * {@link DEFAULT_CONTEXT_TOKENS}. The same chain is used by the Result
-   * chunk handler, `seedResumedSession`, and `refreshLlmConfigCache`.
+   * `claude.llm.context_tokens` → previous `_contextWindowSize` → for
+   * Anthropic only: {@link DEFAULT_CONTEXT_TOKENS}. Local providers
+   * propagate `null` instead — ADR-041 "never guess".
    * @param liveValue - Authoritative value carried by the stream (highest priority).
    * @param model - Resolved model id used for the SSOT lookup.
    */
-  private resolveContextWindow(liveValue: number | undefined, model: string | undefined): number {
+  private resolveContextWindow(
+    liveValue: number | undefined,
+    model: string | undefined
+  ): number | null {
     if (liveValue) return liveValue;
     const fromSsot = this.anthropicModels.contextTokensFor(model);
     if (fromSsot) return fromSsot;
     if (this._persistedContextTokens) return this._persistedContextTokens;
     if (this._contextWindowSize) return this._contextWindowSize;
-    return DEFAULT_CONTEXT_TOKENS;
+    return isLocalProvider(this._currentProvider) ? null : DEFAULT_CONTEXT_TOKENS;
   }
 
   /**
@@ -1040,6 +1071,7 @@ export class ChatStateService {
     try {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
       this._persistedContextTokens = config.context_tokens ?? null;
+      this._currentProvider = config.provider;
       // If we have no live stream value yet, surface the persisted one
       // through `_contextWindowSize` so the next `notifyChange` rebuilds
       // session stats with the right `used / max`.
@@ -1465,6 +1497,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'error':
         out.push({ type: 'error', content: b.content });
         break;
+      case 'image':
+        out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
+        break;
     }
   }
   return out;
@@ -1518,11 +1553,11 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
       case 'error':
         out.push({ kind: 'error', content: b.content });
         break;
+      case 'image':
+        out.push({ kind: 'image', media_type: b.media_type, alt: b.alt ?? null });
+        break;
       case 'permission_prompt':
-        // Permission prompts are not part of the patch state-tree shape;
-        // they're an in-flight UI affordance not persisted as conversation.
-        // Skipping is consistent with how the backend never emits them as
-        // state — they're surfaced via control-request channel.
+        // In-flight UI affordance; never persisted to the state-tree.
         break;
     }
   }

@@ -93,6 +93,29 @@ describe('IdeBridgeComponent', () => {
     expect(component.ideConnecting).toBe(false);
   });
 
+  it('disconnectIde invokes disconnect_ide and clears selectedIde', async () => {
+    await component.ngOnInit();
+    component.selectedIde = { ide_name: 'VS Code', port: 3000 };
+    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+    await component.disconnectIde();
+    expect(invokeSpy).toHaveBeenCalledWith('disconnect_ide');
+    expect(component.selectedIde).toBeNull();
+    expect(component.ideConnecting).toBe(false);
+  });
+
+  it('disconnectIde sets error on invoke failure', async () => {
+    await component.ngOnInit();
+    component.selectedIde = { ide_name: 'VS Code', port: 3000 };
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'disconnect_ide') throw new Error('config write failed');
+      return undefined;
+    };
+    await component.disconnectIde();
+    expect(component.ideError).toBe('Failed to disconnect: Error: config write failed');
+    expect(component.ideConnecting).toBe(false);
+    expect(component.selectedIde).toEqual({ ide_name: 'VS Code', port: 3000 });
+  });
+
   it('loads selected IDE from backend on init', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
@@ -173,8 +196,8 @@ describe('IdeBridgeComponent', () => {
     await new Promise((r) => setTimeout(r, 0));
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
-    const btn = fixture.nativeElement.querySelector('[data-testid="connect-btn"]');
-    expect(btn.textContent.trim()).toBe('connected');
+    const btn = fixture.nativeElement.querySelector('[data-testid="disconnect-btn"]');
+    expect(btn.textContent.trim()).toBe('connected ✕');
     expect(btn.getAttribute('data-active')).toBe('true');
   });
 

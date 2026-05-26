@@ -90,7 +90,48 @@ pub fn check_os_warnings() -> Vec<String> {
     #[cfg(target_os = "windows")]
     warnings.extend(check_nested_virt());
 
+    #[cfg(target_os = "windows")]
+    warnings.extend(check_wsl_mirrored_mode_supported());
+
     warnings
+}
+
+/// Warns when the Windows build is older than 22H2 (build 22621), where
+/// `.wslconfig` `networkingMode=mirrored` is silently ignored — corporate
+/// VPN routes never propagate into WSL2 distros. Not a blocker; Speedwave
+/// works otherwise.
+#[cfg(target_os = "windows")]
+fn check_wsl_mirrored_mode_supported() -> Vec<String> {
+    let build = match windows_build_number() {
+        Some(b) => b,
+        None => return Vec::new(), // Couldn't detect — don't warn on uncertainty.
+    };
+    if build >= 22621 {
+        Vec::new()
+    } else {
+        vec![format!(
+            "Windows build {build} predates WSL2 mirrored networking \
+             (Windows 11 22H2 / build 22621+). Services on a corporate \
+             VPN may be unreachable from inside the Speedwave WSL distro. \
+             Upgrade Windows to fix."
+        )]
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_build_number() -> Option<u32> {
+    let output = crate::binary::system_command("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "[System.Environment]::OSVersion.Version.Build",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 fn check_low_memory() -> Vec<String> {

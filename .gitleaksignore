@@ -14,6 +14,7 @@ crates/speedwave-runtime/src/log_sanitizer.rs:private-key:650
 crates/speedwave-runtime/src/log_sanitizer.rs:generic-api-key:282
 crates/speedwave-runtime/src/log_sanitizer.rs:generic-api-key:330
 crates/speedwave-runtime/src/log_sanitizer.rs:generic-api-key:620
+crates/speedwave-runtime/src/log_sanitizer.rs:generic-api-key:905
 crates/speedwave-runtime/src/log_sanitizer.rs:gitlab-pat:783
 crates/speedwave-runtime/src/log_sanitizer.rs:slack-legacy-workspace-token:486
 crates/speedwave-runtime/src/log_sanitizer.rs:slack-legacy-workspace-token:500

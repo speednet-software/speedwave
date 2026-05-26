@@ -365,20 +365,21 @@ describe('security', () => {
       expect(validateWorkerUrl('http://mcp-a1b2c3:65535')).toBe(true);
     });
 
-    it('accepts macOS host gateway', () => {
-      expect(validateWorkerUrl('http://host.lima.internal:4007')).toBe(true);
-    });
-
-    it('accepts Docker-compatibility host gateway', () => {
+    it('accepts canonical host gateway alias', () => {
       expect(validateWorkerUrl('http://host.docker.internal:4007')).toBe(true);
     });
 
-    it('accepts Windows host gateway', () => {
-      expect(validateWorkerUrl('http://host.speedwave.internal:4007')).toBe(true);
+    // Regression negatives — deprecated aliases removed in the SSOT consolidation.
+    it('rejects deprecated host.lima.internal', () => {
+      expect(validateWorkerUrl('http://host.lima.internal:4007')).toBe(false);
     });
 
-    it('accepts host.containers.internal gateway', () => {
-      expect(validateWorkerUrl('http://host.containers.internal:4007')).toBe(true);
+    it('rejects deprecated host.speedwave.internal', () => {
+      expect(validateWorkerUrl('http://host.speedwave.internal:4007')).toBe(false);
+    });
+
+    it('rejects deprecated host.containers.internal', () => {
+      expect(validateWorkerUrl('http://host.containers.internal:4007')).toBe(false);
     });
 
     it('rejects cloud metadata endpoint', () => {
@@ -418,7 +419,7 @@ describe('security', () => {
     });
 
     it('rejects host gateway without port', () => {
-      expect(validateWorkerUrl('http://host.lima.internal')).toBe(false);
+      expect(validateWorkerUrl('http://host.docker.internal')).toBe(false);
     });
 
     it('rejects trailing hyphen in hostname', () => {

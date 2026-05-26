@@ -116,7 +116,7 @@ Tool selection across the ~25 tools rests on three layers:
 
 1. **`_meta.keywords` + `_meta.deferLoading` (ADR-036)** inside the tool definitions — the hub shows only `readDocument` and `markdownToPdf` upfront; the rest are `deferLoading: true`, reached via `search_tools`, matched on `keywords` (broad enough to catch natural-language queries: `office`, `file`, `make`, `new`, `build`, `template`, `formatted`, `features`, `heading`, `paragraph`, `table`, `sheet`, `slide`, `deck`, …).
 2. **Tool `description`s with cross-references** ("Use this for …" plus "For X instead use `Y`") that disambiguate the overlapping tools (three roads to PDF: `markdownToPdf` ← Markdown, `htmlToPdf` ← HTML, `officeToPdf` ← an existing Office file).
-3. **A `claude-resources/skills/office/SKILL.md` decision-map skill.** v1 shipped without one; feedback showed that even with broad keywords Claude would still occasionally reach for `pip install python-docx` because it had not yet called `search_tools` with a matching query and so did not know `createDocx` existed. The skill — modelled on the existing `playwright-browser` skill, shipped via the core-resources path (`containers/claude-resources/` → `bundle::sync_claude_resources` → data dir → `:ro` mount → `entrypoint.sh` symlink, so no Rust/compose/entrypoint changes) — puts a task→tool table, the `create*`/`renderChart` DSL, the `convertOffice` matrix, and an explicit "**never** `pip install` / `apt install` / `npm install` — the libraries are already behind `office__*` and the Claude container can't install them anyway" guardrail into the system prompt from turn 1. The skill is unconditional (loaded for every project, like `playwright-browser`): Claude only activates it when the description's trigger phrases match the prompt, so for non-Office projects it sits idle. No `/office:*` commands — the skill plus the keyword/description layers cover tool selection without adding slash commands. (This is the "if feedback later shows Claude mis-selecting tools, an `office` skill can be added in a separate PR" revision condition the first cut of this ADR named.)
+3. **A `containers/claude-resources/skills/integrations/office/SKILL.md` decision-map skill.** v1 shipped without one; feedback showed that even with broad keywords Claude would still occasionally reach for `pip install python-docx` because it had not yet called `search_tools` with a matching query and so did not know `createDocx` existed. The skill — modelled on the existing playwright skill, shipped via the core-resources path (`containers/claude-resources/` → `bundle::sync_claude_resources` → data dir → `:ro` mount → `entrypoint.sh` symlink) — puts a task→tool table, the `create*`/`renderChart` DSL, the `convertOffice` matrix, and an explicit "**never** `pip install` / `apt install` / `npm install` — the libraries are already behind `office__*` and the Claude container can't install them anyway" guardrail into the system prompt from turn 1. The skill is linked into `~/.claude/skills/office` only when the `office` integration is enabled in `ENABLED_SERVICES`; with the integration off, Claude does not see the skill and cannot try to call `office__*` tools whose worker is no longer running. No `/office:*` commands — the skill plus the keyword/description layers cover tool selection without adding slash commands.
 
 ### Security contract
 
@@ -132,6 +132,18 @@ This is part of the decision, not an implementation detail:
 ### Deliberate duplication with `presale`
 
 `mcp-office`'s extraction engine is ported from `presale`'s; both repositories keep their own copy. By the Rule of Three (`.claude/rules/engineering-principles.md`) two occurrences is "note it, don't abstract it". If a third consumer appears, a separate effort extracts the engine into a shared library — which spans both repositories and therefore needs its own ADR and the coordination required by CLAUDE.md's "Breaking-change rule".
+
+### Per-integration claude-resources gating
+
+Integration-bound claude-resources live under `containers/claude-resources/<type>/integrations/<config_key>/` (where `<config_key>` matches `TOGGLEABLE_MCP_SERVICES`). `containers/entrypoint.sh` symlinks an `integrations/<svc>/` entry into `~/.claude/<type>/<svc>` only when `<svc>` appears in `ENABLED_SERVICES`, which `compose::apply_integrations_filter` injects into both `mcp-hub` and `claude`. A state file `~/.claude/.speedwave-managed-links` records every link the entrypoint owns; on each start the previously-managed set is removed before the new set is built, so toggling an integration off in Settings removes the corresponding skill from `~/.claude/skills/` rather than leaving it dangling and lying about tools whose worker is no longer running.
+
+Three skill directories live under this convention:
+
+- `containers/claude-resources/skills/integrations/office/` — gated by `office`
+- `containers/claude-resources/skills/integrations/playwright/` — gated by `playwright` (directory name matches the `playwright` `config_key`)
+- `containers/claude-resources/skills/integrations/context7/` — gated by `context7`
+
+Core skills (e.g. `code-review-*`) remain at the top level of `claude-resources/<type>/` and are always linked.
 
 ## Rejected alternatives
 

@@ -1,5 +1,5 @@
 /**
- * `query_docs` tool — fetch documentation snippets for a known library ID.
+ * `queryDocs` tool — fetch documentation snippets for a known library ID.
  * @module mcp-context7/tools/query_docs
  */
 
@@ -16,21 +16,21 @@ import { DEFAULT_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS, MIN_OUTPUT_TOKENS } from '../
 
 /** Tool metadata exposed to the hub. */
 export const queryDocsTool: Tool = {
-  name: 'query_docs',
+  name: 'queryDocs',
   description:
-    'Retrieve documentation snippets for a Context7 library ID. Use resolve_library_id first if the ID is unknown.',
+    'Retrieve documentation snippets for a Context7 library ID. Use resolveLibraryId first if the ID is unknown.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { deferLoading: false },
   keywords: ['context7', 'docs', 'documentation', 'snippets', 'context'],
   example:
-    'const { docs } = await context7.query_docs({ libraryId: "/facebook/react", query: "useState examples" })',
+    'const { docs } = await context7.queryDocs({ libraryId: "/facebook/react", query: "useState examples" })',
   inputSchema: {
     type: 'object',
     properties: {
       libraryId: {
         type: 'string',
         description:
-          'Context7 library ID (e.g. "/facebook/react", "/vercel/next.js@v15.1.8"). Get it from resolve_library_id.',
+          'Context7 library ID (e.g. "/facebook/react", "/vercel/next.js@v15.1.8"). Get it from resolveLibraryId.',
       },
       query: {
         type: 'string',

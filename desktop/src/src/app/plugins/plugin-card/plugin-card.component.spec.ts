@@ -19,6 +19,7 @@ function makeMcpPlugin(): PluginStatusEntry {
         field_type: 'password',
         placeholder: 'Enter key',
         is_secret: true,
+        required: true,
       },
       {
         key: 'host_url',
@@ -26,6 +27,7 @@ function makeMcpPlugin(): PluginStatusEntry {
         field_type: 'text',
         placeholder: 'https://...',
         is_secret: false,
+        required: true,
       },
     ],
     current_values: { host_url: 'https://crm.test' },
@@ -33,6 +35,7 @@ function makeMcpPlugin(): PluginStatusEntry {
     settings_schema: null,
     requires_integrations: [],
     verification_status: 'verified',
+    has_host_bridge: false,
   };
 }
 
@@ -51,6 +54,7 @@ function makeResourcePlugin(): PluginStatusEntry {
     settings_schema: null,
     requires_integrations: [],
     verification_status: 'verified',
+    has_host_bridge: false,
   };
 }
 

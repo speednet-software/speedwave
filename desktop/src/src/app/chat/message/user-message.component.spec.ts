@@ -97,4 +97,48 @@ describe('UserMessageComponent', () => {
     expect(body).not.toBeNull();
     expect(body.textContent?.trim()).toBe('');
   });
+
+  // ── Image attachment placeholders (post-reload contract) ────────────
+
+  it('renders an image placeholder pill with the filename label when alt is set', () => {
+    fixture.componentRef.setInput('blocks', [
+      { type: 'text', content: 'See screenshot:' },
+      { type: 'image', media_type: 'image/png', alt: 'screenshot.png' },
+    ]);
+    fixture.detectChanges();
+
+    const pill = fixture.nativeElement.querySelector(
+      '[data-testid="user-message-image"]'
+    ) as HTMLElement;
+    expect(pill).not.toBeNull();
+    expect(pill.textContent).toContain('screenshot.png');
+    expect(pill.getAttribute('aria-label')).toBe('Image attachment');
+  });
+
+  it('falls back to a humanised MIME label when alt is missing (clipboard paste case)', () => {
+    fixture.componentRef.setInput('blocks', [{ type: 'image', media_type: 'image/png' }]);
+    fixture.detectChanges();
+
+    const pill = fixture.nativeElement.querySelector(
+      '[data-testid="user-message-image"]'
+    ) as HTMLElement;
+    expect(pill).not.toBeNull();
+    expect(pill.textContent).toContain('PNG');
+  });
+
+  it('renders text and image blocks in the order they appear in the array', () => {
+    fixture.componentRef.setInput('blocks', [
+      { type: 'image', media_type: 'image/jpeg', alt: 'one.jpg' },
+      { type: 'text', content: 'after image' },
+    ]);
+    fixture.detectChanges();
+
+    const body = fixture.nativeElement.querySelector(
+      '[data-testid="user-message-body"]'
+    ) as HTMLElement;
+    const imgIdx = body.textContent?.indexOf('one.jpg') ?? -1;
+    const textIdx = body.textContent?.indexOf('after image') ?? -1;
+    expect(imgIdx).toBeGreaterThanOrEqual(0);
+    expect(textIdx).toBeGreaterThan(imgIdx);
+  });
 });

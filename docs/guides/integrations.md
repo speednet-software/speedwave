@@ -107,15 +107,29 @@ If the build fails (network, disk), the integration row reverts to disabled — 
 
 The GitHub integration is a built-in MCP worker that talks to **GitHub.com** through the official Octokit REST client. It is the GitHub-side counterpart to the GitLab worker — repositories, pull requests, branches, commits, GitHub Actions, issues, labels, tags, and releases.
 
-#### Authentication — fine-grained Personal Access Token
+#### Authentication — OAuth App device flow
 
-GitHub uses a single credential: a **fine-grained Personal Access Token**. Create one in GitHub under **Settings → Developer settings → Fine-grained tokens → Generate new token**, then scope it to exactly the repositories you want Claude to reach (or "All repositories" if you trust the worker with your whole account — not recommended). Paste the `github_pat_...` value into the GitHub integration's `token` field in the Desktop app; it is stored at `~/.speedwave/tokens/<project>/github/token` with `0o600` permissions and mounted read-only into the worker.
+The Desktop app authorizes GitHub via the **Speedwave GitHub OAuth App** (registered by Speednet on github.com) using the **device flow** — the same UX as `gh auth login`:
 
-Classic (`ghp_...`) tokens also work, but fine-grained tokens are strongly preferred because they let you grant the minimum permission per repository.
+1. Click **Sign in with GitHub** on the integration card.
+2. The Desktop app shows a short user code (e.g. `ABCD-1234`) and a link to `https://github.com/login/device`.
+3. Open the link, paste the code, click **Authorize Speedwave**.
+4. The Desktop app stores the resulting `gho_...` access token at `~/.speedwave/tokens/<project>/github/token` (`0o600` permissions) and mounts it read-only into the worker.
 
-#### Per-tool permission matrix
+The token is **long-lived** (no expiration window in the OAuth App device flow — GitHub does not publish a precise inactivity TTL, but it is on the order of a year of unused; reconnect manually if a tool call returns `401`). Speedwave does **not** persist a refresh token (there is none for OAuth App device flow), and the access token never crosses the Tauri ↔ Angular boundary — the polling task writes it to disk directly.
 
-A fine-grained token only carries the repository permissions you tick when creating it. Map the tools you want Claude to use to the permissions the token needs:
+The scopes requested are `repo read:user`:
+
+- **`repo`** — full control of private and public repos. Covers Issues, Pull requests, Contents, Releases, branches, commits, and GitHub Actions (runs, logs, artifacts, workflow dispatch).
+- **`read:user`** — used by the connection health probe (`GET /user`).
+
+Org and gist scopes are intentionally not requested — the worker does not call those endpoints.
+
+##### Advanced: PAT fallback
+
+For headless setups or environments where the OAuth flow is unavailable (e.g. GitHub org admins who disable OAuth Apps), you can drop a Personal Access Token (classic `ghp_...` or fine-grained `github_pat_...`) directly into the token file. The worker does not inspect the prefix — any token GitHub accepts works.
+
+If you go this route, the per-tool permissions matrix below maps Claude capabilities to the fine-grained permissions you need:
 
 | Capability                                                     | Token permission                                                 |
 | -------------------------------------------------------------- | ---------------------------------------------------------------- |
@@ -128,7 +142,7 @@ A fine-grained token only carries the repository permissions you tick when creat
 | Read GitHub Actions runs, logs, artifacts, CI status           | Actions: Read **and** Checks: Read **and** Commit statuses: Read |
 | Trigger / re-run workflows                                     | Actions: Read and write                                          |
 
-If a token is missing a permission, the worker returns the GitHub `403` body verbatim along with a hint naming the permission to add — so a failed call tells you exactly which checkbox to tick rather than failing silently.
+When a tool call hits a permission gap, the worker surfaces a generic "token is missing a required scope" message that points users at either the OAuth reconnect path or the PAT permission they need to add.
 
 #### Scope and limitations vs GitLab
 
@@ -189,10 +203,9 @@ Confluence: `listSpaces`, `getSpace`, `searchPages`, `getPage`, `getPageByTitle`
 
 SharePoint integration combines two Microsoft Graph surfaces: a SharePoint document library (files) and SharePoint Pages (the modern wiki / site content). The worker runs in a hardened container with `/tokens:ro` (per ADR-060) and refresh tokens are kept on the host inside the `oauth` worker — see the OAuth flow below.
 
-**Configuration.** The Desktop integration form collects `client_id`, `tenant_id`, `site_id`. The OAuth device-code flow runs once at setup and writes:
+**Configuration.** The Desktop integration form collects `client_id`, `tenant_id`, `site_id`. The OAuth device-code flow runs once at setup and writes two locations: the worker-mounted token directory (read-only mount) holds `access_token` and `site_id`; the host-only OAuth state directory holds `{ provider, providerData: { clientId, tenantId }, refreshToken, scopes, grantedScopes, expiresAt, lastRefreshAt }`. The `provider` field selects the IdP implementation registered in the worker; IdP-specific keys live under `providerData` so future OAuth integrations (e.g. Atlassian) plug in without touching this schema.
 
-- `~/.speedwave/tokens/<project>/sharepoint/` (mounted into the worker as `/tokens:ro`): `access_token`, `site_id`.
-- `~/.speedwave/oauth/<project>/sharepoint.json` (host-only, NOT mounted into the worker): `clientId`, `tenantId`, `refreshToken`, `scopes`, `grantedScopes`, `expiresAt`, `lastRefreshAt`.
+**Upgrading from a v1 SharePoint setup.** Pre-ADR-060 builds (and the first pass of ADR-060 before the OAuthProvider refactor) stored `clientId` / `tenantId` at the top level of `oauth/<project>/sharepoint.json` instead of under `providerData`. The new validator surfaces such files as `malformed_state` and the Integrations page shows the "Re-authorize SharePoint" banner — clicking "Sign in" reruns the device-code flow and writes the file in the new shape. The startup cleanup also removes any legacy `refresh_token` / `client_id` / `tenant_id` files left over inside the worker-mounted token directory. No manual migration steps are required.
 
 **Site ID format.** `site_id` must be a Graph site id — either path form (e.g. `acme.sharepoint.com:/sites/Marketing:` — note both colons: one after the hostname and one at the end) or composite form (`{hostname},{site-guid},{web-guid}`, obtained by calling `GET /sites/{hostname}:/sites/{path}` in Graph Explorer and copying the `id` field). A raw SharePoint URL (`https://{tenant}.sharepoint.com/sites/{name}`) is rejected at worker startup with a guidance message; the worker reports `configured: false` until a valid value is provided. Validation is fail-closed (no URL normalization in the worker) to keep the token mount at a clear trust boundary.
 
@@ -290,7 +303,7 @@ Prefer `WebFetch` when it works; drop to Playwright only when it does not. A Chr
 
 Playwright is unique among the built-in integrations in three ways:
 
-- **No credentials.** It accesses only public URLs; there is no `/tokens` mount and no credential file. Enabling the integration requires no configuration.
+- **No credentials.** It accesses public URLs and may navigate to services running on the host loopback (e.g. local dev servers like `http://host.docker.internal:4200` for an Angular project — see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)). There is no `/tokens` mount and no credential file. Enabling the integration requires no configuration.
 - **No `/workspace` mount.** Screenshots, PDFs, and page dumps are returned to Claude as base64 payloads rather than written to the project. This keeps a compromised Chromium from exfiltrating repo contents.
 - **Higher resource limits.** `shm_size: 2g` (Chromium IPC needs it), `tmpfs /tmp: 1g` (Chromium caches heavily), `cpus: 2.0`, `memory: 2048m` — noticeably larger than the 128 MiB budget given to HTTP-only workers.
 
@@ -320,12 +333,12 @@ Removing the key returns to anonymous mode — the toggle stays enabled (unlike 
 
 #### Tool surface
 
-| Tool                 | Parameters                      | Description                                                                                                                         |
-| -------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `resolve_library_id` | `libraryName`, `query`          | Resolve a name (e.g. "react") to a Context7 ID (e.g. `/facebook/react`). Returns top 10 matches with `trustScore` and version list. |
-| `query_docs`         | `libraryId`, `query`, `tokens?` | Fetch documentation snippets for a known ID. `tokens` defaults to 5000, clamped to `[500, 15000]` to bound context-window usage.    |
+| Tool               | Parameters                      | Description                                                                                                                         |
+| ------------------ | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `resolveLibraryId` | `libraryName`, `query`          | Resolve a name (e.g. "react") to a Context7 ID (e.g. `/facebook/react`). Returns top 10 matches with `trustScore` and version list. |
+| `queryDocs`        | `libraryId`, `query`, `tokens?` | Fetch documentation snippets for a known ID. `tokens` defaults to 5000, clamped to `[500, 15000]` to bound context-window usage.    |
 
-The Hub exposes both tools through `execute_code` (preferred) — e.g. `await context7.resolve_library_id({libraryName: "react", query: "useState"})`.
+The Hub exposes both tools through `execute_code`: `await context7.resolveLibraryId({libraryName: "react", query: "useState"})` and `await context7.queryDocs({libraryId: "/facebook/react", query: "useState"})`.
 
 #### Example prompts
 
@@ -334,7 +347,7 @@ The Hub exposes both tools through `execute_code` (preferred) — e.g. `await co
 
 #### Skill
 
-Speedwave ships `context7/SKILL.md` (in `containers/claude-resources/skills/`) that teaches Claude to prefer Context7 over training data for library, framework, API, CLI, and cloud-service questions. The skill runs the standard `resolve_library_id` → `query_docs` workflow.
+Speedwave ships `containers/claude-resources/skills/integrations/context7/SKILL.md` that teaches Claude to prefer Context7 over training data for library, framework, API, CLI, and cloud-service questions. The skill runs the standard `resolveLibraryId` → `queryDocs` workflow. It is linked into `~/.claude/skills/context7` only when Context7 is enabled in project settings — see [Per-integration Claude resources](#per-integration-claude-resources) for the gating mechanism.
 
 #### Network and security
 
@@ -413,6 +426,34 @@ After cleanup, restart Speedwave. The Desktop app will start normally if no othe
 
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design and [ADR-036](../adr/ADR-036-self-declaring-worker-policy.md) for the tool policy model.
 
+### Bridge plugins — dev UX
+
+Plugins that pair a containerized worker with an external host application (e.g. a Figma Desktop plugin, an editor extension) declare a `host_bridge` block in `plugin.json` — see [ADR-063](../adr/ADR-063-host-bridge-generic.md). Speedwave Desktop spawns a loopback WebSocket relay per such plugin and injects the bridge URL + auth token into the worker's container.
+
+Two optional manifest fields make the user-facing flow smoother:
+
+- `preferred_port: <u16>` — bind the relay on a stable port. If the port is busy at startup, the bridge fails hard (no random fallback) so the external app's saved URL never silently breaks. Must be > 1023.
+- `persistent_token: true` — generate the auth token once and persist it at `~/.speedwave/plugin-state/<slug>/bridge-token` (chmod 0600). Subsequent Speedwave restarts reuse the same token; without this, the token rotates on every restart and external apps must re-paste it.
+
+Example manifest fragment:
+
+```json
+"host_bridge": {
+  "url_env": "MY_BRIDGE_URL",
+  "token_env": "MY_BRIDGE_TOKEN",
+  "display_name": "My Bridge",
+  "roles": { "worker": { "scheme": "header", "name": "x-my-auth" } },
+  "preferred_port": 60123,
+  "persistent_token": true
+}
+```
+
+**User flow** (any bridge plugin): the plugin detail page in Speedwave Desktop shows a _Bridge connection_ card with the connect URL, the auth token (masked, with Reveal/Copy), and a live status dot. Users copy these into their external app once; with `persistent_token: true`, restarts of Speedwave do not invalidate the credentials.
+
+**Recovery from a port collision**: free the port (`lsof -nP -iTCP:<port> -sTCP:LISTEN`), or change `preferred_port` in the manifest, or remove the field to let the kernel pick a random one. Reload the plugin (toggle off/on) to retry.
+
+**Threat model for persistent tokens**: persisting the UUID to a 0600 file extends the secret's lifetime from one Speedwave session to "until the plugin is uninstalled". `plugin::remove_plugin` deletes `plugin-state/<slug>/` entirely, including the token file. An attacker with read/write access to `~/.speedwave/` already has read/write access to the user's home directory and can compromise the bridge regardless of token rotation — persistence does not meaningfully widen the practical attack surface.
+
 ### Tool Policy via `_meta`
 
 Workers (both built-in and plugins) control how the hub presents their tools by declaring a `_meta` field on each tool definition:
@@ -448,6 +489,51 @@ Plugin authors should set `speedwave_compat` in `plugin.json` to declare which S
 ```
 
 This prevents `core.autocrlf=true` (the default on Windows-hosted Git) from rewriting `*.sh` line endings to CRLF on checkout. A plugin `Containerfile` that runs a CRLF `*.sh` will fail with `exit code: 127` (`/bin/sh: 1: …: not found`) when Buildkit invokes the kernel's shebang resolver — see Speedwave issue #603 for context.
+
+## Per-integration Claude resources
+
+Some built-in integrations ship a companion Claude resource — a skill, command, agent, or hook that tells Claude when and how to call the integration's MCP tools (e.g. `office`'s decision-map skill, `playwright`'s automation skill). These resources are only useful when the underlying worker is running, so they are gated on the same per-project toggle as the worker itself.
+
+### Layout
+
+```
+containers/claude-resources/
+├── skills/
+│   ├── code-review-basic/        # core skill — always linked
+│   ├── code-review-…/            # 13 other code-review-* skills
+│   ├── speedwave-code-review/    # core orchestrator
+│   └── integrations/             # integration-bound bucket
+│       ├── office/               # MCP — linked when `office` ∈ ENABLED_SERVICES
+│       ├── playwright/           # MCP — linked when `playwright` ∈ ENABLED_SERVICES
+│       ├── context7/             # MCP — linked when `context7` ∈ ENABLED_SERVICES
+│       ├── slack/sharepoint/redmine/gitlab/github/atlassian/  # MCP — same pattern
+│       └── reminders/calendar/mail/notes/                     # OS sub-services (see Runtime behavior)
+├── commands/
+│   └── integrations/<config_key>/    # same convention for commands
+├── agents/
+│   └── integrations/<config_key>/
+└── hooks/
+    └── integrations/<config_key>/
+```
+
+The directory name under `integrations/` **must match `config_key`** from `crates/speedwave-runtime/src/consts.rs::TOGGLEABLE_MCP_SERVICES` — that is the value Speedwave passes in `ENABLED_SERVICES`. Anything top-level inside `skills/`, `commands/`, `agents/`, or `hooks/` is treated as a core resource and linked unconditionally.
+
+### Runtime behavior
+
+`containers/entrypoint.sh` builds `~/.claude/<type>/` as a real directory of per-entry symlinks on every container start:
+
+1. Core entries (everything outside `integrations/`) are linked unconditionally.
+2. Integration entries under `integrations/<svc>/` are linked only when `<svc>` appears in `ENABLED_SERVICES`. The variable is injected into both the `claude` and `mcp-hub` containers by `apply_integrations_filter` in `crates/speedwave-runtime/src/compose.rs` and reflects the integrations toggle from Settings.
+3. OS sub-service entries (`integrations/reminders/`, `calendar/`, `mail/`, `notes/`) are gated jointly: `os` must appear in `ENABLED_SERVICES` AND the sub-service must NOT appear in `DISABLED_OS_SERVICES`. The list of available sub-services is injected as `OS_AVAILABLE_SUBS` from `TOGGLEABLE_OS_SERVICES`, so adding a new sub-service requires no entrypoint change.
+4. Plugin entries (from `/speedwave/plugins/<slug>/<type>/`) are linked into the same directory, alongside core and integration entries.
+
+The entrypoint records every link it creates in `~/.claude/.speedwave-managed-links`. On the next start it removes those links before building the new set, so toggling an integration off in Settings reliably removes its skill from `~/.claude/skills/`. Files placed in `~/.claude/` by the user are never touched.
+
+### Adding a per-integration resource
+
+1. Place the resource (e.g. `SKILL.md`) under `containers/claude-resources/<type>/integrations/<config_key>/`. `<config_key>` must already exist in `TOGGLEABLE_MCP_SERVICES`.
+2. No Rust or Compose changes are needed — `ENABLED_SERVICES` is already wired up.
+3. Add a BATS test in `_tests/entrypoint/entrypoint.bats` exercising the on/off transition for the new directory.
 
 ## Host Exec
 
@@ -531,7 +617,31 @@ You can run Claude Code inside Speedwave against a local LLM server instead of A
 
 ### Non-standard addresses
 
-The `custom` provider no longer exists. If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), pick the closest matching provider (Ollama, LM Studio, or llama.cpp) and override the **Base URL** field to point at your server. The URL must use `http://` or `https://` and must not include a path.
+If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), select any local provider and override the **Base URL** field. The URL must use `http://` or `https://` and may include a single-segment path prefix such as `/anthropic` (LiteLLM) or `/v1` (AWS-style gateways). Multi-segment paths and query strings are rejected.
+
+### Servers requiring authentication
+
+When the local server requires a Bearer token (vLLM `--api-key`, LM Studio with "Require Authentication" enabled, llama.cpp `--api-key`, LiteLLM `LITELLM_MASTER_KEY`, corporate gateways):
+
+1. In Settings → LLM Provider, enter the token in the **api_key** field. The value is stored in `~/.speedwave/tokens/<project>/local-llm/api_key` (chmod 0600) — the on-disk config never contains the secret.
+2. Click **Discover models** to verify connectivity (the probe sends an `Authorization: Bearer <token>` header and a 1-token `/v1/messages` sanity request).
+
+A leading `Bearer ` typed by mistake is stripped automatically (Claude Code already adds the prefix). Clearing the field and saving deletes the stored token; saving without touching the field leaves the stored token untouched.
+
+### Custom headers (Azure APIM, corporate gateways)
+
+For gateways that require a non-`Authorization` header (e.g. `Ocp-Apim-Subscription-Key`, tenant routing), use the **custom_headers** textarea. Format: one `Name: Value` per line. The parser rejects `Authorization` (use the api_key field instead), `Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`, and any CRLF in values (HTTP request-smuggling defense).
+
+### LiteLLM proxy (route via `/anthropic`)
+
+LiteLLM exposes an Anthropic-compatible path at `/anthropic`. Configure it as:
+
+- **Base URL:** `http://host.docker.internal:4000/anthropic`
+- **api_key:** the value of `LITELLM_MASTER_KEY` set on the LiteLLM server
+
+### Servers without `/v1/messages`
+
+Speedwave requires the server to implement Anthropic Messages on `POST /v1/messages`. Pure OpenAI Chat Completions servers (vLLM stock, TGI, Triton) **will not work for chat** — Settings shows a yellow banner after Discover when the sanity probe detects a missing `/v1/messages` endpoint. Resolve by running a translation proxy (LiteLLM with `/anthropic` route is the common choice) between Speedwave and the OpenAI-only server.
 
 ## See Also
 

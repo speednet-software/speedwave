@@ -23,9 +23,26 @@ import { ProjectStateService } from '../../services/project-state.service';
 import { SlashMenuComponent } from '../slash/slash-menu.component';
 import { SlashService, type SlashCommand } from '../slash/slash.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { AttachmentStripComponent, type AttachmentViewModel } from './attachment-strip.component';
+import { FileDropDirective } from './file-drop.directive';
+import {
+  ImagePreprocessorService,
+  ERROR_UNSUPPORTED_TYPE,
+  type ModelClass,
+  type PreprocessedImage,
+} from '../../services/image-preprocessor.service';
+import type { ChatAttachment } from '../../models/chat';
 
 /** Regex matching `/query` at the very start of input (optionally preceded by whitespace), capturing the query. */
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
+
+/** Attachment between paste/drop and submit; `preprocessed === null` while pica runs. */
+interface AttachmentRecord {
+  id: string;
+  filename: string;
+  previewUrl: string;
+  preprocessed: PreprocessedImage | null;
+}
 
 /**
  * Inline directive prepended to a user message when plan mode is active.
@@ -55,6 +72,8 @@ const PLAN_MODE_PREFIX =
     CdkConnectedOverlay,
     CdkOverlayOrigin,
     TooltipDirective,
+    AttachmentStripComponent,
+    FileDropDirective,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'relative block min-w-0' },
@@ -77,9 +96,38 @@ const PLAN_MODE_PREFIX =
         </button>
       </div>
     }
+    <app-attachment-strip
+      [attachments]="attachmentViewModels()"
+      (remove)="removeAttachment($event)"
+    />
+    @if (attachmentError()) {
+      <div
+        data-testid="composer-attachment-error"
+        role="alert"
+        class="mb-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300"
+      >
+        {{ attachmentError() }}
+      </div>
+    }
+    <div class="sr-only" aria-live="polite" data-testid="composer-attachment-announce">
+      {{ attachmentAnnouncement() }}
+    </div>
     <div
-      class="rounded border border-[var(--line)] bg-[var(--bg-1)] focus-within:border-[var(--accent)]"
+      appFileDrop
+      #fileDrop="appFileDrop"
+      [disabled]="disabled()"
+      (filesDropped)="onFilesDropped($event)"
+      class="relative rounded border border-[var(--line)] bg-[var(--bg-1)] focus-within:border-[var(--accent)]"
+      [class.ring-2]="fileDrop.isDragging()"
+      [class.ring-[var(--accent)]]="fileDrop.isDragging()"
     >
+      @if (fileDrop.isDragging()) {
+        <div
+          class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded bg-[var(--accent)]/10 text-[12px] font-medium text-[var(--accent)]"
+        >
+          Drop image to attach
+        </div>
+      }
       <textarea
         #textarea
         data-testid="chat-input"
@@ -94,6 +142,7 @@ const PLAN_MODE_PREFIX =
         [formControl]="text"
         (keydown.enter)="onEnter($event)"
         (input)="onInput($event)"
+        (paste)="onPaste($event)"
       ></textarea>
       <div
         class="mono flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--line)] px-3 py-1.5 text-[11px] text-[var(--ink-mute)]"
@@ -232,8 +281,12 @@ export class ComposerComponent implements AfterViewInit {
   /** Context window hint (e.g. "128k") — shown next to the model on lg+. */
   readonly contextLabel = input('');
 
-  /** Emits the trimmed message text when the user submits via Enter or the send button. */
-  readonly submitted = output<{ payload: string; displayText: string }>();
+  /** `attachments` are pre-saved to `<project>/.speedwave/pastes/`. */
+  readonly submitted = output<{
+    payload: string;
+    displayText: string;
+    attachments: ChatAttachment[];
+  }>();
 
   /**
    * ADR-045 — emits when the user submits while a turn is streaming.
@@ -252,6 +305,7 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly slashService = inject(SlashService);
   private readonly projectState = inject(ProjectStateService);
+  private readonly preprocessor = inject(ImagePreprocessorService);
 
   /** Reactive control holding the current textarea value. */
   readonly text = new FormControl<string>('', { nonNullable: true });
@@ -267,6 +321,18 @@ export class ComposerComponent implements AfterViewInit {
    * until the user toggles it off — mirrors the CLI's plan mode behaviour.
    */
   readonly planMode = signal<boolean>(false);
+
+  /** Pending image attachments; cleanup effect below revokes blob URLs on remove. */
+  readonly attachments = signal<ReadonlyArray<AttachmentRecord>>([]);
+
+  /** Counter for generating stable attachment ids without crypto. */
+  private attachmentSeq = 0;
+
+  /** Most recent user-facing error (e.g. preprocessing failure, capability reject). */
+  readonly attachmentError = signal<string>('');
+
+  /** Latest aria-live announcement (e.g. "Image attached: screenshot.png"). */
+  readonly attachmentAnnouncement = signal<string>('');
 
   /** Bridges `FormControl.valueChanges` (RxJS) into the signal graph for OnPush. */
   readonly textValue = toSignal(this.text.valueChanges, { initialValue: '' });
@@ -318,6 +384,17 @@ export class ComposerComponent implements AfterViewInit {
       if (value) this.text.disable({ emitEvent: false });
       else this.text.enable({ emitEvent: false });
     });
+    let previous: ReadonlyArray<AttachmentRecord> = [];
+    effect((onCleanup) => {
+      const current = this.attachments();
+      for (const r of previous.filter((p) => !current.some((c) => c.id === p.id))) {
+        URL.revokeObjectURL(r.previewUrl);
+      }
+      previous = current;
+      onCleanup(() => {
+        for (const r of current) URL.revokeObjectURL(r.previewUrl);
+      });
+    });
   }
 
   /** Auto-focus the textarea on mount so the user can start typing immediately. */
@@ -333,13 +410,15 @@ export class ComposerComponent implements AfterViewInit {
     queueMicrotask(() => this.textareaRef?.nativeElement?.focus());
   }
 
-  /**
-   * True when there is text to send. The composer accepts submits while
-   * `streaming` is true — those are routed to `queueRequested` (ADR-045).
-   * `disabled` still blocks all input (auth/setup states).
-   */
+  /** Text submits queue while streaming (ADR-045); submits with attachments don't (ADR-065). */
   canSubmit(): boolean {
-    return !this.disabled() && this.textValue().trim().length > 0;
+    if (this.disabled()) return false;
+    if (this.anyAttachmentPreprocessing()) return false;
+    const hasText = this.textValue().trim().length > 0;
+    const hasAttachments = this.attachments().length > 0;
+    if (!hasText && !hasAttachments) return false;
+    if (hasAttachments && this.streaming()) return false;
+    return true;
   }
 
   /** Truncated preview of the queued slot (single-line, max 80 chars). */
@@ -368,25 +447,154 @@ export class ComposerComponent implements AfterViewInit {
     this.submit();
   }
 
-  /**
-   * Submits the current textarea value and resets the form. Routes to
-   * `queueRequested` while streaming (ADR-045); `submitted` otherwise.
-   *
-   * When plan mode is active, the prefix is added to the backend payload
-   * so Claude produces a plan instead of acting — but the local bubble
-   * still shows the user's raw text, not the directive boilerplate.
-   */
+  /** Routes to queueRequested while streaming (ADR-045); submitted otherwise. */
   submit(): void {
     if (!this.canSubmit()) return;
     const text = this.textValue().trim();
     const payload = this.planMode() ? `${PLAN_MODE_PREFIX}${text}` : text;
+    const attachments = this.readyChatAttachments();
     if (this.streaming()) {
+      if (attachments.length > 0) return;
       this.queueRequested.emit(payload);
     } else {
-      this.submitted.emit({ payload, displayText: text });
+      this.submitted.emit({ payload, displayText: text, attachments });
     }
     this.text.reset('');
+    this.clearAttachments();
     this.closeSlash();
+  }
+
+  /**
+   * preventDefault only when an image was captured, so text paste keeps working.
+   * @param event - Native paste event.
+   */
+  onPaste(event: ClipboardEvent): void {
+    if (this.disabled()) return;
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length === 0) return;
+    event.preventDefault();
+    void this.ingest(files);
+  }
+
+  /**
+   * Drop handler — emits from `FileDropDirective`, validates MIME.
+   * @param files - Dropped files (any MIME).
+   */
+  onFilesDropped(files: File[]): void {
+    void this.ingest(files);
+  }
+
+  /**
+   * Removes one attachment by id.
+   * @param id - Attachment id from the view-model.
+   */
+  removeAttachment(id: string): void {
+    const removed = this.attachments().find((a) => a.id === id);
+    this.attachments.update((list) => list.filter((a) => a.id !== id));
+    if (removed) {
+      this.attachmentAnnouncement.set(`Image removed: ${removed.filename}`);
+    }
+  }
+
+  /** Clears every attachment (post-submit and on session reset). */
+  clearAttachments(): void {
+    this.attachments.set([]);
+    this.attachmentError.set('');
+  }
+
+  /** View-model used by the strip — strips composer-only state out. */
+  readonly attachmentViewModels = computed<ReadonlyArray<AttachmentViewModel>>(() =>
+    this.attachments().map((a) => ({
+      id: a.id,
+      filename: a.filename,
+      previewUrl: a.previewUrl,
+      encodedSizeBytes: a.preprocessed?.sizeBytes ?? 0,
+      preprocessing: a.preprocessed === null,
+    }))
+  );
+
+  /** True when at least one attachment is still being processed. */
+  readonly anyAttachmentPreprocessing = computed<boolean>(() =>
+    this.attachments().some((a) => a.preprocessed === null)
+  );
+
+  /** Submit gating reason (used in tooltip / aria-disabled state). */
+  readonly submitBlockedReason = computed<string>(() => {
+    if (this.disabled()) return '';
+    if (this.anyAttachmentPreprocessing()) return 'Trwa przygotowywanie obrazka…';
+    if (this.attachments().length > 0 && this.streaming()) {
+      return 'Poczekaj na zakończenie odpowiedzi przed wysłaniem obrazka.';
+    }
+    return '';
+  });
+
+  private async ingest(files: File[]): Promise<void> {
+    const images = files.filter((f) => f.type.startsWith('image/'));
+    if (images.length === 0) {
+      // Non-image drop/paste is silently ignored — surfacing an error
+      // would be noisy (e.g. user dragging a PDF onto the window by mistake).
+      return;
+    }
+    const project = this.projectState.activeProject;
+    if (!project) {
+      this.attachmentError.set('Wybierz projekt przed wklejeniem obrazka.');
+      return;
+    }
+
+    const modelClass = this.modelClass();
+    for (const file of images) {
+      const id = `att-${++this.attachmentSeq}`;
+      const previewUrl = URL.createObjectURL(file);
+      this.attachments.update((list) => [
+        ...list,
+        { id, filename: file.name || 'image', previewUrl, preprocessed: null },
+      ]);
+      try {
+        const out = await this.preprocessor.preprocess(file, modelClass, project);
+        // Preprocessor returns its own post-resample blob URL; drop the optimistic one.
+        URL.revokeObjectURL(previewUrl);
+        this.attachments.update((list) =>
+          list.map((a) =>
+            a.id === id ? { ...a, previewUrl: out.previewUrl, preprocessed: out } : a
+          )
+        );
+        this.attachmentError.set('');
+        this.attachmentAnnouncement.set(`Image attached: ${out.attachment.filename}`);
+      } catch (err) {
+        this.attachments.update((list) => list.filter((a) => a.id !== id));
+        URL.revokeObjectURL(previewUrl);
+        this.attachmentError.set(err instanceof Error ? err.message : ERROR_UNSUPPORTED_TYPE);
+      }
+    }
+  }
+
+  private modelClass(): ModelClass {
+    const id = this.model();
+    if (!id) return 'sonnet';
+    if (id.includes('opus')) return 'opus';
+    if (id.includes('haiku')) return 'haiku';
+    return 'sonnet';
+  }
+
+  /** Snapshot of attachments that finished preprocessing. */
+  private readyAttachments(): PreprocessedImage[] {
+    return this.attachments()
+      .map((a) => a.preprocessed)
+      .filter((p): p is PreprocessedImage => p !== null);
+  }
+
+  /** Same snapshot projected to `ChatAttachment` for the parent submit handler. */
+  private readyChatAttachments(): ChatAttachment[] {
+    return this.readyAttachments().map((p) => p.attachment);
   }
 
   /** Toggles plan mode on/off. Persists across messages until toggled again. */
