@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.12.0](https://github.com/speednet-software/speedwave/compare/v0.11.0...v0.12.0) (2026-05-26)
+
+
+### Features
+
+* release v0.12.0 ([#728](https://github.com/speednet-software/speedwave/issues/728)) ([dbc5c62](https://github.com/speednet-software/speedwave/commit/dbc5c62115dc726b1661407399dcb08a745d3714))
+
 ## [0.11.0](https://github.com/speednet-software/speedwave/compare/v0.10.0...v0.11.0) (2026-05-19)
 
 
