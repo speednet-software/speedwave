@@ -125,7 +125,7 @@ The `/logs` route hosts a single page that combines container logs, host-side se
 
 **IDE Bridge connect link.** The IDE Bridge cell renders `connect →` when the daemon is running but no IDE is selected (`selected_ide` is `null`). The link deep-jumps to `/integrations#ide-bridge` (anchor scrolling is enabled in the Angular router for this) so the user can pick a target IDE without scrolling.
 
-**Always-on trace logging.** On view init the page invokes `set_log_level` with `trace` so any diagnostics export carries the most verbose level regardless of any prior runtime setting. Failures are logged at `console.debug` and ignored — the log stream renders without the level upgrade.
+**Always-on trace logging.** Desktop emits every log line at `trace` level — no UI toggle, no config field. The level cap is hard-coded in `main.rs` setup; diagnostics exports therefore always carry the most verbose context.
 
 **Diagnostics export.** A button bundles the runtime log directory plus a compact summary into a ZIP. The path is shown in a modal with a copy-to-clipboard control; the file is opened in the host's file manager rather than auto-attached anywhere, so the user controls who sees it.
 

@@ -4,7 +4,7 @@ Speedwave uses a three-level config merge: defaults -> repo `.speedwave.json` ->
 
 ## Config File: `~/.speedwave/config.json`
 
-The user-level config file stores project definitions, the active project, IDE selection, and log level:
+The user-level config file stores project definitions, the active project, and IDE selection:
 
 ```json
 {
@@ -54,7 +54,6 @@ The user-level config file stores project definitions, the active project, IDE s
   ],
   "active_project": "acme-corp",
   "selected_ide": null,
-  "log_level": null,
   "ui": { "beta_enabled": false }
 }
 ```

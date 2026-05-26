@@ -1352,7 +1352,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1378,7 +1377,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1415,7 +1413,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1437,7 +1434,6 @@ mod tests {
             active_project: Some("fallback-project".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1454,7 +1450,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1481,7 +1476,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 

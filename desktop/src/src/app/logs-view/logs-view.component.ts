@@ -45,12 +45,6 @@ export const LEVEL_CHIPS: readonly LogLevel[] = ['all', 'debug', 'info', 'warn',
 // Polling cadence for the system health grid lives in `SystemHealthService`
 // (`services/system-health.service.ts`) — the SSOT for the polling loop.
 
-/**
- * Trace-level diagnostics is forced at view init so an exported diagnostics
- * ZIP always carries full context regardless of any prior runtime setting.
- */
-const FORCED_LOG_LEVEL = 'trace';
-
 const COMPOSE_RE = /^([\w.-]+)\s*\|\s*(.*)$/;
 // `[HH:MM:SS]` or `[<ISO>]`; ISO is `mcp-shared`'s `ts()`.
 const BRACKETED_TIME_RE =
@@ -65,12 +59,13 @@ const FORMAT_TIME_HMS_RE = /^(\d{2}:\d{2}:\d{2})/;
 const LEVEL_RE = /^(DEBUG|INFO|WARN|WARNING|ERROR|TRACE)\s+(.*)$/i;
 /** Drain prefix the Rust `log_file` writer puts on captured stdout/stderr lines — pure noise in the message. */
 const DRAIN_PREFIX_RE = /^(?:STDOUT|STDERR): (.*)$/;
-const CONTAINER_PREFIX_RE = /^speedwave_[^_]+_([^_]+)(?:_\d+)?$/;
-const TRAILING_INDEX_RE = /_\d+$/;
 
 /**
  * Parse a single compose-log line into `LogLine`. Tolerant — never throws.
- * @param raw - A single log line as emitted by `nerdctl compose logs`.
+ * Backend (`container_logs_cmd::prefix_lines`) already strips the
+ * `speedwave_<project>_` container prefix, so we render whatever source token
+ * arrives — no client-side heuristic.
+ * @param raw - A single log line as emitted by `get_all_logs`.
  */
 export function parseLogLine(raw: string): LogLine {
   const trimmed = raw.trim();
@@ -78,7 +73,7 @@ export function parseLogLine(raw: string): LogLine {
     return { time: '', source: 'log', level: 'info', message: '' };
   }
   const composeMatch = COMPOSE_RE.exec(trimmed);
-  const source = composeMatch ? stripContainerPrefix(composeMatch[1]) : 'log';
+  const source = composeMatch ? composeMatch[1] : 'log';
   const rest = composeMatch ? composeMatch[2] : trimmed;
 
   // Head: nerdctl `--timestamps`, Rust drain, or `[<ISO>]`.
@@ -119,29 +114,42 @@ function normalizeLevel(raw: string): LogLevel {
 }
 
 /**
- * Strip the `speedwave_<project>_` prefix from a container name.
- * @param container - Container name as it appears in compose-log prefixes.
- */
-function stripContainerPrefix(container: string): string {
-  const match = CONTAINER_PREFIX_RE.exec(container);
-  if (match) return match[1];
-  return container.replace(TRAILING_INDEX_RE, '');
-}
-
-/**
  * Interleave per-source blocks into one chronological stream.
- * Lines without a parseable time inherit the previous line's instant.
+ * Lines without a parseable time inherit the *previous* line's instant; if
+ * a line has no parseable time AND no prior line set one (file starts with
+ * untimestamped content), it inherits the *next* line's instant so it sits
+ * with its block rather than sinking to epoch zero.
  * @param lines - Parsed log lines in backend (block) order.
  */
 export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
-  let lastKey = 0;
-  const keyed = lines.map((line) => {
-    const t = line.time ? Date.parse(line.time) : NaN;
+  const keys: number[] = new Array<number>(lines.length).fill(NaN);
+  let lastKey = NaN;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].time ? Date.parse(lines[i].time) : NaN;
     if (!Number.isNaN(t)) lastKey = t;
-    return { line, key: lastKey };
-  });
+    keys[i] = lastKey;
+  }
+  let nextKey = NaN;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!Number.isNaN(keys[i])) {
+      nextKey = keys[i];
+    } else if (!Number.isNaN(nextKey)) {
+      keys[i] = nextKey;
+    }
+  }
+  const keyed = lines.map((line, i) => ({ line, key: keys[i] }));
   // `Array.prototype.sort` is stable (ES2019+) — equal keys keep input order.
-  return keyed.sort((a, b) => a.key - b.key).map((k) => k.line);
+  // Lines that remain NaN (no parseable timestamp anywhere in their block) sort
+  // BEFORE all timestamped lines — matches the historical epoch-zero placement
+  // so banner/header lines stay at the top of the view, not hidden at the bottom.
+  return keyed
+    .sort((a, b) => {
+      if (Number.isNaN(a.key) && Number.isNaN(b.key)) return 0;
+      if (Number.isNaN(a.key)) return -1;
+      if (Number.isNaN(b.key)) return 1;
+      return a.key - b.key;
+    })
+    .map((k) => k.line);
 }
 
 /**
@@ -331,13 +339,13 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
                 @for (c of containerArray(); track c.name) {
                   <li
                     class="mono flex items-center gap-2 text-[11px]"
-                    [attr.data-testid]="'health-container-' + stripPrefix(c.name)"
+                    [attr.data-testid]="'health-container-' + c.name"
                   >
                     <span
                       class="dot"
                       [style.background]="c.healthy ? 'var(--green)' : 'var(--amber)'"
                     ></span>
-                    <span class="text-[var(--ink)]">{{ stripPrefix(c.name) }}</span>
+                    <span class="text-[var(--ink)]">{{ c.name }}</span>
                     <span class="text-[var(--ink-mute)]">· {{ c.status }}</span>
                   </li>
                 }
@@ -630,7 +638,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   readonly containersDetail = computed<string>(() => {
     const containers = this.containerArray();
     const unhealthy = containers.find((c) => !c.healthy);
-    if (unhealthy) return `${stripContainerPrefix(unhealthy.name)}: ${unhealthy.status}`;
+    if (unhealthy) return `${unhealthy.name}: ${unhealthy.status}`;
     return 'all healthy';
   });
 
@@ -715,7 +723,6 @@ export class LogsViewComponent implements OnInit, OnDestroy {
    * banner even though the project pill in the header reads correctly).
    */
   async ngOnInit(): Promise<void> {
-    void this.forceMaxLogLevel();
     await this.refresh();
     // SystemHealthService owns the polling loop and the project-settled
     // health refresh; we just kick it off and read its `health` signal.
@@ -927,9 +934,6 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     this.detailsOpen.update((v) => !v);
   }
 
-  /** Strip the `speedwave_<project>_` prefix from a container name for display. */
-  protected readonly stripPrefix = stripContainerPrefix;
-
   /**
    * Select a level chip.
    * @param level - Level to filter on, or `'all'` to disable the filter.
@@ -966,18 +970,5 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     if (active === 'all') return;
     if (lines.some((l) => l.source === active)) return;
     this.filters.update((f) => ({ ...f, source: 'all' }));
-  }
-
-  /** Force trace-level diagnostics on init; failures log at debug. */
-  private async forceMaxLogLevel(): Promise<void> {
-    try {
-      await this.tauri.invoke('set_log_level', { level: FORCED_LOG_LEVEL });
-    } catch (err) {
-      // Backend unavailable in browser dev mode (expected) or the command
-      // was renamed/removed (regression). Log so a typo surfaces during
-      // development without breaking log rendering, which doesn't depend
-      // on the trace-level upgrade.
-      console.debug('[logs-view] set_log_level failed', err);
-    }
   }
 }

@@ -1040,7 +1040,6 @@ mod tests {
             active_project: Some("alpha".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         }
     }
@@ -1152,7 +1151,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1180,7 +1178,6 @@ mod tests {
             active_project: Some("nonexistent".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1215,7 +1212,6 @@ mod tests {
             active_project: Some("proj".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 

@@ -16,6 +16,20 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
             "-----BEGIN PRIVATE KEY-----\n***REDACTED***\n-----END PRIVATE KEY-----",
         ),
+        // Home paths: /Users/<name>, /home/<name>, C:\Users\<name>.
+        // Username segment replaced with `<user>`; following path tail preserved.
+        (
+            r"(?i)(/Users/|/home/|[A-Z]:\\Users\\)[^/\\\s]+",
+            "${1}<user>",
+        ),
+        // HTTP Cookie / Set-Cookie header values.
+        // Set-Cookie value = `name=value` up to the first `;` (attrs are not
+        // secrets but the name=value pair is). `\S+` would stop at the first
+        // space inside an unusual cookie value and leak the rest.
+        (r"(?i)(Set-Cookie:\s*)[^;\r\n]+", "${1}***REDACTED***"),
+        // Cookie request header: anchor at start-of-line/whitespace so
+        // `Set-Cookie:` does not double-match via `\b` on the `-C` boundary.
+        (r"(?i)(^|\s)(Cookie:\s*)[^\r\n]+", "${1}${2}***REDACTED***"),
         // Bearer tokens: Bearer <token>
         (r"(?i)(Bearer\s+)\S+", "${1}***REDACTED***"),
         // Authorization header values: Authorization: <scheme> <token>
@@ -146,7 +160,7 @@ mod tests {
     /// The definitions vec contains exactly this many rules. If a new rule is
     /// added to the vec but fails to compile, RULES.len() will be less than
     /// this constant and the test will fail, catching the silent drop.
-    const EXPECTED_RULE_COUNT: usize = 18;
+    const EXPECTED_RULE_COUNT: usize = 21;
 
     #[test]
     fn test_rules_count() {
@@ -168,6 +182,9 @@ mod tests {
         // fails explicitly instead of being silently filtered out.
         let patterns: &[&str] = &[
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+            r"(?i)(/Users/|/home/|[A-Z]:\\Users\\)[^/\\\s]+",
+            r"(?i)(Set-Cookie:\s*)[^;\r\n]+",
+            r"(?i)(^|\s)(Cookie:\s*)[^\r\n]+",
             r"(?i)(Bearer\s+)\S+",
             r"(?i)(Authorization:\s*)\S+(\s+\S+)?",
             r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
@@ -1096,5 +1113,81 @@ mod tests {
         let out = panic_payload_to_string(&*payload);
         assert!(out.contains("***REDACTED_SLACK_TOKEN***"), "got: {out}");
         assert!(!out.contains("xoxb-1234567890-leak"));
+    }
+
+    #[test]
+    fn redacts_macos_home_username() {
+        let out = sanitize("error reading /Users/john-doe/.speedwave/config.json");
+        assert!(!out.contains("john-doe"), "got: {out}");
+        assert!(
+            out.contains("/Users/<user>/.speedwave/config.json"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_linux_home_username() {
+        let out = sanitize("loaded from /home/alice/.cache/foo");
+        assert!(!out.contains("alice"), "got: {out}");
+        assert!(out.contains("/home/<user>/.cache/foo"), "got: {out}");
+    }
+
+    #[test]
+    fn redacts_windows_home_username() {
+        let out = sanitize(r"open failed: C:\Users\Bob\AppData\Roaming\speedwave");
+        assert!(!out.contains("Bob"), "got: {out}");
+        assert!(
+            out.contains(r"C:\Users\<user>\AppData\Roaming\speedwave"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn does_not_redact_system_users_path() {
+        let out = sanitize("read /Users/Shared/data.txt");
+        assert!(
+            out.contains("<user>"),
+            "Shared treated as username (acceptable PII over-mask): {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_set_cookie_header() {
+        let out = sanitize("Set-Cookie: session=abc123; Path=/");
+        assert!(!out.contains("abc123"), "got: {out}");
+        assert!(out.contains("***REDACTED***"), "got: {out}");
+        // Attrs after `;` are not secrets and must remain visible for debugging.
+        assert!(
+            out.contains("Path=/"),
+            "Set-Cookie attrs must survive, got: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_set_cookie_value_with_embedded_space() {
+        // Non-RFC value with a space — the previous `\S+` regex stopped at the
+        // first space and leaked the trailing token. `[^;\r\n]+` covers the
+        // whole name=value pair up to the attribute separator.
+        let out = sanitize("Set-Cookie: id=secret extra_data; Path=/");
+        assert!(!out.contains("secret"), "first token leaked: {out}");
+        assert!(
+            !out.contains("extra_data"),
+            "post-space token leaked: {out}"
+        );
+        assert!(out.contains("Path=/"), "attrs must survive: {out}");
+    }
+
+    #[test]
+    fn redacts_cookie_header() {
+        let out = sanitize("Cookie: session_id=xyz; csrftoken=789");
+        assert!(!out.contains("xyz"), "got: {out}");
+        assert!(!out.contains("789"), "got: {out}");
+        assert!(out.contains("***REDACTED***"), "got: {out}");
+    }
+
+    #[test]
+    fn does_not_redact_cookie_word_in_prose() {
+        let out = sanitize("eating a cookie now");
+        assert_eq!(out, "eating a cookie now");
     }
 }

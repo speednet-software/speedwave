@@ -54,6 +54,18 @@ The `claude` image bakes `/usr/local/bin/{pbcopy,xclip,xsel,wl-copy,clip.exe}` a
 
 The wrapper is **write-only by design**: it never reads the host clipboard (OSC 52 query/paste would require a terminal-side response handshake and would leak host clipboard contents into the container). It touches only its own stdin and `/dev/tty`, runs as the unprivileged container user, and adds no new mounts. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
 
+## Log Sanitization
+
+SSOT: `crates/speedwave-runtime/src/log_sanitizer.rs` (Rust) mirrored by `mcp-servers/shared/src/sanitizer.ts` (TypeScript). Every log line written by Desktop, CLI, the worker drain, and host-side MCP services passes through `sanitize()` before reaching disk or stdout. Redacted patterns:
+
+- **Credentials**: Bearer / Authorization / X-Redmine-API-Key headers, JWTs (`eyJ…`), generic `password=` / `secret=` / `api_key=` assignments, URL userinfo (`://user:pass@`), URL query secrets (`?token=…`).
+- **Provider tokens**: Slack (`xox[bpars]-…`), GitHub (`ghp_`, `ghs_`, `gho_`, `ghu_`, `github_pat_`), GitLab (`glpat-…`), Atlassian (`ATATT…`), Anthropic (`sk-ant-…`), generic OpenAI-style (`sk-…`).
+- **HTTP cookies**: both `Cookie:` and `Set-Cookie:` header values.
+- **PEM private keys**: full BEGIN/END blocks.
+- **Host paths / PII**: `/Users/<name>`, `/home/<name>`, `C:\Users\<name>` — the username segment is replaced with `<user>` while the path tail is preserved.
+
+Rust and TS rule counts are pinned by `EXPECTED_RULE_COUNT` / `RULE_COUNT` constants; both test suites fail if the lists drift.
+
 ## Threat Model
 
 When implementing any feature, ask these questions:

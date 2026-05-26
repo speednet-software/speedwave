@@ -391,7 +391,6 @@ mod tests {
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
-            log_level: None,
             transcription: None,
             ui: None,
         };
@@ -434,7 +433,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            log_level: None,
             transcription: None,
             ui: None,
         };

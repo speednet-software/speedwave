@@ -1159,6 +1159,14 @@ pub fn compose_prefix() -> &'static str {
     PREFIX.get_or_init(|| derive_instance_name_from(data_dir()))
 }
 
+/// Strips the `<compose_prefix>_<project>_` prefix from a compose container
+/// name, returning the bare service name. Falls back to the input unchanged
+/// when the prefix does not match (foreign container, malformed name).
+pub fn strip_compose_container_prefix<'a>(name: &'a str, project: &str) -> &'a str {
+    let prefix = format!("{}_{}_", compose_prefix(), project);
+    name.strip_prefix(&prefix).unwrap_or(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2187,5 +2195,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn strip_compose_container_prefix_removes_runtime_project_prefix() {
+        // Build the input from the live `compose_prefix()` so the test is
+        // independent of `SPEEDWAVE_DATA_DIR` (which can override the prefix
+        // via the data-dir basename when run outside `make test`).
+        let prefix = compose_prefix();
+        let input = format!("{prefix}_acme_mcp_hub");
+        let out = strip_compose_container_prefix(&input, "acme");
+        assert_eq!(out, "mcp_hub");
+    }
+
+    #[test]
+    fn strip_compose_container_prefix_handles_multi_segment_project() {
+        let prefix = compose_prefix();
+        let input = format!("{prefix}_dev_downloads_mcp_office");
+        let out = strip_compose_container_prefix(&input, "dev_downloads");
+        assert_eq!(out, "mcp_office");
+    }
+
+    #[test]
+    fn strip_compose_container_prefix_leaves_unrelated_name_unchanged() {
+        let out = strip_compose_container_prefix("other_unrelated_thing", "acme");
+        assert_eq!(out, "other_unrelated_thing");
     }
 }

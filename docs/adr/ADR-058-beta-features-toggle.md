@@ -31,7 +31,7 @@ The visible menu shape is produced by a pure function `tray_menu_spec(update_ver
 
 ### Persistence
 
-The flag lives in top-level user-config: `SpeedwaveUserConfig.ui.beta_enabled: Option<bool>` (new `UiPrefsConfig` struct), defaulting to `false`. It is **user-only** — a checked-in repo `.speedwave.json` cannot set it, consistent with how privacy- and behaviour-sensitive flags are handled elsewhere. Reads/writes go through the existing `config::with_config_lock` + `tokio::task::spawn_blocking` pattern (same as `set_log_level`), so the UI thread never does synchronous config I/O.
+The flag lives in top-level user-config: `SpeedwaveUserConfig.ui.beta_enabled: Option<bool>` (new `UiPrefsConfig` struct), defaulting to `false`. It is **user-only** — a checked-in repo `.speedwave.json` cannot set it, consistent with how privacy- and behaviour-sensitive flags are handled elsewhere. Reads/writes go through the existing `config::with_config_lock` + `tokio::task::spawn_blocking` pattern, so the UI thread never does synchronous config I/O.
 
 ### Write path
 
