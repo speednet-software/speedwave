@@ -72,6 +72,10 @@ ensure_provisioned_windows() {
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
+        # bzip2 required by scripts/lib/fetch-sherpa-onnx-md.sh (ADR-061).
+        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'command -v bzip2'" >/dev/null 2>&1 || ok=0
+    fi
+    if [ "$ok" -eq 1 ]; then
         echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
