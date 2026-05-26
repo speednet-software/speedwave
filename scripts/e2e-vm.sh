@@ -73,6 +73,7 @@ ensure_provisioned_windows() {
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
         # bzip2 required by scripts/lib/fetch-sherpa-onnx-md.sh (ADR-061).
+        # shellcheck disable=SC2086
         ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'command -v bzip2'" >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
