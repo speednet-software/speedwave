@@ -28,6 +28,10 @@ fn compute_ide_state_diff(prev: &IdeScanState, current: &IdeScanState) -> Vec<St
     if !new_anomalies.is_empty() {
         out.push(format!("IDE anomaly: {new_anomalies:?}"));
     }
+    let resolved_anomalies: BTreeSet<_> = prev.anomalies.difference(&current.anomalies).collect();
+    if !resolved_anomalies.is_empty() {
+        out.push(format!("IDE anomaly resolved: {resolved_anomalies:?}"));
+    }
     out
 }
 
@@ -1470,6 +1474,22 @@ mod tests {
             anomalies: BTreeSet::from(["45581.lock:stale".to_string()]),
         };
         assert!(compute_ide_state_diff(&s, &s).is_empty());
+    }
+
+    #[test]
+    fn diff_logs_when_anomaly_resolves() {
+        let prev = IdeScanState {
+            live: BTreeSet::new(),
+            anomalies: BTreeSet::from(["45581.lock:stale".to_string()]),
+        };
+        let curr = IdeScanState::default();
+        let msgs = compute_ide_state_diff(&prev, &curr);
+        // The cleared anomaly fires a "resolved" log so the appearance log has
+        // a matching close-out — operators can correlate the two.
+        assert!(
+            msgs.iter().any(|m| m.starts_with("IDE anomaly resolved")),
+            "got: {msgs:?}"
+        );
     }
 
     #[test]

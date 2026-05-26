@@ -17,7 +17,7 @@ All Rust code uses the `log` crate facade for diagnostic output. **Never use `ep
 | Library (`speedwave-runtime`) | `log` crate facade only (no backend opinion) | Callers provide the backend                         |
 
 - **SSOT for secret redaction:** `crates/speedwave-runtime/src/log_sanitizer.rs` — all log output passes through `sanitize()` via `.format()` callbacks in both Desktop and CLI loggers. Secrets never reach disk or stdout.
-- **Desktop log files:** `~/Library/Logs/<bundle-id>/` (macOS), `%APPDATA%/<bundle-id>/` (Windows). Bundle id is `pl.speedwave.desktop` in release, `pl.speedwave.desktop.dev` under `make dev`; resolved at runtime in `desktop_log_dir()`. Rotation: 50 MB per file, `KeepSome(10)` — tauri-plugin-log prunes on every rotation; no separate cleanup timer.
+- **Desktop log files:** `~/Library/Logs/<bundle-id>/` (macOS), `%LOCALAPPDATA%/<bundle-id>/logs` (Windows) — must match `tauri-plugin-log v2 TargetKind::LogDir`. Bundle id is `pl.speedwave.desktop` in release, `pl.speedwave.desktop.dev` under `make dev`; resolved at runtime in `desktop_log_dir()`. Rotation: 50 MB per file, `KeepSome(10)` — tauri-plugin-log prunes on every rotation; no separate cleanup timer.
 - **CLI:** `RUST_LOG=debug speedwave check` enables debug output on stderr.
 
 ## Rules for writing log statements

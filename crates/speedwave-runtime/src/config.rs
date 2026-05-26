@@ -2406,19 +2406,36 @@ mod tests {
 
     #[test]
     fn migrate_drop_log_level_errs_when_root_is_not_object() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.json");
-        std::fs::write(&path, r#"["unexpected","array","root"]"#).unwrap();
+        // Cover every non-object JSON root shape — array, null, number, string,
+        // bool — to make sure none of them are silently accepted (a user with
+        // a manually-corrupted config must see an actionable error, not a
+        // no-op success).
+        for original in [
+            r#"["unexpected","array","root"]"#,
+            "null",
+            "42",
+            r#""just a string""#,
+            "true",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("config.json");
+            std::fs::write(&path, original).unwrap();
 
-        let err = super::migrate_drop_log_level_in(tmp.path()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not a JSON object"),
-            "expected root-shape error, got: {err:#}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            r#"["unexpected","array","root"]"#
-        );
+            let err = super::migrate_drop_log_level_in(tmp.path()).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a JSON object"),
+                "expected root-shape error for {original:?}, got: {err:#}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                original,
+                "file must be untouched for {original:?}"
+            );
+            assert!(
+                !path.with_extension("json.tmp").exists(),
+                "no orphan tmp for {original:?}"
+            );
+        }
     }
 
     #[test]

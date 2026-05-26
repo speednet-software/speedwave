@@ -419,8 +419,9 @@ mod tests {
 
     #[test]
     fn validate_container_name_accepts_valid() {
-        assert!(validate_container_name("speedwave_acme_claude").is_ok());
-        assert!(validate_container_name("speedwave_proj.v1_mcp-hub").is_ok());
+        let pfx = speedwave_runtime::consts::compose_prefix();
+        assert!(validate_container_name(&format!("{pfx}_acme_claude")).is_ok());
+        assert!(validate_container_name(&format!("{pfx}_proj.v1_mcp-hub")).is_ok());
     }
 
     #[test]
@@ -430,12 +431,14 @@ mod tests {
 
     #[test]
     fn validate_container_name_rejects_shell_characters() {
-        assert!(validate_container_name("speedwave_acme;rm -rf /").is_err());
+        let pfx = speedwave_runtime::consts::compose_prefix();
+        assert!(validate_container_name(&format!("{pfx}_acme;rm -rf /")).is_err());
     }
 
     #[test]
     fn validate_container_name_rejects_path_traversal() {
-        assert!(validate_container_name("speedwave_../etc/passwd").is_err());
+        let pfx = speedwave_runtime::consts::compose_prefix();
+        assert!(validate_container_name(&format!("{pfx}_../etc/passwd")).is_err());
     }
 
     // -- Log sanitization tests (get_container_logs / get_compose_logs) --
