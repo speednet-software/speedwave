@@ -4,9 +4,66 @@
 ## [0.12.0](https://github.com/speednet-software/speedwave/compare/v0.11.0...v0.12.0) (2026-05-26)
 
 
+### ⚠ BREAKING CHANGES
+
+* **linux:** Linux host support dropped ([ADR-059](https://github.com/speednet-software/speedwave/blob/main/docs/adr/ADR-059-drop-linux-support.md)). macOS (Lima) and Windows (WSL2) remain the only supported host platforms. ([#670](https://github.com/speednet-software/speedwave/issues/670))
+
+
 ### Features
 
-* release v0.12.0 ([#728](https://github.com/speednet-software/speedwave/issues/728)) ([dbc5c62](https://github.com/speednet-software/speedwave/commit/dbc5c62115dc726b1661407399dcb08a745d3714))
+* **plugins:** plugin bridge dev UX — stable port, persistent token, plugin detail UI, auto-enable for optional secrets ([#719](https://github.com/speednet-software/speedwave/issues/719))
+* **desktop,cli:** image paste end-to-end via file-mount (SPEED-92, ADR-065) ([#713](https://github.com/speednet-software/speedwave/issues/713))
+* **desktop:** delete conversation from history sidebar ([#711](https://github.com/speednet-software/speedwave/issues/711))
+* **runtime:** local LLM provider end-to-end + VPN inheritance ([#707](https://github.com/speednet-software/speedwave/issues/707))
+* **runtime:** playwright reaches host.docker.internal for local dev server testing ([#706](https://github.com/speednet-software/speedwave/issues/706))
+* **runtime:** consolidate host-gateway alias to single SSOT + disk-full auto-prune ([#703](https://github.com/speednet-software/speedwave/issues/703))
+* **mcp-context7:** native Context7 integration with optional API key ([#673](https://github.com/speednet-software/speedwave/issues/673))
+* **mcp-atlassian:** Atlassian (Jira + Confluence) built-in MCP worker ([#635](https://github.com/speednet-software/speedwave/issues/635))
+* **mcp-github:** GitHub built-in MCP worker + ADR-053 ([#633](https://github.com/speednet-software/speedwave/issues/633))
+* **mcp-sharepoint:** pages/lists CRUD + host-side oauth refresh (ADR-060) ([#671](https://github.com/speednet-software/speedwave/issues/671))
+* **office:** built-in mcp-office worker — Word/Excel/PowerPoint/PDF read·write·convert·charts ([#644](https://github.com/speednet-software/speedwave/issues/644))
+* **host-exec:** per-project Host Exec worker (ADR-054, SPW-83) + log timestamp SSOT ([#657](https://github.com/speednet-software/speedwave/issues/657))
+* **desktop:** meeting transcription — local Whisper + diarization, host audio capture (ADR-056) ([#658](https://github.com/speednet-software/speedwave/issues/658))
+* **desktop:** beta-features toggle in tray menu (ADR-055) ([#660](https://github.com/speednet-software/speedwave/issues/660))
+* **desktop:** gate office + host-exec behind beta toggle (ADR-058) ([#663](https://github.com/speednet-software/speedwave/issues/663))
+* **runtime:** lazy build of enabled worker images (SPW-203) ([#659](https://github.com/speednet-software/speedwave/issues/659))
+* **desktop:** clipboard bridge for Claude auth URL + speedwave login wrapper ([#620](https://github.com/speednet-software/speedwave/issues/620))
+
+
+### Code Refactoring
+
+* **runtime,desktop:** host-side bridges + host MCP worker consolidation ([#708](https://github.com/speednet-software/speedwave/issues/708))
+* **desktop,mcp:** unify OAuth device flow + harden state validation ([#714](https://github.com/speednet-software/speedwave/issues/714))
+
+
+### Bug Fixes
+
+* **runtime,desktop:** release node.exe before Windows installer overwrite ([#712](https://github.com/speednet-software/speedwave/issues/712))
+* **runtime:** support `\\wsl.localhost\Speedwave\` project paths with helpful cross-distro error ([#709](https://github.com/speednet-software/speedwave/issues/709))
+* **security:** Windows shell ban-list + Windows build CI fixes ([#700](https://github.com/speednet-software/speedwave/issues/700))
+* **desktop:** unblock Windows build — pin sherpa-onnx prebuilt to MD-Release variant ([#697](https://github.com/speednet-software/speedwave/issues/697))
+* **mcp-sharepoint,desktop:** make OAuth refresh resilient under watchdog restart ([#680](https://github.com/speednet-software/speedwave/issues/680))
+* **macos:** Calendar TCC silent-reject + unify 4 OS integrations ([#618](https://github.com/speednet-software/speedwave/issues/618))
+* **desktop:** unregister WSL distro and clean bundled Node.js on Windows uninstall ([#613](https://github.com/speednet-software/speedwave/issues/613), [#616](https://github.com/speednet-software/speedwave/issues/616))
+* **runtime:** gate per-integration claude-resources by `ENABLED_SERVICES` ([#718](https://github.com/speednet-software/speedwave/issues/718))
+* **runtime:** bump Claude Code to 2.1.143 ([#683](https://github.com/speednet-software/speedwave/issues/683))
+* **desktop:** hide Claude Code synthetic user entries from chat history ([#710](https://github.com/speednet-software/speedwave/issues/710))
+* **mcp-sharepoint:** reject URL-form site_id with clear setup guidance ([#678](https://github.com/speednet-software/speedwave/issues/678))
+* **ci:** strip MSYS2 backslash escape from sha256sum output ([#699](https://github.com/speednet-software/speedwave/issues/699))
+* **desktop:** stage oauth worker in Windows bundle-build-context.ps1 ([#677](https://github.com/speednet-software/speedwave/issues/677))
+* unify MCP worker init around shared SSOT + atomic reconcile, remove Stop hook ([#705](https://github.com/speednet-software/speedwave/issues/705))
+* **macos:** raise minimumSystemVersion to 10.15 — required by whisper.cpp ([#668](https://github.com/speednet-software/speedwave/issues/668))
+* **desktop:** refresh tray after setup completes, not after create_project ([#665](https://github.com/speednet-software/speedwave/issues/665))
+* **runtime:** use OsStr byte sort in compute_plugin_digest ([#666](https://github.com/speednet-software/speedwave/issues/666))
+* **desktop:** expose Opus 4.6 + log llm writes + honest default label ([#617](https://github.com/speednet-software/speedwave/issues/617))
+* **desktop:** emit PowerShell-shaped Claude auth command on Windows ([#615](https://github.com/speednet-software/speedwave/issues/615))
+* **runtime:** propagate host timezone into all containers ([#619](https://github.com/speednet-software/speedwave/issues/619))
+* **runtime:** harden plugin manifest validation ([#630](https://github.com/speednet-software/speedwave/issues/630))
+
+
+### CI/Release
+
+* **release:** close 6 coverage gaps in release-please-config + backmerge AUTO_RESOLVE_FILES; add anti-regression test (`_tests/desktop/backmerge-alignment.bats`) ([#725](https://github.com/speednet-software/speedwave/issues/725))
 
 ## [0.11.0](https://github.com/speednet-software/speedwave/compare/v0.10.0...v0.11.0) (2026-05-19)
 
