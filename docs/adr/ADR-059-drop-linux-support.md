@@ -35,7 +35,7 @@ Drop Linux as a supported host platform. The application targets macOS (Lima) an
 ### Simplified
 
 - `compose::container_user()` is kept (the `${CONTAINER_USER}` placeholder still appears in `compose.template.yml` and is still substituted by `render_compose`), but the function now unconditionally returns `"1000:1000"`. No platform branch, no rootless `"0:0"` fallback. Call sites are unchanged for minimal churn.
-- `detect_runtime()` returns `Box<dyn ContainerRuntime>` from `LimaRuntime` on macOS and `WslRuntime` on Windows; any other `target_os` is a compile error.
+- `detect_runtime()` returns a `LockedRuntime` wrapping `LimaRuntime` on macOS and `WslRuntime` on Windows; any other `target_os` is a compile error. (`LockedRuntime` is the public façade introduced by the per-project compose-transaction lock — see ADR-066. The wrapped trait `ContainerRuntime` is `pub(crate)` and cannot be named from outside the crate.)
 - The platform-detection enum in the Angular setup wizard collapses from `'darwin' | 'win32' | 'linux'` to `'darwin' | 'win32'`.
 
 ### Preserved as historical record

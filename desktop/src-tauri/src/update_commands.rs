@@ -17,7 +17,7 @@ pub(crate) async fn update_containers(
         log::info!("update_containers: project={project}");
         check_project(&project)?;
         let rt = speedwave_runtime::runtime::detect_runtime();
-        speedwave_runtime::update::update_containers(rt.as_ref(), &project).map_err(|e| {
+        speedwave_runtime::update::update_containers(&rt, &project).map_err(|e| {
             log::error!("update_containers: error: {e}");
             e.to_string()
         })
@@ -32,7 +32,7 @@ pub(crate) async fn rollback_containers(project: String) -> Result<(), String> {
         log::info!("rollback_containers: project={project}");
         check_project(&project)?;
         let rt = speedwave_runtime::runtime::detect_runtime();
-        speedwave_runtime::update::rollback_containers(rt.as_ref(), &project).map_err(|e| {
+        speedwave_runtime::update::rollback_containers(&rt, &project).map_err(|e| {
             log::error!("rollback_containers: error: {e}");
             e.to_string()
         })
@@ -95,7 +95,7 @@ pub(crate) async fn install_update_and_reconcile(
         };
         let rt = speedwave_runtime::runtime::detect_runtime();
         let running_projects = if rt.is_available() {
-            reconcile::list_running_projects(rt.as_ref(), &user_config)?
+            reconcile::list_running_projects(&rt, &user_config)?
         } else {
             Vec::new()
         };
@@ -107,8 +107,8 @@ pub(crate) async fn install_update_and_reconcile(
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
 
         if !running_projects.is_empty() && rt.is_available() {
-            if let Err(stop_error) = reconcile::stop_projects(&running_projects, rt.as_ref()) {
-                if let Err(restore_error) = reconcile::restore_projects(&running_projects, rt.as_ref())
+            if let Err(stop_error) = reconcile::stop_projects(&running_projects, &rt) {
+                if let Err(restore_error) = reconcile::restore_projects(&running_projects, &rt)
                 {
                     log::error!(
                         "install_update_and_reconcile: failed to restore projects after stop error: {restore_error}"
@@ -143,7 +143,7 @@ pub(crate) async fn install_update_and_reconcile(
                 );
             }
 
-            reconcile::restore_projects(&projects_to_restore, rt.as_ref())
+            reconcile::restore_projects(&projects_to_restore, &rt)
         })
         .await
         .map_err(|e| e.to_string())?;

@@ -3,7 +3,6 @@ use crate::bundle;
 use crate::compose::{self, SecurityCheck};
 use crate::config;
 use crate::consts;
-use crate::runtime::ContainerRuntime;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -175,7 +174,7 @@ fn load_snapshot(project: &str) -> anyhow::Result<UpdateSnapshot> {
 // ---------------------------------------------------------------------------
 
 pub fn update_containers(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     project: &str,
 ) -> anyhow::Result<ContainerUpdateResult> {
     validate_project_name(project)?;
@@ -231,38 +230,31 @@ pub fn update_containers(
         );
     }
 
-    // 4. Save snapshot of current compose.yml for rollback (AFTER security check)
-    save_snapshot(project)?;
-
-    // 5. Save new compose.yml
-    compose::save_compose(project, &compose_yml)?;
-
-    // 6. Rebuild images from local Containerfiles BEFORE stopping containers.
-    //    If the build fails, containers keep running with the previous version.
-    //    containerd uses content-addressable storage — new builds don't affect running containers.
-    //    Old-bundle prune is moved to the end of update_containers (after the
-    //    new containers are verified running) so a partial failure leaves
-    //    the previous bundle's images on disk for rollback.
+    // Per-project compose lock covers the full transaction: snapshot, save,
+    // build, down, up. Prevents races with Desktop watchdog/restart paths.
     let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
-    let images_rebuilt = build::build_images_for_bundle(
-        runtime,
-        &build::enabled_images(&integrations),
-        &new_manifest.bundle_id,
-    )
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "Image rebuild failed: {}. Containers are still running with the previous version.",
-            e
+    let images_rebuilt = runtime.transaction(project, |runtime| -> anyhow::Result<u32> {
+        save_snapshot(project)?;
+        compose::save_compose(project, &compose_yml)?;
+
+        let built = build::build_images_for_bundle(
+            runtime,
+            &build::enabled_images(&integrations),
+            &new_manifest.bundle_id,
         )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Image rebuild failed: {}. Containers are still running with the previous version.",
+                e
+            )
+        })?;
+
+        runtime.compose_down(project)?;
+        crate::runtime::compose_validate_with_retry(runtime, project)?;
+        runtime.compose_up_recreate(project)?;
+        Ok(built)
     })?;
-
-    // 7. Graceful shutdown — stop running containers before recreate.
-    //    SIGTERM + timeout (compose default 10s) prevents killing active Claude sessions.
-    runtime.compose_down(project)?;
-
-    // 8. Recreate containers with newly built images
-    runtime.compose_up_recreate(project)?;
 
     // 9. Wait for containers to stabilize before health check.
     //    A crash-looping container may briefly show state=="running".
@@ -310,7 +302,10 @@ pub fn update_containers(
     })
 }
 
-pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> anyhow::Result<()> {
+pub fn rollback_containers(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+) -> anyhow::Result<()> {
     validate_project_name(project)?;
 
     let snapshot = load_snapshot(project)?;
@@ -354,18 +349,17 @@ pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> any
         );
     }
 
-    // Restore compose.yml from snapshot
-    compose::save_compose(project, &snapshot.compose_yml)?;
-
-    // Recreate containers with the old compose config
-    runtime.compose_up_recreate(project).map_err(|e| {
-        anyhow::anyhow!(
-            "Rollback failed: {}. Old compose.yml was restored. Run `speedwave` to start containers manually.",
-            e
-        )
-    })?;
-
-    Ok(())
+    runtime.transaction(project, |runtime| -> anyhow::Result<()> {
+        compose::save_compose(project, &snapshot.compose_yml)?;
+        crate::runtime::compose_validate_with_retry(runtime, project)?;
+        runtime.compose_up_recreate(project).map_err(|e| {
+            anyhow::anyhow!(
+                "Rollback failed: {}. Old compose.yml was restored. Run `speedwave` to start containers manually.",
+                e
+            )
+        })?;
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +534,67 @@ mod tests {
              must appear before compose_down (at byte offset {down_pos}) in \
              update_containers — building first ensures a failed build leaves \
              running containers untouched",
+        );
+    }
+
+    #[test]
+    fn test_update_containers_wraps_full_sequence_in_transaction() {
+        // Structural test: update_containers must wrap snapshot+save+build+down+
+        // validate+up in a single `runtime.transaction(project, ...)` call so
+        // that the per-project compose lock covers the whole sequence.
+        let source = include_str!("update.rs");
+        let fn_start = source
+            .find("fn update_containers(")
+            .expect("update_containers must exist");
+        let fn_body = &source[fn_start..];
+
+        let tx_pos = fn_body
+            .find("runtime.transaction(")
+            .expect("update_containers must call runtime.transaction(project, ...)");
+        let validate_pos = fn_body
+            .find("compose_validate_with_retry")
+            .expect("update_containers must call compose_validate_with_retry between down and up");
+        let up_pos = fn_body
+            .find("runtime.compose_up_recreate(project)")
+            .expect("update_containers must call compose_up_recreate");
+        let down_pos = fn_body
+            .find("runtime.compose_down(project)")
+            .expect("compose_down call expected");
+
+        assert!(
+            tx_pos < down_pos
+                && down_pos < validate_pos
+                && validate_pos < up_pos,
+            "update_containers must follow order: transaction(...) {{ compose_down -> compose_validate_with_retry -> compose_up_recreate }} \
+             (tx={tx_pos}, down={down_pos}, validate={validate_pos}, up={up_pos})"
+        );
+    }
+
+    #[test]
+    fn test_rollback_containers_runs_validate_before_up_recreate_in_transaction() {
+        let source = include_str!("update.rs");
+        let fn_start = source
+            .find("pub fn rollback_containers(")
+            .expect("rollback_containers must exist");
+        let fn_body = &source[fn_start..];
+
+        let tx_pos = fn_body
+            .find("runtime.transaction(")
+            .expect("rollback_containers must call runtime.transaction(project, ...)");
+        let save_pos = fn_body
+            .find("compose::save_compose")
+            .expect("rollback_containers must call save_compose with snapshot YAML");
+        let validate_pos = fn_body
+            .find("compose_validate_with_retry")
+            .expect("rollback_containers must call compose_validate_with_retry");
+        let up_pos = fn_body
+            .find("runtime.compose_up_recreate(project)")
+            .expect("rollback_containers must call compose_up_recreate");
+
+        assert!(
+            tx_pos < save_pos && save_pos < validate_pos && validate_pos < up_pos,
+            "rollback_containers must follow order: transaction(...) {{ save_compose -> compose_validate_with_retry -> compose_up_recreate }} \
+             (tx={tx_pos}, save={save_pos}, validate={validate_pos}, up={up_pos})"
         );
     }
 

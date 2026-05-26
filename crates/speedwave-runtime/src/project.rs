@@ -202,8 +202,7 @@ fn add_project_with_validated_dir(
     // Resolve config and render compose (still no I/O)
     let (resolved, integrations) = config::resolve_project_config(&canonical, &user_config, name);
     let rt = runtime::detect_runtime();
-    let rt_ref: Option<&dyn crate::runtime::ContainerRuntime> =
-        if rt.is_available() { Some(&*rt) } else { None };
+    let rt_ref: Option<&runtime::LockedRuntime> = if rt.is_available() { Some(&rt) } else { None };
     let yaml = compose::render_compose(
         name,
         &canonical_str,

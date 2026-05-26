@@ -4,8 +4,37 @@ use serde_json::Value;
 use std::process::Command;
 use std::sync::Mutex;
 
-pub mod lima;
-pub mod wsl;
+pub(crate) mod compose_locks;
+#[cfg(target_os = "macos")]
+pub(crate) mod lima;
+pub mod locked;
+#[cfg(any(test, feature = "test-support"))]
+pub mod mock_runtime;
+pub(crate) mod wsl;
+
+pub use locked::LockedRuntime;
+pub use wsl::decode_wsl_output;
+
+/// Integration-test hook: returns the global lock-acquisition counter.
+/// Compiled under `#[cfg(test)]` or when the `test-support` feature is on.
+#[cfg(any(test, feature = "test-support"))]
+pub fn lock_acquisitions_for_test() -> usize {
+    locked::LOCK_ACQUISITIONS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Cross-process lock test hook. Gated by `test-support` — production code
+/// must use `LockedRuntime::transaction()` for serialised compose ops.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_project_compose_lock_in_for_test<F, T>(
+    data_dir: &std::path::Path,
+    project: &str,
+    f: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    compose_locks::with_project_compose_lock_in(data_dir, project, f)
+}
 
 /// Serializes concurrent `ensure_ready()` calls across all runtime instances.
 ///
@@ -28,7 +57,7 @@ where
     f()
 }
 
-pub trait ContainerRuntime: Send + Sync {
+pub(crate) trait ContainerRuntime: Send + Sync {
     fn compose_up(&self, project: &str) -> anyhow::Result<()>;
     fn compose_down(&self, project: &str) -> anyhow::Result<()>;
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>>;
@@ -83,6 +112,14 @@ pub trait ContainerRuntime: Send + Sync {
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool>;
     /// Recreates all containers using `--force-recreate --remove-orphans`.
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
+
+    /// Validates compose.yml as the container engine sees it — production
+    /// runtimes MUST override (Lima/WSL run `nerdctl compose config --quiet`).
+    /// The default `Ok(())` is for test stubs only; a forgotten override would
+    /// silently disable VM-side propagation-lag detection.
+    fn compose_validate(&self, _project: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     /// Removes dangling images and build cache (not tagged images).
     ///
@@ -596,6 +633,7 @@ pub(crate) fn cleanup_targets_from_ps_output(ps_output: &str) -> Vec<String> {
     targets
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn run_rm_force(
     runner: &dyn CommandRunner,
     cmd: &str,
@@ -686,7 +724,7 @@ pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
 /// Probes whether `nerdctl exec` works on the given container by running a
 /// trivial command (`true`).  Returns `Ok(())` on success, or the stderr
 /// content as an error.
-fn probe_container_exec(runtime: &dyn ContainerRuntime, container: &str) -> anyhow::Result<()> {
+fn probe_container_exec(runtime: &LockedRuntime, container: &str) -> anyhow::Result<()> {
     let mut cmd = runtime.container_exec_piped(container, &["true"])?;
     let output = cmd.output()?;
     if output.status.success() {
@@ -710,7 +748,7 @@ fn probe_container_exec(runtime: &dyn ContainerRuntime, container: &str) -> anyh
 /// Call this between `compose_up()` and the real `container_exec()` to
 /// transparently recover from container failures.
 pub fn ensure_exec_healthy(
-    runtime: &dyn ContainerRuntime,
+    runtime: &LockedRuntime,
     project: &str,
     container: &str,
 ) -> anyhow::Result<()> {
@@ -765,6 +803,48 @@ pub fn ensure_exec_healthy(
     })
 }
 
+/// Maximum number of `compose_validate` attempts (initial try + retries).
+/// Sleeps occur between attempts: 100 ms before attempt 1, 200 ms before
+/// attempt 2. Total worst-case extra latency: 300 ms.
+const COMPOSE_VALIDATE_MAX_ATTEMPTS: u32 = 3;
+
+/// Retries `compose_validate` with exponential backoff (100 ms before retry 1,
+/// 200 ms before retry 2) on errors matching `is_propagation_error` — typical
+/// of virtiofs/9p mount lag. Total `COMPOSE_VALIDATE_MAX_ATTEMPTS` attempts.
+pub fn compose_validate_with_retry(runtime: &LockedRuntime, project: &str) -> anyhow::Result<()> {
+    let mut delay_ms: u64 = 100;
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..COMPOSE_VALIDATE_MAX_ATTEMPTS {
+        match runtime.compose_validate(project) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt + 1 < COMPOSE_VALIDATE_MAX_ATTEMPTS && is_propagation_error(&e) => {
+                log::warn!(
+                    "compose_validate attempt {}: {e} — retrying after {} ms",
+                    attempt + 1,
+                    delay_ms
+                );
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                delay_ms *= 2;
+                last_err = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // Loop above runs `COMPOSE_VALIDATE_MAX_ATTEMPTS` times; if every attempt
+    // failed with a propagation error, `last_err` is set on each retry branch.
+    // The match arms cover all `Err(_)` cases, so `None` is unreachable.
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("compose_validate exhausted retries with no error")))
+}
+
+/// Heuristic: error looks like virtiofs/9p propagation lag (compose engine
+/// sees stale or partial file).
+fn is_propagation_error(e: &anyhow::Error) -> bool {
+    let s = e.to_string().to_lowercase();
+    s.contains(crate::compose::UNDEFINED_NETWORK_ERROR_FRAGMENT)
+        || s.contains(crate::compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT)
+}
+
 /// Force-remove any containers still registered in the nerdctl name-store for
 /// the given compose project.  Called after `compose down --remove-orphans` to
 /// work around a nerdctl bug where ghost name-store entries survive and cause
@@ -774,6 +854,7 @@ pub fn ensure_exec_healthy(
 /// (e.g. `&["shell", "speedwave", "--", "sudo", "nerdctl"]` for Lima).
 ///
 /// Best-effort: failures are logged but never propagated.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn force_remove_project_containers(
     runner: &dyn CommandRunner,
     cmd: &str,
@@ -825,8 +906,67 @@ pub(crate) fn force_remove_project_containers(
     }
 }
 
+/// Shared `force_remove_project_networks` algorithm parameterised on a run
+/// closure so Lima can wrap each call in `retry_on_eof` while WSL/tests call
+/// the runner directly. Containers must be removed first — nerdctl refuses to
+/// drop a network with attached containers.
+pub(crate) fn force_remove_project_networks_with_run_fn<F>(
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+    run: F,
+) where
+    F: Fn(&str, &[&str]) -> anyhow::Result<String>,
+{
+    let filter = format!("label=com.docker.compose.project={project}");
+    let mut ls_args: Vec<&str> = nerdctl_prefix.to_vec();
+    ls_args.extend_from_slice(&["network", "ls", "--filter", &filter, "-q"]);
+
+    let net_ids = match run(cmd, &ls_args) {
+        Ok(output) => cleanup_targets_from_ps_output(&output),
+        Err(e) => {
+            log::warn!(
+                "force_remove_project_networks: ls failed for {project}: {e} \
+                 — orphan networks may block next compose_up"
+            );
+            return;
+        }
+    };
+    if net_ids.is_empty() {
+        return;
+    }
+
+    log::info!(
+        "force_remove_project_networks: removing {} network(s) for {project}",
+        net_ids.len()
+    );
+    for net_id in &net_ids {
+        let mut rm_args: Vec<&str> = nerdctl_prefix.to_vec();
+        rm_args.extend_from_slice(&["network", "rm", net_id]);
+        if let Err(e) = run(cmd, &rm_args) {
+            log::warn!(
+                "force_remove_project_networks: network rm {net_id} failed for {project}: {e}"
+            );
+        }
+    }
+}
+
+/// WSL/test variant — runner called directly without retry.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn force_remove_project_networks(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+) {
+    force_remove_project_networks_with_run_fn(cmd, project, nerdctl_prefix, |c, a| {
+        runner.run(c, a)
+    });
+}
+
 /// Runs `compose down` and then best-effort cleanup of any stale container
-/// entries for the project, even if `compose down` itself fails.
+/// and network entries for the project, even if `compose down` itself fails.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn compose_down_and_cleanup(
     runner: &dyn CommandRunner,
     cmd: &str,
@@ -840,10 +980,17 @@ pub(crate) fn compose_down_and_cleanup(
     }
 
     force_remove_project_containers(runner, cmd, project, nerdctl_prefix);
+    force_remove_project_networks(runner, cmd, project, nerdctl_prefix);
     down_result.map(|_| ())
 }
 
-pub fn detect_runtime() -> Box<dyn ContainerRuntime> {
+/// SSOT entry point: the only way to obtain a runtime handle outside this
+/// crate. Returns `LockedRuntime` so callers cannot bypass per-project locks.
+pub fn detect_runtime() -> LockedRuntime {
+    LockedRuntime::new(detect_runtime_inner())
+}
+
+pub(crate) fn detect_runtime_inner() -> Box<dyn ContainerRuntime> {
     #[cfg(target_os = "macos")]
     {
         Box::new(lima::LimaRuntime::new())
@@ -928,6 +1075,61 @@ pub(crate) mod test_support {
         }
     }
 
+    /// `CommandRunner` that records every command into a shared `Vec<String>`
+    /// and resolves responses from a pre-seeded `HashMap`. Used by tests that
+    /// need to assert command sequence AND control return values. Previously
+    /// 5 separate inline `struct RecordingRunner` blocks scattered across the
+    /// test module — consolidated here (Rule of Three passed at 5 sites).
+    pub struct TestRecordingRunner {
+        pub commands: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        pub responses: std::collections::HashMap<String, anyhow::Result<String>>,
+    }
+
+    impl Default for TestRecordingRunner {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl TestRecordingRunner {
+        pub fn new() -> Self {
+            Self {
+                commands: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                responses: std::collections::HashMap::new(),
+            }
+        }
+
+        /// Returns a shared handle to the commands log so callers can keep
+        /// inspecting it after the runner is boxed into a `LockedRuntime`.
+        pub fn commands_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+            std::sync::Arc::clone(&self.commands)
+        }
+
+        pub fn with_response(mut self, key: &str, response: &str) -> Self {
+            self.responses
+                .insert(key.to_string(), Ok(response.to_string()));
+            self
+        }
+
+        pub fn with_error(mut self, key: &str, msg: &str) -> Self {
+            self.responses
+                .insert(key.to_string(), Err(anyhow::anyhow!("{msg}")));
+            self
+        }
+    }
+
+    impl CommandRunner for TestRecordingRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            let key = format!("{} {}", cmd, args.join(" "));
+            self.commands.lock().unwrap().push(key.clone());
+            match self.responses.get(&key) {
+                Some(Ok(val)) => Ok(val.clone()),
+                Some(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                None => Err(anyhow::anyhow!("unexpected command: {key}")),
+            }
+        }
+    }
+
     pub struct SequentialMockRunner {
         pub responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<String>>>,
         pub calls: std::sync::Mutex<Vec<(String, Vec<String>, Option<std::time::Duration>)>>,
@@ -980,6 +1182,7 @@ pub(crate) mod test_support {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::runtime::mock_runtime::MockRuntimeBuilder;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -1248,6 +1451,10 @@ services:
             project
         );
         let rm_key = "nerdctl rm -f stale-id".to_string();
+        let net_ls_key = format!(
+            "nerdctl network ls --filter label=com.docker.compose.project={} -q",
+            project
+        );
 
         let runner = RecordingRunner {
             commands: Arc::clone(&commands),
@@ -1258,6 +1465,7 @@ services:
                 ),
                 (ps_key.clone(), Ok("stale-id\n".to_string())),
                 (rm_key.clone(), Ok(String::new())),
+                (net_ls_key.clone(), Ok(String::new())),
             ]),
         };
 
@@ -1279,10 +1487,109 @@ services:
         .unwrap_err();
 
         assert!(err.to_string().contains("compose down failed"));
+        // Ordering invariant: down → ps → rm-containers → network-ls (and network-rm
+        // would follow if ls returned IDs). Containers MUST be removed before networks
+        // — nerdctl refuses network rm with attached containers.
         assert_eq!(
             commands.lock().unwrap().as_slice(),
-            &[down_key, ps_key, rm_key]
+            &[down_key, ps_key, rm_key, net_ls_key]
         );
+    }
+
+    #[test]
+    fn force_remove_project_networks_runs_ls_then_rm_per_id() {
+        struct RecordingRunner {
+            commands: Arc<Mutex<Vec<String>>>,
+            responses: HashMap<String, anyhow::Result<String>>,
+        }
+        impl CommandRunner for RecordingRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.commands.lock().unwrap().push(key.clone());
+                self.responses
+                    .get(&key)
+                    .map(|r| match r {
+                        Ok(v) => Ok(v.clone()),
+                        Err(e) => Err(anyhow::anyhow!("{e}")),
+                    })
+                    .unwrap_or_else(|| Err(anyhow::anyhow!("unexpected: {key}")))
+            }
+        }
+
+        let project = "net-multi";
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let ls_key = format!(
+            "nerdctl network ls --filter label=com.docker.compose.project={} -q",
+            project
+        );
+        let rm_a = "nerdctl network rm net-id-a".to_string();
+        let rm_b = "nerdctl network rm net-id-b".to_string();
+
+        let runner = RecordingRunner {
+            commands: Arc::clone(&commands),
+            responses: HashMap::from([
+                (ls_key.clone(), Ok("net-id-a\nnet-id-b\n".to_string())),
+                (rm_a.clone(), Ok(String::new())),
+                (rm_b.clone(), Ok(String::new())),
+            ]),
+        };
+        force_remove_project_networks(&runner, "nerdctl", project, &[]);
+        assert_eq!(commands.lock().unwrap().as_slice(), &[ls_key, rm_a, rm_b]);
+    }
+
+    #[test]
+    fn force_remove_project_networks_handles_empty_ls() {
+        struct RecordingRunner {
+            commands: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for RecordingRunner {
+            fn run(&self, _: &str, args: &[&str]) -> anyhow::Result<String> {
+                self.commands.lock().unwrap().push(args.join(" "));
+                Ok(String::new())
+            }
+        }
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let runner = RecordingRunner {
+            commands: Arc::clone(&commands),
+        };
+        force_remove_project_networks(&runner, "nerdctl", "empty-ls", &[]);
+        let cmds = commands.lock().unwrap();
+        assert_eq!(cmds.len(), 1, "empty ls → only one command (the ls itself)");
+        assert!(cmds[0].contains("network ls"));
+    }
+
+    #[test]
+    fn force_remove_project_networks_continues_after_rm_failure() {
+        struct RecordingRunner {
+            commands: Arc<Mutex<Vec<String>>>,
+            fail_first_rm: std::sync::atomic::AtomicBool,
+        }
+        impl CommandRunner for RecordingRunner {
+            fn run(&self, _: &str, args: &[&str]) -> anyhow::Result<String> {
+                let cmd = args.join(" ");
+                self.commands.lock().unwrap().push(cmd.clone());
+                if cmd.contains("network ls") {
+                    return Ok("a\nb\n".to_string());
+                }
+                if cmd.contains("network rm a")
+                    && self
+                        .fail_first_rm
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(anyhow::anyhow!("transient nerdctl error"));
+                }
+                Ok(String::new())
+            }
+        }
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let runner = RecordingRunner {
+            commands: Arc::clone(&commands),
+            fail_first_rm: std::sync::atomic::AtomicBool::new(true),
+        };
+        force_remove_project_networks(&runner, "nerdctl", "rm-fail", &[]);
+        let cmds = commands.lock().unwrap();
+        assert!(cmds.iter().any(|c| c.contains("network rm a")));
+        assert!(cmds.iter().any(|c| c.contains("network rm b")));
     }
 
     #[test]
@@ -1439,171 +1746,62 @@ services:
         assert!(!is_stopped_container_error(""));
     }
 
-    /// Mock runtime for testing `ensure_exec_healthy()`.
-    ///
-    /// `exec_healthy` controls whether `container_exec_piped` returns a
-    /// command that succeeds (true) or fails with a stale-mount error.
-    /// `compose_up_recreate` flips `exec_healthy` to `true` and records
-    /// the call.
-    struct ProbeTestRuntime {
-        exec_healthy: std::sync::atomic::AtomicBool,
-        recreate_called: std::sync::atomic::AtomicBool,
-        /// When set, `container_exec_piped` returns a command that fails
-        /// with this message instead of the stale-mount error.
-        custom_error: Option<String>,
-        /// When set, `compose_up_recreate` returns this error.
-        recreate_error: Option<String>,
-        /// When true, `compose_up_recreate` does NOT flip `exec_healthy`.
-        stay_stale: bool,
-    }
+    // -----------------------------------------------------------------------
+    // ensure_exec_healthy tests — driven by `MockRuntimeBuilder`. Each probe
+    // call pops one entry from the scripted exec-piped failure queue; an
+    // empty queue means the default `Command::new("true")` (success).
+    // -----------------------------------------------------------------------
 
-    impl ProbeTestRuntime {
-        fn healthy() -> Self {
-            Self {
-                exec_healthy: std::sync::atomic::AtomicBool::new(true),
-                recreate_called: std::sync::atomic::AtomicBool::new(false),
-                custom_error: None,
-                recreate_error: None,
-                stay_stale: false,
-            }
-        }
-
-        fn stale() -> Self {
-            Self {
-                exec_healthy: std::sync::atomic::AtomicBool::new(false),
-                recreate_called: std::sync::atomic::AtomicBool::new(false),
-                custom_error: None,
-                recreate_error: None,
-                stay_stale: false,
-            }
-        }
-
-        fn stay_stale_after_recreate() -> Self {
-            Self {
-                exec_healthy: std::sync::atomic::AtomicBool::new(false),
-                recreate_called: std::sync::atomic::AtomicBool::new(false),
-                custom_error: None,
-                recreate_error: None,
-                stay_stale: true,
-            }
-        }
-
-        fn with_custom_error(mut self, msg: &str) -> Self {
-            self.custom_error = Some(msg.to_string());
-            self
-        }
-
-        fn with_recreate_error(mut self, msg: &str) -> Self {
-            self.recreate_error = Some(msg.to_string());
-            self
-        }
-
-        fn was_recreated(&self) -> bool {
-            self.recreate_called
-                .load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    impl ContainerRuntime for ProbeTestRuntime {
-        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-            Command::new("true")
-        }
-        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-            if self.exec_healthy.load(std::sync::atomic::Ordering::SeqCst) {
-                Ok(Command::new("true"))
-            } else if let Some(ref msg) = self.custom_error {
-                let mut cmd = Command::new("sh");
-                cmd.env("TEST_MSG", msg)
-                    .args(["-c", "echo \"$TEST_MSG\" >&2; exit 1"]);
-                Ok(cmd)
-            } else {
-                let mut cmd = Command::new("sh");
-                cmd.args([
-                    "-c",
-                    "echo 'current working directory is outside of container mount namespace root -- possible container breakout detected' >&2; exit 1",
-                ]);
-                Ok(cmd)
-            }
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            self.recreate_called
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            if let Some(ref msg) = self.recreate_error {
-                anyhow::bail!("{msg}");
-            }
-            // Recovery: flip exec to healthy (unless stay_stale is set)
-            if !self.stay_stale {
-                self.exec_healthy
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-            Ok(())
-        }
-        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-    }
+    /// Stderr text the runtime classifies as a stale-mount error via
+    /// `is_stale_container_error`. Single source for the test fixture so a
+    /// classifier change reaches every `ensure_exec_healthy` test in one edit.
+    const STALE_MOUNT_STDERR: &str = "current working directory is outside of container mount namespace root -- possible container breakout detected";
 
     #[test]
     fn test_ensure_exec_healthy_noop_when_healthy() {
-        let rt = ProbeTestRuntime::healthy();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         ensure_exec_healthy(&rt, "proj", "container").unwrap();
         assert!(
-            !rt.was_recreated(),
+            !handles.was_recreated(),
             "compose_up_recreate should NOT be called when container is healthy"
         );
     }
 
     #[test]
     fn test_ensure_exec_healthy_recovers_stale_container() {
-        let rt = ProbeTestRuntime::stale();
+        // Probe 1 fails (stale) -> recreate -> Probe 2 succeeds (queue drained).
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_exec_piped_failure(STALE_MOUNT_STDERR)
+            .build();
         ensure_exec_healthy(&rt, "proj", "container").unwrap();
         assert!(
-            rt.was_recreated(),
+            handles.was_recreated(),
             "compose_up_recreate should be called for stale container"
         );
     }
 
     #[test]
     fn test_ensure_exec_healthy_passes_through_non_stale_error() {
-        let rt = ProbeTestRuntime::stale().with_custom_error("connection refused");
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_exec_piped_failure("connection refused")
+            .build();
         let err = ensure_exec_healthy(&rt, "proj", "container").unwrap_err();
         assert!(
             err.to_string().contains("connection refused"),
             "non-stale error should propagate: {err}"
         );
         assert!(
-            !rt.was_recreated(),
+            !handles.was_recreated(),
             "compose_up_recreate should NOT be called for non-stale errors"
         );
     }
 
     #[test]
     fn test_ensure_exec_healthy_recovery_failure_gives_actionable_message() {
-        let rt = ProbeTestRuntime::stale().with_recreate_error("nerdctl compose failed");
+        let (rt, _) = MockRuntimeBuilder::new()
+            .push_exec_piped_failure(STALE_MOUNT_STDERR)
+            .with_fail_on_recreate(&["proj"])
+            .build();
         let err = ensure_exec_healthy(&rt, "proj", "container").unwrap_err();
         assert!(
             err.to_string().contains("Please restart Speedwave"),
@@ -1613,9 +1811,16 @@ services:
 
     #[test]
     fn test_ensure_exec_healthy_still_broken_after_recovery() {
-        let rt = ProbeTestRuntime::stay_stale_after_recreate();
+        // Both probes fail (stale): probe1 -> recreate (succeeds) -> probe2 still fails.
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_exec_piped_failure(STALE_MOUNT_STDERR)
+            .push_exec_piped_failure(STALE_MOUNT_STDERR)
+            .build();
         let err = ensure_exec_healthy(&rt, "proj", "container").unwrap_err();
-        assert!(rt.was_recreated(), "compose_up_recreate should be called");
+        assert!(
+            handles.was_recreated(),
+            "compose_up_recreate should be called"
+        );
         assert!(
             err.to_string()
                 .contains("Containers still broken after recovery"),
@@ -1629,34 +1834,39 @@ services:
 
     #[test]
     fn test_ensure_exec_healthy_recovers_missing_container() {
-        let rt =
-            ProbeTestRuntime::stale().with_custom_error("no such container: speedwave_test_claude");
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_exec_piped_failure("no such container: speedwave_test_claude")
+            .build();
         ensure_exec_healthy(&rt, "proj", "container").unwrap();
         assert!(
-            rt.was_recreated(),
+            handles.was_recreated(),
             "compose_up_recreate should be called for missing container"
         );
     }
 
     #[test]
     fn test_ensure_exec_healthy_recovers_container_not_found() {
-        let rt = ProbeTestRuntime::stale().with_custom_error("container not found");
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_exec_piped_failure("container not found")
+            .build();
         ensure_exec_healthy(&rt, "proj", "container").unwrap();
         assert!(
-            rt.was_recreated(),
+            handles.was_recreated(),
             "compose_up_recreate should be called for 'not found' container"
         );
     }
 
     #[test]
     fn test_ensure_exec_healthy_recovers_stopped_container() {
-        let rt = ProbeTestRuntime::stale().with_custom_error(
-            "time=\"2026-05-03T21:37:58+02:00\" level=fatal \
-             msg=\"cannot exec in a stopped state\"",
-        );
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_exec_piped_failure(
+                "time=\"2026-05-03T21:37:58+02:00\" level=fatal \
+                 msg=\"cannot exec in a stopped state\"",
+            )
+            .build();
         ensure_exec_healthy(&rt, "proj", "container").unwrap();
         assert!(
-            rt.was_recreated(),
+            handles.was_recreated(),
             "compose_up_recreate should be called for stopped container"
         );
     }
@@ -1753,8 +1963,8 @@ services:
 
     #[test]
     fn test_remove_images_default_impl_is_noop() {
-        // ProbeTestRuntime uses the trait default (no override).
-        let rt = ProbeTestRuntime::healthy();
+        // `NoopRuntime` does not override `remove_images`, so this exercises the trait default.
+        let rt = NoopRuntime;
         assert!(
             rt.remove_images(&[], false).is_ok(),
             "default remove_images with empty slice should return Ok"
@@ -1872,6 +2082,88 @@ services:
                 "round-trip failed for argv={argv:?}, quoted={quoted:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // compose_validate_with_retry tests
+    // -----------------------------------------------------------------------
+
+    // `push_validate_result` is FIFO: first push -> first popped.
+
+    #[test]
+    fn compose_validate_with_retry_succeeds_on_first_attempt() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_validate_result(Ok(()))
+            .build();
+        compose_validate_with_retry(&rt, "proj").unwrap();
+        assert_eq!(handles.validate_calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn compose_validate_with_retry_retries_on_propagation_error() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_validate_result(Err("service refers to undefined network foo".to_string()))
+            .push_validate_result(Err("invalid compose project".to_string()))
+            .push_validate_result(Ok(()))
+            .build();
+        compose_validate_with_retry(&rt, "proj").unwrap();
+        assert_eq!(handles.validate_calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn compose_validate_with_retry_does_not_retry_unrelated_errors() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_validate_result(Err("permission denied".to_string()))
+            .build();
+        let err = compose_validate_with_retry(&rt, "proj").unwrap_err();
+        assert!(err.to_string().contains("permission denied"));
+        assert_eq!(handles.validate_calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn compose_validate_with_retry_bails_after_max_retries() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_validate_result(Err("undefined network a".to_string()))
+            .push_validate_result(Err("undefined network b".to_string()))
+            .push_validate_result(Err("undefined network c".to_string()))
+            .build();
+        let err = compose_validate_with_retry(&rt, "proj").unwrap_err();
+        assert!(err.to_string().contains("undefined network c"));
+        assert_eq!(handles.validate_calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn is_propagation_error_matches_undefined_network() {
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "service \"x\" refers to undefined network y"
+        )));
+    }
+
+    #[test]
+    fn is_propagation_error_matches_invalid_compose_project() {
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "invalid compose project"
+        )));
+    }
+
+    #[test]
+    fn is_propagation_error_rejects_unrelated() {
+        assert!(!is_propagation_error(&anyhow::anyhow!(
+            "connection refused"
+        )));
+        assert!(!is_propagation_error(&anyhow::anyhow!("EOF")));
+    }
+
+    #[test]
+    fn is_propagation_error_handles_mixed_case() {
+        // nerdctl on some platforms emits title-cased messages — to_lowercase
+        // normalises them before substring match.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "Service X refers to Undefined Network Y"
+        )));
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "INVALID COMPOSE PROJECT: ..."
+        )));
     }
 }
 

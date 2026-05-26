@@ -330,7 +330,7 @@ fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool 
 /// on such output corrupts the data (inserts replacement characters and null bytes), causing
 /// string comparisons like distro name matching to silently fail.
 #[cfg(any(target_os = "windows", test))]
-use runtime::wsl::decode_wsl_output;
+use runtime::decode_wsl_output;
 
 pub fn init_vm() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
@@ -963,7 +963,7 @@ pub fn build_images() -> anyhow::Result<()> {
             None => config::ResolvedIntegrationsConfig::default(),
         }
     };
-    match build::build_enabled_images(rt.as_ref(), &active_integrations) {
+    match build::build_enabled_images(&rt, &active_integrations) {
         Ok(_) => {}
         Err(e)
             if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
@@ -971,7 +971,7 @@ pub fn build_images() -> anyhow::Result<()> {
         {
             log::warn!("snapshotter recovery failed after prune, restarting engine");
             rt.restart_container_engine()?;
-            build::build_enabled_images(rt.as_ref(), &active_integrations)?;
+            build::build_enabled_images(&rt, &active_integrations)?;
         }
         Err(e) => return Err(e),
     }
@@ -1027,7 +1027,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         project_dir,
         &resolved,
         &integrations,
-        Some(rt.as_ref()),
+        Some(&rt),
         &crate::reconcile::current_bridges_info(),
     )?;
 
@@ -1046,10 +1046,13 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         );
     }
 
-    compose::save_compose(project, &yaml)?;
-
-    log::info!("starting containers via compose_up_recreate");
-    rt.compose_up_recreate(project)?;
+    rt.transaction(project, |rt| -> anyhow::Result<()> {
+        compose::save_compose(project, &yaml)?;
+        log::info!("starting containers via compose_up_recreate");
+        speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
+        rt.compose_up_recreate(project)?;
+        Ok(())
+    })?;
     log::info!("containers started, verifying health");
 
     // Verify containers are actually functional before marking as started.
@@ -1060,7 +1063,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         speedwave_runtime::consts::compose_prefix(),
         project
     );
-    runtime::ensure_exec_healthy(&*rt, project, &claude_container)?;
+    runtime::ensure_exec_healthy(&rt, project, &claude_container)?;
 
     let mut state = SetupState::load();
     state.containers_started = true;
@@ -1103,7 +1106,7 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let rt = runtime::detect_runtime();
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project);
     log::info!("check_claude_auth: container={container_name}");
-    ensure_exec_healthy(&*rt, project, &container_name)?;
+    ensure_exec_healthy(&rt, project, &container_name)?;
     log::info!("check_claude_auth: container healthy, checking auth");
     let mut cmd =
         rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
@@ -3666,7 +3669,7 @@ networks:
             "build_images() must call restart_container_engine() in the recovery path"
         );
         assert!(
-            body.contains("build::build_enabled_images(rt.as_ref(), &active_integrations)?"),
+            body.contains("build::build_enabled_images(&rt, &active_integrations)?"),
             "build_images() must retry build_enabled_images after engine restart"
         );
     }
@@ -4053,86 +4056,32 @@ networks:
     // These tests verify the non-fatal wrapper pattern used in factory_reset
     // handles both Ok and Err from reset_vm() correctly.
     mod reset_vm_factory_reset_contract {
-        use speedwave_runtime::runtime::ContainerRuntime;
-        use std::process::Command;
-
-        // Minimal ContainerRuntime impl for testing reset_vm() contract.
-        // All required methods unimplemented!() — only reset_vm() is under test.
-        macro_rules! stub_runtime {
-            ($name:ident, $reset:expr) => {
-                struct $name;
-                impl ContainerRuntime for $name {
-                    fn reset_vm(&self) -> anyhow::Result<()> {
-                        $reset
-                    }
-                    fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-                        unimplemented!()
-                    }
-                    fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-                        unimplemented!()
-                    }
-                    fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-                        unimplemented!()
-                    }
-                    fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-                        unimplemented!()
-                    }
-                    fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-                        unimplemented!()
-                    }
-                    fn is_available(&self) -> bool {
-                        false
-                    }
-                    fn ensure_ready(&self) -> anyhow::Result<()> {
-                        Ok(())
-                    }
-                    fn build_image(
-                        &self,
-                        _: &str,
-                        _: &str,
-                        _: &str,
-                        _: &[(&str, &str)],
-                    ) -> anyhow::Result<()> {
-                        unimplemented!()
-                    }
-                    fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                        unimplemented!()
-                    }
-                    fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                        unimplemented!()
-                    }
-                    fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-                        unimplemented!()
-                    }
-                    fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-                        unimplemented!()
-                    }
-                }
-            };
-        }
-
-        stub_runtime!(
-            FailResetVm,
-            anyhow::bail!("simulated wsl --unregister failure")
-        );
-        stub_runtime!(OkResetVm, Ok(()));
+        use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 
         #[test]
         fn reset_vm_error_is_non_fatal() {
-            let rt: Box<dyn ContainerRuntime> = Box::new(FailResetVm);
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_reset_vm_error("simulated wsl --unregister failure")
+                .build();
             // Non-fatal: log::warn and continue — must not propagate as Err.
             // This mirrors the exact pattern in factory_reset.
             if let Err(e) = rt.reset_vm() {
                 log::warn!("reset_vm failed (continuing to wipe_data_dir): {e}");
             }
             // Reaching here proves the error did not propagate.
+            assert_eq!(
+                handles.reset_vm_count(),
+                1,
+                "reset_vm must have been invoked"
+            );
         }
 
         #[test]
         fn reset_vm_ok_returns_ok() {
-            let rt: Box<dyn ContainerRuntime> = Box::new(OkResetVm);
-            // trait default returns Ok(()); no warn log, no error propagated
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            // Default builder returns Ok(()); no warn log, no error propagated.
             assert!(rt.reset_vm().is_ok());
+            assert_eq!(handles.reset_vm_count(), 1);
         }
     }
 }

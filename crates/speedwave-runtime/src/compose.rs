@@ -2,7 +2,6 @@ use crate::config::{LlmConfig, ResolvedClaudeConfig, ResolvedIntegrationsConfig}
 use crate::consts;
 use crate::defaults;
 use crate::plugin::{self, PluginManifest};
-use crate::runtime::ContainerRuntime;
 use crate::{build, bundle};
 use std::path::{Path, PathBuf};
 use strum::EnumProperty;
@@ -72,7 +71,7 @@ pub fn render_compose(
     project_dir: &str,
     resolved_config: &ResolvedClaudeConfig,
     integrations: &ResolvedIntegrationsConfig,
-    runtime: Option<&dyn ContainerRuntime>,
+    runtime: Option<&crate::runtime::LockedRuntime>,
     bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
@@ -277,18 +276,130 @@ pub fn compose_output_path_in(
     Ok(data_dir.join("compose").join(project).join("compose.yml"))
 }
 
-/// Saves the rendered compose YAML to disk with owner-only permissions.
-///
-/// Compose may carry `ANTHROPIC_AUTH_TOKEN=<real-key>` when local-LLM auth is
-/// configured (ADR-040 delta) — the rendered file is therefore a secret and
-/// must be 0o600 (Unix) / owner-only ACL (Windows). Atomic via fs_perms so
-/// crash mid-render cannot leave a truncated YAML.
+/// Atomic 0o600 write of the rendered compose YAML. Validates network refs
+/// pre-write and after read-back — bails on any undefined network reference.
+/// File is treated as a secret: may contain `ANTHROPIC_AUTH_TOKEN` when
+/// local-LLM auth is configured (ADR-040).
+#[cfg(test)]
+thread_local! {
+    /// Test seam: when set, overrides the post-write read-back with this string
+    /// to exercise the disk-corruption / virtiofs-divergence branch in
+    /// `save_compose` without needing real filesystem games. Cleared per call.
+    static FORCE_DISK_GARBAGE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn read_back_compose(path: &std::path::Path) -> std::io::Result<String> {
+    if let Some(forced) = FORCE_DISK_GARBAGE.with(|c| c.borrow_mut().take()) {
+        return Ok(forced);
+    }
+    std::fs::read_to_string(path)
+}
+
+#[cfg(not(test))]
+fn read_back_compose(path: &std::path::Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
+}
+
 pub fn save_compose(project: &str, yaml: &str) -> anyhow::Result<()> {
+    validate_compose_network_refs(yaml)
+        .map_err(|e| anyhow::anyhow!("save_compose: in-memory YAML failed validation: {e}"))?;
+
     let path = compose_output_path(project)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     crate::fs_perms::write_restricted_file_atomic(&path, yaml)?;
+
+    let on_disk = read_back_compose(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "save_compose: post-write read-back failed for '{}': {e}",
+            path.display()
+        )
+    })?;
+    validate_compose_network_refs(&on_disk).map_err(|e| {
+        anyhow::anyhow!(
+            "save_compose: disk content failed validation (host write succeeded but \
+             read-back differs from in-memory):\n  on-disk error: {e}\n  in-memory \
+             length: {} bytes\n  on-disk length: {} bytes",
+            yaml.len(),
+            on_disk.len()
+        )
+    })?;
+    Ok(())
+}
+
+/// SSOT for the "undefined network" error fragment shared between the
+/// host-side validator below and `runtime::is_propagation_error` (which uses
+/// it to recognise VM-side `nerdctl compose config` failures).
+pub(crate) const UNDEFINED_NETWORK_ERROR_FRAGMENT: &str = "undefined network";
+
+/// SSOT for the "invalid compose project" error fragment emitted by nerdctl
+/// when a compose.yml references an undefined network — recognised by
+/// `runtime::is_propagation_error` for retry-on-propagation-lag.
+pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose project";
+
+/// Asserts every `services.<svc>.networks: [name]` reference resolves to a
+/// declared top-level `networks.<name>` entry. Catches render bugs and torn
+/// writes that produce truncated/missing network entries.
+fn validate_compose_network_refs(yaml: &str) -> anyhow::Result<()> {
+    let doc: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(yaml).map_err(|e| anyhow::anyhow!("YAML parse failed: {e}"))?;
+
+    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(map) = doc.get("networks").and_then(|n| n.as_mapping()) {
+        for key in map.keys() {
+            if let Some(name) = key.as_str() {
+                declared.insert(name.to_string());
+            }
+        }
+    }
+
+    // Compute once for all error paths — declared set is immutable after this.
+    let mut declared_sorted: Vec<&str> = declared.iter().map(String::as_str).collect();
+    declared_sorted.sort();
+
+    let services = match doc.get("services").and_then(|s| s.as_mapping()) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    for (svc_key, svc_val) in services {
+        let svc_name = svc_key.as_str().unwrap_or("<non-string-key>");
+        let Some(networks) = svc_val.get("networks") else {
+            continue;
+        };
+        // Compose spec allows `networks: null` (or omission) to mean "no network
+        // attachments declared". Treat null/missing same as an absent field.
+        if networks.is_null() {
+            continue;
+        }
+        let refs: Vec<String> = if let Some(seq) = networks.as_sequence() {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        } else if let Some(m) = networks.as_mapping() {
+            m.keys()
+                .filter_map(|k| k.as_str().map(str::to_string))
+                .collect()
+        } else {
+            anyhow::bail!(
+                "service '{svc_name}': networks field is neither a sequence nor a mapping \
+                 (got {:?}) — render bug",
+                networks
+            );
+        };
+        for r in refs {
+            if !declared.contains(&r) {
+                anyhow::bail!(
+                    "service '{svc_name}' references {UNDEFINED_NETWORK_ERROR_FRAGMENT} '{r}'; \
+                     declared networks: [{}]",
+                    declared_sorted.join(", ")
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -11498,5 +11609,230 @@ services:
         // Cleanup — best-effort, errors here would mask the assertion above.
         let _ = std::fs::remove_file(&headers_path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_compose_network_refs tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_network_refs_accepts_valid_topology() {
+        let yaml = r#"
+services:
+  claude:
+    networks:
+      - speedwave_net
+  hub:
+    networks:
+      - speedwave_net
+      - speedwave_net_office
+networks:
+  speedwave_net:
+    driver: bridge
+  speedwave_net_office:
+    driver: bridge
+    internal: true
+"#;
+        validate_compose_network_refs(yaml).unwrap();
+    }
+
+    #[test]
+    fn validate_network_refs_rejects_undefined_reference() {
+        let yaml = r#"
+services:
+  claude:
+    networks:
+      - speedwave_speedwave_network
+networks:
+  speedwave_network:
+    driver: bridge
+"#;
+        let err = validate_compose_network_refs(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'claude'"), "missing service name: {msg}");
+        assert!(
+            msg.contains("'speedwave_speedwave_network'"),
+            "missing offending ref: {msg}"
+        );
+        assert!(
+            msg.contains("speedwave_network"),
+            "missing declared-list: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_network_refs_handles_no_networks_block() {
+        let yaml = r#"
+services:
+  claude:
+    image: example
+"#;
+        validate_compose_network_refs(yaml).unwrap();
+    }
+
+    #[test]
+    fn validate_network_refs_rejects_truncated_name() {
+        // Production-observed truncations: speedwave_, spe, ..._offi.
+        let yaml = r#"
+services:
+  claude:
+    networks:
+      - speedwave_
+networks:
+  speedwave_speedwave_network:
+    driver: bridge
+"#;
+        let err = validate_compose_network_refs(yaml).unwrap_err();
+        assert!(err.to_string().contains("'speedwave_'"));
+    }
+
+    #[test]
+    fn validate_network_refs_handles_services_without_networks_field() {
+        let yaml = r#"
+services:
+  claude: {}
+  hub:
+    networks:
+      - net1
+networks:
+  net1:
+    driver: bridge
+"#;
+        validate_compose_network_refs(yaml).unwrap();
+    }
+
+    #[test]
+    fn validate_network_refs_accepts_map_form_networks_in_service() {
+        // Compose spec allows `networks:` as a mapping (with aliases/ipv4_address)
+        // — the validator must extract the keys as references.
+        let yaml = r#"
+services:
+  claude:
+    networks:
+      net1:
+        aliases:
+          - claude.local
+networks:
+  net1:
+    driver: bridge
+"#;
+        validate_compose_network_refs(yaml).unwrap();
+    }
+
+    #[test]
+    fn validate_network_refs_accepts_null_networks() {
+        // Compose spec: `networks: null` (or `networks: ~`) is a valid way to
+        // declare "no network attachments". Must not be confused with the
+        // "unknown YAML shape" render-bug branch.
+        let yaml = r#"
+services:
+  claude:
+    networks: null
+networks:
+  net1:
+    driver: bridge
+"#;
+        validate_compose_network_refs(yaml).unwrap();
+    }
+
+    #[test]
+    fn validate_network_refs_bails_on_unknown_yaml_shape() {
+        // `networks:` is neither a sequence nor a mapping (here: a scalar) —
+        // render bug or torn-write. Must bail explicitly, not silently pass.
+        let yaml = r#"
+services:
+  claude:
+    networks: just-a-string
+networks:
+  net1:
+    driver: bridge
+"#;
+        let err = validate_compose_network_refs(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("neither a sequence nor a mapping"),
+            "unknown shape must bail with descriptive error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn save_compose_bails_on_invalid_in_memory_yaml() {
+        let project = format!("save-validate-{}", std::process::id());
+        let yaml = r#"
+services:
+  claude:
+    networks:
+      - bogus
+networks:
+  speedwave_net:
+    driver: bridge
+"#;
+        let err = super::save_compose(&project, yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("in-memory YAML failed validation"),
+            "expected in-memory diagnostic: {err}"
+        );
+
+        // Side-effect check: file should NOT have been written.
+        let path = super::compose_output_path(&project).unwrap();
+        assert!(
+            !path.exists(),
+            "compose.yml must not exist after pre-write bail"
+        );
+    }
+
+    #[test]
+    fn save_compose_bails_when_disk_content_diverges_from_memory() {
+        // Test seam: FORCE_DISK_GARBAGE replaces the read-back content with
+        // YAML that fails network-ref validation. Simulates virtiofs/9p
+        // propagation lag or torn write.
+        let project = format!("save-disk-divergence-{}", std::process::id());
+        let valid_yaml = r#"
+services:
+  claude:
+    networks:
+      - speedwave_net
+networks:
+  speedwave_net:
+    driver: bridge
+"#;
+        let corrupt_yaml = r#"
+services:
+  claude:
+    networks:
+      - speedwave_
+networks:
+  speedwave_net:
+    driver: bridge
+"#;
+        super::FORCE_DISK_GARBAGE.with(|c| *c.borrow_mut() = Some(corrupt_yaml.to_string()));
+        let err = super::save_compose(&project, valid_yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("disk content failed validation"),
+            "expected disk-corruption diagnostic, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("in-memory length"),
+            "expected length diagnostic, got: {err}"
+        );
+    }
+
+    #[test]
+    fn save_compose_read_back_io_error_has_actionable_context() {
+        // Inject an IO error via the test seam by setting FORCE_DISK_GARBAGE
+        // to an empty string (which is valid YAML but parseable to an empty
+        // doc — so validate_compose_network_refs passes); then assert that
+        // *valid* disk content does NOT fail the read-back branch.
+        let project = format!("save-readback-ok-{}", std::process::id());
+        let valid_yaml = r#"
+services:
+  claude:
+    networks:
+      - speedwave_net
+networks:
+  speedwave_net:
+    driver: bridge
+"#;
+        super::FORCE_DISK_GARBAGE.with(|c| *c.borrow_mut() = Some(valid_yaml.to_string()));
+        super::save_compose(&project, valid_yaml).unwrap();
     }
 }

@@ -1,5 +1,5 @@
+use crate::bundle;
 use crate::config::ResolvedIntegrationsConfig;
-use crate::{bundle, runtime::ContainerRuntime};
 use std::path::PathBuf;
 
 /// A container image definition. Build set is selected per project via [`enabled_images`].
@@ -157,7 +157,7 @@ pub fn image_ref(name: &str, bundle_id: &str) -> String {
 /// `rt.ensure_ready()` first; do not guard with `is_available()` (a stopped
 /// VM is false there but `ensure_ready()` starts it).
 pub fn images_exist(
-    rt: &dyn super::runtime::ContainerRuntime,
+    rt: &super::runtime::LockedRuntime,
     integrations: &ResolvedIntegrationsConfig,
 ) -> bool {
     let manifest = match crate::bundle::load_current_bundle_manifest() {
@@ -507,7 +507,7 @@ fn platform_restart_hint() -> &'static str {
 
 /// Builds `enabled_images(integrations)` for the current bundle.
 pub fn build_enabled_images(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     integrations: &ResolvedIntegrationsConfig,
 ) -> anyhow::Result<u32> {
     let manifest = bundle::load_current_bundle_manifest()?;
@@ -516,7 +516,7 @@ pub fn build_enabled_images(
 
 /// Builds images from `images` not yet present for `bundle_id`. Returns count built.
 pub fn build_missing_images(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
     bundle_id: &str,
 ) -> anyhow::Result<u32> {
@@ -548,7 +548,7 @@ pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) ->
 /// runtime but are not in `keep`. Filtered through `image_exists` so a fresh
 /// setup that never built a worker doesn't spam `rmi: no such image` warnings.
 pub fn prune_orphan_current_bundle_images(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     current_bundle_id: &str,
     keep: &[&ImageDef],
 ) -> anyhow::Result<()> {
@@ -570,7 +570,7 @@ pub fn prune_orphan_current_bundle_images(
 /// Force-removes the previous bundle's image tags. `--force` is required
 /// because stopped containers from the previous session block plain `rmi`.
 pub fn prune_old_bundle_images(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     old_bundle_id: &str,
 ) -> anyhow::Result<()> {
     let tags: Vec<String> = IMAGES
@@ -596,7 +596,7 @@ pub fn prune_old_bundle_images(
 /// Builds `images` for `bundle_id`. Snapshotter/transient errors retry
 /// internally (see `is_snapshotter_error` / `is_transient_build_error`).
 pub fn build_images_for_bundle(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
     bundle_id: &str,
 ) -> anyhow::Result<u32> {
@@ -680,7 +680,7 @@ pub fn build_images_for_bundle(
 /// [`build_images_for_bundle`] can re-call it. Worker count bounded by CPU + image
 /// count (ADR-032). Errors collected; propagate by priority: snapshotter > transient > first.
 fn try_build_images(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
     vm_root: &std::path::Path,
     bundle_id: &str,
@@ -932,8 +932,6 @@ fn mentions_base_image_registry(msg: &str) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::process::Command;
-    use std::sync::{Arc, Mutex};
 
     /// All built-in images as a slice — the pre-lazy-build "build everything" set.
     fn all_images() -> Vec<&'static ImageDef> {
@@ -957,13 +955,16 @@ mod tests {
     }
 
     /// Builds the full `IMAGES` set, mirroring the old `build_all_images_for_bundle`.
-    fn build_all_for_bundle(rt: &dyn ContainerRuntime, bundle_id: &str) -> anyhow::Result<u32> {
+    fn build_all_for_bundle(
+        rt: &crate::runtime::LockedRuntime,
+        bundle_id: &str,
+    ) -> anyhow::Result<u32> {
         build_images_for_bundle(rt, &all_images(), bundle_id)
     }
 
     /// Runs the worker pool over the full `IMAGES` set (old `try_build_all`).
     fn try_build_all(
-        rt: &dyn ContainerRuntime,
+        rt: &crate::runtime::LockedRuntime,
         vm_root: &std::path::Path,
         bundle_id: &str,
     ) -> anyhow::Result<u32> {
@@ -1720,92 +1721,14 @@ mod tests {
 
     #[test]
     fn test_build_all_images_calls_prepare_build_context() {
-        use serde_json::Value;
+        use crate::runtime::mock_runtime::MockRuntimeBuilder;
+        use std::sync::atomic::Ordering;
 
-        #[derive(Clone)]
-        struct Call {
-            tag: String,
-            context_dir: String,
-            containerfile: String,
-            build_args: Vec<(String, String)>,
-        }
-
-        struct MockRuntime {
-            translated_root: PathBuf,
-            build_calls: Arc<Mutex<Vec<Call>>>,
-            prepare_called: Arc<Mutex<bool>>,
-        }
-
-        impl ContainerRuntime for MockRuntime {
-            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<Value>> {
-                Ok(vec![])
-            }
-            fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-                Command::new("true")
-            }
-            fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-                Ok(Command::new("true"))
-            }
-            fn is_available(&self) -> bool {
-                true
-            }
-            fn ensure_ready(&self) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn build_image(
-                &self,
-                tag: &str,
-                context_dir: &str,
-                containerfile: &str,
-                build_args: &[(&str, &str)],
-            ) -> anyhow::Result<()> {
-                self.build_calls.lock().unwrap().push(Call {
-                    tag: tag.to_string(),
-                    context_dir: context_dir.to_string(),
-                    containerfile: containerfile.to_string(),
-                    build_args: build_args
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect(),
-                });
-                Ok(())
-            }
-            fn prepare_build_context(
-                &self,
-                _build_root: &std::path::Path,
-            ) -> anyhow::Result<PathBuf> {
-                *self.prepare_called.lock().unwrap() = true;
-                Ok(self.translated_root.clone())
-            }
-            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-                Ok(true)
-            }
-        }
-
-        let build_calls = Arc::new(Mutex::new(Vec::new()));
-        let prepare_called = Arc::new(Mutex::new(false));
         let translated = PathBuf::from("/home/user/.speedwave/build-cache");
 
-        let rt = MockRuntime {
-            translated_root: translated.clone(),
-            build_calls: Arc::clone(&build_calls),
-            prepare_called: Arc::clone(&prepare_called),
-        };
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_prepare_build_context_root(translated.clone())
+            .build();
 
         // build_images_for_bundle resolves the real build root, then calls
         // prepare_build_context; the mock returns the translated path.
@@ -1814,11 +1737,11 @@ mod tests {
         assert!(result.is_ok());
 
         assert!(
-            *prepare_called.lock().unwrap(),
+            handles.prepare_build_context_calls.load(Ordering::SeqCst),
             "prepare_build_context should be called"
         );
 
-        let calls = build_calls.lock().unwrap();
+        let calls = handles.build_calls.lock().unwrap();
         assert_eq!(calls.len(), IMAGES.len(), "one build per image");
 
         let mut tags: Vec<&str> = calls.iter().map(|c| c.tag.as_str()).collect();
@@ -1879,115 +1802,65 @@ mod tests {
         }
     }
 
-    /// A mock runtime for testing retry-with-prune logic.
-    ///
-    /// Tracks all `build_image` and `system_prune` calls.
-    /// Can be configured to fail on specific `build_image` tag+attempt combinations.
-    struct RetryMockRuntime {
-        /// Path returned by `prepare_build_context`.
+    /// Build a `MockRuntimeBuilder` configured for retry-with-prune tests:
+    /// `prepare_build_context` returns `build_root`, and `build_image(tag)`
+    /// fails on the (tag, attempt) pairs listed in `fail_on` (keyed as
+    /// `"{tag}:{attempt}"`, mirroring the old `RetryMockRuntime` contract).
+    fn retry_mock(
         build_root: PathBuf,
-        /// Records all calls: "build:<tag>" for build_image, "system_prune" for system_prune.
-        calls: Arc<Mutex<Vec<String>>>,
-        /// Per-tag attempt counter (tag → attempt number, 1-based).
-        attempts: Arc<Mutex<std::collections::HashMap<String, u32>>>,
-        /// Map from "{tag}:{attempt}" → error message. If absent, the call succeeds.
         fail_on: std::collections::HashMap<String, String>,
-    }
-
-    impl RetryMockRuntime {
-        fn new(build_root: PathBuf, fail_on: std::collections::HashMap<String, String>) -> Self {
-            Self {
-                build_root,
-                calls: Arc::new(Mutex::new(Vec::new())),
-                attempts: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                fail_on,
-            }
+    ) -> (
+        crate::runtime::LockedRuntime,
+        crate::runtime::mock_runtime::MockHandles,
+    ) {
+        let mut b = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_prepare_build_context_root(build_root);
+        for (key, msg) in fail_on {
+            let (tag, attempt_str) = key
+                .rsplit_once(':')
+                .expect("fail_on key must be tag:attempt");
+            let attempt: u32 = attempt_str.parse().expect("fail_on attempt must be u32");
+            b = b.with_build_error_for_attempt(tag, attempt, &msg);
         }
+        b.build()
     }
 
-    fn count_builds(recorded: &[String]) -> usize {
-        recorded.iter().filter(|c| c.starts_with("build:")).count()
-    }
-
-    fn count_prunes(recorded: &[String]) -> usize {
-        recorded.iter().filter(|c| *c == "system_prune").count()
-    }
-
-    fn count_unused_prunes(recorded: &[String]) -> usize {
-        recorded
+    /// Number of `system_prune` calls recorded on the handles.
+    fn count_prunes(handles: &crate::runtime::mock_runtime::MockHandles) -> usize {
+        handles
+            .prune_calls
+            .lock()
+            .unwrap()
             .iter()
-            .filter(|c| *c == "prune_unused_images")
+            .filter(|p| **p == "system")
             .count()
     }
 
-    impl ContainerRuntime for RetryMockRuntime {
-        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-            Command::new("true")
-        }
-        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-            Ok(Command::new("true"))
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn build_image(
-            &self,
-            tag: &str,
-            _context_dir: &str,
-            _containerfile: &str,
-            _build_args: &[(&str, &str)],
-        ) -> anyhow::Result<()> {
-            let attempt = {
-                let mut m = self.attempts.lock().unwrap();
-                let e = m.entry(tag.to_string()).or_insert(0);
-                *e += 1;
-                *e
-            };
-            self.calls.lock().unwrap().push(format!("build:{}", tag));
-            let key = format!("{}:{}", tag, attempt);
-            if let Some(msg) = self.fail_on.get(&key) {
-                anyhow::bail!("{}", msg);
-            }
-            Ok(())
-        }
-        fn prepare_build_context(&self, _build_root: &std::path::Path) -> anyhow::Result<PathBuf> {
-            Ok(self.build_root.clone())
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        fn system_prune(&self) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push("system_prune".to_string());
-            Ok(())
-        }
-        fn prune_unused_images(&self) -> anyhow::Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push("prune_unused_images".to_string());
-            Ok(())
-        }
+    /// Number of `prune_unused_images` calls recorded on the handles.
+    fn count_unused_prunes(handles: &crate::runtime::mock_runtime::MockHandles) -> usize {
+        handles
+            .prune_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| **p == "unused")
+            .count()
+    }
+
+    /// Number of `build_image` calls recorded on the handles.
+    fn count_builds(handles: &crate::runtime::mock_runtime::MockHandles) -> usize {
+        handles.build_call_count()
+    }
+
+    /// Number of `build_image` calls for the given tag.
+    fn count_builds_for(handles: &crate::runtime::mock_runtime::MockHandles, tag: &str) -> usize {
+        handles
+            .build_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.tag == tag)
+            .count()
     }
 
     /// Creates a temp directory with the minimum structure needed for
@@ -2004,71 +1877,35 @@ mod tests {
         (tmp, root)
     }
 
-    /// Records build_image calls; image_exists answers from a configurable
-    /// "already present" set (substring match on the tag). For lazy-build tests.
-    struct LazyBuildMock {
+    /// Build a mock with `image_exists(tag) = true` for any tag whose image
+    /// name contains one of the `present` substrings. Mirrors the old
+    /// `LazyBuildMock` contract: tags whose name matches one of `present`
+    /// resolve to true; everything else resolves to false.
+    fn lazy_build_mock(
         build_root: PathBuf,
-        builds: Arc<Mutex<Vec<String>>>,
-        present: Vec<String>,
-    }
-
-    impl LazyBuildMock {
-        fn new(build_root: PathBuf, present: Vec<&str>) -> Self {
-            Self {
-                build_root,
-                builds: Arc::new(Mutex::new(Vec::new())),
-                present: present.into_iter().map(String::from).collect(),
+        present: Vec<&str>,
+    ) -> (
+        crate::runtime::LockedRuntime,
+        crate::runtime::mock_runtime::MockHandles,
+    ) {
+        // `images_exist`-style queries pass the full bundle-suffixed tag; the
+        // substring check `tag.contains(image_name)` is the legal-equivalent
+        // of the old `LazyBuildMock` lookup. We layer one "present" substring
+        // per requested image name on top of `image_exists_default(false)`.
+        let mut b = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_prepare_build_context_root(build_root);
+        // Seed each image name as a "present" override via per-(name, bundle)
+        // entries — but builder's exact-match table can't substring. Instead,
+        // we use the inverse: default false (so absent images report false),
+        // and explicitly seed every IMAGES name across the bundle ids these
+        // tests use. Since the test only uses bundle id "b1", that's enough.
+        for img in IMAGES {
+            if present.iter().any(|p| img.name.contains(p)) {
+                let tag = image_ref(img.name, "b1");
+                b = b.with_image_exists(&tag, true);
             }
         }
-    }
-
-    impl ContainerRuntime for LazyBuildMock {
-        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-            Command::new("true")
-        }
-        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-            Ok(Command::new("true"))
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn build_image(
-            &self,
-            tag: &str,
-            _: &str,
-            _: &str,
-            _: &[(&str, &str)],
-        ) -> anyhow::Result<()> {
-            self.builds.lock().unwrap().push(tag.to_string());
-            Ok(())
-        }
-        fn prepare_build_context(&self, _: &std::path::Path) -> anyhow::Result<PathBuf> {
-            Ok(self.build_root.clone())
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
-            Ok(self.present.iter().any(|p| tag.contains(p.as_str())))
-        }
+        b.build()
     }
 
     #[test]
@@ -2078,10 +1915,10 @@ mod tests {
             github: true,
             ..ResolvedIntegrationsConfig::default()
         };
-        let rt = LazyBuildMock::new(root, vec![]);
+        let (rt, handles) = lazy_build_mock(root, vec![]);
         let n = build_images_for_bundle(&rt, &enabled_images(&cfg), "b1").unwrap();
         assert_eq!(n, 3);
-        let mut built: Vec<String> = rt.builds.lock().unwrap().clone();
+        let mut built = handles.build_tags();
         built.sort();
         assert_eq!(
             built,
@@ -2097,7 +1934,7 @@ mod tests {
     fn test_build_missing_images_skips_present() {
         let (_tmp, root) = create_fake_build_root();
         // claude + mcp-hub already present; mcp-playwright missing.
-        let rt = LazyBuildMock::new(root, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+        let (rt, handles) = lazy_build_mock(root, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
         let images: Vec<&ImageDef> = vec![
             image_for_service_key("playwright").unwrap(),
             IMAGES.iter().find(|i| i.name == IMAGE_CLAUDE).unwrap(),
@@ -2106,7 +1943,7 @@ mod tests {
         let n = build_missing_images(&rt, &images, "b1").unwrap();
         assert_eq!(n, 1, "only the missing playwright image is built");
         assert_eq!(
-            *rt.builds.lock().unwrap(),
+            handles.build_tags(),
             vec![image_ref(IMAGE_MCP_PLAYWRIGHT, "b1")]
         );
     }
@@ -2114,14 +1951,14 @@ mod tests {
     #[test]
     fn test_build_missing_images_noop_when_all_present() {
         let (_tmp, root) = create_fake_build_root();
-        let rt = LazyBuildMock::new(root, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+        let (rt, handles) = lazy_build_mock(root, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
         let images: Vec<&ImageDef> = all_images()
             .into_iter()
             .filter(|i| i.name == IMAGE_CLAUDE || i.name == IMAGE_MCP_HUB)
             .collect();
         let n = build_missing_images(&rt, &images, "b1").unwrap();
         assert_eq!(n, 0);
-        assert!(rt.builds.lock().unwrap().is_empty());
+        assert!(handles.build_tags().is_empty());
     }
 
     #[test]
@@ -2136,22 +1973,20 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
 
         assert!(result.is_ok(), "retry should succeed, got: {:?}", result);
         assert_eq!(result.unwrap(), image_count);
 
-        let recorded = rt.calls.lock().unwrap();
-
         assert_eq!(
-            count_prunes(&recorded),
+            count_prunes(&handles),
             1,
             "system_prune should be called once"
         );
 
-        let build_count = count_builds(&recorded);
+        let build_count = count_builds(&handles);
         assert_eq!(
             build_count,
             2 * image_count as usize,
@@ -2163,10 +1998,7 @@ mod tests {
         // Every image must be built exactly twice (once per attempt).
         for img in IMAGES.iter() {
             let tag = image_ref(img.name, "test-bundle");
-            let per_tag = recorded
-                .iter()
-                .filter(|c| **c == format!("build:{tag}"))
-                .count();
+            let per_tag = count_builds_for(&handles, &tag);
             assert_eq!(
                 per_tag, 2,
                 "image {tag} should be built exactly twice (first + retry)"
@@ -2188,20 +2020,19 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
         assert!(result.is_ok(), "retry should succeed, got: {:?}", result);
         assert_eq!(result.unwrap(), image_count);
 
-        let recorded = rt.calls.lock().unwrap();
         assert_eq!(
-            count_unused_prunes(&recorded),
+            count_unused_prunes(&handles),
             1,
             "prune_unused_images must be called exactly once for disk-full recovery"
         );
         assert_eq!(
-            count_prunes(&recorded),
+            count_prunes(&handles),
             0,
             "system_prune (snapshotter recovery) must NOT be called on disk-full path"
         );
@@ -2220,7 +2051,7 @@ mod tests {
         }
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, _handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
         assert!(result.is_err(), "double disk-full must propagate");
@@ -2270,7 +2101,7 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
 
@@ -2280,14 +2111,13 @@ mod tests {
             "original error should propagate"
         );
 
-        let recorded = rt.calls.lock().unwrap();
         assert_eq!(
-            count_prunes(&recorded),
+            count_prunes(&handles),
             0,
             "system_prune should NOT be called for generic errors"
         );
         assert_eq!(
-            count_builds(&recorded),
+            count_builds(&handles),
             IMAGES.len(),
             "all workers in the first attempt run to completion even when one fails"
         );
@@ -2354,7 +2184,7 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
 
@@ -2367,9 +2197,8 @@ mod tests {
             "should return the second (retry) error"
         );
 
-        let recorded = rt.calls.lock().unwrap();
         assert_eq!(
-            count_prunes(&recorded),
+            count_prunes(&handles),
             1,
             "system_prune should be called once"
         );
@@ -2390,7 +2219,7 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, _handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
         assert!(result.is_err());
@@ -2446,7 +2275,7 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, _handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
         assert!(result.is_err());
@@ -2466,89 +2295,37 @@ mod tests {
 
     mod images_exist_tests {
         use super::*;
-        use crate::runtime::ContainerRuntime;
-        use std::sync::Mutex;
+        use crate::runtime::mock_runtime::MockRuntimeBuilder;
 
-        struct ImageCheckRuntime {
-            missing_tags: Mutex<Vec<String>>,
-        }
-
-        impl ImageCheckRuntime {
-            fn all_present() -> Self {
-                Self {
-                    missing_tags: Mutex::new(vec![]),
-                }
+        /// `image_exists(tag)` returns `true` unless `tag` contains one of
+        /// `missing_name_substrings`. Mirrors the old `ImageCheckRuntime`
+        /// substring contract for `images_exist`, which queries by a runtime-
+        /// computed bundle id we cannot enumerate up front.
+        fn image_check_mock(missing_name_substrings: &[&str]) -> crate::runtime::LockedRuntime {
+            let mut b = MockRuntimeBuilder::new().with_image_exists_default(true);
+            for s in missing_name_substrings {
+                b = b.with_image_missing_substring(s);
             }
-
-            fn with_missing(tags: Vec<&str>) -> Self {
-                Self {
-                    missing_tags: Mutex::new(tags.into_iter().map(String::from).collect()),
-                }
-            }
-        }
-
-        impl ContainerRuntime for ImageCheckRuntime {
-            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-                Ok(vec![])
-            }
-            fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-                Command::new("true")
-            }
-            fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-                Ok(Command::new("true"))
-            }
-            fn is_available(&self) -> bool {
-                true
-            }
-            fn ensure_ready(&self) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn build_image(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &[(&str, &str)],
-            ) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
-                let missing = self.missing_tags.lock().unwrap();
-                Ok(!missing.iter().any(|t| tag.contains(t.as_str())))
-            }
+            let (rt, _) = b.build();
+            rt
         }
 
         #[test]
         fn test_images_exist_returns_true_when_all_present() {
-            let rt = ImageCheckRuntime::all_present();
+            let rt = image_check_mock(&[]);
             assert!(images_exist(&rt, &all_enabled()));
         }
 
         #[test]
         fn test_images_exist_returns_false_when_any_missing() {
-            let rt = ImageCheckRuntime::with_missing(vec!["speedwave-claude"]);
+            let rt = image_check_mock(&["speedwave-claude"]);
             assert!(!images_exist(&rt, &all_enabled()));
         }
 
         #[test]
         fn test_images_exist_ignores_disabled_integration_images() {
             // playwright image absent, but nothing enables playwright → still true.
-            let rt = ImageCheckRuntime::with_missing(vec![IMAGE_MCP_PLAYWRIGHT]);
+            let rt = image_check_mock(&[IMAGE_MCP_PLAYWRIGHT]);
             let cfg = ResolvedIntegrationsConfig {
                 slack: true,
                 ..ResolvedIntegrationsConfig::default()
@@ -2558,7 +2335,7 @@ mod tests {
 
         #[test]
         fn test_images_exist_false_when_an_enabled_worker_image_missing() {
-            let rt = ImageCheckRuntime::with_missing(vec![IMAGE_MCP_SLACK]);
+            let rt = image_check_mock(&[IMAGE_MCP_SLACK]);
             let cfg = ResolvedIntegrationsConfig {
                 slack: true,
                 ..ResolvedIntegrationsConfig::default()
@@ -2842,86 +2619,35 @@ mod tests {
     // ── prune_old_bundle_images tests ─────────────────────────────────────
 
     /// Minimal mock runtime that records remove_images and prune_buildkit_cache calls.
-    struct PruneMockRuntime {
-        removed_tags: Arc<Mutex<Vec<String>>>,
-        buildkit_pruned: Arc<std::sync::atomic::AtomicU32>,
-        buildkit_should_fail: bool,
+    /// Flatten the recorded `remove_images` calls into a single `Vec<String>`
+    /// of removed tags (the old `PruneMockRuntime::removed_tags` shape).
+    fn collect_removed_tags(handles: &crate::runtime::mock_runtime::MockHandles) -> Vec<String> {
+        handles
+            .remove_images_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(tags, _)| tags.clone())
+            .collect()
     }
 
-    impl PruneMockRuntime {
-        fn new() -> Self {
-            Self {
-                removed_tags: Arc::new(Mutex::new(Vec::new())),
-                buildkit_pruned: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                buildkit_should_fail: false,
-            }
-        }
-
-        fn with_failing_buildkit() -> Self {
-            Self {
-                buildkit_should_fail: true,
-                ..Self::new()
-            }
-        }
-    }
-
-    impl ContainerRuntime for PruneMockRuntime {
-        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-            Command::new("true")
-        }
-        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-            Ok(Command::new("true"))
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        fn remove_images(&self, tags: &[String], _force: bool) -> anyhow::Result<()> {
-            self.removed_tags.lock().unwrap().extend_from_slice(tags);
-            Ok(())
-        }
-        fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
-            self.buildkit_pruned
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.buildkit_should_fail {
-                anyhow::bail!("buildkit prune failed");
-            }
-            Ok(())
-        }
+    /// Number of `prune_buildkit_cache` calls recorded on the handles.
+    fn count_buildkit_prunes(handles: &crate::runtime::mock_runtime::MockHandles) -> usize {
+        handles
+            .prune_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| **p == "buildkit")
+            .count()
     }
 
     #[test]
     fn test_prune_old_bundle_images_generates_correct_tags() {
-        let rt = PruneMockRuntime::new();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         prune_old_bundle_images(&rt, "abc123").unwrap();
 
-        let removed = rt.removed_tags.lock().unwrap().clone();
+        let removed = collect_removed_tags(&handles);
         assert_eq!(
             removed.len(),
             IMAGES.len(),
@@ -2940,9 +2666,9 @@ mod tests {
     #[test]
     fn test_prune_old_bundle_images_same_id_still_works() {
         // The caller is responsible for guarding same-id; the function itself is correct either way.
-        let rt = PruneMockRuntime::new();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         prune_old_bundle_images(&rt, "same123").unwrap();
-        assert_eq!(rt.removed_tags.lock().unwrap().len(), IMAGES.len());
+        assert_eq!(collect_removed_tags(&handles).len(), IMAGES.len());
     }
 
     #[test]
@@ -2952,9 +2678,13 @@ mod tests {
             ..ResolvedIntegrationsConfig::default()
         };
         let keep = enabled_images(&cfg);
-        let rt = PruneMockRuntime::new();
+        let mut builder = crate::runtime::mock_runtime::MockRuntimeBuilder::new();
+        for img in IMAGES {
+            builder = builder.with_image_exists(&image_ref(img.name, "cur123"), true);
+        }
+        let (rt, handles) = builder.build();
         prune_orphan_current_bundle_images(&rt, "cur123", &keep).unwrap();
-        let removed = rt.removed_tags.lock().unwrap().clone();
+        let removed = collect_removed_tags(&handles);
         // Removed = IMAGES \ {claude, mcp-hub, mcp-slack} = 6 tags.
         assert_eq!(removed.len(), IMAGES.len() - keep.len());
         for tag in &removed {
@@ -2968,19 +2698,19 @@ mod tests {
     #[test]
     fn test_prune_orphan_current_bundle_noop_when_all_kept() {
         let keep: Vec<&ImageDef> = IMAGES.iter().collect();
-        let rt = PruneMockRuntime::new();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         prune_orphan_current_bundle_images(&rt, "cur123", &keep).unwrap();
-        assert!(rt.removed_tags.lock().unwrap().is_empty());
+        assert!(collect_removed_tags(&handles).is_empty());
     }
 
     #[test]
     fn test_prune_old_bundle_images_also_prunes_buildkit_cache() {
-        let rt = PruneMockRuntime::new();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         prune_old_bundle_images(&rt, "abc123").unwrap();
 
-        let pruned = rt.buildkit_pruned.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
-            pruned, 1,
+            count_buildkit_prunes(&handles),
+            1,
             "prune_buildkit_cache should be called exactly once"
         );
     }
@@ -2989,7 +2719,9 @@ mod tests {
     fn test_prune_old_bundle_images_buildkit_failure_is_warn_only() {
         // A runtime where prune_buildkit_cache fails should NOT cause
         // prune_old_bundle_images to return an error.
-        let rt = PruneMockRuntime::with_failing_buildkit();
+        let (rt, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_prune_buildkit_error("buildkit prune failed")
+            .build();
         assert!(prune_old_bundle_images(&rt, "abc123").is_ok());
     }
 
@@ -3034,7 +2766,7 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root.clone(), fail_on);
+        let (rt, handles) = retry_mock(build_root.clone(), fail_on);
 
         let result = try_build_all(&rt, &build_root, "test-bundle");
         assert!(result.is_err());
@@ -3058,9 +2790,8 @@ mod tests {
             msg.contains("additionally, 1 other image build(s) failed"),
             "multi-failure context must be appended to the error chain, got: {msg}"
         );
-        let recorded = rt.calls.lock().unwrap();
         assert_eq!(
-            count_builds(&recorded),
+            count_builds(&handles),
             IMAGES.len(),
             "all workers finish even when some fail"
         );
@@ -3069,20 +2800,19 @@ mod tests {
     #[test]
     fn test_parallel_build_all_succeed() {
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root.clone(), std::collections::HashMap::new());
+        let (rt, handles) = retry_mock(build_root.clone(), std::collections::HashMap::new());
 
         let result = try_build_all(&rt, &build_root, "test-bundle");
         assert_eq!(result.unwrap(), IMAGES.len() as u32);
 
-        let recorded = rt.calls.lock().unwrap();
-        assert_eq!(count_builds(&recorded), IMAGES.len());
+        assert_eq!(count_builds(&handles), IMAGES.len());
         for img in IMAGES {
             let tag = image_ref(img.name, "test-bundle");
-            let count = recorded
-                .iter()
-                .filter(|c| **c == format!("build:{tag}"))
-                .count();
-            assert_eq!(count, 1, "image {tag} should be built exactly once");
+            assert_eq!(
+                count_builds_for(&handles, &tag),
+                1,
+                "image {tag} should be built exactly once"
+            );
         }
     }
 
@@ -3090,7 +2820,7 @@ mod tests {
     fn test_parallel_build_repeated_correct_result() {
         for _ in 0..5 {
             let (_tmp, build_root) = create_fake_build_root();
-            let rt = RetryMockRuntime::new(build_root.clone(), std::collections::HashMap::new());
+            let (rt, _handles) = retry_mock(build_root.clone(), std::collections::HashMap::new());
             let result = try_build_all(&rt, &build_root, "test-bundle");
             assert_eq!(result.unwrap(), IMAGES.len() as u32);
         }
@@ -3108,19 +2838,18 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
         assert_eq!(result.unwrap(), IMAGES.len() as u32);
 
-        let recorded = rt.calls.lock().unwrap();
         assert_eq!(
-            count_prunes(&recorded),
+            count_prunes(&handles),
             0,
             "transient retry must NOT trigger prune"
         );
         assert_eq!(
-            count_builds(&recorded),
+            count_builds(&handles),
             2 * IMAGES.len(),
             "full first attempt (with one transient failure) + full retry"
         );
@@ -3142,7 +2871,7 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
         assert_eq!(
@@ -3151,14 +2880,13 @@ mod tests {
             "should succeed on the third (second-retry) attempt"
         );
 
-        let recorded = rt.calls.lock().unwrap();
         assert_eq!(
-            count_prunes(&recorded),
+            count_prunes(&handles),
             0,
             "DNS retry must NOT trigger prune"
         );
         assert_eq!(
-            count_builds(&recorded),
+            count_builds(&handles),
             3 * IMAGES.len(),
             "first attempt + 2 retries (all images rebuilt each time)"
         );
@@ -3177,7 +2905,7 @@ mod tests {
         }
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
         assert!(result.is_err(), "exhausting retries must surface the error");
@@ -3187,14 +2915,13 @@ mod tests {
             "final error should carry the DNS failure, got: {msg}"
         );
 
-        let recorded = rt.calls.lock().unwrap();
         assert_eq!(
-            count_prunes(&recorded),
+            count_prunes(&handles),
             0,
             "DNS retry must NOT trigger prune"
         );
         assert_eq!(
-            count_builds(&recorded),
+            count_builds(&handles),
             (TRANSIENT_BUILD_RETRIES as usize + 1) * IMAGES.len(),
             "first attempt + all retries, every image each time"
         );
@@ -3213,7 +2940,7 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime::new(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root, fail_on);
 
         let result = build_all_for_bundle(&rt, "test-bundle");
         assert_eq!(
@@ -3222,9 +2949,8 @@ mod tests {
             "retry after prune must succeed"
         );
 
-        let recorded = rt.calls.lock().unwrap();
         assert_eq!(
-            count_prunes(&recorded),
+            count_prunes(&handles),
             1,
             "snapshotter error must win classification → prune runs, not just transient retry"
         );
@@ -3235,71 +2961,11 @@ mod tests {
         // `std::thread::scope` re-panics on the calling thread when a spawned thread
         // panics, so a panicking `build_image` will propagate out of `try_build_all`.
         // This verifies that worker panics are not silently swallowed.
-        use crate::runtime::NoopRuntime;
-
-        struct PanicMockRuntime {
-            build_root: PathBuf,
-        }
-
-        impl ContainerRuntime for PanicMockRuntime {
-            fn build_image(
-                &self,
-                tag: &str,
-                _: &str,
-                _: &str,
-                _: &[(&str, &str)],
-            ) -> anyhow::Result<()> {
-                if tag.contains("speedwave-mcp-slack") {
-                    panic!("boom");
-                }
-                Ok(())
-            }
-            fn prepare_build_context(
-                &self,
-                _build_root: &std::path::Path,
-            ) -> anyhow::Result<PathBuf> {
-                Ok(self.build_root.clone())
-            }
-            // delegate everything else to NoopRuntime
-            fn compose_up(&self, p: &str) -> anyhow::Result<()> {
-                NoopRuntime.compose_up(p)
-            }
-            fn compose_down(&self, p: &str) -> anyhow::Result<()> {
-                NoopRuntime.compose_down(p)
-            }
-            fn compose_ps(&self, p: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-                NoopRuntime.compose_ps(p)
-            }
-            fn container_exec(&self, c: &str, cmd: &[&str]) -> Command {
-                NoopRuntime.container_exec(c, cmd)
-            }
-            fn container_exec_piped(&self, c: &str, cmd: &[&str]) -> anyhow::Result<Command> {
-                NoopRuntime.container_exec_piped(c, cmd)
-            }
-            fn is_available(&self) -> bool {
-                NoopRuntime.is_available()
-            }
-            fn ensure_ready(&self) -> anyhow::Result<()> {
-                NoopRuntime.ensure_ready()
-            }
-            fn container_logs(&self, c: &str, t: u32) -> anyhow::Result<String> {
-                NoopRuntime.container_logs(c, t)
-            }
-            fn compose_logs(&self, p: &str, t: u32) -> anyhow::Result<String> {
-                NoopRuntime.compose_logs(p, t)
-            }
-            fn compose_up_recreate(&self, p: &str) -> anyhow::Result<()> {
-                NoopRuntime.compose_up_recreate(p)
-            }
-            fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
-                NoopRuntime.image_exists(tag)
-            }
-        }
-
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = PanicMockRuntime {
-            build_root: build_root.clone(),
-        };
+        let (rt, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_prepare_build_context_root(build_root.clone())
+            .with_build_panic_for("speedwave-mcp-slack")
+            .build();
         // std::thread::scope re-panics on the calling thread when any spawned thread
         // panics — wrap in catch_unwind here at the test boundary only.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

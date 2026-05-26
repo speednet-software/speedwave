@@ -258,14 +258,20 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
         log::debug!("recreate_project_containers_if_running: '{project}' not running — skipping");
         return;
     }
-    if let Err(e) = crate::containers_cmd::render_and_save_compose(project, &*rt) {
-        log::warn!("recreate_project_containers_if_running: render failed for '{project}': {e}");
-        return;
-    }
-    if let Err(e) = rt.compose_up_recreate(project) {
-        log::warn!("recreate_project_containers_if_running: recreate failed for '{project}': {e}");
-    } else {
-        log::info!("host_exec: recreated containers for '{project}' so the hub re-discovers");
+    use crate::types::IntoAnyhow;
+    let result = rt.transaction(project, |rt| -> anyhow::Result<()> {
+        crate::containers_cmd::render_and_save_compose(project, rt).into_anyhow()?;
+        speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
+        rt.compose_up_recreate(project)?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => {
+            log::info!("host_exec: recreated containers for '{project}' so the hub re-discovers");
+        }
+        Err(e) => {
+            log::warn!("recreate_project_containers_if_running: failed for '{project}': {e}");
+        }
     }
 }
 
