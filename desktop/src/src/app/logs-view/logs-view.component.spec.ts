@@ -8,11 +8,11 @@ import { HEALTH_REFRESH_INTERVAL_MS } from '../services/system-health.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 const MOCK_LOGS = [
-  'speedwave_test_mcp-hub_1 | [14:34:02.814] INFO  Dispatched tool call',
-  'speedwave_test_redmine_1 | [14:34:01.672] INFO  POST /projects/x → 201',
-  'speedwave_test_sharepoint_1 | [14:33:58.440] WARN  OAuth token expires soon',
-  'speedwave_test_slack_1 | [14:33:42.018] ERROR rate_limited: channels.history',
-  'speedwave_test_mcp-hub_1 | [14:33:57.182] DEBUG Low-level handshake chunk',
+  'mcp_hub | [14:34:02.814] INFO  Dispatched tool call',
+  'mcp_redmine | [14:34:01.672] INFO  POST /projects/x → 201',
+  'mcp_sharepoint | [14:33:58.440] WARN  OAuth token expires soon',
+  'mcp_slack | [14:33:42.018] ERROR rate_limited: channels.history',
+  'mcp_hub | [14:33:57.182] DEBUG Low-level handshake chunk',
 ].join('\n');
 
 describe('LogsViewComponent', () => {
@@ -74,7 +74,7 @@ describe('LogsViewComponent', () => {
     const sources = Array.from(
       fixture.nativeElement.querySelectorAll('[data-testid="logs-source"]')
     ) as HTMLElement[];
-    expect(sources[0].textContent?.trim()).toBe('mcp-hub');
+    expect(sources[0].textContent?.trim()).toBe('mcp_hub');
 
     const levels = Array.from(
       fixture.nativeElement.querySelectorAll('[data-testid="logs-level"]')
@@ -100,7 +100,7 @@ describe('LogsViewComponent', () => {
     // compose-level ISO stamp does. The fallback dates them with the host's
     // current day so two entries from different days cannot collide.
     mockTauri.invokeHandler = async (cmd: string) =>
-      cmd === 'get_all_logs' ? 'speedwave_test_mcp-hub_1 | [11:32:56] INFO  hello' : undefined;
+      cmd === 'get_all_logs' ? 'mcp_hub | [11:32:56] INFO  hello' : undefined;
     vi.spyOn(component as unknown as { todayIso(): string }, 'todayIso').mockReturnValue(
       '2026-04-28'
     );
@@ -120,7 +120,7 @@ describe('LogsViewComponent', () => {
     // identically. `[title]` keeps the raw value (micros + offset).
     const raw = '2026-04-28T11:32:56.123456Z';
     mockTauri.invokeHandler = async (cmd: string) =>
-      cmd === 'get_all_logs' ? `speedwave_test_mcp-hub_1 | ${raw} INFO  hello` : undefined;
+      cmd === 'get_all_logs' ? `mcp_hub | ${raw} INFO  hello` : undefined;
 
     await component.ngOnInit();
     fixture.detectChanges();
@@ -144,7 +144,7 @@ describe('LogsViewComponent', () => {
     const plus2 = '2026-04-28T13:32:56.000+02:00'; // same instant
     const render = async (raw: string): Promise<string> => {
       mockTauri.invokeHandler = async (cmd: string) =>
-        cmd === 'get_all_logs' ? `speedwave_test_mcp-hub_1 | ${raw} INFO x` : undefined;
+        cmd === 'get_all_logs' ? `mcp_hub | ${raw} INFO x` : undefined;
       await component.ngOnInit();
       fixture.detectChanges();
       return (
@@ -209,7 +209,7 @@ describe('LogsViewComponent', () => {
     fixture.detectChanges();
 
     component['setLevel']('warn');
-    component['setSource']('mcp-hub');
+    component['setSource']('mcp_hub');
     fixture.detectChanges();
 
     const empty = fixture.nativeElement.querySelector('[data-testid="logs-empty"]');
@@ -219,8 +219,7 @@ describe('LogsViewComponent', () => {
 
   it('wraps a very long log message with break-words', async () => {
     const longMessage = 'x'.repeat(2000);
-    mockTauri.invokeHandler = async () =>
-      `speedwave_test_claude_1 | [12:00:00] INFO  ${longMessage}`;
+    mockTauri.invokeHandler = async () => `claude | [12:00:00] INFO  ${longMessage}`;
 
     await component.ngOnInit();
     fixture.detectChanges();
@@ -324,7 +323,7 @@ describe('LogsViewComponent', () => {
     fixture.detectChanges();
 
     component['setLevel']('info');
-    component['setSource']('mcp-hub');
+    component['setSource']('mcp_hub');
     fixture.detectChanges();
 
     const rows = fixture.nativeElement.querySelectorAll('[data-testid="logs-line"]');
@@ -332,11 +331,11 @@ describe('LogsViewComponent', () => {
     expect(rows[0].textContent).toContain('Dispatched tool call');
   });
 
-  it('switching the source filter from all to redmine narrows the list', async () => {
+  it('switching the source filter from all to mcp_redmine narrows the list', async () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    component['setSource']('redmine');
+    component['setSource']('mcp_redmine');
     fixture.detectChanges();
 
     const rows = fixture.nativeElement.querySelectorAll('[data-testid="logs-line"]');
@@ -355,8 +354,8 @@ describe('LogsViewComponent', () => {
     ) as HTMLSelectElement;
     expect(select).not.toBeNull();
     const values = Array.from(select.options).map((o) => o.value);
-    // 4 distinct sources in MOCK_LOGS: mcp-hub, redmine, sharepoint, slack — sorted alphabetically.
-    expect(values).toEqual(['all', 'mcp-hub', 'redmine', 'sharepoint', 'slack']);
+    // 4 distinct sources in MOCK_LOGS: mcp_hub, mcp_redmine, mcp_sharepoint, mcp_slack — sorted alphabetically.
+    expect(values).toEqual(['all', 'mcp_hub', 'mcp_redmine', 'mcp_sharepoint', 'mcp_slack']);
   });
 
   it('source select option labels carry per-source line counts', async () => {
@@ -368,9 +367,9 @@ describe('LogsViewComponent', () => {
     ) as HTMLSelectElement;
     const labels = Array.from(select.options).map((o) => o.textContent?.trim());
     expect(labels[0]).toBe('all sources (5)');
-    // mcp-hub appears twice in MOCK_LOGS (info + debug) so its counter must read 2.
-    expect(labels.find((l) => l?.startsWith('mcp-hub'))).toBe('mcp-hub (2)');
-    expect(labels.find((l) => l?.startsWith('redmine'))).toBe('redmine (1)');
+    // mcp_hub appears twice in MOCK_LOGS (info + debug) so its counter must read 2.
+    expect(labels.find((l) => l?.startsWith('mcp_hub'))).toBe('mcp_hub (2)');
+    expect(labels.find((l) => l?.startsWith('mcp_redmine'))).toBe('mcp_redmine (1)');
   });
 
   it('changing the source select narrows the visible rows', async () => {
@@ -380,7 +379,7 @@ describe('LogsViewComponent', () => {
     const select = fixture.nativeElement.querySelector(
       '[data-testid="logs-source-select"]'
     ) as HTMLSelectElement;
-    select.value = 'sharepoint';
+    select.value = 'mcp_sharepoint';
     select.dispatchEvent(new Event('change'));
     fixture.detectChanges();
 
@@ -392,13 +391,13 @@ describe('LogsViewComponent', () => {
   it('falls back to source=all when the selected source vanishes from a refresh', async () => {
     await component.ngOnInit();
     fixture.detectChanges();
-    component['setSource']('redmine');
-    expect(component.filters().source).toBe('redmine');
+    component['setSource']('mcp_redmine');
+    expect(component.filters().source).toBe('mcp_redmine');
 
     // Next refresh returns logs without the `redmine` source — the stale
     // selection must be reconciled instead of stranding the user on an empty list.
     mockTauri.invokeHandler = async (cmd: string) =>
-      cmd === 'get_all_logs' ? 'speedwave_test_mcp-hub_1 | [12:00:00] INFO  still here' : undefined;
+      cmd === 'get_all_logs' ? 'mcp_hub | [12:00:00] INFO  still here' : undefined;
     await component['refresh']();
     fixture.detectChanges();
 
@@ -408,25 +407,25 @@ describe('LogsViewComponent', () => {
 
 describe('parseLogLine', () => {
   it('parses a compose-format line with timestamp and level', () => {
-    const line = parseLogLine('mcp_hub_1 | [14:34:02.814] INFO  Listening on :4000');
+    const line = parseLogLine('mcp_hub | [14:34:02.814] INFO  Listening on :4000');
     expect(line.source).toBe('mcp_hub');
     expect(line.time).toBe('14:34:02.814');
     expect(line.level).toBe('info');
     expect(line.message).toBe('Listening on :4000');
   });
 
-  it('strips the speedwave_<project>_ prefix from compose sources', () => {
-    const line = parseLogLine('speedwave_demo_mcp-hub_1 | [10:00:00] INFO  started');
-    expect(line.source).toBe('mcp-hub');
+  it('uses the backend-supplied source verbatim (no client-side stripping)', () => {
+    const line = parseLogLine('mcp_office | [10:00:00] INFO  started');
+    expect(line.source).toBe('mcp_office');
   });
 
   it('normalises WARNING to warn and TRACE to debug', () => {
-    expect(parseLogLine('hub_1 | [00:00:00] WARNING x').level).toBe('warn');
-    expect(parseLogLine('hub_1 | [00:00:00] TRACE x').level).toBe('debug');
+    expect(parseLogLine('mcp_hub | [00:00:00] WARNING x').level).toBe('warn');
+    expect(parseLogLine('mcp_hub | [00:00:00] TRACE x').level).toBe('debug');
   });
 
   it('handles lines with no level prefix', () => {
-    const line = parseLogLine('hub_1 | [00:00:00] raw text');
+    const line = parseLogLine('mcp_hub | [00:00:00] raw text');
     expect(line.level).toBe('info');
     expect(line.message).toBe('raw text');
   });
@@ -445,7 +444,7 @@ describe('parseLogLine', () => {
   });
 
   it('parses an ISO-timestamp line via the ISO_TIME_RE branch', () => {
-    const line = parseLogLine('hub_1 | 2024-01-15T14:34:02.814Z INFO started');
+    const line = parseLogLine('mcp_hub | 2024-01-15T14:34:02.814Z INFO started');
     expect(line.time).toBe('2024-01-15T14:34:02.814Z');
     expect(line.level).toBe('info');
     expect(line.message).toBe('started');
@@ -492,13 +491,13 @@ describe('parseLogLine', () => {
 
   it('parses a bare bracketed ISO timestamp via the extended BRACKETED_TIME_RE', () => {
     // A worker `ts()` line with no drain/compose prefix — now local offset.
-    const line = parseLogLine('hub_1 | [2026-05-12T14:34:02.814+02:00] 🚀 Starting');
+    const line = parseLogLine('mcp_hub | [2026-05-12T14:34:02.814+02:00] 🚀 Starting');
     expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
     expect(line.message).toBe('🚀 Starting');
   });
 
   it('still parses a bare bracketed UTC `Z` ISO timestamp (older logs / nerdctl)', () => {
-    const line = parseLogLine('hub_1 | [2026-05-12T12:34:02.814Z] 🚀 Starting');
+    const line = parseLogLine('mcp_hub | [2026-05-12T12:34:02.814Z] 🚀 Starting');
     expect(line.time).toBe('2026-05-12T12:34:02.814Z');
     expect(line.message).toBe('🚀 Starting');
   });
@@ -508,9 +507,9 @@ describe('parseLogLine', () => {
     // gets nerdctl's stamp (localised at render); the inline `[<ts()>]` is the
     // same instant, so it's removed from the visible message.
     const line = parseLogLine(
-      'speedwave_doc_mcp-hub_1 | 2026-05-12T13:00:39.816Z [2026-05-12T15:00:39.816+02:00] 🔗 Initializing HTTP bridges'
+      'mcp_hub | 2026-05-12T13:00:39.816Z [2026-05-12T15:00:39.816+02:00] 🔗 Initializing HTTP bridges'
     );
-    expect(line.source).toBe('mcp-hub');
+    expect(line.source).toBe('mcp_hub');
     expect(line.time).toBe('2026-05-12T13:00:39.816Z');
     expect(line.message).toBe('🔗 Initializing HTTP bridges');
     expect(line.message).not.toContain('[2026-');
@@ -539,9 +538,9 @@ describe('sortLogLinesByTime', () => {
       ln('claude | 2026-05-12T14:53:49.000+02:00 SESSION: started'),
       ln('claude | 2026-05-12T14:53:57.000+02:00 SYSTEM: init'),
       ln('claude | 2026-05-12T14:54:32.000+02:00 RESULT: turn complete'),
-      ln('speedwave_test_mcp-hub_1 | 2026-05-12T14:53:48.000+02:00 INFO  Tool registered'),
-      ln('speedwave_test_mcp-hub_1 | 2026-05-12T14:53:49.500+02:00 INFO  Session created'),
-      ln('speedwave_test_mcp-hub_1 | 2026-05-12T14:54:13.000+02:00 INFO  Executing tool'),
+      ln('mcp_hub | 2026-05-12T14:53:48.000+02:00 INFO  Tool registered'),
+      ln('mcp_hub | 2026-05-12T14:53:49.500+02:00 INFO  Session created'),
+      ln('mcp_hub | 2026-05-12T14:54:13.000+02:00 INFO  Executing tool'),
     ]);
     expect(sorted.map((l) => l.time)).toEqual([
       '2026-05-12T14:53:48.000+02:00', // hub
@@ -556,7 +555,7 @@ describe('sortLogLinesByTime', () => {
   it('orders correctly across mixed offsets (UTC `Z` vs `+02:00`) by instant', () => {
     const sorted = sortLogLinesByTime([
       ln('claude | 2026-05-12T14:00:05.000+02:00 SESSION: started'), // 12:00:05Z
-      ln('speedwave_x_mcp-hub_1 | 2026-05-12T12:00:03.000Z hub line'), // 12:00:03Z
+      ln('mcp_hub | 2026-05-12T12:00:03.000Z hub line'), // 12:00:03Z
       ln('claude | 2026-05-12T14:00:01.000+02:00 SESSION: prep'), // 12:00:01Z
     ]);
     expect(sorted.map((l) => l.time)).toEqual([
@@ -567,13 +566,13 @@ describe('sortLogLinesByTime', () => {
   });
 
   it('keeps a timestamp-less line attached to the preceding line (continuation)', () => {
-    const banner = parseLogLine('speedwave_x_mcp-hub_1 | ════════════');
+    const banner = parseLogLine('mcp_hub | ════════════');
     expect(banner.time).toBe(''); // no timestamp
     const sorted = sortLogLinesByTime([
       ln('claude | 2026-05-12T14:00:10.000+02:00 b: later'),
-      ln('speedwave_x_mcp-hub_1 | 2026-05-12T14:00:01.000+02:00 a: first'),
+      ln('mcp_hub | 2026-05-12T14:00:01.000+02:00 a: first'),
       banner, // inherits a:first's instant → stays right after it
-      ln('speedwave_x_mcp-hub_1 | 2026-05-12T14:00:02.000+02:00 a: second'),
+      ln('mcp_hub | 2026-05-12T14:00:02.000+02:00 a: second'),
     ]);
     expect(sorted.map((l) => l.message)).toEqual([
       'a: first',
@@ -586,7 +585,7 @@ describe('sortLogLinesByTime', () => {
   it('is stable for equal instants — keeps input order', () => {
     const sorted = sortLogLinesByTime([
       ln('claude | 2026-05-12T14:00:00.000+02:00 first'),
-      ln('speedwave_x_mcp-hub_1 | 2026-05-12T14:00:00.000+02:00 second'),
+      ln('mcp_hub | 2026-05-12T14:00:00.000+02:00 second'),
       ln('mcp-os | 2026-05-12T14:00:00.000+02:00 STDOUT: third'),
     ]);
     expect(sorted.map((l) => l.message)).toEqual(['first', 'second', 'third']);
@@ -594,6 +593,28 @@ describe('sortLogLinesByTime', () => {
 
   it('returns an empty array unchanged', () => {
     expect(sortLogLinesByTime([])).toEqual([]);
+  });
+
+  it('leading timestamp-less lines inherit the next timestamp, not epoch zero', () => {
+    const banner = parseLogLine('mcp_hub | ════════════');
+    expect(banner.time).toBe('');
+    const sorted = sortLogLinesByTime([
+      banner,
+      ln('mcp_hub | 2026-05-12T14:00:01.000+02:00 a: first'),
+      ln('claude | 2026-05-12T14:00:00.000+02:00 earlier in time'),
+    ]);
+    expect(sorted.map((l) => l.message)).toEqual(['earlier in time', '════════════', 'a: first']);
+  });
+
+  it('purely plain-text input preserves stable input order', () => {
+    // Edge case: every line has NaN key (no timestamp anywhere). Stable sort
+    // must keep input order — banner/header lines stay at the top.
+    const onlyPlain = sortLogLinesByTime([
+      parseLogLine('plugin | starting'),
+      parseLogLine('plugin | ready'),
+      parseLogLine('plugin | done'),
+    ]);
+    expect(onlyPlain.map((l) => l.message)).toEqual(['starting', 'ready', 'done']);
   });
 });
 
@@ -605,9 +626,9 @@ describe('LogsViewComponent — status bar layout', () => {
 
   const MOCK_HEALTH = {
     containers: [
-      { name: 'speedwave_demo_hub', status: 'running', healthy: true },
-      { name: 'speedwave_demo_redmine', status: 'running', healthy: true },
-      { name: 'speedwave_demo_sharepoint', status: 'starting', healthy: false },
+      { name: 'mcp_hub', status: 'running', healthy: true },
+      { name: 'mcp_redmine', status: 'running', healthy: true },
+      { name: 'mcp_sharepoint', status: 'starting', healthy: false },
     ],
     vm: { running: true, vm_type: 'lima' },
     mcp_os: { running: true },
@@ -682,7 +703,7 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(component.mcpOsRunning()).toBe(true);
     expect(component.anyContainerUnhealthy()).toBe(true);
     expect(component.containersLabel()).toContain('2 of 3');
-    expect(component.containersDetail()).toContain('sharepoint');
+    expect(component.containersDetail()).toContain('mcp_sharepoint');
     expect(component.detectedIdes()).toHaveLength(1);
   });
 
@@ -773,12 +794,12 @@ describe('LogsViewComponent — status bar layout', () => {
     const details = fixture.nativeElement.querySelector('[data-testid="logs-status-details"]');
     expect(details).not.toBeNull();
 
-    // One row per container, identified by stripped name.
+    // One row per container, identified by backend-supplied service name.
     expect(
-      fixture.nativeElement.querySelector('[data-testid="health-container-hub"]')
+      fixture.nativeElement.querySelector('[data-testid="health-container-mcp_hub"]')
     ).not.toBeNull();
     expect(
-      fixture.nativeElement.querySelector('[data-testid="health-container-sharepoint"]')
+      fixture.nativeElement.querySelector('[data-testid="health-container-mcp_sharepoint"]')
     ).not.toBeNull();
 
     // One row for the cursor IDE detected in the snapshot.
@@ -974,26 +995,6 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(banner?.textContent).toContain('zip failed');
   });
 
-  it('forces trace-level logging on init so exported diagnostics carry full context', async () => {
-    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-    await component.ngOnInit();
-    expect(invokeSpy).toHaveBeenCalledWith('set_log_level', { level: 'trace' });
-  });
-
-  it('does not surface set_log_level failures (browser dev mode is silent)', async () => {
-    mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'set_log_level') throw new Error('not in tauri');
-      if (cmd === 'get_all_logs') return '';
-      if (cmd === 'get_health') return MOCK_HEALTH;
-      return undefined;
-    };
-    await component.ngOnInit();
-    fixture.detectChanges();
-    // forceMaxLogLevel is best-effort — the error must not bleed into the
-    // banner or block subsequent fetches.
-    expect(component.error()).toBe('');
-  });
-
   it('schedules a scroll-to-bottom write after each successful fetch', async () => {
     // Reproduces the user-visible bug where opening /logs landed on top of
     // the stream. The component delegates the actual scroll to
@@ -1108,7 +1109,7 @@ describe('LogsViewComponent — status bar layout', () => {
   it('skips re-render when the silent poll buffer is byte-identical (lastRaw guard)', async () => {
     await component.ngOnInit();
     mockTauri.invokeHandler = async (cmd: string) =>
-      cmd === 'get_all_logs' ? 'speedwave_test_mcp-hub_1 | hello' : undefined;
+      cmd === 'get_all_logs' ? 'mcp_hub | hello' : undefined;
     // First silent poll populates lastRaw + lines.
     await component['refresh'](true);
     const setSpy = vi.spyOn(component.lines, 'set');
@@ -1129,7 +1130,7 @@ describe('LogsViewComponent — status bar layout', () => {
       return [
         // compose-container line: nerdctl `--timestamps` (UTC) + the worker's
         // own `ts()` (local offset) inside the message.
-        'speedwave_test_mcp-hub_1 | 2026-05-12T12:00:00.123456Z [2026-05-12T14:00:00.123+02:00] INFO container line',
+        'mcp_hub | 2026-05-12T12:00:00.123456Z [2026-05-12T14:00:00.123+02:00] INFO container line',
         'desktop | 2026-05-12T14:34:02.814+02:00 INFO [target] desktop line',
         'mcp-os | 2026-05-12T14:34:03.000+02:00 STDOUT: [2026-05-12T14:34:03.000+02:00] mcp-os line',
         // audit JSON `ts` field stays UTC `Z`; the drain prefix is local offset.
@@ -1145,7 +1146,7 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(sources).toContain('mcp-os');
     expect(sources).toContain('host-exec');
     expect(sources).toContain('claude');
-    expect(sources).toContain('mcp-hub'); // compose container, prefix-stripped
+    expect(sources).toContain('mcp_hub'); // compose container, prefix-stripped
     expect(sources[0]).toBe('all');
   });
 

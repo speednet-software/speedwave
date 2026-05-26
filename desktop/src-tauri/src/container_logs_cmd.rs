@@ -52,6 +52,44 @@ fn read_tail_sanitized(path: &std::path::Path, tail: usize) -> Result<String, St
     ))
 }
 
+// tauri-plugin-log (KeepSome) names rotated files
+// `speedwave-desktop_YYYY-MM-DD_HH-MM-SS.log`; reading only the bare file
+// shows an empty current segment right after rotation.
+fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("read_tail_desktop_logs: cannot read {}: {e}", dir.display());
+            return String::new();
+        }
+    };
+    let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let name = p.file_name()?.to_str()?.to_string();
+            if !name.starts_with("speedwave-desktop") || !name.ends_with(".log") {
+                return None;
+            }
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((p, mtime))
+        })
+        .collect();
+    files.sort_by_key(|(_, m)| *m);
+    let mut combined: Vec<String> = Vec::new();
+    for (path, _) in files {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => combined.extend(content.lines().map(str::to_string)),
+            Err(e) => log::warn!(
+                "read_tail_desktop_logs: cannot read {}: {e}",
+                path.display()
+            ),
+        }
+    }
+    let start = combined.len().saturating_sub(tail);
+    speedwave_runtime::log_sanitizer::sanitize(&combined[start..].join("\n"))
+}
+
 #[tauri::command]
 pub(crate) async fn get_container_logs(
     container: String,
@@ -230,18 +268,30 @@ fn rewrite_desktop_bracketed_level(line: &str) -> String {
 ///
 /// - Empty lines are dropped (they would break `parseLogLine` and add no value).
 /// - Lines that already carry a `<word> | …` prefix (compose container logs)
-///   are passed through unchanged — re-prefixing them would lose the
-///   container name in the dropdown.
+///   have the compose container prefix stripped so the dropdown shows
+///   `mcp_hub` not `speedwave_my_project_mcp_hub` — only when `project` is
+///   supplied (i.e. compose source); host-side sources pass through as-is.
 /// - Other lines (host-side log files) get the `<source> | ` prefix.
 /// - Desktop-log lines additionally have their bracketed level rewritten
 ///   so the Angular level chip works (`[INFO]` → `INFO`).
-pub(crate) fn prefix_lines(source: &str, raw: &str) -> String {
+pub(crate) fn prefix_lines(source: &str, raw: &str, project: Option<&str>) -> String {
     let mut out = String::with_capacity(raw.len() + raw.lines().count() * (source.len() + 4));
     for line in raw.split('\n') {
         if line.is_empty() {
             continue;
         }
         if has_source_prefix(line) {
+            if let Some(proj) = project {
+                if let Some((container, rest)) = line.split_once(" | ") {
+                    let normalised =
+                        speedwave_runtime::consts::strip_compose_container_prefix(container, proj);
+                    out.push_str(normalised);
+                    out.push_str(" | ");
+                    out.push_str(rest);
+                    out.push('\n');
+                    continue;
+                }
+            }
             out.push_str(line);
             out.push('\n');
             continue;
@@ -274,12 +324,12 @@ pub(crate) struct LogSources {
 /// is the frontend's job (`sortLogLinesByTime` in `logs-view.component.ts`) —
 /// every line carries one ISO timestamp, so the renderer parses and merges
 /// them by instant; here we just concatenate.
-pub(crate) fn merge_log_sources(sources: LogSources) -> String {
-    let compose = prefix_lines("compose", &sources.compose);
-    let desktop = prefix_lines("desktop", &sources.desktop);
-    let mcp_os = prefix_lines("mcp-os", &sources.mcp_os);
-    let host_exec = prefix_lines("host-exec", &sources.host_exec);
-    let claude = prefix_lines("claude", &sources.claude);
+pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
+    let compose = prefix_lines("compose", &sources.compose, Some(project));
+    let desktop = prefix_lines("desktop", &sources.desktop, None);
+    let mcp_os = prefix_lines("mcp-os", &sources.mcp_os, None);
+    let host_exec = prefix_lines("host-exec", &sources.host_exec, None);
+    let claude = prefix_lines("claude", &sources.claude, None);
 
     // Apply the sanitizer once to the merged buffer (idempotent — sources are
     // already individually sanitized, this is a defence-in-depth pass).
@@ -323,12 +373,8 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
             String::new()
         };
 
-        // desktop (tauri-plugin-log) — best-effort, missing dir/file is fine
         let desktop = match desktop_log_dir() {
-            Some(dir) => {
-                let path = dir.join("speedwave-desktop.log");
-                read_tail_sanitized(&path, tail_us).unwrap_or_default()
-            }
+            Some(dir) => read_tail_desktop_logs(&dir, tail_us),
             None => String::new(),
         };
 
@@ -345,13 +391,16 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
         let claude_path = speedwave_runtime::consts::claude_session_log_path(&project);
         let claude = read_tail_sanitized(&claude_path, tail_us).unwrap_or_default();
 
-        Ok(merge_log_sources(LogSources {
-            compose,
-            desktop,
-            mcp_os,
-            host_exec,
-            claude,
-        }))
+        Ok(merge_log_sources(
+            LogSources {
+                compose,
+                desktop,
+                mcp_os,
+                host_exec,
+                claude,
+            },
+            &project,
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -666,20 +715,35 @@ mod tests {
     // -- prefix_lines tests --
 
     #[test]
-    fn prefix_lines_passthrough_for_compose_format() {
+    fn prefix_lines_passthrough_for_compose_format_when_no_project() {
         let raw = "claude_1 | hello\nmcp_hub_1 | world";
-        let out = prefix_lines("compose", raw);
-        // Compose lines pass through verbatim — they already have a source token.
+        let out = prefix_lines("compose", raw, None);
+        // With no project supplied, compose lines pass through verbatim.
         assert!(out.contains("claude_1 | hello"));
         assert!(out.contains("mcp_hub_1 | world"));
-        // Must NOT prepend `compose | `.
         assert!(!out.contains("compose | claude_1"));
+    }
+
+    #[test]
+    fn prefix_lines_strips_compose_project_prefix_when_project_supplied() {
+        let prefix = speedwave_runtime::consts::compose_prefix();
+        let raw = format!("{prefix}_my_proj_mcp_hub | line a\nother_container | line b");
+        let out = prefix_lines("compose", &raw, Some("my_proj"));
+        assert!(
+            out.contains("mcp_hub | line a"),
+            "prefix must be stripped, got: {out}"
+        );
+        assert!(
+            out.contains("other_container | line b"),
+            "unrelated container survives, got: {out}"
+        );
+        assert!(!out.contains(&format!("{prefix}_my_proj_mcp_hub | line a")));
     }
 
     #[test]
     fn prefix_lines_prepends_source_for_plain_lines() {
         let raw = "2026-05-06T19:58:38 INFO mcp-os started\nready";
-        let out = prefix_lines("mcp-os", raw);
+        let out = prefix_lines("mcp-os", raw, None);
         assert!(out.contains("mcp-os | 2026-05-06T19:58:38 INFO mcp-os started"));
         assert!(out.contains("mcp-os | ready"));
     }
@@ -687,10 +751,7 @@ mod tests {
     #[test]
     fn prefix_lines_rewrites_desktop_bracketed_level() {
         let raw = "2026-05-06T19:58:38.724+0200 [INFO][speedwave_desktop::integrations_cmd] hi";
-        let out = prefix_lines("desktop", raw);
-        // Bracketed level is unwrapped (with trailing space — frontend LEVEL_RE
-        // requires \s+ after the level word) AND the line is prefixed with
-        // `desktop | `.
+        let out = prefix_lines("desktop", raw, None);
         assert!(
             out.contains("desktop | 2026-05-06T19:58:38.724+0200 INFO [speedwave_desktop::integrations_cmd] hi"),
             "expected unwrapped level + desktop prefix, got: {out}"
@@ -700,19 +761,15 @@ mod tests {
     #[test]
     fn prefix_lines_skips_empty_lines() {
         let raw = "first\n\nsecond\n";
-        let out = prefix_lines("desktop", raw);
-        // No `desktop | ` lines for the empty splits.
+        let out = prefix_lines("desktop", raw, None);
         let pipe_count = out.matches("desktop | ").count();
         assert_eq!(pipe_count, 2, "expected 2 prefixed lines, got: {out}");
     }
 
     #[test]
     fn prefix_lines_does_not_double_rewrite_when_source_is_not_desktop() {
-        // mcp-os logs sometimes contain `[INFO]` text but we must NOT rewrite
-        // them (the rewrite is desktop-format-specific). Non-desktop sources
-        // pass content through with only the prefix added.
         let raw = "2026-05-06T19:58:38 [INFO] foo";
-        let out = prefix_lines("mcp-os", raw);
+        let out = prefix_lines("mcp-os", raw, None);
         assert!(
             out.contains("mcp-os | 2026-05-06T19:58:38 [INFO] foo"),
             "non-desktop source must NOT unwrap brackets; got: {out}"
@@ -723,29 +780,40 @@ mod tests {
 
     #[test]
     fn merge_log_sources_handles_missing_files_as_empty() {
-        // Every source empty → merged buffer is empty.
-        let merged = merge_log_sources(LogSources {
-            compose: String::new(),
-            desktop: String::new(),
-            mcp_os: String::new(),
-            host_exec: String::new(),
-            claude: String::new(),
-        });
+        let merged = merge_log_sources(
+            LogSources {
+                compose: String::new(),
+                desktop: String::new(),
+                mcp_os: String::new(),
+                host_exec: String::new(),
+                claude: String::new(),
+            },
+            "testproj",
+        );
         assert_eq!(merged, "");
     }
 
     #[test]
     fn merge_log_sources_includes_all_source_tokens_in_dropdown_friendly_form() {
-        let merged = merge_log_sources(LogSources {
-            compose: "claude_1 | first\n".to_string(),
-            desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] d\n".to_string(),
-            mcp_os: "ready\n".to_string(),
-            host_exec:
-                r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#
-                    .to_string(),
-            claude: "session started\n".to_string(),
-        });
-        assert!(merged.contains("claude_1 | first"), "compose passthrough");
+        let prefix = speedwave_runtime::consts::compose_prefix();
+        let compose_line = format!("{prefix}_testproj_claude | first\n");
+        let merged = merge_log_sources(
+            LogSources {
+                compose: compose_line.clone(),
+                desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] d\n".to_string(),
+                mcp_os: "ready\n".to_string(),
+                host_exec:
+                    r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#
+                        .to_string(),
+                claude: "session started\n".to_string(),
+            },
+            "testproj",
+        );
+        assert!(
+            merged.contains("claude | first"),
+            "compose prefix stripped, got: {merged}"
+        );
+        assert!(!merged.contains(&format!("{prefix}_testproj_claude")));
         assert!(merged.contains("desktop | 2026-01-01T00:00:00.000+0000 INFO [x] d"));
         assert!(merged.contains("mcp-os | ready"));
         assert!(
@@ -757,16 +825,18 @@ mod tests {
 
     #[test]
     fn merge_log_sources_sanitizes_secrets_across_sources() {
-        // A Bearer token in the desktop log must be redacted in the merged
-        // buffer (sanitizer is applied as a defence-in-depth pass at merge).
-        let merged = merge_log_sources(LogSources {
-            compose: String::new(),
-            desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] auth Bearer sk-ant-api03-secret123\n"
-                .to_string(),
-            mcp_os: String::new(),
-            host_exec: String::new(),
-            claude: String::new(),
-        });
+        let merged = merge_log_sources(
+            LogSources {
+                compose: String::new(),
+                desktop:
+                    "2026-01-01T00:00:00.000+0000 [INFO][x] auth Bearer sk-ant-api03-secret123\n"
+                        .to_string(),
+                mcp_os: String::new(),
+                host_exec: String::new(),
+                claude: String::new(),
+            },
+            "testproj",
+        );
         assert!(
             !merged.contains("sk-ant-api03-secret123"),
             "Bearer token must be redacted, got: {merged}"
@@ -775,29 +845,35 @@ mod tests {
 
     #[test]
     fn merge_log_sources_preserves_compose_block_first() {
-        // The concatenation order is deterministic: compose, then desktop, …
-        // (the frontend re-sorts by timestamp; this just pins the wire order).
-        let merged = merge_log_sources(LogSources {
-            compose: "claude_1 | START\n".to_string(),
-            desktop: "desktop_only_line\n".to_string(),
-            mcp_os: String::new(),
-            host_exec: String::new(),
-            claude: String::new(),
-        });
-        let compose_idx = merged.find("claude_1 | START").unwrap();
+        let prefix = speedwave_runtime::consts::compose_prefix();
+        let compose_line = format!("{prefix}_testproj_claude | START\n");
+        let merged = merge_log_sources(
+            LogSources {
+                compose: compose_line,
+                desktop: "desktop_only_line\n".to_string(),
+                mcp_os: String::new(),
+                host_exec: String::new(),
+                claude: String::new(),
+            },
+            "testproj",
+        );
+        let compose_idx = merged.find("claude | START").unwrap();
         let desktop_idx = merged.find("desktop | desktop_only_line").unwrap();
         assert!(compose_idx < desktop_idx, "compose block must come first");
     }
 
     #[test]
     fn merge_log_sources_host_exec_block_between_mcp_os_and_claude() {
-        let merged = merge_log_sources(LogSources {
-            compose: String::new(),
-            desktop: String::new(),
-            mcp_os: "mcp_os_line\n".to_string(),
-            host_exec: "host_exec_line\n".to_string(),
-            claude: "claude_line\n".to_string(),
-        });
+        let merged = merge_log_sources(
+            LogSources {
+                compose: String::new(),
+                desktop: String::new(),
+                mcp_os: "mcp_os_line\n".to_string(),
+                host_exec: "host_exec_line\n".to_string(),
+                claude: "claude_line\n".to_string(),
+            },
+            "testproj",
+        );
         let mcp_idx = merged.find("mcp-os | mcp_os_line").unwrap();
         let he_idx = merged.find("host-exec | host_exec_line").unwrap();
         let claude_idx = merged.find("claude | claude_line").unwrap();
@@ -806,10 +882,8 @@ mod tests {
 
     #[test]
     fn prefix_lines_does_not_unwrap_brackets_for_host_exec() {
-        // host_exec audit lines are JSON; a `[INFO]`-looking substring (e.g. in
-        // an argv) must not be rewritten — the desktop-only rewrite must not fire.
         let raw = r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#;
-        let out = prefix_lines("host-exec", raw);
+        let out = prefix_lines("host-exec", raw, None);
         assert!(
             out.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#),
             "host-exec content must pass through verbatim with only the prefix, got: {out}"
@@ -823,5 +897,72 @@ mod tests {
         assert!(s.contains("host-exec"), "path: {s}");
         assert!(s.contains("myproj"), "path: {s}");
         assert!(s.ends_with("log"), "path: {s}");
+    }
+
+    // ── read_tail_desktop_logs tests ─────────────────────────────────────────
+
+    #[test]
+    fn read_tail_desktop_logs_returns_empty_when_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope");
+        assert_eq!(read_tail_desktop_logs(&missing, 100), "");
+    }
+
+    #[test]
+    fn read_tail_desktop_logs_returns_empty_on_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_tail_desktop_logs(tmp.path(), 100), "");
+    }
+
+    #[test]
+    fn read_tail_desktop_logs_tails_single_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("speedwave-desktop.log");
+        let lines: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let out = read_tail_desktop_logs(tmp.path(), 3);
+        assert_eq!(out, "line 7\nline 8\nline 9");
+    }
+
+    #[test]
+    fn read_tail_desktop_logs_merges_rotated_files_in_mtime_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let older = tmp.path().join("speedwave-desktop_2026-05-12_08-00-00.log");
+        let newer = tmp.path().join("speedwave-desktop.log");
+        std::fs::write(&older, "old-1\nold-2").unwrap();
+        std::fs::write(&newer, "new-1\nnew-2").unwrap();
+        std::fs::File::open(&older)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+            .unwrap();
+        std::fs::File::open(&newer)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000))
+            .unwrap();
+        let out = read_tail_desktop_logs(tmp.path(), 10);
+        assert!(out.contains("old-1\nold-2\nnew-1\nnew-2"), "got: {out}");
+    }
+
+    #[test]
+    fn read_tail_desktop_logs_ignores_unrelated_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("other.log"), "noise").unwrap();
+        std::fs::write(tmp.path().join("speedwave-desktop.txt"), "noise").unwrap();
+        std::fs::write(tmp.path().join("speedwave-desktop.log"), "keep").unwrap();
+        let out = read_tail_desktop_logs(tmp.path(), 10);
+        assert_eq!(out, "keep");
+    }
+
+    #[test]
+    fn read_tail_desktop_logs_sanitizes_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("speedwave-desktop.log"),
+            "Authorization: Bearer sk-ant-api03-secret",
+        )
+        .unwrap();
+        let out = read_tail_desktop_logs(tmp.path(), 10);
+        assert!(!out.contains("sk-ant-api03-secret"), "got: {out}");
+        assert!(out.contains("***REDACTED"), "got: {out}");
     }
 }

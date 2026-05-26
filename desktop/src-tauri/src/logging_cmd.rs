@@ -1,416 +1,53 @@
-// Log level commands and log cleanup utilities.
+use std::sync::OnceLock;
 
-use speedwave_runtime::config;
+const DEFAULT_BUNDLE_IDENTIFIER: &str = "pl.speedwave.desktop";
 
-pub(crate) fn parse_log_level(s: &str) -> Option<log::LevelFilter> {
-    match s.to_lowercase().as_str() {
-        "error" => Some(log::LevelFilter::Error),
-        "warn" => Some(log::LevelFilter::Warn),
-        "info" => Some(log::LevelFilter::Info),
-        "debug" => Some(log::LevelFilter::Debug),
-        "trace" => Some(log::LevelFilter::Trace),
-        _ => None,
+// `make dev` overrides identifier to `.dev` via TAURI_CONFIG; must match
+// tauri-plugin-log's runtime LogDir target, not the value in tauri.conf.json.
+static BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn init_bundle_identifier(identifier: String) {
+    if BUNDLE_IDENTIFIER.set(identifier).is_err() {
+        log::debug!("init_bundle_identifier: already initialised; ignoring");
     }
 }
 
-#[tauri::command]
-pub(crate) fn set_log_level(level: String) -> Result<(), String> {
-    let filter = parse_log_level(&level).ok_or_else(|| format!("Invalid log level: {level}"))?;
-    log::info!("Log level changed to {level}");
-    log::set_max_level(filter);
-    if let Err(e) = persist_log_level(&level) {
-        log::warn!("Failed to persist log level: {e}");
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn get_log_level() -> String {
-    log::max_level().to_string()
-}
-
-fn persist_log_level(level: &str) -> anyhow::Result<()> {
-    config::with_config_lock(|| {
-        let mut config = config::load_user_config()?;
-        config.log_level = Some(level.to_lowercase());
-        config::save_user_config(&config)
-    })
-}
-
-/// Returns the absolute path of the directory tauri-plugin-log writes
-/// `speedwave-desktop.log` (and rotated copies) into. Per-OS layout matches
-/// what the plugin's `LogDir` target resolves to:
-///
-/// - macOS: `~/Library/Logs/pl.speedwave.desktop`
-/// - Windows: `%APPDATA%/pl.speedwave.desktop` (handled by AppData fallback)
-///
-/// Returns `None` only when `dirs::home_dir()` itself fails (rare, sandbox
-/// edge cases). SSOT for this path — used by `cleanup_old_logs`,
-/// `diagnostics::export_diagnostics`, and the unified-logs view command in
-/// `container_logs_cmd.rs::get_all_logs`.
-pub(crate) fn desktop_log_dir() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
-    if cfg!(target_os = "macos") {
-        Some(home.join("Library/Logs/pl.speedwave.desktop"))
-    } else {
-        // tauri-plugin-log on Windows defaults to %APPDATA%/<bundle id>; this
-        // helper keeps the same convention so log lookup works after install.
-        dirs::data_dir().map(|d| d.join("pl.speedwave.desktop"))
-    }
-}
-
-/// Removes old rotated log files, keeping at most `max_files` recent ones.
-pub(crate) fn cleanup_old_logs(max_files: usize) {
-    let Some(log_dir) = desktop_log_dir() else {
-        return;
-    };
-    cleanup_log_dir(&log_dir, max_files);
-}
-
-/// Core logic for log cleanup — operates on an arbitrary directory.
-///
-/// Keeps the `max_files` most-recently-modified `.log` files in `log_dir` and
-/// deletes the rest.  Non-`.log` files are never touched.
-pub(crate) fn cleanup_log_dir(log_dir: &std::path::Path, max_files: usize) {
-    let entries = match std::fs::read_dir(log_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    let mut log_files: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "log")
-                .unwrap_or(false)
-        })
-        .filter_map(|e| {
-            e.metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| (e.path(), t))
-        })
-        .collect();
-
-    if log_files.len() <= max_files {
-        return;
-    }
-
-    // Sort by modification time, newest first
-    log_files.sort_by(|a, b| b.1.cmp(&a.1));
-
-    // Remove the oldest files beyond the limit
-    for (path, _) in log_files.iter().skip(max_files) {
-        if let Err(e) = std::fs::remove_file(path) {
-            log::warn!("failed to remove old log file {}: {e}", path.display());
+fn bundle_identifier() -> &'static str {
+    match BUNDLE_IDENTIFIER.get() {
+        Some(s) => s.as_str(),
+        None => {
+            // Production build: return the default silently (Tauri setup might not
+            // have run yet during early panic-hook output, etc.). Debug build:
+            // surface the miss — it means desktop_log_dir() was consulted before
+            // init_bundle_identifier and will return the release path under dev.
+            #[cfg(all(debug_assertions, not(test)))]
+            log::warn!(
+                "bundle_identifier(): BUNDLE_IDENTIFIER not initialised yet; falling back to {DEFAULT_BUNDLE_IDENTIFIER}"
+            );
+            DEFAULT_BUNDLE_IDENTIFIER
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// Matches tauri-plugin-log v2 TargetKind::LogDir resolution:
+// macOS: ~/Library/Logs/<bundle>, Windows: %LOCALAPPDATA%/<bundle>/logs.
+pub(crate) fn desktop_log_dir() -> Option<std::path::PathBuf> {
+    let id = bundle_identifier();
+    if cfg!(target_os = "macos") {
+        let home = dirs::home_dir()?;
+        Some(home.join("Library/Logs").join(id))
+    } else {
+        dirs::data_local_dir().map(|d| d.join(id).join("logs"))
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    // -- set_log_level / get_log_level tests --
-    //
-    // These functions mutate global state (`log::set_max_level`), so we
-    // serialize all log-level tests through a single mutex.
-
-    static LOG_LEVEL_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[test]
-    fn set_log_level_accepts_error() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(set_log_level("error".to_string()).is_ok());
-    }
-
-    #[test]
-    fn set_log_level_accepts_warn() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(set_log_level("warn".to_string()).is_ok());
-    }
-
-    #[test]
-    fn set_log_level_accepts_info() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(set_log_level("info".to_string()).is_ok());
-    }
-
-    #[test]
-    fn set_log_level_accepts_debug() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(set_log_level("debug".to_string()).is_ok());
-    }
-
-    #[test]
-    fn set_log_level_accepts_trace() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(set_log_level("trace".to_string()).is_ok());
-    }
-
-    #[test]
-    fn set_log_level_case_insensitive_uppercase() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(set_log_level("ERROR".to_string()).is_ok());
-    }
-
-    #[test]
-    fn set_log_level_case_insensitive_mixed() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(set_log_level("Info".to_string()).is_ok());
-    }
-
-    #[test]
-    fn set_log_level_case_insensitive_debug_upper() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(set_log_level("DEBUG".to_string()).is_ok());
-    }
-
-    #[test]
-    fn set_log_level_rejects_invalid() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        let err = set_log_level("verbose".to_string()).unwrap_err();
-        assert!(
-            err.contains("verbose"),
-            "error should contain the invalid value"
-        );
-    }
-
-    #[test]
-    fn set_log_level_rejects_empty_string() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(set_log_level(String::new()).is_err());
-    }
-
-    #[test]
-    fn get_log_level_returns_non_empty() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        let level = get_log_level();
-        assert!(!level.is_empty(), "log level string should not be empty");
-    }
-
-    #[test]
-    fn set_then_get_log_level_round_trip() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        set_log_level("debug".to_string()).unwrap();
-        let level = get_log_level();
-        assert_eq!(level, "DEBUG");
-    }
-
-    #[test]
-    fn set_log_level_off_returns_error() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(
-            set_log_level("off".to_string()).is_err(),
-            "\"off\" is not a valid log level and should be rejected"
-        );
-    }
-
-    #[test]
-    fn set_log_level_whitespace_padded_returns_error() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        assert!(
-            set_log_level("  debug  ".to_string()).is_err(),
-            "whitespace-padded input should be rejected (no trimming)"
-        );
-    }
-
-    #[test]
-    fn set_log_level_multi_step_round_trip() {
-        let _lock = LOG_LEVEL_MUTEX.lock().unwrap();
-        set_log_level("trace".to_string()).unwrap();
-        set_log_level("error".to_string()).unwrap();
-        let level = get_log_level();
-        assert_eq!(level, "ERROR");
-    }
-
-    // -- cleanup_log_dir tests --
-
-    /// Helper: create a `.log` file inside `dir` with the given name.
-    fn create_log_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-        let p = dir.join(name);
-        std::fs::File::create(&p).unwrap();
-        p
-    }
-
-    /// Helper: create a `.log` file and set its modification time to a specific
-    /// epoch-based timestamp.  Uses `File::set_modified` (stable since Rust 1.75)
-    /// instead of `thread::sleep` for deterministic ordering in tests.
-    fn create_log_file_with_mtime(
-        dir: &std::path::Path,
-        name: &str,
-        epoch_secs: u64,
-    ) -> std::path::PathBuf {
-        let p = dir.join(name);
-        let f = std::fs::File::create(&p).unwrap();
-        let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(epoch_secs);
-        f.set_modified(mtime).unwrap();
-        p
-    }
-
-    #[test]
-    fn cleanup_log_dir_fewer_than_limit_deletes_nothing() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_log_file(tmp.path(), "a.log");
-        create_log_file(tmp.path(), "b.log");
-
-        cleanup_log_dir(tmp.path(), 5);
-
-        let count = std::fs::read_dir(tmp.path()).unwrap().count();
-        assert_eq!(count, 2, "no files should be deleted when under the limit");
-    }
-
-    #[test]
-    fn cleanup_log_dir_exactly_at_limit_deletes_nothing() {
-        let tmp = tempfile::tempdir().unwrap();
-        for i in 0..3 {
-            create_log_file_with_mtime(tmp.path(), &format!("file{i}.log"), 1_000_000 + i * 100);
-        }
-
-        cleanup_log_dir(tmp.path(), 3);
-
-        let count = std::fs::read_dir(tmp.path()).unwrap().count();
-        assert_eq!(count, 3, "no files should be deleted at exactly the limit");
-    }
-
-    #[test]
-    fn cleanup_log_dir_over_limit_deletes_oldest() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Create 6 files with deterministic, well-separated mtimes.
-        // file0 is oldest (epoch 1 000 000), file5 is newest (epoch 1 000 500).
-        let mut created = Vec::new();
-        for i in 0u64..6 {
-            let p = create_log_file_with_mtime(
-                tmp.path(),
-                &format!("file{i}.log"),
-                1_000_000 + i * 100,
-            );
-            created.push(p);
-        }
-
-        cleanup_log_dir(tmp.path(), 3);
-
-        // The 3 newest files (file3, file4, file5) must survive.
-        for p in &created[3..] {
-            assert!(p.exists(), "newest file {} should survive", p.display());
-        }
-        // The 3 oldest files (file0, file1, file2) must be deleted.
-        for p in &created[..3] {
-            assert!(!p.exists(), "oldest file {} should be deleted", p.display());
-        }
-
-        let remaining_count = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .count();
-        assert_eq!(
-            remaining_count, 3,
-            "should keep exactly 3 files, got {remaining_count}"
-        );
-    }
-
-    #[test]
-    fn cleanup_log_dir_ignores_non_log_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        // 4 .log files (over the limit of 2) plus 3 .txt files
-        for i in 0u64..4 {
-            create_log_file_with_mtime(tmp.path(), &format!("file{i}.log"), 1_000_000 + i * 100);
-        }
-        for i in 0..3 {
-            let p = tmp.path().join(format!("notes{i}.txt"));
-            std::fs::File::create(&p).unwrap();
-        }
-
-        cleanup_log_dir(tmp.path(), 2);
-
-        let log_count = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|x| x == "log").unwrap_or(false))
-            .count();
-        let txt_count = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|x| x == "txt").unwrap_or(false))
-            .count();
-
-        assert_eq!(log_count, 2, "should keep exactly 2 .log files");
-        assert_eq!(txt_count, 3, "all .txt files should remain untouched");
-    }
-
-    #[test]
-    fn cleanup_log_dir_nonexistent_directory_does_not_panic() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("does_not_exist");
-        // Should return silently — no panic, no error.
-        cleanup_log_dir(&missing, 5);
-    }
-
-    #[test]
-    fn cleanup_log_dir_max_zero_deletes_all_log_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        for i in 0..4 {
-            create_log_file(tmp.path(), &format!("file{i}.log"));
-        }
-        // Also add a non-log file that must survive
-        let txt = tmp.path().join("keep.txt");
-        std::fs::File::create(&txt).unwrap();
-
-        cleanup_log_dir(tmp.path(), 0);
-
-        let log_count = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|x| x == "log").unwrap_or(false))
-            .count();
-        assert_eq!(log_count, 0, "max_files=0 should delete all .log files");
-        assert!(txt.exists(), ".txt file should not be deleted");
-    }
-
-    #[test]
-    fn cleanup_log_dir_mixed_extensions_only_counts_log() {
-        let tmp = tempfile::tempdir().unwrap();
-        // 2 .log files + 5 .txt files — limit is 3, so nothing should be deleted
-        // because only .log files are counted and 2 < 3.
-        create_log_file(tmp.path(), "a.log");
-        create_log_file(tmp.path(), "b.log");
-        for i in 0..5 {
-            let p = tmp.path().join(format!("data{i}.txt"));
-            std::fs::File::create(&p).unwrap();
-        }
-
-        cleanup_log_dir(tmp.path(), 3);
-
-        let total = std::fs::read_dir(tmp.path()).unwrap().count();
-        assert_eq!(
-            total, 7,
-            "nothing should be deleted — only 2 .log files exist, under limit of 3"
-        );
-    }
-
-    #[test]
-    fn cleanup_log_dir_empty_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        // 0 .log files, max_files=5 — should not panic.
-        cleanup_log_dir(tmp.path(), 5);
-
-        let count = std::fs::read_dir(tmp.path()).unwrap().count();
-        assert_eq!(count, 0, "empty directory should stay empty");
-    }
-
-    // -- desktop_log_dir tests --
-
     #[test]
     fn desktop_log_dir_returns_some_on_supported_platform() {
-        // dirs::home_dir() returns Some on every supported OS during normal
-        // unit-test runs. If this fails on CI it indicates a sandbox issue
-        // worth diagnosing — not silent skip.
         let dir = desktop_log_dir();
         assert!(
             dir.is_some(),
@@ -424,39 +61,39 @@ mod tests {
         let dir = desktop_log_dir().unwrap();
         let s = dir.to_string_lossy();
         assert!(
-            s.contains("Library/Logs/pl.speedwave.desktop"),
-            "macOS path must point at Library/Logs/pl.speedwave.desktop, got {s}"
+            s.contains("Library/Logs/") && s.contains(bundle_identifier()),
+            "macOS path must point under Library/Logs/<bundle>, got {s}"
+        );
+        assert!(
+            !s.contains("/logs"),
+            "macOS path must NOT end with /logs subdir, got {s}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn desktop_log_dir_windows_path_under_local_appdata_logs() {
+        let dir = desktop_log_dir().unwrap();
+        let s = dir.to_string_lossy();
+        // tauri-plugin-log v2 uses LOCALAPPDATA + bundle + /logs on Windows.
+        assert!(
+            s.contains("AppData") && s.contains("Local") && s.ends_with("logs"),
+            "Windows path must be under LocalAppData/<bundle>/logs, got {s}"
+        );
+        assert!(
+            s.contains(bundle_identifier()),
+            "must contain bundle id, got {s}"
         );
     }
 
     #[test]
-    fn cleanup_log_dir_ignores_subdirectories() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Create 2 .log files directly in the directory.
-        create_log_file_with_mtime(tmp.path(), "old.log", 1_000_000);
-        create_log_file_with_mtime(tmp.path(), "new.log", 2_000_000);
-
-        // Create a subdirectory containing a .log file — cleanup must ignore it.
-        let subdir = tmp.path().join("nested");
-        std::fs::create_dir(&subdir).unwrap();
-        create_log_file(&subdir, "inner.log");
-
-        cleanup_log_dir(tmp.path(), 1);
-
-        // Only "new.log" (newest) should survive at the top level.
+    fn desktop_log_dir_honours_initialised_identifier() {
+        let dir = desktop_log_dir().unwrap();
+        let s = dir.to_string_lossy();
         assert!(
-            tmp.path().join("new.log").exists(),
-            "newest top-level .log should survive"
-        );
-        assert!(
-            !tmp.path().join("old.log").exists(),
-            "oldest top-level .log should be deleted"
-        );
-        // The subdirectory and its .log file must be untouched.
-        assert!(subdir.exists(), "subdirectory should not be deleted");
-        assert!(
-            subdir.join("inner.log").exists(),
-            ".log file inside subdirectory should not be deleted"
+            s.contains(bundle_identifier()),
+            "path must contain active bundle identifier ({}), got {s}",
+            bundle_identifier()
         );
     }
 }

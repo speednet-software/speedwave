@@ -10,14 +10,14 @@ All Rust code uses the `log` crate facade for diagnostic output. **Never use `ep
 
 ## Architecture
 
-| Binary                        | Backend                                      | Config                                     |
-| ----------------------------- | -------------------------------------------- | ------------------------------------------ |
-| Desktop (`speedwave-desktop`) | `tauri-plugin-log` v2 (file + stdout)        | Initialized in `main.rs` `.plugin()` chain |
-| CLI (`speedwave`)             | `env_logger` (stderr, respects `RUST_LOG`)   | Initialized at CLI `main()` start          |
-| Library (`speedwave-runtime`) | `log` crate facade only (no backend opinion) | Callers provide the backend                |
+| Binary                        | Backend                                      | Config                                              |
+| ----------------------------- | -------------------------------------------- | --------------------------------------------------- |
+| Desktop (`speedwave-desktop`) | `tauri-plugin-log` v2 (file + stdout)        | Fixed at `Trace`; no runtime toggle, no UI setting. |
+| CLI (`speedwave`)             | `env_logger` (stderr, respects `RUST_LOG`)   | Initialized at CLI `main()` start                   |
+| Library (`speedwave-runtime`) | `log` crate facade only (no backend opinion) | Callers provide the backend                         |
 
 - **SSOT for secret redaction:** `crates/speedwave-runtime/src/log_sanitizer.rs` — all log output passes through `sanitize()` via `.format()` callbacks in both Desktop and CLI loggers. Secrets never reach disk or stdout.
-- **Desktop log files:** `~/Library/Logs/pl.speedwave.desktop/` (macOS), `%APPDATA%/pl.speedwave.desktop/` (Windows). Rotation: 50 MB per file, `KeepAll`, cleanup to 10 files on startup.
+- **Desktop log files:** `~/Library/Logs/<bundle-id>/` (macOS), `%APPDATA%/<bundle-id>/` (Windows). Bundle id is `pl.speedwave.desktop` in release, `pl.speedwave.desktop.dev` under `make dev`; resolved at runtime in `desktop_log_dir()`. Rotation: 50 MB per file, `KeepSome(10)` — tauri-plugin-log prunes on every rotation; no separate cleanup timer.
 - **CLI:** `RUST_LOG=debug speedwave check` enables debug output on stderr.
 
 ## Rules for writing log statements

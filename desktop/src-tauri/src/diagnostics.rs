@@ -139,11 +139,7 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
 
         let zip_path = downloads.join(format!("speedwave-diagnostics-{timestamp}.zip"));
 
-        let log_dir = if cfg!(target_os = "macos") {
-            dirs::home_dir().map(|h| h.join("Library/Logs/pl.speedwave.desktop"))
-        } else {
-            dirs::home_dir().map(|h| h.join(".local/share/pl.speedwave.desktop/logs"))
-        };
+        let log_dir = crate::logging_cmd::desktop_log_dir();
 
         let serial_log = if cfg!(target_os = "macos") {
             Some(

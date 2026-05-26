@@ -18,14 +18,16 @@ pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
 
 /// Write `<ISO> [prefix: ]line` to the log. Errors silently ignored.
 /// Unbracketed ISO so `/logs` view's `ISO_TIME_RE` matches.
+/// `line` passes through `log_sanitizer::sanitize` so secrets never reach disk.
 pub fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
     use std::io::Write;
     if let Some(ref mut f) = file {
         let ts = crate::log_ts::log_timestamp();
+        let sanitized = crate::log_sanitizer::sanitize(line);
         if prefix.is_empty() {
-            let _ = writeln!(f, "{ts} {line}");
+            let _ = writeln!(f, "{ts} {sanitized}");
         } else {
-            let _ = writeln!(f, "{ts} {prefix}: {line}");
+            let _ = writeln!(f, "{ts} {prefix}: {sanitized}");
         }
     }
 }
@@ -145,6 +147,29 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let (_ts, rest) = split_line(&content);
         assert_eq!(rest, "STDOUT: 🚀 héllo — café");
+    }
+
+    #[test]
+    fn write_log_line_sanitizes_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secret.log");
+        let mut file = open_log_file(&path);
+        write_log_line(
+            &mut file,
+            "STDOUT",
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc",
+        );
+        drop(file);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("eyJhbGciOiJIUzI1NiJ9.abc"),
+            "token must not reach disk: {content}"
+        );
+        assert!(
+            content.contains("***REDACTED***"),
+            "sanitizer marker expected: {content}"
+        );
     }
 
     #[test]

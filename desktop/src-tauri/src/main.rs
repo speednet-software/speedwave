@@ -759,15 +759,14 @@ fn is_upstream_alive(port: u16) -> bool {
 /// listening). Separated from the query command so that `get_bridge_status`
 /// does not have write side-effects.
 fn cleanup_dead_ide(bridge: &ide_bridge::IdeBridge) {
+    log::info!(target: "ide_bridge", "cleanup_dead_ide: upstream IDE died, clearing selection");
     bridge.clear_upstream();
-    if let Ok(()) = config::with_config_lock(|| {
+    if let Err(e) = config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         user_config.selected_ide = None;
         config::save_user_config(&user_config)
     }) {
-        // ok
-    } else {
-        log::warn!("cleanup_dead_ide: failed to persist IDE deselection");
+        log::warn!("cleanup_dead_ide: failed to persist IDE deselection: {e}");
     }
 }
 
@@ -886,7 +885,6 @@ fn disconnect_ide(state: tauri::State<SharedIdeBridge>) -> Result<(), String> {
 }
 
 use diagnostics::export_diagnostics;
-use logging_cmd::{cleanup_old_logs, get_log_level, parse_log_level, set_log_level};
 use window::should_debounce;
 use window::{hide_main_window, should_prevent_close, should_run_cleanup, show_main_window};
 
@@ -1634,7 +1632,7 @@ fn main() {
                 .level_for("tungstenite", log::LevelFilter::Warn)
                 .level_for("tokio_tungstenite", log::LevelFilter::Warn)
                 .max_file_size(50_000_000)
-                .rotation_strategy(RotationStrategy::KeepAll)
+                .rotation_strategy(RotationStrategy::KeepSome(10))
                 .format(move |callback, message, record| {
                     let sanitized =
                         speedwave_runtime::log_sanitizer::sanitize(&format!("{message}"));
@@ -1675,13 +1673,14 @@ fn main() {
         .manage(transcript_forwarders.clone())
         .manage(tray_state)
         .setup(move |app| {
-            // Restore persisted log level (default: Info)
-            let initial_level = config::load_user_config()
-                .ok()
-                .and_then(|c| c.log_level)
-                .and_then(|l| parse_log_level(&l))
-                .unwrap_or(log::LevelFilter::Info);
-            log::set_max_level(initial_level);
+            // Fixed at Trace — no user-facing toggle.
+            log::set_max_level(log::LevelFilter::Trace);
+            logging_cmd::init_bundle_identifier(app.config().identifier.clone());
+            if let Err(e) = speedwave_runtime::config::migrate_drop_log_level_in(
+                speedwave_runtime::consts::data_dir(),
+            ) {
+                log::warn!("config migration: {e:#}");
+            }
 
             clipboard_bridge::spawn(app.handle().clone());
 
@@ -1711,16 +1710,8 @@ fn main() {
                 show_audit_failure_dialog_and_exit(app.handle(), body);
             }
 
-            // Clean up old rotated log files (max 10 kept)
-            cleanup_old_logs(10);
-
-            // Periodic cleanup every hour for long-running sessions
-            tauri::async_runtime::spawn(async {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-                    cleanup_old_logs(10);
-                }
-            });
+            // Rotated-log cleanup is owned by `RotationStrategy::KeepSome(10)` —
+            // tauri-plugin-log prunes on every rotation. No separate timer needed.
 
             // Recover the user's login-shell PATH once, on a background thread
             // so a slow shell rc doesn't delay `setup()`. The `host_exec`
@@ -2110,9 +2101,6 @@ fn main() {
             update_commands::get_bundle_reconcile_state,
             update_commands::retry_bundle_reconcile,
             update_commands::restart_app,
-            // Logging
-            set_log_level,
-            get_log_level,
             // UI preferences (ADR-058)
             ui_prefs_cmd::get_beta_enabled,
             ui_prefs_cmd::set_beta_enabled,
@@ -2768,7 +2756,6 @@ mod tests {
             active_project: Some("alpha".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         }
     }
@@ -2840,7 +2827,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 

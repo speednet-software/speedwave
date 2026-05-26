@@ -101,6 +101,7 @@ export { TIMEOUTS } from './timeouts.js';
 
 // Logger
 export { ts } from './logger.js';
+export { sanitize } from './sanitizer.js';
 
 // Errors (SSOT for user-facing messages)
 export { notConfiguredMessage, withSetupGuidance } from './errors.js';

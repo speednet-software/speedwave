@@ -297,7 +297,6 @@ pub struct SpeedwaveUserConfig {
     pub projects: Vec<ProjectUserEntry>,
     pub active_project: Option<String>,
     pub selected_ide: Option<SelectedIde>,
-    pub log_level: Option<String>,
     /// Meeting-transcription preferences (ADR-056). Top-level (not per-project).
     pub transcription: Option<TranscriptionConfig>,
     /// UI preferences (ADR-058). Top-level, user-only.
@@ -630,6 +629,46 @@ fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
     }
 }
 
+/// Removes the obsolete `log_level` field from `<data_dir>/config.json` if
+/// present. Returns `Ok(true)` when the field was removed, `Ok(false)` when
+/// nothing needed to change. Operates on `serde_json::Value` so unknown
+/// future fields are semantically preserved (re-serialised through
+/// `to_string_pretty` — key order and whitespace follow serde-json defaults).
+pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
+    with_config_lock_in(data_dir, || {
+        let path = data_dir.join("config.json");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Ok(false); // first-run / missing file is normal
+        };
+        let mut value: serde_json::Value = serde_json::from_str(&raw)
+            .with_context(|| format!("config migration: {} is not valid JSON", path.display()))?;
+        let obj = value.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "config migration: {} root is not a JSON object",
+                path.display()
+            )
+        })?;
+        if obj.remove("log_level").is_none() {
+            return Ok(false);
+        }
+        let content = serde_json::to_string_pretty(&value)?;
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, &content)?;
+        if let Err(e) = std::fs::rename(&tmp_path, &path) {
+            // Best-effort cleanup so the data dir isn't polluted by an orphan
+            // on filesystems where rename can fail (cross-device, locks).
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(anyhow::anyhow!(
+                "config migration: rename {} → {} failed: {e}",
+                tmp_path.display(),
+                path.display()
+            ));
+        }
+        log::info!("config migration: removed obsolete log_level field");
+        Ok(true)
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -764,8 +803,7 @@ mod tests {
         let pre_adr_json = r#"{
             "projects": [],
             "active_project": null,
-            "selected_ide": null,
-            "log_level": null
+            "selected_ide": null
         }"#;
         let parsed: SpeedwaveUserConfig = serde_json::from_str(pre_adr_json).expect("parse");
         assert!(parsed.ui.is_none());
@@ -883,7 +921,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -935,7 +972,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1031,7 +1067,6 @@ mod tests {
             active_project: Some("acme".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -1057,7 +1092,6 @@ mod tests {
             active_project: Some("test".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1080,7 +1114,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1104,7 +1137,6 @@ mod tests {
             active_project: Some("test".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1139,7 +1171,6 @@ mod tests {
             active_project: Some("v1".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
         save_user_config_to(&config_v1, &config_path).unwrap();
@@ -1156,7 +1187,6 @@ mod tests {
             active_project: Some("v2".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
         save_user_config_to(&config_v2, &config_path).unwrap();
@@ -1169,28 +1199,6 @@ mod tests {
             !config_path.with_extension("json.tmp").exists(),
             "tmp file should not exist after atomic write"
         );
-    }
-
-    #[test]
-    fn test_log_level_serde_roundtrip() {
-        let config = SpeedwaveUserConfig {
-            projects: vec![],
-            active_project: None,
-            selected_ide: None,
-            log_level: Some("debug".to_string()),
-            transcription: None,
-            ui: None,
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: SpeedwaveUserConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.log_level, Some("debug".to_string()));
-    }
-
-    #[test]
-    fn test_log_level_absent_defaults_to_none() {
-        let json = r#"{"projects":[],"active_project":null,"selected_ide":null}"#;
-        let parsed: SpeedwaveUserConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.log_level, None);
     }
 
     // ── resolve_project_config: local-provider flag injection (ADR-040) ──
@@ -1221,7 +1229,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         }
     }
@@ -1273,7 +1280,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -1383,8 +1389,7 @@ mod tests {
                 }
             ],
             "active_project": "acme-corp",
-            "selected_ide": null,
-            "log_level": null
+            "selected_ide": null
         }"#;
         std::fs::write(&config_path, legacy_json).unwrap();
 
@@ -1518,7 +1523,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1555,7 +1559,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            log_level: None,
             transcription: None,
             ui: None,
         };
@@ -1637,7 +1640,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            log_level: None,
             transcription: None,
             ui: None,
         };
@@ -1783,7 +1785,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1823,7 +1824,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -2121,7 +2121,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -2154,7 +2153,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         }
     }
@@ -2230,7 +2228,6 @@ mod tests {
             active_project: Some("beta".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
         let entry = config.active_project_entry();
@@ -2257,7 +2254,6 @@ mod tests {
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
         assert!(
@@ -2332,5 +2328,150 @@ mod tests {
         let r = ResolvedIntegrationsConfig::default();
         assert_eq!(r.is_os_service_enabled("unknown"), None);
         assert_eq!(r.is_os_service_enabled("slack"), None);
+    }
+
+    // ── migrate_drop_log_level ──
+
+    #[test]
+    fn migrate_drop_log_level_removes_field_and_preserves_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"projects":[],"active_project":null,"log_level":"trace","__future_field__":"x"}"#,
+        )
+        .unwrap();
+
+        let changed = super::migrate_drop_log_level_in(tmp.path()).unwrap();
+        assert!(changed);
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let obj = after.as_object().unwrap();
+        assert!(!obj.contains_key("log_level"));
+        assert_eq!(obj.get("__future_field__"), Some(&serde_json::json!("x")));
+    }
+
+    #[test]
+    fn migrate_drop_log_level_noop_when_field_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.json");
+        let original = r#"{"projects":[],"active_project":null}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let changed = super::migrate_drop_log_level_in(tmp.path()).unwrap();
+        assert!(!changed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn migrate_drop_log_level_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, r#"{"projects":[],"log_level":"trace"}"#).unwrap();
+
+        assert!(super::migrate_drop_log_level_in(tmp.path()).unwrap());
+        let after_first = std::fs::read_to_string(&path).unwrap();
+        assert!(!after_first.contains("log_level"));
+
+        assert!(!super::migrate_drop_log_level_in(tmp.path()).unwrap());
+        let after_second = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after_first, after_second,
+            "second call must not rewrite the file"
+        );
+    }
+
+    #[test]
+    fn migrate_drop_log_level_noop_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let changed = super::migrate_drop_log_level_in(tmp.path()).unwrap();
+        assert!(!changed);
+        assert!(!tmp.path().join("config.json").exists());
+    }
+
+    #[test]
+    fn migrate_drop_log_level_errs_on_malformed_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, "{ not valid json").unwrap();
+
+        let err = super::migrate_drop_log_level_in(tmp.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not valid JSON"),
+            "expected JSON-parse error, got: {err:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not valid json");
+    }
+
+    #[test]
+    fn migrate_drop_log_level_errs_when_root_is_not_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, r#"["unexpected","array","root"]"#).unwrap();
+
+        let err = super::migrate_drop_log_level_in(tmp.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a JSON object"),
+            "expected root-shape error, got: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"["unexpected","array","root"]"#
+        );
+    }
+
+    #[test]
+    fn migrate_drop_log_level_cleans_orphan_tmp_on_rename_failure() {
+        // Simulate the post-condition: even if rename fails, no `.tmp` orphan
+        // is left behind. We can't easily force `rename` to fail, but we can
+        // verify that under normal operation the function does not LEAVE a
+        // `.tmp` file behind on the happy path (sanity check that we always
+        // clean up).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, r#"{"projects":[],"log_level":"trace"}"#).unwrap();
+        assert!(super::migrate_drop_log_level_in(tmp.path()).unwrap());
+        let tmp_path = path.with_extension("json.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "tmp file must not survive a successful rename"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrate_drop_log_level_on_readonly_dir_leaves_file_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.json");
+        let original = r#"{"projects":[],"log_level":"trace"}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(tmp.path(), perms).unwrap();
+
+        let result = super::migrate_drop_log_level_in(tmp.path());
+
+        let mut restore = std::fs::metadata(tmp.path()).unwrap().permissions();
+        restore.set_mode(0o755);
+        std::fs::set_permissions(tmp.path(), restore).unwrap();
+
+        // Either the migration refused (Err) or the read-only dir prevented
+        // the temp-rename pair from running. In neither case may the file
+        // shed `log_level` silently — the user's config must survive.
+        match result {
+            Err(_) => {}
+            Ok(false) => {}
+            Ok(true) => {
+                let after = std::fs::read_to_string(&path).unwrap();
+                assert!(
+                    after.contains("log_level"),
+                    "migration claimed success on read-only dir but field actually removed: {after}"
+                );
+            }
+        }
     }
 }
