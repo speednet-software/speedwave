@@ -188,6 +188,31 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
 
     let msg_type = parsed["type"].as_str().unwrap_or("");
 
+    // Skip Claude Code synthetic meta-entries (slash-command caveats, image
+    // attachment markers, …). They have `type:"user"` but are model-facing
+    // hints, never actual user input. Scoped to "user" so a future
+    // upstream `isMeta` on assistant/result rows isn't silently swallowed.
+    // `isMeta` lives at the top level today; we also probe `message.isMeta`
+    // defensively in case Anthropic nests it later.
+    if msg_type == "user" {
+        let reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
+            Some("isMeta")
+        } else if parsed["message"]["isMeta"].as_bool().unwrap_or(false) {
+            Some("message.isMeta")
+        } else if is_synthetic_user_entry(&parsed) {
+            Some("synthetic-content")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            log::debug!(
+                "skipping synthetic user JSONL entry reason={reason} uuid={}",
+                parsed["uuid"].as_str().unwrap_or("?")
+            );
+            return None;
+        }
+    }
+
     match msg_type {
         "user" => parse_user_message(&parsed),
         "assistant" => parse_assistant_message(&parsed),
@@ -197,6 +222,38 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
             None
         }
     }
+}
+
+/// Detects Claude Code synthetic `type:"user"` entries that aren't real user
+/// input: slash-command markers, slash-command stdout/stderr, and the
+/// SDK CLI's `Commands are in the form …` boilerplate. None of these are
+/// flagged with `isMeta`, so we sniff the content. Caller must ensure
+/// `parsed["type"] == "user"`.
+fn is_synthetic_user_entry(parsed: &serde_json::Value) -> bool {
+    let content = &parsed["message"]["content"];
+    if let Some(s) = content.as_str() {
+        text_is_synthetic(s)
+    } else if let Some(arr) = content.as_array() {
+        // Check each text block separately so a synthetic tag is caught even
+        // when it isn't the first block of a multi-block content array.
+        arr.iter()
+            .filter(|b| b["type"].as_str() == Some("text"))
+            .filter_map(|b| b["text"].as_str())
+            .any(text_is_synthetic)
+    } else {
+        false
+    }
+}
+
+fn text_is_synthetic(s: &str) -> bool {
+    let trimmed = s.trim();
+    trimmed.starts_with("<command-name>")
+        || trimmed.starts_with("<command-message>")
+        || trimmed.starts_with("<command-args>")
+        || trimmed.starts_with("<command-result>")
+        || trimmed.starts_with("<local-command-stdout>")
+        || trimmed.starts_with("<local-command-stderr>")
+        || trimmed.starts_with("Commands are in the form `/command [args]`")
 }
 
 fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage> {
@@ -553,6 +610,26 @@ fn get_project_memory_impl(data_dir: &Path, project: &str) -> anyhow::Result<Str
         Ok(content) => Ok(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(anyhow::anyhow!("cannot read project memory: {e}")),
+    }
+}
+
+/// Delete a conversation's JSONL file. Idempotent: a missing file is treated
+/// as success so a double-click on the trash icon doesn't surface an error.
+pub fn delete_conversation(project: &str, session_id: &str) -> anyhow::Result<()> {
+    delete_conversation_impl(consts::data_dir(), project, session_id)
+}
+
+fn delete_conversation_impl(
+    data_dir: &Path,
+    project: &str,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    validate_session_id_impl(session_id)?;
+    let path = sessions_dir_impl(data_dir, project).join(format!("{session_id}.jsonl"));
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("cannot delete session {session_id}: {e}")),
     }
 }
 
@@ -1187,6 +1264,168 @@ mod tests {
     }
 
     #[test]
+    fn list_conversations_skips_is_meta_for_preview() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: …</local-command-caveat>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]},"timestamp":"2025-01-01T00:00:02Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].preview, "real question");
+        assert_eq!(result[0].message_count, 2);
+    }
+
+    #[test]
+    fn parse_jsonl_message_respects_nested_is_meta_under_message() {
+        // Defensive: should Claude Code ever move `isMeta` from top-level
+        // into `message.*`, the filter must still catch it.
+        let line = r#"{"type":"user","message":{"role":"user","isMeta":true,"content":"<local-command-caveat>x</local-command-caveat>"}}"#;
+        assert!(parse_jsonl_message(line).is_none());
+    }
+
+    #[test]
+    fn parse_jsonl_message_does_not_drop_is_meta_on_non_user_types() {
+        // The `isMeta` filter is intentionally scoped to user entries — an
+        // assistant row with isMeta:true must still parse, so future upstream
+        // tagging of legitimate assistant turns doesn't make them vanish.
+        let line = r#"{"type":"assistant","isMeta":true,"message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
+        let msg = parse_jsonl_message(line).expect("assistant with isMeta should parse");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content, "hi");
+    }
+
+    #[test]
+    fn list_conversations_drops_session_with_only_meta_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: …</local-command-caveat>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<command-name>/clear</command-name>"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn get_conversation_omits_is_meta_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: …</local-command-caveat>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]},"timestamp":"2025-01-01T00:00:02Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 2);
+        assert_eq!(transcript.messages[0].role, "user");
+        assert_eq!(transcript.messages[0].content, "real question");
+        assert_eq!(transcript.messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn list_conversations_skips_slash_command_markers() {
+        // Slash-command invocations carry no `isMeta` flag but are still
+        // synthetic — they should not surface as previews or get counted.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout></local-command-stdout>"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].preview, "real question");
+        assert_eq!(result[0].message_count, 2);
+    }
+
+    #[test]
+    fn list_conversations_drops_sdk_cli_boilerplate_session() {
+        // `claude -p "/cmd"` opens a session whose only user entry is the
+        // boilerplate `Commands are in the form …` (no `isMeta`). Such a
+        // session should never appear in the sidebar.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"Commands are in the form `/command [args]`"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_jsonl_message_drops_command_args_and_command_result_prefixes() {
+        // Defensive: Claude Code today only emits <command-name> first, but
+        // these sibling tags belong to the same family and should they ever
+        // arrive as standalone user rows we still want them filtered.
+        for tag in ["<command-args>", "<command-result>"] {
+            let line = format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"{tag}foo</X>"}}}}"#
+            );
+            assert!(
+                parse_jsonl_message(&line).is_none(),
+                "expected {tag} to be filtered"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_jsonl_message_drops_boilerplate_with_trailing_punctuation() {
+        // `starts_with` (not `==`) means small upstream wording tweaks —
+        // trailing newline, period, additional context — don't leak the
+        // boilerplate back into the sidebar.
+        let line = r#"{"type":"user","message":{"role":"user","content":"Commands are in the form `/command [args]`\n\nMore context."}}"#;
+        assert!(parse_jsonl_message(line).is_none());
+    }
+
+    #[test]
+    fn parse_jsonl_message_drops_synthetic_tag_in_non_first_text_block() {
+        // Multi-block content where the synthetic marker isn't the first
+        // block — caught per-block instead of after `join("\n")`.
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"preamble"},{"type":"text","text":"<command-name>/clear</command-name>"}]}}"#;
+        assert!(parse_jsonl_message(line).is_none());
+    }
+
+    #[test]
     fn truncate_preview_is_utf8_safe() {
         // 200 emoji (each 4 bytes) should not panic
         let emoji_msg = "\u{1F600}".repeat(300);
@@ -1623,5 +1862,62 @@ mod tests {
             Some("claude-opus-4-7"),
             "must pick the model with the highest outputTokens, not the alphabetically first key"
         );
+    }
+
+    // ── delete_conversation ────────────────────────────────────────
+
+    #[test]
+    fn delete_conversation_removes_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &[r#"{"type":"user"}"#]);
+        let path = dir.join(format!("{id}.jsonl"));
+        assert!(path.exists());
+
+        delete_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn delete_conversation_is_idempotent_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        let result = delete_conversation_impl(tmp.path(), "proj", id);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn delete_conversation_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_sessions_dir(tmp.path(), "proj");
+
+        let result = delete_conversation_impl(tmp.path(), "proj", "../escape");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_conversation_rejects_empty_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_sessions_dir(tmp.path(), "proj");
+
+        let result = delete_conversation_impl(tmp.path(), "proj", "");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_conversation_does_not_touch_other_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id_a = "abcdef01-2345-6789-abcd-ef0123456789";
+        let id_b = "abcdef01-2345-6789-abcd-ef012345678a";
+        write_session(&dir, id_a, &[r#"{"type":"user"}"#]);
+        write_session(&dir, id_b, &[r#"{"type":"user"}"#]);
+
+        delete_conversation_impl(tmp.path(), "proj", id_a).unwrap();
+        assert!(!dir.join(format!("{id_a}.jsonl")).exists());
+        assert!(dir.join(format!("{id_b}.jsonl")).exists());
     }
 }

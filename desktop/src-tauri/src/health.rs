@@ -74,9 +74,6 @@ impl HealthReport {
 /// Timeout for IDE TCP port probe during polling cycles.
 pub(crate) const IDE_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Timeout for mcp-os TCP port probe (used by both health UI and watchdog).
-const MCP_OS_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
-
 /// Check if an IDE lock file represents a live IDE by verifying PID liveness and TCP port reachability.
 pub(crate) fn is_ide_lock_alive(lock_path: &std::path::Path) -> bool {
     let contents = match std::fs::read_to_string(lock_path) {
@@ -110,80 +107,24 @@ pub(crate) fn is_ide_lock_alive(lock_path: &std::path::Path) -> bool {
 
 /// Core liveness check: PID alive + TCP port reachable. No file I/O.
 fn is_lock_entry_alive(pid: u32, port: u16) -> bool {
-    is_pid_alive(pid) && {
+    speedwave_runtime::host_mcp_process::is_pid_alive(pid) && {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         std::net::TcpStream::connect_timeout(&addr, IDE_POLL_TIMEOUT).is_ok()
     }
 }
 
-/// Returns true if a process with the given PID is currently running.
-pub(crate) fn is_pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-    #[cfg(windows)]
-    {
-        // `tasklist /FI "PID eq N" /NH` prints "INFO: No tasks are running..."
-        // when the PID does not exist. Check for absence of that message rather
-        // than substring-matching the PID (which could false-positive on process
-        // names, session numbers, or memory columns that contain the same digits).
-        speedwave_runtime::binary::system_command("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output()
-            .map(|o| {
-                let out = String::from_utf8_lossy(&o.stdout);
-                o.status.success() && !out.contains("INFO:") && !out.trim().is_empty()
-            })
-            .unwrap_or(false)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
-}
-
 /// Check if the mcp-os process is alive AND listening on its port.
-/// Used by both the health check UI (check_mcp_os) and the watchdog.
+/// Thin re-export of `speedwave_runtime::mcp_os_process::is_mcp_os_alive`
+/// (SSOT).
 pub(crate) fn is_mcp_os_alive() -> bool {
-    check_mcp_os_alive_in(speedwave_runtime::consts::data_dir())
+    speedwave_runtime::mcp_os_process::is_mcp_os_alive()
 }
 
-/// Testable inner implementation: checks PID liveness + TCP port probe
-/// against files in the given `data_dir`.
+/// Testable inner implementation; takes `data_dir` so tests can point
+/// at a temporary directory. Thin wrapper over the runtime SSOT.
+#[cfg(test)]
 pub(crate) fn check_mcp_os_alive_in(data_dir: &std::path::Path) -> bool {
-    let token_path = data_dir.join(speedwave_runtime::consts::MCP_OS_AUTH_TOKEN_FILE);
-    let pid_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PID_FILE);
-    let port_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PORT_FILE);
-
-    if !token_path.exists() {
-        return false;
-    }
-
-    let pid: u32 = match std::fs::read_to_string(&pid_path) {
-        Ok(s) => match s.trim().parse() {
-            Ok(p) if p > 0 => p,
-            _ => return false,
-        },
-        Err(_) => return false,
-    };
-    if !is_pid_alive(pid) {
-        return false;
-    }
-
-    let port: u16 = match std::fs::read_to_string(&port_path) {
-        Ok(s) => match s.trim().parse() {
-            Ok(p) if p > 0 => p,
-            _ => return false,
-        },
-        Err(_) => return false,
-    };
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    std::net::TcpStream::connect_timeout(&addr, MCP_OS_POLL_TIMEOUT).is_ok()
+    speedwave_runtime::mcp_os_process::is_mcp_os_alive_in(data_dir)
 }
 
 pub struct HealthMonitor;
@@ -317,16 +258,45 @@ pub fn list_available_ides() -> Vec<DetectedIde> {
     lock_dir.map(|d| list_ides_in_dir(&d)).unwrap_or_default()
 }
 
+/// Returns true if `~/.claude/ide/<port>.lock` exists and points at a
+/// live (PID + TCP) IDE instance. Probes a single lock file rather than
+/// scanning the whole directory — used by `select_ide` to validate the
+/// exact port the UI sent, including older-window ports that
+/// `list_available_ides` collapses away during dedupe.
+pub fn is_ide_port_alive(port: u16) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let lock_path = home
+        .join(".claude")
+        .join("ide")
+        .join(format!("{port}.lock"));
+    is_ide_lock_alive(&lock_path)
+}
+
 /// Tracks the last number of detected IDEs so we only log at `info!` level
 /// when the count changes (avoids spam from the 5-second polling cycle).
 static LAST_IDE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Scans `lock_dir/*.lock` for IDE lock files with live PIDs and listening ports.
+///
+/// Deduplicates by `(pid, ide_name)` — VS Code writes one lock per window,
+/// all sharing the same `pid`. Keeps the entry with the most recent mtime so
+/// the user-visible list collapses to one row per IDE instance.
 fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
     let Ok(entries) = std::fs::read_dir(lock_dir) else {
         return Vec::new();
     };
-    let result: Vec<DetectedIde> = entries
+
+    struct LiveEntry {
+        ide_name: String,
+        port: u16,
+        ws_url: Option<String>,
+        pid: u32,
+        mtime: std::time::SystemTime,
+    }
+
+    let live: Vec<LiveEntry> = entries
         .flatten()
         .filter_map(|e| {
             let p = e.path();
@@ -340,7 +310,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                 .to_string();
             let contents = std::fs::read_to_string(&p).ok()?;
             let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
-            // Skip our own lock file — user wants to see external IDEs only
             let pid = v
                 .get("pid")
                 .and_then(|x| x.as_u64())
@@ -351,7 +320,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                     return None;
                 }
             }
-            // Derive port from filename when missing in JSON (e.g. "<port>.lock")
             let json_port = v
                 .get("port")
                 .and_then(|x| x.as_u64())
@@ -361,7 +329,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                     .and_then(|s| s.to_str())
                     .and_then(|s| s.parse::<u16>().ok())
             });
-            // Port is required to verify liveness — skip entries without one.
             let Some(port) = port else {
                 debug!("{filename}: skipped (no resolvable port)");
                 return None;
@@ -371,12 +338,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
             } else {
                 "filename"
             };
-            // Skip stale lock files where PID is gone or port is no longer listening.
-            // IDE_POLL_TIMEOUT (50ms) keeps the synchronous health poll fast even with
-            // N stale files. Unlike ide_bridge.rs:cleanup_stale_lock_files() which uses
-            // a port-only TCP check with 200ms timeout, health.rs verifies both PID
-            // liveness and TCP port reachability via is_lock_entry_alive() — called
-            // directly with already-parsed data to avoid a redundant file read.
             let Some(check_pid) = pid else {
                 debug!("{filename}: skipped (no valid PID in JSON)");
                 return None;
@@ -394,12 +355,45 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                 .and_then(|x| x.as_str())
                 .unwrap_or("Unknown")
                 .to_string();
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
             debug!("{filename}: alive, ide={ide_name} port={port} (from {port_source})");
-            Some(DetectedIde {
+            Some(LiveEntry {
                 ide_name,
-                port: Some(port),
+                port,
                 ws_url,
+                pid: check_pid,
+                mtime,
             })
+        })
+        .collect();
+
+    // Dedupe by (pid, ide_name): one IDE process can spawn multiple lock
+    // files (e.g. VS Code with several windows). Keep the most recent.
+    let mut by_key: std::collections::HashMap<(u32, String), LiveEntry> =
+        std::collections::HashMap::new();
+    for entry in live {
+        let key = (entry.pid, entry.ide_name.clone());
+        match by_key.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if entry.mtime > slot.get().mtime {
+                    slot.insert(entry);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+        }
+    }
+
+    let result: Vec<DetectedIde> = by_key
+        .into_values()
+        .map(|e| DetectedIde {
+            ide_name: e.ide_name,
+            port: Some(e.port),
+            ws_url: e.ws_url,
         })
         .collect();
 
@@ -805,6 +799,71 @@ mod tests {
     }
 
     #[test]
+    fn list_ides_dedupes_multiple_windows_of_same_ide() {
+        use super::list_ides_in_dir;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // One external "VS Code" process with two windows → two lock files,
+        // same pid + ide_name, different ports.
+        let (external_pid, _child) = external_alive_pid();
+        let listener_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = listener_a.local_addr().unwrap().port();
+        let listener_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_b = listener_b.local_addr().unwrap().port();
+        for port in [port_a, port_b] {
+            std::fs::write(
+                tmp.path().join(format!("{port}.lock")),
+                format!(
+                    r#"{{"pid":{external_pid},"port":{port},"wsUrl":"ws://127.0.0.1:{port}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Visual Studio Code","transport":"ws"}}"#,
+                ),
+            )
+            .unwrap();
+        }
+
+        let result = list_ides_in_dir(tmp.path());
+        assert_eq!(
+            result.len(),
+            1,
+            "two windows of the same IDE process must collapse to one entry"
+        );
+        assert_eq!(result[0].ide_name, "Visual Studio Code");
+        // Either port is acceptable — the dedupe keeps the latest mtime.
+        assert!(result[0].port == Some(port_a) || result[0].port == Some(port_b));
+        drop(listener_a);
+        drop(listener_b);
+    }
+
+    #[test]
+    fn list_ides_keeps_separate_entries_for_different_ides() {
+        use super::list_ides_in_dir;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Two distinct IDEs (different ide_name) — must NOT collapse.
+        let (external_pid, _child) = external_alive_pid();
+        let l_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = l_a.local_addr().unwrap().port();
+        let l_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_b = l_b.local_addr().unwrap().port();
+        std::fs::write(
+            tmp.path().join(format!("{port_a}.lock")),
+            format!(
+                r#"{{"pid":{external_pid},"port":{port_a},"wsUrl":"ws://127.0.0.1:{port_a}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Cursor","transport":"ws"}}"#,
+            ),
+        ).unwrap();
+        std::fs::write(
+            tmp.path().join(format!("{port_b}.lock")),
+            format!(
+                r#"{{"pid":{external_pid},"port":{port_b},"wsUrl":"ws://127.0.0.1:{port_b}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Visual Studio Code","transport":"ws"}}"#,
+            ),
+        ).unwrap();
+
+        let result = list_ides_in_dir(tmp.path());
+        assert_eq!(result.len(), 2);
+        drop(l_a);
+        drop(l_b);
+    }
+
+    #[test]
     fn list_ides_filters_entry_without_port() {
         use super::list_ides_in_dir;
 
@@ -1145,66 +1204,26 @@ mod tests {
         let _ = health.running;
     }
 
-    #[test]
-    fn check_mcp_os_returns_false_when_token_exists_but_no_pid_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path();
-        let token_path = data_dir.join("mcp-os-auth-token");
-        std::fs::write(&token_path, "test-token").unwrap();
-        // No PID file — should report not running.
-        // We test the logic directly since check_mcp_os() uses the real home dir.
-        let pid_path = data_dir.join("mcp-os-pid");
-        let running = token_path.exists() && {
-            let pid_str = std::fs::read_to_string(&pid_path);
-            pid_str.is_ok()
-        };
-        assert!(!running, "should not report running without PID file");
-    }
-
-    #[test]
-    fn check_mcp_os_returns_false_when_pid_is_dead() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path();
-        let token_path = data_dir.join("mcp-os-auth-token");
-        let pid_path = data_dir.join("mcp-os-pid");
-        std::fs::write(&token_path, "test-token").unwrap();
-        // PID 999999999 is virtually guaranteed not to exist.
-        std::fs::write(&pid_path, "999999999").unwrap();
-        let running = token_path.exists() && {
-            let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-            let pid: u32 = pid_str.trim().parse().unwrap_or(0);
-            pid > 0 && super::is_pid_alive(pid)
-        };
-        assert!(!running, "should not report running for dead PID");
-    }
-
-    #[test]
-    fn check_mcp_os_returns_true_when_pid_is_alive() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path();
-        let token_path = data_dir.join("mcp-os-auth-token");
-        let pid_path = data_dir.join("mcp-os-pid");
-        std::fs::write(&token_path, "test-token").unwrap();
-        // Use current process PID — guaranteed alive.
-        let current_pid = std::process::id();
-        std::fs::write(&pid_path, current_pid.to_string()).unwrap();
-        let running = token_path.exists() && {
-            let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-            let pid: u32 = pid_str.trim().parse().unwrap_or(0);
-            pid > 0 && super::is_pid_alive(pid)
-        };
-        assert!(running, "should report running for alive PID");
-    }
-
     // ── is_mcp_os_alive tests (via check_mcp_os_alive_in) ──────────────
+    //
+    // After the unified-lock migration (PR3), `is_mcp_os_alive_in` reads
+    // `mcp-os.lock.json` instead of the three legacy `mcp-os-*` files. The
+    // tests below construct the fixture using the runtime SSOT helpers so a
+    // schema change in `LockFile` automatically fans out here.
+
+    fn write_mcp_os_lock(data_dir: &std::path::Path, pid: u32, port: u16) {
+        use speedwave_runtime::host_mcp_process::lock::{LockFile, LockService};
+        let lock = LockFile::new(LockService::McpOs, pid, port, "test-token".into());
+        let lock_path = data_dir.join(speedwave_runtime::consts::MCP_OS_LOCK_FILE);
+        speedwave_runtime::host_mcp_process::lock::write(&lock_path, &lock).unwrap();
+    }
 
     #[test]
     fn is_mcp_os_alive_false_when_pid_alive_port_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        std::fs::write(data_dir.join("mcp-os-auth-token"), "test-token").unwrap();
-        std::fs::write(data_dir.join("mcp-os-pid"), std::process::id().to_string()).unwrap();
-        std::fs::write(data_dir.join("mcp-os-port"), "64999").unwrap();
+        // PID is current process (alive); port 64999 is highly unlikely to be listening.
+        write_mcp_os_lock(data_dir, std::process::id(), 64999);
 
         assert!(
             !super::check_mcp_os_alive_in(data_dir),
@@ -1220,9 +1239,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        std::fs::write(data_dir.join("mcp-os-auth-token"), "test-token").unwrap();
-        std::fs::write(data_dir.join("mcp-os-pid"), std::process::id().to_string()).unwrap();
-        std::fs::write(data_dir.join("mcp-os-port"), port.to_string()).unwrap();
+        write_mcp_os_lock(data_dir, std::process::id(), port);
 
         assert!(
             super::check_mcp_os_alive_in(data_dir),
@@ -1232,16 +1249,31 @@ mod tests {
     }
 
     #[test]
-    fn is_mcp_os_alive_false_when_no_port_file() {
+    fn is_mcp_os_alive_false_when_pid_in_lock_is_dead() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        std::fs::write(data_dir.join("mcp-os-auth-token"), "test-token").unwrap();
-        std::fs::write(data_dir.join("mcp-os-pid"), std::process::id().to_string()).unwrap();
-        // No port file
-
+        // PID 999_999_999 is virtually guaranteed not to be alive on the
+        // host. Even if its port were somehow listening, `is_pid_alive`
+        // short-circuits before the TCP probe.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        write_mcp_os_lock(data_dir, 999_999_999, port);
         assert!(
             !super::check_mcp_os_alive_in(data_dir),
-            "missing port file should return false"
+            "dead PID in lock.json must report not-alive"
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn is_mcp_os_alive_false_when_no_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        // No lock.json (and no legacy files either) — must return false
+        // rather than crashing on the missing file.
+        assert!(
+            !super::check_mcp_os_alive_in(data_dir),
+            "missing lock.json should return false"
         );
     }
 

@@ -38,43 +38,118 @@ fi
 # Ensure ~/.claude exists before symlinking anything
 mkdir -p "${HOME}/.claude"
 
-# Determine if plugins env var is set — if so, we must use per-entry symlinks
-# (writable local dir) instead of whole-directory symlinks (which point into
-# a read-only mount and cannot be extended by plugin entries).
-HAS_PLUGINS=false
-if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
-    HAS_PLUGINS=true
+# Symlink claude-resources per-entry into real dirs. Core entries always-on;
+# integrations/<svc>/ gated by ENABLED_SERVICES. Links the script owns are
+# tracked in ~/.claude/.speedwave-managed-links so toggle-off cleans them up.
+# See ADR-022 for the design rationale.
+
+# Reverse migration: an older run may have left whole-directory symlinks.
+for resource_type in skills commands agents hooks; do
+    target="${HOME}/.claude/${resource_type}"
+    if [ -L "${target}" ]; then
+        rm -f "${target}"
+    fi
+    mkdir -p "${target}"
+done
+
+# Drop links managed by the previous run BEFORE creating the new set.
+state_file="${HOME}/.claude/.speedwave-managed-links"
+if [ -f "${state_file}" ]; then
+    while IFS= read -r link; do
+        [ -L "${link}" ] && rm -f "${link}"
+    done < "${state_file}"
 fi
 
-# Symlink core resource directories (skills, commands, agents, hooks) from read-only mount.
-# When plugins are present: create a real directory and symlink each entry individually,
-# so plugin entries can be added alongside core entries.
-# When no plugins: symlink the whole directory (simpler, no per-entry overhead).
-for resource_type in skills commands agents hooks; do
-    if [ -d "${SPEEDWAVE_RESOURCES}/${resource_type}" ]; then
-        if [ "${HAS_PLUGINS}" = true ]; then
-            # Migration: a previous run without plugins may have symlinked the
-            # whole directory to the read-only resources mount. Per-entry mode
-            # needs a writable real directory; otherwise `ln` below resolves
-            # through the symlink and tries to write into the read-only mount,
-            # killing the container with `set -e`.
-            if [ -L "${HOME}/.claude/${resource_type}" ]; then
-                rm -f "${HOME}/.claude/${resource_type}"
-            fi
-            mkdir -p "${HOME}/.claude/${resource_type}"
-            for entry in "${SPEEDWAVE_RESOURCES}/${resource_type}"/*; do
-                [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
-            done
-        else
-            # Reverse migration: a previous run with plugins may have created
-            # a real directory of per-entry symlinks. `ln -sfn` on a real dir
-            # creates a link *inside* it instead of replacing it, so wipe it
-            # before re-establishing the whole-directory symlink.
-            if [ -d "${HOME}/.claude/${resource_type}" ] && [ ! -L "${HOME}/.claude/${resource_type}" ]; then
-                rm -rf "${HOME}/.claude/${resource_type}"
-            fi
-            ln -sfn "${SPEEDWAVE_RESOURCES}/${resource_type}" "${HOME}/.claude/${resource_type}"
+new_state="$(mktemp)"
+trap 'rm -f "${new_state}"' EXIT
+
+# Comma-split ENABLED_SERVICES into a Bash array, trimming whitespace per entry.
+# Source is compose.rs (Rust SSOT TOGGLEABLE_MCP_SERVICES), not user input.
+ENABLED_SVCS=()
+OS_ENABLED=false
+if [ -n "${ENABLED_SERVICES:-}" ]; then
+    IFS=',' read -ra _raw_svcs <<< "${ENABLED_SERVICES}"
+    for _svc in "${_raw_svcs[@]}"; do
+        _svc="${_svc//[[:space:]]/}"
+        [ -z "${_svc}" ] && continue
+        if [ "${_svc}" = "os" ]; then
+            OS_ENABLED=true
         fi
+        ENABLED_SVCS+=("${_svc}")
+    done
+fi
+
+# OS sub-services linked when `os` in ENABLED_SERVICES AND name not in DISABLED_OS_SERVICES.
+# OS_AVAILABLE_SUBS and DISABLED_OS_SERVICES are injected by compose.rs from TOGGLEABLE_OS_SERVICES.
+DISABLED_OS_SVCS=()
+if [ -n "${DISABLED_OS_SERVICES:-}" ]; then
+    IFS=',' read -ra _raw_dis <<< "${DISABLED_OS_SERVICES}"
+    for _d in "${_raw_dis[@]}"; do
+        _d="${_d//[[:space:]]/}"
+        [ -n "${_d}" ] && DISABLED_OS_SVCS+=("${_d}")
+    done
+fi
+
+OS_AVAILABLE=()
+if [ -n "${OS_AVAILABLE_SUBS:-}" ]; then
+    IFS=',' read -ra _raw_av <<< "${OS_AVAILABLE_SUBS}"
+    for _a in "${_raw_av[@]}"; do
+        _a="${_a//[[:space:]]/}"
+        [ -n "${_a}" ] && OS_AVAILABLE+=("${_a}")
+    done
+fi
+
+OS_ENABLED_SUBS=()
+if [ "${OS_ENABLED}" = true ] && [ "${#OS_AVAILABLE[@]}" -gt 0 ]; then
+    for sub in "${OS_AVAILABLE[@]}"; do
+        disabled=false
+        if [ "${#DISABLED_OS_SVCS[@]}" -gt 0 ]; then
+            for d in "${DISABLED_OS_SVCS[@]}"; do
+                [ "${d}" = "${sub}" ] && { disabled=true; break; }
+            done
+        fi
+        [ "${disabled}" = false ] && OS_ENABLED_SUBS+=("${sub}")
+    done
+fi
+
+for resource_type in skills commands agents hooks; do
+    src_dir="${SPEEDWAVE_RESOURCES}/${resource_type}"
+    [ -d "${src_dir}" ] || continue
+
+    # Core entries — always-on. Skip the `integrations/` bucket which is gated below.
+    for entry in "${src_dir}"/*; do
+        [ -e "${entry}" ] || continue
+        name="$(basename "${entry}")"
+        [ "${name}" = "integrations" ] && continue
+        link="${HOME}/.claude/${resource_type}/${name}"
+        ln -sfn "${entry}" "${link}"
+        echo "${link}" >> "${new_state}"
+    done
+
+    # Integration-bound entries — only symlinked when their config_key is in ENABLED_SERVICES.
+    # `os` itself never has its own integration skill: only its sub-services (reminders,
+    # calendar, mail, notes), so we filter it out here and handle the sub-services below.
+    integrations_dir="${src_dir}/integrations"
+    if [ -d "${integrations_dir}" ] && [ "${#ENABLED_SVCS[@]}" -gt 0 ]; then
+        for svc in "${ENABLED_SVCS[@]}"; do
+            [ "${svc}" = "os" ] && continue
+            src="${integrations_dir}/${svc}"
+            [ -d "${src}" ] || continue
+            link="${HOME}/.claude/${resource_type}/${svc}"
+            ln -sfn "${src}" "${link}"
+            echo "${link}" >> "${new_state}"
+        done
+    fi
+
+    # OS sub-services: linked only when `os` is enabled AND the sub-service is not disabled.
+    if [ -d "${integrations_dir}" ] && [ "${#OS_ENABLED_SUBS[@]}" -gt 0 ]; then
+        for sub in "${OS_ENABLED_SUBS[@]}"; do
+            src="${integrations_dir}/${sub}"
+            [ -d "${src}" ] || continue
+            link="${HOME}/.claude/${resource_type}/${sub}"
+            ln -sfn "${src}" "${link}"
+            echo "${link}" >> "${new_state}"
+        done
     fi
 done
 
@@ -93,31 +168,39 @@ if [ -f "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" ]; then
     ln -sf "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" "${HOME}/.claude/output-styles/Speedwave.md"
 fi
 
-# Symlink plugin resources — directories were already created as real dirs above
-if [ "${HAS_PLUGINS}" = true ]; then
+# Symlink plugin resources — same managed-link tracking as core/integration entries
+# so toggling a plugin off cleans up its links on the next restart.
+if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
     for plugin in ${SPEEDWAVE_PLUGINS//,/ }; do
         if ! echo "${plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
             echo "WARNING: Skipping invalid plugin slug: ${plugin}" >&2
             continue
         fi
         plugin_path="/speedwave/plugins/${plugin}"
-        if [ -d "${plugin_path}" ]; then
-            for resource_type in skills commands agents hooks; do
-                if [ -d "${plugin_path}/${resource_type}" ]; then
-                    mkdir -p "${HOME}/.claude/${resource_type}"
-                    for entry in "${plugin_path}/${resource_type}"/*; do
-                        if [ -e "${entry}" ]; then
-                            target="${HOME}/.claude/${resource_type}/$(basename "${entry}")"
-                            if [ -L "${target}" ] && [ "$(readlink "${target}")" != "${entry}" ]; then
-                                echo "WARNING: plugin '${plugin}' overwrites ${resource_type}/$(basename "${entry}") from another plugin" >&2
-                            fi
-                            ln -sfn "${entry}" "${target}"
-                        fi
-                    done
+        [ -d "${plugin_path}" ] || continue
+        for resource_type in skills commands agents hooks; do
+            [ -d "${plugin_path}/${resource_type}" ] || continue
+            for entry in "${plugin_path}/${resource_type}"/*; do
+                [ -e "${entry}" ] || continue
+                target="${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+                if [ -L "${target}" ] && [ "$(readlink "${target}")" != "${entry}" ]; then
+                    echo "WARNING: plugin '${plugin}' overwrites ${resource_type}/$(basename "${entry}") from another plugin" >&2
                 fi
+                ln -sfn "${entry}" "${target}"
+                echo "${target}" >> "${new_state}"
             done
-        fi
+        done
     done
+fi
+
+# Atomically replace the state file. Sorted+deduplicated so successive idempotent runs
+# produce byte-identical state files. On sort failure keep the previous state_file untouched
+# (the EXIT trap cleans up new_state).
+if sort -u "${new_state}" -o "${new_state}"; then
+    mv "${new_state}" "${state_file}"
+else
+    echo "ERROR: failed to sort managed-links; previous state_file preserved" >&2
+    exit 1
 fi
 
 # Generate MCP config for Claude Code — tells it where the MCP hub lives.

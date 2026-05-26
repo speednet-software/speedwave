@@ -45,6 +45,9 @@ pub async fn delete_api_key(project: String) -> Result<(), String> {
 pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
+        // check_claude_auth → ensure_exec_healthy can call compose_up_recreate;
+        // block on bundle reconcile first.
+        crate::containers_cmd::ensure_images_ready()?;
         log::info!("get_auth_status: project={project}");
         let api_key_configured = auth::has_api_key(&project);
         let oauth_authenticated = setup_wizard::check_claude_auth(&project).unwrap_or(false);
@@ -225,6 +228,37 @@ pub async fn get_auth_command(project: String) -> Result<String, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // -- get_auth_status race guard --
+
+    #[test]
+    fn get_auth_status_waits_for_image_readiness() {
+        // Race guard: setup_wizard::check_claude_auth → ensure_exec_healthy →
+        // compose_up_recreate. UI polls auth status at startup; without the
+        // gate, polling during reconcile surfaces "image not available".
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("pub async fn ")
+            .or_else(|| fn_tail.find("pub fn "))
+            .map(|i| fn_start + 1 + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+
+        let ensure_pos = fn_body
+            .find("ensure_images_ready")
+            .expect("get_auth_status must call ensure_images_ready");
+        let inner_call_pos = fn_body
+            .find("setup_wizard::check_claude_auth")
+            .expect("get_auth_status must delegate to setup_wizard::check_claude_auth");
+        assert!(
+            ensure_pos < inner_call_pos,
+            "ensure_images_ready must come BEFORE setup_wizard::check_claude_auth"
+        );
+    }
 
     // -- shell_escape_single_quoted tests --
 

@@ -25,21 +25,37 @@ import {
 } from '@slack/web-api';
 import fs from 'fs/promises';
 import path from 'path';
-import { ts, withSetupGuidance } from '@speedwave/mcp-shared';
+import {
+  ts,
+  withSetupGuidance,
+  ConnectionStatusTracker,
+  backgroundConnectionTest,
+} from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Types
 //═══════════════════════════════════════════════════════════════════════════════
 
+/** Whether Slack tokens were loadable at startup. */
+export type SlackTokensStatus = 'present' | 'missing';
+
 /**
- * Container for bot and user Slack WebClient instances
- * @interface SlackClients
- * @property {WebClient} bot - Bot token client for admin operations
- * @property {WebClient} user - User token client for user-context operations
+ * Container for bot and user Slack WebClient instances.
+ *
+ * Returned in **every** state, including when tokens are absent — callers
+ * check `_tokensStatus === 'missing'` rather than null. This matches the
+ * status-aware pattern used by every other worker after this PR (no more
+ * `if (!client) throw 'not configured'` branches scattered across handlers).
+ *
+ * `statusTracker` is optional only so tool-level unit tests can mock with
+ * `{ bot, user }` without constructing a tracker; runtime always populates it.
  */
 export interface SlackClients {
   bot: WebClient;
   user: WebClient;
+  statusTracker?: ConnectionStatusTracker;
+  /** Whether bot/user tokens were loaded — drives "not configured" semantics. */
+  _tokensStatus: SlackTokensStatus;
 }
 
 /**
@@ -128,7 +144,20 @@ async function loadToken(tokenName: string): Promise<string> {
  * DO NOT change this to throw - it breaks container startup for unconfigured services.
  * @returns Initialized clients, or null if tokens not found/invalid
  */
-export async function initializeSlackClients(): Promise<SlackClients | null> {
+export async function initializeSlackClients(): Promise<SlackClients> {
+  /**
+   * Build the "tokens missing" container. Tools see `_tokensStatus='missing'`
+   * and return a clear setup-guidance error. We hand out placeholder
+   * WebClients (with a sentinel token) so the type stays narrow and we never
+   * carry nullable handles around the codebase.
+   */
+  const tokensMissing = (): SlackClients => ({
+    bot: new WebClient('xoxb-not-configured'),
+    user: new WebClient('xoxp-not-configured'),
+    statusTracker: new ConnectionStatusTracker(),
+    _tokensStatus: 'missing',
+  });
+
   try {
     const botToken = await loadToken('bot_token');
     const userToken = await loadToken('user_token');
@@ -142,24 +171,34 @@ export async function initializeSlackClients(): Promise<SlackClients | null> {
       console.warn(
         `${ts()} ${withSetupGuidance(`Slack tokens are empty or missing. Missing: ${missingTokens.join(', ')}.`)}`
       );
-      // Graceful degradation: log warning, return null, let server start
-      // DO NOT throw here - see JSDoc above for rationale
-      return null;
+      return tokensMissing();
     }
 
     console.log(`${ts()} ✅ Slack: Tokens loaded`);
 
-    return {
-      bot: new WebClient(botToken),
-      user: new WebClient(userToken),
-    };
+    const bot = new WebClient(botToken);
+    const user = new WebClient(userToken);
+    const statusTracker = new ConnectionStatusTracker();
+    // Background sanity check — confirms the bot token is live so healthCheck
+    // can surface a real status. Bolt SDK lazy-connects per call, so we ping
+    // explicitly here to mirror the other workers' init contract.
+    backgroundConnectionTest(
+      statusTracker,
+      async () => {
+        const res = await bot.auth.test();
+        if (!res.ok) {
+          throw new Error(res.error ?? 'auth.test reported not ok');
+        }
+      },
+      'Slack'
+    );
+
+    return { bot, user, statusTracker, _tokensStatus: 'present' };
   } catch (error) {
     console.warn(
       `${ts()} ${withSetupGuidance(`Failed to load Slack tokens: ${error instanceof Error ? error.message : 'Unknown error'}.`)}`
     );
-    // Graceful degradation: log warning, return null, let server start
-    // DO NOT throw here - see JSDoc above for rationale
-    return null;
+    return tokensMissing();
   }
 }
 

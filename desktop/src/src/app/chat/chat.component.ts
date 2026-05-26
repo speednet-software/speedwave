@@ -20,6 +20,7 @@ import type {
   ConversationSummary,
   ConversationTranscript,
   MessageBlock,
+  ChatAttachment,
 } from '../models/chat';
 import { ChatHeaderComponent } from './header/chat-header.component';
 import { ChatMessageListComponent } from './message-list/chat-message-list.component';
@@ -245,16 +246,22 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Sends a message as the user's next turn. Called by the composer on submit.
-   * Guards against empty input and in-flight streaming.
-   * @param event - Composer payload object.
-   * @param event.payload - Backend message body (may include plan-mode prefix).
-   * @param event.displayText - Surface text rendered in the local user bubble.
+   * Composer submit handler.
+   * @param event - Composer payload.
+   * @param event.payload - Wire-side text (may carry plan-mode prefix).
+   * @param event.displayText - Text shown in the local bubble.
+   * @param event.attachments - Preprocessed paste attachments (or empty).
    */
-  async sendMessage(event: { payload: string; displayText: string }): Promise<void> {
-    if (!event?.payload || this.chat.isStreaming) return;
+  async sendMessage(event: {
+    payload: string;
+    displayText: string;
+    attachments?: ChatAttachment[];
+  }): Promise<void> {
+    const attachments = event?.attachments ?? [];
+    if (this.chat.isStreaming) return;
+    if (!event?.payload && attachments.length === 0) return;
     this.cdr.markForCheck();
-    await this.chat.sendMessage(event.payload, event.displayText);
+    await this.chat.sendMessage({ text: event.payload ?? '', attachments }, event.displayText);
   }
 
   /**
@@ -401,6 +408,33 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
     } finally {
       this.resumeInProgress = false;
+      this.cdr.markForCheck();
+    }
+  }
+
+  /**
+   * Deletes a conversation's transcript file. If the active session is the one
+   * being deleted, we reset live chat too — the underlying JSONL is gone, so
+   * resume/retry would fail.
+   * @param sessionId - session UUID to delete.
+   */
+  async deleteConversation(sessionId: string): Promise<void> {
+    const project = this.projectState.activeProject;
+    if (!project) return;
+    const wasActive = this.currentViewSessionId === sessionId;
+    this.historyError = '';
+    try {
+      await this.tauri.invoke('delete_conversation', { project, sessionId });
+      this.conversations = this.conversations.filter((c) => c.session_id !== sessionId);
+      if (wasActive) {
+        this.optimisticSessionId = null;
+        this.chat.resetForNewConversation();
+        await this.chat.init();
+      }
+    } catch (err) {
+      console.error('[chat] deleteConversation failed:', err);
+      this.historyError = `Failed to delete conversation: ${err}`;
+    } finally {
       this.cdr.markForCheck();
     }
   }

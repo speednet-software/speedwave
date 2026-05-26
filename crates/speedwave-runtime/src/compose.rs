@@ -38,6 +38,34 @@ fn resolve_tokens_dir(project_name: &str) -> PathBuf {
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
 const COMPOSE_TEMPLATE: &str = include_str!("../../../containers/compose.template.yml");
 
+/// One live host-side bridge that compose can advertise to a container
+/// worker. The plugin manifest's `host_bridge` declaration drives both
+/// `slug` (which plugin to match) and the env-var names; the Desktop
+/// process supplies the runtime values (`port`, `auth_token`).
+#[derive(Clone, Debug)]
+pub struct HostBridgeRegistration {
+    /// Plugin slug — matched against `PluginManifest.slug` during
+    /// `apply_plugins_from_verified` to decide which worker receives
+    /// the env vars.
+    pub plugin_slug: String,
+    /// TCP port the bridge listens on (loopback only).
+    pub port: u16,
+    /// UUID v4 minted by the bridge at startup.
+    pub auth_token: String,
+    /// Env var name for the bridge URL injected into the worker.
+    pub url_env: String,
+    /// Env var name for the auth token injected into the worker.
+    pub token_env: String,
+}
+
+/// Snapshot of every host-side bridge currently active. CLI builds and
+/// early Desktop startup pass an empty list — affected plugins log
+/// `BRIDGE_NOT_CONFIGURED` and degrade gracefully.
+#[derive(Clone, Debug, Default)]
+pub struct HostBridgesInfo {
+    pub bridges: Vec<HostBridgeRegistration>,
+}
+
 /// Renders a compose.yml for a given project by substituting template variables.
 pub fn render_compose(
     project_name: &str,
@@ -45,6 +73,7 @@ pub fn render_compose(
     resolved_config: &ResolvedClaudeConfig,
     integrations: &ResolvedIntegrationsConfig,
     runtime: Option<&dyn ContainerRuntime>,
+    bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
     let data_dir = consts::data_dir();
@@ -136,7 +165,7 @@ pub fn render_compose(
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
     // Handle LLM provider switching
-    yaml = apply_llm_config(&yaml, &resolved_config.llm)?;
+    yaml = apply_llm_config(&yaml, &resolved_config.llm, project_name)?;
 
     // Ensure plugin images exist (builds pending and missing) before compose generation.
     // Scoped to plugins enabled for this project — a broken plugin in another project
@@ -149,11 +178,14 @@ pub fn render_compose(
     // Integrate installed plugins
     yaml = apply_plugins(
         &yaml,
-        project_name,
-        project_dir,
-        integrations,
-        &network_name,
-        &tokens_dir,
+        &ApplyPluginsCtx {
+            project_name,
+            project_dir,
+            integrations,
+            network_name: &network_name,
+            tokens_dir: &tokens_dir,
+            bridges,
+        },
     )?;
 
     // Propagate host timezone into every service; must run after plugin injection.
@@ -245,13 +277,18 @@ pub fn compose_output_path_in(
     Ok(data_dir.join("compose").join(project).join("compose.yml"))
 }
 
-/// Saves the rendered compose YAML to disk.
+/// Saves the rendered compose YAML to disk with owner-only permissions.
+///
+/// Compose may carry `ANTHROPIC_AUTH_TOKEN=<real-key>` when local-LLM auth is
+/// configured (ADR-040 delta) — the rendered file is therefore a secret and
+/// must be 0o600 (Unix) / owner-only ACL (Windows). Atomic via fs_perms so
+/// crash mid-render cannot leave a truncated YAML.
 pub fn save_compose(project: &str, yaml: &str) -> anyhow::Result<()> {
     let path = compose_output_path(project)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, yaml)?;
+    crate::fs_perms::write_restricted_file_atomic(&path, yaml)?;
     Ok(())
 }
 
@@ -346,8 +383,14 @@ fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
         .map_err(|e| anyhow::anyhow!("inject_host_timezone: failed to serialize compose YAML: {e}"))
 }
 
-fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
+fn apply_llm_config(yaml: &str, llm: &LlmConfig, project: &str) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
+    if !crate::config::LOCAL_PROVIDERS.contains(&provider) && provider != "anthropic" {
+        anyhow::bail!(
+            "Unsupported LLM provider '{provider}'. Supported: anthropic, {}.",
+            crate::config::LOCAL_PROVIDERS.join(", ")
+        );
+    }
     match provider {
         "anthropic" => {
             // ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL pin each alias to the
@@ -357,18 +400,16 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
             // (anthropics/claude-code#34083). Generated dynamically so a SSOT
             // bump (Opus 4.8 etc.) propagates without touching this branch.
             let mut extra_env = crate::defaults::anthropic_default_models_env();
-            // When the user picks an explicit model in Settings, propagate it
-            // through ANTHROPIC_MODEL so Claude Code respects the choice.
-            // Leaving the field blank means the active model resolves through
-            // an alias (`opus`/`sonnet`/`haiku`) which the DEFAULT_*_MODEL
-            // entries above already steer toward the latest 1M variant.
             let model = llm.model.as_deref().map(str::trim).unwrap_or("");
             if !model.is_empty() {
                 extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
             }
             inject_claude_env(yaml, &extra_env)
         }
-        "ollama" | "lmstudio" | "llamacpp" => {
+        // All local providers (legacy aliases + `local`) share the same env
+        // injection. `LOCAL_PROVIDERS` is the SSOT — adding a new local name
+        // there propagates here automatically.
+        local if crate::config::LOCAL_PROVIDERS.contains(&local) => {
             let base_url = llm
                 .base_url
                 .clone()
@@ -383,20 +424,25 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
                     provider
                 )
             })?;
-            let extra_env = std::collections::HashMap::from([
+
+            // Resolve Bearer auth token. If a per-project key file exists, use
+            // it; otherwise inject the documented `sk-no-key-required` dummy so
+            // Claude Code keeps the Authorization header present (some local
+            // servers expect *any* non-empty Bearer).
+            const DUMMY_TOKEN: &str = "sk-no-key-required";
+            let auth_token = if llm.has_api_key {
+                read_local_llm_token_opt(project, "api_key").unwrap_or_else(|| {
+                    log::warn!("local-llm api_key flagged but unreadable — using dummy");
+                    DUMMY_TOKEN.to_string()
+                })
+            } else {
+                DUMMY_TOKEN.to_string()
+            };
+
+            let mut extra_env = std::collections::HashMap::from([
                 ("ANTHROPIC_BASE_URL".to_string(), base_url),
-                (
-                    "ANTHROPIC_AUTH_TOKEN".to_string(),
-                    "sk-no-key-required".to_string(),
-                ),
-                // ANTHROPIC_MODEL is Claude Code's primary mechanism for setting
-                // the active model (and what statusline / `/status` display).
-                // Without it Claude Code falls back to its account-tier default
-                // (Haiku/Sonnet) regardless of where ANTHROPIC_BASE_URL points.
+                ("ANTHROPIC_AUTH_TOKEN".to_string(), auth_token),
                 ("ANTHROPIC_MODEL".to_string(), model.to_string()),
-                // CUSTOM_MODEL_OPTION* adds a friendly entry to the `/model`
-                // picker. Documented as supplementary — useful when the gateway
-                // doesn't auto-populate the picker via /v1/models discovery.
                 (
                     "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
                     model.to_string(),
@@ -418,12 +464,53 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
                     "0".to_string(),
                 ),
             ]);
+
+            // Custom HTTP headers — stored as `Name: Value` per line for
+            // human-friendly editing, flattened to a comma-separated single
+            // line here because nerdctl-compose rejects YAML block literals
+            // inside an `environment:` sequence. `Authorization` is rejected
+            // defensively (a stale token file must not smuggle a header that
+            // would collide with the `ANTHROPIC_AUTH_TOKEN` Bearer).
+            if llm.has_custom_headers {
+                if let Some(headers) = read_local_llm_token_opt(project, "custom_headers") {
+                    let flattened = headers
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .filter(|line| {
+                            // Strip any leading `Authorization:` header.
+                            !line
+                                .split_once(':')
+                                .map(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+                                .unwrap_or(false)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !flattened.is_empty() {
+                        extra_env.insert("ANTHROPIC_CUSTOM_HEADERS".to_string(), flattened);
+                    }
+                }
+            }
+
             inject_claude_env(yaml, &extra_env)
         }
-        other => anyhow::bail!(
-            "Unsupported LLM provider '{other}'. \
-             Supported: anthropic, ollama, lmstudio, llamacpp."
-        ),
+        // Unreachable: the early guard above filters all non-LOCAL_PROVIDERS
+        // and non-"anthropic" values before this match.
+        _ => unreachable!("provider validated by early guard"),
+    }
+}
+
+/// Reads a local-LLM token file. Returns `None` on any failure (missing
+/// file, I/O error, empty content). Callers decide whether to fall back to
+/// a dummy or skip env injection.
+pub fn read_local_llm_token_opt(project: &str, file: &str) -> Option<String> {
+    let path = tokens_path(project, "local-llm", file).ok()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let trimmed = content.trim_end_matches(['\n', '\r']).to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 
@@ -441,10 +528,12 @@ pub fn strip_trailing_v1(url: &str) -> String {
 
 /// Returns the default base URL for a known local model provider.
 /// Used by the frontend to show a placeholder without duplicating the URL logic.
+/// `"local"` defaults to the Ollama port — the most common starting point;
+/// users typically replace it when pointing at a different server.
 pub fn default_base_url(provider: &str) -> Option<String> {
-    let host = consts::DOCKER_HOST;
+    let host = consts::HOST_GATEWAY_ALIAS;
     match provider {
-        "ollama" => Some(format!("http://{host}:11434")),
+        "ollama" | "local" => Some(format!("http://{host}:11434")),
         "lmstudio" => Some(format!("http://{host}:1234")),
         "llamacpp" => Some(format!("http://{host}:8080")),
         _ => None,
@@ -455,13 +544,14 @@ pub fn default_base_url(provider: &str) -> Option<String> {
 ///
 /// Invariant: the only callers (`custom_model_display_name` and
 /// `custom_model_description`) are reached only after `apply_llm_config`
-/// narrows the provider to one of the three local values below. Any other
+/// narrows the provider to one of the local values below. Any other
 /// value at this point indicates a programmer error in `apply_llm_config`.
 fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         "ollama" => "Ollama",
         "lmstudio" => "LM Studio",
         "llamacpp" => "llama.cpp",
+        "local" => "Local",
         other => unreachable!("provider_display_label called with unsupported provider '{other}'"),
     }
 }
@@ -475,8 +565,18 @@ fn custom_model_description(provider: &str) -> String {
 }
 
 /// Validates a base URL for local model providers. Rejects non-HTTP schemes,
-/// credentials, paths, query strings, and fragments.
+/// credentials, query strings, and fragments.
+///
+/// Path policy: accepts `/` (or empty), or a single-segment prefix matching
+/// `^/[A-Za-z0-9_-]+$` (e.g. LiteLLM's `/anthropic`, AWS gateway's `/v1`).
+/// Multi-segment paths, `..`, and trailing slashes on segments are rejected.
 pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
+    // Reject `..` / `.` segments in the *raw* input before url::Url parses, as
+    // the URL crate normalizes them away (`http://host/..` parses to path `/`).
+    // Without this, a malicious URL could slip through traversal checks.
+    if raw.contains("/..") || raw.contains("/./") || raw.ends_with("/.") {
+        anyhow::bail!("base_url must not contain '..' or '.' path segments");
+    }
     let parsed =
         url::Url::parse(raw).map_err(|e| anyhow::anyhow!("Invalid base_url '{}': {}", raw, e))?;
     match parsed.scheme() {
@@ -488,12 +588,115 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
     }
     let path = parsed.path();
     if path != "/" && !path.is_empty() {
-        anyhow::bail!("base_url must not contain a path (got '{}')", path);
+        // Allow a single-segment path prefix (LiteLLM `/anthropic`,
+        // AWS-style `/v1`). Anything multi-segment, traversal, or trailing
+        // slash on the segment is rejected.
+        if !path.starts_with('/') {
+            anyhow::bail!("base_url path must start with '/', got '{}'", path);
+        }
+        let segment = &path[1..];
+        let valid = !segment.is_empty()
+            && !segment.contains('/')
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !valid {
+            anyhow::bail!(
+                "base_url path must be a single segment matching ^/[A-Za-z0-9_-]+$ (got '{}')",
+                path
+            );
+        }
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
         anyhow::bail!("base_url must not contain query or fragment");
     }
     Ok(())
+}
+
+// ── Local-LLM token paths ────────────────────────────────────────────────
+//
+// Per-project secrets for the "local" LLM provider (Bearer token + custom
+// headers) live at `~/.speedwave/tokens/<project>/local-llm/<file>` with
+// owner-only perms (Unix 0o600 files, 0o700 dirs; Windows ACL deny-others).
+//
+// `tokens_path` and `ensure_token_dir` are the SSOT for resolving these paths.
+// Service and file names are whitelisted to prevent path traversal — adding a
+// new local-LLM artifact = edit one constant, not the helper signature.
+
+/// Services with token files under `~/.speedwave/tokens/<project>/<service>/`.
+/// Whitelist enforced by `tokens_path`. Plugins use a separate path discipline
+/// (validated by `plugin::validate_manifest`).
+const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm"];
+
+/// Per-service whitelist of file names allowed under
+/// `tokens/<project>/<service>/`. Adding a new file = edit this map.
+const ALLOWED_TOKEN_FILES_LOCAL_LLM: &[&str] = &["api_key", "custom_headers"];
+
+fn allowed_files_for(service: &str) -> Option<&'static [&'static str]> {
+    match service {
+        "local-llm" => Some(ALLOWED_TOKEN_FILES_LOCAL_LLM),
+        _ => None,
+    }
+}
+
+/// Resolves the on-disk path for a per-project local-LLM token file.
+/// Validates every segment against allow-lists to prevent path traversal.
+pub fn tokens_path(project: &str, service: &str, file: &str) -> anyhow::Result<PathBuf> {
+    tokens_path_in(consts::data_dir().as_path(), project, service, file)
+}
+
+/// Testable variant: resolves under an explicit data directory.
+pub fn tokens_path_in(
+    data_dir: &Path,
+    project: &str,
+    service: &str,
+    file: &str,
+) -> anyhow::Result<PathBuf> {
+    crate::validation::validate_project_name(project)?;
+    if !ALLOWED_TOKEN_SERVICES.contains(&service) {
+        anyhow::bail!("tokens_path: service '{}' not in allow-list", service);
+    }
+    let files = allowed_files_for(service).ok_or_else(|| {
+        anyhow::anyhow!("tokens_path: no file allow-list for service '{}'", service)
+    })?;
+    if !files.contains(&file) {
+        anyhow::bail!(
+            "tokens_path: file '{}' not allowed for service '{}'",
+            file,
+            service
+        );
+    }
+    Ok(data_dir
+        .join("tokens")
+        .join(project)
+        .join(service)
+        .join(file))
+}
+
+/// Ensures `~/.speedwave/tokens/<project>/<service>/` exists with owner-only
+/// perms on every level (`tokens/`, `tokens/<project>/`,
+/// `tokens/<project>/<service>/`). Validates segments via `tokens_path`.
+pub fn ensure_token_dir(project: &str, service: &str) -> anyhow::Result<PathBuf> {
+    ensure_token_dir_in(consts::data_dir().as_path(), project, service)
+}
+
+/// Testable variant.
+pub fn ensure_token_dir_in(
+    data_dir: &Path,
+    project: &str,
+    service: &str,
+) -> anyhow::Result<PathBuf> {
+    crate::validation::validate_project_name(project)?;
+    if !ALLOWED_TOKEN_SERVICES.contains(&service) {
+        anyhow::bail!("ensure_token_dir: service '{}' not in allow-list", service);
+    }
+    let tokens_root = data_dir.join("tokens");
+    crate::fs_perms::ensure_owner_only_dir(&tokens_root)?;
+    let project_dir = tokens_root.join(project);
+    crate::fs_perms::ensure_owner_only_dir(&project_dir)?;
+    let service_dir = project_dir.join(service);
+    crate::fs_perms::ensure_owner_only_dir(&service_dir)?;
+    Ok(service_dir)
 }
 
 // --- Plugin integration ---
@@ -512,24 +715,27 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 /// render time so a post-install tamper that only changed the manifest
 /// (not enough to change the digest, e.g. a different field semantic)
 /// would still be caught by the same code that gates install.
-fn apply_plugins(
-    yaml: &str,
-    project_name: &str,
-    project_dir: &str,
-    integrations: &ResolvedIntegrationsConfig,
-    network_name: &str,
-    tokens_dir: &std::path::Path,
-) -> anyhow::Result<String> {
+///
+/// **Host-gateway note:** `ensure_host_gateway_extra_host` is intentionally NOT
+/// called for plugin services. Plugin workers communicate with `mcp-hub` over
+/// the internal compose network — they have no direct host-side dependency.
+/// If a future plugin needs to reach the host (e.g. invoking `host_exec`),
+/// the helper must be called for that plugin's compose service.
+fn apply_plugins(yaml: &str, ctx: &ApplyPluginsCtx<'_>) -> anyhow::Result<String> {
     let plugins = plugin::list_verified_plugins()?;
-    apply_plugins_from_verified(
-        yaml,
-        project_name,
-        project_dir,
-        integrations,
-        network_name,
-        tokens_dir,
-        &plugins,
-    )
+    apply_plugins_from_verified(yaml, ctx, &plugins)
+}
+
+/// Per-call inputs shared by `apply_plugins` and `apply_plugins_from_verified`.
+/// Bundled together so each new plugin-injection knob lives in one struct
+/// instead of growing the function signature.
+pub(crate) struct ApplyPluginsCtx<'a> {
+    pub project_name: &'a str,
+    pub project_dir: &'a str,
+    pub integrations: &'a ResolvedIntegrationsConfig,
+    pub network_name: &'a str,
+    pub tokens_dir: &'a std::path::Path,
+    pub bridges: &'a HostBridgesInfo,
 }
 
 /// Test-friendly variant of [`apply_plugins`] — accepts a pre-built
@@ -538,15 +744,21 @@ fn apply_plugins(
 /// `apply_plugins`; tests inject crafted scenarios (forged manifest,
 /// dangling `claude-resources` symlink, slug collision) without
 /// touching the user's real data dir.
+// Internal helper exposed only for tests that need to inject crafted
+// `VerifiedPlugin` fixtures; the public entrypoint is `apply_plugins`.
 fn apply_plugins_from_verified(
     yaml: &str,
-    project_name: &str,
-    project_dir: &str,
-    integrations: &ResolvedIntegrationsConfig,
-    network_name: &str,
-    tokens_dir: &std::path::Path,
+    ctx: &ApplyPluginsCtx<'_>,
     plugins: &[plugin::VerifiedPlugin],
 ) -> anyhow::Result<String> {
+    let ApplyPluginsCtx {
+        project_name,
+        project_dir,
+        integrations,
+        network_name,
+        tokens_dir,
+        bridges,
+    } = *ctx;
     if plugins.is_empty() {
         return Ok(yaml.to_string());
     }
@@ -622,6 +834,31 @@ fn apply_plugins_from_verified(
                 consts::PORT_WORKER
             );
             inject_worker_env(&mut doc, &worker_env, &url);
+
+            // Plugin's manifest may declare a host-side WebSocket bridge
+            // (see ADR-063). When the Desktop has registered one for this
+            // slug, inject the env vars the plugin asked for.
+            if manifest.host_bridge.is_some() {
+                if let Some(registration) = bridges.bridges.iter().find(|r| r.plugin_slug == *slug)
+                {
+                    let compose_name = plugin::derive_compose_name(sid);
+                    let bridge_url =
+                        format!("ws://{}:{}/", consts::HOST_GATEWAY_ALIAS, registration.port);
+                    add_service_env_var(
+                        &mut doc,
+                        &compose_name,
+                        &registration.url_env,
+                        &bridge_url,
+                    )?;
+                    add_service_env_var(
+                        &mut doc,
+                        &compose_name,
+                        &registration.token_env,
+                        &registration.auth_token,
+                    )?;
+                    ensure_host_gateway_extra_host(&mut doc, &compose_name);
+                }
+            }
         }
 
         // Mount claude-resources to claude container. The resources dir
@@ -685,9 +922,9 @@ pub(crate) fn apply_auth_config_in(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Adds an environment variable to a named service. Fails loudly if the service
-/// does not exist in the YAML — unlike `inject_worker_env()` which silently no-ops.
-/// Creates the `environment` key as a sequence if it does not exist.
+/// Adds an environment variable to a named service. Returns `Err` if the service is absent;
+/// `inject_env_into()` logs a warning and returns instead. Both create the `environment` key
+/// as a sequence if it does not exist.
 fn add_service_env_var(
     doc: &mut serde_yaml_ng::Value,
     service_name: &str,
@@ -890,8 +1127,12 @@ pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec
 /// Filters compose services based on integrations config.
 /// - Removes disabled MCP service containers from the `services` map
 /// - Removes corresponding WORKER_*_URL from hub environment
-/// - Injects ENABLED_SERVICES env var into hub (comma-separated) — see [`enabled_hub_service_ids`]
-/// - Injects DISABLED_OS_SERVICES env var into hub if any OS sub-integrations are disabled
+/// - Injects ENABLED_SERVICES (comma-separated, see [`enabled_hub_service_ids`])
+///   into both the `mcp-hub` (for tool routing) and the `claude` container
+///   (so `entrypoint.sh` can gate per-integration claude-resources)
+/// - Injects DISABLED_OS_SERVICES into both `mcp-hub` (for sub-tool routing) and
+///   `claude` (so `entrypoint.sh` can gate per-OS-sub-service claude-resources)
+///   when any OS sub-integrations are disabled
 fn apply_integrations_filter(
     yaml: &str,
     integrations: &ResolvedIntegrationsConfig,
@@ -919,7 +1160,7 @@ fn apply_integrations_filter(
                 services_map.remove(serde_yaml_ng::Value::String(svc.compose_name.to_string()));
             }
         }
-        remove_hub_env_var(&mut doc, svc.worker_env);
+        remove_env_from(&mut doc, "mcp-hub", svc.worker_env);
         // An egress-less worker (e.g. office, ADR-055) has its own internal network
         // `{NETWORK_NAME}_{config_key}`; when it is disabled, drop that network and the
         // hub's attachment to it so the rendered compose has no dangling internal network.
@@ -939,12 +1180,13 @@ fn apply_integrations_filter(
         }
     }
 
-    // Inject ENABLED_SERVICES into hub (same predicate as build::enabled_images).
+    // Hub uses ENABLED_SERVICES for tool routing; claude entrypoint uses it to gate claude-resources.
     let enabled_csv = enabled_hub_service_ids(integrations).join(",");
     log::debug!("integrations filter: enabled_services={}", enabled_csv);
-    inject_worker_env(&mut doc, "ENABLED_SERVICES", &enabled_csv);
+    inject_env_into(&mut doc, "mcp-hub", "ENABLED_SERVICES", &enabled_csv);
+    inject_env_into(&mut doc, "claude", "ENABLED_SERVICES", &enabled_csv);
 
-    // Inject DISABLED_OS_SERVICES if any OS sub-integrations are disabled
+    // Hub uses DISABLED_OS_SERVICES for sub-tool routing; claude entrypoint uses it to gate OS sub-service skills.
     let disabled_os: Vec<&str> = consts::TOGGLEABLE_OS_SERVICES
         .iter()
         .filter(|svc| {
@@ -955,28 +1197,44 @@ fn apply_integrations_filter(
         .map(|svc| svc.config_key)
         .collect();
     if !disabled_os.is_empty() {
-        log::debug!("integrations filter: disabled_os={}", disabled_os.join(","));
-        inject_worker_env(&mut doc, "DISABLED_OS_SERVICES", &disabled_os.join(","));
+        let disabled_csv = disabled_os.join(",");
+        log::debug!("integrations filter: disabled_os={}", disabled_csv);
+        inject_env_into(&mut doc, "mcp-hub", "DISABLED_OS_SERVICES", &disabled_csv);
+        inject_env_into(&mut doc, "claude", "DISABLED_OS_SERVICES", &disabled_csv);
     }
+
+    // OS_AVAILABLE_SUBS lets entrypoint.sh iterate sub-services without hardcoding the list.
+    let os_available_csv = consts::TOGGLEABLE_OS_SERVICES
+        .iter()
+        .map(|svc| svc.config_key)
+        .collect::<Vec<_>>()
+        .join(",");
+    inject_env_into(&mut doc, "claude", "OS_AVAILABLE_SUBS", &os_available_csv);
 
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Removes an environment variable from the mcp-hub service.
-fn remove_hub_env_var(doc: &mut serde_yaml_ng::Value, env_var_name: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(hub) = services.get_mut("mcp-hub") {
-            if let Some(environment) = hub.get_mut("environment") {
-                if let Some(env_seq) = environment.as_sequence_mut() {
-                    env_seq.retain(|item| {
-                        item.as_str()
-                            .map(|s| !s.starts_with(&format!("{}=", env_var_name)))
-                            .unwrap_or(true)
-                    });
-                }
-            }
-        }
-    }
+/// Removes an environment variable from an arbitrary service's `environment`
+/// sequence. No-op if the service or its `environment` sequence is absent —
+/// same posture as [`inject_env_into`].
+fn remove_env_from(doc: &mut serde_yaml_ng::Value, service: &str, env_name: &str) {
+    let Some(services) = doc.get_mut("services") else {
+        return;
+    };
+    let Some(svc) = services.get_mut(service) else {
+        return;
+    };
+    let Some(environment) = svc.get_mut("environment") else {
+        return;
+    };
+    let Some(env_seq) = environment.as_sequence_mut() else {
+        return;
+    };
+    env_seq.retain(|item| {
+        item.as_str()
+            .map(|s| s.split('=').next() != Some(env_name))
+            .unwrap_or(true)
+    });
 }
 
 /// Injects mcp-os configuration into the mcp-hub container if the
@@ -990,22 +1248,26 @@ fn remove_hub_env_var(doc: &mut serde_yaml_ng::Value, env_var_name: &str) {
 /// Claude container is NOT modified — it only sees the hub.
 fn apply_mcp_os_config(yaml: &str) -> anyhow::Result<String> {
     let data_dir = consts::data_dir();
-    let token_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
-    let port_path = data_dir.join(consts::MCP_OS_PORT_FILE);
-    apply_mcp_os_config_with_path(yaml, &token_path, &port_path)
+    let lock_path = data_dir.join(consts::MCP_OS_LOCK_FILE);
+    let token_mount_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
+    apply_mcp_os_config_with_path(yaml, &token_mount_path, &lock_path)
 }
 
-/// Test-only alias preserved so existing fixtures keep working.
+/// Test-only alias preserved so existing fixtures keep working. `lock_path`
+/// is the unified `lock.json`; `token_mount_path` is the standalone
+/// token file bind-mounted into the hub (dual-write contract — see
+/// `mcp_os_process::spawn_in`).
 fn apply_mcp_os_config_with_path(
     yaml: &str,
-    token_path: &std::path::Path,
-    port_path: &std::path::Path,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
 ) -> anyhow::Result<String> {
     apply_worker_config(
         yaml,
         "mcp-os",
-        token_path,
-        port_path,
+        token_mount_path,
+        lock_path,
+        crate::host_mcp_process::lock::LockService::McpOs,
         "WORKER_OS_URL",
         "os-auth-token",
     )
@@ -1014,22 +1276,23 @@ fn apply_mcp_os_config_with_path(
 /// Injects `WORKER_HOST_EXEC_URL` + bearer-token mount into the hub if the worker is up.
 fn apply_host_exec_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     let state_dir = crate::host_exec::host_exec_project_dir(consts::data_dir(), project);
-    let token_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
-    let port_path = state_dir.join(consts::HOST_EXEC_PORT_FILE);
-    apply_host_exec_config_with_paths(yaml, &token_path, &port_path)
+    let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
+    let token_mount_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
+    apply_host_exec_config_with_paths(yaml, &token_mount_path, &lock_path)
 }
 
 /// Test-only alias preserved so existing fixtures keep working.
 fn apply_host_exec_config_with_paths(
     yaml: &str,
-    token_path: &std::path::Path,
-    port_path: &std::path::Path,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
 ) -> anyhow::Result<String> {
     apply_worker_config(
         yaml,
         "host_exec",
-        token_path,
-        port_path,
+        token_mount_path,
+        lock_path,
+        crate::host_mcp_process::lock::LockService::HostExec,
         "WORKER_HOST_EXEC_URL",
         "host_exec-auth-token",
     )
@@ -1046,19 +1309,19 @@ fn apply_host_exec_config_with_paths(
 /// `<oauth-state-dir>/.bearer-map.json` (bearer → service).
 fn apply_oauth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
     let state_dir = crate::oauth_process::oauth_project_dir(consts::data_dir(), project);
-    let port_path = state_dir.join(consts::OAUTH_PORT_FILE);
+    let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
     let bearer_map_path = state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
-    apply_oauth_config_with_paths(yaml, &state_dir, &port_path, &bearer_map_path)
+    apply_oauth_config_with_paths(yaml, &state_dir, &lock_path, &bearer_map_path)
 }
 
 /// Test-only entry point — same logic, explicit paths.
 fn apply_oauth_config_with_paths(
     yaml: &str,
     state_dir: &std::path::Path,
-    port_path: &std::path::Path,
+    lock_path: &std::path::Path,
     bearer_map_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let port = match read_worker_port_file(port_path, "oauth") {
+    let port = match read_lock_port(lock_path, crate::host_mcp_process::lock::LockService::Oauth) {
         Some(p) => p,
         None => return Ok(yaml.to_string()),
     };
@@ -1100,6 +1363,7 @@ fn apply_oauth_config_with_paths(
                 continue;
             }
         }
+        ensure_host_gateway_extra_host(&mut doc, compose_service);
         inject_env_into(&mut doc, compose_service, "WORKER_OAUTH_URL", &url);
         let mount = format!(
             "{}:/secrets/oauth-auth-token-{service_id}:ro",
@@ -1121,44 +1385,64 @@ fn read_oauth_bearer_map(
     Some(map)
 }
 
-/// Inject `<env_var>=<gateway-url>` + mount `<token_path>:/secrets/<secret_name>:ro` into the
-/// hub iff token+port files are readable. No-op (returns unchanged YAML) when files absent —
-/// any read failure is treated as not running (avoids TOCTOU vs runtime respawn).
+/// Inject `<env_var>=<gateway-url>` + mount `<token_mount_path>:/secrets/<secret_name>:ro`
+/// into the hub iff `lock.json` is readable and the mount-token file exists.
+/// No-op (returns unchanged YAML) when files absent — any read failure is
+/// treated as not running (avoids TOCTOU vs runtime respawn).
 fn apply_worker_config(
     yaml: &str,
     label: &str,
-    token_path: &std::path::Path,
-    port_path: &std::path::Path,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
+    service: crate::host_mcp_process::lock::LockService,
     env_var: &str,
     secret_name: &str,
 ) -> anyhow::Result<String> {
-    let token = match std::fs::read_to_string(token_path) {
+    let port = match read_lock_port(lock_path, service) {
+        Some(p) => p,
+        None => return Ok(yaml.to_string()),
+    };
+    let token = match std::fs::read_to_string(token_mount_path) {
         Ok(s) => s.trim().to_string(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(yaml.to_string()),
         Err(e) => {
-            log::debug!("{label} token read failed ({e}); treating as not running");
+            log::debug!("{label} token mount read failed ({e}); treating as not running");
             return Ok(yaml.to_string());
         }
     };
     if token.is_empty() {
         return Ok(yaml.to_string());
     }
-    let port = match read_worker_port_file(port_path, label) {
-        Some(p) => p,
-        None => return Ok(yaml.to_string()),
-    };
     let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+    ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
     inject_worker_env(&mut doc, env_var, &url);
     add_hub_volume(
         &mut doc,
-        &format!("{}:/secrets/{secret_name}:ro", to_engine_path(token_path)?),
+        &format!(
+            "{}:/secrets/{secret_name}:ro",
+            to_engine_path(token_mount_path)?
+        ),
     );
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
+/// Read a worker's port from its `lock.json`. `None` when the file is
+/// absent or the JSON is unparseable / has the wrong `service` tag.
+///
+/// Each worker manager migrates pre-PR3 layout to `lock.json` before
+/// completing `spawn_*`, so by the time compose reads the port the
+/// JSON must exist; no legacy fallback is required here.
+fn read_lock_port(
+    lock_path: &std::path::Path,
+    service: crate::host_mcp_process::lock::LockService,
+) -> Option<u16> {
+    crate::host_mcp_process::lock::read(lock_path, service).map(|lock| lock.port)
+}
+
 /// Read a worker's `port` file. `None` when missing or unparseable; warns on invalid content.
+#[cfg(test)]
 fn read_worker_port_file(port_path: &std::path::Path, label: &str) -> Option<u16> {
     let content = std::fs::read_to_string(port_path).ok()?;
     match content.trim().parse::<u16>() {
@@ -1181,14 +1465,7 @@ fn read_host_exec_port(port_path: &std::path::Path) -> Option<u16> {
 
 /// URL where a host-side worker listens, as seen from inside a container.
 fn worker_gateway_url(port: u16) -> String {
-    #[cfg(target_os = "macos")]
-    {
-        format!("http://host.lima.internal:{port}")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        format!("http://host.containers.internal:{port}")
-    }
+    format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS)
 }
 
 /// Test-only alias — implementation is `worker_gateway_url`.
@@ -1231,20 +1508,10 @@ pub fn container_user() -> &'static str {
 
 /// Returns the hostname Claude Code should use for IDE WebSocket connections.
 /// Set as `CLAUDE_CODE_IDE_HOST_OVERRIDE` in the container environment.
-///
-/// Claude Code hardcodes `ws://127.0.0.1:<port>` when connecting to IDEs.
-/// Inside a container, 127.0.0.1 is the container's own loopback — not the host.
-/// This env var overrides the host to the platform-specific gateway DNS name
-/// so Claude can reach the IDE Bridge running on the host.
+/// Overrides Claude Code's hardcoded `ws://127.0.0.1` so it reaches the IDE
+/// Bridge on the host via the gateway alias resolved by `extra_hosts`.
 fn ide_host_override() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        consts::LIMA_HOST // "host.lima.internal"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        consts::WSL_HOST // "host.speedwave.internal"
-    }
+    consts::HOST_GATEWAY_ALIAS
 }
 
 /// Verifies that a plugin's `claude-resources` directory and every entry
@@ -1302,26 +1569,47 @@ fn walk_reject_symlinks(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Injects a WORKER_*_URL environment variable into the mcp-hub service.
+/// Injects an env var into the `mcp-hub` service. Thin wrapper over
+/// [`inject_env_into`] — idempotent (replaces an existing entry).
 fn inject_worker_env(doc: &mut serde_yaml_ng::Value, env_name: &str, url: &str) {
     inject_env_into(doc, "mcp-hub", env_name, url)
 }
 
-/// Inject `<env_name>=<value>` into an arbitrary service's `environment` sequence.
-/// No-op if the service or its `environment` sequence is absent — same TOCTOU-friendly
-/// posture as `inject_worker_env`.
+/// Inject `<env_name>=<value>` into a service's `environment` sequence.
+/// Idempotent: replaces existing entry; creates `environment` if absent. Warns and returns
+/// only when the service itself is missing (mirrors `add_service_env_var`).
 fn inject_env_into(doc: &mut serde_yaml_ng::Value, service: &str, env_name: &str, value: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(svc) = services.get_mut(service) {
-            if let Some(environment) = svc.get_mut("environment") {
-                if let Some(env_seq) = environment.as_sequence_mut() {
-                    env_seq.push(serde_yaml_ng::Value::String(format!(
-                        "{}={}",
-                        env_name, value
-                    )));
-                }
-            }
-        }
+    let Some(services) = doc.get_mut("services").and_then(|s| s.as_mapping_mut()) else {
+        log::warn!(
+            "inject_env_into: 'services' key absent or not a mapping — cannot inject {env_name} into '{service}'"
+        );
+        return;
+    };
+    let Some(svc) = services
+        .get_mut(serde_yaml_ng::Value::String(service.to_string()))
+        .and_then(|s| s.as_mapping_mut())
+    else {
+        log::warn!("inject_env_into: service '{service}' absent — cannot inject {env_name}");
+        return;
+    };
+
+    let env_key = serde_yaml_ng::Value::String("environment".to_string());
+    let env_entry = svc
+        .entry(env_key)
+        .or_insert_with(|| serde_yaml_ng::Value::Sequence(Vec::new()));
+    let Some(env_seq) = env_entry.as_sequence_mut() else {
+        log::warn!("inject_env_into: service '{service}' 'environment' is not a sequence — cannot inject {env_name}");
+        return;
+    };
+
+    let new_entry = format!("{}={}", env_name, value);
+    let existing = env_seq.iter().position(|v| {
+        v.as_str()
+            .is_some_and(|s| s.split('=').next() == Some(env_name))
+    });
+    match existing {
+        Some(idx) => env_seq[idx] = serde_yaml_ng::Value::String(new_entry),
+        None => env_seq.push(serde_yaml_ng::Value::String(new_entry)),
     }
 }
 
@@ -1343,6 +1631,38 @@ fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
     add_service_volume(doc, "mcp-hub", mount)
 }
 
+/// Idempotently ensures `<service>.extra_hosts` contains an entry mapping
+/// `HOST_GATEWAY_ALIAS` to the host gateway IP. Called AFTER `${HOST_GATEWAY}`
+/// substitution — inserts a literal IP, not a placeholder.
+/// Idempotency by hostname prefix: replaces an existing canonical entry (any IP)
+/// rather than appending a duplicate.
+fn ensure_host_gateway_extra_host(doc: &mut serde_yaml_ng::Value, service: &str) {
+    let canonical_entry = format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip());
+    let hostname_prefix = format!("{}:", consts::HOST_GATEWAY_ALIAS);
+    let Some(services) = doc.get_mut("services") else {
+        return;
+    };
+    let Some(svc) = services.get_mut(service) else {
+        return;
+    };
+    if svc.get("extra_hosts").is_none() {
+        svc["extra_hosts"] =
+            serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(canonical_entry)]);
+        return;
+    }
+    let Some(seq) = svc["extra_hosts"].as_sequence_mut() else {
+        return;
+    };
+    if let Some(existing) = seq
+        .iter_mut()
+        .find(|v| v.as_str().is_some_and(|s| s.starts_with(&hostname_prefix)))
+    {
+        *existing = serde_yaml_ng::Value::String(canonical_entry);
+    } else {
+        seq.push(serde_yaml_ng::Value::String(canonical_entry));
+    }
+}
+
 /// Adds a volume mount to an arbitrary service. No-op if the service is absent.
 fn add_service_volume(doc: &mut serde_yaml_ng::Value, service: &str, mount: &str) {
     if let Some(services) = doc.get_mut("services") {
@@ -1361,17 +1681,10 @@ fn add_service_volume(doc: &mut serde_yaml_ng::Value, service: &str, mount: &str
     }
 }
 
-/// Adds an environment variable to the claude service.
+/// Adds an environment variable to the claude service. Thin wrapper over
+/// [`inject_env_into`] — idempotent (replaces an existing entry).
 fn add_claude_env_var(doc: &mut serde_yaml_ng::Value, key: &str, value: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(claude) = services.get_mut("claude") {
-            if let Some(environment) = claude.get_mut("environment") {
-                if let Some(env_seq) = environment.as_sequence_mut() {
-                    env_seq.push(serde_yaml_ng::Value::String(format!("{}={}", key, value)));
-                }
-            }
-        }
-    }
+    inject_env_into(doc, "claude", key, value)
 }
 
 // --- SecurityCheck ---
@@ -2668,6 +2981,192 @@ mod tests {
 
     const SECURITY_RULE_COUNT: usize = 31;
 
+    /// Render the same compose template via `render_compose` with a local
+    /// LLM provider + multi-line custom_headers token, and check the result
+    /// re-parses. This is the production code path; if it diverges from
+    /// `inject_claude_env_multiline_value_keeps_yaml_parseable`, the bug
+    /// is elsewhere in the pipeline (token reader, env merger, host_tz, …).
+    #[test]
+    fn render_compose_with_multiline_custom_headers_is_valid_yaml() {
+        // Use the same locking pattern as the existing token-touching tests
+        // — they share a global `~/.speedwave/tokens` namespace and would
+        // otherwise race when run in parallel.
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let project = format!("render-multiline-headers-{}", std::process::id());
+        let tokens_dir = ensure_token_dir(&project, "local-llm")
+            .expect("ensure_token_dir must succeed in test env");
+        std::fs::write(tokens_dir.join("api_key"), "sk-test-key").unwrap();
+        std::fs::write(
+            tokens_dir.join("custom_headers"),
+            "X-Tenant-ID: foo\nX-Subscription-ID: bar\n",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm: crate::config::LlmConfig {
+                provider: Some("local".to_string()),
+                model: Some("unsloth/Qwen3.6-35B".to_string()),
+                base_url: Some("http://100.74.182.88:8888".to_string()),
+                context_tokens: None,
+                has_api_key: true,
+                has_custom_headers: true,
+            },
+        };
+        let integrations = ResolvedIntegrationsConfig::default();
+
+        let yaml = render_compose(
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        // Sanitised in the panic message — the rendered YAML contains the
+        // injected ANTHROPIC_AUTH_TOKEN, which CodeQL flags as cleartext
+        // secret logging. The parse error alone identifies the regression.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
+            .unwrap_or_else(|e| panic!("rendered compose YAML must re-parse: {e}"));
+        // Custom headers must survive intact AND be on a single line —
+        // nerdctl/docker-compose YAML parsers reject block literals inside
+        // an `environment:` sequence (manifested as `line N: could not find
+        // expected ':'`), so the headers are joined with `, ` separators.
+        let env_seq = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .expect("claude.environment must be a sequence");
+        let header_entry = env_seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
+            .expect("ANTHROPIC_CUSTOM_HEADERS entry present");
+        assert!(
+            !header_entry.contains('\n'),
+            "header env var must be a single line, got: {header_entry:?}"
+        );
+        assert!(header_entry.contains("X-Tenant-ID: foo"));
+        assert!(header_entry.contains("X-Subscription-ID: bar"));
+        // The rendered scalar must also be a plain scalar in the raw YAML —
+        // a block literal (`|-`, `>`) would still parse via serde_yaml_ng but
+        // breaks nerdctl-compose, which is what triggered the original bug.
+        assert!(
+            !yaml.contains("ANTHROPIC_CUSTOM_HEADERS=\n")
+                && !yaml.contains("- |-")
+                && !yaml.contains("- |\n"),
+            "headers env var must render as a single-line plain scalar, not \
+             a block literal (would break nerdctl-compose)"
+        );
+
+        // Cleanup — best-effort, errors here would mask the assertion above.
+        let _ = std::fs::remove_file(tokens_dir.join("api_key"));
+        let _ = std::fs::remove_file(tokens_dir.join("custom_headers"));
+        let _ = std::fs::remove_dir(&tokens_dir);
+    }
+
+    /// `Authorization` in a stale `custom_headers` token must not be allowed
+    /// to smuggle a header that collides with `ANTHROPIC_AUTH_TOKEN` Bearer.
+    /// Mirrors the defensive reject in `build_llm_probe_client_with_auth`.
+    #[test]
+    fn render_compose_strips_authorization_from_custom_headers() {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let project = format!("authz-strip-{}", std::process::id());
+        let tokens_dir = ensure_token_dir(&project, "local-llm")
+            .expect("ensure_token_dir must succeed in test env");
+        std::fs::write(tokens_dir.join("api_key"), "sk-test").unwrap();
+        std::fs::write(
+            tokens_dir.join("custom_headers"),
+            "X-Tenant-ID: foo\nAuthorization: Bearer leaked\nX-Other: bar\n",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm: crate::config::LlmConfig {
+                provider: Some("local".to_string()),
+                model: Some("m".to_string()),
+                base_url: Some("http://x:1".to_string()),
+                context_tokens: None,
+                has_api_key: true,
+                has_custom_headers: true,
+            },
+        };
+        let yaml = render_compose(
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let header_entry = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
+            .expect("header entry present");
+        assert!(header_entry.contains("X-Tenant-ID"));
+        assert!(header_entry.contains("X-Other"));
+        assert!(
+            !header_entry.to_ascii_lowercase().contains("authorization"),
+            "Authorization header must be stripped, got: {header_entry:?}"
+        );
+        assert!(!header_entry.contains("leaked"));
+
+        let _ = std::fs::remove_file(tokens_dir.join("api_key"));
+        let _ = std::fs::remove_file(tokens_dir.join("custom_headers"));
+        let _ = std::fs::remove_dir(&tokens_dir);
+    }
+
+    /// Repro for the broken compose YAML observed when a user saves custom
+    /// HTTP headers for a local LLM. Multi-line `ANTHROPIC_CUSTOM_HEADERS`
+    /// values must serialise as a quoted scalar so the YAML parser does not
+    /// treat the second line as a new top-level key.
+    #[test]
+    fn inject_claude_env_multiline_value_keeps_yaml_parseable() {
+        let yaml = "services:\n  claude:\n    image: x\n    environment:\n    - PORT=4000\n";
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+            "X-Tenant-ID: foo\nX-Subscription-ID: bar".to_string(),
+        );
+        let injected = inject_claude_env(yaml, &env).expect("inject must succeed");
+        // The injected YAML must re-parse cleanly; if the multi-line value
+        // breaks YAML structure, `from_str` will fail.
+        let _doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&injected).expect("re-parsed YAML must be valid");
+        // And the header value must still be retrievable intact.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&injected).unwrap();
+        let env_seq = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .unwrap();
+        let header_entry = env_seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
+            .expect("header entry present");
+        assert!(header_entry.contains("X-Tenant-ID: foo"));
+        assert!(header_entry.contains("X-Subscription-ID: bar"));
+    }
+
     fn default_flags() -> Vec<String> {
         crate::defaults::DEFAULT_FLAGS
             .iter()
@@ -2676,16 +3175,7 @@ mod tests {
     }
 
     fn get_hub_env_seq(doc: &serde_yaml_ng::Value) -> Vec<String> {
-        doc.get("services")
-            .and_then(|s| s.get("mcp-hub"))
-            .and_then(|h| h.get("environment"))
-            .and_then(|e| e.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default()
+        get_service_env_seq(doc, "mcp-hub")
     }
 
     fn find_env_value(env: &[String], prefix: &str) -> Option<String> {
@@ -3101,6 +3591,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_ok());
         let yaml = result.unwrap();
@@ -3137,6 +3628,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3194,6 +3686,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -3226,6 +3719,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3268,6 +3762,23 @@ services:
             "mcp-playwright must set PORT={}",
             crate::consts::PORT_WORKER
         );
+
+        // ADR-062: mcp-playwright resolves `host.docker.internal` to the platform
+        // gateway IP so Claude and plugins can navigate to host-local services
+        // (e.g. local dev servers). Verifies the rendered compose — not the
+        // template — so the `${HOST_GATEWAY}` substitution must have occurred.
+        let extra_hosts = pw
+            .get("extra_hosts")
+            .and_then(|v| v.as_sequence())
+            .expect("mcp-playwright must have extra_hosts (ADR-062)");
+        let gateway_ip = crate::compose::host_gateway_ip();
+        let expected_entry = format!("host.docker.internal:{gateway_ip}");
+        assert!(
+            extra_hosts
+                .iter()
+                .any(|v| v.as_str() == Some(expected_entry.as_str())),
+            "mcp-playwright must resolve host.docker.internal to {gateway_ip} (rendered, not template)"
+        );
     }
 
     /// mcp-office has no credentials — the generated compose must not mount any `/tokens`
@@ -3290,6 +3801,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -3347,6 +3859,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3383,6 +3896,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3420,6 +3934,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3456,6 +3971,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3548,6 +4064,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3628,6 +4145,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -3655,6 +4173,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let expected = format!("MCP_HUB_PORT={}", crate::consts::PORT_BASE);
@@ -3681,6 +4200,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3727,6 +4247,7 @@ services:
             &config,
             &all_enabled_integrations(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3735,11 +4256,11 @@ services:
             if let Some((key, value)) = entry.split_once('=') {
                 if key.starts_with("WORKER_") && key.ends_with("_URL") {
                     // WORKER_OS_URL and WORKER_HOST_EXEC_URL are host-side
-                    // gateways (host.lima.internal / host.docker.internal /
-                    // host.containers.internal) with dynamically assigned ports
-                    // — the workers run on the host, not in the compose network.
-                    // ADR-038's "every WORKER_*_URL points at :PORT_WORKER" rule
-                    // applies only to in-cluster (containerized) workers.
+                    // gateways (host.docker.internal) with dynamically assigned
+                    // ports — the workers run on the host, not in the compose
+                    // network. ADR-038's "every WORKER_*_URL points at
+                    // :PORT_WORKER" rule applies only to in-cluster (containerized)
+                    // workers.
                     if key == "WORKER_OS_URL" || key == "WORKER_HOST_EXEC_URL" {
                         continue;
                     }
@@ -3777,6 +4298,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
@@ -3827,6 +4349,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
 
@@ -3941,6 +4464,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -4006,6 +4530,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -4039,6 +4564,153 @@ services:
                 .is_some_and(|s| s == "WORKER_PRESALE_URL=http://mcp-presale:4006")
         });
         assert!(has_presale, "WORKER_PRESALE_URL should be in mcp-hub env");
+    }
+
+    /// Second call with the same key must REPLACE, not duplicate. Both claude and
+    /// hub receive ENABLED_SERVICES via this helper; re-renders would otherwise
+    /// accumulate stale entries in env sequences. Test both services so a future
+    /// regression that breaks the replace-path for one container is caught.
+    #[test]
+    fn test_inject_env_into_idempotent() {
+        for service in ["mcp-hub", "claude"] {
+            let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+
+            inject_env_into(&mut doc, service, "ENABLED_SERVICES", "slack");
+            inject_env_into(&mut doc, service, "ENABLED_SERVICES", "slack,office");
+
+            let svc = doc.get("services").unwrap().get(service).unwrap();
+            let env_seq = svc.get("environment").unwrap().as_sequence().unwrap();
+            let occurrences = env_seq
+                .iter()
+                .filter(|v| {
+                    v.as_str()
+                        .is_some_and(|s| s.starts_with("ENABLED_SERVICES="))
+                })
+                .count();
+            assert_eq!(
+                occurrences, 1,
+                "service '{service}': ENABLED_SERVICES must appear exactly once after repeated injection"
+            );
+            let final_value = env_seq
+                .iter()
+                .find_map(|v| v.as_str().and_then(|s| s.strip_prefix("ENABLED_SERVICES=")));
+            assert_eq!(final_value, Some("slack,office"), "service '{service}'");
+        }
+    }
+
+    /// Missing service yields a warn and a no-op — nothing must mutate elsewhere.
+    #[test]
+    fn test_inject_env_into_absent_service_is_safe_no_op() {
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        let hub_before = get_service_env_seq(&doc, "mcp-hub");
+
+        inject_env_into(&mut doc, "nonexistent-service", "FOO", "bar");
+
+        assert!(doc
+            .get("services")
+            .and_then(|s| s.get("nonexistent-service"))
+            .is_none());
+        assert_eq!(get_service_env_seq(&doc, "mcp-hub"), hub_before);
+    }
+
+    /// Missing `environment` key on an existing service is created on the fly.
+    #[test]
+    fn test_inject_env_into_creates_missing_environment() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  bare-service:\n    image: example\n").unwrap();
+        inject_env_into(&mut doc, "bare-service", "FOO", "bar");
+        let env = get_service_env_seq(&doc, "bare-service");
+        assert_eq!(find_env_value(&env, "FOO=").as_deref(), Some("bar"));
+    }
+
+    /// `remove_env_from` removes the named key from an arbitrary service and no-ops on absent paths.
+    #[test]
+    fn test_remove_env_from() {
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+
+        inject_env_into(&mut doc, "claude", "TEST_KEY", "value");
+        assert!(find_env_value(&get_service_env_seq(&doc, "claude"), "TEST_KEY=").is_some());
+
+        remove_env_from(&mut doc, "claude", "TEST_KEY");
+        assert!(find_env_value(&get_service_env_seq(&doc, "claude"), "TEST_KEY=").is_none());
+
+        // No-op on absent service / env name.
+        remove_env_from(&mut doc, "nonexistent-service", "ANY");
+        remove_env_from(&mut doc, "claude", "NEVER_INJECTED");
+
+        // Removing only matches by exact key, not prefix.
+        inject_env_into(&mut doc, "claude", "FOO", "1");
+        inject_env_into(&mut doc, "claude", "FOO_BAR", "2");
+        remove_env_from(&mut doc, "claude", "FOO");
+        let env = get_service_env_seq(&doc, "claude");
+        assert!(find_env_value(&env, "FOO=").is_none());
+        assert_eq!(find_env_value(&env, "FOO_BAR=").as_deref(), Some("2"));
+    }
+
+    /// The claude container needs ENABLED_SERVICES so entrypoint.sh can gate
+    /// per-integration claude-resources (skills/commands/agents/hooks).
+    #[test]
+    fn test_apply_integrations_filter_injects_enabled_services_into_claude() {
+        let resolved = ResolvedIntegrationsConfig {
+            slack: true,
+            office: true,
+            ..Default::default()
+        };
+        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net").unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+
+        let claude_env = find_env_value(&get_service_env_seq(&doc, "claude"), "ENABLED_SERVICES=")
+            .expect("claude must have ENABLED_SERVICES");
+        let hub_env = find_env_value(&get_service_env_seq(&doc, "mcp-hub"), "ENABLED_SERVICES=")
+            .expect("mcp-hub must have ENABLED_SERVICES");
+        assert_eq!(
+            claude_env, hub_env,
+            "claude and mcp-hub must see identical ENABLED_SERVICES"
+        );
+        assert!(claude_env.contains("slack"));
+        assert!(claude_env.contains("office"));
+    }
+
+    /// claude container needs DISABLED_OS_SERVICES so entrypoint.sh can gate OS sub-service skills.
+    #[test]
+    fn test_apply_integrations_filter_injects_disabled_os_services_into_claude() {
+        let resolved = ResolvedIntegrationsConfig {
+            os_calendar: true,
+            ..Default::default()
+        };
+        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net").unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+
+        let claude_disabled = find_env_value(
+            &get_service_env_seq(&doc, "claude"),
+            "DISABLED_OS_SERVICES=",
+        )
+        .expect("DISABLED_OS_SERVICES must be injected into claude");
+        let hub_disabled = find_env_value(
+            &get_service_env_seq(&doc, "mcp-hub"),
+            "DISABLED_OS_SERVICES=",
+        )
+        .expect("DISABLED_OS_SERVICES must be injected into mcp-hub");
+        assert_eq!(claude_disabled, hub_disabled);
+        for sub in ["reminders", "mail", "notes"] {
+            assert!(
+                claude_disabled.contains(sub),
+                "missing {sub}: {claude_disabled}"
+            );
+        }
+        assert!(!claude_disabled.contains("calendar"));
+
+        let os_available =
+            find_env_value(&get_service_env_seq(&doc, "claude"), "OS_AVAILABLE_SUBS=")
+                .expect("OS_AVAILABLE_SUBS must be injected into claude");
+        for sub in ["reminders", "calendar", "mail", "notes"] {
+            assert!(os_available.contains(sub), "missing {sub}: {os_available}");
+        }
+        // OS_AVAILABLE_SUBS is consumed only by claude's entrypoint, never by the hub.
+        assert!(
+            find_env_value(&get_service_env_seq(&doc, "mcp-hub"), "OS_AVAILABLE_SUBS=").is_none(),
+            "OS_AVAILABLE_SUBS must not be injected into mcp-hub"
+        );
     }
 
     #[test]
@@ -4196,6 +4868,8 @@ services:
                 model: Some("llama3.3".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4204,12 +4878,14 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
-        // Ollama: direct injection at host.docker.internal:11434 (no /v1 suffix — ADR-040)
+        // Ollama: direct injection via default_base_url SSOT (no /v1 suffix — ADR-040)
+        let expected = format!("ANTHROPIC_BASE_URL={}", default_base_url("ollama").unwrap());
         assert!(
-            yaml.contains("ANTHROPIC_BASE_URL=http://host.docker.internal:11434"),
-            "Ollama provider should set ANTHROPIC_BASE_URL to host.docker.internal:11434 (no /v1)"
+            yaml.contains(&expected),
+            "Ollama provider should set {expected} (no /v1)"
         );
     }
 
@@ -4223,6 +4899,8 @@ services:
                 model: None,
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let result = render_compose(
@@ -4231,6 +4909,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -4257,6 +4936,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         // Default anthropic: no proxy, no ANTHROPIC_BASE_URL override
@@ -4312,6 +4992,8 @@ services:
                 model: Some("llama3.3".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4320,12 +5002,14 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
+        let expected_ollama = format!("ANTHROPIC_BASE_URL={}", default_base_url("ollama").unwrap());
         assert!(
-            env.iter().any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:11434"),
-            "Ollama must set ANTHROPIC_BASE_URL to host.docker.internal:11434 (no /v1), got: {env:?}"
+            env.iter().any(|e| e == &expected_ollama),
+            "Ollama must set {expected_ollama} (no /v1), got: {env:?}"
         );
         assert!(
             env.iter()
@@ -4389,6 +5073,8 @@ services:
                 model: Some("qwen2.5-coder".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4397,13 +5083,17 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
+        let expected = format!(
+            "ANTHROPIC_BASE_URL={}",
+            default_base_url("lmstudio").unwrap()
+        );
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:1234"),
-            "LM Studio must use port 1234, got: {env:?}"
+            env.iter().any(|e| e == &expected),
+            "LM Studio must set {expected}, got: {env:?}"
         );
     }
 
@@ -4417,6 +5107,8 @@ services:
                 model: Some("deepseek-r1".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4425,13 +5117,17 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
+        let expected = format!(
+            "ANTHROPIC_BASE_URL={}",
+            default_base_url("llamacpp").unwrap()
+        );
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:8080"),
-            "llama.cpp must use port 8080, got: {env:?}"
+            env.iter().any(|e| e == &expected),
+            "llama.cpp must set {expected}, got: {env:?}"
         );
     }
 
@@ -4445,6 +5141,8 @@ services:
                 model: Some("some-model".to_string()),
                 base_url: Some("http://host.docker.internal:9999".to_string()),
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let result = render_compose(
@@ -4453,6 +5151,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -4476,6 +5175,8 @@ services:
                 model: Some("my-model".to_string()),
                 base_url: Some("http://host.docker.internal:9999".to_string()),
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let result = render_compose(
@@ -4484,6 +5185,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -4518,9 +5220,11 @@ services:
             model: Some("llama3.3".to_string()),
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let result1 = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
-        let result2 = apply_llm_config(&result1, &llm).unwrap();
+        let result1 = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let result2 = apply_llm_config(&result1, &llm, "test-project").unwrap();
         assert_eq!(
             result1, result2,
             "apply_llm_config must be idempotent (no UUID injection)"
@@ -4546,11 +5250,63 @@ services:
     }
 
     #[test]
-    fn test_base_url_rejects_path() {
-        assert!(
-            validate_base_url("http://host.docker.internal:11434/api/v1/").is_err(),
-            "Must reject URL with path"
-        );
+    fn test_base_url_rejects_multi_segment_path() {
+        // Multi-segment paths must be rejected even with the relaxed policy.
+        for bad in &[
+            "http://host.docker.internal:11434/api/v1/",
+            "http://host.docker.internal:11434/a/b",
+            "http://host.docker.internal:11434/anthropic/v1",
+        ] {
+            assert!(
+                validate_base_url(bad).is_err(),
+                "Must reject multi-segment path: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_url_accepts_single_segment_path() {
+        // LiteLLM `/anthropic`, AWS-style `/v1`, any single ASCII segment.
+        for ok in &[
+            "http://host.docker.internal:4000/anthropic",
+            "http://litellm.local/v1",
+            "https://gateway.example.com/aws_proxy",
+            "http://host:8080/my-route",
+        ] {
+            assert!(
+                validate_base_url(ok).is_ok(),
+                "Must accept single-segment path: {ok}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_url_rejects_path_traversal() {
+        for bad in &[
+            "http://host/..",
+            "http://host/../etc",
+            "http://host/./foo",
+            "http://host/foo/",
+        ] {
+            assert!(
+                validate_base_url(bad).is_err(),
+                "Must reject traversal/trailing-slash path: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_url_rejects_query_and_fragment() {
+        for bad in &[
+            "http://host/anthropic?api_key=x",
+            "http://host/v1#section",
+            "http://host?token=x",
+        ] {
+            assert!(
+                validate_base_url(bad).is_err(),
+                "Must reject query/fragment: {bad}"
+            );
+        }
     }
 
     #[test]
@@ -4570,27 +5326,21 @@ services:
     }
 
     #[test]
-    fn test_compose_template_contains_all_container_host_aliases() {
-        // compose.template.yml injects all aliases from CONTAINER_HOST_ALIASES via
-        // extra_hosts. Iterating the constant (rather than asserting on a literal)
-        // keeps the test in sync with the SSOT — adding a new alias to the const
-        // without updating the template will fail here.
-        for alias in consts::CONTAINER_HOST_ALIASES {
-            assert!(
-                COMPOSE_TEMPLATE.contains(alias),
-                "compose.template.yml must map {} (named in CONTAINER_HOST_ALIASES)",
-                alias
-            );
-        }
+    fn compose_template_claude_has_canonical_host_gateway_entry() {
+        // Static template guard — `claude` and `mcp-playwright` must list the
+        // canonical host gateway alias in extra_hosts (ADR-062). Other services
+        // receive it dynamically through `ensure_host_gateway_extra_host`.
+        let expected = format!(r#"- "{}:${{HOST_GATEWAY}}""#, consts::HOST_GATEWAY_ALIAS);
+        assert!(
+            COMPOSE_TEMPLATE.lines().any(|l| l.trim() == expected),
+            "compose.template.yml must contain '{expected}' in extra_hosts"
+        );
     }
 
     #[test]
-    fn test_all_template_aliases_are_in_container_host_aliases() {
-        // Inverse guard: every "host.*.internal" hostname that appears in the
-        // extra_hosts block of compose.template.yml must be named in
-        // CONTAINER_HOST_ALIASES.  Without this check, adding an alias to the
-        // template without updating the constant would silently break host-side
-        // code that uses CONTAINER_HOST_ALIASES to rewrite aliases to loopback.
+    fn compose_template_extra_hosts_contains_only_canonical_alias() {
+        // Inverse guard: no deprecated `host.*.internal` alias may sneak back
+        // into the template's extra_hosts block.
         let mut in_extra_hosts = false;
         for line in COMPOSE_TEMPLATE.lines() {
             let trimmed = line.trim();
@@ -4598,27 +5348,225 @@ services:
                 in_extra_hosts = true;
                 continue;
             }
-            // A non-indented, non-list line signals the end of the extra_hosts block.
             if in_extra_hosts && !trimmed.starts_with('-') && !trimmed.is_empty() {
                 in_extra_hosts = false;
             }
             if !in_extra_hosts {
                 continue;
             }
-            // Lines look like: - "host.lima.internal:${HOST_GATEWAY}"
             if let Some(alias) = trimmed
                 .strip_prefix("- \"")
                 .and_then(|s| s.split(':').next())
                 .filter(|h| h.starts_with("host.") && h.ends_with(".internal"))
             {
-                assert!(
-                    consts::CONTAINER_HOST_ALIASES.contains(&alias),
-                    "compose.template.yml extra_hosts contains '{}' which is not in \
-                     CONTAINER_HOST_ALIASES — add it to the const in consts.rs",
-                    alias
+                assert_eq!(
+                    alias,
+                    consts::HOST_GATEWAY_ALIAS,
+                    "compose.template.yml extra_hosts contains deprecated alias '{alias}'; \
+                     only the canonical HOST_GATEWAY_ALIAS is allowed"
                 );
             }
         }
+    }
+
+    /// ADR-062: the `mcp-playwright` block in the template must declare
+    /// the canonical `extra_hosts` entry so Claude and plugins can navigate
+    /// to host-local services. This guard catches removal of the alias from
+    /// the template, independent of the rendered-compose test.
+    #[test]
+    fn mcp_playwright_section_has_extra_hosts_in_template() {
+        let needle = "\n  mcp-playwright:\n";
+        let pw_start = COMPOSE_TEMPLATE
+            .find(needle)
+            .expect("mcp-playwright section must exist in compose.template.yml");
+        let after_pw = pw_start + needle.len();
+        let next_service = COMPOSE_TEMPLATE[after_pw..]
+            .find("\n  mcp-")
+            .map(|i| after_pw + i)
+            .unwrap_or(COMPOSE_TEMPLATE.len());
+        let pw_block = &COMPOSE_TEMPLATE[pw_start..next_service];
+        let expected = format!(r#"- "{}:${{HOST_GATEWAY}}""#, consts::HOST_GATEWAY_ALIAS);
+        // Match an actual YAML list item, not the same string inside a comment.
+        // `lines().any(|l| l.trim() == expected)` rejects commented-out lines
+        // (they start with `#` after trim), unlike `contains()` on the whole block.
+        assert!(
+            pw_block.lines().any(|l| l.trim() == expected),
+            "mcp-playwright section in compose.template.yml must declare extra_hosts '{expected}' (ADR-062)"
+        );
+    }
+
+    // ---- ensure_host_gateway_extra_host + per-consumer injection tests ----
+
+    fn render_substituted_template() -> String {
+        COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", host_gateway_ip())
+    }
+
+    /// Write a fixture lock.json + standalone token mount file, for the
+    /// given service. Returns `(token_mount_path, lock_path)` — both are
+    /// inputs to `apply_*_config_with_path*`.
+    fn write_lock_and_token_mount(
+        tmp: &std::path::Path,
+        service: crate::host_mcp_process::lock::LockService,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use crate::host_mcp_process::lock::{self, LockFile};
+        let token_path = tmp.join("auth-token");
+        let lock_path = tmp.join(consts::PER_PROJECT_LOCK_FILE);
+        std::fs::write(&token_path, "test-token").unwrap();
+        let lock = LockFile::new(service, 12345, 4007, "test-token".into());
+        lock::write(&lock_path, &lock).unwrap();
+        (token_path, lock_path)
+    }
+
+    /// Legacy shim — kept under the old name to minimize churn in tests
+    /// that don't care about the service tag (host_exec by default).
+    fn write_token_and_port(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        write_lock_and_token_mount(tmp, crate::host_mcp_process::lock::LockService::HostExec)
+    }
+
+    fn extra_hosts_for(yaml: &str, service: &str) -> Vec<String> {
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        doc["services"][service]["extra_hosts"]
+            .as_sequence()
+            .map(|s| {
+                s.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn count_canonical_entries(entries: &[String]) -> usize {
+        let prefix = format!("{}:", consts::HOST_GATEWAY_ALIAS);
+        entries.iter().filter(|e| e.starts_with(&prefix)).count()
+    }
+
+    #[test]
+    fn apply_mcp_os_config_adds_host_gateway_to_hub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, lock_path) = write_lock_and_token_mount(
+            tmp.path(),
+            crate::host_mcp_process::lock::LockService::McpOs,
+        );
+        let yaml = render_substituted_template();
+        let result = apply_mcp_os_config_with_path(&yaml, &token_path, &lock_path).unwrap();
+        let entries = extra_hosts_for(&result, "mcp-hub");
+        assert_eq!(
+            count_canonical_entries(&entries),
+            1,
+            "mcp-hub must have exactly 1 host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn apply_host_exec_config_adds_host_gateway_to_hub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, port_path) = write_token_and_port(tmp.path());
+        let yaml = render_substituted_template();
+        let result = apply_host_exec_config_with_paths(&yaml, &token_path, &port_path).unwrap();
+        let entries = extra_hosts_for(&result, "mcp-hub");
+        assert_eq!(
+            count_canonical_entries(&entries),
+            1,
+            "mcp-hub must have exactly 1 host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn apply_oauth_config_adds_host_gateway_to_each_consumer() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        lock::write(
+            &lock_path,
+            &LockFile::new(LockService::Oauth, 12345, 4090, "supervisor".into()),
+        )
+        .unwrap();
+        let bearer_map_path = tmp.path().join("bearer-map.json");
+        std::fs::write(
+            &bearer_map_path,
+            r#"{"bearer-sharepoint-secret":"sharepoint"}"#,
+        )
+        .unwrap();
+
+        let yaml = render_substituted_template();
+        let result =
+            apply_oauth_config_with_paths(&yaml, tmp.path(), &lock_path, &bearer_map_path).unwrap();
+
+        // Each OAuth-consumer in the bearer map gets the canonical alias in its extra_hosts.
+        let entries = extra_hosts_for(&result, "mcp-sharepoint");
+        assert_eq!(
+            count_canonical_entries(&entries),
+            1,
+            "mcp-sharepoint must have exactly 1 host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_host_gateway_extra_host_is_idempotent() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        let yaml = serde_yaml_ng::to_string(&doc).unwrap();
+        let entries = extra_hosts_for(&yaml, "mcp-hub");
+        assert_eq!(
+            count_canonical_entries(&entries),
+            1,
+            "after 2× helper calls, mcp-hub must still have 1 entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_host_gateway_extra_host_replaces_existing_canonical_entry() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
+        // Pre-seed mcp-hub with a stale canonical entry pointing at a wrong IP.
+        doc["services"]["mcp-hub"]["extra_hosts"] =
+            serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(format!(
+                "{}:9.9.9.9",
+                consts::HOST_GATEWAY_ALIAS
+            ))]);
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        let yaml = serde_yaml_ng::to_string(&doc).unwrap();
+        let entries = extra_hosts_for(&yaml, "mcp-hub");
+        assert_eq!(
+            entries.len(),
+            1,
+            "must replace, not append, got: {entries:?}"
+        );
+        assert_eq!(
+            entries[0],
+            format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip())
+        );
+    }
+
+    // SSOT-definition guards: literal expected values for each local provider.
+    // Render tests above use `default_base_url()` to avoid drift; these tests
+    // pin the actual literal so that breaking BOTH the function AND the render
+    // assertion in lockstep would still fail here.
+
+    #[test]
+    fn test_default_base_url_ollama_returns_canonical_url() {
+        assert_eq!(
+            default_base_url("ollama").as_deref(),
+            Some("http://host.docker.internal:11434")
+        );
+    }
+
+    #[test]
+    fn test_default_base_url_lmstudio_returns_canonical_url() {
+        assert_eq!(
+            default_base_url("lmstudio").as_deref(),
+            Some("http://host.docker.internal:1234")
+        );
+    }
+
+    #[test]
+    fn test_default_base_url_llamacpp_returns_canonical_url() {
+        assert_eq!(
+            default_base_url("llamacpp").as_deref(),
+            Some("http://host.docker.internal:8080")
+        );
     }
 
     #[test]
@@ -4633,8 +5581,10 @@ services:
             model: Some("claude-sonnet-4-6".to_string()),
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
             env.iter().any(|e| e == "ANTHROPIC_MODEL=claude-sonnet-4-6"),
@@ -4657,8 +5607,10 @@ services:
             model: None,
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
             !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
@@ -4672,8 +5624,11 @@ services:
             model: Some("   ".to_string()),
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let rendered_blank = apply_llm_config(COMPOSE_TEMPLATE, &llm_blank).unwrap();
+        let rendered_blank =
+            apply_llm_config(COMPOSE_TEMPLATE, &llm_blank, "test-project").unwrap();
         let env_blank = get_claude_env(&rendered_blank);
         assert!(
             !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
@@ -4694,8 +5649,10 @@ services:
             model: None,
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
 
         let expected = crate::defaults::anthropic_default_models_env();
@@ -4719,11 +5676,14 @@ services:
             model: Some("llama3.3".to_string()),
             base_url: None,
             context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
         };
         let llm_anthropic = LlmConfig::default();
 
-        let with_ollama = apply_llm_config(COMPOSE_TEMPLATE, &llm_ollama).unwrap();
-        let with_anthropic = apply_llm_config(COMPOSE_TEMPLATE, &llm_anthropic).unwrap();
+        let with_ollama = apply_llm_config(COMPOSE_TEMPLATE, &llm_ollama, "test-project").unwrap();
+        let with_anthropic =
+            apply_llm_config(COMPOSE_TEMPLATE, &llm_anthropic, "test-project").unwrap();
 
         let env_ollama = get_claude_env(&with_ollama);
         let env_anthropic = get_claude_env(&with_anthropic);
@@ -4767,6 +5727,8 @@ services:
                 model: Some("deepseek-r1".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4775,6 +5737,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -4795,6 +5758,8 @@ services:
                 model: Some("qwen2.5-coder".to_string()),
                 base_url: None,
                 context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
             },
         };
         let yaml = render_compose(
@@ -4803,6 +5768,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let env = get_claude_env(&yaml);
@@ -4827,6 +5793,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let expected = format!("CLAUDE_VERSION={}", crate::defaults::CLAUDE_VERSION);
@@ -4859,6 +5826,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .expect("render_compose should succeed");
 
@@ -5008,27 +5976,35 @@ services:
 
     #[test]
     fn test_mcp_os_config_injects_when_token_exists() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("mcp-os-auth-token");
-        let port_path = tmp.path().join("mcp-os-port");
+        let lock_path = tmp.path().join(consts::MCP_OS_LOCK_FILE);
         std::fs::write(&token_path, "test-uuid-token-abc").unwrap();
-        std::fs::write(&port_path, "54321").unwrap();
+        lock::write(
+            &lock_path,
+            &LockFile::new(
+                LockService::McpOs,
+                12345,
+                54321,
+                "test-uuid-token-abc".into(),
+            ),
+        )
+        .unwrap();
 
-        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &port_path).unwrap();
+        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &lock_path).unwrap();
 
-        // WORKER_OS_URL must be injected into mcp-hub env with the dynamic port
         assert!(
             result.contains("WORKER_OS_URL="),
-            "WORKER_OS_URL must be injected when token file exists.\nGot:\n{}",
+            "WORKER_OS_URL must be injected when lock.json exists.\nGot:\n{}",
             result
         );
         assert!(
             result.contains(":54321"),
-            "WORKER_OS_URL must use port from port file.\nGot:\n{}",
+            "WORKER_OS_URL must use port from lock.json.\nGot:\n{}",
             result
         );
 
-        // Token file must be bind-mounted into hub
         let expected_mount = format!("{}:/secrets/os-auth-token:ro", token_path.display());
         assert!(
             result.contains(&expected_mount),
@@ -5076,22 +6052,11 @@ services:
     fn test_mcp_os_gateway_url_uses_gateway_not_bind_addr() {
         let port: u16 = 12345;
         let url = mcp_os_gateway_url(port);
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(
-                url,
-                format!("http://host.lima.internal:{port}"),
-                "macOS: containers reach mcp-os via host.lima.internal"
-            );
-        }
-        #[cfg(target_os = "windows")]
-        {
-            assert_eq!(
-                url,
-                format!("http://host.containers.internal:{port}"),
-                "Windows: containers reach mcp-os via WSL2 host alias"
-            );
-        }
+        assert_eq!(
+            url,
+            format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS),
+            "containers reach mcp-os via the canonical host gateway alias"
+        );
         // URL must never contain 0.0.0.0 — that's the bind address, not a routable address
         assert!(
             !url.contains("0.0.0.0"),
@@ -5241,14 +6206,24 @@ services:
 
     #[test]
     fn test_host_exec_config_injects_url_and_mounts_token() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("auth-token");
-        let port_path = tmp.path().join("port");
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
         std::fs::write(&token_path, "host-exec-uuid-token").unwrap();
-        std::fs::write(&port_path, "49215").unwrap();
+        lock::write(
+            &lock_path,
+            &LockFile::new(
+                LockService::HostExec,
+                12345,
+                49215,
+                "host-exec-uuid-token".into(),
+            ),
+        )
+        .unwrap();
 
         let result =
-            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &port_path).unwrap();
+            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &lock_path).unwrap();
 
         // WORKER_HOST_EXEC_URL injected into mcp-hub with the dynamic port and a
         // host-gateway hostname (never 0.0.0.0).
@@ -5303,10 +6278,7 @@ services:
             !url.contains("0.0.0.0"),
             "must be a routable host-gateway address, not the bind addr"
         );
-        #[cfg(target_os = "macos")]
-        assert_eq!(url, "http://host.lima.internal:49215");
-        #[cfg(target_os = "windows")]
-        assert_eq!(url, "http://host.containers.internal:49215");
+        assert_eq!(url, format!("http://{}:49215", consts::HOST_GATEWAY_ALIAS));
         // Same alias scheme as mcp-os — only the port differs.
         assert_eq!(host_exec_gateway_url(1), mcp_os_gateway_url(1));
     }
@@ -5384,12 +6356,21 @@ services:
     #[test]
     fn test_oauth_config_skipped_when_bearer_map_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49300").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49300,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &tmp.path().join("no-bearer-map.json"),
         )
         .unwrap();
@@ -5402,14 +6383,23 @@ services:
     #[test]
     fn test_oauth_config_skipped_when_bearer_map_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49300").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49300,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, "{}").unwrap();
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -5422,15 +6412,24 @@ services:
     #[test]
     fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49301").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp-uuid": "sharepoint"}"#).unwrap();
 
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -5491,15 +6490,24 @@ services:
     #[test]
     fn test_oauth_config_writes_per_service_bearer_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49301").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-x": "sharepoint"}"#).unwrap();
 
         apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -5532,15 +6540,24 @@ services:
     #[test]
     fn test_oauth_config_does_not_inject_into_slack_or_redmine() {
         let tmp = tempfile::tempdir().unwrap();
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "49301").unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                12345,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
 
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_MULTIPLE_WORKERS,
             tmp.path(),
-            &port_path,
+            &lock_path,
             &bearer_map_path,
         )
         .unwrap();
@@ -5610,6 +6627,50 @@ services:
         assert_eq!(read_host_exec_port(&p), None, "out of u16 range");
     }
 
+    // ── read_lock_port legacy fallback ──────────────────────────────────
+
+    #[test]
+    fn test_read_lock_port_reads_lock_json_when_present() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("lock.json");
+        lock::write(
+            &lock_path,
+            &LockFile::new(LockService::HostExec, 12345, 49215, "tok".into()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_lock_port(&lock_path, LockService::HostExec),
+            Some(49215)
+        );
+    }
+
+    #[test]
+    fn test_read_lock_port_returns_none_when_lock_json_absent() {
+        use crate::host_mcp_process::lock::LockService;
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("lock.json"); // absent
+
+        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
+    }
+
+    #[test]
+    fn test_read_lock_port_returns_none_when_wrong_service_tag() {
+        // `read` returns None if the JSON exists but `service` doesn't match
+        // — defends against a lock file from a different worker getting picked up.
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("lock.json");
+        lock::write(
+            &lock_path,
+            &LockFile::new(LockService::Oauth, 12345, 49215, "tok".into()),
+        )
+        .unwrap();
+
+        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
+    }
+
     #[test]
     fn test_apply_integrations_filter_enabled_services_includes_host_exec_when_on() {
         let mut integrations = ResolvedIntegrationsConfig::default();
@@ -5663,6 +6724,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -5863,6 +6925,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -5926,6 +6989,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -5957,6 +7021,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -5992,6 +7057,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
@@ -6007,8 +7073,8 @@ services:
 
     #[test]
     fn test_ide_host_override_uses_gateway_hostname() {
-        // CLAUDE_CODE_IDE_HOST_OVERRIDE must use the same gateway hostname
-        // as mcp_os_gateway_url — it resolves to the host from inside the VM.
+        // CLAUDE_CODE_IDE_HOST_OVERRIDE must use the canonical host gateway alias
+        // — same as worker_gateway_url, resolvable from inside the VM via extra_hosts.
         let host = ide_host_override();
         assert!(
             !host.contains("127.0.0.1"),
@@ -6018,10 +7084,7 @@ services:
             !host.contains("0.0.0.0"),
             "IDE host override must NOT be 0.0.0.0"
         );
-        #[cfg(target_os = "macos")]
-        assert_eq!(host, consts::LIMA_HOST);
-        #[cfg(target_os = "windows")]
-        assert_eq!(host, consts::WSL_HOST);
+        assert_eq!(host, consts::HOST_GATEWAY_ALIAS);
     }
 
     #[test]
@@ -6038,6 +7101,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6072,6 +7136,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6106,6 +7171,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -6233,11 +7299,33 @@ services:
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig::default();
-        assert!(render_compose("", "/tmp/proj", &resolved, &integrations, None).is_err());
-        assert!(render_compose("../evil", "/tmp/proj", &resolved, &integrations, None).is_err());
-        assert!(
-            render_compose(&"a".repeat(64), "/tmp/proj", &resolved, &integrations, None).is_err()
-        );
+        assert!(render_compose(
+            "",
+            "/tmp/proj",
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default()
+        )
+        .is_err());
+        assert!(render_compose(
+            "../evil",
+            "/tmp/proj",
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default()
+        )
+        .is_err());
+        assert!(render_compose(
+            &"a".repeat(64),
+            "/tmp/proj",
+            &resolved,
+            &integrations,
+            None,
+            &HostBridgesInfo::default()
+        )
+        .is_err());
     }
 
     #[test]
@@ -6541,6 +7629,7 @@ services:
             &config,
             &integrations,
             None,
+            &HostBridgesInfo::default(),
         );
         assert!(
             result.is_ok(),
@@ -6633,6 +7722,20 @@ services:
             enabled_var.is_empty(),
             "ENABLED_SERVICES should be empty when all integrations disabled, got: '{}'",
             enabled_var
+        );
+
+        // claude must also receive ENABLED_SERVICES (even empty) so entrypoint links zero integrations.
+        let claude_env_seq = get_service_env_seq(&doc, "claude");
+        assert!(
+            !claude_env_seq.is_empty(),
+            "claude.environment must be present"
+        );
+        let claude_enabled_var = find_env_value(&claude_env_seq, "ENABLED_SERVICES=")
+            .expect("ENABLED_SERVICES must be injected into the claude container");
+        assert!(
+            claude_enabled_var.is_empty(),
+            "claude ENABLED_SERVICES should be empty when all integrations disabled, got: '{}'",
+            claude_enabled_var
         );
 
         // All WORKER_*_URL vars should be removed from hub env
@@ -6743,8 +7846,15 @@ services:
             context7: true,
             ..ResolvedIntegrationsConfig::default()
         };
-        let result =
-            render_compose("test-project", "/workspace", &config, &integrations, None).unwrap();
+        let result = render_compose(
+            "test-project",
+            "/workspace",
+            &config,
+            &integrations,
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
         let expected = container_user();
 
@@ -6840,6 +7950,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         }
     }
 
@@ -7118,6 +8229,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
@@ -7166,6 +8278,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let svc = plugin::generate_plugin_service(
             &manifest,
@@ -7261,6 +8374,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -7635,6 +8749,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
 
         // generate_plugin_service requires a port for MCP plugins,
@@ -8567,6 +9682,7 @@ networks:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         }];
 
         // Compose with plugin service already present (as apply_plugins would leave it)
@@ -8678,6 +9794,7 @@ services:
             mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge: None,
         };
         let violations = SecurityCheck::run(&yaml, "test", &[manifest], &test_expected_paths());
         assert!(
@@ -9454,6 +10571,7 @@ services:
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
+            &HostBridgesInfo::default(),
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -9679,10 +10797,16 @@ services:
         plugin_dir: &Path,
         mem_limit: Option<&str>,
     ) -> plugin::VerifiedPlugin {
-        // MCP plugins (service_id present) require a Containerfile per
-        // validate_manifest. Stub one in the fixture dir so apply_plugins
-        // re-validation passes the existence check and proceeds to the
-        // render-time invariants we actually want to test.
+        fixture_verified_plugin_full(slug, service_id, plugin_dir, mem_limit, None)
+    }
+
+    fn fixture_verified_plugin_full(
+        slug: &str,
+        service_id: Option<&str>,
+        plugin_dir: &Path,
+        mem_limit: Option<&str>,
+        host_bridge: Option<plugin::HostBridgeManifest>,
+    ) -> plugin::VerifiedPlugin {
         if service_id.is_some() {
             std::fs::create_dir_all(plugin_dir).ok();
             std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").ok();
@@ -9704,8 +10828,31 @@ services:
             mem_limit: mem_limit.map(String::from),
             cpu_limit: None,
             requires_integrations: vec![],
+            host_bridge,
         };
         plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
+    }
+
+    fn fixture_host_bridge_manifest(url_env: &str, token_env: &str) -> plugin::HostBridgeManifest {
+        // `validate_manifest` rejects empty roles, so seed one valid role.
+        let roles = std::collections::HashMap::from([(
+            "worker".to_string(),
+            plugin::HostBridgeRoleAuth::Header {
+                name: "x-bridge-auth".to_string(),
+            },
+        )]);
+        plugin::HostBridgeManifest {
+            url_env: url_env.into(),
+            token_env: token_env.into(),
+            roles,
+            origin_policy: plugin::HostBridgeOriginPolicy::default(),
+            max_frame_bytes: None,
+            collision_policy: plugin::HostBridgeCollisionPolicy::default(),
+            pending_slot_timeout_secs: None,
+            display_name: "Fixture".into(),
+            preferred_port: None,
+            persistent_token: false,
+        }
     }
 
     /// `apply_plugins` re-runs `validate_manifest` so a manifest whose
@@ -9722,13 +10869,17 @@ services:
         std::fs::create_dir_all(&plugin_dir).unwrap();
         // 999g is far above the 16 GiB cap. Re-validation must reject.
         let vp = fixture_verified_plugin("evil", Some("evil"), &plugin_dir, Some("999g"));
+        let cfg = fixture_integrations_with_enabled("evil");
         let result = super::apply_plugins_from_verified(
             fixture_compose_yaml(),
-            "test-project",
-            "/tmp/test",
-            &fixture_integrations_with_enabled("evil"),
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &super::HostBridgesInfo::default(),
+            },
             &[vp],
         );
         let err = result.expect_err("oversized mem_limit must be rejected at render");
@@ -9770,11 +10921,14 @@ services:
         let vp = fixture_verified_plugin("decoy", Some("decoy"), &plugin_dir, None);
         let err = super::apply_plugins_from_verified(
             yaml,
-            "test-project",
-            "/tmp/test",
-            &cfg,
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &super::HostBridgesInfo::default(),
+            },
             &[vp],
         )
         .expect_err("collision must abort the render");
@@ -9798,11 +10952,14 @@ services:
         let vp = fixture_verified_plugin("ok-plugin", Some("ok-plugin"), &plugin_dir, None);
         let yaml = super::apply_plugins_from_verified(
             fixture_compose_yaml(),
-            "test-project",
-            "/tmp/test",
-            &cfg,
-            "test-net",
-            tmp.path(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &super::HostBridgesInfo::default(),
+            },
             &[vp],
         )
         .expect("happy path must render");
@@ -9829,5 +10986,517 @@ services:
         std::fs::write(deep.join("ok.md"), b"hi").unwrap();
         super::ensure_resources_dir_safe(&plugin, &plugin.join("claude-resources"))
             .expect("deep real-directory tree must be accepted");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Host-bridge env injection (generic plugin host-bridge plumbing)
+    // ──────────────────────────────────────────────────────────────────────
+
+    fn render_with_host_bridge_plugin(
+        slug: &str,
+        url_env: &str,
+        token_env: &str,
+        bridges: &super::HostBridgesInfo,
+    ) -> anyhow::Result<String> {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join(slug);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin_full(
+            slug,
+            Some(slug),
+            &plugin_dir,
+            None,
+            Some(fixture_host_bridge_manifest(url_env, token_env)),
+        );
+        let cfg = fixture_integrations_with_enabled(slug);
+        super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges,
+            },
+            &[vp],
+        )
+    }
+
+    #[test]
+    fn test_render_compose_default_bridges_omits_host_bridge_env() {
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &super::HostBridgesInfo::default(),
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("FIGMA_BRIDGE_URL"),
+            "host-bridge env must NOT be injected when bridges is empty, got:\n{yaml}"
+        );
+        assert!(!yaml.contains("FIGMA_BRIDGE_TOKEN"));
+    }
+
+    #[test]
+    fn test_render_compose_with_host_bridge_registration_injects_url_and_token() {
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "figma".to_string(),
+                port: 54321,
+                auth_token: "test-token-abc".to_string(),
+                url_env: "FIGMA_BRIDGE_URL".to_string(),
+                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("FIGMA_BRIDGE_URL"),
+            "FIGMA_BRIDGE_URL must be injected, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("FIGMA_BRIDGE_TOKEN"),
+            "FIGMA_BRIDGE_TOKEN must be injected, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("54321"),
+            "port must appear in URL, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("test-token-abc"),
+            "token must appear in env, got:\n{yaml}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Local LLM: tokens_path / ensure_token_dir / read_local_llm_token /
+    // apply_llm_config for provider="local"
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tokens_path_resolves_for_local_llm() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = super::tokens_path_in(dir.path(), "myproj", "local-llm", "api_key").unwrap();
+        let expected = dir
+            .path()
+            .join("tokens")
+            .join("myproj")
+            .join("local-llm")
+            .join("api_key");
+        assert_eq!(p, expected);
+    }
+
+    #[test]
+    fn tokens_path_rejects_unknown_service() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::tokens_path_in(dir.path(), "myproj", "../etc", "api_key").is_err());
+        assert!(super::tokens_path_in(dir.path(), "myproj", "slack", "token").is_err());
+    }
+
+    #[test]
+    fn tokens_path_rejects_unknown_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::tokens_path_in(dir.path(), "myproj", "local-llm", "../passwd").is_err());
+        assert!(super::tokens_path_in(dir.path(), "myproj", "local-llm", "random").is_err());
+    }
+
+    #[test]
+    fn tokens_path_rejects_invalid_project_name() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::tokens_path_in(dir.path(), "../etc", "local-llm", "api_key").is_err());
+    }
+
+    #[test]
+    fn ensure_token_dir_creates_three_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let service_dir = super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
+
+        assert!(service_dir.is_dir());
+        assert!(dir.path().join("tokens").is_dir());
+        assert!(dir.path().join("tokens").join("myproj").is_dir());
+        assert!(dir
+            .path()
+            .join("tokens")
+            .join("myproj")
+            .join("local-llm")
+            .is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_token_dir_sets_0o700_on_all_levels() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
+
+        for level in &[
+            dir.path().join("tokens"),
+            dir.path().join("tokens").join("myproj"),
+            dir.path().join("tokens").join("myproj").join("local-llm"),
+        ] {
+            let mode = std::fs::metadata(level).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "expected 0o700 at {}, got 0o{mode:o}",
+                level.display()
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_token_dir_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
+        // Second call must succeed and not change tree.
+        super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
+    }
+
+    #[test]
+    fn apply_llm_config_local_provider_renders_with_dummy_when_no_key() {
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("my-model".to_string()),
+            base_url: Some("http://host.docker.internal:8080/anthropic".to_string()),
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let env = get_claude_env(&rendered);
+
+        // Dummy token when has_api_key=false.
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
+            "Expected dummy token, got env: {env:?}"
+        );
+        // Base URL with path prefix preserved.
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:8080/anthropic"),
+            "Base URL with path prefix lost, got env: {env:?}"
+        );
+        // Friendly label uses "Local".
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=my-model (Local)"),
+            "Expected 'Local' display label, got env: {env:?}"
+        );
+        // Custom headers NOT injected when has_custom_headers=false.
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_CUSTOM_HEADERS=")),
+            "Custom headers must not be injected when flag is false, got env: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_compose_host_bridge_url_uses_host_docker_internal() {
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "figma".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "FIGMA_BRIDGE_URL".to_string(),
+                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("ws://host.docker.internal:54321/"),
+            "URL must use host.docker.internal alias, got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn apply_llm_config_local_uses_default_base_url_when_none() {
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("foo".to_string()),
+            base_url: None,
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let env = get_claude_env(&rendered);
+        let expected = format!("ANTHROPIC_BASE_URL={}", default_base_url("local").unwrap());
+        assert!(
+            env.iter().any(|e| e == &expected),
+            "Expected default base_url for 'local', got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_compose_host_bridge_adds_extra_hosts_for_plugin_service() {
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "figma".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "FIGMA_BRIDGE_URL".to_string(),
+                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "figma",
+            "FIGMA_BRIDGE_URL",
+            "FIGMA_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let services = doc.get("services").and_then(|v| v.as_mapping()).unwrap();
+        let mcp_figma = services
+            .get(serde_yaml_ng::Value::String("mcp-figma".to_string()))
+            .and_then(|v| v.as_mapping())
+            .expect("mcp-figma service must be present");
+        let extra_hosts = mcp_figma
+            .get(serde_yaml_ng::Value::String("extra_hosts".to_string()))
+            .expect("mcp-figma needs extra_hosts for host.docker.internal");
+        let entries: Vec<String> = extra_hosts
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.starts_with("host.docker.internal:")),
+            "extra_hosts must include host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_from_verified_skips_bridge_for_plugins_without_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("notbridge");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin("notbridge", Some("notbridge"), &plugin_dir, None);
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "notbridge".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "SOMETHING_URL".to_string(),
+                token_env: "SOMETHING_TOKEN".to_string(),
+            }],
+        };
+        let cfg = fixture_integrations_with_enabled("notbridge");
+        let yaml = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &bridges,
+            },
+            &[vp],
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("SOMETHING_URL"),
+            "plugin without host_bridge manifest must NOT receive bridge env, got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_from_verified_skips_bridge_when_no_registration_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("figma");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin_full(
+            "figma",
+            Some("figma"),
+            &plugin_dir,
+            None,
+            Some(fixture_host_bridge_manifest(
+                "FIGMA_BRIDGE_URL",
+                "FIGMA_BRIDGE_TOKEN",
+            )),
+        );
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "other".to_string(),
+                port: 54322,
+                auth_token: "x".to_string(),
+                url_env: "OTHER_URL".to_string(),
+                token_env: "OTHER_TOKEN".to_string(),
+            }],
+        };
+        let cfg = fixture_integrations_with_enabled("figma");
+        let yaml = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            &super::ApplyPluginsCtx {
+                project_name: "test-project",
+                project_dir: "/tmp/test",
+                integrations: &cfg,
+                network_name: "test-net",
+                tokens_dir: tmp.path(),
+                bridges: &bridges,
+            },
+            &[vp],
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("FIGMA_BRIDGE_URL"),
+            "figma plugin declares host_bridge but no registration matches its slug, got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn default_base_url_for_local_matches_ollama() {
+        // Both resolve to the same canonical default — `local` is the new name
+        // for "an Anthropic-Messages-speaking server"; Ollama port is the most
+        // common starting point.
+        assert_eq!(default_base_url("local"), default_base_url("ollama"));
+    }
+
+    #[test]
+    fn provider_display_label_local_returns_local() {
+        assert_eq!(provider_display_label("local"), "Local");
+    }
+
+    /// Crash recovery invariant: if `update_llm_config` writes the token file
+    /// but a crash kills the process before `save_user_config` flips the
+    /// `has_api_key=true` flag, the orphaned token file is left on disk with
+    /// `has_api_key=false` in config. `apply_llm_config` must **ignore the
+    /// orphaned file** and fall back to the documented dummy. Otherwise an
+    /// abandoned token could silently leak into a future container render.
+    #[test]
+    fn apply_llm_config_ignores_orphaned_token_when_flag_is_false() {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+
+        let project = format!("crash-recovery-{}", std::process::id());
+        let dir = ensure_token_dir(&project, "local-llm")
+            .expect("ensure_token_dir must succeed in test env");
+        let api_key_path = dir.join("api_key");
+        // Simulate the orphan: a token written by an interrupted save that
+        // never reached config.json.
+        crate::fs_perms::write_restricted_file_atomic(&api_key_path, "leaked-secret-from-crash")
+            .expect("write must succeed");
+
+        // Config carries `has_api_key=false` (crash before flag flip).
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("test-model".to_string()),
+            base_url: Some("http://host.docker.internal:8080".to_string()),
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, &project).unwrap();
+        let env = get_claude_env(&rendered);
+
+        // Critical: dummy, not the orphaned secret.
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
+            "Orphaned token file MUST NOT leak when has_api_key=false. \
+             Got env: {env:?}"
+        );
+        assert!(
+            !env.iter().any(|e| e.contains("leaked-secret-from-crash")),
+            "Leaked secret must not appear in rendered YAML: {env:?}"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&api_key_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// CRITICAL: multi-line `ANTHROPIC_CUSTOM_HEADERS` (one `Name: Value` per
+    /// line in the on-disk token file) must be flattened to a single-line,
+    /// comma-separated env entry before injection. nerdctl-compose / Docker
+    /// Compose YAML parsers reject block literals inside an `environment:`
+    /// sequence — a multi-line scalar produces `yaml: line N: could not find
+    /// expected ':'` and `compose up` fails. Claude Code's
+    /// `ANTHROPIC_CUSTOM_HEADERS` parser accepts both newline- and
+    /// comma-separated forms, so flattening is lossless.
+    ///
+    /// Test guarantees:
+    /// 1. The injected env var value is present in the YAML environment list.
+    /// 2. The value is a single line (no `\n`), with each header joined by
+    ///    `, ` separators.
+    /// 3. Every original header survives intact.
+    /// 4. The rendered YAML re-parses cleanly (defensive check against future
+    ///    regressions that might re-introduce block-literal serialisation).
+    #[test]
+    fn apply_llm_config_multiline_custom_headers_survives_yaml_roundtrip() {
+        use std::sync::Mutex;
+        // Serialize across test threads — apply_llm_config reads from the
+        // real `tokens_path` which is global state. Each invocation uses a
+        // unique project name so per-project files do not collide.
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+
+        let project = format!("custom-headers-roundtrip-{}", std::process::id());
+        let dir = ensure_token_dir(&project, "local-llm")
+            .expect("ensure_token_dir must succeed in test env");
+        let headers_path = dir.join("custom_headers");
+        let multiline = "X-Foo: bar\nX-Tenant-ID: acme\nOcp-Apim-Subscription-Key: secret-123";
+        crate::fs_perms::write_restricted_file_atomic(&headers_path, multiline)
+            .expect("write_restricted_file_atomic must succeed");
+
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("test-model".to_string()),
+            base_url: Some("http://host.docker.internal:8080".to_string()),
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: true,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, &project).unwrap();
+
+        // Step 1: the env entry is present as a string.
+        let env = get_claude_env(&rendered);
+        let entry = env
+            .iter()
+            .find(|e| e.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
+            .unwrap_or_else(|| panic!("ANTHROPIC_CUSTOM_HEADERS not injected: {env:?}"));
+        let value = entry
+            .strip_prefix("ANTHROPIC_CUSTOM_HEADERS=")
+            .expect("env entry must start with prefix");
+
+        // Step 2: value is single-line, comma-joined, with every original
+        // header preserved.
+        assert!(
+            !value.contains('\n'),
+            "ANTHROPIC_CUSTOM_HEADERS must be a single line (nerdctl-compose \
+             rejects block literals inside an environment: sequence), got: {value:?}"
+        );
+        for header in multiline.split('\n') {
+            assert!(
+                value.contains(header),
+                "header {header:?} missing after flattening, got: {value:?}"
+            );
+        }
+        // Step 3: full re-parse defends against future serialiser changes
+        // that might re-introduce block literals.
+        let _: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendered)
+            .expect("rendered compose must re-parse — block-literal regression?");
+
+        // Cleanup — best-effort, errors here would mask the assertion above.
+        let _ = std::fs::remove_file(&headers_path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

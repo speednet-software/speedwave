@@ -38,6 +38,8 @@ Speedwave ships as an NSIS installer (`.exe`); an MSI is also published for mana
 
 Speedwave does not modify your default WSL distro and does not require Docker Desktop. The `Speedwave` distro is dedicated to Speedwave. When you uninstall Speedwave via Add/Remove Programs, the uninstaller will offer an opt-in prompt to also remove the `Speedwave` WSL distro and user data (`%USERPROFILE%\.speedwave`). If you already have a phantom `Speedwave` distro from an earlier uninstall (v0.10.0 or before), remove it manually with `wsl --unregister Speedwave` before reinstalling.
 
+The v0.11+ installer automatically releases the bundled `node.exe` (host MCP workers) before overwriting it, so upgrading while Speedwave is running no longer fails with "Error opening file for writing". This is enforced by two layers: a Windows Job Object that ties every worker's lifetime to `Speedwave.exe` (so a crash kills the workers automatically), plus a NSIS PRE-INSTALL sweep that catches any orphan that survived. If you are still on v0.10.x and hit that error, close Speedwave from the system tray, end any leftover `Node.js JavaScript Runtime` processes in Task Manager, and re-run the installer — once you are on v0.11+ this is handled automatically.
+
 If the auto-install fails (locked-down corporate machine, Group Policy, etc.), enable WSL2 manually from an elevated PowerShell and retry:
 
 ```powershell
@@ -65,6 +67,39 @@ speedwave check OK -- all system checks passed
 If a check fails, the command prints the failing rule and a remediation hint, then exits non-zero. Re-run after applying the fix.
 
 The Desktop app surfaces the same checks plus per-container health and IDE-bridge status, refreshed every 5 s.
+
+## WSL-native workflow
+
+Speedwave on Windows runs inside its own dedicated WSL2 distribution named **Speedwave**. The hardened container runtime (cap_drop ALL, read_only filesystem, token isolation per worker — see [Container architecture](../architecture/containers.md)) lives in that distro and **cannot access files inside other WSL distributions** at native speed. This is the same architectural choice every isolated container runtime makes on Windows (Docker Desktop, Rancher Desktop, Podman Desktop) — each ships its own dedicated WSL distro rather than installing into the user's distro.
+
+> **Note on Docker Desktop comparison**: Docker Desktop offers "WSL Integration" that injects the `docker` CLI into the user's distros via `/mnt/wsl/docker-desktop/`. Speedwave does not do this — Speedwave is operated through the Desktop UI or the bundled `speedwave` CLI on Windows, so there is no use case for "run the Speedwave CLI from inside my Ubuntu distro". The two products solve different problems.
+
+### Where to keep your projects
+
+Three workflows work well; choose based on where your code already lives:
+
+1. **Recommended for new projects** — keep them inside Speedwave's distro at `\\wsl.localhost\Speedwave\projects\<name>\`. Native ext4 performance, accessible from Windows Explorer and natively visible to Speedwave's container. Create the folder once from PowerShell:
+
+   ```powershell
+   New-Item -Path '\\wsl.localhost\Speedwave\projects\my-project' -ItemType Directory
+   ```
+
+2. **Migrating an existing project from your own WSL distro** — copy it once into Speedwave's distro:
+
+   ```powershell
+   Copy-Item -Recurse '\\wsl.localhost\Ubuntu\home\<you>\<project>' '\\wsl.localhost\Speedwave\projects\<project>'
+   ```
+
+   The copy lives independently from the original; edits in your Ubuntu distro will not propagate to the Speedwave copy and vice versa.
+
+3. **Cross-distro accessibility** — keep the project on a Windows drive like `C:\projects\<name>\`. Visible to your Ubuntu distro as `/mnt/c/projects/<name>` and to Speedwave's container as `/workspace`. File I/O is slower (NTFS via 9P from both sides) — Microsoft explicitly [recommends against this for intensive I/O](https://learn.microsoft.com/en-us/windows/wsl/filesystems#file-storage-and-performance-across-file-systems) — but it works from any WSL distro.
+
+### What does not work and why
+
+- **In-place use of `\\wsl.localhost\<other-distro>\...`** — Speedwave's container runs in an isolated distro and cannot see other WSL distros' rootfs natively. Selecting such a path in "Create new project" surfaces a helpful error with the options above. (Docker Desktop solves this differently — it built an API proxy plus a cross-distro VHD binding mechanism over several years to give containers transparent access to user-distro files. Speedwave does not have this; the workflow above is the supported path.)
+- **Installing Speedwave into your own WSL distro** — not supported. The security model (hardened isolation, token isolation per worker, separate containerd) depends on the dedicated distro boundary.
+
+See [ADR-064: Bypass `canonicalize()` for WSL UNC project paths](../adr/ADR-064-canonicalize-bypass-for-wsl-unc.md) for the architectural rationale behind how WSL UNC project paths are validated and translated.
 
 ## Logging in to Anthropic
 

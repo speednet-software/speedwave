@@ -12,7 +12,7 @@
  * @interface GitHubConfig
  */
 export interface GitHubConfig {
-  /** GitHub Personal Access Token (fine-grained or classic) used for API authentication */
+  /** GitHub access token — OAuth App user token (from device flow) or PAT (advanced fallback). */
   token: string;
   /** Optional API base URL. Defaults to https://api.github.com for github.com. GHES not supported in v1. */
   baseUrl?: string;
@@ -330,15 +330,5 @@ export interface GitHubCommitComparison {
   status: string;
 }
 
-/**
- * Result of a GitHub API connection test with error categorization.
- * @interface ConnectionTestResult
- */
-export interface ConnectionTestResult {
-  /** True if the connection test succeeded */
-  success: boolean;
-  /** Human-readable error message when the test failed */
-  error?: string;
-  /** Categorized error type for downstream handling */
-  errorType?: 'auth' | 'network' | 'permission' | 'not_found' | 'unknown';
-}
+// ConnectionTestResult moved to @speedwave/mcp-shared (SSOT). Import directly
+// from the shared package; this worker no longer defines its own variant.

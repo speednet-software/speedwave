@@ -28,6 +28,7 @@ const MOCK_PLUGINS = {
           field_type: 'password',
           placeholder: 'Enter key',
           is_secret: true,
+          required: true,
         },
       ],
       current_values: {},
@@ -35,6 +36,7 @@ const MOCK_PLUGINS = {
       settings_schema: null,
       requires_integrations: [],
       verification_status: 'verified',
+      has_host_bridge: false,
     },
     {
       slug: 'my-commands',
@@ -50,6 +52,7 @@ const MOCK_PLUGINS = {
       settings_schema: null,
       requires_integrations: [],
       verification_status: 'verified',
+      has_host_bridge: false,
     },
   ],
 };
@@ -782,6 +785,7 @@ describe('PluginsComponent', () => {
                   requires_integrations: [],
                   verification_status: 'invalid_signature',
                   verification_error: 'Ed25519 verification failed',
+                  has_host_bridge: false,
                 },
               ],
             };

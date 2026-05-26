@@ -112,6 +112,33 @@ In short: treat any enabled Host Exec recipe as "this repository's code, on my m
 
 All MCP workers listen on the same internal port (`PORT_WORKER`, see [ADR-038](../adr/ADR-038-single-internal-worker-port.md)) inside their own container namespaces; the hub disambiguates workers by DNS service name. Port numbers carry no security weight — the three pillars above (token, network, hardening) do not depend on per-worker port uniqueness.
 
+## Host Bridges
+
+Speedwave Desktop runs the IDE Bridge on the generic host-bridge
+skeleton (`desktop/src-tauri/src/bridges/host_bridge.rs`, see
+[ADR-063](../adr/ADR-063-host-bridge-generic.md)). It pairs Claude Code
+(in the container) with a local IDE on the host (Endpoint mode). Lock
+file: `~/.speedwave/ide-bridge/<port>.lock`. Mounted into the container
+as `/home/speedwave/.claude/ide/` (`:ro`).
+
+Security invariants:
+
+- **Bind only to `127.0.0.1`** (kernel-assigned port). Not reachable from
+  LAN.
+- **UUID v4 auth token per session** (regenerated on every Desktop
+  start; never persisted across restarts).
+- **Constant-time token comparison** prevents timing side channels.
+- **Origin header policy** rejects browser CSRF (`RejectIfPresent`).
+- **Lock file `0o600` in `0o700` parent dir** — token unreadable by other
+  users on the host. Atomic write via `tempfile::NamedTempFile::persist`
+  closes the partial-write window.
+- **Token never logged.** `HostBridge::Debug` redacts the token; the
+  Desktop event channel emits role + state only.
+
+Residual risk: a user-mode process running as the same UID as the
+Desktop can read the lock file. This matches the platform assumption
+that same-uid processes are inside the trust boundary.
+
 ## Executor Sandbox (MCP Hub)
 
 The MCP Hub executes model-generated JavaScript in a restricted `AsyncFunction` sandbox. Security is provided by multiple layers:
@@ -129,7 +156,7 @@ The MCP Hub HTTP bridge validates all outbound worker URLs at the single resolut
 point (`getWorkerUrl()`) before any `fetch()` call:
 
 - **Canonical URL allowlist**: Only Docker internal service names (`mcp-*`) and
-  platform host gateways (`host.{lima,docker,containers,speedwave}.internal`) are accepted
+  the canonical host gateway alias `host.docker.internal` are accepted
 - **Port enforcement**: Port must be present and in range 1-65535
 - **Protocol enforcement**: Only `http:` (internal Docker network, no TLS needed)
 - **No pathname/query**: Worker URLs must be bare endpoints
@@ -173,6 +200,8 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 | `NO_SOCKET_CLAUDE`            | claude                    | No `docker.sock` or `nerdctl.sock` volume mounts                                                 |
 | `NO_EXTERNAL_LLM_KEYS_CLAUDE` | claude                    | No `OPENAI_*`, `GEMINI_*`, `DEEPSEEK_*`, `OPENROUTER_*` env vars (these belong in the LLM proxy) |
 | `NO_PORTS_WORKERS`            | Built-in MCP workers      | Built-in services must not expose ports at all — inter-container communication uses Docker DNS   |
+
+**Host-gateway alias distribution.** `host.docker.internal` is statically present in `extra_hosts` for `claude` and `mcp-playwright` (see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)), and dynamically injected for `mcp-hub` and OAuth-consumer services by `ensure_host_gateway_extra_host()`. Other built-in workers (slack, github, gitlab, atlassian, redmine, context7, office) have no host-side dependency and therefore no `extra_hosts` entry. The underlying IP routing to the VM gateway exists for every container regardless — the alias only adds DNS convenience.
 
 ### Container User Rule
 
@@ -437,9 +466,20 @@ Compromising the **Apple Developer ID key alone** is sufficient to ship malware 
 
 Treat the Apple Developer ID as the primary secret. The Tauri key is a defense-in-depth layer against compromises of the GitHub release infrastructure, not a substitute for Apple Developer ID protection.
 
+## Windows Host MCP Worker Lifecycle (Job Object)
+
+On Windows, every host MCP worker (`mcp-os`, `host_exec`, `oauth`) is attached at spawn to a Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK`. Parent (`Speedwave.exe`) crash → kernel closes the Job handle → child `node.exe` terminates automatically. The NSIS `NSIS_HOOK_PREINSTALL` sweep is the fallback for orphans that survive the parent (e.g. v0.10.x workers spawned before Job Object support shipped). See [ADR-048](../adr/ADR-048-windows-uninstall-cleanup.md) §"PRE-INSTALL orphan worker sweep" for the architectural decision.
+
+### Accepted residual risks
+
+- **`JOB_OBJECT_LIMIT_BREAKAWAY_OK` permits descendants to escape the job.** A `host_exec` recipe that runs a tool which spawns with `CREATE_BREAKAWAY_FROM_JOB` (UAC elevation prompts, MSI subprocesses, some `cmd /c start /b` patterns) produces a descendant that survives a parent crash. This is intentional — without the flag those legitimate spawns fail with `ERROR_ACCESS_DENIED` and `host_exec` recipes silently break. The NSIS PRE-INSTALL sweep is the safety net: it kills any orphan whose `ExecutablePath` is under `$INSTDIR\nodejs\` regardless of how it escaped.
+- **TOCTOU window between `Command::spawn` and `AssignProcessToJobObject`** (~microseconds, unbounded under heavy scheduler load). Grandchildren spawned in that window inherit no job and survive parent crash. The atomic fix (`PROC_THREAD_ATTRIBUTE_JOB_LIST` in `STARTUPINFOEX`, or `CREATE_SUSPENDED` + `ResumeThread`) requires bypassing `std::process::Command` and is deferred. Mitigations: (a) host MCP workers do not spawn grandchildren during their synchronous startup phase, (b) the NSIS sweep catches any orphan that does slip through.
+- **`AssignProcessToJobObject` failure in nested-job environments** (debugger, Windows Sandbox, MSIX container, PCA compatibility job) returns `ERROR_ACCESS_DENIED`. Parent-crash protection is disabled for that worker; the code logs at error level and the NSIS sweep remains the only orphan defence on next install.
+
 ## See Also
 
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)
+- [ADR-048: Windows Uninstall Cleanup (incl. PRE-INSTALL orphan sweep)](../adr/ADR-048-windows-uninstall-cleanup.md)
 - [ADR-059: Drop Linux Support](../adr/ADR-059-drop-linux-support.md)
 - [ADR-037: Code Signing and Bundled Binary Signing](../adr/ADR-037-code-signing-and-bundled-binary-signing.md)
 - [ADR-051: Plugin Signature Runtime Verification](../adr/ADR-051-plugin-signature-runtime-verification.md)

@@ -15,6 +15,7 @@ import { IntegrationsResponse } from '../../models/integration';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { BridgeConnectionComponent } from '../bridge-connection/bridge-connection.component';
 
 /** Tabs available in the plugin-detail view. */
 export type PluginDetailTab = 'dashboard' | 'settings' | 'tools' | 'logs';
@@ -29,7 +30,13 @@ interface ExposedTool {
 /** Detail page for a single plugin with Dashboard / Settings / Tools / Logs tabs. */
 @Component({
   selector: 'app-plugin-detail',
-  imports: [CommonModule, PluginSettingsFormComponent, ProjectPillComponent, TooltipDirective],
+  imports: [
+    CommonModule,
+    PluginSettingsFormComponent,
+    ProjectPillComponent,
+    TooltipDirective,
+    BridgeConnectionComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -301,6 +308,10 @@ interface ExposedTool {
                 >
                   Plugin dashboard content will appear here.
                 </p>
+              }
+
+              @if (plugin.has_host_bridge) {
+                <app-bridge-connection [slug]="plugin.slug" />
               }
 
               <div

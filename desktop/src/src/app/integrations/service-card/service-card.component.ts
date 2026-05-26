@@ -136,20 +136,44 @@ export interface SaveCredentialsEvent {
                 @if (
                   !deviceCodeInfo() && oauthStatus() !== 'polling' && oauthStatus() !== 'starting'
                 ) {
-                  <button
-                    type="button"
-                    class="mono rounded ring-1 ring-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90"
-                    (click)="onStartOAuth()"
-                  >
-                    Sign in with Microsoft
-                  </button>
+                  @if (svc().configured) {
+                    <button
+                      type="button"
+                      class="mono text-[11px] text-[var(--ink-dim)] underline decoration-dotted underline-offset-2 hover:text-[var(--ink)]"
+                      data-testid="btn-reconnect-oauth"
+                      (click)="onStartOAuth()"
+                    >
+                      Reconnect to {{ oauthProviderLabel() }}
+                    </button>
+                  } @else {
+                    <button
+                      type="button"
+                      class="mono rounded ring-1 ring-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                      data-testid="btn-start-oauth"
+                      [disabled]="!oauthPrerequisitesMet()"
+                      [attr.title]="
+                        oauthPrerequisitesMet() ? null : oauthPrerequisitesMissingMessage()
+                      "
+                      (click)="onStartOAuth()"
+                    >
+                      Sign in with {{ oauthProviderLabel() }}
+                    </button>
+                    @if (!oauthPrerequisitesMet()) {
+                      <p
+                        class="mono mt-2 text-[11px] text-[var(--ink-dim)]"
+                        data-testid="oauth-prereq-hint"
+                      >
+                        {{ oauthPrerequisitesMissingMessage() }}
+                      </p>
+                    }
+                  }
                 }
                 @if (oauthStatus() === 'starting') {
                   <p
                     class="mono text-[12px] text-[var(--ink-dim)] my-2"
                     data-testid="polling-status"
                   >
-                    Connecting to Microsoft...
+                    Connecting to {{ oauthProviderLabel() }}...
                   </p>
                   <button
                     type="button"
@@ -175,7 +199,7 @@ export interface SaveCredentialsEvent {
                       data-testid="btn-link"
                       (click)="openVerificationUrl.emit(info.verification_uri)"
                     >
-                      Open Microsoft Sign-in
+                      Open {{ oauthProviderLabel() }} Sign-in
                     </button>
                     <span
                       class="mono text-[11px] text-[var(--ink-dim)] select-all break-all"
@@ -214,21 +238,32 @@ export interface SaveCredentialsEvent {
             }
 
             <div class="flex gap-3 mt-4">
-              <button
-                type="submit"
-                class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-50"
-                [attr.data-testid]="'integrations-save-' + svc().service"
-              >
-                Save
-              </button>
-              <button
-                type="button"
-                class="mono rounded ring-1 ring-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10"
-                [attr.data-testid]="'integrations-remove-' + svc().service"
-                (click)="deleteCredentials.emit(svc())"
-              >
-                Remove Credentials
-              </button>
+              <!--
+                Save button only for classic-form services (no OAuth flow).
+                When an OAuth flow exists (SharePoint, GitHub), the Sign in /
+                Reconnect button persists every non-OAuth field via
+                save_integration_credentials before kicking off the flow,
+                so an explicit Save is redundant.
+              -->
+              @if (hasNonOAuthFields() && !hasOAuthFields()) {
+                <button
+                  type="submit"
+                  class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-50"
+                  [attr.data-testid]="'integrations-save-' + svc().service"
+                >
+                  Save
+                </button>
+              }
+              @if (svc().configured) {
+                <button
+                  type="button"
+                  class="mono rounded ring-1 ring-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10"
+                  [attr.data-testid]="'integrations-remove-' + svc().service"
+                  (click)="deleteCredentials.emit(svc())"
+                >
+                  Remove Credentials
+                </button>
+              }
             </div>
           </form>
         </div>
@@ -255,6 +290,23 @@ export class ServiceCardComponent {
   readonly openVerificationUrl = output<string>();
 
   editedValues: Record<string, string> = {};
+
+  /**
+   * Provider label used in OAuth button copy. Hardcoded per service id —
+   * the worker descriptor in `consts.rs` does not (yet) carry an `oauth_provider_label`
+   * field; adding one for two services is over-engineering today (Rule of Three).
+   * @returns the IdP brand name shown to users (e.g. "Microsoft", "GitHub")
+   */
+  oauthProviderLabel(): string {
+    switch (this.svc().service) {
+      case 'sharepoint':
+        return 'Microsoft';
+      case 'github':
+        return 'GitHub';
+      default:
+        return 'provider';
+    }
+  }
 
   /**
    * Semantic status dot key — drives both the tinted dot colour and a
@@ -302,6 +354,35 @@ export class ServiceCardComponent {
    */
   hasOAuthFields(): boolean {
     return this.svc().auth_fields.some((f) => f.oauth_flow);
+  }
+
+  /** Typed prerequisites for the OAuth button. */
+  private oauthPrerequisiteFields() {
+    return this.svc().auth_fields.filter((f) => !f.oauth_flow && !f.optional);
+  }
+
+  /** True when every typed prerequisite has a non-blank value. */
+  oauthPrerequisitesMet(): boolean {
+    return this.oauthPrerequisiteFields().every((f) => this.getFieldValue(f.key).trim() !== '');
+  }
+
+  /** Hint listing the typed prerequisites still missing, empty when all set. */
+  oauthPrerequisitesMissingMessage(): string {
+    const missing = this.oauthPrerequisiteFields()
+      .filter((f) => this.getFieldValue(f.key).trim() === '')
+      .map((f) => f.label);
+    if (missing.length === 0) return '';
+    return `Fill in ${missing.join(', ')} above to enable sign-in.`;
+  }
+
+  /**
+   * Returns whether any auth fields are NOT OAuth-driven (i.e. need a Save
+   * button because the user types them into the form). For services where
+   * every field is `oauth_flow: true` (e.g. GitHub OAuth App), the Save
+   * button is suppressed — the token is persisted by the polling task.
+   */
+  hasNonOAuthFields(): boolean {
+    return this.svc().auth_fields.some((f) => !f.oauth_flow);
   }
 
   /**

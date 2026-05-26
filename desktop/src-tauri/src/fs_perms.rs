@@ -1,20 +1,33 @@
-//! Cross-platform file permission utilities.
+//! Cross-platform file/directory permission utilities.
 //!
-//! On Unix: sets mode 0o600 (owner read/write only).
+//! On Unix: sets mode 0o600 (file) or 0o700 (directory) — owner only.
 //! On Windows: replaces the DACL with a single ACE granting GENERIC_ALL
-//! to the current user only (equivalent of 0o600).
+//! to the current user only. The Win32 SE_FILE_OBJECT type covers both
+//! regular files and directories, so the ACL helper is shared.
 
 /// Restrict file permissions to owner-only access.
 /// - Unix: `chmod 600`
 /// - Windows: DACL with a single GENERIC_ALL ACE for the current user
-///
-/// Returns `Ok(())` on success, or an error string on failure. **Windows ACL
-/// failure is propagated as `Err`** (previously swallowed) — see PR1 / ADR-060.
 pub fn set_owner_only(path: &std::path::Path) -> Result<(), String> {
+    set_owner_only_with_mode(path, 0o600)
+}
+
+/// Restrict directory permissions to owner-only access.
+/// - Unix: `chmod 700`
+/// - Windows: DACL with a single GENERIC_ALL ACE for the current user
+pub fn set_owner_only_dir(path: &std::path::Path) -> Result<(), String> {
+    set_owner_only_with_mode(path, 0o700)
+}
+
+/// SSOT for `set_owner_only` and `set_owner_only_dir`. Unix mode differs
+/// between files (`0o600`) and dirs (`0o700`); on Windows
+/// `SE_FILE_OBJECT` handles both regular files and directories, so the
+/// ACL helper is shared and `_mode` is ignored there.
+fn set_owner_only_with_mode(path: &std::path::Path, _mode: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(_mode))
             .map_err(|e| e.to_string())?;
     }
 
@@ -105,6 +118,45 @@ mod tests {
     }
 
     #[test]
+    fn set_owner_only_dir_sets_700_on_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("subdir");
+        std::fs::create_dir(&target).unwrap();
+
+        set_owner_only_dir(&target).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
+        }
+    }
+
+    #[test]
+    fn set_owner_only_dir_works_on_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("existing");
+        std::fs::create_dir(&target).unwrap();
+        // Place a file inside — perms change on dir must not affect contents.
+        std::fs::write(target.join("file.txt"), b"contents").unwrap();
+
+        set_owner_only_dir(&target).unwrap();
+
+        let content = std::fs::read_to_string(target.join("file.txt")).unwrap();
+        assert_eq!(content, "contents");
+    }
+
+    #[test]
+    fn set_owner_only_dir_fails_on_nonexistent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("does_not_exist");
+
+        let result = set_owner_only_dir(&target);
+        assert!(result.is_err(), "should fail on nonexistent directory");
+    }
+
+    #[test]
     fn set_owner_only_tightens_world_readable_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("loose.txt");
@@ -132,9 +184,9 @@ mod tests {
 }
 
 /// Restrict a file to the current user only via Windows ACL.
-/// **Returns `Err` on any Win32 failure** — the caller must treat the file as
-/// world-readable and remove/quarantine it. Previously logged a warning and
-/// returned silently, leaving secrets exposed. Fixed in PR1.
+/// **Returns `Err` on any Win32 failure** — the caller must treat the file
+/// as world-readable and remove/quarantine it, since a silent failure would
+/// leave secrets exposed on disk.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn set_windows_acl_owner_only(path: &std::path::Path) -> Result<(), String> {

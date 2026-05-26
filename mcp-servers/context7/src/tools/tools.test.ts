@@ -22,9 +22,9 @@ function makeStubClient(): Context7Client & {
   };
 }
 
-describe('resolve_library_id metadata', () => {
+describe('resolveLibraryId metadata', () => {
   it('exposes name, schema, examples', () => {
-    expect(resolveLibraryIdTool.name).toBe('resolve_library_id');
+    expect(resolveLibraryIdTool.name).toBe('resolveLibraryId');
     expect(resolveLibraryIdTool.inputSchema.type).toBe('object');
     expect(resolveLibraryIdTool.inputSchema.required).toEqual(['libraryName', 'query']);
     expect(resolveLibraryIdTool.annotations?.readOnlyHint).toBe(true);
@@ -32,7 +32,7 @@ describe('resolve_library_id metadata', () => {
   });
 });
 
-describe('resolve_library_id handler', () => {
+describe('resolveLibraryId handler', () => {
   it('rejects missing libraryName', async () => {
     const client = makeStubClient();
     const { handler } = createResolveLibraryIdTool(client);
@@ -94,15 +94,15 @@ describe('resolve_library_id handler', () => {
   });
 });
 
-describe('query_docs metadata', () => {
+describe('queryDocs metadata', () => {
   it('exposes name, schema, examples', () => {
-    expect(queryDocsTool.name).toBe('query_docs');
+    expect(queryDocsTool.name).toBe('queryDocs');
     expect(queryDocsTool.inputSchema.required).toEqual(['libraryId', 'query']);
     expect(queryDocsTool.annotations?.readOnlyHint).toBe(true);
   });
 });
 
-describe('query_docs handler', () => {
+describe('queryDocs handler', () => {
   it('rejects missing libraryId', async () => {
     const client = makeStubClient();
     const { handler } = createQueryDocsTool(client);

@@ -1,24 +1,51 @@
 #!/bin/bash
-# Clipboard wrapper — five symlinks (pbcopy/xclip/xsel/wl-copy/clip.exe)
-# point here. Two channels (both write-only):
-#   1. Bridge file: stdin → ~/.clipboard-bridge (the Tauri desktop process
-#      watches it and copies to the host clipboard). Works in any terminal.
-#      NOTE: the filename ".clipboard-bridge" must match BRIDGE_FILENAME in
-#      desktop/src-tauri/src/clipboard_bridge.rs (cross-checked by a test in
-#      _tests/entrypoint/osc52-copy.bats).
-#   2. OSC 52: emits ESC]52;c;<base64>BEL on /dev/tty for terminals that honor
-#      it (iTerm2, Alacritty, Windows Terminal, etc.). No-op on Apple Terminal.
-# Errors on either channel are reported to stderr (Claude Code shows it in the
-# TTY) but the script always exits 0 so Claude's "press c" detection keeps
-# working. See ADR-052.
+# Clipboard wrapper (ADR-052). Five symlinks (pbcopy/xclip/xsel/wl-copy/clip.exe)
+# point here; routes by -o/--out/--paste flag presence.
+#
+# Write: stdin → ~/.clipboard-bridge (Tauri watcher relays to host) + OSC 52 on /dev/tty.
+# Read:  serve /workspace/.speedwave/pastes/clip.png to xclip -t TARGETS/-t image/png -o.
 
-# `set -f` disables filename globbing so the base64 blob and the raw input are
-# never expanded as shell patterns.
 set -f
 
+is_read=0
+for arg in "$@"; do
+    case "$arg" in
+        -o|--out|-out|--output|--paste) is_read=1; break ;;
+    esac
+done
+
+CLIP_FILE="${SPEEDWAVE_CLIP_FILE:-/workspace/.speedwave/pastes/clip.png}"
+
+if [ "$is_read" -eq 1 ]; then
+    mime=""
+    prev=""
+    for arg in "$@"; do
+        if [ "$prev" = "-t" ] || [ "$prev" = "--type" ]; then
+            mime="$arg"
+        fi
+        prev="$arg"
+    done
+
+    case "$mime" in
+        TARGETS|targets)
+            if [ -s "$CLIP_FILE" ]; then printf 'image/png\n'; exit 0; fi
+            exit 1
+            ;;
+        image/png|"")
+            if [ -s "$CLIP_FILE" ]; then exec cat -- "$CLIP_FILE"; fi
+            echo "osc52-copy: no image in host clipboard ($CLIP_FILE)" >&2
+            exit 1
+            ;;
+        *)
+            echo "osc52-copy: unsupported read mime '$mime'" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# Write path.
 input=$(cat)
 
-# Channel 1: bridge file (atomic write via temp + mv).
 bridge="${HOME}/.clipboard-bridge"
 tmp="${bridge}.tmp.$$"
 if ! printf '%s' "$input" > "$tmp" 2>/dev/null || ! mv "$tmp" "$bridge" 2>/dev/null; then
@@ -26,7 +53,6 @@ if ! printf '%s' "$input" > "$tmp" 2>/dev/null || ! mv "$tmp" "$bridge" 2>/dev/n
 fi
 rm -f "$tmp" 2>/dev/null
 
-# Channel 2: OSC 52 on TTY.
 encoded=$(printf '%s' "$input" | (base64 -w 0 2>/dev/null || base64))
 seq=$'\033]52;c;'"${encoded}"$'\007'
 if (exec 9>/dev/tty) 2>/dev/null; then

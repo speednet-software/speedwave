@@ -6,8 +6,19 @@ import { describe, it, expect } from 'vitest';
 import { createChannelTools } from './channel-tools.js';
 import { createUserTools } from './user-tools.js';
 import { ToolDefinition } from '@speedwave/mcp-shared';
+import type { SlackClients } from '../client.js';
 
-const allTools: ToolDefinition[] = [...createChannelTools(null), ...createUserTools(null)];
+/** Helper: clients object representing "tokens missing" — replaces null. */
+const stubClients: SlackClients = {
+  bot: {} as any,
+  user: {} as any,
+  _tokensStatus: 'missing',
+};
+
+const allTools: ToolDefinition[] = [
+  ...createChannelTools(stubClients),
+  ...createUserTools(stubClients),
+];
 
 describe('tool metadata', () => {
   it('should have at least one tool defined', () => {

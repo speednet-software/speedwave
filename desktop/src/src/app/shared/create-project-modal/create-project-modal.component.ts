@@ -123,7 +123,7 @@ export interface CreatedProject {
 
           @if (error()) {
             <div
-              class="mono mt-3 rounded border border-red-500/30 bg-red-500/5 p-2 text-[11.5px] text-red-300"
+              class="mono mt-3 max-h-96 overflow-y-auto whitespace-pre-wrap rounded border border-red-500/30 bg-red-500/5 p-2 text-[11.5px] text-red-300"
               data-testid="create-project-error"
               role="alert"
             >

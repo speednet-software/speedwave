@@ -15,7 +15,14 @@
 import { Octokit } from '@octokit/rest';
 import { throttling } from '@octokit/plugin-throttling';
 import { retry } from '@octokit/plugin-retry';
-import { loadToken, ts, withSetupGuidance } from '@speedwave/mcp-shared';
+import {
+  loadToken,
+  ts,
+  withSetupGuidance,
+  ConnectionStatusTracker,
+  backgroundConnectionTest,
+} from '@speedwave/mcp-shared';
+import type { HealthStatus } from '@speedwave/mcp-shared';
 import type {
   GitHubConfig,
   GitHubRepo,
@@ -33,8 +40,8 @@ import type {
   GitHubComment,
   GitHubReviewComment,
   GitHubCommitComparison,
-  ConnectionTestResult,
 } from './types.js';
+import type { ConnectionTestResult } from '@speedwave/mcp-shared';
 
 // Re-export the key types so consumers (the tools layer) can import them from the client too.
 export type {
@@ -54,8 +61,8 @@ export type {
   GitHubComment,
   GitHubReviewComment,
   GitHubCommitComparison,
-  ConnectionTestResult,
 } from './types.js';
+export type { ConnectionTestResult } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Octokit composition (rate-limit throttling + transient-error retry)
@@ -186,6 +193,13 @@ function classifyOctokitError(error: unknown): ErrorCategory {
 export class GitHubClient {
   private octokit: InstanceType<typeof MyOctokit>;
   private config: GitHubConfig;
+  /** Connection status tracker. Updated by background test scheduled in init. */
+  public readonly statusTracker = new ConnectionStatusTracker();
+
+  /** Shared health snapshot. Read by the index.ts healthCheck callback. */
+  getHealthStatus(): HealthStatus {
+    return this.statusTracker.getHealth();
+  }
 
   /**
    * Creates a new GitHub API client instance with authentication.
@@ -549,7 +563,7 @@ export class GitHubClient {
         if (err.response?.headers?.['x-ratelimit-remaining'] === '0') {
           return 'GitHub API rate limit exceeded. Try again later.';
         }
-        return "Permission denied. Your GitHub fine-grained PAT may be missing a required permission (e.g. Issues, Pull requests, Contents, or Actions: Read/Write). Check the token's repository permissions.";
+        return 'Permission denied. Your GitHub token is missing a required scope. If you authorized Speedwave via the GitHub OAuth flow, reconnect to re-grant scopes; if you provided a PAT directly, check its repository permissions.';
       }
       case 'not_found':
         return 'Resource not found in GitHub. Check the owner/repo and that your token has access.';
@@ -1906,14 +1920,18 @@ export async function initializeGitHubClient(): Promise<GitHubClient | null> {
     }
 
     const client = new GitHubClient({ token });
+    backgroundConnectionTest(
+      client.statusTracker,
+      async () => {
+        const result = await client.testConnection();
+        if (!result.success) {
+          throw new Error(result.error ?? 'connection test failed');
+        }
+      },
+      'GitHub'
+    );
 
-    const connectionResult = await client.testConnection();
-    if (!connectionResult.success) {
-      console.warn(`${ts()} GitHub connection test failed: ${connectionResult.error}`);
-      return null;
-    }
-
-    console.log(`${ts()} ✅ GitHub client initialized`);
+    console.log(`${ts()} ✅ GitHub client initialized, connection test scheduled`);
     return client;
   } catch (error) {
     // Broad catch is intentional (graceful degradation), but surface the full error —

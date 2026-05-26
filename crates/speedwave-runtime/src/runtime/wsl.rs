@@ -173,6 +173,134 @@ impl WslRuntime {
     }
 }
 
+/// Parsed WSL UNC path: `\\wsl.localhost\<distro>\<rest>` and equivalent forms.
+/// Server name and distro name are matched case-insensitively (Windows UNC is
+/// case-insensitive, and WSL distro names compare case-insensitively).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WslUncInfo {
+    /// Distro name as written by the user (preserves original casing for messages).
+    pub distro: String,
+    /// Path inside the distro, leading slash stripped, backslashes normalized to `/`.
+    /// Empty string for bare-root paths (`\\wsl.localhost\Speedwave\`).
+    pub rest: String,
+}
+
+impl WslUncInfo {
+    /// Returns `true` if `distro` matches Speedwave's own runtime distro
+    /// (case-insensitive).
+    pub fn is_runtime_distro(&self) -> bool {
+        self.distro.eq_ignore_ascii_case(consts::WSL_DISTRO_NAME)
+    }
+}
+
+/// Returns `true` if the path is the WSL distro root (`/` after translation).
+/// Used by `project::add_project` to reject `\\wsl.localhost\Speedwave\` as a
+/// project directory — mounting `/` as `/workspace` would expose the entire
+/// runtime distro.
+///
+/// Normalises trailing separators, `.` segments, and `..` segments before
+/// comparing. `/foo/..` and `/foo/../` both resolve to root.
+pub fn is_root_path(p: &Path) -> bool {
+    // Walk components: skip `.` and `RootDir` (the leading `/`); push `Normal`
+    // components and pop them on `..`. Empty stack means we collapsed to root.
+    use std::path::Component;
+    let mut depth: i32 = 0;
+    for c in p.components() {
+        match c {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                depth = (depth - 1).max(0);
+            }
+            Component::Normal(_) => depth += 1,
+        }
+    }
+    depth == 0
+}
+
+/// Shared parser for the WSL UNC prefix surface. Strips `\\?\UNC\` (case-insensitive
+/// for the `UNC` segment) or `\\` from the front and returns the remainder. Returns
+/// `None` for paths that do not start with a UNC marker.
+///
+/// SSOT for prefix handling — used by [`is_wsl_unc_path`] and
+/// [`looks_like_wsl_unc_prefix`] so the two cannot drift apart.
+fn strip_unc_prefix(s: &str) -> Option<&str> {
+    // `\\?\UNC\` extended-length prefix: first 4 bytes (`\\?\`) are case-stable,
+    // bytes 4..7 (`UNC`) are case-insensitive per the Win32 path normalization
+    // contract, byte 7 is the literal `\`. Check explicitly to also accept
+    // mixed-case (`\\?\Unc\`, `\\?\uNc\`, ...) that some tooling may emit.
+    let bytes = s.as_bytes();
+    if bytes.len() >= 8
+        && &bytes[0..4] == br"\\?\"
+        && bytes[4].eq_ignore_ascii_case(&b'U')
+        && bytes[5].eq_ignore_ascii_case(&b'N')
+        && bytes[6].eq_ignore_ascii_case(&b'C')
+        && bytes[7] == b'\\'
+    {
+        // Safe: first 8 bytes are all ASCII.
+        return Some(&s[8..]);
+    }
+    s.strip_prefix(r"\\")
+}
+
+/// Returns `true` if `server` is a WSL UNC server name (`wsl.localhost` or
+/// `wsl$`, case-insensitive). Single SSOT for server matching.
+fn is_wsl_server(server: &str) -> bool {
+    server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$")
+}
+
+/// Recognizes WSL UNC paths in all four forms Windows emits:
+/// - `\\wsl.localhost\<distro>\<rest>` (modern)
+/// - `\\wsl$\<distro>\<rest>` (legacy)
+/// - `\\?\UNC\wsl.localhost\<distro>\<rest>` (canonicalized modern)
+/// - `\\?\UNC\wsl$\<distro>\<rest>` (canonicalized legacy)
+///
+/// Returns `None` for non-WSL UNC paths (`\\server\share\...`), drive-letter
+/// paths, and Unix paths.
+pub fn is_wsl_unc_path(s: &str) -> Option<WslUncInfo> {
+    // Strip `\\?\UNC\` / `\\?\unc\` / `\\` (shared SSOT — see `strip_unc_prefix`).
+    let after_double_backslash = strip_unc_prefix(s)?;
+
+    // Split on backslash: server, distro, rest...
+    let mut parts = after_double_backslash.splitn(3, '\\');
+    let server = parts.next()?;
+    let distro = parts.next()?;
+
+    // Server must be a WSL UNC server (shared SSOT — see `is_wsl_server`).
+    if !is_wsl_server(server) {
+        return None;
+    }
+
+    // Distro must be non-empty.
+    if distro.is_empty() {
+        return None;
+    }
+
+    // Rest may be missing (bare root: `\\wsl.localhost\Speedwave` or `\\wsl.localhost\Speedwave\`).
+    let rest = parts.next().unwrap_or("").replace('\\', "/");
+    // Strip trailing slash from bare-root variants to normalize "" and "/" into "".
+    let rest = rest.trim_end_matches('/').to_string();
+
+    Some(WslUncInfo {
+        distro: distro.to_string(),
+        rest,
+    })
+}
+
+/// Returns `true` if a path string looks like a WSL UNC server prefix
+/// (`\\wsl.localhost\...`, `\\wsl$\...`, or their `\\?\UNC\` canonicalized
+/// equivalents) — even when malformed (e.g. missing distro segment). Used
+/// by [`windows_to_wsl_path`] to surface a precise "Malformed WSL UNC"
+/// error instead of the generic "Network UNC" reject.
+pub fn looks_like_wsl_unc_prefix(s: &str) -> bool {
+    match strip_unc_prefix(s) {
+        Some(rest) => {
+            let server = rest.split('\\').next().unwrap_or("");
+            is_wsl_server(server)
+        }
+        None => false,
+    }
+}
+
 /// Converts a Windows-style path (`C:\foo\bar` or `C:/foo/bar`) to a WSL mount path
 /// (`/mnt/c/foo/bar`). Passes through paths that are already Unix-style.
 ///
@@ -180,8 +308,13 @@ impl WslRuntime {
 /// return (e.g. from `canonicalize()` or `GetTempPath()`), stripping it to extract
 /// the underlying drive-letter path.
 ///
-/// Returns an error for true UNC paths (`\\server\share`) which cannot be mapped
-/// to WSL mount points.
+/// Recognizes WSL UNC paths (`\\wsl.localhost\<distro>\...`, `\\wsl$\<distro>\...`,
+/// and their canonicalized `\\?\UNC\...` forms): if `<distro>` matches Speedwave's
+/// own runtime distro, returns the inner path (`/<rest>`). For other distros,
+/// returns a helpful error explaining options (copy/move/native).
+///
+/// Returns an error for true network UNC paths (`\\server\share`) which cannot
+/// be mapped to WSL mount points.
 pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
     let s = path.to_string_lossy();
     let bytes = s.as_bytes();
@@ -199,11 +332,36 @@ pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
         return windows_to_wsl_path(Path::new(&s[4..]));
     }
 
-    // Reject true UNC paths (\\server\share) — they can't be mapped to /mnt/<drive>/
+    // WSL UNC paths: match own distro → /<rest>; mismatch → helpful error.
+    // Pure parsing is in `is_wsl_unc_path`; covers all 4 forms including \\?\UNC\.
+    if let Some(info) = is_wsl_unc_path(&s) {
+        if info.is_runtime_distro() {
+            // Bare root (rest == "") returns "/" — pure path translator.
+            // Rejection of "/" as a project dir is enforced in project::add_project.
+            return Ok(PathBuf::from(format!("/{}", info.rest)));
+        }
+        anyhow::bail!(consts::wsl_other_distro_msg(&info.distro));
+    }
+
+    // Malformed WSL UNC (e.g. `\\wsl.localhost\` with no distro segment):
+    // surface a precise error instead of falling through to the generic
+    // "Network UNC" reject, which would mislead users who typed a WSL path.
+    if looks_like_wsl_unc_prefix(&s) {
+        anyhow::bail!(
+            "Malformed WSL UNC path '{}': expected \\\\wsl.localhost\\<distro>\\<path> or \
+             \\\\wsl$\\<distro>\\<path>. The distribution name is missing.",
+            s
+        );
+    }
+
+    // Reject true network UNC paths (\\server\share) — not WSL, not mappable.
     if bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\' {
         anyhow::bail!(
-            "UNC path '{}' is not supported. Move your project under a drive-letter path (e.g. C:\\Users\\...)",
-            s
+            "Network UNC path '{}' is not supported. Move your project under a drive-letter path \
+             (e.g. C:\\Users\\...) or copy it into the Speedwave WSL distribution \
+             (\\\\wsl.localhost\\{}\\projects\\...).",
+            s,
+            consts::WSL_DISTRO_NAME
         );
     }
 
@@ -349,6 +507,21 @@ impl ContainerRuntime for WslRuntime {
         let mut command = crate::binary::system_command("wsl.exe");
         command.args(["-d", distro, "--", "sh", "-c", &remote_cmd]);
         Ok(command)
+    }
+
+    fn vm_exec(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        stdin: &[u8],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<super::VmExecOutput> {
+        let distro = self.distro();
+        let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
+        let remote_cmd = super::shell_quote_argv(&argv);
+        let mut command = crate::binary::system_command("wsl.exe");
+        command.args(["-d", distro, "--", "sh", "-c", &remote_cmd]);
+        super::vm_exec_run(command, stdin, timeout)
     }
 
     fn is_available(&self) -> bool {
@@ -503,6 +676,20 @@ impl ContainerRuntime for WslRuntime {
             "wsl.exe",
             &[
                 "-d", distro, "--", "nerdctl", "builder", "prune", "--all", "--force",
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn prune_unused_images(&self) -> anyhow::Result<()> {
+        // No `require_running` gate — WSL2 distros auto-start on `wsl.exe -d`
+        // invocation (consistent with `system_prune` / `prune_buildkit_cache`
+        // above; LimaRuntime gates explicitly because Lima needs a manual start).
+        let distro = self.distro();
+        self.runner.run(
+            "wsl.exe",
+            &[
+                "-d", distro, "--", "nerdctl", "system", "prune", "--all", "--force",
             ],
         )?;
         Ok(())
@@ -1102,8 +1289,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("UNC path"),
-            "error should mention UNC, got: {}",
+            err.contains("Network UNC"),
+            "error should mention Network UNC (to distinguish from WSL UNC), got: {}",
             err
         );
     }
@@ -1135,9 +1322,506 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_rejects_unc_without_drive() {
-        // \\?\UNC\server\share — not a drive-letter path, should still be rejected
+        // \\?\UNC\server\share — true network UNC after extended-prefix strip,
+        // should still be rejected as Network UNC (not WSL UNC).
         let result = windows_to_wsl_path(Path::new(r"\\?\UNC\server\share"));
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Network UNC"),
+            "error should mention Network UNC, got: {}",
+            err
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // WSL UNC path support — \\wsl.localhost\<distro>\, \\wsl$\<distro>\,
+    // and their canonicalized \\?\UNC\... forms.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_wsl_unc_path_modern_form() {
+        let info = is_wsl_unc_path(r"\\wsl.localhost\Speedwave\workspace\foo").unwrap();
+        assert_eq!(info.distro, "Speedwave");
+        assert_eq!(info.rest, "workspace/foo");
+        assert!(info.is_runtime_distro());
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_legacy_form() {
+        let info = is_wsl_unc_path(r"\\wsl$\Speedwave\workspace").unwrap();
+        assert_eq!(info.distro, "Speedwave");
+        assert_eq!(info.rest, "workspace");
+        assert!(info.is_runtime_distro());
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_extended_modern() {
+        let info = is_wsl_unc_path(r"\\?\UNC\wsl.localhost\Speedwave\foo").unwrap();
+        assert_eq!(info.distro, "Speedwave");
+        assert_eq!(info.rest, "foo");
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_extended_legacy() {
+        let info = is_wsl_unc_path(r"\\?\UNC\wsl$\Speedwave\foo").unwrap();
+        assert_eq!(info.distro, "Speedwave");
+        assert_eq!(info.rest, "foo");
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_extended_lowercase_unc() {
+        // \\?\unc\... lowercase variant.
+        let info = is_wsl_unc_path(r"\\?\unc\wsl.localhost\Speedwave\foo").unwrap();
+        assert_eq!(info.rest, "foo");
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_case_insensitive_server() {
+        let info = is_wsl_unc_path(r"\\WSL.LOCALHOST\Speedwave\foo").unwrap();
+        assert_eq!(info.distro, "Speedwave");
+        assert_eq!(info.rest, "foo");
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_other_distro_not_runtime() {
+        let info = is_wsl_unc_path(r"\\wsl.localhost\Ubuntu\home\luke\foo").unwrap();
+        assert_eq!(info.distro, "Ubuntu");
+        assert_eq!(info.rest, "home/luke/foo");
+        assert!(!info.is_runtime_distro());
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_bare_root_with_trailing_slash() {
+        let info = is_wsl_unc_path(r"\\wsl.localhost\Speedwave\").unwrap();
+        assert_eq!(info.distro, "Speedwave");
+        assert_eq!(info.rest, "");
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_bare_root_no_trailing_slash() {
+        let info = is_wsl_unc_path(r"\\wsl.localhost\Speedwave").unwrap();
+        assert_eq!(info.distro, "Speedwave");
+        assert_eq!(info.rest, "");
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_returns_none_for_network_share() {
+        assert!(is_wsl_unc_path(r"\\fileserver\share\foo").is_none());
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_returns_none_for_drive_letter() {
+        assert!(is_wsl_unc_path(r"C:\projects\foo").is_none());
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_returns_none_for_unix_path() {
+        assert!(is_wsl_unc_path("/home/user/foo").is_none());
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_returns_none_for_empty_distro() {
+        // \\wsl.localhost\\foo — missing distro segment.
+        assert!(is_wsl_unc_path(r"\\wsl.localhost\\foo").is_none());
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_wsl_localhost_own_distro() {
+        let result =
+            windows_to_wsl_path(Path::new(r"\\wsl.localhost\Speedwave\workspace\foo")).unwrap();
+        assert_eq!(result, PathBuf::from("/workspace/foo"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_wsl_dollar_own_distro() {
+        let result = windows_to_wsl_path(Path::new(r"\\wsl$\Speedwave\workspace")).unwrap();
+        assert_eq!(result, PathBuf::from("/workspace"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_canonicalized_wsl_unc() {
+        // \\?\UNC\wsl.localhost\Speedwave\foo (what canonicalize() may return on Windows)
+        let result =
+            windows_to_wsl_path(Path::new(r"\\?\UNC\wsl.localhost\Speedwave\foo")).unwrap();
+        assert_eq!(result, PathBuf::from("/foo"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_canonicalized_wsl_dollar() {
+        let result = windows_to_wsl_path(Path::new(r"\\?\UNC\wsl$\Speedwave\foo")).unwrap();
+        assert_eq!(result, PathBuf::from("/foo"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_case_insensitive_distro() {
+        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\speedwave\foo")).unwrap();
+        assert_eq!(result, PathBuf::from("/foo"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_mixed_slashes_in_rest() {
+        // After splitting on backslash for distro extraction, mixed slashes
+        // within the rest must still normalize to forward slashes.
+        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\Speedwave\foo\bar")).unwrap();
+        assert_eq!(result, PathBuf::from("/foo/bar"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_wsl_localhost_bare_root_returns_slash() {
+        // Pure path translator returns "/" for bare root distro paths.
+        // Rejection of "/" as a project dir is enforced in project::add_project.
+        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\Speedwave\")).unwrap();
+        assert_eq!(result, PathBuf::from("/"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_wsl_localhost_other_distro_bails() {
+        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\Ubuntu\home\luke\foo"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Ubuntu"),
+            "error should mention the other distro name 'Ubuntu', got: {}",
+            err
+        );
+        assert!(
+            err.contains("Speedwave"),
+            "error should mention runtime distro 'Speedwave', got: {}",
+            err
+        );
+        // Option 1: PowerShell Copy-Item (recommended path).
+        assert!(
+            err.contains("Copy-Item"),
+            "error should suggest PowerShell Copy-Item, got: {}",
+            err
+        );
+        // Option 2: move to /mnt/c/.
+        assert!(
+            err.contains("/mnt/c/"),
+            "error should suggest moving to /mnt/c/, got: {}",
+            err
+        );
+        // Option 3: native Claude Code without Speedwave.
+        assert!(
+            err.contains("native") && err.contains("Claude Code"),
+            "error should mention native Claude Code as a fallback option, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_canonicalized_other_distro_bails() {
+        let result = windows_to_wsl_path(Path::new(r"\\?\UNC\wsl.localhost\Debian\workspace"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Debian"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_wsl_dollar_other_distro_bails() {
+        let result = windows_to_wsl_path(Path::new(r"\\wsl$\Ubuntu\home\foo"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Ubuntu"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Malformed WSL UNC — must surface a precise error, not "Network UNC".
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_windows_to_wsl_path_malformed_wsl_unc_missing_distro() {
+        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Malformed WSL UNC"),
+            "should report malformed WSL UNC (not Network UNC), got: {err}"
+        );
+        assert!(
+            !err.contains("Network UNC"),
+            "must not misclassify as Network UNC, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_malformed_wsl_dollar_missing_distro() {
+        let result = windows_to_wsl_path(Path::new(r"\\wsl$\"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Malformed WSL UNC"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_malformed_canonicalized_missing_distro() {
+        let result = windows_to_wsl_path(Path::new(r"\\?\UNC\wsl.localhost\"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Malformed WSL UNC"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_empty_after_extended_strip() {
+        // \\?\UNC\ alone (no server, no distro). Falls through to Network UNC reject
+        // after \\?\UNC\ strip leaves an empty after-prefix → is_wsl_unc_path returns
+        // None, looks_like_wsl_unc_prefix returns false (server is empty), so we end
+        // up at the generic UNC branch — but the input no longer starts with \\, so
+        // the path becomes an unrecognised pass-through. Document the actual behavior
+        // (no panic, returns Err or pass-through).
+        let result = windows_to_wsl_path(Path::new(r"\\?\UNC\"));
+        // Either Err (caught by some branch) or a pass-through Ok — both acceptable,
+        // the important thing is no panic and no incorrect mapping.
+        match result {
+            Ok(p) => {
+                // If pass-through, the result must not be misleading (must not be /)
+                assert_ne!(p, PathBuf::from("/"), "empty UNC must not map to root");
+            }
+            Err(_) => {} // Err is fine — the input is malformed
+        }
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_bare_double_backslash() {
+        // \\ alone — no server, no distro.
+        let result = windows_to_wsl_path(Path::new(r"\\"));
+        // Should be rejected (Network UNC branch catches it as bytes[0..2] == \\\\).
+        assert!(result.is_err());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // is_root_path helper — must catch every bare-root variant including
+    // `.` and `..` segments. Reject any path with surviving Normal components.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_root_path_accepts_root_variants() {
+        // Empty, "/", "//" (trailing), "/.", "/./" all collapse to root.
+        assert!(is_root_path(Path::new("/")));
+        assert!(is_root_path(Path::new("")));
+        assert!(is_root_path(Path::new("/.")));
+        assert!(is_root_path(Path::new("/./")));
+    }
+
+    #[test]
+    fn test_is_root_path_accepts_parent_dir_collapsing_to_root() {
+        // /foo/.. and /foo/bar/../.. both pop back to root.
+        assert!(is_root_path(Path::new("/foo/..")));
+        assert!(is_root_path(Path::new("/foo/bar/../..")));
+        // Excess `..` clamps at root, never below.
+        assert!(is_root_path(Path::new("/../..")));
+    }
+
+    #[test]
+    fn test_is_root_path_rejects_subdirs() {
+        assert!(!is_root_path(Path::new("/projects/foo")));
+        assert!(!is_root_path(Path::new("/workspace")));
+        // /foo/bar/.. → /foo, not root.
+        assert!(!is_root_path(Path::new("/foo/bar/..")));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // looks_like_wsl_unc_prefix — used to surface "Malformed WSL UNC" error.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_looks_like_wsl_unc_prefix_modern() {
+        assert!(looks_like_wsl_unc_prefix(r"\\wsl.localhost\"));
+        assert!(looks_like_wsl_unc_prefix(r"\\wsl.localhost\Speedwave\foo"));
+    }
+
+    #[test]
+    fn test_looks_like_wsl_unc_prefix_legacy() {
+        assert!(looks_like_wsl_unc_prefix(r"\\wsl$\"));
+    }
+
+    #[test]
+    fn test_looks_like_wsl_unc_prefix_extended() {
+        assert!(looks_like_wsl_unc_prefix(r"\\?\UNC\wsl.localhost\"));
+        assert!(looks_like_wsl_unc_prefix(r"\\?\unc\wsl$\foo"));
+    }
+
+    #[test]
+    fn test_looks_like_wsl_unc_prefix_rejects_network_unc() {
+        assert!(!looks_like_wsl_unc_prefix(r"\\server\share"));
+        assert!(!looks_like_wsl_unc_prefix(r"\\?\UNC\server\share"));
+    }
+
+    #[test]
+    fn test_looks_like_wsl_unc_prefix_rejects_drive_letter() {
+        assert!(!looks_like_wsl_unc_prefix(r"C:\foo"));
+        assert!(!looks_like_wsl_unc_prefix("/home/user"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Direct tests for shared SSOT helpers `strip_unc_prefix` and
+    // `is_wsl_server`. Both are exercised transitively by `is_wsl_unc_path`
+    // and `looks_like_wsl_unc_prefix`, but per `.claude/rules/git-workflow.md`
+    // every function must have direct test cases — these guard against future
+    // changes that pass downstream tests by accident.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_strip_unc_prefix_modern_double_backslash() {
+        assert_eq!(
+            strip_unc_prefix(r"\\wsl.localhost\Speedwave\foo"),
+            Some(r"wsl.localhost\Speedwave\foo")
+        );
+    }
+
+    #[test]
+    fn test_strip_unc_prefix_extended_uppercase() {
+        assert_eq!(
+            strip_unc_prefix(r"\\?\UNC\wsl.localhost\Speedwave\foo"),
+            Some(r"wsl.localhost\Speedwave\foo")
+        );
+    }
+
+    #[test]
+    fn test_strip_unc_prefix_extended_lowercase() {
+        assert_eq!(
+            strip_unc_prefix(r"\\?\unc\wsl.localhost\Speedwave\foo"),
+            Some(r"wsl.localhost\Speedwave\foo")
+        );
+    }
+
+    #[test]
+    fn test_strip_unc_prefix_no_prefix_returns_none() {
+        assert_eq!(strip_unc_prefix(r"C:\foo"), None);
+        assert_eq!(strip_unc_prefix("/home/user"), None);
+        assert_eq!(strip_unc_prefix(""), None);
+    }
+
+    #[test]
+    fn test_strip_unc_prefix_single_backslash_returns_none() {
+        // Single `\` is not a UNC marker.
+        assert_eq!(strip_unc_prefix(r"\foo"), None);
+    }
+
+    #[test]
+    fn test_strip_unc_prefix_mixed_case_extended() {
+        // Per Win32 path normalization, the `UNC` segment is case-insensitive.
+        // Mixed-case forms (not produced by canonicalize but possible from
+        // manual input or third-party tooling) must still be recognized.
+        assert_eq!(
+            strip_unc_prefix(r"\\?\Unc\wsl.localhost\Speedwave\foo"),
+            Some(r"wsl.localhost\Speedwave\foo")
+        );
+        assert_eq!(
+            strip_unc_prefix(r"\\?\uNc\wsl.localhost\Speedwave\foo"),
+            Some(r"wsl.localhost\Speedwave\foo")
+        );
+        assert_eq!(
+            strip_unc_prefix(r"\\?\UnC\wsl.localhost\Speedwave\foo"),
+            Some(r"wsl.localhost\Speedwave\foo")
+        );
+    }
+
+    #[test]
+    fn test_strip_unc_prefix_extended_takes_priority_over_double_backslash() {
+        // The `\\?\UNC\` branch MUST be tried before the plain `\\` branch.
+        // If the order were reversed, `\\?\UNC\wsl.localhost\...` would match
+        // `\\` first, leaving the bogus "server" `?\UNC\wsl.localhost`.
+        let result = strip_unc_prefix(r"\\?\UNC\wsl.localhost\Speedwave\foo");
+        assert_eq!(result, Some(r"wsl.localhost\Speedwave\foo"));
+        // Negative: result must NOT contain the `?\UNC\` fragment that the
+        // wrong order would produce.
+        assert!(!result.unwrap().contains("?"));
+        assert!(!result.unwrap().contains("UNC"));
+    }
+
+    #[test]
+    fn test_is_wsl_server_accepts_modern() {
+        assert!(is_wsl_server("wsl.localhost"));
+        assert!(is_wsl_server("WSL.LOCALHOST"));
+        assert!(is_wsl_server("Wsl.Localhost"));
+    }
+
+    #[test]
+    fn test_is_wsl_server_accepts_legacy() {
+        assert!(is_wsl_server("wsl$"));
+        assert!(is_wsl_server("WSL$"));
+    }
+
+    #[test]
+    fn test_is_wsl_server_rejects_typosquats() {
+        assert!(!is_wsl_server("wsl.localhost.evil.com"));
+        assert!(!is_wsl_server("wsl"));
+        assert!(!is_wsl_server("wsl.lan"));
+        assert!(!is_wsl_server(""));
+        assert!(!is_wsl_server("fileserver"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Defense-in-depth: Unicode distros, typosquats, and end-to-end empty
+    // distro classification through windows_to_wsl_path (not just the parser).
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_wsl_unc_path_accepts_unicode_distro_safely() {
+        // Unicode distro names are allowed by WSL; our parser captures them
+        // verbatim and `is_runtime_distro` uses `eq_ignore_ascii_case` which
+        // only folds ASCII — so a Unicode distro never collides with
+        // "Speedwave" and is correctly classified as a non-runtime distro.
+        let info = is_wsl_unc_path(r"\\wsl.localhost\日本語\foo").unwrap();
+        assert_eq!(info.distro, "日本語");
+        assert_eq!(info.rest, "foo");
+        assert!(
+            !info.is_runtime_distro(),
+            "Unicode distro must never collide with Speedwave"
+        );
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path_rejects_typosquat_server() {
+        // `\\wsl.localhost.evil.com\Speedwave\foo` — server is NOT
+        // `wsl.localhost` even with case-insensitive comparison.
+        assert!(is_wsl_unc_path(r"\\wsl.localhost.evil.com\Speedwave\foo").is_none());
+        // Bare-word "wsl" without the `.localhost` or `$` suffix is also rejected.
+        assert!(is_wsl_unc_path(r"\\wsl\Speedwave\foo").is_none());
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_typosquat_server_is_network_unc() {
+        // Typosquat server falls through is_wsl_unc_path (None) and
+        // looks_like_wsl_unc_prefix (server doesn't match) → ends up at the
+        // generic Network UNC reject, NOT the helpful WSL message. Correct
+        // behaviour — a typosquatted server isn't WSL.
+        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost.evil.com\Speedwave\foo"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Network UNC"),
+            "typosquat must classify as Network UNC, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_empty_distro_segment_e2e() {
+        // `\\wsl.localhost\\foo` — empty distro between the 3rd and 4th
+        // backslash. is_wsl_unc_path returns None (empty distro check), but
+        // looks_like_wsl_unc_prefix returns true (server matches), so the
+        // user sees "Malformed WSL UNC" instead of the generic Network UNC.
+        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\\foo"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Malformed WSL UNC"),
+            "empty distro must produce Malformed WSL UNC, got: {err}"
+        );
+        assert!(
+            !err.contains("Network UNC"),
+            "empty distro must NOT be misclassified as Network UNC, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_canonicalized_empty_distro_e2e() {
+        // Same as above but after extended-length canonicalization.
+        let result = windows_to_wsl_path(Path::new(r"\\?\UNC\wsl.localhost\\foo"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Malformed WSL UNC"));
     }
 
     #[test]

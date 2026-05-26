@@ -72,14 +72,15 @@ export async function handleGetUsers(
 }
 
 /**
- * Tool handler function
- * @param clients - Slack client instances
+ * Tool handler function.
+ * @param clients - Slack client instances (always non-null; checks
+ *   `_tokensStatus === 'missing'` to surface the configuration error).
  */
-export function createUserTools(clients: SlackClients | null): ToolDefinition[] {
+export function createUserTools(clients: SlackClients): ToolDefinition[] {
   const withClients =
     <T>(handler: (c: SlackClients, p: T) => Promise<ToolResult>) =>
     async (params: T): Promise<ToolResult> => {
-      if (!clients) {
+      if (clients._tokensStatus === 'missing') {
         return {
           success: false,
           error: {

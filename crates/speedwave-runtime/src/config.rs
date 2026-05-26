@@ -12,12 +12,18 @@ pub struct LlmConfig {
     /// Context window of the active model, in tokens.
     /// For Anthropic this is resolved from the static SSOT
     /// (`defaults::ANTHROPIC_MODELS`); for local providers it comes from the
-    /// real provider API (Ollama `/api/show`, LM Studio `/api/v0/models`,
-    /// llama.cpp `/v1/models`) and is persisted alongside the model id so the
+    /// real provider API and is persisted alongside the model id so the
     /// chat footer can render an honest `used / max` ratio without keeping a
     /// duplicate hard-coded table on the frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u32>,
+    /// True when an API key file exists at `tokens/<project>/local-llm/api_key`.
+    /// The key value never lives in config.json — only the presence flag.
+    #[serde(default)]
+    pub has_api_key: bool,
+    /// True when custom headers file exists at `tokens/<project>/local-llm/custom_headers`.
+    #[serde(default)]
+    pub has_custom_headers: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
@@ -413,7 +419,7 @@ pub fn resolve_project_config(
 /// Provider names that route through a local LLM server (no Anthropic API
 /// call). SSOT for code that enumerates the set (e.g. tests that exercise
 /// every local provider). `is_local_provider` is the matching predicate.
-pub const LOCAL_PROVIDERS: &[&str] = &["ollama", "lmstudio", "llamacpp"];
+pub const LOCAL_PROVIDERS: &[&str] = &["ollama", "lmstudio", "llamacpp", "local"];
 
 /// Returns true for provider values that point at a local LLM server
 /// (Ollama, LM Studio, or llama.cpp).
@@ -603,6 +609,15 @@ fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
     }
     if overlay.base_url.is_some() {
         base.base_url.clone_from(&overlay.base_url);
+    }
+    if overlay.context_tokens.is_some() {
+        base.context_tokens = overlay.context_tokens;
+    }
+    if overlay.has_api_key {
+        base.has_api_key = true;
+    }
+    if overlay.has_custom_headers {
+        base.has_custom_headers = true;
     }
 }
 
@@ -910,6 +925,8 @@ mod tests {
                         model: Some("llama3.3".to_string()),
                         base_url: Some("http://host.docker.internal:11434".to_string()),
                         context_tokens: None,
+                        has_api_key: false,
+                        has_custom_headers: false,
                     }),
                 }),
                 integrations: None,
@@ -1194,6 +1211,8 @@ mod tests {
                         model: model.map(|m| m.to_string()),
                         base_url: Some("http://host.docker.internal:11434".to_string()),
                         context_tokens: None,
+                        has_api_key: false,
+                        has_custom_headers: false,
                     }),
                 }),
                 integrations: None,
@@ -1244,6 +1263,8 @@ mod tests {
                         model: None,
                         base_url: None,
                         context_tokens: None,
+                        has_api_key: false,
+                        has_custom_headers: false,
                     }),
                 }),
                 integrations: None,

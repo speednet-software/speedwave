@@ -330,6 +330,11 @@ jobs:
         shell: bash
         run: cargo test -p speedwave-runtime --lib "build::"
 
+      - name: cargo test host_mcp_process::job_object
+        # Windows-only kill-on-close end-to-end — see ADR-048.
+        shell: bash
+        run: cargo test -p speedwave-runtime --lib "host_mcp_process::job_object"
+
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash
         env:
@@ -384,3 +389,7 @@ jobs:
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo check --all-targets
+
+      # installer_hooks tests run on macOS (cargo check above already
+      # validates Windows compile); linking the test bin here clashes
+      # with sherpa-onnx/whisper-rs CRT (ADR-061).

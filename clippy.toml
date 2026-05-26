@@ -1,0 +1,10 @@
+# Workspace-wide clippy configuration.
+
+# Raise the `result_large_err` threshold because the bridges'
+# accept-callback signature is dictated by tokio_tungstenite
+# (`Result<Response<()>, http::Response<Option<String>>>`) — the error
+# variant cannot be boxed without breaking the upstream API contract.
+# Per-site `#[allow(clippy::result_large_err)]` would violate the
+# CLAUDE.md rule against `#[allow]` in production code; the config knob
+# is the supported alternative.
+large-error-threshold = 256

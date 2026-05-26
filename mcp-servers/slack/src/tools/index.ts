@@ -14,8 +14,9 @@ import { createUserTools } from './user-tools.js';
 
 /**
  * Creates complete tool definitions array for Slack MCP server.
- * @param clients - Slack client instances
+ * @param clients - Slack client instances (never null after this PR;
+ *   `_tokensStatus === 'missing'` indicates an unconfigured worker).
  */
-export function createToolDefinitions(clients: SlackClients | null): ToolDefinition[] {
+export function createToolDefinitions(clients: SlackClients): ToolDefinition[] {
   return [...createChannelTools(clients), ...createUserTools(clients)];
 }

@@ -129,13 +129,14 @@ If present, the value MUST NOT be empty or whitespace, and MUST parse as a `semv
 
 ### auth_fields entry
 
-| Field         | Type   | Description                                                |
-| ------------- | ------ | ---------------------------------------------------------- |
-| `key`         | string | File name under `tokens/<project>/<slug>/`                 |
-| `label`       | string | Label shown in Desktop UI                                  |
-| `field_type`  | string | `"password"` or `"text"`                                   |
-| `placeholder` | string | Placeholder text in the input field                        |
-| `is_secret`   | bool   | If `true`, stored as a token file with `0o600` permissions |
+| Field         | Type   | Description                                                                                                |
+| ------------- | ------ | ---------------------------------------------------------------------------------------------------------- |
+| `key`         | string | File name under `tokens/<project>/<slug>/`                                                                 |
+| `label`       | string | Label shown in Desktop UI                                                                                  |
+| `field_type`  | string | `"password"` or `"text"`                                                                                   |
+| `placeholder` | string | Placeholder text in the input field                                                                        |
+| `is_secret`   | bool   | If `true`, stored as a token file with `0o600` permissions                                                 |
+| `required`    | bool   | Defaults to `true`. If `false`, missing value does not block auto-enable or the `configured` status check. |
 
 ---
 

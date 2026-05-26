@@ -605,7 +605,15 @@ pub fn build_images_for_bundle(
     let needs_cleanup = vm_root != root;
 
     let result = try_build_images(runtime, images, &vm_root, bundle_id).or_else(|first_err| {
-        if is_snapshotter_error(&first_err) {
+        if is_disk_full_error(&first_err) {
+            log::warn!(
+                "build failed with disk-full error, pruning unused images and retrying: {first_err}"
+            );
+            if let Err(prune_err) = runtime.prune_unused_images() {
+                log::warn!("prune_unused_images failed: {prune_err}");
+            }
+            try_build_images(runtime, images, &vm_root, bundle_id)
+        } else if is_snapshotter_error(&first_err) {
             log::warn!(
                 "build failed with containerd snapshotter error, pruning and retrying: {first_err}"
             );
@@ -638,9 +646,16 @@ pub fn build_images_for_bundle(
         }
     });
 
-    // Enrich final error with VM guidance if I/O related
+    // Enrich final error with actionable guidance
     let result = result.map_err(|err| {
-        if is_transient_build_error(&err) {
+        if is_disk_full_error(&err) {
+            err.context(
+                "Container VM disk full — aggressive prune already attempted but disk space \
+                 is still insufficient. Free space in the Lima/WSL2 VM (delete unused projects \
+                 in Speedwave, or restart Speedwave to retry auto-prune). Check usage with \
+                 `df -h` inside the VM.",
+            )
+        } else if is_transient_build_error(&err) {
             err.context(
                 "Image build failed due to an I/O error. If running inside a virtual machine \
                  (VMware, VirtualBox), try increasing VM memory to at least 8 GB and ensuring \
@@ -823,6 +838,20 @@ fn try_build_images(
     } else {
         chosen
     })
+}
+
+/// `true` if `err` mentions ENOSPC anywhere in its chain.
+/// Recovery: `prune_unused_images` + retry. Covers cross-worktree image
+/// accumulation that `prune_old_bundle_images` cannot see (it only knows this
+/// worktree's last `applied_bundle_id`).
+fn is_disk_full_error(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        let msg = cause.to_string().to_ascii_lowercase();
+        if msg.contains("no space left on device") || msg.contains("enospc") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns `true` if the error looks like a containerd overlayfs snapshotter bug.
@@ -1884,6 +1913,13 @@ mod tests {
         recorded.iter().filter(|c| *c == "system_prune").count()
     }
 
+    fn count_unused_prunes(recorded: &[String]) -> usize {
+        recorded
+            .iter()
+            .filter(|c| *c == "prune_unused_images")
+            .count()
+    }
+
     impl ContainerRuntime for RetryMockRuntime {
         fn compose_up(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
@@ -1943,6 +1979,13 @@ mod tests {
         }
         fn system_prune(&self) -> anyhow::Result<()> {
             self.calls.lock().unwrap().push("system_prune".to_string());
+            Ok(())
+        }
+        fn prune_unused_images(&self) -> anyhow::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("prune_unused_images".to_string());
             Ok(())
         }
     }
@@ -2129,6 +2172,93 @@ mod tests {
                 "image {tag} should be built exactly twice (first + retry)"
             );
         }
+    }
+
+    #[test]
+    fn test_retry_on_disk_full_error() {
+        // Disk-full on first attempt triggers prune_unused_images + retry.
+        let image_count = IMAGES.len() as u32;
+
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(
+            format!("{}:1", image_ref(IMAGE_MCP_OFFICE, "test-bundle")),
+            "failed to extract layer sha256:abc: write /var/lib/containerd/...: \
+             no space left on device"
+                .to_string(),
+        );
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root, fail_on);
+
+        let result = build_all_for_bundle(&rt, "test-bundle");
+        assert!(result.is_ok(), "retry should succeed, got: {:?}", result);
+        assert_eq!(result.unwrap(), image_count);
+
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(
+            count_unused_prunes(&recorded),
+            1,
+            "prune_unused_images must be called exactly once for disk-full recovery"
+        );
+        assert_eq!(
+            count_prunes(&recorded),
+            0,
+            "system_prune (snapshotter recovery) must NOT be called on disk-full path"
+        );
+    }
+
+    #[test]
+    fn test_disk_full_unrecovered_gets_friendly_error() {
+        // Disk-full on attempts 1 AND 2 → prune attempted, build still fails,
+        // and the user-facing message must mention disk space (not "VM memory").
+        let mut fail_on = std::collections::HashMap::new();
+        for attempt in 1..=2 {
+            fail_on.insert(
+                format!("{}:{attempt}", image_ref(IMAGE_MCP_OFFICE, "test-bundle")),
+                "no space left on device".to_string(),
+            );
+        }
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root, fail_on);
+
+        let result = build_all_for_bundle(&rt, "test-bundle");
+        assert!(result.is_err(), "double disk-full must propagate");
+
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("disk space is still insufficient"),
+            "error must mention insufficient disk space, got: {msg}"
+        );
+        assert!(
+            !msg.contains("VM memory") && !msg.contains("nested virtualization"),
+            "error must NOT show the VM-memory hint for disk-full, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_is_disk_full_error_matches_enospc() {
+        assert!(is_disk_full_error(&anyhow::anyhow!(
+            "no space left on device"
+        )));
+        assert!(is_disk_full_error(&anyhow::anyhow!("ENOSPC")));
+        assert!(is_disk_full_error(&anyhow::anyhow!(
+            "failed to extract layer: write /var/lib/containerd/...: No Space Left On Device"
+        )));
+    }
+
+    #[test]
+    fn test_is_disk_full_error_rejects_unrelated() {
+        assert!(!is_disk_full_error(&anyhow::anyhow!("i/o timeout")));
+        assert!(!is_disk_full_error(&anyhow::anyhow!("apply layer error")));
+        assert!(!is_disk_full_error(&anyhow::anyhow!("permission denied")));
+    }
+
+    #[test]
+    fn test_is_disk_full_error_matches_wrapped() {
+        let inner = anyhow::anyhow!("no space left on device");
+        let outer = inner.context("nerdctl build failed");
+        assert!(is_disk_full_error(&outer));
     }
 
     #[test]

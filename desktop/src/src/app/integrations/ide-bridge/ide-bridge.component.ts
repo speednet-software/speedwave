@@ -62,9 +62,17 @@ import { DetectedIde } from '../../models/health';
                   </td>
                   <td class="px-3 py-2 text-right">
                     @if (selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port) {
-                      <span class="pill green" data-testid="connect-btn" data-active="true"
-                        >connected</span
+                      <button
+                        type="button"
+                        class="pill green hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+                        [disabled]="ideConnecting"
+                        (click)="disconnectIde()"
+                        data-testid="disconnect-btn"
+                        data-active="true"
+                        title="Click to disconnect"
                       >
+                        connected ✕
+                      </button>
                     } @else {
                       <button
                         type="button"
@@ -179,6 +187,21 @@ export class IdeBridgeComponent implements OnInit, OnDestroy {
       this.selectedIde = { ide_name: ide.ide_name, port: ide.port };
     } catch (err) {
       this.ideError = `Failed to connect to ${ide.ide_name}: ${err}`;
+    } finally {
+      this.ideConnecting = false;
+      this.cdr.markForCheck();
+    }
+  }
+
+  /** Disconnects the IDE Bridge and clears persisted selection. */
+  async disconnectIde(): Promise<void> {
+    this.ideConnecting = true;
+    this.ideError = null;
+    try {
+      await this.tauri.invoke('disconnect_ide');
+      this.selectedIde = null;
+    } catch (err) {
+      this.ideError = `Failed to disconnect: ${err}`;
     } finally {
       this.ideConnecting = false;
       this.cdr.markForCheck();

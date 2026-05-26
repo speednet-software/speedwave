@@ -64,6 +64,31 @@ pub(crate) struct AuthStatusResponse {
     pub(crate) oauth_authenticated: bool,
 }
 
+/// Update DTO for the LLM settings save path.
+///
+/// Mirrors `speedwave_runtime::config::LlmConfig` fields but adds two
+/// tri-state credential fields that the runtime struct doesn't carry (it
+/// only stores presence flags). The `api_key` / `custom_headers` *values*
+/// land in token files on disk; only `has_api_key` / `has_custom_headers`
+/// reach `LlmConfig` in `config.json`.
+///
+/// Tri-state semantics via `serde_with::rust::double_option`:
+/// - **field omitted** (`None`) — leave on-disk file unchanged
+/// - **explicit `null`** (`Some(None)`) — delete on-disk file, flag becomes false
+/// - **string** (`Some(Some(value))`) — write/replace; empty string also deletes
+#[derive(Deserialize, Default)]
+pub(crate) struct LlmConfigUpdate {
+    pub(crate) provider: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) base_url: Option<String>,
+    #[serde(default)]
+    pub(crate) context_tokens: Option<u32>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) api_key: Option<Option<String>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) custom_headers: Option<Option<String>>,
+}
+
 #[derive(Serialize, Clone)]
 pub(crate) struct AuthField {
     pub(crate) key: String,
@@ -336,8 +361,13 @@ mod tests {
     }
 
     #[test]
-    fn get_auth_fields_other_services_no_oauth_flow() {
-        for svc_key in &["slack", "gitlab", "github", "atlassian", "redmine"] {
+    fn get_auth_fields_classic_form_services_no_oauth_flow() {
+        // Services that authenticate with a single user-entered token (PAT,
+        // API key, bot token) — none of their fields should be flagged as
+        // OAuth-flow-driven. SharePoint and GitHub are intentionally NOT in
+        // this list because they use OAuth device flow (the UI renders a
+        // "Sign in with X" button instead of a text input for the OAuth field).
+        for svc_key in &["slack", "gitlab", "atlassian", "redmine"] {
             let fields = get_auth_fields(svc_key);
             for field in &fields {
                 assert!(
@@ -347,6 +377,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn get_auth_fields_github_token_uses_oauth_flow() {
+        // GitHub `token` field is populated by the OAuth App device flow
+        // (`start_github_oauth` Tauri command) — the UI must not render a
+        // text input for it. SharePoint has the analogous invariant tested
+        // in `get_auth_fields_includes_oauth_flow` above.
+        let fields = get_auth_fields("github");
+        let token = fields
+            .iter()
+            .find(|f| f.key == "token")
+            .expect("github must declare a token field");
+        assert!(
+            token.oauth_flow,
+            "github token field must have oauth_flow=true so the UI renders a 'Sign in with GitHub' button"
+        );
     }
 
     #[test]
@@ -401,6 +448,8 @@ mod tests {
                 model: Some("qwen3:35b".to_string()),
                 base_url: Some("http://localhost:11434".to_string()),
                 context_tokens: Some(32_768),
+                has_api_key: false,
+                has_custom_headers: false,
             },
             default_base_url: Some("http://host.docker.internal:11434".to_string()),
         };
