@@ -1207,8 +1207,13 @@ pub fn ensure_project_images_built(
         .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
     let enabled = speedwave_runtime::build::enabled_images(&integrations);
     speedwave_runtime::build::build_missing_images(rt, &enabled, &manifest.bundle_id)
-        .map(|_| ())
-        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))
+        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
+
+    // Plugin images must also be built outside the compose lock (ADR-066).
+    let enabled_plugin_ids = integrations.enabled_plugin_service_ids();
+    speedwave_runtime::plugin::ensure_plugin_images(rt, &enabled_plugin_ids)
+        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
+    Ok(())
 }
 
 /// Removes worker images that `project` no longer enables. Per-project scope
@@ -1305,11 +1310,13 @@ pub async fn restart_integration_containers(
         }
 
         rt.transaction(&project, |rt| -> anyhow::Result<()> {
-            if let Err(e) = speedwave_runtime::update::save_snapshot(&project) {
-                log::warn!(
-                    "restart_integration_containers: save_snapshot failed, rollback will not work: {e}"
-                );
-            }
+            // Hard-fail if snapshot can't be saved — without it, rollback
+            // would restore stale config from a previous cycle.
+            speedwave_runtime::update::save_snapshot(&project).map_err(|e| {
+                anyhow::anyhow!(
+                    "Cannot safely restart: failed to save rollback snapshot — retry or check disk space ({e})"
+                )
+            })?;
 
             rt.compose_down(&project).map_err(|e| {
                 log::error!("restart_integration_containers: compose_down error: {e}");

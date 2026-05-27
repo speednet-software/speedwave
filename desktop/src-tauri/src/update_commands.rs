@@ -17,6 +17,7 @@ pub(crate) async fn update_containers(
         log::info!("update_containers: project={project}");
         check_project(&project)?;
         let rt = speedwave_runtime::runtime::detect_runtime();
+        rt.ensure_ready().map_err(|e| e.to_string())?;
         speedwave_runtime::update::update_containers(&rt, &project).map_err(|e| {
             log::error!("update_containers: error: {e}");
             e.to_string()
@@ -32,6 +33,7 @@ pub(crate) async fn rollback_containers(project: String) -> Result<(), String> {
         log::info!("rollback_containers: project={project}");
         check_project(&project)?;
         let rt = speedwave_runtime::runtime::detect_runtime();
+        rt.ensure_ready().map_err(|e| e.to_string())?;
         speedwave_runtime::update::rollback_containers(&rt, &project).map_err(|e| {
             log::error!("rollback_containers: error: {e}");
             e.to_string()

@@ -262,6 +262,9 @@ fn restore_one_project(
     project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<(), String> {
+    // Build OUTSIDE the lock (ADR-066): bundle + plugin images.
+    crate::integrations_cmd::ensure_project_images_built(rt, project)?;
+
     use crate::types::IntoAnyhow;
     rt.transaction(project, |rt| -> anyhow::Result<()> {
         let _ = rt.compose_down(project);
@@ -715,6 +718,12 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
         // ensure_images_ready runs outside the transaction — long-running and idempotent.
         if let Err(e) = crate::containers_cmd::ensure_images_ready() {
             log::warn!("reconcile_compose_port: images not ready: {e}");
+            return;
+        }
+
+        // Build OUTSIDE the lock (ADR-066): plugin images for this project.
+        if let Err(e) = crate::integrations_cmd::ensure_project_images_built(&rt, &project) {
+            log::warn!("reconcile_compose_port: project images not built: {e}");
             return;
         }
 
