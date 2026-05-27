@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.12.1](https://github.com/speednet-software/speedwave/compare/v0.12.0...v0.12.1) (2026-05-27)
+
+
+### Bug Fixes
+
+* runtime compose lock, desktop log/path fixes, e2e bzip2 ([#733](https://github.com/speednet-software/speedwave/issues/733)) ([53e043c](https://github.com/speednet-software/speedwave/commit/53e043c8084c587e08bc48927390f73b8cc5694d))
+
 ## [0.12.0](https://github.com/speednet-software/speedwave/compare/v0.11.0...v0.12.0) (2026-05-26)
 
 
