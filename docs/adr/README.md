@@ -72,6 +72,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-063](ADR-063-host-bridge-generic.md)                              | Generic HostBridge skeleton for host-side WebSocket relays                               | Accepted              |
 | [ADR-064](ADR-064-canonicalize-bypass-for-wsl-unc.md)                  | Bypass `canonicalize()` for WSL UNC project paths on Windows                             | Accepted              |
 | [ADR-065](ADR-065-image-attachments-structured-input.md)               | Image attachments via structured `WireContentBlock[]` user input                         | Accepted              |
+| [ADR-066](ADR-066-locked-runtime-per-project-compose-lock.md)          | `LockedRuntime` wrapper enforcing per-project compose transaction lock                   | Accepted              |
 
 ## Creating a New ADR
 

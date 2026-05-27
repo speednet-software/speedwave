@@ -496,7 +496,7 @@ fn main() -> anyhow::Result<()> {
         });
         let project_name = resolve_project(&user_config)?;
         println!("Updating containers for project '{}'...", project_name);
-        match update::update_containers(runtime.as_ref(), &project_name) {
+        match update::update_containers(&runtime, &project_name) {
             Ok(result) => {
                 println!(
                     "Updated {} containers ({} images rebuilt)",
@@ -543,8 +543,8 @@ fn main() -> anyhow::Result<()> {
     match &action {
         CliAction::PluginInstall(path) => {
             let rt = detect_runtime();
-            let rt_ref: Option<&dyn speedwave_runtime::runtime::ContainerRuntime> =
-                if rt.is_available() { Some(&*rt) } else { None };
+            let rt_ref: Option<&speedwave_runtime::runtime::LockedRuntime> =
+                if rt.is_available() { Some(&rt) } else { None };
             let outcome = plugin::install_plugin(std::path::Path::new(path), rt_ref, &mut |_| {})?;
             match outcome {
                 plugin::InstallOutcome::Installed(manifest) => {
@@ -594,8 +594,8 @@ fn main() -> anyhow::Result<()> {
         }
         CliAction::PluginRemove(slug) => {
             let rt = detect_runtime();
-            let rt_ref: Option<&dyn speedwave_runtime::runtime::ContainerRuntime> =
-                if rt.is_available() { Some(&*rt) } else { None };
+            let rt_ref: Option<&speedwave_runtime::runtime::LockedRuntime> =
+                if rt.is_available() { Some(&rt) } else { None };
             plugin::remove_plugin(slug, rt_ref)?;
             println!("Plugin '{}' removed", slug);
             std::process::exit(0);
@@ -758,7 +758,7 @@ fn main() -> anyhow::Result<()> {
         &project_dir.to_string_lossy(),
         &resolved,
         &integrations,
-        Some(&*runtime),
+        Some(&runtime),
         &compose::HostBridgesInfo::default(),
     )?;
 
@@ -849,14 +849,20 @@ fn main() -> anyhow::Result<()> {
     // compose_up is idempotent (no --force-recreate) — nerdctl
     // recreates containers whose config changed. Skip the expensive compose_ps
     // call over SSH; just call compose_up unconditionally and let the engine
-    // decide what needs recreating.
-    compose::save_compose(&project_name, &compose_yml)?;
-    runtime.compose_up(&project_name)?;
+    // decide what needs recreating. Wrapped in a per-project transaction so a
+    // concurrent Desktop process restarting the same project cannot overwrite
+    // compose.yml between save and up (see ADR-066).
+    runtime.transaction(&project_name, |runtime| -> anyhow::Result<()> {
+        compose::save_compose(&project_name, &compose_yml)?;
+        speedwave_runtime::runtime::compose_validate_with_retry(runtime, &project_name)?;
+        runtime.compose_up(&project_name)?;
+        Ok(())
+    })?;
 
     // Verify container exec works before starting interactive session.
     // Recovers automatically from stale mounts after macOS sleep/resume.
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
-    ensure_exec_healthy(&*runtime, &project_name, &container_name)?;
+    ensure_exec_healthy(&runtime, &project_name, &container_name)?;
 
     // Handle `speedwave login` — runs `claude` interactively with the same
     // resolved flags as a normal start (--dangerously-skip-permissions etc.).
@@ -1352,7 +1358,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1378,7 +1383,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1415,7 +1419,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1437,7 +1440,6 @@ mod tests {
             active_project: Some("fallback-project".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1454,7 +1456,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1481,7 +1482,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 

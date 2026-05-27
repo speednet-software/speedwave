@@ -1188,7 +1188,7 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
 
 /// Builds missing worker images for `project`. Returns sanitized error on failure.
 pub fn ensure_project_images_built(
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
     project: &str,
 ) -> Result<(), String> {
     let user_config = speedwave_runtime::config::load_user_config()
@@ -1207,17 +1207,19 @@ pub fn ensure_project_images_built(
         .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
     let enabled = speedwave_runtime::build::enabled_images(&integrations);
     speedwave_runtime::build::build_missing_images(rt, &enabled, &manifest.bundle_id)
-        .map(|_| ())
-        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))
+        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
+
+    // Plugin images must also be built outside the compose lock (ADR-066).
+    let enabled_plugin_ids = integrations.enabled_plugin_service_ids();
+    speedwave_runtime::plugin::ensure_plugin_images(rt, &enabled_plugin_ids)
+        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
+    Ok(())
 }
 
 /// Removes worker images that `project` no longer enables. Per-project scope
 /// (ADR-057): switching to a project that needs a pruned image triggers a
 /// lazy build. Warn-only — failure never blocks restart.
-fn prune_unused_worker_images(
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
-    project: &str,
-) {
+fn prune_unused_worker_images(rt: &speedwave_runtime::runtime::LockedRuntime, project: &str) {
     let user_config = match speedwave_runtime::config::load_user_config() {
         Ok(c) => c,
         Err(e) => {
@@ -1295,13 +1297,9 @@ pub async fn restart_integration_containers(
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
-        // Save snapshot of current compose.yml for rollback before any changes
-        if let Err(e) = speedwave_runtime::update::save_snapshot(&project) {
-            log::warn!("restart_integration_containers: save_snapshot failed, rollback will not work: {e}");
-        }
-
-        // Lazy build; rollback `just_enabled` on failure.
-        if let Err(sanitized) = ensure_project_images_built(&*rt, &project) {
+        // Build OUTSIDE the compose lock (ADR-066). On failure, undo the
+        // just-enabled config toggle but leave running containers intact.
+        if let Err(sanitized) = ensure_project_images_built(&rt, &project) {
             log::error!("restart_integration_containers: image build failed: {sanitized}");
             if let Some(svc) = just_enabled.as_deref() {
                 rollback_integration_to_disabled(&project, svc);
@@ -1311,34 +1309,49 @@ pub async fn restart_integration_containers(
             ));
         }
 
-        rt.compose_down(&project).map_err(|e| {
-            log::error!("restart_integration_containers: compose_down error: {e}");
-            e.to_string()
-        })?;
+        rt.transaction(&project, |rt| -> anyhow::Result<()> {
+            // Hard-fail only on real IO errors (disk full, permission denied);
+            // save_snapshot returns Ok(()) when compose.yml doesn't exist yet.
+            speedwave_runtime::update::save_snapshot(&project).map_err(|e| {
+                anyhow::anyhow!(
+                    "Cannot safely restart: failed to write rollback snapshot ({e})"
+                )
+            })?;
 
-        // Resolve config, render compose, security check, save
-        crate::containers_cmd::render_and_save_compose(&project, &*rt)?;
+            rt.compose_down(&project).map_err(|e| {
+                log::error!("restart_integration_containers: compose_down error: {e}");
+                anyhow::anyhow!("{e}")
+            })?;
 
-        if let Err(e) = rt.compose_up_recreate(&project) {
-            log::error!(
-                "restart_integration_containers: compose_up_recreate failed: {e}, attempting rollback"
-            );
-            if let Err(rb_err) = speedwave_runtime::update::rollback_containers(&*rt, &project) {
+            use crate::types::IntoAnyhow;
+            crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
+
+            // Both validate and up_recreate are post-compose_down; either failing
+            // leaves containers stopped, so both require rollback.
+            let recreate_result = speedwave_runtime::runtime::compose_validate_with_retry(
+                rt, &project,
+            )
+            .and_then(|()| rt.compose_up_recreate(&project));
+
+            if let Err(e) = recreate_result {
                 log::error!(
-                    "restart_integration_containers: rollback also failed: {rb_err}"
+                    "restart_integration_containers: recreate failed: {e}, attempting rollback"
                 );
-                return Err(format!(
-                    "Restart failed: {e}. Rollback also failed: {rb_err}. Containers are stopped. Run speedwave to restart manually."
-                ));
+                // Nested transaction: rollback acquires its own — reentrant via HELD_LOCKS.
+                if let Err(rb_err) = speedwave_runtime::update::rollback_containers(rt, &project) {
+                    log::error!("restart_integration_containers: rollback also failed: {rb_err}");
+                    anyhow::bail!(
+                        "Restart failed: {e}. Rollback also failed: {rb_err}. Containers are stopped. Run speedwave to restart manually."
+                    );
+                }
+                anyhow::bail!("Restart failed: {e}. Rolled back to previous configuration.");
             }
-            return Err(format!(
-                "Restart failed: {e}. Rolled back to previous configuration."
-            ));
-        }
 
-        // Drop worker images this project no longer enables (ADR-057 per-project
-        // scope; other projects rebuild lazily on switch). Warn-only.
-        prune_unused_worker_images(&*rt, &project);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+
+        prune_unused_worker_images(&rt, &project);
 
         Ok(())
     })

@@ -8,9 +8,11 @@ import type { HealthReport } from '../models/health';
 
 const MOCK_HEALTHY_REPORT: HealthReport = {
   containers: [
-    { name: 'speedwave_test_claude', status: 'running', healthy: true },
-    { name: 'speedwave_test_mcp-hub', status: 'running', healthy: true },
-    { name: 'speedwave_test_redmine', status: 'starting', healthy: false },
+    // Backend (parse_container_entries) strips the compose prefix; mocks
+    // reflect the post-strip wire format the component actually receives.
+    { name: 'claude', status: 'running', healthy: true },
+    { name: 'mcp_hub', status: 'running', healthy: true },
+    { name: 'mcp_redmine', status: 'starting', healthy: false },
   ],
   vm: { running: true, vm_type: 'lima' },
   mcp_os: { running: true },
@@ -88,11 +90,7 @@ describe('SystemViewComponent', () => {
     const names = Array.from(
       fixture.nativeElement.querySelectorAll('[data-testid="system-name"]')
     ) as HTMLElement[];
-    expect(names.map((n) => n.textContent?.trim())).toEqual([
-      'speedwave_test_claude',
-      'speedwave_test_mcp-hub',
-      'speedwave_test_redmine',
-    ]);
+    expect(names.map((n) => n.textContent?.trim())).toEqual(['claude', 'mcp_hub', 'mcp_redmine']);
 
     const states = Array.from(
       fixture.nativeElement.querySelectorAll('[data-testid="system-state"]')
@@ -263,7 +261,7 @@ describe('SystemViewComponent', () => {
     const btn = fixture.nativeElement.querySelector(
       '[data-testid="system-restart"]'
     ) as HTMLButtonElement;
-    await component['restart']('speedwave_test_claude');
+    await component['restart']('claude');
     fixture.detectChanges();
 
     expect(calls).toContain('recreate_project_containers');
@@ -286,15 +284,15 @@ describe('SystemViewComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    const restartPromise = component['restart']('speedwave_test_claude');
+    const restartPromise = component['restart']('claude');
     fixture.detectChanges();
 
-    expect(component.restarting.has('speedwave_test_claude')).toBe(true);
+    expect(component.restarting.has('claude')).toBe(true);
 
     restartResolver.current?.();
     await restartPromise;
     fixture.detectChanges();
 
-    expect(component.restarting.has('speedwave_test_claude')).toBe(false);
+    expect(component.restarting.has('claude')).toBe(false);
   });
 });

@@ -247,7 +247,7 @@ pub async fn install_plugin(
 
     let outcome = tokio::task::spawn_blocking(move || {
         let rt = speedwave_runtime::runtime::detect_runtime();
-        plugin::install_plugin(&path, Some(&*rt), &mut |progress| {
+        plugin::install_plugin(&path, Some(&rt), &mut |progress| {
             let _ = app.emit("plugin_install_status", progress);
         })
     })
@@ -324,8 +324,8 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
     // detected runtime is unavailable we skip image cleanup, mirroring
     // the install_plugin code path.
     let rt = speedwave_runtime::runtime::detect_runtime();
-    let rt_ref: Option<&dyn speedwave_runtime::runtime::ContainerRuntime> =
-        if rt.is_available() { Some(&*rt) } else { None };
+    let rt_ref: Option<&speedwave_runtime::runtime::LockedRuntime> =
+        if rt.is_available() { Some(&rt) } else { None };
     plugin::remove_plugin(&slug, rt_ref).map_err(|e| e.to_string())?;
 
     // Collect project names for token cleanup (before config lock)
@@ -996,7 +996,6 @@ mod tests {
             active_project: Some("test-project".into()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
         let json = serde_json::to_string_pretty(&initial_config).unwrap();
@@ -1044,7 +1043,6 @@ mod tests {
             active_project: Some("test-project".into()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1072,7 +1070,6 @@ mod tests {
             active_project: Some("test-project".into()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1128,7 +1125,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1196,7 +1192,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1510,7 +1505,6 @@ mod tests {
             active_project: Some("my-project".into()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
         // Simulate the auto-enable block from install_plugin

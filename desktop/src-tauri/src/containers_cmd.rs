@@ -5,7 +5,6 @@
 // `Result<T, String>` for Tauri's serialization boundary.
 
 use speedwave_runtime::config;
-use speedwave_runtime::runtime::ContainerRuntime;
 
 use crate::reconcile::{SharedIdeBridge, SharedMcpOs};
 use crate::setup_wizard;
@@ -128,11 +127,12 @@ pub(crate) enum SwitchResult {
 }
 
 /// Tears down (partially-started) new project, then restores previous.
-/// Returns Ok if restore succeeded, Err with combined message if not.
+/// Each project takes its own per-project lock — intentional, not a bug:
+/// `new` and `previous` are different projects, no cross-project transaction.
 pub(crate) fn teardown_and_restore(
     new_project: &str,
     previous: &str,
-    rt: &dyn ContainerRuntime,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<(), String> {
     let down_err = rt.compose_down(new_project).err();
     if let Some(ref e) = down_err {
@@ -149,7 +149,10 @@ pub(crate) fn teardown_and_restore(
 
 /// Tears down new project without restoring anything.
 /// Used when previous is None — no project to restore.
-pub(crate) fn teardown_only(new_project: &str, rt: &dyn ContainerRuntime) -> Option<String> {
+pub(crate) fn teardown_only(
+    new_project: &str,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
+) -> Option<String> {
     rt.compose_down(new_project).err().map(|e| {
         log::warn!("teardown new '{new_project}' failed: {e}");
         format!("teardown of '{new_project}' failed: {e}")
@@ -161,8 +164,8 @@ pub(crate) fn teardown_only(new_project: &str, rt: &dyn ContainerRuntime) -> Opt
 pub(crate) fn switch_project_core(
     previous: &Option<String>,
     new_project: &str,
-    rt: &dyn ContainerRuntime,
-    recreate_fn: &dyn Fn(&str, &dyn ContainerRuntime) -> Result<(), String>,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
+    recreate_fn: &dyn Fn(&str, &speedwave_runtime::runtime::LockedRuntime) -> Result<(), String>,
 ) -> SwitchResult {
     // 1. Ensure runtime is ready
     if let Err(e) = rt.ensure_ready() {
@@ -213,13 +216,10 @@ pub(crate) fn switch_project_core(
 // ---------------------------------------------------------------------------
 
 /// Renders a new compose.yml for a project and saves it after security check.
-///
-/// Shared pipeline used by `recreate_project_containers`,
-/// `restart_integration_containers`, and `reconcile_compose_port`.
-pub(crate) fn render_and_save_compose(
-    project: &str,
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
-) -> Result<String, String> {
+/// Caller MUST run `ensure_project_images_built` before invoking — passes
+/// `None` to `render_compose` so the image-build path is not entered under
+/// the compose lock (ADR-066).
+pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     let project_dir = user_config
         .find_project(project)
@@ -237,7 +237,7 @@ pub(crate) fn render_and_save_compose(
         &project_dir,
         &resolved,
         &integrations,
-        Some(rt),
+        None,
         &crate::reconcile::current_bridges_info(),
     )
     .map_err(|e| e.to_string())?;
@@ -276,7 +276,7 @@ pub(crate) fn render_and_save_compose(
     }
 
     speedwave_runtime::compose::save_compose(project, &yaml).map_err(|e| e.to_string())?;
-    Ok(yaml)
+    Ok(())
 }
 
 /// Formats security violations into a human-readable multi-line string.
@@ -412,10 +412,9 @@ pub async fn add_project(
     chat_state: tauri::State<'_, crate::chat::SharedChatSession>,
     mcp_os: tauri::State<'_, SharedMcpOs>,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
-    compose_lock: tauri::State<'_, crate::ComposeLock>,
 ) -> Result<(), String> {
     // Start subsystems on-demand (e.g. after factory reset / fresh install)
-    crate::ensure_mcp_os_running(&mcp_os, &app, compose_lock.inner().clone());
+    crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
 
     // Pre-flight: detect CloudStorage TCC denial before adding project.
@@ -470,7 +469,7 @@ pub async fn add_project(
             };
         }
         let rt = speedwave_runtime::runtime::detect_runtime();
-        switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, _rt| {
+        switch_project_core(&prev_clone, &new_clone, &rt, &|proj, _rt| {
             // start_containers calls ensure_ready internally (noop — VM already up)
             check_project(proj)?;
             log::info!("add_project: starting containers for project={proj}");
@@ -534,10 +533,8 @@ pub async fn start_containers(
     app: tauri::AppHandle,
     mcp_os: tauri::State<'_, SharedMcpOs>,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
-    compose_lock: tauri::State<'_, crate::ComposeLock>,
 ) -> Result<(), String> {
-    // Start subsystems on-demand (e.g. after factory reset / fresh install)
-    crate::ensure_mcp_os_running(&mcp_os, &app, compose_lock.inner().clone());
+    crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
 
     tokio::task::spawn_blocking(move || {
@@ -633,23 +630,22 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
-        // Lazy build for the destination project (ADR-057).
-        if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&*rt, &project)
+        // Lazy build (ADR-057).
+        if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, &project)
         {
             log::error!("recreate_project_containers: image build failed: {sanitized}");
             return Err(format!("Image build failed: {sanitized}"));
         }
 
-        // Stop old containers (ignore errors — they may not be running)
-        let _ = rt.compose_down(&project);
-
-        // Resolve config, render compose, security check, save
-        render_and_save_compose(&project, &*rt)?;
-
-        rt.compose_up_recreate(&project).map_err(|e| {
-            log::error!("recreate_project_containers: compose_up_recreate failed: {e}");
-            e.to_string()
-        })?;
+        use crate::types::IntoAnyhow;
+        rt.transaction(&project, |rt| -> anyhow::Result<()> {
+            let _ = rt.compose_down(&project);
+            render_and_save_compose(&project).into_anyhow()?;
+            speedwave_runtime::runtime::compose_validate_with_retry(rt, &project)?;
+            rt.compose_up_recreate(&project)?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
 
         log::info!("recreate_project_containers: done for project={project}");
         Ok(())
@@ -1040,7 +1036,6 @@ mod tests {
             active_project: Some("alpha".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         }
     }
@@ -1152,7 +1147,6 @@ mod tests {
             active_project: None,
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1180,7 +1174,6 @@ mod tests {
             active_project: Some("nonexistent".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1215,7 +1208,6 @@ mod tests {
             active_project: Some("proj".to_string()),
             selected_ide: None,
             transcription: None,
-            log_level: None,
             ui: None,
         };
 
@@ -1583,120 +1575,24 @@ mod tests {
 
     // -- MockRuntime for switch/teardown tests --
 
-    use speedwave_runtime::runtime::ContainerRuntime;
-    use std::sync::{Arc, Mutex};
-
-    struct MockRuntime {
-        down_calls: Arc<Mutex<Vec<String>>>,
-        up_calls: Arc<Mutex<Vec<String>>>,
-        ensure_ready_fails: bool,
-        fail_on_down: Vec<String>,
-        fail_on_up: Vec<String>,
-    }
-
-    impl MockRuntime {
-        fn new() -> Self {
-            Self {
-                down_calls: Arc::new(Mutex::new(Vec::new())),
-                up_calls: Arc::new(Mutex::new(Vec::new())),
-                ensure_ready_fails: false,
-                fail_on_down: Vec::new(),
-                fail_on_up: Vec::new(),
-            }
-        }
-
-        fn with_ensure_ready_fails(mut self) -> Self {
-            self.ensure_ready_fails = true;
-            self
-        }
-
-        fn with_fail_on_down(mut self, projects: &[&str]) -> Self {
-            self.fail_on_down = projects.iter().map(|s| s.to_string()).collect();
-            self
-        }
-
-        fn with_fail_on_up(mut self, projects: &[&str]) -> Self {
-            self.fail_on_up = projects.iter().map(|s| s.to_string()).collect();
-            self
-        }
-
-        fn down_calls(&self) -> Vec<String> {
-            self.down_calls.lock().unwrap().clone()
-        }
-
-        fn up_calls(&self) -> Vec<String> {
-            self.up_calls.lock().unwrap().clone()
-        }
-    }
-
-    impl ContainerRuntime for MockRuntime {
-        fn compose_up(&self, project: &str) -> anyhow::Result<()> {
-            self.up_calls.lock().unwrap().push(project.to_string());
-            if self.fail_on_up.contains(&project.to_string()) {
-                anyhow::bail!("mock up error for {project}");
-            }
-            Ok(())
-        }
-        fn compose_down(&self, project: &str) -> anyhow::Result<()> {
-            self.down_calls.lock().unwrap().push(project.to_string());
-            if self.fail_on_down.contains(&project.to_string()) {
-                anyhow::bail!("mock down error for {project}");
-            }
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
-            std::process::Command::new("true")
-        }
-        fn container_exec_piped(
-            &self,
-            _: &str,
-            _: &[&str],
-        ) -> anyhow::Result<std::process::Command> {
-            Ok(std::process::Command::new("true"))
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            if self.ensure_ready_fails {
-                anyhow::bail!("VM not ready");
-            }
-            Ok(())
-        }
-        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-    }
+    use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 
     // -- teardown_and_restore tests --
 
     #[test]
     fn teardown_and_restore_ok() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = teardown_and_restore("new_proj", "prev_proj", &rt);
         assert!(result.is_ok());
-        assert_eq!(rt.down_calls(), vec!["new_proj"]);
-        assert_eq!(rt.up_calls(), vec!["prev_proj"]);
+        assert_eq!(handles.down_projects(), vec!["new_proj"]);
+        assert_eq!(handles.up_projects(), vec!["prev_proj"]);
     }
 
     #[test]
     fn teardown_and_restore_up_fails() {
-        let rt = MockRuntime::new().with_fail_on_up(&["prev_proj"]);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_fail_on_up(&["prev_proj"])
+            .build();
         let result = teardown_and_restore("new_proj", "prev_proj", &rt);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1704,15 +1600,16 @@ mod tests {
             err.contains("restore 'prev_proj' failed"),
             "expected restore error, got: {err}"
         );
-        assert_eq!(rt.down_calls(), vec!["new_proj"]);
-        assert_eq!(rt.up_calls(), vec!["prev_proj"]);
+        assert_eq!(handles.down_projects(), vec!["new_proj"]);
+        assert_eq!(handles.up_projects(), vec!["prev_proj"]);
     }
 
     #[test]
     fn teardown_and_restore_both_fail() {
-        let rt = MockRuntime::new()
+        let (rt, _handles) = MockRuntimeBuilder::new()
             .with_fail_on_down(&["new_proj"])
-            .with_fail_on_up(&["prev_proj"]);
+            .with_fail_on_up(&["prev_proj"])
+            .build();
         let result = teardown_and_restore("new_proj", "prev_proj", &rt);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1730,15 +1627,17 @@ mod tests {
 
     #[test]
     fn teardown_only_ok() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = teardown_only("new_proj", &rt);
         assert!(result.is_none());
-        assert_eq!(rt.down_calls(), vec!["new_proj"]);
+        assert_eq!(handles.down_projects(), vec!["new_proj"]);
     }
 
     #[test]
     fn teardown_only_fails() {
-        let rt = MockRuntime::new().with_fail_on_down(&["new_proj"]);
+        let (rt, _handles) = MockRuntimeBuilder::new()
+            .with_fail_on_down(&["new_proj"])
+            .build();
         let result = teardown_only("new_proj", &rt);
         assert!(result.is_some());
         let msg = result.unwrap();
@@ -1750,44 +1649,52 @@ mod tests {
 
     // -- switch_project_core tests --
 
-    fn ok_recreate(_proj: &str, _rt: &dyn ContainerRuntime) -> Result<(), String> {
+    fn ok_recreate(
+        _proj: &str,
+        _rt: &speedwave_runtime::runtime::LockedRuntime,
+    ) -> Result<(), String> {
         Ok(())
     }
 
-    fn fail_recreate(_proj: &str, _rt: &dyn ContainerRuntime) -> Result<(), String> {
+    fn fail_recreate(
+        _proj: &str,
+        _rt: &speedwave_runtime::runtime::LockedRuntime,
+    ) -> Result<(), String> {
         Err("recreate failed".to_string())
     }
 
     #[test]
     fn switch_core_happy_path_with_previous() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
         assert!(matches!(result, SwitchResult::Succeeded));
-        assert_eq!(rt.down_calls(), vec!["prev"]);
+        assert_eq!(handles.down_projects(), vec!["prev"]);
     }
 
     #[test]
     fn switch_core_happy_path_no_previous() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = switch_project_core(&None, "new", &rt, &ok_recreate);
         assert!(matches!(result, SwitchResult::Succeeded));
-        assert!(rt.down_calls().is_empty());
+        assert!(handles.down_projects().is_empty());
     }
 
     #[test]
     fn switch_core_happy_path_same_project() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("same".to_string());
         let result = switch_project_core(&prev, "same", &rt, &ok_recreate);
         assert!(matches!(result, SwitchResult::Succeeded));
         // No down call when prev == new
-        assert!(rt.down_calls().is_empty());
+        assert!(handles.down_projects().is_empty());
     }
 
     #[test]
     fn switch_core_ensure_ready_fails() {
-        let rt = MockRuntime::new().with_ensure_ready_fails();
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_ensure_ready_error("VM not ready")
+            .build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
         match result {
@@ -1801,13 +1708,15 @@ mod tests {
             SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // No compose calls when ensure_ready fails
-        assert!(rt.down_calls().is_empty());
-        assert!(rt.up_calls().is_empty());
+        assert!(handles.down_projects().is_empty());
+        assert!(handles.up_projects().is_empty());
     }
 
     #[test]
     fn switch_core_down_prev_fails_up_prev_ok() {
-        let rt = MockRuntime::new().with_fail_on_down(&["prev"]);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_fail_on_down(&["prev"])
+            .build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
         match result {
@@ -1824,15 +1733,16 @@ mod tests {
             }
             SwitchResult::Succeeded => panic!("expected Failed"),
         }
-        assert_eq!(rt.down_calls(), vec!["prev"]);
-        assert_eq!(rt.up_calls(), vec!["prev"]);
+        assert_eq!(handles.down_projects(), vec!["prev"]);
+        assert_eq!(handles.up_projects(), vec!["prev"]);
     }
 
     #[test]
     fn switch_core_down_prev_fails_up_prev_fails() {
-        let rt = MockRuntime::new()
+        let (rt, _handles) = MockRuntimeBuilder::new()
             .with_fail_on_down(&["prev"])
-            .with_fail_on_up(&["prev"]);
+            .with_fail_on_up(&["prev"])
+            .build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
         match result {
@@ -1853,7 +1763,7 @@ mod tests {
 
     #[test]
     fn switch_core_recreate_fails_with_previous() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &fail_recreate);
         match result {
@@ -1868,14 +1778,14 @@ mod tests {
             SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // down(prev) for stop + down(new) for teardown
-        assert_eq!(rt.down_calls(), vec!["prev", "new"]);
+        assert_eq!(handles.down_projects(), vec!["prev", "new"]);
         // up(prev) for restore
-        assert_eq!(rt.up_calls(), vec!["prev"]);
+        assert_eq!(handles.up_projects(), vec!["prev"]);
     }
 
     #[test]
     fn switch_core_recreate_fails_no_previous() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = switch_project_core(&None, "new", &rt, &fail_recreate);
         match result {
             SwitchResult::Failed {
@@ -1888,13 +1798,13 @@ mod tests {
             }
             SwitchResult::Succeeded => panic!("expected Failed"),
         }
-        assert_eq!(rt.down_calls(), vec!["new"]);
-        assert!(rt.up_calls().is_empty());
+        assert_eq!(handles.down_projects(), vec!["new"]);
+        assert!(handles.up_projects().is_empty());
     }
 
     #[test]
     fn switch_core_recreate_fails_restore_fails() {
-        let rt = MockRuntime::new().with_fail_on_up(&["prev"]);
+        let (rt, _handles) = MockRuntimeBuilder::new().with_fail_on_up(&["prev"]).build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &fail_recreate);
         match result {
@@ -1912,7 +1822,7 @@ mod tests {
 
     #[test]
     fn switch_core_recreate_fails_via_closure_with_previous() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &|_proj, _rt| {
             Err("render error".to_string())
@@ -1924,13 +1834,13 @@ mod tests {
             SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // down(prev) for stop + down(new) for teardown (noop)
-        assert_eq!(rt.down_calls(), vec!["prev", "new"]);
-        assert_eq!(rt.up_calls(), vec!["prev"]);
+        assert_eq!(handles.down_projects(), vec!["prev", "new"]);
+        assert_eq!(handles.up_projects(), vec!["prev"]);
     }
 
     #[test]
     fn switch_core_recreate_fails_via_closure_no_previous() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = switch_project_core(&None, "new", &rt, &|_proj, _rt| {
             Err("render error".to_string())
         });
@@ -1941,8 +1851,8 @@ mod tests {
             SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // down(new) for teardown only
-        assert_eq!(rt.down_calls(), vec!["new"]);
-        assert!(rt.up_calls().is_empty());
+        assert_eq!(handles.down_projects(), vec!["new"]);
+        assert!(handles.up_projects().is_empty());
     }
 
     // -- add_project flow tests --
@@ -1954,19 +1864,27 @@ mod tests {
 
     /// Simulates the add_project closure: check_project (always ok in tests)
     /// + start_containers (delegates to compose_up to simulate container start).
-    fn add_project_recreate(proj: &str, rt: &dyn ContainerRuntime) -> Result<(), String> {
+    fn add_project_recreate(
+        proj: &str,
+        rt: &speedwave_runtime::runtime::LockedRuntime,
+    ) -> Result<(), String> {
         // In production: check_project(proj)? + start_containers(proj)
         // start_containers calls ensure_ready (noop) + render + compose_up
         rt.compose_up(proj).map_err(|e| e.to_string())
     }
 
-    fn add_project_recreate_fail(_proj: &str, _rt: &dyn ContainerRuntime) -> Result<(), String> {
+    fn add_project_recreate_fail(
+        _proj: &str,
+        _rt: &speedwave_runtime::runtime::LockedRuntime,
+    ) -> Result<(), String> {
         Err("start_containers failed".to_string())
     }
 
     #[test]
     fn add_project_ensure_ready_fails() {
-        let rt = MockRuntime::new().with_ensure_ready_fails();
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_ensure_ready_error("VM not ready")
+            .build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
         match result {
@@ -1979,24 +1897,29 @@ mod tests {
             }
             SwitchResult::Succeeded => panic!("expected Failed"),
         }
-        assert!(rt.down_calls().is_empty(), "no compose calls when VM fails");
-        assert!(rt.up_calls().is_empty());
+        assert!(
+            handles.down_projects().is_empty(),
+            "no compose calls when VM fails"
+        );
+        assert!(handles.up_projects().is_empty());
     }
 
     #[test]
     fn add_project_happy_path_with_previous() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
         assert!(matches!(result, SwitchResult::Succeeded));
         // ensure_ready → down(prev) → up(new) via start_containers
-        assert_eq!(rt.down_calls(), vec!["prev"]);
-        assert_eq!(rt.up_calls(), vec!["new"]);
+        assert_eq!(handles.down_projects(), vec!["prev"]);
+        assert_eq!(handles.up_projects(), vec!["new"]);
     }
 
     #[test]
     fn add_project_down_prev_fails_restore_ok() {
-        let rt = MockRuntime::new().with_fail_on_down(&["prev"]);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_fail_on_down(&["prev"])
+            .build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
         match result {
@@ -2013,14 +1936,14 @@ mod tests {
             }
             SwitchResult::Succeeded => panic!("expected Failed"),
         }
-        assert_eq!(rt.down_calls(), vec!["prev"]);
-        assert_eq!(rt.up_calls(), vec!["prev"]);
+        assert_eq!(handles.down_projects(), vec!["prev"]);
+        assert_eq!(handles.up_projects(), vec!["prev"]);
     }
 
     #[test]
     fn add_project_start_containers_fails_restore_prev() {
         // start_containers fails → teardown_and_restore(new, prev)
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate_fail);
         match result {
@@ -2035,19 +1958,19 @@ mod tests {
             SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // down(prev) for stop + down(new) for teardown
-        assert_eq!(rt.down_calls(), vec!["prev", "new"]);
+        assert_eq!(handles.down_projects(), vec!["prev", "new"]);
         // up(prev) for restore
-        assert_eq!(rt.up_calls(), vec!["prev"]);
+        assert_eq!(handles.up_projects(), vec!["prev"]);
     }
 
     #[test]
     fn add_project_happy_path_no_previous() {
-        let rt = MockRuntime::new();
+        let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = switch_project_core(&None, "new", &rt, &add_project_recreate);
         assert!(matches!(result, SwitchResult::Succeeded));
         // No previous → no down, only up(new)
-        assert!(rt.down_calls().is_empty());
-        assert_eq!(rt.up_calls(), vec!["new"]);
+        assert!(handles.down_projects().is_empty());
+        assert_eq!(handles.up_projects(), vec!["new"]);
     }
 
     #[test]

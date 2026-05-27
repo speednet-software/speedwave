@@ -21,8 +21,6 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
       case 'get_update_settings':
         return { auto_check: true, check_interval_hours: 24 };
-      case 'get_log_level':
-        return 'info';
       case 'get_platform':
         return 'darwin';
       case 'get_auth_status':

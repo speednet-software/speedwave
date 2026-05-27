@@ -466,7 +466,7 @@ async fn run_vm_curl(
     tokio::task::spawn_blocking(move || {
         let runtime = speedwave_runtime::runtime::detect_runtime();
         run_vm_curl_blocking(
-            &*runtime,
+            &runtime,
             &method,
             &url,
             json_body.as_ref(),
@@ -480,7 +480,7 @@ async fn run_vm_curl(
 }
 
 fn run_vm_curl_blocking(
-    runtime: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    runtime: &speedwave_runtime::runtime::LockedRuntime,
     method: &str,
     url: &str,
     json_body: Option<&serde_json::Value>,

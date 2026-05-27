@@ -5,6 +5,19 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const MAX_CREDENTIAL_BYTES: usize = 4096;
 
+/// Converts a `Result<T, String>` into `anyhow::Result<T>` — eliminates the
+/// repeated `.map_err(|e| anyhow::anyhow!("{e}"))` boilerplate at compose
+/// transaction callsites where the inner function returns `String` errors.
+pub(crate) trait IntoAnyhow<T> {
+    fn into_anyhow(self) -> anyhow::Result<T>;
+}
+
+impl<T> IntoAnyhow<T> for Result<T, String> {
+    fn into_anyhow(self) -> anyhow::Result<T> {
+        self.map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------

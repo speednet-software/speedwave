@@ -46,6 +46,7 @@ impl LimaRuntime {
         }
     }
 
+    #[cfg(test)]
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
         Self {
             runner,
@@ -235,7 +236,28 @@ fn compose_down_and_cleanup_with_retry(
     }
 
     force_remove_project_containers_with_retry(runner, cmd, project, nerdctl_prefix);
+    force_remove_project_networks_with_retry(runner, cmd, project, nerdctl_prefix);
     down_result
+}
+
+/// Lima-flavoured force-remove for project networks. `retry_on_eof` wrapper
+/// around `network rm`. No `--time=0` (networks have no graceful-stop window).
+fn force_remove_project_networks_with_retry(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+) {
+    // Each network ls/rm goes through retry_on_eof. The shared algorithm in
+    // mod.rs handles the rest of the orchestration.
+    super::force_remove_project_networks_with_run_fn(cmd, project, nerdctl_prefix, |c, a| {
+        let label = if a.contains(&"ls") {
+            "network_ls"
+        } else {
+            "network_rm"
+        };
+        retry_on_eof(label, || runner.run(c, a))
+    });
 }
 
 /// Lima-flavoured force-remove. Same shape as
@@ -693,6 +715,29 @@ impl ContainerRuntime for LimaRuntime {
                 "-d",
                 "--force-recreate",
                 "--remove-orphans",
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
+        self.require_running()?;
+        let compose_file = super::compose_file_path(project)?;
+        self.runner.run(
+            "limactl",
+            &[
+                "shell",
+                consts::lima_vm_name(),
+                "--",
+                "sudo",
+                "nerdctl",
+                "compose",
+                "-f",
+                &compose_file,
+                "-p",
+                project,
+                "config",
+                "--quiet",
             ],
         )?;
         Ok(())
@@ -1634,11 +1679,12 @@ mod tests {
         rt.compose_down("testproject").unwrap();
 
         let commands = recorded.lock().unwrap();
-        // compose down + force_remove ps -a + rm -f stale-id
+        // down + ps + rm-container + network-ls (no rm because make_recording_runner's
+        // network-ls response is empty by default).
         assert_eq!(
             commands.len(),
-            3,
-            "compose_down should issue 3 commands (down + ps cleanup + rm), got: {:?}",
+            4,
+            "compose_down should issue 4 commands (down + ps + rm + network-ls), got: {:?}",
             *commands
         );
 
@@ -1678,6 +1724,36 @@ mod tests {
             commands[2].contains("rm -f stale-id"),
             "third command should remove stale container id, got: {}",
             commands[2]
+        );
+    }
+
+    #[test]
+    fn test_compose_validate_runs_nerdctl_compose_config_quiet() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        rt.compose_validate("vproj").unwrap();
+
+        let commands = recorded.lock().unwrap();
+        // Should emit exactly one limactl shell ... nerdctl compose ... config --quiet
+        let compose_cmd = commands
+            .iter()
+            .find(|c| c.contains("nerdctl compose") && c.contains("config"))
+            .expect("expected nerdctl compose config command");
+        assert!(
+            compose_cmd.starts_with("limactl shell"),
+            "compose_validate must wrap call in limactl shell, got: {compose_cmd}"
+        );
+        assert!(
+            compose_cmd.contains("sudo nerdctl compose"),
+            "compose_validate must use sudo nerdctl compose, got: {compose_cmd}"
+        );
+        assert!(
+            compose_cmd.contains("-p vproj"),
+            "compose_validate must pass -p vproj, got: {compose_cmd}"
+        );
+        assert!(
+            compose_cmd.contains("config --quiet"),
+            "compose_validate must run `config --quiet`, got: {compose_cmd}"
         );
     }
 

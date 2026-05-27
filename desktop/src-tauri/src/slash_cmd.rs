@@ -31,7 +31,7 @@ pub(crate) async fn list_slash_commands(
         let handle =
             slash::ProjectHandle::new(&project_entry.name, PathBuf::from(&project_entry.dir));
         let rt = runtime::detect_runtime();
-        slash::discover_slash_commands(&*rt, &handle).map_err(|e| e.to_string())
+        slash::discover_slash_commands(&rt, &handle).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("slash discovery task failed: {e}"))??;

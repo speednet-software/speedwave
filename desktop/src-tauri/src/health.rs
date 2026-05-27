@@ -1,8 +1,46 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::BTreeSet;
+use std::sync::{LazyLock, Mutex, PoisonError};
 
-use log::{debug, info};
+use log::info;
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::runtime;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct IdeScanState {
+    // Fingerprint built before dedupe so same-port duplicates collapse via set
+    // semantics, not via mtime tie-break.
+    live: BTreeSet<(String, u16)>,
+    anomalies: BTreeSet<String>,
+}
+
+static LAST_IDE_STATE: LazyLock<Mutex<IdeScanState>> =
+    LazyLock::new(|| Mutex::new(IdeScanState::default()));
+
+fn compute_ide_state_diff(prev: &IdeScanState, current: &IdeScanState) -> Vec<String> {
+    let mut out = Vec::new();
+    if prev.live != current.live {
+        out.push(format!(
+            "IDE state changed: {:?} → {:?}",
+            prev.live, current.live
+        ));
+    }
+    let new_anomalies: BTreeSet<_> = current.anomalies.difference(&prev.anomalies).collect();
+    if !new_anomalies.is_empty() {
+        out.push(format!("IDE anomaly: {new_anomalies:?}"));
+    }
+    let resolved_anomalies: BTreeSet<_> = prev.anomalies.difference(&current.anomalies).collect();
+    if !resolved_anomalies.is_empty() {
+        out.push(format!("IDE anomaly resolved: {resolved_anomalies:?}"));
+    }
+    out
+}
+
+#[cfg(test)]
+pub(super) fn reset_ide_state_for_tests() {
+    *LAST_IDE_STATE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = IdeScanState::default();
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ContainerHealth {
@@ -133,7 +171,7 @@ impl HealthMonitor {
     pub fn check_containers(project: &str) -> anyhow::Result<Vec<ContainerHealth>> {
         let rt = runtime::detect_runtime();
         let ps = rt.compose_ps(project)?;
-        Ok(parse_container_entries(&ps))
+        Ok(parse_container_entries(&ps, project))
     }
 }
 
@@ -141,15 +179,16 @@ impl HealthMonitor {
 ///
 /// Handles field name differences across nerdctl versions: `Name`/`name`,
 /// `State`/`Status`/`state`/`status`.
-fn parse_container_entries(entries: &[serde_json::Value]) -> Vec<ContainerHealth> {
+fn parse_container_entries(entries: &[serde_json::Value], project: &str) -> Vec<ContainerHealth> {
     entries
         .iter()
         .map(|entry| {
-            let name = entry
+            let raw_name = entry
                 .get("Name")
                 .or_else(|| entry.get("name"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
+                .unwrap_or("unknown");
+            let name = speedwave_runtime::consts::strip_compose_container_prefix(raw_name, project)
                 .to_string();
 
             let status = entry
@@ -274,10 +313,6 @@ pub fn is_ide_port_alive(port: u16) -> bool {
     is_ide_lock_alive(&lock_path)
 }
 
-/// Tracks the last number of detected IDEs so we only log at `info!` level
-/// when the count changes (avoids spam from the 5-second polling cycle).
-static LAST_IDE_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 /// Scans `lock_dir/*.lock` for IDE lock files with live PIDs and listening ports.
 ///
 /// Deduplicates by `(pid, ide_name)` — VS Code writes one lock per window,
@@ -295,6 +330,8 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         pid: u32,
         mtime: std::time::SystemTime,
     }
+
+    let mut anomalies: BTreeSet<String> = BTreeSet::new();
 
     let live: Vec<LiveEntry> = entries
         .flatten()
@@ -316,7 +353,7 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                 .and_then(|p| u32::try_from(p).ok());
             if let Some(pid) = pid {
                 if pid == std::process::id() {
-                    debug!("{filename}: skipped (own PID)");
+                    anomalies.insert(format!("{filename}:own_pid"));
                     return None;
                 }
             }
@@ -330,20 +367,15 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                     .and_then(|s| s.parse::<u16>().ok())
             });
             let Some(port) = port else {
-                debug!("{filename}: skipped (no resolvable port)");
+                anomalies.insert(format!("{filename}:no_port"));
                 return None;
             };
-            let port_source = if json_port.is_some() {
-                "json"
-            } else {
-                "filename"
-            };
             let Some(check_pid) = pid else {
-                debug!("{filename}: skipped (no valid PID in JSON)");
+                anomalies.insert(format!("{filename}:no_pid"));
                 return None;
             };
             if !is_lock_entry_alive(check_pid, port) {
-                debug!("{filename}: skipped (stale — PID or port not alive)");
+                anomalies.insert(format!("{filename}:stale"));
                 return None;
             }
             let ws_url = v
@@ -359,7 +391,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
                 .metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::UNIX_EPOCH);
-            debug!("{filename}: alive, ide={ide_name} port={port} (from {port_source})");
             Some(LiveEntry {
                 ide_name,
                 port,
@@ -370,8 +401,11 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         })
         .collect();
 
-    // Dedupe by (pid, ide_name): one IDE process can spawn multiple lock
-    // files (e.g. VS Code with several windows). Keep the most recent.
+    // Fingerprint built from the full pre-dedupe set so identical (ide, port)
+    // pairs across multiple lock files collapse via BTreeSet, not via mtime.
+    let live_fingerprint: BTreeSet<(String, u16)> =
+        live.iter().map(|e| (e.ide_name.clone(), e.port)).collect();
+
     let mut by_key: std::collections::HashMap<(u32, String), LiveEntry> =
         std::collections::HashMap::new();
     for entry in live {
@@ -388,7 +422,9 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         }
     }
 
-    let result: Vec<DetectedIde> = by_key
+    // HashMap iteration is hash-randomised; sort so the frontend's
+    // detected-IDE list does not jump around between 5-second polls.
+    let mut result: Vec<DetectedIde> = by_key
         .into_values()
         .map(|e| DetectedIde {
             ide_name: e.ide_name,
@@ -396,16 +432,25 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
             ws_url: e.ws_url,
         })
         .collect();
+    result.sort_by(|a, b| a.ide_name.cmp(&b.ide_name).then(a.port.cmp(&b.port)));
 
-    let count = result.len();
-    let prev = LAST_IDE_COUNT.swap(count, Ordering::Relaxed);
-    if count != prev {
-        info!("detected IDE count changed: {prev} → {count}");
+    let current = IdeScanState {
+        live: live_fingerprint,
+        anomalies,
+    };
+    let messages = {
+        let mut last = LAST_IDE_STATE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let msgs = compute_ide_state_diff(&last, &current);
+        *last = current;
+        msgs
+    };
+    // Lock released — log writes (possibly involving file rotation) cannot
+    // block a concurrent caller waiting on LAST_IDE_STATE.
+    for msg in messages {
+        info!("{msg}");
     }
-    debug!(
-        "IDE scan complete: {count} live IDE(s) in {}",
-        lock_dir.display()
-    );
 
     result
 }
@@ -432,9 +477,11 @@ impl HealthMonitor {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        parse_container_entries, ContainerHealth, DetectedIde, HealthMonitor, HealthReport,
-        IdeBridgeHealth, McpOsHealth, VmHealth,
+        compute_ide_state_diff, parse_container_entries, reset_ide_state_for_tests,
+        ContainerHealth, DetectedIde, HealthMonitor, HealthReport, IdeBridgeHealth, IdeScanState,
+        McpOsHealth, VmHealth,
     };
+    use std::collections::BTreeSet;
 
     /// Returns a PID that is alive and different from `std::process::id()`.
     /// Unix: parent PID. Windows: spawns a sleeping process.
@@ -613,7 +660,7 @@ mod tests {
             r#"[{"Name":"mcp_hub","State":"running"},{"Name":"claude","State":"exited"}]"#,
         )
         .unwrap();
-        let result = parse_container_entries(&entries);
+        let result = parse_container_entries(&entries, "myproj");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].name, "mcp_hub");
         assert_eq!(result[0].status, "running");
@@ -627,7 +674,7 @@ mod tests {
     fn parse_docker_status_field() {
         let entries: Vec<serde_json::Value> =
             serde_json::from_str(r#"[{"Name":"hub","Status":"Up 5 minutes"}]"#).unwrap();
-        let result = parse_container_entries(&entries);
+        let result = parse_container_entries(&entries, "p");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status, "Up 5 minutes");
         assert!(result[0].healthy);
@@ -636,7 +683,7 @@ mod tests {
     #[test]
     fn parse_missing_fields_returns_unknown() {
         let entries: Vec<serde_json::Value> = serde_json::from_str(r#"[{"ID":"abc"}]"#).unwrap();
-        let result = parse_container_entries(&entries);
+        let result = parse_container_entries(&entries, "p");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "unknown");
         assert_eq!(result[0].status, "unknown");
@@ -645,8 +692,32 @@ mod tests {
 
     #[test]
     fn parse_empty_entries() {
-        let result = parse_container_entries(&[]);
+        let result = parse_container_entries(&[], "p");
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_strips_runtime_project_prefix() {
+        // Build container names from the live `compose_prefix()` so the test
+        // is independent of `SPEEDWAVE_DATA_DIR`.
+        let prefix = speedwave_runtime::consts::compose_prefix();
+        let json = format!(
+            r#"[{{"Name":"{prefix}_my_proj_mcp_hub","State":"running"}},
+                {{"Name":"{prefix}_my_proj_mcp_office","State":"running"}}]"#
+        );
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        let result = parse_container_entries(&entries, "my_proj");
+        assert_eq!(result[0].name, "mcp_hub", "underscores in project survive");
+        assert_eq!(result[1].name, "mcp_office");
+    }
+
+    #[test]
+    fn parse_leaves_unrelated_container_unchanged() {
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(r#"[{"Name":"other_unrelated_thing","State":"running"}]"#)
+                .unwrap();
+        let result = parse_container_entries(&entries, "p");
+        assert_eq!(result[0].name, "other_unrelated_thing");
     }
 
     #[test]
@@ -885,7 +956,7 @@ mod tests {
     fn parse_lowercase_name_and_state() {
         let entries: Vec<serde_json::Value> =
             serde_json::from_str(r#"[{"name":"hub","state":"running"}]"#).unwrap();
-        let result = parse_container_entries(&entries);
+        let result = parse_container_entries(&entries, "p");
         assert_eq!(result[0].name, "hub");
         assert_eq!(result[0].status, "running");
         assert!(result[0].healthy);
@@ -1351,5 +1422,122 @@ mod tests {
             report.selected_ide.as_ref().and_then(|i| i.port),
             Some(6_902)
         );
+    }
+
+    fn state_with_live(entries: &[(&str, u16)]) -> IdeScanState {
+        IdeScanState {
+            live: entries
+                .iter()
+                .map(|(n, p)| ((*n).to_string(), *p))
+                .collect(),
+            anomalies: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn diff_returns_nothing_when_state_unchanged() {
+        let s = state_with_live(&[("VS Code", 45_581)]);
+        assert!(compute_ide_state_diff(&s, &s).is_empty());
+    }
+
+    #[test]
+    fn diff_logs_when_ide_added() {
+        let prev = IdeScanState::default();
+        let curr = state_with_live(&[("VS Code", 45_581)]);
+        let msgs = compute_ide_state_diff(&prev, &curr);
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].starts_with("IDE state changed"));
+    }
+
+    #[test]
+    fn diff_logs_when_port_changed_same_count() {
+        let prev = state_with_live(&[("VS Code", 45_581)]);
+        let curr = state_with_live(&[("VS Code", 50_000)]);
+        let msgs = compute_ide_state_diff(&prev, &curr);
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].starts_with("IDE state changed"));
+    }
+
+    #[test]
+    fn diff_logs_when_anomaly_appears() {
+        let prev = IdeScanState::default();
+        let curr = IdeScanState {
+            live: BTreeSet::new(),
+            anomalies: BTreeSet::from(["45581.lock:stale".to_string()]),
+        };
+        let msgs = compute_ide_state_diff(&prev, &curr);
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].starts_with("IDE anomaly"));
+    }
+
+    #[test]
+    fn diff_does_not_relog_persistent_anomaly() {
+        let s = IdeScanState {
+            live: BTreeSet::new(),
+            anomalies: BTreeSet::from(["45581.lock:stale".to_string()]),
+        };
+        assert!(compute_ide_state_diff(&s, &s).is_empty());
+    }
+
+    #[test]
+    fn diff_logs_when_anomaly_resolves() {
+        let prev = IdeScanState {
+            live: BTreeSet::new(),
+            anomalies: BTreeSet::from(["45581.lock:stale".to_string()]),
+        };
+        let curr = IdeScanState::default();
+        let msgs = compute_ide_state_diff(&prev, &curr);
+        // The cleared anomaly fires a "resolved" log so the appearance log has
+        // a matching close-out — operators can correlate the two.
+        assert!(
+            msgs.iter().any(|m| m.starts_with("IDE anomaly resolved")),
+            "got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn list_ides_stable_across_repeated_calls() {
+        use super::list_ides_in_dir;
+
+        reset_ide_state_for_tests();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (external_pid, _child) = external_alive_pid();
+        let l_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = l_a.local_addr().unwrap().port();
+        let l_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_b = l_b.local_addr().unwrap().port();
+        std::fs::write(
+            tmp.path().join(format!("{port_a}.lock")),
+            format!(
+                r#"{{"pid":{external_pid},"port":{port_a},"wsUrl":"ws://127.0.0.1:{port_a}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Cursor","transport":"ws"}}"#,
+            ),
+        ).unwrap();
+        std::fs::write(
+            tmp.path().join(format!("{port_b}.lock")),
+            format!(
+                r#"{{"pid":{external_pid},"port":{port_b},"wsUrl":"ws://127.0.0.1:{port_b}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Visual Studio Code","transport":"ws"}}"#,
+            ),
+        ).unwrap();
+
+        let r1 = list_ides_in_dir(tmp.path());
+        let r2 = list_ides_in_dir(tmp.path());
+        let r3 = list_ides_in_dir(tmp.path());
+
+        for r in [&r1, &r2, &r3] {
+            assert_eq!(r.len(), 2, "two IDEs must be detected consistently");
+        }
+        // Compare full Vec in input order (no post-sort) — backend MUST return
+        // a stable order so the frontend's detected-IDE list doesn't jump.
+        let shape = |r: &Vec<DetectedIde>| -> Vec<(String, Option<u16>)> {
+            r.iter().map(|d| (d.ide_name.clone(), d.port)).collect()
+        };
+        assert_eq!(shape(&r1), shape(&r2), "order must be stable across polls");
+        assert_eq!(shape(&r2), shape(&r3), "order must be stable across polls");
+        // And the order is sorted by (ide_name, port), so Cursor < Visual Studio Code.
+        assert_eq!(r1[0].ide_name, "Cursor");
+        assert_eq!(r1[1].ide_name, "Visual Studio Code");
+        drop(l_a);
+        drop(l_b);
     }
 }

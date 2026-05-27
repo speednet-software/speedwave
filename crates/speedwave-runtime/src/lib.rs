@@ -38,3 +38,11 @@ pub mod transcription;
 pub mod tz;
 pub mod update;
 pub mod validation;
+
+/// Test-only re-exports of internal transaction helpers.
+#[cfg(any(test, feature = "test-support"))]
+pub mod update_test_support {
+    pub use crate::update::{
+        apply_rollback_transaction, apply_update_transaction, maybe_prune_previous_bundle,
+    };
+}

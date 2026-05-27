@@ -31,6 +31,9 @@ desktop/src-tauri/src/log_commands.rs:generic-api-key:128
 desktop/src-tauri/build-context/mcp-servers/hub/src/pii-tokenizer.test.ts:generic-api-key:87
 mcp-servers/hub/src/pii-tokenizer.test.ts:generic-api-key:87
 
+# TS sanitizer test fixture — fake JWT used to verify redaction.
+mcp-servers/shared/src/sanitizer.test.ts:generic-api-key:18
+
 # Whisper model names in the transcription model catalogue (ADR-056).
 # "large-v3-turbo" / "large-v3-turbo-q5_0" / "large-v3-q5_0" are official
 # OpenAI Whisper model identifiers, not API keys — gitleaks' generic-api-key
