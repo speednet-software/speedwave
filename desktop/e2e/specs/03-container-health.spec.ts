@@ -31,8 +31,9 @@ describe('Container Health', function () {
     expect(report.overall_healthy).toBe(true);
     expect(report.vm.running).toBe(true);
     expect(report.containers.length).toBeGreaterThanOrEqual(2);
-    expect(report.containers.some((c) => c.name.endsWith('_claude'))).toBe(true);
-    expect(report.containers.some((c) => c.name.endsWith('_mcp_hub'))).toBe(true);
+    // Compose-prefix stripped server-side (PR #730).
+    expect(report.containers.some((c) => c.name === 'claude')).toBe(true);
+    expect(report.containers.some((c) => c.name === 'mcp_hub')).toBe(true);
     for (const container of report.containers) {
       expect(container.healthy).toBe(true);
     }
