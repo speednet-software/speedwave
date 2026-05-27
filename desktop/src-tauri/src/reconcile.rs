@@ -268,7 +268,7 @@ fn restore_one_project(
     use crate::types::IntoAnyhow;
     rt.transaction(project, |rt| -> anyhow::Result<()> {
         let _ = rt.compose_down(project);
-        crate::containers_cmd::render_and_save_compose(project, rt).into_anyhow()?;
+        crate::containers_cmd::render_and_save_compose(project).into_anyhow()?;
         speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
         rt.compose_up_recreate(project)
             .map_err(|e| anyhow::anyhow!("compose_up_recreate failed for '{project}': {e}"))?;
@@ -731,7 +731,7 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
         // restart_integration_containers / update_containers.
         use crate::types::IntoAnyhow;
         let result = rt.transaction(&project, |rt| -> anyhow::Result<()> {
-            crate::containers_cmd::render_and_save_compose(&project, rt).into_anyhow()?;
+            crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
             speedwave_runtime::runtime::compose_validate_with_retry(rt, &project)?;
             rt.compose_up_recreate(&project)?;
             Ok(())

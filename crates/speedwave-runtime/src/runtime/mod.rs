@@ -814,11 +814,14 @@ const COMPOSE_VALIDATE_MAX_ATTEMPTS: u32 = 3;
 /// of virtiofs/9p mount lag. Total `COMPOSE_VALIDATE_MAX_ATTEMPTS` attempts.
 pub fn compose_validate_with_retry(runtime: &LockedRuntime, project: &str) -> anyhow::Result<()> {
     let mut delay_ms: u64 = 100;
-    let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..COMPOSE_VALIDATE_MAX_ATTEMPTS {
         match runtime.compose_validate(project) {
             Ok(()) => return Ok(()),
-            Err(e) if attempt + 1 < COMPOSE_VALIDATE_MAX_ATTEMPTS && is_propagation_error(&e) => {
+            Err(e) => {
+                let is_last = attempt + 1 == COMPOSE_VALIDATE_MAX_ATTEMPTS;
+                if is_last || !is_propagation_error(&e) {
+                    return Err(e);
+                }
                 log::warn!(
                     "compose_validate attempt {}: {e} — retrying after {} ms",
                     attempt + 1,
@@ -826,16 +829,10 @@ pub fn compose_validate_with_retry(runtime: &LockedRuntime, project: &str) -> an
                 );
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 delay_ms *= 2;
-                last_err = Some(e);
             }
-            Err(e) => return Err(e),
         }
     }
-    // Loop above runs `COMPOSE_VALIDATE_MAX_ATTEMPTS` times; if every attempt
-    // failed with a propagation error, `last_err` is set on each retry branch.
-    // The match arms cover all `Err(_)` cases, so `None` is unreachable.
-    Err(last_err
-        .unwrap_or_else(|| anyhow::anyhow!("compose_validate exhausted retries with no error")))
+    unreachable!("loop body always returns on the final attempt")
 }
 
 /// Heuristic: error looks like virtiofs/9p propagation lag (compose engine

@@ -68,13 +68,23 @@ fn secure_snapshot_dirs(dir: &std::path::Path) -> anyhow::Result<()> {
 #[cfg(test)]
 fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result<()> {
     let compose_path = compose::compose_output_path_in(data_dir, project)?;
-    let compose_yml = std::fs::read_to_string(&compose_path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot read current compose file at {}: {}",
-            compose_path.display(),
-            e
-        )
-    })?;
+    let compose_yml = match std::fs::read_to_string(&compose_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log::warn!(
+                "save_snapshot: no compose.yml at {} — rollback will be unavailable",
+                compose_path.display()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "cannot read current compose file at {}: {}",
+                compose_path.display(),
+                e
+            ));
+        }
+    };
 
     let dir = data_dir.join("snapshots").join(project);
     std::fs::create_dir_all(&dir)?;
@@ -117,13 +127,25 @@ fn load_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
 
 pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let compose_path = compose::compose_output_path(project)?;
-    let compose_yml = std::fs::read_to_string(&compose_path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot read current compose file at {}: {}",
-            compose_path.display(),
-            e
-        )
-    })?;
+    let compose_yml = match std::fs::read_to_string(&compose_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // First-time restart (compose.yml never rendered yet) — proceed
+            // without a rollback snapshot rather than blocking the restart.
+            log::warn!(
+                "save_snapshot: no compose.yml at {} — rollback will be unavailable for this restart",
+                compose_path.display()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "cannot read current compose file at {}: {}",
+                compose_path.display(),
+                e
+            ));
+        }
+    };
 
     let dir = snapshot_dir(project)?;
     std::fs::create_dir_all(&dir)?;
@@ -267,8 +289,8 @@ fn apply_rollback_transaction_inner(
     snapshot_yml: &str,
 ) -> anyhow::Result<()> {
     runtime.transaction(project, |runtime| -> anyhow::Result<()> {
+        // No VM-side validate on rollback — virtiofs lag would block recovery (ADR-066).
         compose::save_compose(project, snapshot_yml)?;
-        crate::runtime::compose_validate_with_retry(runtime, project)?;
         runtime.compose_up_recreate(project).map_err(|e| {
             anyhow::anyhow!(
                 "Rollback failed: {}. Old compose.yml was restored. Run `speedwave` to start containers manually.",
@@ -506,6 +528,52 @@ mod tests {
         let loaded: ContainerUpdateResult = serde_json::from_str(&json).unwrap();
         assert!(!loaded.success);
         assert_eq!(loaded.error.as_deref(), Some("build failed"));
+    }
+
+    #[test]
+    fn save_snapshot_returns_ok_when_compose_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = "no-compose-yet";
+        // Intentionally no compose.yml written.
+        let result = save_snapshot_in(dir.path(), project);
+        assert!(
+            result.is_ok(),
+            "missing compose.yml must be tolerated (first-time integration enable)"
+        );
+        let snap_path = snapshot_path_in(dir.path(), project);
+        assert!(
+            !snap_path.exists(),
+            "no snapshot file should be written when there is no compose.yml"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_snapshot_propagates_non_notfound_io_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let project = "perm-denied";
+
+        let compose_path = compose::compose_output_path_in(dir.path(), project).unwrap();
+        std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
+        std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
+        // Strip all permissions from the file so read fails with PermissionDenied (not NotFound).
+        std::fs::set_permissions(&compose_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = save_snapshot_in(dir.path(), project);
+
+        // Restore perms before asserting so tempdir can clean up.
+        let _ = std::fs::set_permissions(&compose_path, std::fs::Permissions::from_mode(0o644));
+
+        assert!(
+            result.is_err(),
+            "permission-denied on compose.yml must bubble up as a hard error"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("rollback will be unavailable"),
+            "real IO errors must NOT be silently treated as 'no snapshot needed'"
+        );
     }
 
     #[cfg(unix)]

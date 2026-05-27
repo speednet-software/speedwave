@@ -1310,11 +1310,11 @@ pub async fn restart_integration_containers(
         }
 
         rt.transaction(&project, |rt| -> anyhow::Result<()> {
-            // Hard-fail if snapshot can't be saved — without it, rollback
-            // would restore stale config from a previous cycle.
+            // Hard-fail only on real IO errors (disk full, permission denied);
+            // save_snapshot returns Ok(()) when compose.yml doesn't exist yet.
             speedwave_runtime::update::save_snapshot(&project).map_err(|e| {
                 anyhow::anyhow!(
-                    "Cannot safely restart: failed to save rollback snapshot — retry or check disk space ({e})"
+                    "Cannot safely restart: failed to write rollback snapshot ({e})"
                 )
             })?;
 
@@ -1324,13 +1324,18 @@ pub async fn restart_integration_containers(
             })?;
 
             use crate::types::IntoAnyhow;
-            crate::containers_cmd::render_and_save_compose(&project, rt).into_anyhow()?;
+            crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
 
-            speedwave_runtime::runtime::compose_validate_with_retry(rt, &project)?;
+            // Both validate and up_recreate are post-compose_down; either failing
+            // leaves containers stopped, so both require rollback.
+            let recreate_result = speedwave_runtime::runtime::compose_validate_with_retry(
+                rt, &project,
+            )
+            .and_then(|()| rt.compose_up_recreate(&project));
 
-            if let Err(e) = rt.compose_up_recreate(&project) {
+            if let Err(e) = recreate_result {
                 log::error!(
-                    "restart_integration_containers: compose_up_recreate failed: {e}, attempting rollback"
+                    "restart_integration_containers: recreate failed: {e}, attempting rollback"
                 );
                 // Nested transaction: rollback acquires its own — reentrant via HELD_LOCKS.
                 if let Err(rb_err) = speedwave_runtime::update::rollback_containers(rt, &project) {

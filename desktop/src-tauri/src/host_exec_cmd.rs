@@ -258,9 +258,16 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
         log::debug!("recreate_project_containers_if_running: '{project}' not running — skipping");
         return;
     }
+    // Build OUTSIDE the compose lock (ADR-066).
+    if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
+        log::warn!(
+            "recreate_project_containers_if_running: pre-build failed for '{project}': {sanitized}"
+        );
+        return;
+    }
     use crate::types::IntoAnyhow;
     let result = rt.transaction(project, |rt| -> anyhow::Result<()> {
-        crate::containers_cmd::render_and_save_compose(project, rt).into_anyhow()?;
+        crate::containers_cmd::render_and_save_compose(project).into_anyhow()?;
         speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
         rt.compose_up_recreate(project)?;
         Ok(())

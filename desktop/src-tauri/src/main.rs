@@ -499,7 +499,7 @@ async fn switch_project(
             // virtiofs/9p propagation-lag recovery.
             use crate::types::IntoAnyhow;
             rt.transaction(proj, |rt| -> anyhow::Result<()> {
-                containers_cmd::render_and_save_compose(proj, rt).into_anyhow()?;
+                containers_cmd::render_and_save_compose(proj).into_anyhow()?;
                 speedwave_runtime::runtime::compose_validate_with_retry(rt, proj)?;
                 rt.compose_up_recreate(proj)?;
                 Ok(())

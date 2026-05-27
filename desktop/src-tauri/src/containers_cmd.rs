@@ -216,13 +216,10 @@ pub(crate) fn switch_project_core(
 // ---------------------------------------------------------------------------
 
 /// Renders a new compose.yml for a project and saves it after security check.
-///
-/// Shared pipeline used by `recreate_project_containers`,
-/// `restart_integration_containers`, and `reconcile_compose_port`.
-pub(crate) fn render_and_save_compose(
-    project: &str,
-    rt: &speedwave_runtime::runtime::LockedRuntime,
-) -> Result<(), String> {
+/// Caller MUST run `ensure_project_images_built` before invoking — passes
+/// `None` to `render_compose` so the image-build path is not entered under
+/// the compose lock (ADR-066).
+pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     let project_dir = user_config
         .find_project(project)
@@ -240,7 +237,7 @@ pub(crate) fn render_and_save_compose(
         &project_dir,
         &resolved,
         &integrations,
-        Some(rt),
+        None,
         &crate::reconcile::current_bridges_info(),
     )
     .map_err(|e| e.to_string())?;
@@ -643,7 +640,7 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         use crate::types::IntoAnyhow;
         rt.transaction(&project, |rt| -> anyhow::Result<()> {
             let _ = rt.compose_down(&project);
-            render_and_save_compose(&project, rt).into_anyhow()?;
+            render_and_save_compose(&project).into_anyhow()?;
             speedwave_runtime::runtime::compose_validate_with_retry(rt, &project)?;
             rt.compose_up_recreate(&project)?;
             Ok(())
