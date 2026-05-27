@@ -12,7 +12,6 @@
 //! is installed / removed.
 
 use crate::consts;
-use crate::runtime::ContainerRuntime;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -121,7 +120,7 @@ impl ProjectHandle {
 /// Fallback results are cached too so that a stopped container does not
 /// trigger repeated 60-second timeouts on every keystroke.
 pub fn discover_slash_commands(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
 ) -> anyhow::Result<SlashDiscovery> {
     if let Some(cached) = cache_get(&project.name) {
@@ -302,7 +301,10 @@ fn parse_init_line(line: &str) -> Option<RawDiscovery> {
 /// inside `container`, reads stdout line by line, and returns the first
 /// parsed `system/init` event. Kills the child as soon as that line is
 /// captured so we do not pay for a full turn.
-fn run_discovery(runtime: &dyn ContainerRuntime, container: &str) -> anyhow::Result<RawDiscovery> {
+fn run_discovery(
+    runtime: &crate::runtime::LockedRuntime,
+    container: &str,
+) -> anyhow::Result<RawDiscovery> {
     let args = [
         consts::CLAUDE_BINARY,
         "-p",
@@ -684,105 +686,7 @@ fn claude_container_name(project: &str) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use serde_json::Value;
-    use std::process::Command;
-
-    /// Mock runtime returns a canned stream-json script for `container_exec_piped`.
-    struct MockRuntime {
-        script: String,
-    }
-
-    impl MockRuntime {
-        fn new(script: &str) -> Self {
-            Self {
-                script: script.to_string(),
-            }
-        }
-    }
-
-    impl ContainerRuntime for MockRuntime {
-        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-            Command::new("true")
-        }
-        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-            let mut cmd = Command::new("sh");
-            cmd.env("SW_TEST_SCRIPT", &self.script)
-                .args(["-c", "printf '%s' \"$SW_TEST_SCRIPT\""]);
-            Ok(cmd)
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-    }
-
-    /// Runtime that always errors on piped exec — simulates a stopped container.
-    struct FailingRuntime;
-
-    impl ContainerRuntime for FailingRuntime {
-        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-            Command::new("true")
-        }
-        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-            anyhow::bail!("container not running")
-        }
-        fn is_available(&self) -> bool {
-            false
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            anyhow::bail!("runtime not ready")
-        }
-        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(false)
-        }
-    }
+    use crate::runtime::mock_runtime::MockRuntimeBuilder;
 
     fn sample_init_json() -> String {
         serde_json::json!({
@@ -1045,7 +949,9 @@ mod tests {
     #[test]
     fn run_discovery_parses_mock_init_stream() {
         let script = format!("{}\n", sample_init_json());
-        let runtime = MockRuntime::new(&script);
+        let (runtime, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
         let raw = run_discovery(&runtime, "test-container").expect("init parsed");
         assert!(raw.slash_commands.iter().any(|n| n == "help"));
         assert_eq!(raw.plugins.len(), 1);
@@ -1054,7 +960,9 @@ mod tests {
     #[test]
     fn run_discovery_fails_when_no_init_line() {
         let script = "just some text\nmore noise\n".to_string();
-        let runtime = MockRuntime::new(&script);
+        let (runtime, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
         let err = run_discovery(&runtime, "test-container").expect_err("should fail");
         let msg = err.to_string();
         assert!(msg.contains("no system/init") || msg.contains("no output"));
@@ -1062,7 +970,9 @@ mod tests {
 
     #[test]
     fn run_discovery_fails_when_container_not_running() {
-        let runtime = FailingRuntime;
+        let (runtime, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
         let err = run_discovery(&runtime, "test-container").expect_err("should fail");
         assert!(err.to_string().contains("container not running"));
     }
@@ -1071,7 +981,9 @@ mod tests {
     fn discover_slash_commands_returns_fallback_when_container_unavailable() {
         invalidate_all_caches();
         let project = ProjectHandle::new(unique_project_name("fallback"), std::env::temp_dir());
-        let runtime = FailingRuntime;
+        let (runtime, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
         let d = discover_slash_commands(&runtime, &project).unwrap();
         assert_eq!(d.source, DiscoverySource::Fallback);
         assert!(d.commands.iter().any(|c| c.name == "help"));
@@ -1082,7 +994,9 @@ mod tests {
         invalidate_all_caches();
         let script = format!("{}\n", sample_init_json());
         let project = ProjectHandle::new(unique_project_name("cache"), std::env::temp_dir());
-        let runtime = MockRuntime::new(&script);
+        let (runtime, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
 
         let first = discover_slash_commands(&runtime, &project).unwrap();
         assert_eq!(first.source, DiscoverySource::Init);
@@ -1090,7 +1004,9 @@ mod tests {
 
         // Switching to a failing runtime would normally return fallback,
         // but the cached Init result must be returned instead.
-        let failing = FailingRuntime;
+        let (failing, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
         let second = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(second.source, DiscoverySource::Init);
         assert_eq!(first, second);

@@ -242,7 +242,7 @@ fn emit_bundle_status(app_handle: &tauri::AppHandle) {
 }
 
 pub(crate) fn list_running_projects(
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
     user_config: &config::SpeedwaveUserConfig,
 ) -> Result<Vec<String>, String> {
     let mut running = Vec::new();
@@ -257,20 +257,29 @@ pub(crate) fn list_running_projects(
     Ok(running)
 }
 
-/// Restores one project: compose_down, render, compose_up_recreate.
+/// Restores one project under the per-project compose lock.
 fn restore_one_project(
     project: &str,
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<(), String> {
-    let _ = rt.compose_down(project);
-    crate::containers_cmd::render_and_save_compose(project, rt)?;
-    rt.compose_up_recreate(project)
-        .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))
+    // Build OUTSIDE the lock (ADR-066): bundle + plugin images.
+    crate::integrations_cmd::ensure_project_images_built(rt, project)?;
+
+    use crate::types::IntoAnyhow;
+    rt.transaction(project, |rt| -> anyhow::Result<()> {
+        let _ = rt.compose_down(project);
+        crate::containers_cmd::render_and_save_compose(project).into_anyhow()?;
+        speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
+        rt.compose_up_recreate(project)
+            .map_err(|e| anyhow::anyhow!("compose_up_recreate failed for '{project}': {e}"))?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 pub(crate) fn restore_projects(
     projects: &[String],
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<(), String> {
     for project in projects {
         // NB1-v4 (Option C): substitute CloudStorage TCC prefix BEFORE the
@@ -292,7 +301,7 @@ pub(crate) fn restore_projects(
 
 pub(crate) fn stop_projects(
     projects: &[String],
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<(), String> {
     for project in projects {
         rt.compose_down(project)
@@ -361,7 +370,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
 
     // Even when bundle_id matches, verify images actually exist.
     // They may have been lost after containerd reinstall or VM recreation.
-    if !bundle_changed && runtime_ready && !build::images_exist(&*rt, &active_integrations) {
+    if !bundle_changed && runtime_ready && !build::images_exist(&rt, &active_integrations) {
         log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
         bundle_changed = true;
     }
@@ -452,7 +461,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // pre-restore phase — no containers are running yet (see ContainerRuntime
         // trait docs for restart_container_engine).
         let enabled = build::enabled_images(&active_integrations);
-        match build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id) {
+        match build::build_images_for_bundle(&rt, &enabled, &manifest.bundle_id) {
             Ok(_) => {}
             Err(e)
                 if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
@@ -464,12 +473,13 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                     log::error!("reconcile_bundle: {msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
-                build::build_images_for_bundle(rt.as_ref(), &enabled, &manifest.bundle_id)
-                    .map_err(|e| {
+                build::build_images_for_bundle(&rt, &enabled, &manifest.bundle_id).map_err(
+                    |e| {
                         let msg = format!("Image rebuild failed after engine restart: {e}");
                         log::error!("reconcile_bundle: {msg}");
                         set_bundle_error(&mut state, msg)
-                    })?;
+                    },
+                )?;
             }
             Err(e) => {
                 let msg = format!("Image rebuild failed: {e}");
@@ -479,12 +489,12 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         }
         // Plugin images enabled in the active project (warn-only).
         let enabled_plugins: Vec<&str> = active_integrations.enabled_plugin_service_ids();
-        if let Err(e) = plugin::ensure_plugin_images(rt.as_ref(), &enabled_plugins) {
+        if let Err(e) = plugin::ensure_plugin_images(&rt, &enabled_plugins) {
             log::warn!("reconcile_bundle: failed to rebuild some plugin images: {e}");
         }
         // Drop tags from this bundle that no longer belong to enabled set (warn-only).
         if let Err(e) =
-            build::prune_orphan_current_bundle_images(rt.as_ref(), &manifest.bundle_id, &enabled)
+            build::prune_orphan_current_bundle_images(&rt, &manifest.bundle_id, &enabled)
         {
             log::warn!("reconcile_bundle: orphan-tag prune failed: {e}");
         }
@@ -516,7 +526,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         }
     };
     let mut projects = state.pending_running_projects.clone();
-    let running_projects = list_running_projects(rt.as_ref(), &user_config)?;
+    let running_projects = list_running_projects(&rt, &user_config)?;
     for project in running_projects {
         if !projects.contains(&project) {
             projects.push(project);
@@ -531,7 +541,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
     {
         log::info!("reconcile_bundle: restoring {} project(s)", projects.len());
-        restore_projects(&projects, rt.as_ref()).map_err(|e| {
+        restore_projects(&projects, &rt).map_err(|e| {
             let msg = format!("Project restore failed: {e}");
             log::error!("reconcile_bundle: {msg}");
             set_bundle_error(&mut state, msg)
@@ -551,7 +561,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     if let Some(old_id) =
         build::should_prune_bundle(state.applied_bundle_id.as_deref(), &manifest.bundle_id)
     {
-        if let Err(e) = build::prune_old_bundle_images(rt.as_ref(), old_id) {
+        if let Err(e) = build::prune_old_bundle_images(&rt, old_id) {
             log::warn!("Failed to prune old bundle images: {e}");
         }
     }
@@ -626,13 +636,9 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
 /// a stale WORKER_OS_URL in their compose.yml. If so, regenerate compose and
 /// recreate containers so the hub connects to the correct port.
 ///
-/// Runs in a background thread to avoid blocking app startup.
-/// The `compose_lock` serialises this with `start_chat`/`resume_conversation`
-/// to prevent concurrent compose operations.
-pub(crate) fn reconcile_compose_port(
-    app_handle: &tauri::AppHandle,
-    compose_lock: std::sync::Arc<std::sync::Mutex<()>>,
-) {
+/// Runs in a background thread. Per-project compose lock serialises this
+/// with `start_chat`/`resume_conversation`/`restart_integration_containers`.
+pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
     let handle = app_handle.clone();
     std::thread::spawn(move || {
         let project = match config::load_user_config()
@@ -709,42 +715,34 @@ pub(crate) fn reconcile_compose_port(
             return;
         }
 
-        // Acquire compose lock to prevent concurrent compose operations
-        // (e.g. start_chat running ensure_exec_healthy at the same time).
-        let _compose_guard = match compose_lock.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                log::error!("reconcile_compose_port: compose lock poisoned: {e}");
-                return;
-            }
-        };
-
-        // Regenerate compose with the current port
-        if let Err(e) = crate::containers_cmd::render_and_save_compose(&project, &*rt) {
-            log::error!("reconcile_compose_port: {e}");
-            return;
-        }
-
-        // Force-recreate to ensure the hub picks up the new WORKER_OS_URL.
-        // nerdctl compose (unlike Docker Compose) does not reliably detect
-        // env-var-only changes in `compose_up`, so force-recreate is needed
-        // for correctness.  The compose lock prevents this from racing with
-        // start_chat / resume_conversation.
-        // Block on bundle reconcile: mcp-os can respawn while bundle rebuild
-        // is in progress, in which case compose_up_recreate would hit a tag
-        // that has not been built yet.
+        // ensure_images_ready runs outside the transaction — long-running and idempotent.
         if let Err(e) = crate::containers_cmd::ensure_images_ready() {
             log::warn!("reconcile_compose_port: images not ready: {e}");
             return;
         }
-        if let Err(e) = rt.compose_up_recreate(&project) {
-            log::error!("reconcile_compose_port: compose_up_recreate failed: {e}");
+
+        // Build OUTSIDE the lock (ADR-066): plugin images for this project.
+        if let Err(e) = crate::integrations_cmd::ensure_project_images_built(&rt, &project) {
+            log::warn!("reconcile_compose_port: project images not built: {e}");
+            return;
+        }
+
+        // Per-project compose lock serialises this with start_chat /
+        // restart_integration_containers / update_containers.
+        use crate::types::IntoAnyhow;
+        let result = rt.transaction(&project, |rt| -> anyhow::Result<()> {
+            crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
+            speedwave_runtime::runtime::compose_validate_with_retry(rt, &project)?;
+            rt.compose_up_recreate(&project)?;
+            Ok(())
+        });
+        if let Err(e) = result {
+            log::error!("reconcile_compose_port: {e}");
             return;
         }
 
         log::info!("reconcile_compose_port: containers recreated with mcp-os port {current_port}");
 
-        // Notify the frontend that containers were restarted
         use tauri::Emitter;
         let _ = handle.emit("containers_reconciled", current_port);
     });
@@ -762,7 +760,7 @@ pub(crate) fn reconcile_compose_port(
 /// not called on macOS (compiled out by the cfg).
 #[cfg(target_os = "windows")]
 fn stop_all_containers(
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
     projects: &[config::ProjectUserEntry],
 ) {
     for project in projects {
@@ -795,7 +793,7 @@ fn stop_all_containers(
 /// failing `compose_down` only logs a warning. Skipping it on macOS loses
 /// no information, since VM shutdown imminently replaces it.
 pub(crate) fn run_container_cleanup(
-    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
     projects: &[config::ProjectUserEntry],
 ) {
     #[cfg(target_os = "windows")]
@@ -849,7 +847,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 Vec::new()
             }
         };
-        run_container_cleanup(rt.as_ref(), &projects);
+        run_container_cleanup(&rt, &projects);
 
         // Host process cleanup
         match ide_bridge.lock() {
@@ -973,6 +971,44 @@ mod tests {
     }
 
     #[test]
+    fn restore_one_project_wraps_full_sequence_in_transaction() {
+        // Structural test: restore_one_project must wrap compose_down (best-effort),
+        // render_and_save_compose, compose_validate_with_retry, and compose_up_recreate
+        // in a single rt.transaction(project, ...) so the per-project lock covers
+        // the whole sequence.
+        let source = include_str!("reconcile.rs");
+        let fn_start = source
+            .find("fn restore_one_project(")
+            .expect("restore_one_project must exist");
+        let fn_body = &source[fn_start..];
+
+        let tx_pos = fn_body
+            .find("rt.transaction(")
+            .expect("restore_one_project must call rt.transaction(project, ...)");
+        let down_pos = fn_body
+            .find("rt.compose_down(project)")
+            .expect("restore_one_project must call compose_down (best-effort)");
+        let render_pos = fn_body
+            .find("render_and_save_compose")
+            .expect("restore_one_project must call render_and_save_compose");
+        let validate_pos = fn_body
+            .find("compose_validate_with_retry")
+            .expect("restore_one_project must call compose_validate_with_retry");
+        let up_pos = fn_body
+            .find("rt.compose_up_recreate(project)")
+            .expect("restore_one_project must call compose_up_recreate");
+
+        assert!(
+            tx_pos < down_pos
+                && down_pos < render_pos
+                && render_pos < validate_pos
+                && validate_pos < up_pos,
+            "restore_one_project must follow order: transaction(...) {{ compose_down -> render_and_save_compose -> compose_validate_with_retry -> compose_up_recreate }} \
+             (tx={tx_pos}, down={down_pos}, render={render_pos}, validate={validate_pos}, up={up_pos})"
+        );
+    }
+
+    #[test]
     fn reconcile_compose_port_waits_for_image_readiness() {
         // Race guard: mcp-os respawn may race with bundle image rebuild;
         // compose_up_recreate against a missing tag emits image-not-available.
@@ -1025,90 +1061,7 @@ mod tests {
     mod stop_all_containers_tests {
         use super::stop_all_containers;
         use speedwave_runtime::config::ProjectUserEntry;
-        use speedwave_runtime::runtime::ContainerRuntime;
-        use std::sync::{Arc, Mutex};
-
-        struct MockRuntime {
-            down_calls: Arc<Mutex<Vec<String>>>,
-            fail_on: Vec<String>,
-        }
-
-        impl MockRuntime {
-            fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
-                let calls = Arc::new(Mutex::new(Vec::new()));
-                (
-                    Self {
-                        down_calls: calls.clone(),
-                        fail_on: Vec::new(),
-                    },
-                    calls,
-                )
-            }
-
-            fn failing(names: &[&str]) -> (Self, Arc<Mutex<Vec<String>>>) {
-                let calls = Arc::new(Mutex::new(Vec::new()));
-                (
-                    Self {
-                        down_calls: calls.clone(),
-                        fail_on: names.iter().map(|s| s.to_string()).collect(),
-                    },
-                    calls,
-                )
-            }
-        }
-
-        impl ContainerRuntime for MockRuntime {
-            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_down(&self, project: &str) -> anyhow::Result<()> {
-                self.down_calls.lock().unwrap().push(project.to_string());
-                if self.fail_on.contains(&project.to_string()) {
-                    anyhow::bail!("mock error for {project}");
-                }
-                Ok(())
-            }
-            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-                Ok(vec![])
-            }
-            fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
-                std::process::Command::new("true")
-            }
-            fn container_exec_piped(
-                &self,
-                _: &str,
-                _: &[&str],
-            ) -> anyhow::Result<std::process::Command> {
-                Ok(std::process::Command::new("true"))
-            }
-            fn is_available(&self) -> bool {
-                true
-            }
-            fn ensure_ready(&self) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn build_image(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &[(&str, &str)],
-            ) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-                Ok(true)
-            }
-        }
+        use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 
         fn project(name: &str) -> ProjectUserEntry {
             ProjectUserEntry {
@@ -1122,32 +1075,32 @@ mod tests {
 
         #[test]
         fn calls_compose_down_for_each_project() {
-            let (rt, calls) = MockRuntime::new();
+            let (rt, handles) = MockRuntimeBuilder::new().build();
             let projects = vec![project("alpha"), project("beta"), project("gamma")];
 
             stop_all_containers(&rt, &projects);
 
-            let recorded = calls.lock().unwrap();
-            assert_eq!(*recorded, vec!["alpha", "beta", "gamma"]);
+            assert_eq!(handles.down_projects(), vec!["alpha", "beta", "gamma"]);
         }
 
         #[test]
         fn empty_projects_is_noop() {
-            let (rt, calls) = MockRuntime::new();
+            let (rt, handles) = MockRuntimeBuilder::new().build();
             stop_all_containers(&rt, &[]);
-            assert!(calls.lock().unwrap().is_empty());
+            assert!(handles.down_projects().is_empty());
         }
 
         #[test]
         fn failure_does_not_abort_remaining_projects() {
-            let (rt, calls) = MockRuntime::failing(&["beta"]);
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_fail_on_down(&["beta"])
+                .build();
             let projects = vec![project("alpha"), project("beta"), project("gamma")];
 
             stop_all_containers(&rt, &projects);
 
-            let recorded = calls.lock().unwrap();
             assert_eq!(
-                *recorded,
+                handles.down_projects(),
                 vec!["alpha", "beta", "gamma"],
                 "all projects should be attempted even when one fails"
             );
@@ -1157,97 +1110,7 @@ mod tests {
     mod run_container_cleanup_tests {
         use super::run_container_cleanup;
         use speedwave_runtime::config::ProjectUserEntry;
-        use speedwave_runtime::runtime::ContainerRuntime;
-        use std::sync::{Arc, Mutex};
-
-        struct TrackingRuntime {
-            calls: Arc<Mutex<Vec<String>>>,
-            fail_stop_vm: bool,
-        }
-
-        impl TrackingRuntime {
-            fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
-                let calls = Arc::new(Mutex::new(Vec::new()));
-                (
-                    Self {
-                        calls: calls.clone(),
-                        fail_stop_vm: false,
-                    },
-                    calls,
-                )
-            }
-
-            fn failing_stop_vm() -> (Self, Arc<Mutex<Vec<String>>>) {
-                let calls = Arc::new(Mutex::new(Vec::new()));
-                (
-                    Self {
-                        calls: calls.clone(),
-                        fail_stop_vm: true,
-                    },
-                    calls,
-                )
-            }
-        }
-
-        impl ContainerRuntime for TrackingRuntime {
-            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_down(&self, project: &str) -> anyhow::Result<()> {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("compose_down:{project}"));
-                Ok(())
-            }
-            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-                Ok(vec![])
-            }
-            fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
-                std::process::Command::new("true")
-            }
-            fn container_exec_piped(
-                &self,
-                _: &str,
-                _: &[&str],
-            ) -> anyhow::Result<std::process::Command> {
-                Ok(std::process::Command::new("true"))
-            }
-            fn is_available(&self) -> bool {
-                true
-            }
-            fn ensure_ready(&self) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn build_image(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &[(&str, &str)],
-            ) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-                Ok(true)
-            }
-            fn stop_vm(&self) -> anyhow::Result<()> {
-                self.calls.lock().unwrap().push("stop_vm".to_string());
-                if self.fail_stop_vm {
-                    anyhow::bail!("mock stop_vm error");
-                }
-                Ok(())
-            }
-        }
+        use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 
         fn project(name: &str) -> ProjectUserEntry {
             ProjectUserEntry {
@@ -1267,14 +1130,20 @@ mod tests {
             // (.github/workflows/desktop-build.yml) runs only `cargo build`,
             // not `cargo test`. Enabling `cargo test` on the Windows matrix
             // leg is tracked as a follow-up PR.
-            let (rt, calls) = TrackingRuntime::new();
+            let (rt, handles) = MockRuntimeBuilder::new().build();
             let projects = vec![project("alpha"), project("beta")];
             run_container_cleanup(&rt, &projects);
-            let recorded = calls.lock().unwrap();
             assert_eq!(
-                *recorded,
-                vec!["compose_down:alpha", "compose_down:beta", "stop_vm",],
-                "on non-macOS cleanup order must be: compose_down per project, then stop_vm"
+                handles.down_projects(),
+                vec!["alpha", "beta"],
+                "on non-macOS each project must be torn down before stop_vm"
+            );
+            assert_eq!(
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "stop_vm must run after per-project compose_down"
             );
         }
 
@@ -1285,37 +1154,48 @@ mod tests {
             // --force`, which reaps containers for free. Per-project
             // compose_down would waste up to 10s per project (nerdctl's
             // hard-coded graceful stop) and kill the Quit UX.
-            let (rt, calls) = TrackingRuntime::new();
+            let (rt, handles) = MockRuntimeBuilder::new().build();
             let projects = vec![project("alpha"), project("beta")];
             run_container_cleanup(&rt, &projects);
-            let recorded = calls.lock().unwrap();
-            assert_eq!(
-                *recorded,
-                vec!["stop_vm"],
-                "on macOS only stop_vm must be called; the Lima VM poweroff reaps \
+            assert!(
+                handles.down_projects().is_empty(),
+                "on macOS compose_down must NOT be called; the Lima VM poweroff reaps \
                  every container for free"
+            );
+            assert_eq!(
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "only stop_vm must run on macOS cleanup"
             );
         }
 
         #[test]
         fn stop_vm_failure_does_not_panic() {
-            let (rt, calls) = TrackingRuntime::failing_stop_vm();
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_stop_vm_error("mock stop_vm error")
+                .build();
             run_container_cleanup(&rt, &[]);
-            let recorded = calls.lock().unwrap();
-            assert!(
-                recorded.contains(&"stop_vm".to_string()),
-                "stop_vm must be attempted, got: {recorded:?}"
+            assert_eq!(
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "stop_vm must be attempted even when it fails"
             );
         }
 
         #[test]
         fn empty_projects_still_calls_stop_vm() {
-            let (rt, calls) = TrackingRuntime::new();
+            let (rt, handles) = MockRuntimeBuilder::new().build();
             run_container_cleanup(&rt, &[]);
-            let recorded = calls.lock().unwrap();
+            assert!(handles.down_projects().is_empty());
             assert_eq!(
-                *recorded,
-                vec!["stop_vm"],
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1,
                 "stop_vm must run even with no projects"
             );
         }

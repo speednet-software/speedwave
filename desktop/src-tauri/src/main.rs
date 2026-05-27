@@ -136,11 +136,6 @@ pub(crate) fn stash_cleanup_handle(
     }
 }
 
-/// Serialises compose operations across `start_chat`, `resume_conversation`,
-/// and `reconcile_compose_port` to prevent concurrent `compose_up` /
-/// `compose_up_recreate` calls during container restart.
-type ComposeLock = Arc<Mutex<()>>;
-
 const MAIN_WINDOW_LABEL: &str = "main";
 
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
@@ -162,8 +157,8 @@ const MSG_NOT_AUTHENTICATED: &str = "Claude is not authenticated. Please authent
 
 /// Shared implementation for `start_chat` and `resume_conversation`.
 ///
-/// 1. Acquires the compose lock and verifies Claude auth (which also runs
-///    `ensure_exec_healthy`).
+/// 1. Acquires the per-project compose lock via `rt.transaction()` and verifies
+///    Claude auth (which also runs `ensure_exec_healthy`).
 /// 2. Extracts the old session from the mutex and stops it **outside** the
 ///    session lock — `stop()` can block on `child.wait()` / reader thread
 ///    join, and holding the session mutex during that time would starve
@@ -172,44 +167,34 @@ const MSG_NOT_AUTHENTICATED: &str = "Claude is not authenticated. Please authent
 fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,
-    compose_arc: ComposeLock,
     session_arc: SharedChatSession,
     host_exec_arc: SharedHostExec,
     oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Spawn host_exec before the container check — the hub needs port/auth-token files (ADR-054).
     let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, project);
-    // Spawn oauth before the container check — compose injects WORKER_OAUTH_URL +
-    // per-service bearer mount into OAuth-consuming workers (ADR-060). No-op if
-    // no integration with `uses_oauth_refresh = true` is enabled.
     let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
 
-    // Block on bundle reconcile before any path that may call compose_up_recreate.
-    // Without this guard, both the recreate-on-fresh-worker branch below and
-    // check_claude_auth → ensure_exec_healthy can hit nerdctl with a tag that
-    // reconcile has not yet built, surfacing "image not available" to the user.
     containers_cmd::ensure_images_ready()?;
 
     if host_exec_just_started || oauth_just_started {
         host_exec_cmd::recreate_project_containers_if_running(project);
     }
 
-    // Pre-flight: verify Claude is authenticated.  `check_claude_auth`
-    // also calls `ensure_exec_healthy`, so containers are guaranteed
-    // healthy after this returns.  The compose lock serialises this with
-    // `reconcile_compose_port` to prevent concurrent compose operations.
-    {
-        log::info!("start_session_inner: acquiring compose lock");
-        let _compose_guard = compose_arc
-            .lock()
-            .map_err(|e| format!("Compose lock poisoned: {e}"))?;
+    // Per-project compose lock serialises auth check with concurrent compose ops.
+    log::info!("start_session_inner: acquiring compose lock");
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    // `_rt` unused: `check_claude_auth` builds its own runtime; HELD_LOCKS
+    // makes that call reentrant within this thread + project.
+    rt.transaction(project, |_rt| -> anyhow::Result<()> {
         log::info!("start_session_inner: compose lock acquired, checking auth");
-        let authed = setup_wizard::check_claude_auth(project).map_err(|e| e.to_string())?;
+        let authed = setup_wizard::check_claude_auth(project)?;
         if !authed {
-            return Err(MSG_NOT_AUTHENTICATED.to_string());
+            anyhow::bail!("{}", MSG_NOT_AUTHENTICATED);
         }
-    }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     // Extract old session and stop it outside the lock.
     log::info!("start_session_inner: extracting old session");
@@ -240,21 +225,18 @@ async fn start_chat(
     project: String,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
-    compose_lock: tauri::State<'_, ComposeLock>,
     host_exec: tauri::State<'_, SharedHostExec>,
     oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
     log::info!("start_chat: project={project}");
     let session_arc = state.inner().clone();
-    let compose_arc = compose_lock.inner().clone();
     let host_exec_arc = host_exec.inner().clone();
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
             None,
-            compose_arc,
             session_arc,
             host_exec_arc,
             oauth_arc,
@@ -402,7 +384,6 @@ async fn resume_conversation(
     session_id: String,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
-    compose_lock: tauri::State<'_, ComposeLock>,
     host_exec: tauri::State<'_, SharedHostExec>,
     oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
@@ -410,14 +391,12 @@ async fn resume_conversation(
     history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
     log::info!("resume_conversation: project={project}");
     let session_arc = state.inner().clone();
-    let compose_arc = compose_lock.inner().clone();
     let host_exec_arc = host_exec.inner().clone();
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
             Some(&session_id),
-            compose_arc,
             session_arc,
             host_exec_arc,
             oauth_arc,
@@ -507,15 +486,25 @@ async fn switch_project(
             };
         }
         let rt = speedwave_runtime::runtime::detect_runtime();
-        switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, rt| {
+        switch_project_core(&prev_clone, &new_clone, &rt, &|proj, rt| {
             check_project(proj)?;
             // Lazy build for the destination project (ADR-057).
             if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
             // compose_down(prev) already handled by switch_project_core step 2.
-            containers_cmd::render_and_save_compose(proj, rt)?;
-            rt.compose_up_recreate(proj).map_err(|e| e.to_string())
+            // Wrap the destination project's render → validate → up sequence in a
+            // single transaction so it shares semantics with every other compose
+            // callsite (see ADR-066) and benefits from compose_validate_with_retry's
+            // virtiofs/9p propagation-lag recovery.
+            use crate::types::IntoAnyhow;
+            rt.transaction(proj, |rt| -> anyhow::Result<()> {
+                containers_cmd::render_and_save_compose(proj).into_anyhow()?;
+                speedwave_runtime::runtime::compose_validate_with_retry(rt, proj)?;
+                rt.compose_up_recreate(proj)?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())
         })
     })
     .await
@@ -548,8 +537,8 @@ async fn switch_project(
         let restore_result: Result<(), String> = tokio::task::spawn_blocking(move || {
             let rt = speedwave_runtime::runtime::detect_runtime();
             match &prev_for_restore {
-                Some(prev) => teardown_and_restore(&new_for_teardown, prev, &*rt),
-                None => teardown_only(&new_for_teardown, &*rt).map_or(Ok(()), Err),
+                Some(prev) => teardown_and_restore(&new_for_teardown, prev, &rt),
+                None => teardown_only(&new_for_teardown, &rt).map_or(Ok(()), Err),
             }
         })
         .await
@@ -1007,12 +996,8 @@ fn plugin_bridge_get_status(
     })
 }
 
-/// Start mcp-os watchdog thread. Called from setup() and ensure_mcp_os_running().
-fn start_mcp_os_watchdog(
-    mcp_os: SharedMcpOs,
-    app_handle: tauri::AppHandle,
-    compose_lock: ComposeLock,
-) {
+/// mcp-os watchdog thread.
+fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
         use std::time::Duration;
         const CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -1052,10 +1037,7 @@ fn start_mcp_os_watchdog(
                         match proc.respawn() {
                             Ok(port) => {
                                 log::info!("mcp-os watchdog: respawned (port {port})");
-                                reconcile::reconcile_compose_port(
-                                    &app_handle,
-                                    compose_lock.clone(),
-                                );
+                                reconcile::reconcile_compose_port(&app_handle);
                             }
                             Err(e) => {
                                 log::error!("mcp-os watchdog: respawn failed: {e}");
@@ -1095,11 +1077,7 @@ fn ensure_ide_bridge_running(ide_bridge: &SharedIdeBridge, app_handle: &tauri::A
 /// spawn to prevent races (two callers both seeing None and double-spawning).
 /// This can block up to `PORT_READ_TIMEOUT` (10 s) — acceptable for a
 /// single-user desktop app where concurrent Tauri commands are rare.
-fn ensure_mcp_os_running(
-    mcp_os: &SharedMcpOs,
-    app_handle: &tauri::AppHandle,
-    compose_lock: ComposeLock,
-) {
+fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
     let mut guard = match mcp_os.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1123,7 +1101,7 @@ fn ensure_mcp_os_running(
                              // watchdog loop on None. Harmless in single-user desktop app
                              // — the watchdog exits on the next iteration when it sees None.
                 WATCHDOG_STOP.store(false, Ordering::Relaxed);
-                start_mcp_os_watchdog(mcp_os.clone(), app_handle.clone(), compose_lock);
+                start_mcp_os_watchdog(mcp_os.clone(), app_handle.clone());
             }
             Err(e) => log::error!("ensure_mcp_os_running: spawn failed: {e}"),
         }
@@ -1516,7 +1494,6 @@ fn main() {
     }
 
     let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
-    let compose_lock: ComposeLock = Arc::new(Mutex::new(()));
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
     // Meeting-transcription stores (ADR-056). Active sessions live in memory;
@@ -1659,7 +1636,6 @@ fn main() {
             }
         }))
         .manage(initial_session)
-        .manage(compose_lock.clone())
         .manage(ide_bridge.clone())
         .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
@@ -1756,13 +1732,8 @@ fn main() {
                                 *guard = Some(proc);
                             }
 
-                            // If containers are already running, regenerate compose with the
-                            // new mcp-os port and recreate them. Without this, the hub would
-                            // keep connecting to the old (dead) port from the previous session.
-                            reconcile::reconcile_compose_port(
-                                app.handle(),
-                                compose_lock.clone(),
-                            );
+                            // Compose regen + recreate so hub picks up new mcp-os port.
+                            reconcile::reconcile_compose_port(app.handle());
                         }
                         Err(e) => log::error!("mcp-os spawn error: {e}"),
                     }
@@ -1770,12 +1741,7 @@ fn main() {
                     log::warn!("mcp-os script not found — OS integrations will be unavailable");
                 }
 
-                // Start mcp-os watchdog thread
-                start_mcp_os_watchdog(
-                    mcp_os.clone(),
-                    app.handle().clone(),
-                    compose_lock.clone(),
-                );
+                start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());
 
                 // Start the per-project host_exec watchdog. No worker is
                 // spawned here — host_exec is per-project and spawned on
@@ -2519,8 +2485,8 @@ mod tests {
         let body = extract_fn_body(source, "fn start_session_inner(");
 
         let compose_pos = body
-            .find("_compose_guard")
-            .expect("start_session_inner must acquire compose lock");
+            .find("rt.transaction(")
+            .expect("start_session_inner must call rt.transaction for the per-project lock");
         let auth_pos = body
             .find("setup_wizard::check_claude_auth")
             .expect("start_session_inner must call check_claude_auth");

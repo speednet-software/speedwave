@@ -1,7 +1,12 @@
+#[cfg(any(target_os = "windows", test))]
 use super::{CommandRunner, ContainerRuntime, RealRunner};
 use crate::consts;
+#[cfg(any(target_os = "windows", test))]
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(target_os = "windows", test))]
+use std::path::PathBuf;
+#[cfg(any(target_os = "windows", test))]
 use std::process::Command;
 
 /// Decodes raw bytes from `wsl.exe` output, handling UTF-16LE (with or without BOM)
@@ -47,6 +52,7 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).to_string()
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub struct WslRuntime {
     runner: Box<dyn CommandRunner>,
     retry_delay: std::time::Duration,
@@ -54,12 +60,14 @@ pub struct WslRuntime {
     distro_name: String,
 }
 
+#[cfg(any(target_os = "windows", test))]
 impl Default for WslRuntime {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 impl WslRuntime {
     pub fn new() -> Self {
         Self {
@@ -72,6 +80,7 @@ impl WslRuntime {
         }
     }
 
+    #[cfg(test)]
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
         Self {
             runner,
@@ -291,6 +300,7 @@ pub fn is_wsl_unc_path(s: &str) -> Option<WslUncInfo> {
 /// equivalents) — even when malformed (e.g. missing distro segment). Used
 /// by [`windows_to_wsl_path`] to surface a precise "Malformed WSL UNC"
 /// error instead of the generic "Network UNC" reject.
+#[cfg(any(target_os = "windows", test))]
 pub fn looks_like_wsl_unc_prefix(s: &str) -> bool {
     match strip_unc_prefix(s) {
         Some(rest) => {
@@ -315,6 +325,7 @@ pub fn looks_like_wsl_unc_prefix(s: &str) -> bool {
 ///
 /// Returns an error for true network UNC paths (`\\server\share`) which cannot
 /// be mapped to WSL mount points.
+#[cfg(any(target_os = "windows", test))]
 pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
     let s = path.to_string_lossy();
     let bytes = s.as_bytes();
@@ -385,12 +396,14 @@ pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
 ///
 /// `compose_file_path()` returns a Windows path (e.g. `C:\Users\...\compose.yml`);
 /// nerdctl inside WSL2 needs it as `/mnt/c/Users/.../compose.yml`.
+#[cfg(any(target_os = "windows", test))]
 fn wsl_compose_file_path(project: &str) -> anyhow::Result<String> {
     let win_path = super::compose_file_path(project)?;
     let wsl_path = windows_to_wsl_path(Path::new(&win_path))?;
     Ok(wsl_path.to_string_lossy().to_string())
 }
 
+#[cfg(any(target_os = "windows", test))]
 impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
@@ -632,6 +645,28 @@ impl ContainerRuntime for WslRuntime {
         Ok(())
     }
 
+    fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
+        let distro = self.distro();
+        let compose_file = wsl_compose_file_path(project)?;
+        self.runner.run(
+            "wsl.exe",
+            &[
+                "-d",
+                distro,
+                "--",
+                "nerdctl",
+                "compose",
+                "-f",
+                &compose_file,
+                "-p",
+                project,
+                "config",
+                "--quiet",
+            ],
+        )?;
+        Ok(())
+    }
+
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
         let distro = self.distro();
         let result = self.runner.run(
@@ -807,6 +842,7 @@ impl ContainerRuntime for WslRuntime {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 impl WslRuntime {
     fn ensure_ready_inner(&self) -> anyhow::Result<()> {
         // OS prerequisite check (SSOT: os_prereqs module)
@@ -1257,6 +1293,21 @@ mod tests {
         let runner = MockRunner::new().with_response(&expected_key, "");
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.compose_up_recreate("acme").is_ok());
+    }
+
+    #[test]
+    fn test_compose_validate_runs_nerdctl_compose_config_quiet() {
+        let compose_file = wsl_compose_file_path("acme").unwrap();
+        let expected_key = format!(
+            "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme config --quiet",
+            compose_file
+        );
+        let runner = MockRunner::new().with_response(&expected_key, "");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.compose_validate("acme").is_ok(),
+            "compose_validate must emit `wsl.exe -d Speedwave -- nerdctl compose -f <file> -p acme config --quiet`"
+        );
     }
 
     #[test]

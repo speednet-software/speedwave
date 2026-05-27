@@ -1,6 +1,5 @@
 use crate::compose::container_user;
 use crate::consts;
-use crate::runtime::ContainerRuntime;
 use crate::signing;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1045,7 +1044,7 @@ pub fn peek_plugin_manifest(zip_path: &Path) -> anyhow::Result<PluginManifestSum
 ///   retried on the next launch via [`ensure_plugin_images`].
 pub fn install_plugin(
     zip_path: &Path,
-    runtime: Option<&dyn ContainerRuntime>,
+    runtime: Option<&crate::runtime::LockedRuntime>,
     on_progress: &mut dyn FnMut(PluginInstallProgress),
 ) -> anyhow::Result<InstallOutcome> {
     let plugins_dir = plugins_base_dir()?;
@@ -1057,7 +1056,7 @@ pub fn install_plugin(
 /// `tempfile::tempdir()`.
 fn install_plugin_with_base(
     zip_path: &Path,
-    runtime: Option<&dyn ContainerRuntime>,
+    runtime: Option<&crate::runtime::LockedRuntime>,
     on_progress: &mut dyn FnMut(PluginInstallProgress),
     plugins_dir: &Path,
 ) -> anyhow::Result<InstallOutcome> {
@@ -1248,7 +1247,10 @@ fn install_plugin_with_base(
 /// the surviving image is at worst a few hundred MB of leaked disk.
 ///
 /// Pass `runtime: None` to keep the legacy behaviour (delete files only).
-pub fn remove_plugin(slug: &str, runtime: Option<&dyn ContainerRuntime>) -> anyhow::Result<()> {
+pub fn remove_plugin(
+    slug: &str,
+    runtime: Option<&crate::runtime::LockedRuntime>,
+) -> anyhow::Result<()> {
     let plugins_dir = plugins_base_dir()?;
     remove_plugin_with_base(slug, &plugins_dir, runtime)
 }
@@ -1259,7 +1261,7 @@ pub fn remove_plugin(slug: &str, runtime: Option<&dyn ContainerRuntime>) -> anyh
 fn remove_plugin_with_base(
     slug: &str,
     plugins_dir: &Path,
-    runtime: Option<&dyn ContainerRuntime>,
+    runtime: Option<&crate::runtime::LockedRuntime>,
 ) -> anyhow::Result<()> {
     validate_slug(slug)?;
     let plugin_dir = plugins_dir.join(slug);
@@ -1741,7 +1743,7 @@ pub(crate) fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, St
 ///
 /// This is the primary fix for image loss after VM reset. Use in `render_compose()`.
 pub fn ensure_plugin_images(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     enabled_service_ids: &[&str],
 ) -> anyhow::Result<()> {
     let plugins_dir = plugins_base_dir()?;
@@ -1750,7 +1752,7 @@ pub fn ensure_plugin_images(
 
 /// Inner implementation of `ensure_plugin_images()` — accepts explicit plugins dir for testability.
 fn ensure_plugin_images_from_dir(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     enabled_service_ids: &[&str],
     plugins_dir: &Path,
 ) -> anyhow::Result<()> {
@@ -1823,7 +1825,7 @@ fn ensure_plugin_images_from_dir(
 ///
 /// When `enabled_service_ids` is `None`, all pending plugins are built — used in tests.
 fn build_pending_from_dir(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     enabled_service_ids: Option<&[&str]>,
     plugins_dir: &Path,
 ) -> anyhow::Result<()> {
@@ -1896,7 +1898,7 @@ fn build_pending_from_dir(
 /// `RUN` inside the Containerfile runs with the build context's contents
 /// available, so the verify gate must come *before* `prepare_build_context`.
 fn build_single_plugin_image(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
@@ -3831,56 +3833,6 @@ mod tests {
     #[test]
     fn test_install_plugin_emits_failed_with_sanitized_error() {
         // Build error containing a credential — must be sanitized before emission.
-        struct SecretLeakingRuntime;
-        impl ContainerRuntime for SecretLeakingRuntime {
-            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-                Ok(vec![])
-            }
-            fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
-                std::process::Command::new("true")
-            }
-            fn container_exec_piped(
-                &self,
-                _: &str,
-                _: &[&str],
-            ) -> anyhow::Result<std::process::Command> {
-                Ok(std::process::Command::new("true"))
-            }
-            fn is_available(&self) -> bool {
-                true
-            }
-            fn ensure_ready(&self) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn build_image(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &[(&str, &str)],
-            ) -> anyhow::Result<()> {
-                anyhow::bail!("RUN curl https://user:tok@registry.example.com/foo failed")
-            }
-            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-                Ok(false)
-            }
-            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-        }
-
         let _guard = unsigned_env_lock();
         std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
         let tmp = tempfile::tempdir().unwrap();
@@ -3889,7 +3841,9 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
 
         let progresses = std::sync::Mutex::new(Vec::<PluginInstallProgress>::new());
-        let rt = SecretLeakingRuntime;
+        let (rt, _) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_all_builds_failing("RUN curl https://user:tok@registry.example.com/foo failed")
+            .build();
         let result = install_plugin_with_base(
             &zip,
             Some(&rt),
@@ -3945,76 +3899,6 @@ mod tests {
 
     // --- remove_plugin image cleanup tests ---
 
-    /// Mock that records every `remove_images` call (tags + force) for inspection.
-    struct ImageRemovingRuntime {
-        calls: std::sync::Mutex<Vec<(Vec<String>, bool)>>,
-        return_err: bool,
-    }
-    impl ImageRemovingRuntime {
-        fn new() -> Self {
-            Self {
-                calls: std::sync::Mutex::new(vec![]),
-                return_err: false,
-            }
-        }
-        fn failing() -> Self {
-            Self {
-                calls: std::sync::Mutex::new(vec![]),
-                return_err: true,
-            }
-        }
-    }
-    impl ContainerRuntime for ImageRemovingRuntime {
-        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
-            std::process::Command::new("true")
-        }
-        fn container_exec_piped(
-            &self,
-            _: &str,
-            _: &[&str],
-        ) -> anyhow::Result<std::process::Command> {
-            Ok(std::process::Command::new("true"))
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(false)
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push((tags.to_vec(), force));
-            if self.return_err {
-                anyhow::bail!("simulated nerdctl rmi failure")
-            } else {
-                Ok(())
-            }
-        }
-    }
-
     /// Helper: install a plugin into `plugins_dir` so we have something to remove.
     fn write_plugin_dir(plugins_dir: &Path, slug: &str, with_service_id: bool) {
         let plugin_dir = plugins_dir.join(slug);
@@ -4038,14 +3922,14 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
         write_plugin_dir(&plugins_dir, "img-cleanup", true);
 
-        let rt = ImageRemovingRuntime::new();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         remove_plugin_with_base("img-cleanup", &plugins_dir, Some(&rt)).unwrap();
 
         // Plugin dir is gone.
         assert!(!plugins_dir.join("img-cleanup").exists());
         // remove_images called once with the expected tag AND force=true
         // (uninstall is an explicit user request — no waiting for prune).
-        let calls = rt.calls.into_inner().unwrap();
+        let calls = handles.remove_images_calls.lock().unwrap().clone();
         assert_eq!(
             calls,
             vec![(vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)]
@@ -4058,11 +3942,11 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
         write_plugin_dir(&plugins_dir, "skills-only", false);
 
-        let rt = ImageRemovingRuntime::new();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         remove_plugin_with_base("skills-only", &plugins_dir, Some(&rt)).unwrap();
 
         // remove_images NOT called for plugins without a service_id.
-        assert!(rt.calls.into_inner().unwrap().is_empty());
+        assert!(handles.remove_images_calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -4083,13 +3967,15 @@ mod tests {
         write_plugin_dir(&plugins_dir, "rmi-fails", true);
 
         // Best-effort: image removal failure logs a warning but does not fail.
-        let rt = ImageRemovingRuntime::failing();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_remove_images_error("simulated nerdctl rmi failure")
+            .build();
         let result = remove_plugin_with_base("rmi-fails", &plugins_dir, Some(&rt));
         assert!(result.is_ok(), "remove_plugin must not fail on rmi error");
         assert!(!plugins_dir.join("rmi-fails").exists());
         // remove_images was attempted with force=true even on the error path
         // — the uninstall caller never silently downgrades to non-force rmi.
-        let calls = rt.calls.into_inner().unwrap();
+        let calls = handles.remove_images_calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 1);
         assert!(
             calls[0].1,
@@ -5717,57 +5603,13 @@ mod tests {
 
     // --- build_pending_from_dir error accumulation tests ---
 
-    /// Minimal mock runtime for build_pending_from_dir tests.
-    /// build_image always fails so we can verify runtime errors are accumulated too.
-    struct FailingBuildRuntime;
-
-    impl ContainerRuntime for FailingBuildRuntime {
-        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
-            std::process::Command::new("true")
-        }
-        fn container_exec_piped(
-            &self,
-            _: &str,
-            _: &[&str],
-        ) -> anyhow::Result<std::process::Command> {
-            Ok(std::process::Command::new("true"))
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn build_image(
-            &self,
-            _tag: &str,
-            _context_dir: &str,
-            _containerfile: &str,
-            _build_args: &[(&str, &str)],
-        ) -> anyhow::Result<()> {
-            anyhow::bail!("mock build failure")
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(true)
-        }
+    /// Builds a mock runtime whose `build_image` always errors with "mock build failure".
+    /// `image_exists` defaults to `false`; tests that need it `true` can override.
+    fn failing_build_runtime() -> crate::runtime::LockedRuntime {
+        let (rt, _) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_all_builds_failing("mock build failure")
+            .build();
+        rt
     }
 
     #[test]
@@ -5791,7 +5633,7 @@ mod tests {
         )
         .unwrap();
 
-        let rt = FailingBuildRuntime;
+        let rt = failing_build_runtime();
         let result = build_pending_from_dir(&rt, None, plugins_dir);
 
         assert!(
@@ -5841,7 +5683,7 @@ mod tests {
         // Containerfile needed by build_single_plugin_image
         std::fs::write(valid_dir.join("Containerfile"), "FROM scratch").unwrap();
 
-        let rt = FailingBuildRuntime;
+        let rt = failing_build_runtime();
         let result = build_pending_from_dir(&rt, None, plugins_dir);
 
         assert!(result.is_err(), "should return error when build fails");
@@ -5886,7 +5728,7 @@ mod tests {
         .unwrap();
         std::fs::write(good_dir.join("Containerfile"), "FROM scratch").unwrap();
 
-        let rt = FailingBuildRuntime;
+        let rt = failing_build_runtime();
         let result = build_pending_from_dir(&rt, None, plugins_dir);
 
         assert!(result.is_err(), "should accumulate both error types");
@@ -5912,7 +5754,7 @@ mod tests {
         std::fs::create_dir_all(&no_marker_dir).unwrap();
         std::fs::write(no_marker_dir.join("plugin.json"), "INVALID").unwrap();
 
-        let rt = FailingBuildRuntime;
+        let rt = failing_build_runtime();
         let result = build_pending_from_dir(&rt, None, plugins_dir);
         assert!(
             result.is_ok(),
@@ -5925,7 +5767,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let nonexistent = tmp.path().join("does-not-exist");
 
-        let rt = FailingBuildRuntime;
+        let rt = failing_build_runtime();
         let result = build_pending_from_dir(&rt, None, &nonexistent);
         assert!(
             result.is_ok(),
@@ -5990,101 +5832,39 @@ mod tests {
         );
     }
 
-    // --- TrackingRuntime: mock for ensure_plugin_images tests ---
+    // --- ensure_plugin_images test helpers (delegating to MockRuntimeBuilder) ---
 
-    use std::collections::HashSet;
-    use std::sync::Mutex;
-
-    /// Mock runtime that tracks image_exists and build_image calls with configurable responses.
-    ///
-    /// After a successful `build_image`, the tag is added to `existing_images` so subsequent
-    /// `image_exists` checks behave like a real runtime (built images stay built). This lets
-    /// tests assert exact build call counts instead of `>= 1`.
-    struct TrackingRuntime {
-        existing_images: Mutex<HashSet<String>>,
-        build_calls: Mutex<Vec<String>>,
-        build_should_fail: bool,
+    /// Builds a mock with the given image tags marked as present. Successful
+    /// builds insert the tag into the `image_exists` map (mirrors real-runtime
+    /// semantics) so subsequent `image_exists` checks return `true` for that
+    /// tag — letting tests assert exact build call counts.
+    fn tracking_runtime(
+        existing: &[&str],
+    ) -> (
+        crate::runtime::LockedRuntime,
+        crate::runtime::mock_runtime::MockHandles,
+    ) {
+        let mut b = crate::runtime::mock_runtime::MockRuntimeBuilder::new();
+        for tag in existing {
+            b = b.with_image_exists(tag, true);
+        }
+        b.build()
     }
 
-    impl TrackingRuntime {
-        fn new(existing: &[&str]) -> Self {
-            Self {
-                existing_images: Mutex::new(existing.iter().map(|s| s.to_string()).collect()),
-                build_calls: Mutex::new(vec![]),
-                build_should_fail: false,
-            }
+    /// Same as [`tracking_runtime`] but every `build_image` call fails with
+    /// "mock build failure". Used for build-error accumulation tests.
+    fn failing_tracking_runtime(
+        existing: &[&str],
+    ) -> (
+        crate::runtime::LockedRuntime,
+        crate::runtime::mock_runtime::MockHandles,
+    ) {
+        let mut b = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_all_builds_failing("mock build failure");
+        for tag in existing {
+            b = b.with_image_exists(tag, true);
         }
-
-        fn failing(existing: &[&str]) -> Self {
-            Self {
-                existing_images: Mutex::new(existing.iter().map(|s| s.to_string()).collect()),
-                build_calls: Mutex::new(vec![]),
-                build_should_fail: true,
-            }
-        }
-
-        fn build_call_count(&self) -> usize {
-            self.build_calls.lock().unwrap().len()
-        }
-
-        fn was_built(&self, tag: &str) -> bool {
-            self.build_calls.lock().unwrap().contains(&tag.to_string())
-        }
-    }
-
-    impl ContainerRuntime for TrackingRuntime {
-        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
-            std::process::Command::new("true")
-        }
-        fn container_exec_piped(
-            &self,
-            _: &str,
-            _: &[&str],
-        ) -> anyhow::Result<std::process::Command> {
-            Ok(std::process::Command::new("true"))
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn ensure_ready(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn build_image(
-            &self,
-            tag: &str,
-            _context_dir: &str,
-            _containerfile: &str,
-            _build_args: &[(&str, &str)],
-        ) -> anyhow::Result<()> {
-            self.build_calls.lock().unwrap().push(tag.to_string());
-            if self.build_should_fail {
-                anyhow::bail!("mock build failure")
-            } else {
-                self.existing_images.lock().unwrap().insert(tag.to_string());
-                Ok(())
-            }
-        }
-        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
-            Ok(self.existing_images.lock().unwrap().contains(tag))
-        }
+        b.build()
     }
 
     fn make_mcp_plugin_dir(plugins_dir: &std::path::Path, slug: &str, version: &str) {
@@ -6126,11 +5906,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
 
-        let rt = TrackingRuntime::new(&[]); // no existing images
+        let (rt, handle) = tracking_runtime(&[]); // no existing images
         ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
 
-        assert_eq!(rt.build_call_count(), 1, "should build the missing image");
-        assert!(rt.was_built("speedwave-mcp-presale:1.4.6"));
+        assert_eq!(
+            handle.build_call_count(),
+            1,
+            "should build the missing image"
+        );
+        assert!(handle.was_built("speedwave-mcp-presale:1.4.6"));
     }
 
     #[test]
@@ -6139,11 +5923,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
 
-        let rt = TrackingRuntime::new(&["speedwave-mcp-presale:1.4.6"]); // image exists
+        let (rt, handle) = tracking_runtime(&["speedwave-mcp-presale:1.4.6"]); // image exists
         ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
 
         assert_eq!(
-            rt.build_call_count(),
+            handle.build_call_count(),
             0,
             "should not rebuild existing image"
         );
@@ -6155,12 +5939,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
 
-        let rt = TrackingRuntime::new(&[]); // no existing images
-                                            // enabled_service_ids is empty — presale is disabled for this project
+        let (rt, handle) = tracking_runtime(&[]); // no existing images
+                                                  // enabled_service_ids is empty — presale is disabled for this project
         ensure_plugin_images_from_dir(&rt, &[], tmp.path()).unwrap();
 
         assert_eq!(
-            rt.build_call_count(),
+            handle.build_call_count(),
             0,
             "disabled plugin should not be built"
         );
@@ -6172,12 +5956,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         make_resource_only_plugin_dir(tmp.path(), "my-skills", "1.0.0");
 
-        let rt = TrackingRuntime::new(&[]);
+        let (rt, handle) = tracking_runtime(&[]);
         // resource-only plugins have no service_id and no Containerfile
         ensure_plugin_images_from_dir(&rt, &["my-skills"], tmp.path()).unwrap();
 
         assert_eq!(
-            rt.build_call_count(),
+            handle.build_call_count(),
             0,
             "resource-only plugin has no image"
         );
@@ -6191,16 +5975,16 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0"); // enabled, existing image
         make_mcp_plugin_dir(tmp.path(), "plugin-c", "1.0.0"); // disabled, missing image
 
-        let rt = TrackingRuntime::new(&["speedwave-mcp-plugin-b:1.0.0"]); // B exists
+        let (rt, handle) = tracking_runtime(&["speedwave-mcp-plugin-b:1.0.0"]); // B exists
         ensure_plugin_images_from_dir(&rt, &["plugin-a", "plugin-b"], tmp.path()).unwrap();
 
         assert_eq!(
-            rt.build_call_count(),
+            handle.build_call_count(),
             1,
             "only plugin-a should be built (plugin-b exists, plugin-c disabled)"
         );
-        assert!(rt.was_built("speedwave-mcp-plugin-a:1.0.0"));
-        assert!(!rt.was_built("speedwave-mcp-plugin-c:1.0.0"));
+        assert!(handle.was_built("speedwave-mcp-plugin-a:1.0.0"));
+        assert!(!handle.was_built("speedwave-mcp-plugin-c:1.0.0"));
     }
 
     #[test]
@@ -6211,13 +5995,13 @@ mod tests {
         // Add .image_pending marker
         std::fs::write(tmp.path().join("presale").join(".image_pending"), "").unwrap();
 
-        let rt = TrackingRuntime::new(&[]); // image missing
+        let (rt, handle) = tracking_runtime(&[]); // image missing
         ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
 
         // Built exactly once: the pending pass builds it, then the second pass sees it via
         // image_exists() and skips. (TrackingRuntime.build_image now inserts into existing_images.)
         assert_eq!(
-            rt.build_call_count(),
+            handle.build_call_count(),
             1,
             "pending plugin image should be built exactly once"
         );
@@ -6232,7 +6016,7 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
 
-        let rt = TrackingRuntime::failing(&[]); // build always fails
+        let (rt, _handle) = failing_tracking_runtime(&[]); // build always fails
         let err =
             ensure_plugin_images_from_dir(&rt, &["plugin-a", "plugin-b"], tmp.path()).unwrap_err();
 
@@ -6254,11 +6038,15 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
 
-        let rt = TrackingRuntime::failing(&[]); // both fail
+        let (rt, handle) = failing_tracking_runtime(&[]); // both fail
         let _ = ensure_plugin_images_from_dir(&rt, &["plugin-a", "plugin-b"], tmp.path());
 
         // Both should have been attempted despite first failure
-        assert_eq!(rt.build_call_count(), 2, "both plugins should be attempted");
+        assert_eq!(
+            handle.build_call_count(),
+            2,
+            "both plugins should be attempted"
+        );
     }
 
     #[test]
@@ -6284,74 +6072,25 @@ mod tests {
         .unwrap();
         // No Containerfile created
 
-        let rt = TrackingRuntime::new(&[]);
+        let (rt, handle) = tracking_runtime(&[]);
         let err = ensure_plugin_images_from_dir(&rt, &["my-mcp"], tmp.path())
             .expect_err("MCP plugin without Containerfile must fail the verified loader");
         assert!(err.to_string().contains("Containerfile"));
-        assert_eq!(rt.build_call_count(), 0);
+        assert_eq!(handle.build_call_count(), 0);
     }
 
     #[test]
     fn test_ensure_plugin_images_image_exists_returns_err() {
         let _g = UnsignedBypassGuard::new();
         // image_exists returning Err should be treated as missing — attempt build
-        // We use FailingBuildRuntime for this because TrackingRuntime always succeeds
-        // for image_exists. Create a custom mock inline.
-
-        struct ExistsErrorRuntime;
-        impl ContainerRuntime for ExistsErrorRuntime {
-            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-                Ok(vec![])
-            }
-            fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
-                std::process::Command::new("true")
-            }
-            fn container_exec_piped(
-                &self,
-                _: &str,
-                _: &[&str],
-            ) -> anyhow::Result<std::process::Command> {
-                Ok(std::process::Command::new("true"))
-            }
-            fn is_available(&self) -> bool {
-                true
-            }
-            fn ensure_ready(&self) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn build_image(
-                &self,
-                _tag: &str,
-                _context_dir: &str,
-                _containerfile: &str,
-                _build_args: &[(&str, &str)],
-            ) -> anyhow::Result<()> {
-                Ok(()) // build succeeds
-            }
-            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-                anyhow::bail!("runtime unavailable")
-            }
-        }
+        // (which succeeds with the default builder), so the whole pass returns Ok.
 
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
 
-        let rt = ExistsErrorRuntime;
+        let (rt, _handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_image_exists_error("runtime unavailable")
+            .build();
         // image_exists returns Err → treated as missing → build attempted → succeeds
         ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
     }
@@ -6364,9 +6103,9 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
         std::fs::create_dir_all(&plugins_dir).unwrap();
 
-        let rt = TrackingRuntime::new(&[]);
+        let (rt, handle) = tracking_runtime(&[]);
         ensure_plugin_images_from_dir(&rt, &["presale"], &plugins_dir).unwrap();
-        assert_eq!(rt.build_call_count(), 0);
+        assert_eq!(handle.build_call_count(), 0);
     }
 
     #[test]
@@ -6374,9 +6113,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let nonexistent = tmp.path().join("does-not-exist");
 
-        let rt = TrackingRuntime::new(&[]);
+        let (rt, handle) = tracking_runtime(&[]);
         ensure_plugin_images_from_dir(&rt, &["presale"], &nonexistent).unwrap();
-        assert_eq!(rt.build_call_count(), 0);
+        assert_eq!(handle.build_call_count(), 0);
     }
 
     #[test]
@@ -6391,12 +6130,12 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(plugin_dir.join("plugin.json"), "NOT VALID JSON").unwrap();
 
-        let rt = TrackingRuntime::new(&[]);
+        let (rt, handle) = tracking_runtime(&[]);
         let err = ensure_plugin_images_from_dir(&rt, &["bad-plugin"], tmp.path())
             .expect_err("invalid manifest must fail the verified loader");
         assert!(err.to_string().contains("bad-plugin"));
         assert_eq!(
-            rt.build_call_count(),
+            handle.build_call_count(),
             0,
             "no build attempted on a failed load"
         );
@@ -6423,14 +6162,14 @@ mod tests {
         .unwrap();
         std::fs::write(plugin_dir.join("Containerfile"), "FROM scratch").unwrap();
 
-        let rt = TrackingRuntime::new(&[]);
+        let (rt, handle) = tracking_runtime(&[]);
         ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
 
-        assert_eq!(rt.build_call_count(), 1);
+        assert_eq!(handle.build_call_count(), 1);
         assert!(
-            rt.was_built("speedwave-mcp-presale:custom-tag"),
+            handle.was_built("speedwave-mcp-presale:custom-tag"),
             "should use custom image_tag, got calls: {:?}",
-            rt.build_calls.lock().unwrap()
+            handle.build_tags()
         );
     }
 
@@ -6445,7 +6184,7 @@ mod tests {
         std::fs::write(&pending, "").unwrap();
         assert!(pending.exists(), "marker should exist before build");
 
-        let rt = TrackingRuntime::new(&[]); // image missing
+        let (rt, _handle) = tracking_runtime(&[]); // image missing
         ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
 
         assert!(
@@ -6461,14 +6200,18 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
 
         // First call: image missing → builds it
-        let rt = TrackingRuntime::new(&[]);
+        let (rt, handle) = tracking_runtime(&[]);
         ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
-        assert_eq!(rt.build_call_count(), 1, "first call should build");
+        assert_eq!(handle.build_call_count(), 1, "first call should build");
 
         // Second call: image now exists (simulate by creating a runtime that knows about it)
-        let rt2 = TrackingRuntime::new(&["speedwave-mcp-presale:1.0.0"]);
+        let (rt2, handle2) = tracking_runtime(&["speedwave-mcp-presale:1.0.0"]);
         ensure_plugin_images_from_dir(&rt2, &["presale"], tmp.path()).unwrap();
-        assert_eq!(rt2.build_call_count(), 0, "second call should skip build");
+        assert_eq!(
+            handle2.build_call_count(),
+            0,
+            "second call should skip build"
+        );
     }
 
     // --- Critical interaction test: reconcile → restore_projects ---
@@ -6482,7 +6225,7 @@ mod tests {
 
         // Reconcile pass: union covers both enabled plugins; plugin-a fails but
         // the error is accumulated, not short-circuited.
-        let rt_failing = TrackingRuntime::failing(&[]);
+        let (rt_failing, _) = failing_tracking_runtime(&[]);
         let union_result =
             ensure_plugin_images_from_dir(&rt_failing, &["plugin-a", "plugin-b"], tmp.path());
         assert!(
@@ -6491,7 +6234,7 @@ mod tests {
         );
 
         // Project using only plugin-b — succeeds (image already exists in this runtime).
-        let rt_b_exists = TrackingRuntime::new(&["speedwave-mcp-plugin-b:1.0.0"]);
+        let (rt_b_exists, _) = tracking_runtime(&["speedwave-mcp-plugin-b:1.0.0"]);
         let project_b_result =
             ensure_plugin_images_from_dir(&rt_b_exists, &["plugin-b"], tmp.path());
         assert!(
@@ -6501,7 +6244,7 @@ mod tests {
         );
 
         // Project using only plugin-a — still fails.
-        let rt_a_missing = TrackingRuntime::failing(&[]);
+        let (rt_a_missing, _) = failing_tracking_runtime(&[]);
         let project_a_result =
             ensure_plugin_images_from_dir(&rt_a_missing, &["plugin-a"], tmp.path());
         assert!(

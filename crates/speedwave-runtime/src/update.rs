@@ -3,7 +3,6 @@ use crate::bundle;
 use crate::compose::{self, SecurityCheck};
 use crate::config;
 use crate::consts;
-use crate::runtime::ContainerRuntime;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -69,13 +68,23 @@ fn secure_snapshot_dirs(dir: &std::path::Path) -> anyhow::Result<()> {
 #[cfg(test)]
 fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result<()> {
     let compose_path = compose::compose_output_path_in(data_dir, project)?;
-    let compose_yml = std::fs::read_to_string(&compose_path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot read current compose file at {}: {}",
-            compose_path.display(),
-            e
-        )
-    })?;
+    let compose_yml = match std::fs::read_to_string(&compose_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log::warn!(
+                "save_snapshot: no compose.yml at {} — rollback will be unavailable",
+                compose_path.display()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "cannot read current compose file at {}: {}",
+                compose_path.display(),
+                e
+            ));
+        }
+    };
 
     let dir = data_dir.join("snapshots").join(project);
     std::fs::create_dir_all(&dir)?;
@@ -118,13 +127,25 @@ fn load_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
 
 pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let compose_path = compose::compose_output_path(project)?;
-    let compose_yml = std::fs::read_to_string(&compose_path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot read current compose file at {}: {}",
-            compose_path.display(),
-            e
-        )
-    })?;
+    let compose_yml = match std::fs::read_to_string(&compose_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // First-time restart (compose.yml never rendered yet) — proceed
+            // without a rollback snapshot rather than blocking the restart.
+            log::warn!(
+                "save_snapshot: no compose.yml at {} — rollback will be unavailable for this restart",
+                compose_path.display()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "cannot read current compose file at {}: {}",
+                compose_path.display(),
+                e
+            ));
+        }
+    };
 
     let dir = snapshot_dir(project)?;
     std::fs::create_dir_all(&dir)?;
@@ -170,12 +191,118 @@ fn load_snapshot(project: &str) -> anyhow::Result<UpdateSnapshot> {
     Ok(snapshot)
 }
 
+/// Prunes previous-bundle images iff bundle ID changed. Callers MUST
+/// invoke only after new containers are confirmed running (atomicity).
+#[cfg(any(test, feature = "test-support"))]
+pub fn maybe_prune_previous_bundle(
+    runtime: &crate::runtime::LockedRuntime,
+    applied_bundle_id: Option<&str>,
+    new_bundle_id: &str,
+) {
+    maybe_prune_previous_bundle_inner(runtime, applied_bundle_id, new_bundle_id);
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn maybe_prune_previous_bundle(
+    runtime: &crate::runtime::LockedRuntime,
+    applied_bundle_id: Option<&str>,
+    new_bundle_id: &str,
+) {
+    maybe_prune_previous_bundle_inner(runtime, applied_bundle_id, new_bundle_id);
+}
+
+fn maybe_prune_previous_bundle_inner(
+    runtime: &crate::runtime::LockedRuntime,
+    applied_bundle_id: Option<&str>,
+    new_bundle_id: &str,
+) {
+    if let Some(old_id) = build::should_prune_bundle(applied_bundle_id, new_bundle_id) {
+        if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
+            log::warn!("Failed to prune old bundle images: {e}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Update / rollback
 // ---------------------------------------------------------------------------
 
+/// Compose mutation core. Caller MUST build images before calling —
+/// builds run outside the lock (90+ s would block concurrent sessions).
+/// See ADR-066.
+#[cfg(any(test, feature = "test-support"))]
+pub fn apply_update_transaction(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    compose_yml: &str,
+) -> anyhow::Result<()> {
+    apply_update_transaction_inner(runtime, project, compose_yml)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn apply_update_transaction(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    compose_yml: &str,
+) -> anyhow::Result<()> {
+    apply_update_transaction_inner(runtime, project, compose_yml)
+}
+
+fn apply_update_transaction_inner(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    compose_yml: &str,
+) -> anyhow::Result<()> {
+    runtime.transaction(project, |runtime| -> anyhow::Result<()> {
+        save_snapshot(project)?;
+        compose::save_compose(project, compose_yml)?;
+        runtime.compose_down(project)?;
+        crate::runtime::compose_validate_with_retry(runtime, project)?;
+        runtime.compose_up_recreate(project)?;
+        Ok(())
+    })
+}
+
+/// Mutation core of `rollback_containers`. Restores snapshot YAML and
+/// recreates containers under the per-project compose lock.
+#[cfg(any(test, feature = "test-support"))]
+pub fn apply_rollback_transaction(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    snapshot_yml: &str,
+) -> anyhow::Result<()> {
+    apply_rollback_transaction_inner(runtime, project, snapshot_yml)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn apply_rollback_transaction(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    snapshot_yml: &str,
+) -> anyhow::Result<()> {
+    apply_rollback_transaction_inner(runtime, project, snapshot_yml)
+}
+
+fn apply_rollback_transaction_inner(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+    snapshot_yml: &str,
+) -> anyhow::Result<()> {
+    runtime.transaction(project, |runtime| -> anyhow::Result<()> {
+        // No VM-side validate on rollback — virtiofs lag would block recovery (ADR-066).
+        compose::save_compose(project, snapshot_yml)?;
+        runtime.compose_up_recreate(project).map_err(|e| {
+            anyhow::anyhow!(
+                "Rollback failed: {}. Old compose.yml was restored. Run `speedwave` to start containers manually.",
+                e
+            )
+        })?;
+        Ok(())
+    })
+}
+
 pub fn update_containers(
-    runtime: &dyn ContainerRuntime,
+    runtime: &crate::runtime::LockedRuntime,
     project: &str,
 ) -> anyhow::Result<ContainerUpdateResult> {
     validate_project_name(project)?;
@@ -231,20 +358,11 @@ pub fn update_containers(
         );
     }
 
-    // 4. Save snapshot of current compose.yml for rollback (AFTER security check)
-    save_snapshot(project)?;
-
-    // 5. Save new compose.yml
-    compose::save_compose(project, &compose_yml)?;
-
-    // 6. Rebuild images from local Containerfiles BEFORE stopping containers.
-    //    If the build fails, containers keep running with the previous version.
-    //    containerd uses content-addressable storage — new builds don't affect running containers.
-    //    Old-bundle prune is moved to the end of update_containers (after the
-    //    new containers are verified running) so a partial failure leaves
-    //    the previous bundle's images on disk for rollback.
     let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
+
+    // Build OUTSIDE the compose lock — see ADR-066. If build fails, no
+    // snapshot is written and running containers are untouched.
     let images_rebuilt = build::build_images_for_bundle(
         runtime,
         &build::enabled_images(&integrations),
@@ -252,17 +370,11 @@ pub fn update_containers(
     )
     .map_err(|e| {
         anyhow::anyhow!(
-            "Image rebuild failed: {}. Containers are still running with the previous version.",
-            e
+            "Image rebuild failed: {e}. Containers are still running with the previous version."
         )
     })?;
 
-    // 7. Graceful shutdown — stop running containers before recreate.
-    //    SIGTERM + timeout (compose default 10s) prevents killing active Claude sessions.
-    runtime.compose_down(project)?;
-
-    // 8. Recreate containers with newly built images
-    runtime.compose_up_recreate(project)?;
+    apply_update_transaction(runtime, project, &compose_yml)?;
 
     // 9. Wait for containers to stabilize before health check.
     //    A crash-looping container may briefly show state=="running".
@@ -290,17 +402,11 @@ pub fn update_containers(
         );
     }
 
-    // Atomic prune: only drop the previous bundle's images now that the new
-    // containers are confirmed running. If anything above this point failed,
-    // the previous-bundle images remain on disk for a clean rollback.
-    if let Some(old_id) = build::should_prune_bundle(
+    maybe_prune_previous_bundle(
+        runtime,
         bundle_state.applied_bundle_id.as_deref(),
         &new_manifest.bundle_id,
-    ) {
-        if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
-            log::warn!("Failed to prune old bundle images: {e}");
-        }
-    }
+    );
 
     Ok(ContainerUpdateResult {
         success: true,
@@ -310,7 +416,10 @@ pub fn update_containers(
     })
 }
 
-pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> anyhow::Result<()> {
+pub fn rollback_containers(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &str,
+) -> anyhow::Result<()> {
     validate_project_name(project)?;
 
     let snapshot = load_snapshot(project)?;
@@ -354,18 +463,7 @@ pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> any
         );
     }
 
-    // Restore compose.yml from snapshot
-    compose::save_compose(project, &snapshot.compose_yml)?;
-
-    // Recreate containers with the old compose config
-    runtime.compose_up_recreate(project).map_err(|e| {
-        anyhow::anyhow!(
-            "Rollback failed: {}. Old compose.yml was restored. Run `speedwave` to start containers manually.",
-            e
-        )
-    })?;
-
-    Ok(())
+    apply_rollback_transaction(runtime, project, &snapshot.compose_yml)
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +471,7 @@ pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> any
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -430,6 +528,52 @@ mod tests {
         let loaded: ContainerUpdateResult = serde_json::from_str(&json).unwrap();
         assert!(!loaded.success);
         assert_eq!(loaded.error.as_deref(), Some("build failed"));
+    }
+
+    #[test]
+    fn save_snapshot_returns_ok_when_compose_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = "no-compose-yet";
+        // Intentionally no compose.yml written.
+        let result = save_snapshot_in(dir.path(), project);
+        assert!(
+            result.is_ok(),
+            "missing compose.yml must be tolerated (first-time integration enable)"
+        );
+        let snap_path = snapshot_path_in(dir.path(), project);
+        assert!(
+            !snap_path.exists(),
+            "no snapshot file should be written when there is no compose.yml"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_snapshot_propagates_non_notfound_io_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let project = "perm-denied";
+
+        let compose_path = compose::compose_output_path_in(dir.path(), project).unwrap();
+        std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
+        std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
+        // Strip all permissions from the file so read fails with PermissionDenied (not NotFound).
+        std::fs::set_permissions(&compose_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = save_snapshot_in(dir.path(), project);
+
+        // Restore perms before asserting so tempdir can clean up.
+        let _ = std::fs::set_permissions(&compose_path, std::fs::Permissions::from_mode(0o644));
+
+        assert!(
+            result.is_err(),
+            "permission-denied on compose.yml must bubble up as a hard error"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("rollback will be unavailable"),
+            "real IO errors must NOT be silently treated as 'no snapshot needed'"
+        );
     }
 
     #[cfg(unix)]
@@ -503,45 +647,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_build_before_compose_down_in_update_containers() {
-        // **Why a structural (source-code) test?**
-        //
-        // The key safety invariant: `build_images_for_bundle` must run BEFORE
-        // `compose_down`. Building first means a failed build leaves running
-        // containers untouched (containerd uses content-addressable storage,
-        // so new images don't affect running containers).
-        //
-        // A behavioral test would require mocking `build::build_images_for_bundle`
-        // (a free function, not a trait method) plus `config::load_user_config`,
-        // `compose::render_compose`, `SecurityCheck::run`, and filesystem I/O.
-        // That level of test infrastructure isn't justified for a single
-        // ordering invariant. Instead we verify the call order directly in
-        // the source text, scoped to the `update_containers` function body.
-        let source = include_str!("update.rs");
-
-        // Locate the function body to avoid false matches from
-        // rollback_containers or other functions that also call compose_down.
-        let fn_start = source
-            .find("fn update_containers(")
-            .expect("update_containers function must exist in update.rs");
-        let fn_body = &source[fn_start..];
-
-        let build_pos = fn_body
-            .find("build::build_images_for_bundle")
-            .expect("build_images_for_bundle call must exist in update_containers");
-        let down_pos = fn_body
-            .find("runtime.compose_down(project)")
-            .expect("compose_down call must exist in update_containers");
-
-        assert!(
-            build_pos < down_pos,
-            "Safety invariant violated: build_images_for_bundle (at byte offset {build_pos}) \
-             must appear before compose_down (at byte offset {down_pos}) in \
-             update_containers — building first ensures a failed build leaves \
-             running containers untouched",
-        );
-    }
+    // Behavioural tests for `apply_update_transaction` and
+    // `apply_rollback_transaction` live in `tests/apply_transaction_behaviour.rs`
+    // — they need a fresh `OnceLock` for `data_dir()`, which is only possible
+    // in a separate integration-test binary.
 
     #[test]
     fn test_rollback_with_empty_plugin_manifests_is_valid() {
@@ -749,40 +858,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_prune_after_recreate_in_update_containers() {
-        // Structural test: prune_old_bundle_images must appear AFTER the new
-        // containers are recreated and verified — atomicity guarantee. If
-        // anything earlier failed, the previous bundle's images stay on disk
-        // so rollback has a complete previous state to restore.
-        let source = include_str!("update.rs");
-
-        let fn_start = source
-            .find("fn update_containers(")
-            .expect("update_containers function must exist in update.rs");
-        let fn_body = &source[fn_start..];
-
-        let prune_pos = fn_body
-            .find("prune_old_bundle_images")
-            .expect("prune_old_bundle_images call must exist in update_containers");
-        let build_pos = fn_body
-            .find("build::build_images_for_bundle")
-            .expect("build_images_for_bundle call must exist in update_containers");
-        let recreate_pos = fn_body
-            .find("compose_up_recreate(project)")
-            .expect("compose_up_recreate call must exist in update_containers");
-
-        assert!(
-            prune_pos > build_pos,
-            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
-             build_images_for_bundle (at byte {build_pos}) in update_containers"
-        );
-        assert!(
-            prune_pos > recreate_pos,
-            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
-             compose_up_recreate (at byte {recreate_pos}) in update_containers"
-        );
-    }
+    // Behavioural prune coverage: tests/apply_transaction_behaviour.rs.
 
     #[test]
     fn test_render_compose_called_with_runtime_in_update_containers() {

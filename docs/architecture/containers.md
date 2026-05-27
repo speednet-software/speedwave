@@ -156,6 +156,33 @@ The mechanism uses a `Condvar` with tri-state `ImageReadiness` (`Ready`, `Buildi
 
 The Desktop frontend shows a unified blocking overlay in the Shell component while containers are not ready (checking, starting, switching, rebuilding states).
 
+## Per-Project Compose Transaction Lock (ADR-066)
+
+Every compose-touching operation (`compose_up`, `compose_down`, `compose_ps`, `compose_up_recreate`, `compose_logs`, `compose_validate`) goes through `LockedRuntime` — the public wrapper returned by `detect_runtime()`. The wrapped `ContainerRuntime` trait is `pub(crate)`; no caller outside `speedwave-runtime` can hold a raw `Box<dyn ContainerRuntime>`. This is enforced by `tests/ssot_enforcement.rs`.
+
+`LockedRuntime::transaction(project, |rt| { ... })` is the canonical API for multi-step sequences (`save_snapshot → build → compose_down → render/save → compose_validate → compose_up_recreate → rollback`). Reentrant: inner compose ops on the same project skip re-acquisition via a `thread_local` marker.
+
+The lock has two layers:
+
+1. **In-process** — `Arc<Mutex<()>>` per project, interned in a static `HashMap`. Serialises threads cheaply (no syscall).
+2. **Cross-process** — `fs2::FileExt::lock_exclusive` on `<data_dir>/compose/<project>/compose.lock`. Serialises Desktop against CLI (`speedwave update`) and other Desktop instances. RAII via `FileLockGuard::drop` — released on panic.
+
+Per-project granularity: different projects never block each other; the same project serialises across threads and processes.
+
+## VM-side Compose Validation
+
+After every `save_compose`, transactions call `compose_validate_with_retry(rt, project)` which runs `nerdctl compose -f <file> -p <project> config --quiet` inside the VM/distro. This catches virtiofs/9p propagation lag — the host atomic-write succeeded but the engine still sees stale or torn YAML.
+
+Retries on errors matching `is_propagation_error` (substrings `"undefined network"` and `"invalid compose project"`, both lowercased). Backoff: 100 ms before retry 1, 200 ms before retry 2. Max 3 attempts. Non-propagation errors propagate immediately.
+
+The error-fragment strings are SSOT'd as `compose::UNDEFINED_NETWORK_ERROR_FRAGMENT` and `compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT`, shared between the host-side `validate_compose_network_refs` (which emits the fragment) and `runtime::is_propagation_error` (which recognises it).
+
+## Network Cleanup (compose_down)
+
+`compose_down_and_cleanup` calls `force_remove_project_containers` followed by `force_remove_project_networks` — containers must be removed first because nerdctl refuses to drop a network with attached containers. Cleanup is best-effort: failures are logged at `warn!` (not `debug!`, since an orphan network blocks the next `compose_up`).
+
+The shared algorithm lives in `runtime::force_remove_project_networks_with_run_fn`, parameterised on a run closure: Lima wraps each `nerdctl network ls / rm` call in `retry_on_eof` for transient VM-shell EOF on macOS sleep/resume; WSL calls the runner directly.
+
 ## Container Recovery
 
 Speedwave auto-recovers from two container failure modes:

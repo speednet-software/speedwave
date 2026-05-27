@@ -99,6 +99,9 @@ audio-transcription = ["dep:hound", "dep:reqwest", "dep:tar", "dep:bzip2", "dep:
 # Internal: pulls in cpal. Only meaningful on Windows (the target-specific dep
 # block above), but listing it unconditionally keeps `--features` simple.
 windows-capture = ["dep:cpal"]
+# Re-exports `runtime::test_support` with mock builders, so downstream test
+# code can construct `LockedRuntime` without seeing the (pub(crate)) trait.
+test-support = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
@@ -111,3 +114,19 @@ serial_test = "3"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "lock_acquisitions"
+required-features = ["test-support"]
+
+[[test]]
+name = "compose_lock_cross_process"
+required-features = ["test-support"]
+
+[[test]]
+name = "ssot_enforcement"
+# No required-features — pure source-parsing assertions, no runtime types.
+
+[[test]]
+name = "apply_transaction_behaviour"
+required-features = ["test-support"]
