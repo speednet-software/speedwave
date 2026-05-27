@@ -184,6 +184,8 @@ fn start_session_inner(
     // Per-project compose lock serialises auth check with concurrent compose ops.
     log::info!("start_session_inner: acquiring compose lock");
     let rt = speedwave_runtime::runtime::detect_runtime();
+    // `_rt` unused: `check_claude_auth` builds its own runtime; HELD_LOCKS
+    // makes that call reentrant within this thread + project.
     rt.transaction(project, |_rt| -> anyhow::Result<()> {
         log::info!("start_session_inner: compose lock acquired, checking auth");
         let authed = setup_wizard::check_claude_auth(project)?;

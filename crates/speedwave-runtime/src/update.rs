@@ -169,21 +169,52 @@ fn load_snapshot(project: &str) -> anyhow::Result<UpdateSnapshot> {
     Ok(snapshot)
 }
 
+/// Prunes previous-bundle images iff bundle ID changed. Callers MUST
+/// invoke only after new containers are confirmed running (atomicity).
+#[cfg(any(test, feature = "test-support"))]
+pub fn maybe_prune_previous_bundle(
+    runtime: &crate::runtime::LockedRuntime,
+    applied_bundle_id: Option<&str>,
+    new_bundle_id: &str,
+) {
+    maybe_prune_previous_bundle_inner(runtime, applied_bundle_id, new_bundle_id);
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn maybe_prune_previous_bundle(
+    runtime: &crate::runtime::LockedRuntime,
+    applied_bundle_id: Option<&str>,
+    new_bundle_id: &str,
+) {
+    maybe_prune_previous_bundle_inner(runtime, applied_bundle_id, new_bundle_id);
+}
+
+fn maybe_prune_previous_bundle_inner(
+    runtime: &crate::runtime::LockedRuntime,
+    applied_bundle_id: Option<&str>,
+    new_bundle_id: &str,
+) {
+    if let Some(old_id) = build::should_prune_bundle(applied_bundle_id, new_bundle_id) {
+        if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
+            log::warn!("Failed to prune old bundle images: {e}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Update / rollback
 // ---------------------------------------------------------------------------
 
-/// Mutation core of `update_containers`. Caller preparation runs outside;
-/// this function owns the per-project compose lock.
+/// Compose mutation core. Caller MUST build images before calling —
+/// builds run outside the lock (90+ s would block concurrent sessions).
+/// See ADR-066.
 #[cfg(any(test, feature = "test-support"))]
 pub fn apply_update_transaction(
     runtime: &crate::runtime::LockedRuntime,
     project: &str,
     compose_yml: &str,
-    enabled_images: &[&build::ImageDef],
-    bundle_id: &str,
-) -> anyhow::Result<u32> {
-    apply_update_transaction_inner(runtime, project, compose_yml, enabled_images, bundle_id)
+) -> anyhow::Result<()> {
+    apply_update_transaction_inner(runtime, project, compose_yml)
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
@@ -191,35 +222,22 @@ fn apply_update_transaction(
     runtime: &crate::runtime::LockedRuntime,
     project: &str,
     compose_yml: &str,
-    enabled_images: &[&build::ImageDef],
-    bundle_id: &str,
-) -> anyhow::Result<u32> {
-    apply_update_transaction_inner(runtime, project, compose_yml, enabled_images, bundle_id)
+) -> anyhow::Result<()> {
+    apply_update_transaction_inner(runtime, project, compose_yml)
 }
 
 fn apply_update_transaction_inner(
     runtime: &crate::runtime::LockedRuntime,
     project: &str,
     compose_yml: &str,
-    enabled_images: &[&build::ImageDef],
-    bundle_id: &str,
-) -> anyhow::Result<u32> {
-    runtime.transaction(project, |runtime| -> anyhow::Result<u32> {
+) -> anyhow::Result<()> {
+    runtime.transaction(project, |runtime| -> anyhow::Result<()> {
         save_snapshot(project)?;
         compose::save_compose(project, compose_yml)?;
-
-        let built =
-            build::build_images_for_bundle(runtime, enabled_images, bundle_id).map_err(|e| {
-                anyhow::anyhow!(
-                    "Image rebuild failed: {}. Containers are still running with the previous version.",
-                    e
-                )
-            })?;
-
         runtime.compose_down(project)?;
         crate::runtime::compose_validate_with_retry(runtime, project)?;
         runtime.compose_up_recreate(project)?;
-        Ok(built)
+        Ok(())
     })
 }
 
@@ -320,13 +338,21 @@ pub fn update_containers(
 
     let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
-    let images_rebuilt = apply_update_transaction(
+
+    // Build OUTSIDE the compose lock — see ADR-066. If build fails, no
+    // snapshot is written and running containers are untouched.
+    let images_rebuilt = build::build_images_for_bundle(
         runtime,
-        project,
-        &compose_yml,
         &build::enabled_images(&integrations),
         &new_manifest.bundle_id,
-    )?;
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Image rebuild failed: {e}. Containers are still running with the previous version."
+        )
+    })?;
+
+    apply_update_transaction(runtime, project, &compose_yml)?;
 
     // 9. Wait for containers to stabilize before health check.
     //    A crash-looping container may briefly show state=="running".
@@ -354,17 +380,11 @@ pub fn update_containers(
         );
     }
 
-    // Atomic prune: only drop the previous bundle's images now that the new
-    // containers are confirmed running. If anything above this point failed,
-    // the previous-bundle images remain on disk for a clean rollback.
-    if let Some(old_id) = build::should_prune_bundle(
+    maybe_prune_previous_bundle(
+        runtime,
         bundle_state.applied_bundle_id.as_deref(),
         &new_manifest.bundle_id,
-    ) {
-        if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
-            log::warn!("Failed to prune old bundle images: {e}");
-        }
-    }
+    );
 
     Ok(ContainerUpdateResult {
         success: true,
@@ -770,28 +790,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_prune_after_apply_in_update_containers() {
-        // Atomicity invariant: previous-bundle prune runs only after the new
-        // containers are verified running. `apply_update_transaction` owns the
-        // build/recreate sequence; `prune_old_bundle_images` must follow it.
-        let source = include_str!("update.rs");
-        let fn_start = source
-            .find("fn update_containers(")
-            .expect("update_containers must exist");
-        let fn_body = &source[fn_start..];
-        let apply_pos = fn_body
-            .find("apply_update_transaction(")
-            .expect("apply_update_transaction call expected");
-        let prune_pos = fn_body
-            .find("prune_old_bundle_images")
-            .expect("prune_old_bundle_images call expected");
-        assert!(
-            prune_pos > apply_pos,
-            "prune_old_bundle_images ({prune_pos}) must appear AFTER \
-             apply_update_transaction ({apply_pos}) — atomic on-success prune"
-        );
-    }
+    // Behavioural prune coverage: tests/apply_transaction_behaviour.rs.
 
     #[test]
     fn test_render_compose_called_with_runtime_in_update_containers() {

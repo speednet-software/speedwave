@@ -114,10 +114,11 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
 
     /// Validates compose.yml as the container engine sees it — production
-    /// runtimes MUST override (Lima/WSL run `nerdctl compose config --quiet`).
-    /// The default `Ok(())` is for test stubs only; a forgotten override would
-    /// silently disable VM-side propagation-lag detection.
+    /// runtimes MUST override. Default body is for test stubs only.
     fn compose_validate(&self, _project: &str) -> anyhow::Result<()> {
+        log::error!(
+            "compose_validate: default no-op called — production runtime forgot to override"
+        );
         Ok(())
     }
 

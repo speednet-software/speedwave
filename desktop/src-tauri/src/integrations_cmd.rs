@@ -1292,20 +1292,22 @@ pub async fn restart_integration_containers(
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
+        // Build OUTSIDE the compose lock (ADR-066). On failure, undo the
+        // just-enabled config toggle but leave running containers intact.
+        if let Err(sanitized) = ensure_project_images_built(&rt, &project) {
+            log::error!("restart_integration_containers: image build failed: {sanitized}");
+            if let Some(svc) = just_enabled.as_deref() {
+                rollback_integration_to_disabled(&project, svc);
+            }
+            return Err(format!(
+                "Image build failed: {sanitized}. Containers are still running with the previous configuration."
+            ));
+        }
+
         rt.transaction(&project, |rt| -> anyhow::Result<()> {
             if let Err(e) = speedwave_runtime::update::save_snapshot(&project) {
                 log::warn!(
                     "restart_integration_containers: save_snapshot failed, rollback will not work: {e}"
-                );
-            }
-
-            if let Err(sanitized) = ensure_project_images_built(rt, &project) {
-                log::error!("restart_integration_containers: image build failed: {sanitized}");
-                if let Some(svc) = just_enabled.as_deref() {
-                    rollback_integration_to_disabled(&project, svc);
-                }
-                anyhow::bail!(
-                    "Image build failed: {sanitized}. Containers are still running with the previous configuration."
                 );
             }
 
@@ -1323,6 +1325,7 @@ pub async fn restart_integration_containers(
                 log::error!(
                     "restart_integration_containers: compose_up_recreate failed: {e}, attempting rollback"
                 );
+                // Nested transaction: rollback acquires its own — reentrant via HELD_LOCKS.
                 if let Err(rb_err) = speedwave_runtime::update::rollback_containers(rt, &project) {
                     log::error!("restart_integration_containers: rollback also failed: {rb_err}");
                     anyhow::bail!(
