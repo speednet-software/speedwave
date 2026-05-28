@@ -769,7 +769,7 @@ download-sherpa-onnx:
 ifeq ($(OS),Windows_NT)
 	@echo "Pre-fetching sherpa-onnx MD-Release for Windows CRT alignment (ADR-061)..."
 	@mkdir -p $(SHERPA_FETCH_DIR)
-	@bash -c 'export SHERPA_ONNX_FETCH_DIR="$(SHERPA_FETCH_DIR)"; LIB_DIR=$$(bash scripts/lib/fetch-sherpa-onnx-md.sh | tail -1); echo "$$LIB_DIR" > $(SHERPA_LIB_CACHE); echo "  ✅ SHERPA_ONNX_LIB_DIR=$$LIB_DIR"'
+	@bash scripts/dev-fetch-sherpa-cache.sh "$(SHERPA_FETCH_DIR)" "$(SHERPA_LIB_CACHE)"
 else
 	@echo "  ⬚ download-sherpa-onnx skipped (not Windows)"
 endif
@@ -782,7 +782,7 @@ endif
 ifeq ($(OS),Windows_NT)
 dev: download-nodejs download-sherpa-onnx download-wsl-resources
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
-	@bash -c 'export SHERPA_ONNX_LIB_DIR=$$(cat $(SHERPA_LIB_CACHE)); echo "Building with SHERPA_ONNX_LIB_DIR=$$SHERPA_ONNX_LIB_DIR"; "$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp'
+	@sh -c 'export SHERPA_ONNX_LIB_DIR=$$(cat $(SHERPA_LIB_CACHE)); echo "Building with SHERPA_ONNX_LIB_DIR=$$SHERPA_ONNX_LIB_DIR"; "$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp'
 	@echo "Preparing build context..."
 	@bash scripts/bundle-build-context.sh
 	mkdir -p desktop/src-tauri/cli
