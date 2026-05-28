@@ -1760,12 +1760,11 @@ fn resolve_sweep_script() -> Option<std::path::PathBuf> {
 /// (logs warn, returns) so AppLocker / WDAC policy cannot brick startup.
 /// SSOT for the kill predicate is `windows/sweep.ps1`.
 #[cfg(target_os = "windows")]
-fn run_pre_link_sweep(cli_dir: &std::path::Path) {
+fn run_pre_link_sweep() {
     let Some(sweep) = resolve_sweep_script() else {
         log::warn!("pre-link sweep skipped: sweep.ps1 not found in bundle");
         return;
     };
-    let _ = cli_dir;
     let inst_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
@@ -1848,7 +1847,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
         // ~/.speedwave/bin/speedwave.exe before we try to overwrite it.
         // Covers MSI users (no NSIS PRE-INSTALL sweep), AppLocker failures,
         // and post-install processes spawned by containers (ADR-048).
-        run_pre_link_sweep(&cli_dir);
+        run_pre_link_sweep();
 
         copy_cli_binary(cli_source, &cli_dir)?;
 

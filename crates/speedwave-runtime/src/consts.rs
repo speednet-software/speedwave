@@ -2123,11 +2123,13 @@ mod tests {
 
     #[test]
     fn wsl_distro_name_appears_in_installer_hooks() {
-        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
+        // Hand-edited source. The committed installer-hooks.nsh is generated
+        // from this template + sweep.ps1 + firewall.ps1 — see CLAUDE.md.
+        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks-template.nsh");
         assert!(
             src.contains(PRODUCTION_WSL_DISTRO),
             "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
-             installer-hooks.nsh; rename it there too (CLAUDE.md SSOT alignment)"
+             installer-hooks-template.nsh; rename it there too (CLAUDE.md SSOT alignment)"
         );
     }
 
@@ -2153,24 +2155,26 @@ mod tests {
     }
 
     #[test]
-    fn data_dir_appears_in_installer_hooks() {
-        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
+    fn data_dir_appears_in_installer_hooks_template() {
         // DATA_DIR = ".speedwave"; the NSIS hook hard-codes "$PROFILE\.speedwave"
+        // in the hand-edited template.
+        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks-template.nsh");
         assert!(
             src.contains(DATA_DIR),
-            "DATA_DIR ({DATA_DIR}) not found in installer-hooks.nsh; \
+            "DATA_DIR ({DATA_DIR}) not found in installer-hooks-template.nsh; \
              rename it there too (CLAUDE.md SSOT alignment)"
         );
     }
 
     #[test]
-    fn nodejs_subdir_appears_in_installer_hooks() {
-        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
-        // NODEJS_SUBDIR = "nodejs"; the NSIS PRE-INSTALL sweep filters
-        // processes whose ExecutablePath starts with $INSTDIR\nodejs\.
+    fn nodejs_subdir_appears_in_sweep_script() {
+        // NODEJS_SUBDIR = "nodejs"; the sweep script (consumed by NSIS, MSI,
+        // and Tauri runtime) filters processes whose ExecutablePath starts
+        // with $instDir\nodejs\.
+        let src = include_str!("../../../desktop/src-tauri/windows/sweep.ps1");
         assert!(
             src.contains(NODEJS_SUBDIR),
-            "NODEJS_SUBDIR ({NODEJS_SUBDIR}) not found in installer-hooks.nsh; \
+            "NODEJS_SUBDIR ({NODEJS_SUBDIR}) not found in sweep.ps1; \
              rename it there too (ADR-048 SSOT alignment)"
         );
     }
