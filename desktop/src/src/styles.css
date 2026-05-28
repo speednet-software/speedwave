@@ -82,6 +82,9 @@
   src: url('/fonts/ibm-plex-sans-700.woff2') format('woff2');
 }
 
+/* Dark mode driven by `.dark` on <html>, not prefers-color-scheme — see ADR notes. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* ── Speedwave terminal-minimal palette ──
    Source of truth: design-proposals/06-terminal-minimal.html (lines 13–69).
    Defined as plain CSS custom properties on :root so Tailwind arbitrary-value
@@ -106,11 +109,12 @@
   --ink-dim:  #9aa3ba;
   --ink-mute: #707a96;
 
-  /* Accent (rotates per theme) */
+  /* Accent (rotates per theme; --on-accent rotates too — pastels keep dark ink,
+     saturated reds/violets flip to white for WCAG AA contrast). */
   --accent:      #ff4d6d;
   --accent-dim:  #c9304e;
   --accent-soft: rgba(255, 77, 109, 0.10);
-  --on-accent:   #07090f;
+  --on-accent:   #ffffff;
 
   /* Semantic palette */
   --teal:   #22d3b7;
@@ -125,31 +129,93 @@
   --font-view-title: 'IBM Plex Sans', 'Inter', sans-serif;
 }
 
-/* ── Theme variants — only --accent + family rotate; backgrounds stay dark ── */
+/* ── Theme variants — accent rotates per [data-theme]; backgrounds rotate per
+      `.dark` class on <html> (see light overlay below). ── */
 [data-theme='mint'] {
   --accent:      #5eead4;
   --accent-dim:  #2dd4bf;
   --accent-soft: rgba(94, 234, 212, 0.10);
+  --on-accent:   #07090f;
 }
 [data-theme='amber'] {
   --accent:      #f5b942;
   --accent-dim:  #d99a24;
   --accent-soft: rgba(245, 185, 66, 0.10);
+  --on-accent:   #07090f;
 }
 [data-theme='iris'] {
   --accent:      #a78bfa;
   --accent-dim:  #8b5cf6;
   --accent-soft: rgba(167, 139, 250, 0.12);
+  --on-accent:   #ffffff;
 }
 [data-theme='cyan'] {
   --accent:      #38bdf8;
   --accent-dim:  #0ea5e9;
   --accent-soft: rgba(56, 189, 248, 0.10);
+  --on-accent:   #07090f;
 }
 [data-theme='sand'] {
   --accent:      #d4a574;
   --accent-dim:  #a97f4e;
   --accent-soft: rgba(212, 165, 116, 0.10);
+  --on-accent:   #07090f;
+}
+
+/* ── Light mode overlay — applied when <html> lacks `.dark`. Backgrounds and
+      ink flip to light; accents use desaturated/darker hexes to keep WCAG AA
+      contrast vs the light --bg. Crimson is the default (no [data-theme] attr). */
+:root:not(.dark) {
+  color-scheme: light;
+
+  /* --bg matches the native macOS light titlebar (#ffffff) so the sidebar
+     and header band flow seamlessly into the system chrome. */
+  --bg:        #ffffff;
+  --bg-1:      #f7f8fb;
+  --bg-2:      #eef1f6;
+  --bg-3:      #e3e8ef;
+
+  --line:        #d6dbe5;
+  --line-strong: #b9c1d0;
+
+  --ink:      #0b0e18;
+  --ink-dim:  #3b4458;
+  --ink-mute: #5a6377;
+
+  --accent:      #c4133a;
+  --accent-dim:  #9a0e2d;
+  --accent-soft: rgba(196, 19, 58, 0.14);
+  --on-accent:   #ffffff;
+}
+:root:not(.dark)[data-theme='mint'] {
+  --accent:      #0d8a72;
+  --accent-dim:  #0a6e5b;
+  --accent-soft: rgba(13, 138, 114, 0.16);
+  --on-accent:   #ffffff;
+}
+:root:not(.dark)[data-theme='amber'] {
+  --accent:      #9a6b00;
+  --accent-dim:  #7a5500;
+  --accent-soft: rgba(154, 107, 0, 0.16);
+  --on-accent:   #ffffff;
+}
+:root:not(.dark)[data-theme='iris'] {
+  --accent:      #6d28d9;
+  --accent-dim:  #5b21b6;
+  --accent-soft: rgba(109, 40, 217, 0.14);
+  --on-accent:   #ffffff;
+}
+:root:not(.dark)[data-theme='cyan'] {
+  --accent:      #0e7490;
+  --accent-dim:  #0b5d73;
+  --accent-soft: rgba(14, 116, 144, 0.16);
+  --on-accent:   #ffffff;
+}
+:root:not(.dark)[data-theme='sand'] {
+  --accent:      #8a5a2b;
+  --accent-dim:  #6e4621;
+  --accent-soft: rgba(138, 90, 43, 0.16);
+  --on-accent:   #ffffff;
 }
 
 /* ── Tailwind theme bridge ──

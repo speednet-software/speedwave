@@ -9,7 +9,7 @@ import {
 import { Router, RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
-import { ThemeService, type ThemeId } from '../services/theme.service';
+import { ThemeService, type ThemeId, type ThemeMode } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { BetaService } from '../services/beta.service';
 import { AuthSectionComponent } from './auth-section/auth-section.component';
@@ -38,6 +38,20 @@ const THEME_CARDS: readonly ThemeCard[] = [
   { id: 'iris', label: 'iris', hex: '#a78bfa' },
   { id: 'cyan', label: 'cyan', hex: '#38bdf8' },
   { id: 'sand', label: 'sand', hex: '#d4a574' },
+] as const;
+
+/** Display copy + glyph for one mode card (light/dark/auto). */
+interface ModeCard {
+  readonly id: ThemeMode;
+  readonly label: string;
+  readonly glyph: string;
+}
+
+/** Cards rendered in the MODE row above the accent grid. */
+const MODE_CARDS: readonly ModeCard[] = [
+  { id: 'light', label: 'light', glyph: '◯' },
+  { id: 'dark', label: 'dark', glyph: '●' },
+  { id: 'auto', label: 'auto', glyph: '◐' },
 ] as const;
 
 /** Displays application settings and provides factory reset functionality. */
@@ -112,9 +126,30 @@ const THEME_CARDS: readonly ThemeCard[] = [
         >
           <h2 class="view-title view-title-section text-[var(--ink)]">Appearance</h2>
           <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-            Choose an accent color for buttons, links and syntax highlighting. Backgrounds stay dark
-            across all themes.
+            Choose appearance mode and accent color. Auto follows your system.
           </p>
+
+          <div class="mono mb-2 mt-4 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+            mode
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            @for (card of modeCards; track card.id) {
+              <button
+                type="button"
+                [attr.data-mode-btn]="card.id"
+                [class.active]="theme.mode() === card.id"
+                [attr.aria-pressed]="theme.mode() === card.id"
+                class="theme-card flex items-center gap-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]"
+                (click)="theme.setMode(card.id)"
+              >
+                <span class="mono w-4 text-center text-[14px] text-[var(--ink-dim)]">{{
+                  card.glyph
+                }}</span>
+                <span class="mono text-[12px] text-[var(--ink)]">{{ card.label }}</span>
+                <span class="check ml-auto text-[var(--accent)]">&#9679;</span>
+              </button>
+            }
+          </div>
 
           <div class="mono mb-2 mt-4 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
             accent color
@@ -170,6 +205,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
 
   /** Static catalog of accent themes — bound 1:1 by the Appearance card grid. */
   readonly themeCards: readonly ThemeCard[] = THEME_CARDS;
+  /** Static catalog of appearance modes — bound 1:1 by the MODE row. */
+  readonly modeCards: readonly ModeCard[] = MODE_CARDS;
   /** Theme service exposed to the template so card click handlers can switch accents. */
   readonly theme = inject(ThemeService);
   /** UI state service exposed for the project switcher trigger in the header. */

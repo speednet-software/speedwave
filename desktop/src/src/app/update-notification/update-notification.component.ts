@@ -35,7 +35,7 @@ import { ProjectList, UpdateCheckOutcome, UpdateInfo } from '../models/update';
           }
           @if (!confirmUpdate) {
             <button
-              class="px-3 py-0.5 bg-sw-accent text-sw-bg-darkest border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+              class="px-3 py-0.5 bg-sw-accent text-on-accent border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
               (click)="confirmUpdate = true"
               [disabled]="installing"
             >
@@ -43,7 +43,7 @@ import { ProjectList, UpdateCheckOutcome, UpdateInfo } from '../models/update';
             </button>
           } @else {
             <button
-              class="px-3 py-0.5 bg-sw-accent text-sw-bg-darkest border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+              class="px-3 py-0.5 bg-sw-accent text-on-accent border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
               (click)="installAndRestart()"
               [disabled]="installing"
             >
