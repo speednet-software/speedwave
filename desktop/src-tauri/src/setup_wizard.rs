@@ -941,6 +941,9 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
 /// VM / WSL distro still physically exists. `cli_linked` is excluded — CLI
 /// symlink creation is optional. The runtime check catches external removal
 /// (factory reset, manual unregister, data_dir rename) that leaves stale state.
+///
+/// **Cost:** `is_installed()` spawns `limactl list` (macOS) or `wsl.exe --list`
+/// (Windows) per call. Safe for navigation/route guards; do not poll.
 pub fn is_setup_complete() -> bool {
     let state = SetupState::load();
     if !state.is_complete() {

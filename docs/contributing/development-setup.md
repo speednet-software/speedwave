@@ -68,11 +68,12 @@ choco install -y git make rustup.install nodejs-lts cmake llvm `
 
 `make` from Chocolatey is GNU Make 4.4 — required because **GnuWin32 make 3.81** (sometimes pre-installed elsewhere) mishandles `$(VAR)` expansion in recipes and `\` line continuations.
 
-### `.cargo/config.toml`
+### `.cargo/config.local.toml`
 
-This file is checked into the repo and pins the MSVC linker by absolute path. Without it, cargo on Git Bash finds `/usr/bin/link` (Cygwin's hardlink tool) before MSVC's `link.exe` and the build fails with `LNK1146` / `LNK1170` / `LNK1206`-class errors. If your MSVC version differs from `14.44.35207`, update the path:
+Create this file (gitignored) to pin the MSVC linker by absolute path. Without it, cargo on Git Bash finds `/usr/bin/link` (Cygwin's hardlink tool) before MSVC's `link.exe` and the build fails with `LNK1146` / `LNK1170` / `LNK1206`-class errors. Cargo automatically merges `config.local.toml` next to `config.toml`. Replace `<your-version>` with the MSVC version installed by VS Build Tools (find under `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\`):
 
 ```toml
+# .cargo/config.local.toml — per-machine, NOT checked in
 [target.x86_64-pc-windows-msvc]
 linker = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\<your-version>\\bin\\HostX64\\x64\\link.exe"
 ```
@@ -92,7 +93,7 @@ Then convert to bash-sourceable form (one line per `export KEY='VALUE'`) and sav
 export PATH="${_VCVARS_PATH:-}:/c/ProgramData/chocolatey/bin:/c/Users/<you>/.cargo/bin:/c/Program Files/nodejs:/c/Program Files/LLVM/bin:/c/Program Files/CMake/bin:/c/Program Files/Git/cmd:/usr/bin:/bin"
 ```
 
-PATH order matters: MSVC bin must precede `/usr/bin` so cargo's child processes find MSVC `cl.exe` first. The `.cargo/config.toml` linker pin makes this less critical for `link.exe` specifically, but other MSVC tools (`cl.exe`, `dumpbin.exe`) still rely on PATH.
+PATH order matters: MSVC bin must precede `/usr/bin` so cargo's child processes find MSVC `cl.exe` first. The `.cargo/config.local.toml` linker pin makes this less critical for `link.exe` specifically, but other MSVC tools (`cl.exe`, `dumpbin.exe`) still rely on PATH.
 
 ### Sherpa-onnx CRT alignment
 

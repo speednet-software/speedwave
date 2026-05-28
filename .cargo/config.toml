@@ -1,4 +1,0 @@
-# Windows-native dev: explicit MSVC linker path, bypassing PATH lookup.
-# Without this, cargo on Git Bash finds /usr/bin/link (Cygwin coreutils) first.
-[target.x86_64-pc-windows-msvc]
-linker = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe"

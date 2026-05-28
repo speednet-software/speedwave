@@ -1,6 +1,9 @@
 # Rust / Cargo
 target/
 **/*.rs.bk
+# Per-machine cargo overrides (linker path, etc.) — template documented in
+# docs/contributing/development-setup.md
+.cargo/config.local.toml
 
 # Node.js (root-level lockfiles if any)
 node_modules/
