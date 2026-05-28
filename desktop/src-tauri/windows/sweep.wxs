@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SSOT: WiX CustomAction parity for the NSIS PRE-INSTALL sweep.
+     Executes windows/sweep.ps1 (bundled via tauri.windows.conf.json
+     bundle.resources) to kill stale Speedwave.exe / nodejs / CLI processes
+     before MSI overwrites the binaries. See ADR-048. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!-- Immediate CA: bake env vars + pwsh command line into the deferred CA. -->
+    <CustomAction Id="SpeedwaveSweepSetData"
+                  Property="SpeedwaveSweepDeferred"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command &quot;$env:SPW_INSTDIR='[INSTALLDIR]'.TrimEnd('\'); $env:SPW_DATA_DIR=[%USERPROFILE]+'\.speedwave'; &amp; '[INSTALLDIR]resources\windows\sweep.ps1'&quot;"
+                  Execute="immediate"
+                  Return="check" />
+
+    <!-- Deferred CA: runs elevated as System; cannot fail the install
+         (Return="ignore") because sweep failure is non-fatal — file-in-use
+         errors during overwrite will surface separately if they happen. -->
+    <CustomAction Id="SpeedwaveSweepDeferred"
+                  BinaryKey="WixCA"
+                  DllEntry="CAQuietExec64"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- After InstallFiles so resources\windows\sweep.ps1 exists on disk.
+           Trade-off vs NSIS PREINSTALL: MSI RestartManager handles file-in-use
+           automatically before our sweep runs. Sweep still kills stragglers. -->
+      <Custom Action="SpeedwaveSweepSetData" After="InstallFiles">NOT Installed OR REINSTALL</Custom>
+      <Custom Action="SpeedwaveSweepDeferred" After="SpeedwaveSweepSetData">NOT Installed OR REINSTALL</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

@@ -134,7 +134,11 @@ pub(crate) fn build_auth_command_for_platform(
         let ddir = strip_windows_extended_length_prefix(&data_dir_str);
         if needs_env_pin {
             // Pin CLI path to <data_dir>/bin so PATH cannot resolve a foreign install.
-            let cli_path = format!("{}\\bin\\speedwave.exe", ddir);
+            let cli_path = format!(
+                "{}\\{}\\speedwave.exe",
+                ddir,
+                speedwave_runtime::consts::CLI_BIN_SUBDIR
+            );
             format!(
                 "$env:{} = '{}'; Set-Location '{}'; & '{}' login --project '{}'",
                 speedwave_runtime::consts::DATA_DIR_ENV,

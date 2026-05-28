@@ -1671,7 +1671,9 @@ fn cli_install_path() -> Option<std::path::PathBuf> {
         .join(consts::CLI_BINARY);
 
     #[cfg(target_os = "windows")]
-    let path = consts::data_dir().join("bin").join("speedwave.exe");
+    let path = consts::data_dir()
+        .join(consts::CLI_BIN_SUBDIR)
+        .join("speedwave.exe");
 
     Some(path)
 }
@@ -1721,6 +1723,95 @@ pub fn link_cli() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolves `windows/sweep.ps1` from the Tauri bundle on Windows. Mirrors
+/// `resolve_cli_source_from` semantics: prefer `SPEEDWAVE_RESOURCES_DIR`,
+/// then the production bundle layout, then dev fallbacks.
+#[cfg(target_os = "windows")]
+fn resolve_sweep_script() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
+        let bundled = std::path::PathBuf::from(&resources_dir)
+            .join("windows")
+            .join("sweep.ps1");
+        if bundled.exists() {
+            return Some(bundled);
+        }
+    }
+    let resources = exe_dir.join("resources").join("windows").join("sweep.ps1");
+    if resources.exists() {
+        return Some(resources);
+    }
+    let dev = exe_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("windows").join("sweep.ps1"));
+    if let Some(ref path) = dev {
+        if path.exists() {
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
+/// Defense-in-depth: kill any stale Speedwave / Node / CLI process holding
+/// the binaries we are about to overwrite. Runs at every Tauri Desktop
+/// startup, complementing the install-time sweep in NSIS + WiX. Fails open
+/// (logs warn, returns) so AppLocker / WDAC policy cannot brick startup.
+/// SSOT for the kill predicate is `windows/sweep.ps1`.
+#[cfg(target_os = "windows")]
+fn run_pre_link_sweep(cli_dir: &std::path::Path) {
+    let Some(sweep) = resolve_sweep_script() else {
+        log::warn!("pre-link sweep skipped: sweep.ps1 not found in bundle");
+        return;
+    };
+    let _ = cli_dir;
+    let inst_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_default();
+    let data_dir = consts::data_dir();
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+    let powershell = std::path::PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+
+    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe. Full mode is
+    // reserved for install-time hooks (NSIS/MSI) — Tauri Desktop must not
+    // target its own workers or self.
+    let result = std::process::Command::new(&powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&sweep)
+        .args(["-Mode", "runtime"])
+        .env("SPW_INSTDIR", &inst_dir)
+        .env("SPW_DATA_DIR", &data_dir)
+        .output();
+    match result {
+        Ok(out) if out.status.success() => {
+            log::info!("pre-link sweep: ok");
+        }
+        Ok(out) => {
+            log::warn!(
+                "pre-link sweep exited {:?} (non-fatal): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            log::warn!("pre-link sweep spawn failed (non-fatal): {e}");
+        }
+    }
+}
+
 /// Inner implementation that copies the CLI binary and configures PATH using explicit paths.
 ///
 /// Separated from [`link_cli`] for unit testing without depending on `current_exe()` or
@@ -1736,7 +1827,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
     #[cfg(target_os = "windows")]
     {
         let _ = home;
-        let cli_dir = consts::data_dir().join("bin");
+        let cli_dir = consts::data_dir().join(consts::CLI_BIN_SUBDIR);
 
         let cli_dir_str = cli_dir.to_string_lossy().to_string();
 
@@ -1752,6 +1843,12 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
                 cli_dir_str
             );
         }
+
+        // Defense-in-depth: kill any stale CLI / worker process holding
+        // ~/.speedwave/bin/speedwave.exe before we try to overwrite it.
+        // Covers MSI users (no NSIS PRE-INSTALL sweep), AppLocker failures,
+        // and post-install processes spawned by containers (ADR-048).
+        run_pre_link_sweep(&cli_dir);
 
         copy_cli_binary(cli_source, &cli_dir)?;
 

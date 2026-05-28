@@ -20,32 +20,63 @@
 Var SpeedwaveCleanData
 Var SpeedwaveDataDirOverride
 
-; PRE-INSTALL: release $INSTDIR\Speedwave.exe + $INSTDIR\nodejs\* before
-; the installer overwrites them. Without this, upgrades fail with
-; "Error opening file for writing" on stale workers.
-; See ADR-048 §"PRE-INSTALL orphan worker sweep" for the full design
-; (env-var passing, CIM enumeration, ordinal path filter, file-lock poll).
-!macro NSIS_HOOK_PREINSTALL
-  ; Materialize the sweep script into $PLUGINSDIR (auto-cleaned by NSIS).
+; ============================================================================
+; GENERATED CONTENT BELOW — DO NOT EDIT BY HAND.
+; Sources: windows/sweep.ps1, windows/firewall.ps1
+; Regenerate: make generate-installer-nsh
+; ============================================================================
+
+!macro SPEEDWAVE_MATERIALIZE_SWEEP
+  !define SW_SWEEP_ID ${__LINE__}
   InitPluginsDir
   ClearErrors
-  FileOpen $0 "$PLUGINSDIR\speedwave-sweep.ps1" w
-  ; Without IfErrors, failed FileOpen leaves $0 empty and FileWrite silently no-ops.
-  IfErrors 0 sw_sweep_write_ok
-    DetailPrint "Speedwave PRE-INSTALL: could not create sweep script in $PLUGINSDIR — skipping process sweep."
-    Goto sw_preinstall_done
-  sw_sweep_write_ok:
+  FileOpen $0 "$PLUGINSDIR\sweep.ps1" w
+  IfErrors 0 sw_sweep_write_ok_${SW_SWEEP_ID}
+    DetailPrint "Speedwave: could not create sweep.ps1 in $PLUGINSDIR — skipping."
+    Goto sw_sweep_write_done_${SW_SWEEP_ID}
+  sw_sweep_write_ok_${SW_SWEEP_ID}:
+  FileWrite $0 `# SSOT: process sweep for Speedwave Windows upgrades.$\r$\n`
+  FileWrite $0 `# Consumed by: NSIS PREINSTALL hook, WiX CustomAction, setup_wizard::link_cli.$\r$\n`
+  FileWrite $0 `# Env: SPW_INSTDIR (Tauri app dir) + SPW_DATA_DIR (speedwave data dir).$\r$\n`
+  FileWrite $0 `# Args: -Mode full|runtime$\r$\n`
+  FileWrite $0 `#   full    (default; install-time): kill Speedwave.exe + nodejs\*.exe + bin\speedwave.exe.$\r$\n`
+  FileWrite $0 `#   runtime (Tauri Desktop pre-link): kill only bin\speedwave.exe — Tauri must NOT$\r$\n`
+  FileWrite $0 `#           target its own workers or itself or the sweep deadlocks on its own locks.$\r$\n`
+  FileWrite $0 `# Exits: 0 ok, 2 missing env, 3 enum failed, 4 lock timeout.$\r$\n`
+  FileWrite $0 `# See ADR-048 for design constraints (string concat, OrdinalIgnoreCase, CIM).$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `param($\r$\n`
+  FileWrite $0 `  [ValidateSet('full', 'runtime')]$\r$\n`
+  FileWrite $0 `  [string]$$Mode = 'full'$\r$\n`
+  FileWrite $0 `)$\r$\n`
+  FileWrite $0 `$\r$\n`
   FileWrite $0 `$$ErrorActionPreference = 'Stop'$\r$\n`
+  FileWrite $0 `$\r$\n`
   FileWrite $0 `$$instDir = $$env:SPW_INSTDIR$\r$\n`
   FileWrite $0 `if (-not $$instDir) { Write-Error 'SPW_INSTDIR not set'; exit 2 }$\r$\n`
-  ; String concat instead of Join-Path — see ADR-048.
+  FileWrite $0 `$$dataDir = $$env:SPW_DATA_DIR$\r$\n`
+  FileWrite $0 `if (-not $$dataDir) { Write-Error 'SPW_DATA_DIR not set'; exit 2 }$\r$\n`
+  FileWrite $0 `$\r$\n`
   FileWrite $0 `$$instDir = $$instDir.TrimEnd('\')$\r$\n`
+  FileWrite $0 `$$dataDir = $$dataDir.TrimEnd('\')$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# String concat per ADR-048.$\r$\n`
   FileWrite $0 `$$nodePrefix = $$instDir + '\nodejs\'$\r$\n`
   FileWrite $0 `$$desktopExe = $$instDir + '\Speedwave.exe'$\r$\n`
+  FileWrite $0 `$$cliExe = $$dataDir + '\bin\speedwave.exe'$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Runtime mode: scope to the CLI binary only (Tauri Desktop is itself running$\r$\n`
+  FileWrite $0 `# the sweep — killing its own workers / self deadlocks the lock-poll).$\r$\n`
+  FileWrite $0 `$$includeWorkers = ($$Mode -eq 'full')$\r$\n`
+  FileWrite $0 `$\r$\n`
   FileWrite $0 `try {$\r$\n`
   FileWrite $0 `  $$procs = Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue$\r$\n`
   FileWrite $0 `  $$victims = $$procs | Where-Object {$\r$\n`
-  FileWrite $0 `    $$_.ExecutablePath -and ($$_.ExecutablePath.StartsWith($$nodePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or $$_.ExecutablePath.Equals($$desktopExe, [System.StringComparison]::OrdinalIgnoreCase))$\r$\n`
+  FileWrite $0 `    $$_.ExecutablePath -and ($\r$\n`
+  FileWrite $0 `      ($$includeWorkers -and $$_.ExecutablePath.StartsWith($$nodePrefix, [System.StringComparison]::OrdinalIgnoreCase)) -or$\r$\n`
+  FileWrite $0 `      ($$includeWorkers -and $$_.ExecutablePath.Equals($$desktopExe, [System.StringComparison]::OrdinalIgnoreCase)) -or$\r$\n`
+  FileWrite $0 `      $$_.ExecutablePath.Equals($$cliExe, [System.StringComparison]::OrdinalIgnoreCase)$\r$\n`
+  FileWrite $0 `    )$\r$\n`
   FileWrite $0 `  }$\r$\n`
   FileWrite $0 `  foreach ($$v in $$victims) {$\r$\n`
   FileWrite $0 `    Write-Output ('killing PID ' + $$v.ProcessId + ' ' + $$v.ExecutablePath)$\r$\n`
@@ -55,9 +86,13 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `  Write-Error ('sweep enumeration failed: ' + $$_)$\r$\n`
   FileWrite $0 `  exit 3$\r$\n`
   FileWrite $0 `}$\r$\n`
-  ; Poll file write access on the two binaries the installer is about
-  ; to overwrite. Returns when both unlock or after 20 s timeout.
-  FileWrite $0 `$$targets = @($$desktopExe, $$nodePrefix + 'node.exe')$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Poll write access. Returns when all targets unlock, or 20 s timeout.$\r$\n`
+  FileWrite $0 `if ($$includeWorkers) {$\r$\n`
+  FileWrite $0 `  $$targets = @($$desktopExe, $$nodePrefix + 'node.exe', $$cliExe)$\r$\n`
+  FileWrite $0 `} else {$\r$\n`
+  FileWrite $0 `  $$targets = @($$cliExe)$\r$\n`
+  FileWrite $0 `}$\r$\n`
   FileWrite $0 `for ($$i = 0; $$i -lt 20; $$i++) {$\r$\n`
   FileWrite $0 `  $$locked = $$false$\r$\n`
   FileWrite $0 `  foreach ($$t in $$targets) {$\r$\n`
@@ -76,21 +111,141 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `Write-Error 'targets still locked after 20 s'$\r$\n`
   FileWrite $0 `exit 4$\r$\n`
   FileClose $0
+  sw_sweep_write_done_${SW_SWEEP_ID}:
+  !undef SW_SWEEP_ID
+!macroend
+
+!macro SPEEDWAVE_MATERIALIZE_FIREWALL
+  !define SW_FIREWALL_ID ${__LINE__}
+  InitPluginsDir
+  ClearErrors
+  FileOpen $0 "$PLUGINSDIR\firewall.ps1" w
+  IfErrors 0 sw_firewall_write_ok_${SW_FIREWALL_ID}
+    DetailPrint "Speedwave: could not create firewall.ps1 in $PLUGINSDIR — skipping."
+    Goto sw_firewall_write_done_${SW_FIREWALL_ID}
+  sw_firewall_write_ok_${SW_FIREWALL_ID}:
+  FileWrite $0 `# SSOT: Hyper-V firewall rule for the Speedwave WSL VM.$\r$\n`
+  FileWrite $0 `# Consumed by: NSIS POSTINSTALL/POSTUNINSTALL, WiX CustomAction.$\r$\n`
+  FileWrite $0 `# Usage: firewall.ps1 -Mode install|uninstall$\r$\n`
+  FileWrite $0 `# Fail-open: log warn and exit 0 on policy/permission failure.$\r$\n`
+  FileWrite $0 `# Ref: https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `param($\r$\n`
+  FileWrite $0 `  [ValidateSet('install', 'uninstall')]$\r$\n`
+  FileWrite $0 `  [string]$$Mode = 'install'$\r$\n`
+  FileWrite $0 `)$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `$$ErrorActionPreference = 'Continue'$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# WSL VMCreatorId is fixed by Microsoft for all WSL2 distros.$\r$\n`
+  FileWrite $0 `$$WslVmCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'$\r$\n`
+  FileWrite $0 `$$RuleName = 'Speedwave WSL Inbound'$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `function Write-Status($$msg) { Write-Output $\"speedwave-firewall: $$msg$\" }$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `if ($$Mode -eq 'install') {$\r$\n`
+  FileWrite $0 `  # Remove stale WDF block rules left by users who clicked $\"Anuluj/Cancel$\"$\r$\n`
+  FileWrite $0 `  # on prior WDF prompts before the Hyper-V rule existed. Block rules in WDF$\r$\n`
+  FileWrite $0 `  # do not interact with Hyper-V firewall but mislead diagnostics.$\r$\n`
+  FileWrite $0 `  try {$\r$\n`
+  FileWrite $0 `    $$stale = Get-NetFirewallRule -Action Block -ErrorAction SilentlyContinue | Where-Object {$\r$\n`
+  FileWrite $0 `      $$app = $$_ | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue$\r$\n`
+  FileWrite $0 `      $$app -and $$app.Program -and ($\r$\n`
+  FileWrite $0 `        $$app.Program -match 'speedwave-desktop\.exe$$' -or$\r$\n`
+  FileWrite $0 `        $$app.Program -match 'Speedwave\.exe$$' -or$\r$\n`
+  FileWrite $0 `        $$app.Program -match '\\nodejs\\node\.exe$$' -or$\r$\n`
+  FileWrite $0 `        $$app.Program -match '\\\.speedwave[^\\]*\\bin\\speedwave\.exe$$'$\r$\n`
+  FileWrite $0 `      )$\r$\n`
+  FileWrite $0 `    }$\r$\n`
+  FileWrite $0 `    foreach ($$r in $$stale) {$\r$\n`
+  FileWrite $0 `      Write-Status $\"removing stale WDF block rule: $$($$r.DisplayName)$\"$\r$\n`
+  FileWrite $0 `      Remove-NetFirewallRule -Name $$r.Name -ErrorAction SilentlyContinue$\r$\n`
+  FileWrite $0 `    }$\r$\n`
+  FileWrite $0 `  } catch {$\r$\n`
+  FileWrite $0 `    Write-Status $\"WDF cleanup failed (non-fatal): $$_$\"$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `  # Create / re-create Hyper-V firewall rule. Idempotent.$\r$\n`
+  FileWrite $0 `  try {$\r$\n`
+  FileWrite $0 `    Get-NetFirewallHyperVRule -DisplayName $$RuleName -ErrorAction SilentlyContinue |$\r$\n`
+  FileWrite $0 `      Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue$\r$\n`
+  FileWrite $0 `    New-NetFirewallHyperVRule ``$\r$\n`
+  FileWrite $0 `      -DisplayName $$RuleName ``$\r$\n`
+  FileWrite $0 `      -Direction Inbound ``$\r$\n`
+  FileWrite $0 `      -Action Allow ``$\r$\n`
+  FileWrite $0 `      -VMCreatorId $$WslVmCreatorId ``$\r$\n`
+  FileWrite $0 `      -Protocol TCP ``$\r$\n`
+  FileWrite $0 `      -LocalPorts Any ``$\r$\n`
+  FileWrite $0 `      -ErrorAction Stop | Out-Null$\r$\n`
+  FileWrite $0 `    Write-Status $\"Hyper-V rule installed for VMCreatorId $$WslVmCreatorId$\"$\r$\n`
+  FileWrite $0 `    exit 0$\r$\n`
+  FileWrite $0 `  } catch {$\r$\n`
+  FileWrite $0 `    Write-Status $\"Hyper-V rule install failed (fail-open): $$_$\"$\r$\n`
+  FileWrite $0 `    exit 0$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `if ($$Mode -eq 'uninstall') {$\r$\n`
+  FileWrite $0 `  try {$\r$\n`
+  FileWrite $0 `    Get-NetFirewallHyperVRule -DisplayName $$RuleName -ErrorAction SilentlyContinue |$\r$\n`
+  FileWrite $0 `      Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue$\r$\n`
+  FileWrite $0 `    Write-Status $\"Hyper-V rule removed$\"$\r$\n`
+  FileWrite $0 `    exit 0$\r$\n`
+  FileWrite $0 `  } catch {$\r$\n`
+  FileWrite $0 `    Write-Status $\"Hyper-V rule uninstall failed (fail-open): $$_$\"$\r$\n`
+  FileWrite $0 `    exit 0$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileClose $0
+  sw_firewall_write_done_${SW_FIREWALL_ID}:
+  !undef SW_FIREWALL_ID
+!macroend
+; Generator replaces the marker above with materialize macros derived from
+; windows/sweep.ps1 + firewall.ps1. See scripts/generate-installer-nsh.sh.
+
+; PRE-INSTALL: release $INSTDIR\Speedwave.exe, $INSTDIR\nodejs\*, and
+; $dataDir\bin\speedwave.exe before the installer overwrites them.
+; Without this, upgrades fail with "Error opening file for writing" on
+; stale workers, or link_cli silently keeps a stale CLI on next launch.
+; See ADR-048 §"PRE-INSTALL orphan worker sweep".
+!macro NSIS_HOOK_PREINSTALL
+  ; Materialize sweep.ps1 into $PLUGINSDIR (auto-cleaned by NSIS).
+  !insertmacro SPEEDWAVE_MATERIALIZE_SWEEP
 
   ; $INSTDIR via env var (process-scoped) — see ADR-048.
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", t "$INSTDIR")i'
 
-  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\speedwave-sweep.ps1"`
+  ; $dataDir for CLI sweep: honour SPEEDWAVE_DATA_DIR, else $PROFILE\.speedwave
+  ; (DATA_DIR const in consts.rs).
+  ReadEnvStr $1 "SPEEDWAVE_DATA_DIR"
+  StrCmp $1 "" 0 sw_data_dir_ok
+    StrCpy $1 "$PROFILE\.speedwave"
+  sw_data_dir_ok:
+  System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", t "$1")i'
+
+  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\sweep.ps1"`
   Pop $0
   ${If} $0 != 0
     DetailPrint "Speedwave PRE-INSTALL: sweep exited $0 — install may fail with 'file in use'."
     DetailPrint "Common causes: PowerShell missing, AppLocker / WDAC blocking script execution, ExecutionPolicy enforced by GPO, or a worker process the sweep could not kill."
   ${EndIf}
 
-  ; Clear the env var so it does not leak into other installer phases.
+  ; Clear env vars so they do not leak into other installer phases.
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", i 0)i'
+  System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", i 0)i'
+!macroend
 
-  sw_preinstall_done:
+; POST-INSTALL: create Hyper-V firewall rule for the WSL VM so the host
+; bridge (bound on the WSL adapter IP, not 127.0.0.1) is reachable from
+; containers without surfacing a per-binary WDF prompt to the user.
+; See CLAUDE.md SSOT row for windows/firewall.ps1.
+!macro NSIS_HOOK_POSTINSTALL
+  !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
+  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\firewall.ps1" -Mode install`
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "Speedwave POST-INSTALL: firewall rule install exited $0 (non-fatal)."
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
@@ -127,6 +282,14 @@ Var SpeedwaveDataDirOverride
   ; otherwise orphan. Run unconditionally, before the user-data branch.
   RMDir /r "$LOCALAPPDATA\Speedwave\nodejs"
   RMDir "$LOCALAPPDATA\Speedwave"
+
+  ; Always remove Hyper-V firewall rule — it is app config, not user data.
+  !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
+  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\firewall.ps1" -Mode uninstall`
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "Speedwave POST-UNINSTALL: firewall rule remove exited $0 (non-fatal)."
+  ${EndIf}
 
   StrCmp $SpeedwaveCleanData "1" 0 sw_skip_cleanup
 

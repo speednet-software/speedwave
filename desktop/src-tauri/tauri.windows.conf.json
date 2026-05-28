@@ -9,11 +9,19 @@
       "mcp-os/": "mcp-os/",
       "host_exec/": "host_exec/",
       "oauth/": "oauth/",
-      "cli/speedwave.exe": "cli/speedwave.exe"
+      "cli/speedwave.exe": "cli/speedwave.exe",
+      "windows/sweep.ps1": "windows/sweep.ps1",
+      "windows/firewall.ps1": "windows/firewall.ps1"
     },
     "windows": {
       "nsis": {
         "installerHooks": "windows/installer-hooks.nsh"
+      },
+      "wix": {
+        "fragmentPaths": [
+          "windows/sweep.wxs",
+          "windows/firewall.wxs"
+        ]
       }
     }
   }

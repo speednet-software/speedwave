@@ -3329,6 +3329,7 @@ mod tests {
     /// `inject_claude_env_multiline_value_keeps_yaml_parseable`, the bug
     /// is elsewhere in the pipeline (token reader, env merger, host_tz, …).
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn render_compose_with_multiline_custom_headers_is_valid_yaml() {
         // Use the same locking pattern as the existing token-touching tests
         // — they share a global `~/.speedwave/tokens` namespace and would
@@ -3418,6 +3419,7 @@ mod tests {
     /// to smuggle a header that collides with `ANTHROPIC_AUTH_TOKEN` Bearer.
     /// Mirrors the defensive reject in `build_llm_probe_client_with_auth`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn render_compose_strips_authorization_from_custom_headers() {
         use std::sync::Mutex;
         static LOCK: Mutex<()> = Mutex::new(());
@@ -3921,6 +3923,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitution() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3956,6 +3959,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_uses_bundle_scoped_image_refs() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4016,6 +4020,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_has_sharepoint_workspace_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4045,6 +4050,7 @@ services:
     /// carries the hardening profile (cap_drop: ALL, read_only, no-new-privileges,
     /// shm_size: 2g), and has `PORT=PORT_WORKER`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_service_present() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4127,6 +4133,7 @@ services:
     /// volume, must mount `/workspace:rw`, and must be attached only to its egress-less
     /// `{NETWORK_NAME}_office` network (ADR-055).
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_office_no_token_mount_workspace_rw_office_network_only() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4185,6 +4192,7 @@ services:
     /// mcp-playwright has no credentials — the generated compose must not mount
     /// any `/tokens` volume (attack-surface reduction per ADR).
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_no_token_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4222,6 +4230,7 @@ services:
     /// v1 explicitly refuses the `/workspace` mount — outputs return as base64
     /// so a compromised Chromium cannot exfiltrate repo contents.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_no_workspace_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4260,6 +4269,7 @@ services:
     /// Hub must know where to reach the Playwright worker. The URL is injected
     /// from the compose template and must point at `:PORT_WORKER`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_playwright_worker_url_in_hub_env() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4297,6 +4307,7 @@ services:
     /// other API workers use — see the comment in compose.template.yml). Also verifies
     /// the read-only, project-scoped `/tokens` mount and `PORT=PORT_WORKER`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_github_service_present() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4390,6 +4401,7 @@ services:
     /// Hub must know where to reach the GitHub worker — `WORKER_GITHUB_URL` injected
     /// from the compose template, pointing at `:PORT_WORKER`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_github_worker_url_in_hub_env() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4475,6 +4487,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_has_mcp_hub_port() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4501,6 +4514,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_hub_port_matches_port_base() {
         // MCP_HUB_PORT in the claude container must equal PORT_BASE (hub port).
         // If these drift apart, entrypoint.sh generates wrong mcp-config.json URL.
@@ -4530,6 +4544,7 @@ services:
     /// `PORT_WORKER` (3000). The hub itself is exempt — it listens on
     /// `PORT_BASE` (4000).
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_all_workers_use_port_worker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4577,6 +4592,7 @@ services:
     /// at `:{PORT_WORKER}`. `WORKER_OS_URL` is exempt: mcp-os runs on the host
     /// and uses a dynamic port allocated by the OS, not PORT_WORKER.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_hub_worker_urls_use_port_worker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4677,6 +4693,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_hub_port_survives_inject_claude_env() {
         // Regression: inject_claude_env re-parses YAML via serde_yaml_ng.
         // MCP_HUB_PORT must survive the parse → serialize roundtrip.
@@ -4792,6 +4809,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_hub_port_in_claude_service_env() {
         // Verify MCP_HUB_PORT is specifically in the claude service environment,
         // not somewhere else in the compose file.
@@ -4860,6 +4878,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_passes_security_check() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5201,6 +5220,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_ollama_provider() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5232,6 +5252,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_local_provider_requires_model() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5266,6 +5287,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_default_anthropic() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5325,6 +5347,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_ollama_direct_injection() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5406,6 +5429,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_lmstudio_default_url() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5440,6 +5464,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_llamacpp_default_url() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5474,6 +5499,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_unsupported_provider_rejected() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5504,6 +5530,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_custom_provider_rejected_after_removal() {
         // Regression guard: the `custom` provider value was removed end-to-end.
         // Any lingering config that still sets `provider = "custom"` must now
@@ -5668,6 +5695,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn compose_template_claude_has_canonical_host_gateway_entry() {
         // Static template guard — `claude` and `mcp-playwright` must list the
         // canonical host gateway alias in extra_hosts (ADR-062). Other services
@@ -5783,6 +5811,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn apply_mcp_os_config_adds_host_gateway_to_hub() {
         let tmp = tempfile::tempdir().unwrap();
         let (token_path, lock_path) = write_lock_and_token_mount(
@@ -5800,6 +5829,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn apply_host_exec_config_adds_host_gateway_to_hub() {
         let tmp = tempfile::tempdir().unwrap();
         let (token_path, port_path) = write_token_and_port(tmp.path());
@@ -5814,6 +5844,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn apply_oauth_config_adds_host_gateway_to_each_consumer() {
         use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
@@ -5844,6 +5875,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn ensure_host_gateway_extra_host_is_idempotent() {
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
@@ -5859,6 +5891,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn ensure_host_gateway_extra_host_replaces_existing_canonical_entry() {
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
@@ -6064,6 +6097,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_llamacpp_custom_model_option_labels() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -6095,6 +6129,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_lmstudio_custom_model_option_labels() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -6126,6 +6161,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_claude_version_is_pinned() {
         // Regression guard: CLAUDE_VERSION must be the pinned semver from defaults.
         let config = ResolvedClaudeConfig {
@@ -6158,6 +6194,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_workspace_mount_is_readwrite() {
         // The workspace must be read-write so Claude can create/edit files.
         // This guards against accidentally adding :ro to the workspace mount.
@@ -7051,6 +7088,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_enables_host_exec_in_hub_when_project_has_it() {
         // End-to-end: render_compose with host_exec enabled puts it in
         // ENABLED_SERVICES. (WORKER_HOST_EXEC_URL is NOT injected here because
@@ -7256,6 +7294,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_contains_ide_lock_mount() {
         // render_compose must substitute ${IDE_LOCK_DIR} so the claude container
         // has the ide-bridge directory mounted as /home/speedwave/.claude/ide:ro.
@@ -7323,6 +7362,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_container_user() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7355,6 +7395,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_host_gateway() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7391,6 +7432,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_ide_host_override() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7434,6 +7476,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_claude_env_has_ide_host_override() {
         // CLAUDE_CODE_IDE_HOST_OVERRIDE must be in the claude service environment.
         let config = ResolvedClaudeConfig {
@@ -7470,6 +7513,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_claude_env_has_no_flicker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7505,6 +7549,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_claude_env_has_effort_level() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7638,6 +7683,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_rejects_invalid_project_name() {
         let resolved = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7955,6 +8001,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_with_mixed_enabled_disabled_end_to_end() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -8173,6 +8220,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_all_services_have_container_user() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -10765,6 +10813,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_ensure_plugin_images_called_before_apply_plugins() {
         // Structural test: verify render_compose() uses ensure_plugin_images (not
         // build_pending_plugin_images) and calls it BEFORE apply_plugins.
@@ -10905,6 +10954,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_propagates_tz_to_all_services() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -12139,16 +12189,15 @@ networks:
         reset_host_addressing_computer_for_test();
     }
 
+    // FailingComputer is exercised directly (not via the global slot) so this
+    // test cannot poison concurrent render_compose tests that consume the
+    // production computer through host_gateway_ip(). The Err propagation path
+    // in host_addressing() is identical regardless of which computer raised.
     #[test]
-    #[serial_test::serial(host_addressing)]
-    fn host_addressing_surfaces_computer_error() {
-        set_host_addressing_computer_for_test(std::sync::Arc::new(FailingComputer(
-            "wsl probe failed".into(),
-        )));
-        let err = host_addressing().unwrap_err();
+    fn failing_computer_returns_err() {
+        let computer = FailingComputer("wsl probe failed".into());
+        let err = computer.compute().unwrap_err();
         assert!(err.to_string().contains("wsl probe failed"));
-
-        reset_host_addressing_computer_for_test();
     }
 
     #[test]

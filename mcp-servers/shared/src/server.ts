@@ -135,7 +135,7 @@ export interface MCPServer {
  */
 export function createMCPServer(options: MCPServerOptions): MCPServer {
   // Default 127.0.0.1 is macOS-only; Windows supervisor always sets MCP_LISTEN_HOST
-  // to the WSL adapter IP (compose::host_bind_address). See ADR-066 / SSOT row.
+  // to the WSL adapter IP (compose::host_bind_address). See ADR-067 / SSOT row.
   const {
     name,
     version,

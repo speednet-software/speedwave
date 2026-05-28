@@ -215,10 +215,17 @@ build-cli:
 build-cli-release:
 	cargo build -p speedwave-cli --release
 
-build-desktop:
+# Regenerates desktop/src-tauri/windows/installer-hooks.nsh from its template
+# + sweep.ps1 + firewall.ps1 (see scripts/generate-installer-nsh.sh). Cheap and
+# idempotent — safe to call unconditionally before any build that ships an
+# installer (Windows NSIS or MSI) or runs installer_hooks drift detector tests.
+generate-installer-nsh:
+	@bash scripts/generate-installer-nsh.sh
+
+build-desktop: generate-installer-nsh
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs
+build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then "$(MAKE)" download-wsl-resources; fi
 	@bash scripts/bundle-build-context.sh
@@ -329,7 +336,7 @@ test-cli:
 	@cargo test -p speedwave-cli
 	@echo "✅ CLI tests passed"
 
-test-desktop: build-cli build-angular build-mcp build-os-cli
+test-desktop: build-cli build-angular build-mcp build-os-cli generate-installer-nsh
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
 	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then "$(MAKE)" download-nodejs; fi
@@ -780,7 +787,7 @@ endif
 # invokes the actual builds explicitly.
 
 ifeq ($(OS),Windows_NT)
-dev: download-nodejs download-sherpa-onnx download-wsl-resources
+dev: download-nodejs download-sherpa-onnx download-wsl-resources generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@sh -c 'export SHERPA_ONNX_LIB_DIR=$$(cat $(SHERPA_LIB_CACHE)); echo "Building with SHERPA_ONNX_LIB_DIR=$$SHERPA_ONNX_LIB_DIR"; "$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp'
 	@echo "Preparing build context..."
@@ -790,7 +797,7 @@ dev: download-nodejs download-sherpa-onnx download-wsl-resources
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh $(SHERPA_LIB_CACHE)
 else
-dev: build-cli build-os-cli build-mcp download-nodejs
+dev: build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@echo "Preparing build context..."

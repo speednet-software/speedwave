@@ -168,6 +168,9 @@ pub const NERDCTL_FULL_SUBDIR: &str = "nerdctl-full";
 /// Subdirectory within resources for the bundled Node.js binary.
 pub const NODEJS_SUBDIR: &str = "nodejs";
 
+/// `data_dir()/bin/` — Windows CLI install dir; SSOT for `windows/sweep.ps1`.
+pub const CLI_BIN_SUBDIR: &str = "bin";
+
 /// WSL2 distribution name used by Speedwave on Windows.
 ///
 /// Derived from [`data_dir()`] basename — the production default

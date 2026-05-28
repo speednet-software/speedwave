@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SSOT: WiX CustomAction parity for the NSIS POST-INSTALL Hyper-V firewall
+     rule. Executes windows/firewall.ps1 (bundled via tauri.windows.conf.json
+     bundle.resources) at install + uninstall time. See CLAUDE.md SSOT row. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <CustomAction Id="SpeedwaveFirewallInstallSetData"
+                  Property="SpeedwaveFirewallInstallDeferred"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]resources\windows\firewall.ps1&quot; -Mode install"
+                  Execute="immediate"
+                  Return="check" />
+    <CustomAction Id="SpeedwaveFirewallInstallDeferred"
+                  BinaryKey="WixCA"
+                  DllEntry="CAQuietExec64"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="SpeedwaveFirewallUninstallSetData"
+                  Property="SpeedwaveFirewallUninstallDeferred"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]resources\windows\firewall.ps1&quot; -Mode uninstall"
+                  Execute="immediate"
+                  Return="check" />
+    <CustomAction Id="SpeedwaveFirewallUninstallDeferred"
+                  BinaryKey="WixCA"
+                  DllEntry="CAQuietExec64"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="SpeedwaveFirewallInstallSetData" After="InstallFiles">NOT Installed OR REINSTALL</Custom>
+      <Custom Action="SpeedwaveFirewallInstallDeferred" After="SpeedwaveFirewallInstallSetData">NOT Installed OR REINSTALL</Custom>
+
+      <!-- Uninstall path: remove the rule before files are wiped so firewall.ps1
+           is still on disk when the CA executes. -->
+      <Custom Action="SpeedwaveFirewallUninstallSetData" Before="RemoveFiles">REMOVE="ALL"</Custom>
+      <Custom Action="SpeedwaveFirewallUninstallDeferred" After="SpeedwaveFirewallUninstallSetData">REMOVE="ALL"</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>
