@@ -505,6 +505,38 @@ pub async fn add_project(
     Ok(())
 }
 
+/// Tears down a project's containers, host_exec drain, and unregisters it.
+/// Runtime layer rejects the active project (sentinel-prefixed error for the UI).
+#[tauri::command]
+pub async fn remove_project(
+    name: String,
+    host_exec: tauri::State<'_, crate::reconcile::SharedHostExec>,
+) -> Result<(), String> {
+    crate::reconcile::teardown_host_exec_for_project(host_exec.inner(), &name);
+
+    let name_clone = name.clone();
+    tokio::task::spawn_blocking(move || {
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        if rt.is_available() {
+            // Lima/WSL compose_down already force-removes containers and networks on retry,
+            // so the only Err we see here is when the runtime itself is broken — refuse to
+            // wipe config in that case so the user can retry.
+            rt.compose_down(&name_clone).map_err(|e| {
+                log::error!("remove_project: compose_down('{name_clone}') failed: {e}");
+                format!("Failed to stop containers for '{name_clone}': {e}")
+            })?;
+        }
+
+        log::info!("remove_project: name={name_clone}");
+        speedwave_runtime::project::remove_project(&name_clone).map_err(|e| {
+            log::error!("remove_project: error: {e}");
+            e.to_string()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // Container lifecycle commands
 // ---------------------------------------------------------------------------

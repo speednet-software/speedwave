@@ -2037,6 +2037,7 @@ fn main() {
             list_projects,
             switch_project,
             containers_cmd::add_project,
+            containers_cmd::remove_project,
             // Health
             get_health,
             // Container logs
