@@ -26,7 +26,9 @@ services:
       - CLAUDE_VERSION=${CLAUDE_VERSION}
       - MCP_HUB_PORT=${PORT_HUB}
       - CLAUDE_CODE_IDE_HOST_OVERRIDE=${IDE_HOST_OVERRIDE}
-      - CLAUDE_CODE_EFFORT_LEVEL=max
+      # `auto` = use the model's own default effort (high on Opus 4.8). A valid
+      # value per Claude Code env-vars docs (low|medium|high|xhigh|max|auto).
+      - CLAUDE_CODE_EFFORT_LEVEL=auto
       - ANTHROPIC_LOG=debug
     working_dir: /workspace
     networks:

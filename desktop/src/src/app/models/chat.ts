@@ -247,7 +247,10 @@ export interface SessionStats {
   session_id: string;
   /** Total session cost in USD — estimated from token counts at API pricing. */
   total_cost: number;
-  /** Per-step usage from flat result.usage (not cumulative). Use for CTX %. */
+  /**
+   * Latest turn's full-prompt usage from flat result.usage (not summed across
+   * turns). Drives CTX % (input + cache_read + cache_write); `in:` uses input only.
+   */
   usage?: UsageInfo;
   model?: string;
   rate_limit?: RateLimitInfo;

@@ -7580,10 +7580,10 @@ services:
 
         let has_effort_level = claude_env
             .iter()
-            .any(|v| v.as_str() == Some("CLAUDE_CODE_EFFORT_LEVEL=max"));
+            .any(|v| v.as_str() == Some("CLAUDE_CODE_EFFORT_LEVEL=auto"));
         assert!(
             has_effort_level,
-            "CLAUDE_CODE_EFFORT_LEVEL=max must be in claude service environment"
+            "CLAUDE_CODE_EFFORT_LEVEL=auto must be in claude service environment"
         );
     }
 

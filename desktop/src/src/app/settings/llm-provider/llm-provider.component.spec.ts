@@ -34,8 +34,8 @@ async function flushMicrotasks(cycles = 10): Promise<void> {
  */
 const TEST_ANTHROPIC_MODELS = [
   {
-    id: 'claude-opus-4-7',
-    family: 'Opus 4.7',
+    id: 'claude-opus-4-8',
+    family: 'Opus 4.8',
     context_tokens: 1_000_000,
     latest: true,
   },
@@ -50,6 +50,12 @@ const TEST_ANTHROPIC_MODELS = [
     family: 'Haiku 4.5',
     context_tokens: 200_000,
     latest: true,
+  },
+  {
+    id: 'claude-opus-4-7',
+    family: 'Opus 4.7',
+    context_tokens: 1_000_000,
+    latest: false,
   },
   {
     id: 'claude-opus-4-6',
@@ -74,7 +80,7 @@ function setupMockTauri(mockTauri: MockTauriService, provider = 'anthropic'): vo
       case 'list_anthropic_models':
         return TEST_ANTHROPIC_MODELS;
       case 'get_default_anthropic_model_label':
-        return 'Opus 4.7';
+        return 'Opus 4.8';
       case 'update_llm_config':
         return undefined;
       case 'discover_llm_models':
@@ -436,9 +442,10 @@ describe('LlmProviderComponent', () => {
     // legacy after.
     expect(options).toEqual([
       '',
-      'claude-opus-4-7',
+      'claude-opus-4-8',
       'claude-sonnet-4-6',
       'claude-haiku-4-5',
+      'claude-opus-4-7',
       'claude-opus-4-6',
     ]);
     const defaultLabel = (
@@ -456,7 +463,7 @@ describe('LlmProviderComponent', () => {
     const latestIds = Array.from(latestGroup.querySelectorAll('option')).map(
       (o) => (o as HTMLOptionElement).value
     );
-    expect(latestIds).toEqual(['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
+    expect(latestIds).toEqual(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
 
     // Legacy entries are visible but quarantined to the "Legacy" optgroup.
     const legacyGroup = modelEl.querySelector('optgroup[label="Legacy"]') as HTMLOptGroupElement;
@@ -464,15 +471,15 @@ describe('LlmProviderComponent', () => {
     const legacyIds = Array.from(legacyGroup.querySelectorAll('option')).map(
       (o) => (o as HTMLOptionElement).value
     );
-    expect(legacyIds).toEqual(['claude-opus-4-6']);
+    expect(legacyIds).toEqual(['claude-opus-4-7', 'claude-opus-4-6']);
 
     // Labels carry the family + context window so users see the same
-    // ctx value the chat footer reports (1M for Opus 4.7, 200k for Haiku).
-    const opus47Label = (
-      modelEl.querySelector('option[value="claude-opus-4-7"]') as HTMLOptionElement
+    // ctx value the chat footer reports (1M for Opus 4.8, 200k for Haiku).
+    const opus48Label = (
+      modelEl.querySelector('option[value="claude-opus-4-8"]') as HTMLOptionElement
     )?.textContent?.trim();
-    expect(opus47Label).toContain('Opus 4.7');
-    expect(opus47Label).toContain('1M ctx');
+    expect(opus48Label).toContain('Opus 4.8');
+    expect(opus48Label).toContain('1M ctx');
     const haikuLabel = (
       modelEl.querySelector('option[value="claude-haiku-4-5"]') as HTMLOptionElement
     )?.textContent?.trim();
@@ -498,7 +505,7 @@ describe('LlmProviderComponent', () => {
         case 'list_anthropic_models':
           return TEST_ANTHROPIC_MODELS;
         case 'get_default_anthropic_model_label':
-          return 'Opus 4.7';
+          return 'Opus 4.8';
         default:
           return undefined;
       }
@@ -521,7 +528,7 @@ describe('LlmProviderComponent', () => {
 
   it('renders dynamic Default — <family> label when backend returns a label', async () => {
     // Backend SSOT returns the Opus family label so the dropdown surfaces
-    // what `(default)` actually steers toward (alias mode → Opus 4.7 today).
+    // what `(default)` actually steers toward (alias mode → Opus 4.8 today).
     // Anything but the dynamic form would hide the resolved model from the
     // user — exactly the regression this PR fixes.
     component.ngOnInit();
@@ -536,7 +543,7 @@ describe('LlmProviderComponent', () => {
     const defaultLabel = (
       modelEl.querySelector('option[value=""]') as HTMLOptionElement
     )?.textContent?.trim();
-    expect(defaultLabel).toBe('Default — Opus 4.7 (switchable via /model)');
+    expect(defaultLabel).toBe('Default — Opus 4.8 (switchable via /model)');
   });
 
   it('falls back to the generic placeholder when backend returns null', async () => {

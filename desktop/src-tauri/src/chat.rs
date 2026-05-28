@@ -1002,8 +1002,9 @@ impl StreamParser {
 ///
 /// Two sources are possible:
 ///
-///  * Flat `usage` (Claude Code CLI today) — already per-step, so the value
-///    is emitted as the turn and the snapshot accumulates it.
+///  * Flat `usage` (Claude Code CLI today) — the latest turn's full prompt
+///    usage (`input_tokens` is the uncached remainder, `cache_read` is the
+///    re-sent history); emitted as the turn, snapshot accumulates it.
 ///  * `modelUsage` only (cumulative per-model, no flat `usage`) — compute
 ///    `turn = cumulative - snapshot` and advance the snapshot.
 ///
