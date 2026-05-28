@@ -167,7 +167,9 @@ describe('PluginCredentialsFormComponent', () => {
     ).toBe(0);
   });
 
-  it('emits clearField with the key when a configured field\'s "clear" is clicked', () => {
+  it('per-field clear is confirm-gated (first click stages, Yes emits)', () => {
+    // H9 — per-field clear is destructive, so it requires a confirm. First
+    // click shows inline Yes/Cancel; only Yes emits the clearField event.
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.componentRef.setInput('configuredFields', ['figma_pat']);
     fixture.detectChanges();
@@ -175,12 +177,49 @@ describe('PluginCredentialsFormComponent', () => {
     const clearFieldSpy = vi.fn<(key: string) => void>();
     component.clearField.subscribe(clearFieldSpy);
 
-    const clearBtn = fixture.nativeElement.querySelector(
-      '[data-testid="cred-clear-figma_pat"]'
+    // First click stages the confirm — no emit yet.
+    (
+      fixture.nativeElement.querySelector(
+        '[data-testid="cred-clear-figma_pat"]'
+      ) as HTMLButtonElement
+    ).click();
+    fixture.detectChanges();
+    expect(clearFieldSpy).not.toHaveBeenCalled();
+    const confirmBtn = fixture.nativeElement.querySelector(
+      '[data-testid="cred-clear-confirm-figma_pat"]'
     ) as HTMLButtonElement;
-    clearBtn.click();
+    expect(confirmBtn).not.toBeNull();
 
+    // Confirm — now emit.
+    confirmBtn.click();
     expect(clearFieldSpy).toHaveBeenCalledWith('figma_pat');
+  });
+
+  it('per-field clear Cancel dismisses the confirm without emitting', () => {
+    fixture.componentRef.setInput('authFields', makeAuthFields());
+    fixture.componentRef.setInput('configuredFields', ['figma_pat']);
+    fixture.detectChanges();
+    const clearFieldSpy = vi.fn<(key: string) => void>();
+    component.clearField.subscribe(clearFieldSpy);
+
+    (
+      fixture.nativeElement.querySelector(
+        '[data-testid="cred-clear-figma_pat"]'
+      ) as HTMLButtonElement
+    ).click();
+    fixture.detectChanges();
+    (
+      fixture.nativeElement.querySelector(
+        '[data-testid="cred-clear-cancel-figma_pat"]'
+      ) as HTMLButtonElement
+    ).click();
+    fixture.detectChanges();
+
+    expect(clearFieldSpy).not.toHaveBeenCalled();
+    // After cancel the confirm is gone — original "clear" link is back.
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="cred-clear-figma_pat"]')
+    ).not.toBeNull();
   });
 
   it('shows a "stored — type to replace" placeholder for configured fields', () => {
@@ -319,6 +358,126 @@ describe('PluginCredentialsFormComponent', () => {
       '[data-testid="cred-input-figma_pat"]'
     ) as HTMLInputElement;
     expect(input.getAttribute('maxlength')).toBe(String(MAX_PLUGIN_CREDENTIAL_BYTES));
+  });
+
+  // ── H7 a11y wiring ─────────────────────────────────────────────────────
+
+  it('wires aria-describedby to description + error ids when present', () => {
+    const fields: PluginAuthField[] = [
+      {
+        key: 'figma_pat',
+        label: 'PAT',
+        field_type: 'password',
+        placeholder: '',
+        is_secret: true,
+        required: true,
+        description: 'Generate at figma.com.',
+        validation: { pattern: '^figd_.+$', message: 'starts with figd_' },
+      },
+    ];
+    fixture.componentRef.setInput('authFields', fields);
+    fixture.detectChanges();
+
+    const input = fixture.nativeElement.querySelector(
+      '[data-testid="cred-input-figma_pat"]'
+    ) as HTMLInputElement;
+    // Description present → described-by includes it; no error yet → only desc.
+    expect(input.getAttribute('aria-describedby')).toBe('cred-desc-figma_pat');
+    expect(input.getAttribute('aria-invalid')).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('#cred-desc-figma_pat'),
+      'description <p> must have the bound id'
+    ).not.toBeNull();
+
+    // Submit invalid value → error appears, both ids in described-by + aria-invalid=true.
+    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'ghp_wrong');
+    (
+      fixture.nativeElement.querySelector(
+        '[data-testid="plugin-credentials-form"]'
+      ) as HTMLFormElement
+    ).dispatchEvent(new Event('submit'));
+    fixture.detectChanges();
+    expect(input.getAttribute('aria-describedby')).toBe('cred-desc-figma_pat cred-err-figma_pat');
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    const errEl = fixture.nativeElement.querySelector('#cred-err-figma_pat');
+    expect(errEl).not.toBeNull();
+    expect(errEl?.getAttribute('role')).toBe('alert');
+  });
+
+  it('drops aria-describedby when neither description nor error is present', () => {
+    fixture.componentRef.setInput('authFields', makeAuthFields()); // no description
+    fixture.detectChanges();
+    const input = fixture.nativeElement.querySelector(
+      '[data-testid="cred-input-figma_pat"]'
+    ) as HTMLInputElement;
+    expect(input.getAttribute('aria-describedby')).toBeNull();
+  });
+
+  // ── H8 secret masking on textarea ──────────────────────────────────────
+
+  it('applies the secret-mask CSS class to <textarea> when is_secret', () => {
+    const fields: PluginAuthField[] = [
+      {
+        key: 'pem',
+        label: 'PEM key',
+        field_type: 'textarea',
+        placeholder: '-----BEGIN…',
+        is_secret: true,
+        required: false,
+      },
+    ];
+    fixture.componentRef.setInput('authFields', fields);
+    fixture.detectChanges();
+    const el = fixture.nativeElement.querySelector(
+      '[data-testid="cred-input-pem"]'
+    ) as HTMLTextAreaElement;
+    expect(el.classList.contains('cred-secret-mask')).toBe(true);
+  });
+
+  // ── M7 blur validation ─────────────────────────────────────────────────
+
+  it('re-validates on blur (not just on submit)', () => {
+    const fields: PluginAuthField[] = [
+      {
+        key: 'figma_pat',
+        label: 'Token',
+        field_type: 'password',
+        placeholder: '',
+        is_secret: true,
+        required: false,
+        validation: { pattern: '^figd_.+$', message: 'must start with figd_' },
+      },
+    ];
+    fixture.componentRef.setInput('authFields', fields);
+    fixture.detectChanges();
+
+    const input = fixture.nativeElement.querySelector(
+      '[data-testid="cred-input-figma_pat"]'
+    ) as HTMLInputElement;
+    input.value = 'ghp_bad';
+    input.dispatchEvent(new Event('input'));
+    input.dispatchEvent(new Event('blur'));
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="cred-error-figma_pat"]')
+    ).not.toBeNull();
+  });
+
+  // ── M8 Save button disabled during in-flight ──────────────────────────
+
+  it('disables Save and switches label to "Saving…" while inFlight', () => {
+    fixture.componentRef.setInput('authFields', makeAuthFields());
+    fixture.componentRef.setInput('inFlight', true);
+    fixture.detectChanges();
+
+    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'figd_x');
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector(
+      '[data-testid="save-credentials-btn"]'
+    ) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent?.trim()).toBe('Saving…');
   });
 
   it('ignores input events whose target is not an HTMLInputElement', () => {

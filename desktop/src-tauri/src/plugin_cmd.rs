@@ -88,6 +88,26 @@ fn field_has_stored_value(path: &std::path::Path) -> bool {
     }
 }
 
+/// Returns the manifest `instructions` to surface in `PluginStatusEntry`.
+/// `None` when the plugin is unverified, when no instructions are declared,
+/// or when the cap would be exceeded — the latter is install-time invariant,
+/// re-checked here as defence-in-depth (a >cap blob never reaches the
+/// webview's `[innerHTML]`).
+fn instructions_for_ui(verified: bool, instructions: Option<&str>) -> Option<String> {
+    if !verified {
+        return None;
+    }
+    let s = instructions?;
+    if s.len() > speedwave_runtime::consts::PLUGIN_INSTRUCTIONS_MAX_BYTES {
+        log::warn!(
+            "plugin manifest instructions exceeds {} bytes — withholding from UI",
+            speedwave_runtime::consts::PLUGIN_INSTRUCTIONS_MAX_BYTES
+        );
+        return None;
+    }
+    Some(s.to_string())
+}
+
 /// Validates a credential field name and value for safety.
 pub(crate) fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
     if key.contains('/') || key.contains('\\') || key.contains("..") || key.contains('\0') {
@@ -209,16 +229,12 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             service_id: manifest.service_id.clone(),
             version: manifest.version.clone(),
             description: manifest.description.clone(),
-            // Trust boundary: only surface free-form Markdown instructions for
-            // a verified plugin. An unverified/tampered manifest must not get
-            // its `instructions` rendered (the frontend binds it via
-            // [innerHTML]); withholding it here is the authoritative gate, the
-            // frontend's verification check is defence-in-depth.
-            instructions: if verified {
-                manifest.instructions.clone()
-            } else {
-                None
-            },
+            // Trust boundary for free-form Markdown: only verified plugins,
+            // and re-check the install-time cap (defence-in-depth — if
+            // signature verify is ever bypassed, the renderer still won't see
+            // an oversized blob). The frontend `@if (verified)` is the third
+            // layer.
+            instructions: instructions_for_ui(verified, manifest.instructions.as_deref()),
             enabled,
             configured,
             auth_fields,
@@ -765,19 +781,8 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     .map_err(|e| e.to_string())
 }
 
-/// Deletes a SINGLE stored credential field for a plugin.
-///
-/// Unlike `delete_plugin_credentials` (which clears every field and
-/// auto-disables the plugin — a recovery action), this removes just one
-/// token file and leaves the plugin enabled. It backs the per-field
-/// "clear" button in the credentials form, letting a user rotate or
-/// remove one secret without wiping the rest.
-///
-/// Verified-only (this is normal configuration, not tamper recovery),
-/// allowlist-checked (the key must be a declared `auth_field`), and
-/// path-traversal-guarded — identical security posture to
-/// `save_plugin_credentials`. Deleting a non-existent file is a no-op
-/// success (idempotent).
+/// Deletes a SINGLE stored credential field. Verified-only + allowlist +
+/// symlink-guard. See ADR-015 "Credentials" for the layered safety contract.
 #[tauri::command]
 pub fn delete_plugin_credential_field(
     project: String,
@@ -806,37 +811,29 @@ pub fn delete_plugin_credential_field(
     remove_credential_file_guarded(&svc_dir, &key)
 }
 
-/// Removes a single credential file under `svc_dir`, refusing any path that
-/// resolves **outside** that directory (symlink target or `..` escape) —
-/// defence-in-depth on top of the `validate_credential_field` key check.
+/// Removes a single credential file under `svc_dir`. Refuses any symlink —
+/// credentials are only ever written by `save_plugin_credentials` via
+/// `fs::write`, never as symlinks, so a symlink in the token dir is treated
+/// as adversarial regardless of where its target points. Idempotent: a
+/// genuinely missing entry is success; other IO errors (permission, dangling
+/// symlinks via `metadata` after refusal-by-symlink-type) are surfaced.
 ///
-/// Idempotent: a genuinely missing file (`NotFound`) is success. Other IO
-/// errors on `canonicalize` (e.g. permission denied) are surfaced rather than
-/// silently treated as "already gone", and a symlink whose target escapes the
-/// token dir is refused without deleting it.
-///
-/// Extracted from `delete_plugin_credential_field` so the path-safety guard
-/// is unit-testable without standing up a verified on-disk plugin fixture.
+/// Uses `symlink_metadata` (no-follow) so we delete `path` itself rather than
+/// its symlink target (defence-in-depth — addresses both the M1 case where a
+/// same-dir symlink would otherwise have its target unlinked, and the Low
+/// case where a dangling symlink would short-circuit `canonicalize` as
+/// "already gone"). Extracted so the safety guard is unit-testable without
+/// a verified-plugin fixture.
 fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Result<(), String> {
     let path = svc_dir.join(key);
-    match path.canonicalize() {
-        Ok(canon) => {
-            let svc_canon = svc_dir.canonicalize().map_err(|e| e.to_string())?;
-            if !canon.starts_with(&svc_canon) {
-                return Err(format!(
-                    "refusing to delete '{}': resolves outside the plugin's token dir",
-                    canon.display()
-                ));
-            }
-            std::fs::remove_file(&canon).map_err(|e| e.to_string())
-        }
-        // No such file — nothing to delete; idempotent success.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        // Permission/other IO error: the file may exist but be inaccessible —
-        // surface it instead of pretending the delete succeeded.
-        Err(e) => Err(format!(
-            "could not resolve credential path for '{key}': {e}"
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(format!(
+            "refusing to delete '{}': credential entry is a symlink (defence-in-depth — credentials are written via fs::write, never as symlinks)",
+            path.display()
         )),
+        Ok(_) => std::fs::remove_file(&path).map_err(|e| e.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not stat credential entry '{key}': {e}")),
     }
 }
 
@@ -916,6 +913,24 @@ mod tests {
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r##""instructions":"# Setup"##));
+    }
+
+    #[test]
+    fn instructions_for_ui_gates_unverified_oversized_and_absent() {
+        // Verified + within cap → passes through unchanged.
+        let ok = instructions_for_ui(true, Some("# Setup\nclean"));
+        assert_eq!(ok.as_deref(), Some("# Setup\nclean"));
+        // Unverified plugin → withheld regardless of content.
+        assert_eq!(instructions_for_ui(false, Some("# Setup")), None);
+        // Verified + no instructions → still None.
+        assert_eq!(instructions_for_ui(true, None), None);
+        // Verified + oversized → withheld (defence-in-depth re-check of the
+        // install-time cap in case signature verify is ever bypassed).
+        let huge = "a".repeat(speedwave_runtime::consts::PLUGIN_INSTRUCTIONS_MAX_BYTES + 1);
+        assert_eq!(instructions_for_ui(true, Some(&huge)), None);
+        // Verified + exactly at cap → passes (cap is inclusive).
+        let at_cap = "a".repeat(speedwave_runtime::consts::PLUGIN_INSTRUCTIONS_MAX_BYTES);
+        assert!(instructions_for_ui(true, Some(&at_cap)).is_some());
     }
 
     #[test]
@@ -1223,10 +1238,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn remove_credential_file_guarded_refuses_symlink_escape() {
-        // The canonicalize + starts_with guard: a key that is a symlink whose
-        // target lives OUTSIDE the token dir must be refused, and the target
-        // must survive. This is the security-critical path the old test never
-        // exercised (it only checked Vec membership).
+        // A symlink whose target lives outside the token dir must be refused
+        // and the target must survive intact.
         let svc = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let victim = outside.path().join("victim");
@@ -1234,11 +1247,44 @@ mod tests {
         std::os::unix::fs::symlink(&victim, svc.path().join("evil")).unwrap();
 
         let err = remove_credential_file_guarded(svc.path(), "evil").unwrap_err();
-        assert!(err.contains("outside"), "got: {err}");
+        assert!(err.contains("symlink"), "got: {err}");
         assert!(
             victim.exists(),
             "a file outside the token dir must never be deleted via a symlink"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_credential_file_guarded_refuses_intra_dir_symlink() {
+        // A symlink whose target also lives INSIDE the token dir: the old
+        // implementation would have unlinked the target (M1). The new
+        // symlink_metadata-based check refuses every symlink, so the target
+        // is preserved unconditionally.
+        let svc = tempfile::tempdir().unwrap();
+        let target = svc.path().join("real");
+        std::fs::write(&target, "real credential").unwrap();
+        std::os::unix::fs::symlink(&target, svc.path().join("alias")).unwrap();
+
+        let err = remove_credential_file_guarded(svc.path(), "alias").unwrap_err();
+        assert!(err.contains("symlink"), "got: {err}");
+        assert!(
+            target.exists(),
+            "an intra-dir symlink target must NOT be unlinked when deleting the alias"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_credential_file_guarded_refuses_dangling_symlink() {
+        // A symlink whose target never existed used to short-circuit through
+        // canonicalize's NotFound branch as "idempotent success"; now we use
+        // symlink_metadata (no-follow), so the symlink is rejected outright.
+        let svc = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/no/such/thing", svc.path().join("ghost")).unwrap();
+
+        let err = remove_credential_file_guarded(svc.path(), "ghost").unwrap_err();
+        assert!(err.contains("symlink"), "got: {err}");
     }
 
     #[test]

@@ -166,6 +166,19 @@ Enforcement and limits:
 - **Two-sided.** The form blocks submit and shows `message`; `save_plugin_credentials` re-checks host-side, so a crafted IPC call cannot bypass it. An empty value (leave-stored-untouched) is never rejected — emptiness is governed by `required`.
 - **Capped + RE2-only.** `pattern` is length-capped (`consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN`, 512) and must compile under the Rust `regex` crate, which is a linear-time RE2-style engine with no backreferences or look-around[^13]. Both are checked at install (`validate_manifest`), so JS-only patterns are rejected before a plugin ships rather than diverging between browser and host.
 
+#### Regex flavour vs `settings_schema`
+
+A plugin manifest can carry **two** regex surfaces:
+
+| Surface                                           | Engine                                                                                   | Flavour                                                                                          | Where checked                                                                |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `auth_fields[].validation.pattern`                | Rust `regex` crate (compiled in `plugin.rs`) + native HTML `pattern` (browser JS engine) | **RE2 subset** — no backreferences, no look-around, no atomic groups; linear-time guarantee[^13] | install (`validate_manifest`) + save (`save_plugin_credentials`) + UI submit |
+| `settings_schema` (JSON Schema `pattern` keyword) | JSON Schema validator on save                                                            | **ECMA-262** (JavaScript regex) — backreferences and look-around allowed[^14]                    | install (size/shape) + save (`plugin_save_settings`)                         |
+
+The two are deliberately separate: `auth_fields` are _credentials_ (secret tokens, host URLs — single value per field, strict format), while `settings` are _user-settable preferences_ (structured payload, often shaped by JSON Schema's full vocabulary). A plugin author writing `(?=.*\d)` works in `settings_schema` and fails at `auth_fields[].validation` install time — the cleaner alternative (extend `settings_schema` to auth_fields) was rejected because the two surfaces have different lifecycle and storage (per-field token files vs. one JSON blob in `plugin_settings`).
+
+**Practical guidance:** if a credential pattern needs look-around or backreferences, it is too restrictive for a regex anyway — declare the field `is_secret` and validate inside the worker after `/tokens/<key>` read.
+
 ---
 
 ## Identification: `slug` and `service_id`
@@ -562,3 +575,5 @@ Tauri commands: `get_plugins`, `peek_plugin_manifest`, `install_plugin`, `remove
 [^12]: https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#version-requirement-syntax
 
 [^13]: [`regex` crate documentation — Syntax & guarantees (no backreferences or look-around; linear-time matching)](https://docs.rs/regex/latest/regex/#syntax)
+
+[^14]: [JSON Schema Validation — `pattern` keyword (uses ECMA-262 regex)](https://json-schema.org/draft/2020-12/json-schema-validation#name-pattern)

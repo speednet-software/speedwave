@@ -7,7 +7,7 @@ import {
   inject,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { marked } from 'marked';
+import { Marked } from 'marked';
 import { ActivatedRoute, Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
@@ -28,6 +28,22 @@ export type PluginDetailTab = 'dashboard' | 'settings' | 'tools' | 'logs';
 
 /** Shown when a mutation is attempted with no active project / loaded plugin. */
 const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project first.';
+
+/**
+ * Scoped `marked` instance for the Dashboard `instructions` block. Forces
+ * every rendered `<a>` to open in a new tab with `rel="noopener noreferrer"`
+ * so a click inside the Tauri webview can't navigate the SPA away (state
+ * loss) nor leak `window.opener` to the linked page. Scoped — does not
+ * touch other markdown call sites (e.g. chat text-block).
+ */
+const instructionsMarked = new Marked({
+  renderer: {
+    link({ href, title, text }) {
+      const titleAttr = title ? ` title="${title}"` : '';
+      return `<a href="${href}" target="_blank" rel="noopener noreferrer"${titleAttr}>${text}</a>`;
+    },
+  },
+});
 
 /** A single tool exposed by a plugin worker (placeholder data until backend exposes). */
 interface ExposedTool {
@@ -202,6 +218,7 @@ interface ExposedTool {
                 <details
                   class="mb-4 rounded border border-[var(--line)] bg-[var(--bg-1)]"
                   data-testid="plugin-instructions-details"
+                  [attr.open]="plugin.configured ? null : ''"
                 >
                   <summary
                     class="mono flex cursor-pointer items-center gap-2 px-4 py-2.5 text-[10px] uppercase tracking-widest text-[var(--ink-mute)] hover:text-[var(--ink-dim)]"
@@ -215,6 +232,17 @@ interface ExposedTool {
                     [innerHTML]="renderedInstructions()"
                   ></div>
                 </details>
+              }
+              @if (plugin.verification_status !== 'verified' && plugin.verification_error) {
+                <p
+                  class="mb-4 rounded border border-red-500/30 bg-red-500/[0.04] px-4 py-3 text-[12px] leading-relaxed text-red-300"
+                  data-testid="plugin-verification-error"
+                >
+                  <strong class="mono mr-1 uppercase tracking-widest text-[10px]"
+                    >{{ plugin.verification_status }}:</strong
+                  >
+                  {{ plugin.verification_error }}
+                </p>
               }
 
               <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -395,6 +423,7 @@ interface ExposedTool {
                   <app-plugin-credentials-form
                     [authFields]="plugin.auth_fields"
                     [configuredFields]="plugin.configured_fields"
+                    [inFlight]="saving"
                     (save)="onSaveCredentials($event)"
                     (clear)="confirmingReset = true"
                     (clearField)="onClearField($event)"
@@ -519,6 +548,16 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   /** True while `delete_plugin_credentials` is in flight; disables confirm/cancel. */
   resetting = false;
 
+  /**
+   * True while any credential/settings mutation is in flight via
+   * `runPluginMutation`. Bound to the credentials form's `inFlight` input so
+   * Save disables + flips to "Saving…" — blocks double-submit + signals work.
+   */
+  saving = false;
+
+  /** Handle for the M9 auto-fade timeout on `success` — cancelled on new mutations. */
+  private successFadeTimer: ReturnType<typeof setTimeout> | null = null;
+
   private route = inject(ActivatedRoute);
   private router = inject(Router);
   private cdr = inject(ChangeDetectorRef);
@@ -537,23 +576,17 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   private instructionsCache: { src: string; html: string } | null = null;
 
   /**
-   * Renders the plugin's `instructions` Markdown to HTML for the Dashboard.
-   * The result is bound via `[innerHTML]`; Angular's default template
-   * sanitisation (the `SecurityContext.HTML` applied automatically to
-   * `[innerHTML]` bindings) strips scripts/handlers — this only holds while
-   * the value is bound directly and is NOT wrapped in `bypassSecurityTrustHtml`.
-   * Defence-in-depth: the backend only ships `instructions` for verified
-   * plugins (see `plugin_cmd.rs`), and the template `@if` re-checks
-   * `verification_status === 'verified'`. Memoized on the source string so
-   * OnPush change-detection cycles don't re-parse on every tick. Returns
-   * `''` when the manifest has no instructions.
+   * Renders the manifest's `instructions` Markdown. Result is bound via
+   * `[innerHTML]`, sanitised at bind-time by Angular's default `SecurityContext.HTML`
+   * (only holds while the binding is NOT wrapped in `bypassSecurityTrustHtml`).
+   * Memoised on the source string so OnPush ticks don't re-parse.
    * @returns HTML string (sanitised at bind time), or `''`
    */
   renderedInstructions(): string {
     const src = this.plugin?.instructions ?? '';
     if (!src) return '';
     if (this.instructionsCache?.src !== src) {
-      const html = marked.parse(src, { async: false });
+      const html = instructionsMarked.parse(src, { async: false });
       if (typeof html !== 'string') {
         throw new Error('marked.parse returned a Promise; async option must remain false');
       }
@@ -595,6 +628,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
       this.unsubProjectReady();
       this.unsubProjectReady = null;
     }
+    this.cancelSuccessFade();
   }
 
   /** Navigates back to the plugins list. */
@@ -686,31 +720,15 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Shared skeleton for the "guard → clear status → invoke → set success →
-   * (optionally) refresh" flow used by every settings/credentials mutation
-   * on this page. Extracted because onSaveSettings / onSaveCredentials /
-   * onResetCredentials were byte-for-byte identical apart from the command
-   * name, payload, and success message (Rule of Three).
-   *
-   * Two correctness invariants this enforces (both were review findings):
-   *
-   *  1. `slug` and `project` are captured into locals BEFORE the first
-   *     `await`. An async event (project switch, navigation) firing
-   *     mid-flight could otherwise null `this.plugin` between the invoke
-   *     and the refresh, producing an NPE on `this.plugin.slug`.
-   *
-   *  2. A refresh failure must NOT clobber `this.success` with an error —
-   *     the credentials were already saved, so showing the user a
-   *     save-error would be a lie. `loadPlugin` swallows its own failure
-   *     into `this.error`, so after the refresh we detect that and clear
-   *     it, surfacing only to the console. The successful-mutation success
-   *     message wins.
+   * Shared skeleton for credentials/settings mutations: guard → clear status
+   * → invoke → set success → reload. Captures slug/project before the first
+   * await (project-switch mid-flight would otherwise null `this.plugin`). On
+   * reload failure the success message survives (the mutation already won)
+   * with a "view may be stale" caveat.
    * @param command - Tauri command name to invoke
-   * @param buildPayload - given the validated (slug, project), returns the
-   *   command arguments. Receiving them as params means the null-guard lives
-   *   ONLY here — callers don't repeat it.
+   * @param buildPayload - given validated (slug, project), returns the payload
    * @param successMsg - message to show on success
-   * @returns true if the invoke succeeded, false otherwise (guard fail or error)
+   * @returns true if the invoke succeeded, false otherwise
    */
   private async runPluginMutation(
     command: string,
@@ -726,29 +744,50 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     const project = this.activeProject;
     this.error = '';
     this.success = '';
+    this.cancelSuccessFade(); // any pending fade from a prior mutation
+    this.saving = true;
+    this.cdr.markForCheck();
     try {
       await this.tauri.invoke(command, buildPayload(slug, project));
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
+      this.saving = false;
       this.cdr.markForCheck();
       return false;
     }
     this.success = successMsg;
     this.projectState.requestRestart();
-    // Refresh to reflect new state (e.g. the configured badge). `loadPlugin`
-    // catches its own errors into `this.error`; the mutation already
-    // succeeded, so a reload failure must not surface as a save *error*.
-    // But we must not silently hide a now-stale view either — downgrade it
-    // to a caveat appended to the success line (+ console), so the badge
-    // possibly being out of date is signalled rather than swallowed.
+    // Refresh state (e.g. configured badge). `loadPlugin` swallows its error
+    // into `this.error`; downgrade to a caveat on the success line + console
+    // so a stale view is signalled rather than hidden under the success msg.
     await this.loadPlugin(slug);
     if (this.error) {
       console.warn('plugin reload after mutation failed:', this.error);
       this.error = '';
       this.success = `${successMsg} — but the view could not refresh; reopen the plugin to see the latest state.`;
     }
+    this.saving = false;
+    this.scheduleSuccessFade();
     this.cdr.markForCheck();
     return true;
+  }
+
+  /** Clear an in-flight fade timer (success was overwritten by a new mutation). */
+  private cancelSuccessFade(): void {
+    if (this.successFadeTimer !== null) {
+      clearTimeout(this.successFadeTimer);
+      this.successFadeTimer = null;
+    }
+  }
+
+  /** Auto-fade the green success banner after a short window (M9). */
+  private scheduleSuccessFade(): void {
+    this.cancelSuccessFade();
+    this.successFadeTimer = setTimeout(() => {
+      this.success = '';
+      this.successFadeTimer = null;
+      this.cdr.markForCheck();
+    }, 5000);
   }
 
   /**

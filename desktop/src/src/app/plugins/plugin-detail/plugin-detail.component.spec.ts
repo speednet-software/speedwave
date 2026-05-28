@@ -311,7 +311,9 @@ describe('PluginDetailComponent', () => {
     expect(el.querySelector('strong')?.textContent).toBe('token');
   });
 
-  it('keeps the instructions collapsed by default (expandable disclosure)', async () => {
+  it('keeps the instructions collapsed by default for a configured plugin', async () => {
+    // Default MOCK_PLUGINS has `configured: true`, so the disclosure is closed
+    // — we don't shout setup steps at someone who's already past setup.
     const { component, fixture } = setupWithInstructions('## Setup\n\nDo the thing.');
     await initAndDetect(component, fixture);
 
@@ -319,11 +321,51 @@ describe('PluginDetailComponent', () => {
       '[data-testid="plugin-instructions-details"]'
     ) as HTMLDetailsElement;
     expect(details).not.toBeNull();
-    // Collapsed by default — no `open` attribute, so it takes one line until clicked.
     expect(details.open).toBe(false);
     expect(
       fixture.nativeElement.querySelector('[data-testid="plugin-instructions-toggle"]')
     ).not.toBeNull();
+  });
+
+  it('auto-opens the instructions disclosure for an unconfigured plugin (M10)', async () => {
+    // First-time user landing on a plugin with credentials still to fill in
+    // should see the setup guide immediately, not hunt for it.
+    const { component, fixture } = setup();
+    mockTauri.invokeHandler = (cmd: string) => {
+      if (cmd === 'get_plugins') {
+        const resp = JSON.parse(JSON.stringify(MOCK_PLUGINS));
+        resp.plugins[0].instructions = '## Setup\n\nGenerate a token.';
+        resp.plugins[0].configured = false;
+        return Promise.resolve(resp);
+      }
+      return defaultInvokeHandler(cmd);
+    };
+    await initAndDetect(component, fixture);
+
+    const details = fixture.nativeElement.querySelector(
+      '[data-testid="plugin-instructions-details"]'
+    ) as HTMLDetailsElement;
+    expect(details).not.toBeNull();
+    expect(details.open).toBe(true);
+  });
+
+  it('surfaces verification_error for an unverified plugin (M11)', async () => {
+    const { component, fixture } = setup();
+    mockTauri.invokeHandler = (cmd: string) => {
+      if (cmd === 'get_plugins') {
+        const resp = JSON.parse(JSON.stringify(MOCK_PLUGINS));
+        resp.plugins[0].verification_status = 'signature_invalid';
+        resp.plugins[0].verification_error = 'SIGNATURE digest mismatch';
+        return Promise.resolve(resp);
+      }
+      return defaultInvokeHandler(cmd);
+    };
+    await initAndDetect(component, fixture);
+
+    const banner = fixture.nativeElement.querySelector('[data-testid="plugin-verification-error"]');
+    expect(banner).not.toBeNull();
+    expect(banner.textContent).toContain('signature_invalid');
+    expect(banner.textContent).toContain('SIGNATURE digest mismatch');
   });
 
   it('does NOT render instructions for an unverified plugin (XSS trust boundary)', async () => {
@@ -338,6 +380,55 @@ describe('PluginDetailComponent', () => {
     expect(
       fixture.nativeElement.querySelector('[data-testid="plugin-instructions-details"]')
     ).toBeNull();
+  });
+
+  it('opens markdown links in a new tab with rel="noopener noreferrer"', async () => {
+    // Otherwise a click inside the Tauri webview would navigate the SPA away
+    // (state loss) and leak `window.opener` to the linked page.
+    const { component, fixture } = setupWithInstructions(
+      '## Docs\n\nSee [the spec](https://example.com/spec) for details.'
+    );
+    await initAndDetect(component, fixture);
+    const link = fixture.nativeElement.querySelector(
+      '[data-testid="plugin-instructions"] a'
+    ) as HTMLAnchorElement;
+    expect(link).not.toBeNull();
+    expect(link.getAttribute('target')).toBe('_blank');
+    const rel = link.getAttribute('rel') ?? '';
+    expect(rel).toContain('noopener');
+    expect(rel).toContain('noreferrer');
+  });
+
+  it('sanitises malicious markdown on the verified path (Angular DomSanitizer)', async () => {
+    // The unverified-path test above exercises the @if gate, which short-
+    // circuits before marked.parse() runs. This one exercises the verified
+    // path so the sanitizer actually applies: <script>, <img onerror>, and
+    // javascript: link must not produce live HTML that could execute.
+    const { component, fixture } = setupWithInstructions(
+      '## Setup\n\n' +
+        '<script>window.__pwned=true</script>\n\n' +
+        '<img src=x onerror="window.__pwned=true">\n\n' +
+        '[click](javascript:alert(1))'
+    );
+    await initAndDetect(component, fixture);
+
+    const el = fixture.nativeElement.querySelector('[data-testid="plugin-instructions"]');
+    expect(el).not.toBeNull();
+    const html = el.innerHTML.toLowerCase();
+    // Angular's DomSanitizer:
+    //   - strips <script> entirely,
+    //   - drops on* event-handler attributes (onerror, onclick, …),
+    //   - rewrites `javascript:` URLs to `unsafe:javascript:` so the browser
+    //     refuses to navigate (the literal string survives but is inert).
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('onerror');
+    expect(html).not.toMatch(/href="javascript:/);
+    expect(html).toContain('unsafe:javascript:'); // sanitiser actually ran
+    // And the host scope was never poisoned.
+    expect(
+      (window as unknown as { __pwned?: boolean }).__pwned,
+      'sanitiser must prevent inline-script execution'
+    ).not.toBe(true);
   });
 
   it('omits the instructions block when the manifest has none', async () => {

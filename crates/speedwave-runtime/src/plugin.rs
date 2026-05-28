@@ -68,10 +68,8 @@ pub(crate) const ALLOWED_AUTH_FIELD_TYPES: &[&str] = &["text", "password", "text
 /// a single anchored pattern plus an optional human-readable message.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AuthFieldValidation {
-    /// Raw regex string as it arrives from the (untrusted) manifest JSON.
-    /// Not used directly for matching — it is always funnelled through
-    /// [`ValidatedPattern::compile`], which enforces the length cap and
-    /// anchored-compile invariants. See that type for the full contract.
+    /// Raw regex string from the manifest. Always funnelled through
+    /// [`compile_anchored_pattern`] — see that fn for cap+compile invariants.
     pub pattern: String,
     /// Optional message shown when the value fails the pattern. When absent,
     /// the UI falls back to a generic "invalid format" string.
@@ -79,61 +77,34 @@ pub struct AuthFieldValidation {
     pub message: Option<String>,
 }
 
-/// A regex constraint proven safe to run against a credential value:
-/// non-empty, within [`consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN`], and
-/// compiled in its **anchored** full-match form (`^(?:…)$`).
+/// Single gate for `auth_fields[].validation.pattern`: rejects empty and
+/// oversized patterns, then compiles in anchored full-match form
+/// (`^(?:pattern)$`). Used by `validate_manifest` (install) and
+/// `validate_credential_value` (save) so the cap/compile rules live in one
+/// place. Error strings are phrased to read after `auth_field '<key>' `.
 ///
-/// The only constructor is [`ValidatedPattern::compile`], so *holding* a
-/// value is proof the invariant was checked — [`validate_credential_value`]
-/// matches through this type and therefore cannot run an oversized or
-/// uncompilable pattern. It is the single gate: both `validate_manifest`
-/// (install time) and `validate_credential_value` (save time) construct it,
-/// so the cap/compile rules cannot drift between the two call sites.
-#[derive(Debug)]
-pub struct ValidatedPattern(regex::Regex);
-
-impl ValidatedPattern {
-    /// Validates a raw `auth_fields[].validation.pattern` and compiles it in
-    /// anchored form. Error strings are phrased to read after an
-    /// `auth_field '<key>' ` prefix at the manifest-validation call site.
-    ///
-    /// **Cross-language invariant:** the anchoring (`^(?:…)$`) must stay in
-    /// sync with the Desktop form's `validationErrorFor`
-    /// (`plugin-credentials-form.component.ts`), which wraps the same pattern
-    /// in JS so the browser pre-check and this host check agree. The pattern
-    /// must compile under the Rust `regex` crate's RE2 subset (no
-    /// backreferences / look-around); JS-only patterns are rejected here.
-    pub fn compile(pattern: &str) -> Result<Self, String> {
-        if pattern.is_empty() {
-            return Err("has an empty validation.pattern (omit `validation` instead)".to_string());
-        }
-        if pattern.len() > consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN {
-            return Err(format!(
-                "has a validation.pattern that exceeds {} bytes",
-                consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN
-            ));
-        }
-        regex::Regex::new(&format!("^(?:{pattern})$"))
-            .map(ValidatedPattern)
-            .map_err(|e| format!("has an invalid validation.pattern: {e}"))
+/// Anchoring mirrors the Desktop form's `validationErrorFor` (JS) — those
+/// two wrappers must stay in sync. The pattern must compile under the Rust
+/// `regex` crate's RE2 subset (no backreferences / look-around); details and
+/// the JS-vs-RE2 flavour difference are documented in ADR-015.
+pub fn compile_anchored_pattern(pattern: &str) -> Result<regex::Regex, String> {
+    if pattern.is_empty() {
+        return Err("has an empty validation.pattern (omit `validation` instead)".to_string());
     }
-
-    /// True when `value` fully matches the (anchored) pattern.
-    pub fn is_match(&self, value: &str) -> bool {
-        self.0.is_match(value)
+    if pattern.len() > consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN {
+        return Err(format!(
+            "has a validation.pattern that exceeds {} bytes",
+            consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN
+        ));
     }
+    regex::Regex::new(&format!("^(?:{pattern})$"))
+        .map_err(|e| format!("has an invalid validation.pattern: {e}"))
 }
 
-/// Validates a single credential value against its field's optional regex
-/// constraint. No constraint, or an empty value (the user is leaving the
-/// stored value untouched), is always accepted — emptiness is enforced
-/// separately by the `required` flag, not here. On mismatch returns the
-/// author's `message`, or a generic fallback that names the field.
-///
-/// Recompiles via [`ValidatedPattern::compile`] on each call: saves are rare
-/// and the pattern was already proven valid at manifest-validation time, so
-/// the `Err` arm is effectively unreachable post-install — but we surface it
-/// rather than panic if a manifest somehow reached disk unvalidated.
+/// Validates a credential value against the field's optional regex
+/// constraint. Returns `Ok` when no constraint, when the value is empty
+/// (= "leave stored value untouched"; `required` enforces emptiness), or on
+/// match. On mismatch returns the author's `message` or a generic fallback.
 pub fn validate_credential_value(field: &AuthFieldDef, value: &str) -> Result<(), String> {
     let Some(validation) = &field.validation else {
         return Ok(());
@@ -141,9 +112,9 @@ pub fn validate_credential_value(field: &AuthFieldDef, value: &str) -> Result<()
     if value.is_empty() {
         return Ok(());
     }
-    let pattern = ValidatedPattern::compile(&validation.pattern)
+    let re = compile_anchored_pattern(&validation.pattern)
         .map_err(|e| format!("auth_field '{}' {e}", field.key))?;
-    if pattern.is_match(value) {
+    if re.is_match(value) {
         Ok(())
     } else {
         Err(validation.message.clone().unwrap_or_else(|| {
@@ -865,12 +836,10 @@ pub(crate) fn validate_manifest(
                 ALLOWED_AUTH_FIELD_TYPES
             );
         }
-        // Validate the optional regex constraint at install time through the
-        // single ValidatedPattern gate (length cap + anchored compile), so a
-        // broken or oversized pattern is rejected here — never at
-        // credential-save time, and never shipped to the browser's JS engine.
+        // Reject broken/oversized regex constraints at install time via the
+        // single `compile_anchored_pattern` gate.
         if let Some(validation) = &field.validation {
-            ValidatedPattern::compile(&validation.pattern)
+            compile_anchored_pattern(&validation.pattern)
                 .map_err(|e| anyhow::anyhow!("auth_field '{}' {e}", field.key))?;
         }
     }
@@ -5215,22 +5184,22 @@ mod tests {
     }
 
     #[test]
-    fn validated_pattern_compile_enforces_invariants() {
+    fn compile_anchored_pattern_enforces_invariants() {
         // empty / oversized / uncompilable all rejected; valid compiles and
         // matches anchored (full-match only).
-        assert!(ValidatedPattern::compile("").unwrap_err().contains("empty"));
+        assert!(compile_anchored_pattern("").unwrap_err().contains("empty"));
         let huge = "a".repeat(consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN + 1);
-        assert!(ValidatedPattern::compile(&huge)
+        assert!(compile_anchored_pattern(&huge)
             .unwrap_err()
             .contains("exceeds"));
-        assert!(ValidatedPattern::compile("(")
+        assert!(compile_anchored_pattern("(")
             .unwrap_err()
             .contains("invalid"));
-        let p = ValidatedPattern::compile("figd_[a-z]+").unwrap();
-        assert!(p.is_match("figd_abc"));
+        let re = compile_anchored_pattern("figd_[a-z]+").unwrap();
+        assert!(re.is_match("figd_abc"));
         assert!(
-            !p.is_match("x figd_abc"),
-            "ValidatedPattern must anchor to a full match"
+            !re.is_match("x figd_abc"),
+            "compile_anchored_pattern must wrap in ^(?:…)$ for full-match"
         );
     }
 

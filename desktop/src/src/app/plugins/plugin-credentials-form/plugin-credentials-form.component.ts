@@ -46,18 +46,39 @@ import {
                   data-testid="cred-configured-badge"
                   >✓ set</span
                 >
-                <button
-                  type="button"
-                  class="text-[11px] text-sw-text-ghost underline hover:text-red-300"
-                  [attr.data-testid]="'cred-clear-' + field.key"
-                  (click)="clearField.emit(field.key)"
-                >
-                  clear
-                </button>
+                @if (confirmingClearKey === field.key) {
+                  <span class="text-[11px] text-red-300">Clear?</span>
+                  <button
+                    type="button"
+                    class="text-[11px] font-semibold text-red-300 underline"
+                    [attr.data-testid]="'cred-clear-confirm-' + field.key"
+                    (click)="confirmClear(field.key)"
+                  >
+                    Yes
+                  </button>
+                  <button
+                    type="button"
+                    class="text-[11px] text-sw-text-ghost underline"
+                    [attr.data-testid]="'cred-clear-cancel-' + field.key"
+                    (click)="cancelClear()"
+                  >
+                    Cancel
+                  </button>
+                } @else {
+                  <button
+                    type="button"
+                    class="text-[11px] text-sw-text-ghost underline hover:text-red-300"
+                    [attr.data-testid]="'cred-clear-' + field.key"
+                    (click)="requestClear(field.key)"
+                  >
+                    clear
+                  </button>
+                }
               }
             </label>
             @if (field.description) {
               <p
+                [id]="'cred-desc-' + field.key"
                 class="mb-1.5 text-[11px] leading-relaxed text-sw-text-ghost"
                 data-testid="cred-description"
               >
@@ -65,9 +86,11 @@ import {
               </p>
             }
             @if (field.field_type === 'textarea') {
-              <!-- Multi-line secret (PEM key, JSON service account). The HTML
-                   pattern attribute is invalid on textarea, so the regex
-                   constraint is enforced by the submit-time JS check + backend. -->
+              <!-- Multi-line secret (PEM, service-account JSON). The HTML
+                   pattern attribute is invalid on textarea, so the regex is
+                   checked by JS at submit + the backend. Masked with
+                   -webkit-text-security when is_secret (Tauri webviews are
+                   Chromium/WebKit). -->
               <textarea
                 [id]="'cred-' + field.key"
                 rows="3"
@@ -76,9 +99,13 @@ import {
                 "
                 [value]="getValue(field.key)"
                 (input)="onFieldInput(field.key, $event)"
+                (blur)="onFieldBlur(field, $event)"
                 autocomplete="off"
                 spellcheck="false"
                 [attr.maxlength]="maxCredentialBytes"
+                [attr.aria-describedby]="describedByFor(field.key)"
+                [attr.aria-invalid]="errorFor(field.key) ? 'true' : null"
+                [class.cred-secret-mask]="field.is_secret"
                 class="box-border w-full resize-y rounded border border-sw-border bg-sw-bg-darkest
                        px-3 py-2.5 font-mono text-sm text-sw-text
                        focus:border-sw-accent focus:outline-none"
@@ -93,11 +120,14 @@ import {
                 "
                 [value]="getValue(field.key)"
                 (input)="onFieldInput(field.key, $event)"
+                (blur)="onFieldBlur(field, $event)"
                 autocomplete="off"
                 spellcheck="false"
                 [attr.maxlength]="maxCredentialBytes"
                 [attr.pattern]="field.validation?.pattern ?? null"
                 [attr.title]="field.validation?.message ?? null"
+                [attr.aria-describedby]="describedByFor(field.key)"
+                [attr.aria-invalid]="errorFor(field.key) ? 'true' : null"
                 class="box-border w-full rounded border border-sw-border bg-sw-bg-darkest
                        px-3 py-2.5 font-mono text-sm text-sw-text
                        focus:border-sw-accent focus:outline-none"
@@ -106,7 +136,9 @@ import {
             }
             @if (errorFor(field.key); as err) {
               <p
+                [id]="'cred-err-' + field.key"
                 class="mt-1.5 text-[11px] leading-relaxed text-red-300"
+                role="alert"
                 [attr.data-testid]="'cred-error-' + field.key"
               >
                 {{ err }}
@@ -117,12 +149,12 @@ import {
         <div class="mt-6 flex gap-3">
           <button
             type="submit"
-            [disabled]="!hasAnyValue()"
+            [disabled]="!hasAnyValue() || inFlight()"
             class="rounded bg-sw-accent px-4 py-2 font-mono text-[12px]
                    text-sw-bg-darkest disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="save-credentials-btn"
           >
-            Save credentials
+            {{ inFlight() ? 'Saving…' : 'Save credentials' }}
           </button>
           <button
             type="button"
@@ -138,6 +170,16 @@ import {
       </form>
     }
   `,
+  styles: [
+    // Mask multi-line secrets the way <input type=password> masks single-line.
+    // Tauri webviews are Chromium (Windows/WebView2) / WebKit (macOS), both
+    // support the vendor-prefixed property.
+    `
+      .cred-secret-mask {
+        -webkit-text-security: disc;
+      }
+    `,
+  ],
 })
 export class PluginCredentialsFormComponent {
   readonly authFields = input.required<PluginAuthField[]>();
@@ -156,11 +198,86 @@ export class PluginCredentialsFormComponent {
    * `delete_plugin_credentials` (clear ALL) when this fires.
    */
   readonly clear = output<void>();
-  /** Fired with a single field key when the user clicks that field's "clear". */
+  /**
+   * Fired with a single field key when the user confirms that field's "clear"
+   * (inline Yes/Cancel prompt, like Reset all). Never fired without confirm.
+   */
   readonly clearField = output<string>();
+  /**
+   * True while a save/clear is in flight upstream. When true the Save button
+   * is disabled to block double-submit (each click would re-trigger the
+   * `save_plugin_credentials` Tauri call + container restart).
+   */
+  readonly inFlight = input<boolean>(false);
 
   /** Template binding for the per-field byte cap (mirrors Rust SSOT). */
   protected readonly maxCredentialBytes = MAX_PLUGIN_CREDENTIAL_BYTES;
+
+  /**
+   * Key of the field whose `clear` button was clicked; null when no confirm
+   * is showing. One-at-a-time — opening another field's confirm replaces it.
+   */
+  confirmingClearKey: string | null = null;
+
+  /**
+   * Stage the confirm for a specific field (first click on "clear").
+   * @param key the auth_fields[] entry to clear
+   */
+  requestClear(key: string): void {
+    this.confirmingClearKey = key;
+  }
+
+  /**
+   * User clicked "Yes" — actually emit `clearField` and dismiss the confirm.
+   * @param key the auth_fields[] entry to clear
+   */
+  confirmClear(key: string): void {
+    this.confirmingClearKey = null;
+    this.clearField.emit(key);
+  }
+
+  /** Dismiss the confirm without clearing. */
+  cancelClear(): void {
+    this.confirmingClearKey = null;
+  }
+
+  /**
+   * Space-joined list of `id`s the field is described by, for screen
+   * readers — the help text `<p>` and/or the validation error `<p>`. Returns
+   * `null` (not empty string) when neither is present so Angular drops the
+   * attribute entirely instead of binding an empty `aria-describedby`.
+   * @param key the field key
+   * @returns the attribute value, or `null`
+   */
+  describedByFor(key: string): string | null {
+    const field = this.authFields().find((f) => f.key === key);
+    const ids: string[] = [];
+    if (field?.description) ids.push(`cred-desc-${key}`);
+    if (this.errorFor(key)) ids.push(`cred-err-${key}`);
+    return ids.length ? ids.join(' ') : null;
+  }
+
+  /**
+   * Re-validate a single field when focus leaves it, so format errors are
+   * surfaced as soon as the user moves on — not held until submit.
+   * @param field the auth field
+   * @param event the blur event
+   */
+  onFieldBlur(field: PluginAuthField, event: Event): void {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) return;
+    const value = target.value.trim();
+    if (!value) {
+      delete this.validationErrors[field.key];
+      return;
+    }
+    const err = this.validationErrorFor(field, value);
+    if (err) {
+      this.validationErrors[field.key] = err;
+    } else {
+      delete this.validationErrors[field.key];
+    }
+  }
 
   /**
    * True when the given field key has a value stored on disk.
