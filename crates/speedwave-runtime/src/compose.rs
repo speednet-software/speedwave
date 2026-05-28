@@ -6169,19 +6169,22 @@ services:
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let result = render_compose(
             "test-project",
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
             &HostBridgesInfo::default(),
-        )
-        .unwrap();
+        );
+        // CodeQL: avoid {result:?} / {yaml} in panic — anyhow chain may carry
+        // apply_oauth_config / init_secrets_dir traces. See project.rs:700.
+        let yaml = result.expect("render_compose must succeed in test env");
         let expected = format!("CLAUDE_VERSION={}", crate::defaults::CLAUDE_VERSION);
         assert!(
             yaml.contains(&expected),
-            "render_compose must inject {expected}, got:\n{yaml}"
+            "render_compose must inject {expected} (rendered length: {} chars)",
+            yaml.len()
         );
         assert!(
             !yaml.contains("CLAUDE_VERSION=latest"),
@@ -8024,12 +8027,9 @@ services:
             None,
             &HostBridgesInfo::default(),
         );
-        assert!(
-            result.is_ok(),
-            "render_compose should succeed: {:?}",
-            result
-        );
-        let yaml = result.unwrap();
+        // CodeQL: avoid {result:?} — anyhow chain may carry apply_oauth_config
+        // / init_secrets_dir traces. See project.rs:700.
+        let yaml = result.expect("render_compose should succeed in test env");
 
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
