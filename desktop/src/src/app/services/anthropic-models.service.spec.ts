@@ -7,8 +7,8 @@ import { DEFAULT_CONTEXT_TOKENS, type AnthropicModel } from '../models/llm';
 
 const FIXTURE: AnthropicModel[] = [
   {
-    id: 'claude-opus-4-7',
-    family: 'Opus 4.7',
+    id: 'claude-opus-4-8',
+    family: 'Opus 4.8',
     context_tokens: 1_000_000,
     latest: true,
   },
@@ -23,6 +23,12 @@ const FIXTURE: AnthropicModel[] = [
     family: 'Haiku 4.5',
     context_tokens: 200_000,
     latest: true,
+  },
+  {
+    id: 'claude-opus-4-7',
+    family: 'Opus 4.7',
+    context_tokens: 1_000_000,
+    latest: false,
   },
 ];
 
@@ -96,6 +102,7 @@ describe('AnthropicModelsService', () => {
 
     it('returns the exact context window for a known full id', async () => {
       await service.list();
+      expect(service.contextTokensFor('claude-opus-4-8')).toBe(1_000_000);
       expect(service.contextTokensFor('claude-opus-4-7')).toBe(1_000_000);
       expect(service.contextTokensFor('claude-haiku-4-5')).toBe(200_000);
     });

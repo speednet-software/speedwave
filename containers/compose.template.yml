@@ -26,7 +26,7 @@ services:
       - CLAUDE_VERSION=${CLAUDE_VERSION}
       - MCP_HUB_PORT=${PORT_HUB}
       - CLAUDE_CODE_IDE_HOST_OVERRIDE=${IDE_HOST_OVERRIDE}
-      - CLAUDE_CODE_EFFORT_LEVEL=max
+      - CLAUDE_CODE_EFFORT_LEVEL=auto
       - ANTHROPIC_LOG=debug
     working_dir: /workspace
     networks:

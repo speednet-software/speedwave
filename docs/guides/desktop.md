@@ -57,12 +57,12 @@ The Desktop chat UI launches `claude -p --output-format stream-json` inside the 
 The bar at the bottom of the chat shows the current state of the session, mirroring the container statusline layout:
 
 ```
-claude-opus-4-7 │ CTX ██░░░ 2% │ 116k/1M │ Limit ░░░░░ 30% reset 16:42 │ $0.1409 │ In: 3 CR: 22,560 CW: 75 Out: 825
+claude-opus-4-8 │ CTX ██░░░ 2% │ 116k/1M │ Limit ░░░░░ 30% reset 16:42 │ $0.1409 │ In: 3 CR: 22,560 CW: 75 Out: 825
 ```
 
 | Element      | Source                                     | Meaning                                                                                                                                                                 |
 | ------------ | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`      | `system.init.model`                        | Model id (e.g. `claude-opus-4-7`, `llama3.3`).                                                                                                                          |
+| `model`      | `system.init.model`                        | Model id (e.g. `claude-opus-4-8`, `llama3.3`).                                                                                                                          |
 | `CTX N%`     | `resolveContextWindow` (see below)         | Percentage of the context window used by the current turn (`input_tokens + cache_read + cache_creation`) ÷ window. Bar turns amber at 50%, red at 76%, bold red at 90%. |
 | `used / max` | `formatContextLabel` (`models/llm.ts`)     | Short-form ratio (`116k/1M`, `42k/200k`). The label is `1M` for ≥ 1_000_000, `Xk` for ≥ 1_000.                                                                          |
 | `Limit N%`   | `rate_limit_event.rate_limit_info`         | 5-hour subscription quota utilisation (Pro/Max only — absent for API-key users).                                                                                        |
@@ -72,7 +72,7 @@ claude-opus-4-7 │ CTX ██░░░ 2% │ 116k/1M │ Limit ░░░░░
 | `CW: N`      | `result.usage.cache_creation_input_tokens` | Tokens written to prompt cache during the last turn.                                                                                                                    |
 | `Out: N`     | Cumulative `result.usage.output_tokens`    | Total tokens generated across all turns in the session.                                                                                                                 |
 
-**Per-step vs. cumulative.** Claude Code's result message contains two usage sources: `result.usage` (flat — per-step, resets each API call) and `result.modelUsage` (cumulative — grows over the session). The CTX % uses the flat per-step value so it reflects actual context window consumption; the total cost uses `total_cost_usd` (cumulative) because cost accumulates.
+**Latest-turn vs. cumulative.** Claude Code's result message contains two usage sources: `result.usage` (flat — the latest turn's full-prompt usage, _not_ summed across turns) and `result.modelUsage` (cumulative — grows over the session). The CTX % uses the flat value (`input_tokens + cache_read + cache_creation`) because each turn re-sends the whole conversation, so the latest turn already reflects total context occupancy — summing across turns would double-count the re-sent history. The total cost uses `total_cost_usd` (cumulative) because cost accumulates. In the Desktop footer, `in:` shows `input_tokens` only (the new uncached input) so a short chat doesn't read as the full context size; the CTX gauge keeps the additive total.
 
 **Context window resolution.** `ChatStateService.resolveContextWindow` walks a five-step fallback chain so the footer always has a concrete value:
 

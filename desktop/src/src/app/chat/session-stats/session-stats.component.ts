@@ -36,10 +36,10 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
         @if (s.usage; as usage) {
           <span
             class="whitespace-nowrap"
-            appTooltip="Input tokens consumed (prompt + cache reads/writes)"
+            appTooltip="New input tokens this turn (excludes history served from cache)"
             placement="top"
           >
-            in: <span class="text-[var(--teal)]">{{ formatNum(totalInput()) }}</span>
+            in: <span class="text-[var(--teal)]">{{ formatNum(inboundTokens()) }}</span>
           </span>
           <span
             class="whitespace-nowrap"
@@ -131,7 +131,7 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
       >
         <span
           class="whitespace-nowrap"
-          appTooltip="Input tokens consumed (prompt + cache reads/writes)"
+          appTooltip="New input tokens this turn (excludes history served from cache)"
           placement="top"
         >
           in: <span class="text-[var(--teal)]">0</span>
@@ -211,11 +211,23 @@ export class SessionStatsComponent {
   readonly branch = input<string | null>(null);
 
   /**
-   * Total input tokens consumed from the context window (sum of `input`,
-   * `cache_read`, `cache_write`). Matches the statusline.sh calculation —
-   * `output_tokens` are excluded because they don't occupy the prompt context.
+   * New input tokens the user sent this turn — `input_tokens` only, the
+   * uncached remainder after the last cache breakpoint. Excludes
+   * `cache_read` (the re-sent system prompt + tool catalog + history served
+   * from cache), which is what made a short chat read as 181k. For a local
+   * model (no prompt cache) the cache fields are 0, so this equals the whole
+   * prompt — correct in both cases. Drives the `in:` counter only.
    */
-  readonly totalInput = computed<number>(() => {
+  readonly inboundTokens = computed<number>(() => this.stats()?.usage?.input_tokens ?? 0);
+
+  /**
+   * Total tokens occupying the context window this turn (`input` +
+   * `cache_read` + `cache_write`) — the verified Anthropic formula
+   * (input_tokens is the uncached remainder; the three are additive).
+   * `output_tokens` are excluded because they don't occupy the prompt.
+   * Drives the ctx gauge (percentage + used/max), never the `in:` counter.
+   */
+  readonly ctxTotal = computed<number>(() => {
     const usage = this.stats()?.usage;
     if (!usage) return 0;
     return usage.input_tokens + (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0);
@@ -228,7 +240,7 @@ export class SessionStatsComponent {
    * than fabricating a default — ADR-041 "never guess".
    */
   readonly ctxPct = computed<number | null>(() => {
-    const total = this.totalInput();
+    const total = this.ctxTotal();
     if (total <= 0) return 0;
     const windowSize = this.stats()?.context_window_size;
     if (!windowSize || windowSize <= 0) return null;
@@ -252,7 +264,7 @@ export class SessionStatsComponent {
    * is unknown — template hides the label.
    */
   readonly ctxUsedMax = computed<string | null>(() => {
-    const total = this.totalInput();
+    const total = this.ctxTotal();
     if (total <= 0) return '';
     const windowSize = this.stats()?.context_window_size;
     if (!windowSize || windowSize <= 0) return null;

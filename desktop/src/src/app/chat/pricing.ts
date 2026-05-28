@@ -32,15 +32,18 @@ export interface ModelPricing {
  */
 export const PRICING: Record<string, ModelPricing> = {
   // All entries verified against the Anthropic published pricing page on
-  // 2026-04-25 (https://docs.claude.com/en/docs/about-claude/models#model-pricing).
-  // Opus 4.5/4.6/4.7 are all currently shipping models; update when prices change.
-  // Opus family — $15 / $75 per 1M
-  'claude-opus-4-5': { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 },
-  'claude-opus-4-6': { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 },
-  'claude-opus-4-7': { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 },
-  // The 1-million-token context variant pricing for Opus — best-effort; verify
-  'claude-opus-4-6[1m]': { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 },
-  'claude-opus-4-7[1m]': { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 },
+  // 2026-05-28 (https://platform.claude.com/docs/en/about-claude/pricing#model-pricing).
+  // Opus 4.5/4.6/4.7/4.8 are all $5 / $25 per 1M (4.1 and earlier were $15 / $75).
+  // Opus 4.6/4.7/4.8 include the full 1M context window at standard pricing,
+  // so the [1m] variants match the base rate.
+  // Opus family — $5 / $25 per 1M
+  'claude-opus-4-5': { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
+  'claude-opus-4-6': { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
+  'claude-opus-4-7': { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
+  'claude-opus-4-8': { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
+  'claude-opus-4-6[1m]': { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
+  'claude-opus-4-7[1m]': { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
+  'claude-opus-4-8[1m]': { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
 
   // Sonnet family — $3 / $15 per 1M
   'claude-sonnet-4-5': { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 },

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const CLAUDE_VERSION: &str = "2.1.153";
+pub const CLAUDE_VERSION: &str = "2.1.154";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -43,8 +43,8 @@ pub struct AnthropicModelInfo {
 /// their use was the opposite of what the `latest` flag intended.
 pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
     AnthropicModelInfo {
-        id: "claude-opus-4-7",
-        family: "Opus 4.7",
+        id: "claude-opus-4-8",
+        family: "Opus 4.8",
         context_tokens: 1_000_000,
         latest: true,
     },
@@ -59,6 +59,12 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Haiku 4.5",
         context_tokens: 200_000,
         latest: true,
+    },
+    AnthropicModelInfo {
+        id: "claude-opus-4-7",
+        family: "Opus 4.7",
+        context_tokens: 1_000_000,
+        latest: false,
     },
     AnthropicModelInfo {
         id: "claude-opus-4-6",
@@ -457,9 +463,9 @@ mod tests {
     #[test]
     fn default_anthropic_family_label_returns_latest_opus_family() {
         // Forces the constant in this assertion to be updated alongside the
-        // SSOT when a new Opus snapshot lands (e.g. Opus 4.8). If the test
+        // SSOT when a new Opus snapshot lands (e.g. Opus 4.9). If the test
         // breaks on a model bump, the helper still works — the assertion
         // just needs to follow the family label.
-        assert_eq!(default_anthropic_family_label(), Some("Opus 4.7"));
+        assert_eq!(default_anthropic_family_label(), Some("Opus 4.8"));
     }
 }
