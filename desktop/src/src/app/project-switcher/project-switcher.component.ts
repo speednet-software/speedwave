@@ -20,6 +20,22 @@ import { TooltipDirective } from '../shared/tooltip.directive';
 import { swatchFor } from './project-swatch';
 
 /**
+ * Sentinel prefix used by the runtime to mark "active project removal rejected".
+ * Must match crates/speedwave-runtime/src/project.rs::REMOVE_ACTIVE_PROJECT_ERR_PREFIX.
+ */
+const ACTIVE_PROJECT_ERR_PREFIX = 'active_project_removal: ';
+
+/**
+ * Strips the runtime sentinel prefix so the user sees the human-readable message.
+ * Exported for unit testing.
+ * @param msg - Raw backend error message that may carry the sentinel prefix.
+ */
+export function cleanRemoveErrorMessage(msg: string): string {
+  const idx = msg.indexOf(ACTIVE_PROJECT_ERR_PREFIX);
+  return idx >= 0 ? msg.slice(idx + ACTIVE_PROJECT_ERR_PREFIX.length) : msg;
+}
+
+/**
  * Project switcher dropdown — toggled from the chat header / command palette.
  *
  * Visibility is wired to {@link UiStateService.projectSwitcherOpen} so the
@@ -51,7 +67,7 @@ import { swatchFor } from './project-swatch';
           <!-- Body: project rows -->
           <div class="max-h-64 overflow-y-auto p-1">
             @for (entry of visibleProjects(); track entry.project.name) {
-              @let pendingDelete = entry.project.name === pendingDeleteId();
+              @let pendingDelete = entry.project.name === pendingDeleteName();
               <div
                 class="group flex items-center gap-1 rounded px-2 py-1.5"
                 [class]="entry.isActive ? rowActiveClasses : rowInactiveClasses"
@@ -133,13 +149,13 @@ import { swatchFor } from './project-swatch';
                   >
                 }
               </div>
-              @if (removeError() && entry.project.name === removeErrorName()) {
+              @if (removeError()?.project === entry.project.name) {
                 <div
                   class="mono px-2 pb-1.5 text-[10px] text-red-300"
                   [attr.data-testid]="'project-switcher-remove-error-' + entry.project.name"
                   role="alert"
                 >
-                  {{ removeError() }}
+                  {{ removeError()?.msg }}
                 </div>
               }
             } @empty {
@@ -190,12 +206,10 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   readonly showAddForm = signal<boolean>(false);
 
   /** Name of the row pending remove confirmation; `null` when none. */
-  readonly pendingDeleteId = signal<string | null>(null);
+  readonly pendingDeleteName = signal<string | null>(null);
 
-  /** Backend error message to surface inline under a row; `null` when none. */
-  readonly removeError = signal<string | null>(null);
-  /** Project name the surfaced error refers to. */
-  readonly removeErrorName = signal<string | null>(null);
+  /** Backend error to surface inline under a row; `null` when none. */
+  readonly removeError = signal<{ msg: string; project: string } | null>(null);
 
   /** Tailwind class string for the active row (highlighted bg, no hover-bg). */
   readonly rowActiveClasses = 'bg-[var(--bg-2)]';
@@ -220,21 +234,19 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
     // a stale "Sure?" confirm prompt or an error for a missing project.
     effect(() => {
       if (!this.ui.projectSwitcherOpen()) {
-        this.pendingDeleteId.set(null);
+        this.pendingDeleteName.set(null);
         this.removeError.set(null);
-        this.removeErrorName.set(null);
       }
     });
     effect(() => {
       const names = new Set(this.projects().map((p) => p.name));
-      const pending = this.pendingDeleteId();
+      const pending = this.pendingDeleteName();
       if (pending !== null && !names.has(pending)) {
-        this.pendingDeleteId.set(null);
+        this.pendingDeleteName.set(null);
       }
-      const errName = this.removeErrorName();
-      if (errName !== null && !names.has(errName)) {
+      const err = this.removeError();
+      if (err !== null && !names.has(err.project)) {
         this.removeError.set(null);
-        this.removeErrorName.set(null);
       }
     });
   }
@@ -309,15 +321,14 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
    * @param name - The project to mark as pending removal.
    */
   requestRemove(name: string): void {
-    this.pendingDeleteId.set(name);
+    this.pendingDeleteName.set(name);
     this.removeError.set(null);
-    this.removeErrorName.set(null);
     this.cdr.markForCheck();
   }
 
   /** Dismisses the confirm prompt without removing. */
   cancelRemove(): void {
-    this.pendingDeleteId.set(null);
+    this.pendingDeleteName.set(null);
     this.cdr.markForCheck();
   }
 
@@ -326,28 +337,16 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
    * @param name - The project to remove.
    */
   async confirmRemove(name: string): Promise<void> {
-    this.pendingDeleteId.set(null);
+    this.pendingDeleteName.set(null);
     try {
       await this.projectState.removeProject(name);
       this.removeError.set(null);
-      this.removeErrorName.set(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.removeError.set(this.cleanRemoveErrorMessage(msg));
-      this.removeErrorName.set(name);
+      this.removeError.set({ msg: cleanRemoveErrorMessage(msg), project: name });
       this.logger.error(`Failed to remove project: ${msg}`);
     }
     this.cdr.markForCheck();
-  }
-
-  /**
-   * Strips the runtime sentinel prefix so the user sees the human-readable message.
-   * @param msg - Raw backend error message that may carry the sentinel prefix.
-   */
-  private cleanRemoveErrorMessage(msg: string): string {
-    const prefix = 'active_project_removal: ';
-    const idx = msg.indexOf(prefix);
-    return idx >= 0 ? msg.slice(idx + prefix.length) : msg;
   }
 
   /** Decorates the project list with swatch color and active flag. */

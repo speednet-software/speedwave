@@ -873,9 +873,21 @@ mod tests {
 
     #[test]
     fn remove_project_missing_errors() {
+        // Exercises the "populated config, name not in list" branch — distinct
+        // from "missing config.json" which load_user_config_from treats as default.
         let tmp = tempfile::tempdir().unwrap();
+        let pd = tmp.path().join("real");
+        std::fs::create_dir_all(&pd).unwrap();
+        let canonical = std::fs::canonicalize(&pd).unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
+        add_project_with_validated_dir(
+            "real",
+            canonical.clone(),
+            canonical.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
 
         let result = remove_project_with_data_dir("ghost", &data_dir);
         assert!(result.is_err());
@@ -884,6 +896,9 @@ mod tests {
             err.contains("not found"),
             "expected 'not found', got: {err}"
         );
+        // Sanity: the real project must remain untouched.
+        let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        assert!(cfg.find_project("real").is_some());
     }
 
     #[test]

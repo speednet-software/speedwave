@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { ProjectSwitcherComponent } from './project-switcher.component';
+import { ProjectSwitcherComponent, cleanRemoveErrorMessage } from './project-switcher.component';
 import { LoggerService } from '../services/logger.service';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -51,7 +51,7 @@ describe('ProjectSwitcherComponent', () => {
     expect(component.projects()).toEqual([]);
     expect(component.activeProject()).toBeNull();
     expect(component.showAddForm()).toBe(false);
-    expect(component.pendingDeleteId()).toBeNull();
+    expect(component.pendingDeleteName()).toBeNull();
   });
 
   describe('visibility binding (UiStateService.projectSwitcherOpen)', () => {
@@ -309,7 +309,7 @@ describe('ProjectSwitcherComponent', () => {
     it('requestRemove() swaps the row into the confirm prompt', () => {
       component.requestRemove('beta');
       fixture.detectChanges();
-      expect(component.pendingDeleteId()).toBe('beta');
+      expect(component.pendingDeleteName()).toBe('beta');
       expect(
         fixture.nativeElement.querySelector('[data-testid="project-switcher-confirm-beta"]')
       ).not.toBeNull();
@@ -320,7 +320,7 @@ describe('ProjectSwitcherComponent', () => {
       component.requestRemove('beta');
       component.cancelRemove();
       fixture.detectChanges();
-      expect(component.pendingDeleteId()).toBeNull();
+      expect(component.pendingDeleteName()).toBeNull();
       expect(invokeSpy).not.toHaveBeenCalledWith('remove_project', expect.anything());
     });
 
@@ -329,7 +329,7 @@ describe('ProjectSwitcherComponent', () => {
       component.requestRemove('beta');
       await component.confirmRemove('beta');
       expect(invokeSpy).toHaveBeenCalledWith('remove_project', { name: 'beta' });
-      expect(component.pendingDeleteId()).toBeNull();
+      expect(component.pendingDeleteName()).toBeNull();
     });
 
     it('surfaces backend error inline and strips the runtime sentinel prefix', async () => {
@@ -350,10 +350,10 @@ describe('ProjectSwitcherComponent', () => {
       };
       await component.confirmRemove('beta');
       fixture.detectChanges();
-      expect(component.removeErrorName()).toBe('beta');
-      expect(component.removeError()).toBe(
-        "Cannot remove the active project 'beta'. Switch first."
-      );
+      expect(component.removeError()).toEqual({
+        msg: "Cannot remove the active project 'beta'. Switch first.",
+        project: 'beta',
+      });
       const inline = fixture.nativeElement.querySelector(
         '[data-testid="project-switcher-remove-error-beta"]'
       );
@@ -361,18 +361,16 @@ describe('ProjectSwitcherComponent', () => {
       expect(mockLogError).toHaveBeenCalled();
     });
 
-    it('clears pendingDeleteId and removeError when the dropdown closes', () => {
+    it('clears pendingDeleteName and removeError when the dropdown closes', () => {
       component.requestRemove('beta');
-      component.removeError.set('boom');
-      component.removeErrorName.set('beta');
+      component.removeError.set({ msg: 'boom', project: 'beta' });
       ui.closeProjectSwitcher();
       fixture.detectChanges();
-      expect(component.pendingDeleteId()).toBeNull();
+      expect(component.pendingDeleteName()).toBeNull();
       expect(component.removeError()).toBeNull();
-      expect(component.removeErrorName()).toBeNull();
     });
 
-    it('clears pendingDeleteId when the pending project disappears from the list', async () => {
+    it('clears pendingDeleteName when the pending project disappears from the list', async () => {
       component.requestRemove('beta');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_projects')
@@ -388,7 +386,7 @@ describe('ProjectSwitcherComponent', () => {
       }>('list_projects');
       component.projects.set(refreshed.projects);
       fixture.detectChanges();
-      expect(component.pendingDeleteId()).toBeNull();
+      expect(component.pendingDeleteName()).toBeNull();
     });
 
     it('does not render trash button or confirm UI on the active row', () => {
@@ -401,5 +399,20 @@ describe('ProjectSwitcherComponent', () => {
       );
       expect(inactiveTrash).not.toBeNull();
     });
+  });
+});
+
+describe('cleanRemoveErrorMessage', () => {
+  it('strips the sentinel prefix', () => {
+    expect(
+      cleanRemoveErrorMessage("active_project_removal: Cannot remove the active project 'beta'.")
+    ).toBe("Cannot remove the active project 'beta'.");
+  });
+
+  it('returns the message unchanged when no sentinel prefix is present', () => {
+    expect(cleanRemoveErrorMessage('Some other backend failure')).toBe(
+      'Some other backend failure'
+    );
+    expect(cleanRemoveErrorMessage('')).toBe('');
   });
 });
