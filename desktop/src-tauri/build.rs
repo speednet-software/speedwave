@@ -36,8 +36,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         allow_stubs,
     )?;
 
-    let manifest =
-        speedwave_runtime::bundle::generate_bundle_manifest(env!("CARGO_PKG_VERSION"), &hash_root)?;
+    let manifest = speedwave_runtime::bundle::generate_bundle_manifest(
+        env!("CARGO_PKG_VERSION"),
+        speedwave_runtime::defaults::CLAUDE_VERSION,
+        &hash_root,
+    )?;
     std::fs::create_dir_all(&build_context)?;
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
     std::fs::write(

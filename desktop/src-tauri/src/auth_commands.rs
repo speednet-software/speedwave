@@ -133,11 +133,14 @@ pub(crate) fn build_auth_command_for_platform(
         let pdir = strip_windows_extended_length_prefix(project_dir);
         let ddir = strip_windows_extended_length_prefix(&data_dir_str);
         if needs_env_pin {
+            // Pin CLI path to <data_dir>/bin so PATH cannot resolve a foreign install.
+            let cli_path = format!("{}\\bin\\speedwave.exe", ddir);
             format!(
-                "$env:{} = '{}'; Set-Location '{}'; speedwave login --project '{}'",
+                "$env:{} = '{}'; Set-Location '{}'; & '{}' login --project '{}'",
                 speedwave_runtime::consts::DATA_DIR_ENV,
                 ps_escape_single_quoted(ddir),
                 ps_escape_single_quoted(pdir),
+                ps_escape_single_quoted(&cli_path),
                 ps_escape_single_quoted(project),
             )
         } else {
@@ -605,19 +608,37 @@ mod tests {
             Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
             true,
         );
-        assert!(cmd.starts_with(&format!(
-            "$env:{} = '",
-            speedwave_runtime::consts::DATA_DIR_ENV
-        )));
-        let env_pos = cmd.find("$env:").unwrap();
-        let loc_pos = cmd.find("Set-Location").unwrap();
-        // Find "; speedwave" to avoid matching "SPEEDWAVE_DATA_DIR"
-        let sw_pos = cmd.find("; speedwave").unwrap();
-        assert!(env_pos < loc_pos);
-        assert!(loc_pos < sw_pos);
-        assert!(cmd.ends_with("speedwave login --project 'myproj'"));
+        assert_eq!(
+            cmd,
+            format!(
+                "$env:{} = 'C:\\Users\\test\\.speedwave-dev'; \
+                 Set-Location 'C:\\Users\\test\\Projects'; \
+                 & 'C:\\Users\\test\\.speedwave-dev\\bin\\speedwave.exe' \
+                 login --project 'myproj'",
+                speedwave_runtime::consts::DATA_DIR_ENV,
+            )
+        );
         assert!(!cmd.contains("&&"));
         assert!(!cmd.contains("export "));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_custom_data_dir_pins_cli_path() {
+        let cmd = build_auth_command_for_platform(
+            "p",
+            r"C:\proj",
+            std::path::Path::new(r"C:\Users\test\.speedwave-dev"),
+            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
+            true,
+        );
+        assert!(
+            cmd.contains(r"& 'C:\Users\test\.speedwave-dev\bin\speedwave.exe'"),
+            "env-pinned PS command must invoke CLI via absolute data_dir path, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("; speedwave login"),
+            "bare `speedwave` would let PATH pick a foreign install, got: {cmd}"
+        );
     }
 
     #[test]
