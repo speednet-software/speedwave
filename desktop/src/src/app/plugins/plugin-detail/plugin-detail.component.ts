@@ -24,7 +24,7 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 import { BridgeConnectionComponent } from '../bridge-connection/bridge-connection.component';
 
 /** Tabs available in the plugin-detail view. */
-export type PluginDetailTab = 'dashboard' | 'settings' | 'tools' | 'logs';
+export type PluginDetailTab = 'dashboard' | 'settings' | 'logs';
 
 /** Shown when a mutation is attempted with no active project / loaded plugin. */
 const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project first.';
@@ -36,23 +36,29 @@ const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project fi
  * loss) nor leak `window.opener` to the linked page. Scoped — does not
  * touch other markdown call sites (e.g. chat text-block).
  */
+/**
+ * Escape user-supplied strings before interpolating into an HTML attribute
+ * value. Angular's `DomSanitizer` still applies at bind time (so this is
+ * defence-in-depth, not the primary XSS gate), but a manifest author writing
+ * `[x](url "It's a \"quote\"")` would otherwise produce structurally
+ * malformed HTML that breaks subsequent attributes on the same `<a>`.
+ * @param s the string to escape
+ * @returns `s` with `&` → `&amp;` and `"` → `&quot;`
+ */
+function escAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+}
+
 const instructionsMarked = new Marked({
   renderer: {
     link({ href, title, text }) {
-      const titleAttr = title ? ` title="${title}"` : '';
-      return `<a href="${href}" target="_blank" rel="noopener noreferrer"${titleAttr}>${text}</a>`;
+      const titleAttr = title ? ` title="${escAttr(title)}"` : '';
+      return `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer"${titleAttr}>${text}</a>`;
     },
   },
 });
 
-/** A single tool exposed by a plugin worker (placeholder data until backend exposes). */
-interface ExposedTool {
-  name: string;
-  calls: number;
-  errors: number;
-}
-
-/** Detail page for a single plugin with Dashboard / Settings / Tools / Logs tabs. */
+/** Detail page for a single plugin with Dashboard / Settings / Logs tabs. */
 @Component({
   selector: 'app-plugin-detail',
   imports: [
@@ -182,19 +188,6 @@ interface ExposedTool {
               role="tab"
               class="px-1 pb-2"
               [class.border-b-2]="true"
-              [style.borderBottomColor]="activeTab === 'tools' ? 'var(--accent)' : 'transparent'"
-              [style.color]="activeTab === 'tools' ? 'var(--ink)' : 'var(--ink-mute)'"
-              [attr.aria-selected]="activeTab === 'tools'"
-              data-testid="tab-tools"
-              (click)="selectTab('tools')"
-            >
-              tools · {{ exposedTools.length }}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              class="px-1 pb-2"
-              [class.border-b-2]="true"
               [style.borderBottomColor]="activeTab === 'logs' ? 'var(--accent)' : 'transparent'"
               [style.color]="activeTab === 'logs' ? 'var(--ink)' : 'var(--ink-mute)'"
               [attr.aria-selected]="activeTab === 'logs'"
@@ -271,52 +264,7 @@ interface ExposedTool {
                     {{ statusDetail() }}
                   </div>
                 </div>
-
-                <div
-                  class="rounded border border-[var(--line)] bg-[var(--bg-1)] p-4"
-                  data-testid="invocations-card"
-                >
-                  <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-                    invocations
-                  </div>
-                  <div class="mt-1 text-[20px] text-[var(--ink)]" data-testid="invocations-value">
-                    {{ totalInvocations() }}
-                  </div>
-                  <div
-                    class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
-                    data-testid="invocations-detail"
-                  >
-                    last 24h · {{ totalErrors() }} errors
-                  </div>
-                </div>
               </div>
-
-              @if (exposedTools.length > 0) {
-                <div
-                  class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)]"
-                  data-testid="tools-card"
-                >
-                  <div
-                    class="mono border-b border-[var(--line)] px-4 py-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  >
-                    exposed tools
-                  </div>
-                  <div class="divide-y divide-[var(--line)]">
-                    @for (tool of exposedTools; track tool.name) {
-                      <div
-                        class="mono flex items-center gap-3 px-4 py-2 text-[12px]"
-                        [attr.data-testid]="'tool-row-' + tool.name"
-                      >
-                        <span class="text-[var(--accent)]">fn</span>
-                        <span class="text-[var(--teal)]">{{ tool.name }}</span>
-                        <span class="ml-auto text-[var(--ink-mute)]"
-                          >{{ tool.calls }} calls · {{ tool.errors }} err</span
-                        >
-                      </div>
-                    }
-                  </div>
-                </div>
-              }
 
               @if (plugin.requires_integrations.length > 0) {
                 <div class="mt-4" data-testid="integration-requirements">
@@ -478,33 +426,6 @@ interface ExposedTool {
             </div>
           }
 
-          @if (activeTab === 'tools') {
-            <div data-testid="tools-content">
-              @if (exposedTools.length === 0) {
-                <p class="mono text-[12px] text-[var(--ink-mute)]" data-testid="tools-empty">
-                  This plugin does not expose tools.
-                </p>
-              } @else {
-                <div class="rounded border border-[var(--line)] bg-[var(--bg-1)]">
-                  <div class="divide-y divide-[var(--line)]">
-                    @for (tool of exposedTools; track tool.name) {
-                      <div
-                        class="mono flex items-center gap-3 px-4 py-2 text-[12px]"
-                        [attr.data-testid]="'tools-tab-row-' + tool.name"
-                      >
-                        <span class="text-[var(--accent)]">fn</span>
-                        <span class="text-[var(--teal)]">{{ tool.name }}</span>
-                        <span class="ml-auto text-[var(--ink-mute)]"
-                          >{{ tool.calls }} calls · {{ tool.errors }} err</span
-                        >
-                      </div>
-                    }
-                  </div>
-                </div>
-              }
-            </div>
-          }
-
           @if (activeTab === 'logs') {
             <div data-testid="logs-content">
               <p class="mono text-[12px] text-[var(--ink-mute)]" data-testid="logs-link-hint">
@@ -535,8 +456,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   error = '';
   success = '';
   integrationStatuses = new Map<string, boolean>();
-  /** Exposed tools — currently always empty until the backend reports them. */
-  exposedTools: ExposedTool[] = [];
 
   /** True when the user clicked "uninstall" and we're showing the confirm prompt. */
   confirmingRemove = false;
@@ -707,16 +626,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     if (!this.plugin) return '';
     const sid = this.plugin.service_id ?? this.plugin.slug;
     return `${sid} · v${this.plugin.version}`;
-  }
-
-  /** Total invocations across all exposed tools. */
-  totalInvocations(): number {
-    return this.exposedTools.reduce((sum, t) => sum + t.calls, 0);
-  }
-
-  /** Total errors across all exposed tools. */
-  totalErrors(): number {
-    return this.exposedTools.reduce((sum, t) => sum + t.errors, 0);
   }
 
   /**

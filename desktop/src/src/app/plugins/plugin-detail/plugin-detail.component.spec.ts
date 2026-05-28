@@ -382,6 +382,26 @@ describe('PluginDetailComponent', () => {
     ).toBeNull();
   });
 
+  it('escapes quotes in markdown link href and title (no attribute breakout)', async () => {
+    // A manifest author writing `[x](url "It's a \"quote\"")` should not produce
+    // structurally malformed HTML where the embedded `"` breaks out of the
+    // attribute. esc() collapses `"` → &quot; and `&` → &amp; before
+    // interpolating into the template literal.
+    const { component, fixture } = setupWithInstructions(
+      '[click](http://example.com/?a="b"&c=d "It\'s a \\"quote\\"")'
+    );
+    await initAndDetect(component, fixture);
+    const link = fixture.nativeElement.querySelector(
+      '[data-testid="plugin-instructions"] a'
+    ) as HTMLAnchorElement;
+    expect(link).not.toBeNull();
+    // Browser parses the attribute correctly — no extra siblings, no broken markup.
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toContain('noopener');
+    // href contains the literal `"` after the browser un-escaped &quot;.
+    expect(link.getAttribute('href')).toContain('"b"');
+  });
+
   it('opens markdown links in a new tab with rel="noopener noreferrer"', async () => {
     // Otherwise a click inside the Tauri webview would navigate the SPA away
     // (state loss) and leak `window.opener` to the linked page.
@@ -568,17 +588,19 @@ describe('PluginDetailComponent', () => {
   });
 
   describe('terminal-minimal tabs + master toggle', () => {
-    it('renders four tabs: dashboard / settings / tools · N / logs', async () => {
+    it('renders three tabs: dashboard / settings / logs', async () => {
+      // `tools` tab was removed (YAGNI — backend never exposed per-plugin
+      // tool stats, so `exposedTools` was always `[]`).
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
-      const tabBar = fixture.nativeElement.querySelector('[data-testid="tab-bar"]');
-      expect(tabBar).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="tab-bar"]')).not.toBeNull();
       expect(fixture.nativeElement.querySelector('[data-testid="tab-dashboard"]')).not.toBeNull();
       expect(fixture.nativeElement.querySelector('[data-testid="tab-settings"]')).not.toBeNull();
-      const tools = fixture.nativeElement.querySelector('[data-testid="tab-tools"]');
-      expect(tools).not.toBeNull();
-      expect(tools.textContent).toContain('tools');
       expect(fixture.nativeElement.querySelector('[data-testid="tab-logs"]')).not.toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="tab-tools"]'),
+        'tools tab should be removed'
+      ).toBeNull();
     });
 
     it('selecting the settings tab swaps the active panel', async () => {
@@ -603,13 +625,10 @@ describe('PluginDetailComponent', () => {
       expect(mockRouter.navigate).toHaveBeenCalledWith(['/logs']);
     });
 
-    it('renders the dashboard status + invocations cards', async () => {
+    it('renders the dashboard status card', async () => {
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
       expect(fixture.nativeElement.querySelector('[data-testid="status-card"]')).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="invocations-card"]')
-      ).not.toBeNull();
       expect(fixture.nativeElement.querySelector('[data-testid="status-detail"]')).not.toBeNull();
     });
 

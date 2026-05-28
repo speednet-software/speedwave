@@ -748,23 +748,11 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
                 .filter_map(|e| e.file_name().into_string().ok())
                 .collect(),
         };
-        let svc_canon = svc_dir.canonicalize().map_err(|e| e.to_string())?;
+        // Use the single symlink-aware helper so bulk and per-field delete
+        // share one safety contract (no-follow + refuse all symlinks + only
+        // remove the literal path).
         for key in &keys {
-            let path = svc_dir.join(key);
-            // Path-traversal guard: canonicalise and confirm it stays
-            // inside the service token dir before unlinking.
-            match path.canonicalize() {
-                Ok(canon) if canon.starts_with(&svc_canon) => {
-                    std::fs::remove_file(&canon).map_err(|e| e.to_string())?;
-                }
-                Ok(canon) => {
-                    return Err(format!(
-                        "refusing to delete '{}': resolves outside the plugin's token dir",
-                        canon.display()
-                    ));
-                }
-                Err(_) => { /* file doesn't exist — nothing to delete */ }
-            }
+            remove_credential_file_guarded(&svc_dir, key)?;
         }
     }
 
