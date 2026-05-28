@@ -7,6 +7,7 @@
 //! flaky probe); host_exec uses a single attempt.
 
 use std::net::{IpAddr, SocketAddr, TcpStream};
+#[cfg(unix)]
 use std::process::Command;
 use std::time::Duration;
 
