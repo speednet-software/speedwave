@@ -75,6 +75,9 @@ pub fn render_compose(
     bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
+    // Windows: WSL adapter IP can drift; re-detect before it lands in extra_hosts.
+    #[cfg(target_os = "windows")]
+    invalidate_host_addressing_cache();
     let data_dir = consts::data_dir();
     let tokens_dir = resolve_tokens_dir(project_name);
     let claude_home = crate::claude_home::claude_home_dir(data_dir, project_name);
@@ -151,7 +154,7 @@ pub fn render_compose(
         std::fs::set_permissions(&ide_lock_dir, std::fs::Permissions::from_mode(0o700))?;
     }
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
-    yaml = yaml.replace("${HOST_GATEWAY}", host_gateway_ip());
+    yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
@@ -966,7 +969,7 @@ fn apply_plugins_from_verified(
                         &registration.token_env,
                         &registration.auth_token,
                     )?;
-                    ensure_host_gateway_extra_host(&mut doc, &compose_name);
+                    ensure_host_gateway_extra_host(&mut doc, &compose_name)?;
                 }
             }
         }
@@ -1473,7 +1476,7 @@ fn apply_oauth_config_with_paths(
                 continue;
             }
         }
-        ensure_host_gateway_extra_host(&mut doc, compose_service);
+        ensure_host_gateway_extra_host(&mut doc, compose_service)?;
         inject_env_into(&mut doc, compose_service, "WORKER_OAUTH_URL", &url);
         let mount = format!(
             "{}:/secrets/oauth-auth-token-{service_id}:ro",
@@ -1526,7 +1529,7 @@ fn apply_worker_config(
     let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-    ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+    ensure_host_gateway_extra_host(&mut doc, "mcp-hub")?;
     inject_worker_env(&mut doc, env_var, &url);
     add_hub_volume(
         &mut doc,
@@ -1590,19 +1593,244 @@ fn host_exec_gateway_url(port: u16) -> String {
     worker_gateway_url(port)
 }
 
-/// Returns the host IP/hostname reachable from inside the container/VM.
-/// Used for `extra_hosts` entries and constructing wsUrls in lock files.
-///
-/// macOS: Lima vzNAT always assigns 192.168.5.2 to the macOS host — static, not DHCP.
-/// Windows: nerdctl in WSL2 uses 192.168.65.1.
-pub fn host_gateway_ip() -> &'static str {
-    #[cfg(target_os = "macos")]
+/// Container-side `gateway_ip` + host-side `bind_address`. On Windows both
+/// equal the WSL vEthernet adapter IP (mirrored-mode 127.0.0.1 broken — WSL#11312).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostAddressing {
+    pub gateway_ip: String,
+    pub bind_address: String,
+}
+
+/// Test seam. Production: `LimaStatic` (macOS) / `WslDetector` (Windows).
+pub trait HostAddressingComputer: Send + Sync {
+    fn compute(&self) -> anyhow::Result<HostAddressing>;
+}
+
+static HOST_ADDRESSING: std::sync::RwLock<Option<HostAddressing>> = std::sync::RwLock::new(None);
+
+static COMPUTER: std::sync::RwLock<Option<std::sync::Arc<dyn HostAddressingComputer>>> =
+    std::sync::RwLock::new(None);
+
+/// Cached `HostAddressing`; on Windows returns `Err` on detection failure.
+pub fn host_addressing() -> anyhow::Result<HostAddressing> {
+    if let Some(addr) = HOST_ADDRESSING
+        .read()
+        .map_err(|e| anyhow::anyhow!("host_addressing cache poisoned: {e}"))?
+        .clone()
     {
-        consts::LIMA_VZ_HOST_IP // "192.168.5.2"
+        return Ok(addr);
     }
+    let computer = current_computer();
+    let addr = computer.compute()?;
+    let mut write = HOST_ADDRESSING
+        .write()
+        .map_err(|e| anyhow::anyhow!("host_addressing cache poisoned: {e}"))?;
+    if let Some(existing) = write.clone() {
+        return Ok(existing);
+    }
+    *write = Some(addr.clone());
+    Ok(addr)
+}
+
+/// Container-side gateway IP (compose `extra_hosts` target).
+pub fn host_gateway_ip() -> anyhow::Result<String> {
+    Ok(host_addressing()?.gateway_ip)
+}
+
+/// Host-side `TcpListener::bind` address (macOS: 127.0.0.1; Windows: WSL adapter IP).
+pub fn host_bind_address() -> anyhow::Result<String> {
+    Ok(host_addressing()?.bind_address)
+}
+
+/// Clears the cached `HostAddressing` so the next call recomputes.
+pub fn invalidate_host_addressing_cache() {
+    if let Ok(mut write) = HOST_ADDRESSING.write() {
+        *write = None;
+    }
+}
+
+fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
+    if let Ok(slot) = COMPUTER.read() {
+        if let Some(c) = slot.as_ref() {
+            return std::sync::Arc::clone(c);
+        }
+    }
+    // Install the default computer for this platform.
+    let default: std::sync::Arc<dyn HostAddressingComputer> = {
+        #[cfg(target_os = "macos")]
+        {
+            std::sync::Arc::new(host_addressing_impls::LimaStatic)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::sync::Arc::new(host_addressing_impls::WslDetector)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            std::sync::Arc::new(host_addressing_impls::Unsupported)
+        }
+    };
+    if let Ok(mut slot) = COMPUTER.write() {
+        if slot.is_none() {
+            *slot = Some(std::sync::Arc::clone(&default));
+        }
+        if let Some(c) = slot.as_ref() {
+            return std::sync::Arc::clone(c);
+        }
+    }
+    default
+}
+
+/// Test-only: inject a fixture computer. Pair with `#[serial_test::serial]`.
+#[cfg(test)]
+pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAddressingComputer>) {
+    *COMPUTER.write().expect("COMPUTER write lock") = Some(computer);
+    invalidate_host_addressing_cache();
+}
+
+/// Test-only: restore the platform default computer.
+#[cfg(test)]
+pub fn reset_host_addressing_computer_for_test() {
+    *COMPUTER.write().expect("COMPUTER write lock") = None;
+    invalidate_host_addressing_cache();
+}
+
+mod host_addressing_impls {
+    use super::HostAddressing;
+
+    #[cfg(target_os = "macos")]
+    pub(super) struct LimaStatic;
+
+    #[cfg(target_os = "macos")]
+    impl super::HostAddressingComputer for LimaStatic {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            Ok(HostAddressing {
+                gateway_ip: crate::consts::LIMA_VZ_HOST_IP.to_string(),
+                bind_address: "127.0.0.1".to_string(),
+            })
+        }
+    }
+
     #[cfg(target_os = "windows")]
-    {
-        consts::WSL_HOST_IP // "192.168.65.1"
+    pub(super) struct WslDetector;
+
+    #[cfg(target_os = "windows")]
+    impl super::HostAddressingComputer for WslDetector {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            let ip = detect_wsl_gateway_ip()?;
+            Ok(HostAddressing {
+                gateway_ip: ip.clone(),
+                bind_address: ip,
+            })
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn detect_wsl_gateway_ip() -> anyhow::Result<String> {
+        let distro = crate::consts::wsl_distro_name();
+        let output = crate::binary::system_command("wsl.exe")
+            .args(["-d", distro, "--", "sh", "-c", "ip -4 route show default"])
+            .output()
+            .map_err(|e| anyhow::anyhow!("wsl.exe probe failed for distro '{distro}': {e}"))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "wsl.exe -d {distro} ip route returned status {} (stderr: {})",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let decoded = crate::runtime::wsl::decode_wsl_output(&output.stdout);
+        parse_default_route_gateway(&decoded).ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not parse WSL gateway IP from default route output of distro '{distro}': {decoded:?}"
+            )
+        })
+    }
+
+    /// Extracts the first IPv4 gateway from `ip -4 route show default` output.
+    /// Rejects loopback / unspecified / link-local / multicast.
+    #[cfg(any(target_os = "windows", test))]
+    pub(super) fn parse_default_route_gateway(output: &str) -> Option<String> {
+        for line in output.lines() {
+            let line = line.trim();
+            if !line.starts_with("default") {
+                continue;
+            }
+            let mut tokens = line.split_whitespace();
+            // `default via X.X.X.X ...`
+            while let Some(tok) = tokens.next() {
+                if tok == "via" {
+                    if let Some(ip_str) = tokens.next() {
+                        if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                            if is_acceptable_gateway(ip) {
+                                return Some(ip.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    fn is_acceptable_gateway(ip: std::net::Ipv4Addr) -> bool {
+        !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() && !ip.is_multicast()
+    }
+
+    #[cfg(test)]
+    mod parse_tests {
+        use super::parse_default_route_gateway;
+
+        #[test]
+        fn extracts_ipv4_from_default_route_line() {
+            let out = "default via 172.24.48.1 dev eth0 proto kernel\n";
+            assert_eq!(
+                parse_default_route_gateway(out),
+                Some("172.24.48.1".to_string())
+            );
+        }
+
+        #[test]
+        fn returns_none_when_no_default_route() {
+            assert_eq!(
+                parse_default_route_gateway("10.4.1.0/24 dev br-xxx\n"),
+                None
+            );
+        }
+
+        #[test]
+        fn rejects_loopback_via() {
+            let out = "default via 127.0.0.1 dev lo proto kernel\n";
+            assert_eq!(parse_default_route_gateway(out), None);
+        }
+
+        #[test]
+        fn picks_first_default_route_when_multiple() {
+            let out = "default via 172.24.48.1 dev eth0\n\
+                       default via 10.0.0.1 dev eth1 metric 100\n";
+            assert_eq!(
+                parse_default_route_gateway(out),
+                Some("172.24.48.1".to_string())
+            );
+        }
+
+        #[test]
+        fn rejects_unspecified_via() {
+            let out = "default via 0.0.0.0 dev eth0\n";
+            assert_eq!(parse_default_route_gateway(out), None);
+        }
+
+        #[test]
+        fn ignores_non_default_lines() {
+            let out = "10.4.1.0/24 dev br-xxx proto kernel scope link src 10.4.1.1\n\
+                       default via 172.30.96.1 dev eth0\n\
+                       172.30.96.0/20 dev eth0 proto kernel scope link src 172.30.99.123\n";
+            assert_eq!(
+                parse_default_route_gateway(out),
+                Some("172.30.96.1".to_string())
+            );
+        }
     }
 }
 
@@ -1746,22 +1974,25 @@ fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
 /// substitution — inserts a literal IP, not a placeholder.
 /// Idempotency by hostname prefix: replaces an existing canonical entry (any IP)
 /// rather than appending a duplicate.
-fn ensure_host_gateway_extra_host(doc: &mut serde_yaml_ng::Value, service: &str) {
-    let canonical_entry = format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip());
+fn ensure_host_gateway_extra_host(
+    doc: &mut serde_yaml_ng::Value,
+    service: &str,
+) -> anyhow::Result<()> {
+    let canonical_entry = format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip()?);
     let hostname_prefix = format!("{}:", consts::HOST_GATEWAY_ALIAS);
     let Some(services) = doc.get_mut("services") else {
-        return;
+        return Ok(());
     };
     let Some(svc) = services.get_mut(service) else {
-        return;
+        return Ok(());
     };
     if svc.get("extra_hosts").is_none() {
         svc["extra_hosts"] =
             serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(canonical_entry)]);
-        return;
+        return Ok(());
     }
     let Some(seq) = svc["extra_hosts"].as_sequence_mut() else {
-        return;
+        return Ok(());
     };
     if let Some(existing) = seq
         .iter_mut()
@@ -1771,6 +2002,7 @@ fn ensure_host_gateway_extra_host(doc: &mut serde_yaml_ng::Value, service: &str)
     } else {
         seq.push(serde_yaml_ng::Value::String(canonical_entry));
     }
+    Ok(())
 }
 
 /// Adds a volume mount to an arbitrary service. No-op if the service is absent.
@@ -3881,7 +4113,7 @@ services:
             .get("extra_hosts")
             .and_then(|v| v.as_sequence())
             .expect("mcp-playwright must have extra_hosts (ADR-062)");
-        let gateway_ip = crate::compose::host_gateway_ip();
+        let gateway_ip = crate::compose::host_gateway_ip().expect("test host addressing");
         let expected_entry = format!("host.docker.internal:{gateway_ip}");
         assert!(
             extra_hosts
@@ -5508,7 +5740,7 @@ services:
     // ---- ensure_host_gateway_extra_host + per-consumer injection tests ----
 
     fn render_substituted_template() -> String {
-        COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", host_gateway_ip())
+        COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", &host_gateway_ip().expect("test"))
     }
 
     /// Write a fixture lock.json + standalone token mount file, for the
@@ -5615,8 +5847,8 @@ services:
     fn ensure_host_gateway_extra_host_is_idempotent() {
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
-        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
-        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub").expect("test");
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub").expect("test");
         let yaml = serde_yaml_ng::to_string(&doc).unwrap();
         let entries = extra_hosts_for(&yaml, "mcp-hub");
         assert_eq!(
@@ -5636,7 +5868,7 @@ services:
                 "{}:9.9.9.9",
                 consts::HOST_GATEWAY_ALIAS
             ))]);
-        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub").expect("test");
         let yaml = serde_yaml_ng::to_string(&doc).unwrap();
         let entries = extra_hosts_for(&yaml, "mcp-hub");
         assert_eq!(
@@ -5646,7 +5878,11 @@ services:
         );
         assert_eq!(
             entries[0],
-            format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip())
+            format!(
+                "{}:{}",
+                consts::HOST_GATEWAY_ALIAS,
+                host_gateway_ip().expect("test")
+            )
         );
     }
 
@@ -7139,9 +7375,9 @@ services:
             "render_compose must substitute ${{HOST_GATEWAY}}"
         );
         // Must contain a valid IP (not the placeholder)
-        let expected_ip = host_gateway_ip();
+        let expected_ip = host_gateway_ip().expect("test");
         assert!(
-            result.contains(expected_ip),
+            result.contains(&expected_ip),
             "rendered compose must contain host gateway IP {expected_ip}"
         );
     }
@@ -11833,5 +12069,129 @@ networks:
 "#;
         super::FORCE_DISK_GARBAGE.with(|c| *c.borrow_mut() = Some(valid_yaml.to_string()));
         super::save_compose(&project, valid_yaml).unwrap();
+    }
+
+    // ── HostAddressing resolver tests ───────────────────────────────────────
+
+    struct FixedComputer(HostAddressing);
+    impl HostAddressingComputer for FixedComputer {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct CountingComputer {
+        addr: HostAddressing,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl HostAddressingComputer for CountingComputer {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.addr.clone())
+        }
+    }
+
+    struct FailingComputer(String);
+    impl HostAddressingComputer for FailingComputer {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            Err(anyhow::anyhow!(self.0.clone()))
+        }
+    }
+
+    fn sample_addr() -> HostAddressing {
+        HostAddressing {
+            gateway_ip: "172.24.48.1".into(),
+            bind_address: "172.24.48.1".into(),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn host_addressing_caches_after_first_call() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        set_host_addressing_computer_for_test(std::sync::Arc::new(CountingComputer {
+            addr: sample_addr(),
+            calls: std::sync::Arc::clone(&calls),
+        }));
+
+        let a = host_addressing().unwrap();
+        let b = host_addressing().unwrap();
+        assert_eq!(a, b);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        reset_host_addressing_computer_for_test();
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn host_addressing_recomputes_after_invalidation() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        set_host_addressing_computer_for_test(std::sync::Arc::new(CountingComputer {
+            addr: sample_addr(),
+            calls: std::sync::Arc::clone(&calls),
+        }));
+
+        host_addressing().unwrap();
+        invalidate_host_addressing_cache();
+        host_addressing().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        reset_host_addressing_computer_for_test();
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn host_addressing_surfaces_computer_error() {
+        set_host_addressing_computer_for_test(std::sync::Arc::new(FailingComputer(
+            "wsl probe failed".into(),
+        )));
+        let err = host_addressing().unwrap_err();
+        assert!(err.to_string().contains("wsl probe failed"));
+
+        reset_host_addressing_computer_for_test();
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn host_gateway_ip_and_bind_address_split_correctly() {
+        set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(HostAddressing {
+            gateway_ip: "192.168.5.2".into(),
+            bind_address: "127.0.0.1".into(),
+        })));
+        assert_eq!(host_gateway_ip().unwrap(), "192.168.5.2");
+        assert_eq!(host_bind_address().unwrap(), "127.0.0.1");
+
+        reset_host_addressing_computer_for_test();
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn host_addressing_concurrent_callers_share_one_computation() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        set_host_addressing_computer_for_test(std::sync::Arc::new(CountingComputer {
+            addr: sample_addr(),
+            calls: std::sync::Arc::clone(&calls),
+        }));
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let b = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    b.wait();
+                    host_addressing().unwrap()
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let n = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            n >= 1 && n <= 4,
+            "computer called {n} times — expected 1..=4 (one wins; losers see cached or recompute under race)"
+        );
+
+        reset_host_addressing_computer_for_test();
     }
 }

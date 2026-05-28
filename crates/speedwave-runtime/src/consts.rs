@@ -157,8 +157,6 @@ pub const HOST_GATEWAY_ALIAS: &str = "host.docker.internal";
 /// IP of the macOS host as seen from inside nerdctl containers in the Lima vzNAT network.
 /// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
 pub const LIMA_VZ_HOST_IP: &str = "192.168.5.2";
-/// IP of the Windows host as seen from inside WSL2 containers.
-pub const WSL_HOST_IP: &str = "192.168.65.1";
 
 /// Container user for unprivileged mode (macOS Lima, Windows WSL2).
 /// containerd runs as root inside the VM → UID 1000 maps to UID 1000 on host.

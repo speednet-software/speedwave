@@ -134,13 +134,13 @@ impl HostExecProcess {
     }
 }
 
-/// Quick TCP liveness probe against `127.0.0.1:<port>`.
+/// Quick TCP liveness probe against the worker's bind address.
 pub fn is_host_exec_alive(port: u16) -> bool {
     if port == 0 {
         return false;
     }
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    std::net::TcpStream::connect_timeout(&addr, consts::PORT_PROBE_TIMEOUT).is_ok()
+    let bind = crate::host_mcp_process::probe::host_bind_address_for_probe();
+    crate::host_mcp_process::probe::probe_tcp(&bind, port, 1, consts::PORT_PROBE_TIMEOUT)
 }
 
 /// Write the config snapshot JSON `chmod 600` — may hold env-value secrets.
