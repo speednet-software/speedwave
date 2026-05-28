@@ -107,6 +107,10 @@ impl LockedRuntime {
         self.inner.is_available()
     }
 
+    pub fn is_installed(&self) -> bool {
+        self.inner.is_installed()
+    }
+
     pub fn ensure_ready(&self) -> anyhow::Result<()> {
         self.inner.ensure_ready()
     }
@@ -284,6 +288,14 @@ mod tests {
             .transaction("p", |_| Ok::<i32, anyhow::Error>(7))
             .unwrap();
         assert_eq!(v, 7);
+    }
+
+    #[test]
+    fn is_installed_defaults_to_is_available() {
+        let (rt_yes, _) = MockRuntimeBuilder::new().with_is_available(true).build();
+        assert!(rt_yes.is_installed());
+        let (rt_no, _) = MockRuntimeBuilder::new().with_is_available(false).build();
+        assert!(!rt_no.is_installed());
     }
 
     #[test]

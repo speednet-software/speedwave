@@ -79,6 +79,12 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// `ensure_ready()` can start it successfully.
     fn is_available(&self) -> bool;
 
+    /// `true` if the VM / WSL distro exists, regardless of running state.
+    /// Used by `is_setup_complete` to detect external removal.
+    fn is_installed(&self) -> bool {
+        self.is_available()
+    }
+
     /// Brings the runtime to a fully operational state, or returns a descriptive error.
     ///
     /// Safe to call unconditionally before any runtime operation. Implementations

@@ -598,6 +598,17 @@ impl ContainerRuntime for LimaRuntime {
             .unwrap_or(false)
     }
 
+    fn is_installed(&self) -> bool {
+        // `limactl list <name>` exits 0 only when the VM exists (any status).
+        self.runner
+            .run(
+                "limactl",
+                &["list", "--format", "{{.Name}}", consts::lima_vm_name()],
+            )
+            .map(|output| output.trim() == consts::lima_vm_name())
+            .unwrap_or(false)
+    }
+
     fn build_image(
         &self,
         tag: &str,
