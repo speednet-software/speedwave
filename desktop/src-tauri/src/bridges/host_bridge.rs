@@ -35,13 +35,12 @@ pub enum AuthScheme {
     /// set arbitrary headers on the WebSocket upgrade.
     Header(&'static str),
     /// Token in the URL query string (`?<name>=<token>`). Required for
-    /// browser-based clients — the WebSocket API does not allow custom
-    /// headers on the upgrade. **Accepted risk:** URL query strings
-    /// can leak via process arg lists, browser history, and HTTP
-    /// `Referer` headers. Mitigated by (a) listening only on
-    /// `127.0.0.1`, (b) regenerating the token on every Desktop
-    /// startup, (c) `0o600` lock file. Prefer `Header` when the client
-    /// can set headers.
+    /// browser-based clients. **Accepted risk:** URL query strings can
+    /// leak via process arg lists, browser history, and `Referer` headers.
+    /// Mitigated by (a) binding only on a host-local address —
+    /// `127.0.0.1` on macOS, WSL vEthernet adapter IP on Windows (invisible
+    /// from LAN), via `compose::host_bind_address`; (b) UUID v4 token
+    /// regenerated each Desktop startup; (c) `0o600` lock file.
     QueryParam(&'static str),
 }
 
@@ -433,16 +432,7 @@ impl HostBridge {
         config: HostBridgeConfig,
         opts: HostBridgeNewOptions,
     ) -> anyhow::Result<Self> {
-        let listener = match opts.preferred_port {
-            Some(p) => std::net::TcpListener::bind(("127.0.0.1", p)).with_context(|| {
-                format!(
-                    "HostBridge '{}': preferred_port {p} unavailable",
-                    &config.name
-                )
-            })?,
-            None => std::net::TcpListener::bind("127.0.0.1:0")
-                .context("HostBridge: failed to bind 127.0.0.1:0")?,
-        };
+        let listener = bind_with_retry(&config.name, opts.preferred_port)?;
         let port = listener.local_addr()?.port();
         let token = load_or_create_persistent_token(opts.persistent_token_path.as_deref())?;
 
@@ -640,6 +630,45 @@ impl HostBridge {
             Err(e) => return Err(e).context("removing lock file"),
         }
         Ok(())
+    }
+}
+
+/// Binds the listener on `compose::host_bind_address()`. Retries once on
+/// `EADDRNOTAVAIL` (typical after `wsl --shutdown` invalidated the cached
+/// adapter IP) after re-detecting.
+fn bind_with_retry(
+    name: &str,
+    preferred_port: Option<u16>,
+) -> anyhow::Result<std::net::TcpListener> {
+    let attempt = |addr: &str| -> std::io::Result<std::net::TcpListener> {
+        match preferred_port {
+            Some(p) => std::net::TcpListener::bind((addr, p)),
+            None => std::net::TcpListener::bind((addr, 0)),
+        }
+    };
+    let first = speedwave_runtime::compose::host_bind_address()
+        .with_context(|| format!("HostBridge '{name}': resolving bind address"))?;
+    match attempt(&first) {
+        Ok(l) => Ok(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+            log::warn!(
+                "HostBridge '{name}': bind on {first} returned EADDRNOTAVAIL; \
+                 invalidating host_addressing cache and retrying"
+            );
+            speedwave_runtime::compose::invalidate_host_addressing_cache();
+            let second = speedwave_runtime::compose::host_bind_address()
+                .with_context(|| format!("HostBridge '{name}': re-resolving bind address"))?;
+            attempt(&second).with_context(|| {
+                format!(
+                    "HostBridge '{name}': bind on {second} failed after retry (preferred_port={preferred_port:?})"
+                )
+            })
+        }
+        Err(e) => Err(anyhow::Error::from(e)).with_context(|| {
+            format!(
+                "HostBridge '{name}': bind on {first} failed (preferred_port={preferred_port:?})"
+            )
+        }),
     }
 }
 
@@ -1309,6 +1338,24 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration) {
         Ok(e) => e,
         Err(_) => return,
     };
+    // Probe on the same address bridges bind on (macOS: 127.0.0.1; Windows:
+    // WSL adapter IP). If detection fails, skip — better to leave orphan
+    // locks than to delete files for live bridges that probe rejects.
+    let bind: std::net::IpAddr = match speedwave_runtime::compose::host_bind_address() {
+        Ok(addr) => match addr.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                log::warn!(
+                    "cleanup_stale_lock_files: host_bind_address {addr:?} unparseable ({e}); skipping"
+                );
+                return;
+            }
+        },
+        Err(e) => {
+            log::warn!("cleanup_stale_lock_files: host_bind_address failed ({e}); skipping");
+            return;
+        }
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|x| x.to_str()) != Some("lock") {
@@ -1325,9 +1372,7 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration) {
                 continue;
             }
         };
-        if StdTcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), probe_timeout)
-            .is_err()
-        {
+        if StdTcpStream::connect_timeout(&SocketAddr::new(bind, port), probe_timeout).is_err() {
             log::debug!(
                 target: "host_bridge",
                 "removing stale lock {:?} (port {} not listening)",
