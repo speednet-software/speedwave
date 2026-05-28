@@ -72,7 +72,7 @@ import { JsonSchema } from '../../models/plugin';
         <div class="flex gap-3 mt-4">
           <button
             type="submit"
-            class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-on-accent"
+            class="btn-outline-accent px-5 py-1.5 text-[13px]"
             data-testid="settings-save"
           >
             Save Settings

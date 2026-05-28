@@ -5,10 +5,10 @@
  * initial render, and asserts zero WCAG 2.1 AA violations. Any new
  * view must be added to VIEWS so the sweep remains comprehensive.
  *
- * Sweep matrix: each view is rendered in every (mode × accent) pair the
- * app actually ships — 2 modes × 6 accents — so contrast regressions
- * cannot land silently. `auto` mode is covered by the ThemeService unit
- * tests; here we only assert the two deterministic effective modes.
+ * Sweep matrix: each view is rendered in every (effective-mode × accent) pair
+ * the app ships, so contrast regressions cannot land silently. `auto` mode is
+ * covered by the ThemeService unit tests; here we only assert the deterministic
+ * effective modes.
  *
  * Waivers (with justification) go in docs/accessibility/contrast-report.md.
  */
@@ -37,10 +37,12 @@ import { ToolBlockComponent } from './chat/blocks/tool-block.component';
 
 import { TauriService } from './services/tauri.service';
 import { MockTauriService } from './testing/mock-tauri.service';
-import { THEME_IDS, type ThemeId } from './services/theme.service';
+import { THEME_IDS, THEME_MODES, type ThemeId, type EffectiveMode } from './services/theme.service';
 
-type EffectiveMode = 'light' | 'dark';
-const EFFECTIVE_MODES: readonly EffectiveMode[] = ['light', 'dark'] as const;
+// Derived from THEME_MODES so a future explicit (non-auto) mode is swept automatically.
+const EFFECTIVE_MODES: readonly EffectiveMode[] = THEME_MODES.filter(
+  (m): m is EffectiveMode => m !== 'auto'
+);
 
 /**
  * Stubs `window.matchMedia` so ThemeService can construct in jsdom even though

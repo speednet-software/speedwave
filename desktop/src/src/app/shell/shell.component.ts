@@ -15,7 +15,6 @@ import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.c
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
-import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { CommandPaletteComponent } from './command-palette/command-palette.component';
 import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
@@ -26,7 +25,7 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
 /**
  * Application shell — hosts the left icon rail, the routed main content, and
  * the global keyboard shortcuts (⌘1/⌘2/⌘3/⌘L for view nav, ⌘B for the
- * conversations drawer, ⌘K for the command palette, ⌘T to cycle accent themes).
+ * conversations drawer, ⌘K for the command palette).
  *
  * Blocking overlays (loading / check-failed / restart-required / error banner)
  * live here because they must cover the rail and the routed content alike.
@@ -46,7 +45,9 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown)': 'onKeydown($event)' },
   template: `
-    <div class="flex h-screen flex-col bg-[var(--bg)] text-[var(--ink)]">
+    <div
+      class="flex h-screen flex-col border-t border-[var(--line)] bg-[var(--bg)] text-[var(--ink)]"
+    >
       @if (projectState.status !== 'ready' && projectState.status !== 'auth_required') {
         @if (projectState.status === 'check_failed') {
           <div
@@ -184,7 +185,6 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
 export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
-  readonly theme = inject(ThemeService);
   readonly beta = inject(BetaService);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
@@ -321,10 +321,6 @@ export class ShellComponent implements OnInit, OnDestroy {
       case 'b':
         event.preventDefault();
         this.ui.toggleSidebar();
-        return;
-      case 't':
-        event.preventDefault();
-        this.theme.cycle();
         return;
       case '1':
         event.preventDefault();

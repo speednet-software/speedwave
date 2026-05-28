@@ -1,9 +1,12 @@
-import { Injectable, OnDestroy, signal, type Signal } from '@angular/core';
+import { inject, Injectable, OnDestroy, signal, type Signal } from '@angular/core';
+import { NativeThemeAdapter, type EffectiveMode } from './native-theme-adapter';
+
+export type { EffectiveMode } from './native-theme-adapter';
 
 /** Identifiers for every accent theme exposed in Settings → Appearance. */
 export type ThemeId = 'crimson' | 'mint' | 'amber' | 'iris' | 'cyan' | 'sand';
 
-/** Display order for the ⌘T cycle and the Appearance picker. */
+/** Display order for the Appearance accent picker. */
 export const THEME_IDS: readonly ThemeId[] = [
   'crimson',
   'mint',
@@ -19,13 +22,43 @@ export type ThemeMode = 'light' | 'dark' | 'auto';
 /** Display order for the MODE picker in Appearance. */
 export const THEME_MODES: readonly ThemeMode[] = ['light', 'dark', 'auto'] as const;
 
-/** localStorage keys — kept out of the public API to avoid drift between read/write. */
-const THEME_STORAGE_KEY = 'speedwave-theme';
-const MODE_STORAGE_KEY = 'speedwave-theme-mode';
+/** localStorage key for the accent theme. Exported so tests assert the real key (no drift). */
+export const THEME_STORAGE_KEY = 'speedwave-theme';
+/** localStorage key for the appearance mode. Exported so tests assert the real key (no drift). */
+export const MODE_STORAGE_KEY = 'speedwave-theme-mode';
+
+/**
+ * Persists a value to localStorage, tolerating private-mode / quota failures.
+ * @param key localStorage key to write.
+ * @param value Value to store.
+ */
+function safePersist(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* private mode / disabled storage — ignore. */
+  }
+}
+
+/**
+ * Reads a persisted choice, validating it against an allowlist.
+ * @param key localStorage key to read.
+ * @param allowlist Permitted values; anything else falls back.
+ * @param fallback Value returned for missing / unknown / unreadable entries.
+ */
+function readStoredChoice<T extends string>(key: string, allowlist: readonly T[], fallback: T): T {
+  let saved: string | null;
+  try {
+    saved = localStorage.getItem(key);
+  } catch {
+    saved = null;
+  }
+  return (allowlist as readonly string[]).includes(saved ?? '') ? (saved as T) : fallback;
+}
 
 /**
  * Applies a theme to <html> and persists it. Crimson is the default → no attr written.
- * @param id Theme to activate and persist to localStorage.
+ * @param id Accent theme to activate and persist.
  */
 function writeTheme(id: ThemeId): void {
   const html = document.documentElement;
@@ -34,22 +67,7 @@ function writeTheme(id: ThemeId): void {
   } else {
     html.setAttribute('data-theme', id);
   }
-  try {
-    localStorage.setItem(THEME_STORAGE_KEY, id);
-  } catch {
-    /* private mode / disabled storage — ignore. */
-  }
-}
-
-/** Reads the persisted theme, falling back to crimson on unknown / missing values. */
-function readInitialTheme(): ThemeId {
-  let saved: string | null;
-  try {
-    saved = localStorage.getItem(THEME_STORAGE_KEY);
-  } catch {
-    saved = null;
-  }
-  return (THEME_IDS as readonly string[]).includes(saved ?? '') ? (saved as ThemeId) : 'crimson';
+  safePersist(THEME_STORAGE_KEY, id);
 }
 
 /** Defensive matchMedia accessor — undefined in SSR and some test environments. */
@@ -58,7 +76,8 @@ function getDarkMQ(): MediaQueryList | null {
     return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
       ? window.matchMedia('(prefers-color-scheme: dark)')
       : null;
-  } catch {
+  } catch (err) {
+    console.warn('ThemeService: matchMedia unavailable', err);
     return null;
   }
 }
@@ -67,55 +86,22 @@ function getDarkMQ(): MediaQueryList | null {
  * Resolves `auto` to the effective mode via `prefers-color-scheme`; light/dark pass through.
  * @param mode User-selected appearance mode.
  */
-function resolveEffectiveMode(mode: ThemeMode): 'light' | 'dark' {
+function resolveEffectiveMode(mode: ThemeMode): EffectiveMode {
   if (mode === 'light' || mode === 'dark') return mode;
   return getDarkMQ()?.matches ? 'dark' : 'light';
 }
 
 /**
- * Pushes the effective mode to the native window so macOS system glyphs
- * (traffic lights) match the app theme. Dynamically imported so test
- * runners without the Tauri runtime (jsdom) don't pull in the module.
- * @param effective Resolved light/dark mode to apply to the native window.
+ * Toggles `.dark` on <html> to match the effective mode.
+ * @param effective Resolved light/dark mode.
  */
-function syncNativeWindowTheme(effective: 'light' | 'dark'): void {
-  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
-  import('@tauri-apps/api/window')
-    .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(effective))
-    .catch(() => {
-      /* setTheme is best-effort — silently ignore platform/version errors. */
-    });
-}
-
-/**
- * Toggles `.dark` on <html> to match the effective mode and persists the choice.
- * @param mode Mode to activate and persist to localStorage.
- */
-function writeMode(mode: ThemeMode): void {
+function applyModeClass(effective: EffectiveMode): void {
   const html = document.documentElement;
-  const effective = resolveEffectiveMode(mode);
   if (effective === 'dark') {
     html.classList.add('dark');
   } else {
     html.classList.remove('dark');
   }
-  syncNativeWindowTheme(effective);
-  try {
-    localStorage.setItem(MODE_STORAGE_KEY, mode);
-  } catch {
-    /* private mode / disabled storage — ignore. */
-  }
-}
-
-/** Reads the persisted mode, falling back to dark for first-run / unknown values. */
-function readInitialMode(): ThemeMode {
-  let saved: string | null;
-  try {
-    saved = localStorage.getItem(MODE_STORAGE_KEY);
-  } catch {
-    saved = null;
-  }
-  return (THEME_MODES as readonly string[]).includes(saved ?? '') ? (saved as ThemeMode) : 'dark';
 }
 
 /**
@@ -123,14 +109,22 @@ function readInitialMode(): ThemeMode {
  *
  * Two orthogonal axes:
  * - **Accent** ({@link theme}) — six named variants selected by `[data-theme]`
- *   on <html>. ⌘T cycles through them.
+ *   on <html>, chosen from the Appearance picker.
  * - **Mode** ({@link mode}) — light/dark/auto, toggling `.dark` on <html>.
  *   `auto` reacts to `prefers-color-scheme` changes at runtime.
+ *
+ * Native window chrome sync is delegated to {@link NativeThemeAdapter}.
  */
 @Injectable({ providedIn: 'root' })
 export class ThemeService implements OnDestroy {
-  private readonly themeSignal = signal<ThemeId>(readInitialTheme());
-  private readonly modeSignal = signal<ThemeMode>(readInitialMode());
+  private readonly native = inject(NativeThemeAdapter);
+
+  private readonly themeSignal = signal<ThemeId>(
+    readStoredChoice(THEME_STORAGE_KEY, THEME_IDS, 'crimson')
+  );
+  private readonly modeSignal = signal<ThemeMode>(
+    readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, 'dark')
+  );
 
   /** Read-only signal of the current accent theme id. */
   readonly theme: Signal<ThemeId> = this.themeSignal.asReadonly();
@@ -139,7 +133,7 @@ export class ThemeService implements OnDestroy {
 
   private readonly mediaQuery = getDarkMQ();
   private readonly mediaListener = (): void => {
-    if (this.modeSignal() === 'auto') writeMode('auto');
+    if (this.modeSignal() === 'auto') this.applyMode('auto');
   };
   private readonly abortController = new AbortController();
 
@@ -149,17 +143,19 @@ export class ThemeService implements OnDestroy {
    */
   constructor() {
     writeTheme(this.themeSignal());
-    writeMode(this.modeSignal());
+    this.applyMode(this.modeSignal());
 
     if (this.mediaQuery) {
       if (typeof this.mediaQuery.addEventListener === 'function') {
         this.mediaQuery.addEventListener('change', this.mediaListener, {
           signal: this.abortController.signal,
         });
-      } else if (typeof (this.mediaQuery as MediaQueryList).addListener === 'function') {
+      } else if (typeof this.mediaQuery.addListener === 'function') {
         // Legacy WebView fallback — addListener is deprecated but still required
-        // on older WebKit builds shipped in some Tauri targets.
-        (this.mediaQuery as MediaQueryList).addListener(this.mediaListener);
+        // on older WebKit builds shipped in some Tauri targets. Cleaned up by
+        // the matching removeListener in ngOnDestroy (the AbortController only
+        // unregisters the addEventListener path).
+        this.mediaQuery.addListener(this.mediaListener);
       }
     }
   }
@@ -167,11 +163,14 @@ export class ThemeService implements OnDestroy {
   /** Removes the matchMedia listener when the root service is torn down. */
   ngOnDestroy(): void {
     this.abortController.abort();
-    if (
-      this.mediaQuery &&
-      typeof (this.mediaQuery as MediaQueryList).removeListener === 'function'
-    ) {
-      (this.mediaQuery as MediaQueryList).removeListener(this.mediaListener);
+    // Legacy fallback teardown — only needed when addEventListener was unavailable
+    // (otherwise the AbortController above already removed the listener).
+    if (this.mediaQuery && typeof this.mediaQuery.addEventListener !== 'function') {
+      try {
+        this.mediaQuery.removeListener?.(this.mediaListener);
+      } catch {
+        /* removeListener may be a hard error on some legacy hosts — ignore. */
+      }
     }
   }
 
@@ -185,13 +184,6 @@ export class ThemeService implements OnDestroy {
     writeTheme(id);
   }
 
-  /** Advances to the next theme in {@link THEME_IDS}, wrapping at the end. ⌘T binds here. */
-  cycle(): void {
-    const current = this.themeSignal();
-    const next = THEME_IDS[(THEME_IDS.indexOf(current) + 1) % THEME_IDS.length];
-    this.setTheme(next);
-  }
-
   /**
    * Switches the appearance mode and persists the choice.
    * @param mode Mode to activate; no-op if already active.
@@ -199,6 +191,17 @@ export class ThemeService implements OnDestroy {
   setMode(mode: ThemeMode): void {
     if (this.modeSignal() === mode) return;
     this.modeSignal.set(mode);
-    writeMode(mode);
+    this.applyMode(mode);
+  }
+
+  /**
+   * Resolves, applies the DOM class, syncs native chrome, and persists the mode.
+   * @param mode Mode to apply (light/dark/auto).
+   */
+  private applyMode(mode: ThemeMode): void {
+    const effective = resolveEffectiveMode(mode);
+    applyModeClass(effective);
+    this.native.syncWindowTheme(effective);
+    safePersist(MODE_STORAGE_KEY, mode);
   }
 }

@@ -233,7 +233,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
               <button
                 type="button"
                 data-testid="redmine-validate-btn"
-                class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-on-accent disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                class="btn-outline-accent flex items-center gap-2 px-5 py-1.5 text-[13px]"
                 [disabled]="validating"
                 (click)="onValidate()"
               >
@@ -319,7 +319,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                   <button
                     type="button"
                     data-testid="redmine-save-btn"
-                    class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-on-accent"
+                    class="btn-outline-accent px-5 py-1.5 text-[13px]"
                     (click)="onSaveMappings()"
                   >
                     Save
@@ -366,7 +366,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                 <button
                   type="button"
                   data-testid="redmine-edit-btn"
-                  class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-on-accent"
+                  class="btn-outline-accent px-5 py-1.5 text-[13px]"
                   (click)="onEdit()"
                 >
                   Edit

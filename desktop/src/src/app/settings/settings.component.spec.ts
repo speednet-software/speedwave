@@ -254,18 +254,13 @@ describe('SettingsComponent', () => {
       expect(theme.theme()).toBe('cyan');
     });
 
-    it('renders the heading, accent-color label, and ⌘T shortcut hint', () => {
+    it('renders the heading and accent-color label', () => {
       fixture.detectChanges();
       const section = fixture.nativeElement.querySelector(
         '[data-testid="settings-section-appearance"]'
       );
       expect(section.textContent).toContain('Appearance');
       expect(section.textContent).toContain('accent color');
-      // Mockup shortcut copy: "shortcut: ⌘T cycles themes"
-      expect(section.textContent).toContain('cycles themes');
-      const kbd = section.querySelector('.kbd');
-      expect(kbd).not.toBeNull();
-      expect(kbd.textContent).toContain('⌘T');
     });
 
     it('does not toggle theme when the same card is clicked twice (no-op)', () => {

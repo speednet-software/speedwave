@@ -1,19 +1,17 @@
 import { TestBed } from '@angular/core/testing';
 import {
   ThemeService,
-  THEME_IDS,
   THEME_MODES,
+  THEME_STORAGE_KEY,
+  MODE_STORAGE_KEY,
   type ThemeId,
   type ThemeMode,
 } from './theme.service';
 
-const STORAGE_KEY = 'speedwave-theme';
-const MODE_STORAGE_KEY = 'speedwave-theme-mode';
-
 /**
- * Installs a controllable `matchMedia` on `window`. Returns the mock plus a
- * `fireChange` helper that simulates a system theme toggle.
- * @param prefersDark Initial `matches` value for `(prefers-color-scheme: dark)`.
+ * Installs a controllable `matchMedia` on `window`.
+ * @param prefersDark Initial `matches` for `(prefers-color-scheme: dark)`.
+ * @returns `fireChange` to simulate OS theme toggles; `restore` to remove the stub.
  */
 function mockMatchMedia(prefersDark: boolean): {
   fireChange: (prefersDarkNow: boolean) => void;
@@ -25,7 +23,16 @@ function mockMatchMedia(prefersDark: boolean): {
     matches: prefersDark,
     media: '(prefers-color-scheme: dark)',
     onchange: null,
-    addEventListener: (_: string, fn: (e: MediaQueryListEvent) => void) => listeners.add(fn),
+    // Honour `options.signal` like a real EventTarget so AbortController-based
+    // teardown is exercised faithfully by the tests.
+    addEventListener: (
+      _: string,
+      fn: (e: MediaQueryListEvent) => void,
+      options?: { signal?: AbortSignal }
+    ) => {
+      listeners.add(fn);
+      options?.signal?.addEventListener('abort', () => listeners.delete(fn));
+    },
     removeEventListener: (_: string, fn: (e: MediaQueryListEvent) => void) => listeners.delete(fn),
     addListener: (fn: (e: MediaQueryListEvent) => void) => listeners.add(fn),
     removeListener: (fn: (e: MediaQueryListEvent) => void) => listeners.delete(fn),
@@ -114,7 +121,7 @@ describe('ThemeService', () => {
   });
 
   it('hydrates a previously persisted theme from localStorage', () => {
-    localStorage.setItem(STORAGE_KEY, 'mint');
+    localStorage.setItem(THEME_STORAGE_KEY, 'mint');
     const svc = create();
     expect(svc.theme()).toBe<ThemeId>('mint');
     expect(document.documentElement.getAttribute('data-theme')).toBe('mint');
@@ -125,7 +132,7 @@ describe('ThemeService', () => {
     svc.setTheme('amber');
     expect(svc.theme()).toBe<ThemeId>('amber');
     expect(document.documentElement.getAttribute('data-theme')).toBe('amber');
-    expect(localStorage.getItem(STORAGE_KEY)).toBe('amber');
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('amber');
   });
 
   it('removes data-theme when switching back to the crimson default', () => {
@@ -134,19 +141,19 @@ describe('ThemeService', () => {
     svc.setTheme('crimson');
     expect(svc.theme()).toBe<ThemeId>('crimson');
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
-    expect(localStorage.getItem(STORAGE_KEY)).toBe('crimson');
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('crimson');
   });
 
   // Edge cases
   it('treats unknown stored values as crimson', () => {
-    localStorage.setItem(STORAGE_KEY, 'bogus');
+    localStorage.setItem(THEME_STORAGE_KEY, 'bogus');
     const svc = create();
     expect(svc.theme()).toBe<ThemeId>('crimson');
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
   });
 
   it('treats an empty stored value as crimson', () => {
-    localStorage.setItem(STORAGE_KEY, '');
+    localStorage.setItem(THEME_STORAGE_KEY, '');
     const svc = create();
     expect(svc.theme()).toBe<ThemeId>('crimson');
   });
@@ -154,29 +161,10 @@ describe('ThemeService', () => {
   it('is a no-op when setTheme is called with the current theme', () => {
     const svc = create();
     svc.setTheme('mint');
-    const callsBefore = localStorage.getItem(STORAGE_KEY);
+    const callsBefore = localStorage.getItem(THEME_STORAGE_KEY);
     svc.setTheme('mint');
     expect(svc.theme()).toBe<ThemeId>('mint');
-    expect(localStorage.getItem(STORAGE_KEY)).toBe(callsBefore);
-  });
-
-  // State transitions — cycle()
-  it('cycle() advances through THEME_IDS in order', () => {
-    const svc = create();
-    const seen: ThemeId[] = [svc.theme()];
-    for (let i = 0; i < THEME_IDS.length; i += 1) {
-      svc.cycle();
-      seen.push(svc.theme());
-    }
-    expect(seen[0]).toBe<ThemeId>('crimson');
-    expect(seen.slice(1, 1 + THEME_IDS.length)).toEqual([
-      'mint',
-      'amber',
-      'iris',
-      'cyan',
-      'sand',
-      'crimson',
-    ] as ThemeId[]);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe(callsBefore);
   });
 
   // Error path — corrupted localStorage
@@ -275,8 +263,28 @@ describe('ThemeService', () => {
     it('is a no-op when setMode is called with the current mode', () => {
       const svc = create();
       svc.setMode('light');
+      const persisted = localStorage.getItem(MODE_STORAGE_KEY);
       svc.setMode('light');
       expect(svc.mode()).toBe<ThemeMode>('light');
+      // The early-return guard must skip the redundant persist.
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBe(persisted);
+    });
+
+    it('hydrates persisted "auto" mode at startup, applying system dark preference', () => {
+      media.restore();
+      media = mockMatchMedia(true);
+      localStorage.setItem(MODE_STORAGE_KEY, 'auto');
+      const svc = create();
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+    });
+
+    it('stops reacting to prefers-color-scheme changes after ngOnDestroy', () => {
+      const svc = create();
+      svc.setMode('auto');
+      svc.ngOnDestroy();
+      media.fireChange(true);
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
     });
 
     // State transitions
