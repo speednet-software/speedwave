@@ -45,6 +45,114 @@ pub struct AuthFieldDef {
     /// pre-existing strict behavior (auto-enable blocked on any secret).
     #[serde(default = "default_required")]
     pub required: bool,
+    /// Optional human-readable help text shown under the field label in the
+    /// Desktop credentials form. Omitted manifests deserialize to `None`;
+    /// an explicit empty string is preserved (not coerced to `None`) so a
+    /// plugin author can intentionally render nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional format constraint enforced on the entered value, both in the
+    /// Desktop form (HTML `pattern` attribute) and at save time on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<AuthFieldValidation>,
+}
+
+/// Allowed `auth_fields[].field_type` values. Public plugin contract — mirrored
+/// by the TS `PluginAuthFieldType` union in
+/// `desktop/src/src/app/models/plugin.ts`; the test
+/// `allowed_auth_field_types_match_ts_union` enforces they stay identical.
+pub(crate) const ALLOWED_AUTH_FIELD_TYPES: &[&str] = &["text", "password", "textarea"];
+
+/// A regex format constraint for an [`AuthFieldDef`] value (manifest schema —
+/// public plugin contract). Variant A of the auth-field validation design:
+/// a single anchored pattern plus an optional human-readable message.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AuthFieldValidation {
+    /// Raw regex string as it arrives from the (untrusted) manifest JSON.
+    /// Not used directly for matching — it is always funnelled through
+    /// [`ValidatedPattern::compile`], which enforces the length cap and
+    /// anchored-compile invariants. See that type for the full contract.
+    pub pattern: String,
+    /// Optional message shown when the value fails the pattern. When absent,
+    /// the UI falls back to a generic "invalid format" string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// A regex constraint proven safe to run against a credential value:
+/// non-empty, within [`consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN`], and
+/// compiled in its **anchored** full-match form (`^(?:…)$`).
+///
+/// The only constructor is [`ValidatedPattern::compile`], so *holding* a
+/// value is proof the invariant was checked — [`validate_credential_value`]
+/// matches through this type and therefore cannot run an oversized or
+/// uncompilable pattern. It is the single gate: both `validate_manifest`
+/// (install time) and `validate_credential_value` (save time) construct it,
+/// so the cap/compile rules cannot drift between the two call sites.
+#[derive(Debug)]
+pub struct ValidatedPattern(regex::Regex);
+
+impl ValidatedPattern {
+    /// Validates a raw `auth_fields[].validation.pattern` and compiles it in
+    /// anchored form. Error strings are phrased to read after an
+    /// `auth_field '<key>' ` prefix at the manifest-validation call site.
+    ///
+    /// **Cross-language invariant:** the anchoring (`^(?:…)$`) must stay in
+    /// sync with the Desktop form's `validationErrorFor`
+    /// (`plugin-credentials-form.component.ts`), which wraps the same pattern
+    /// in JS so the browser pre-check and this host check agree. The pattern
+    /// must compile under the Rust `regex` crate's RE2 subset (no
+    /// backreferences / look-around); JS-only patterns are rejected here.
+    pub fn compile(pattern: &str) -> Result<Self, String> {
+        if pattern.is_empty() {
+            return Err("has an empty validation.pattern (omit `validation` instead)".to_string());
+        }
+        if pattern.len() > consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN {
+            return Err(format!(
+                "has a validation.pattern that exceeds {} bytes",
+                consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN
+            ));
+        }
+        regex::Regex::new(&format!("^(?:{pattern})$"))
+            .map(ValidatedPattern)
+            .map_err(|e| format!("has an invalid validation.pattern: {e}"))
+    }
+
+    /// True when `value` fully matches the (anchored) pattern.
+    pub fn is_match(&self, value: &str) -> bool {
+        self.0.is_match(value)
+    }
+}
+
+/// Validates a single credential value against its field's optional regex
+/// constraint. No constraint, or an empty value (the user is leaving the
+/// stored value untouched), is always accepted — emptiness is enforced
+/// separately by the `required` flag, not here. On mismatch returns the
+/// author's `message`, or a generic fallback that names the field.
+///
+/// Recompiles via [`ValidatedPattern::compile`] on each call: saves are rare
+/// and the pattern was already proven valid at manifest-validation time, so
+/// the `Err` arm is effectively unreachable post-install — but we surface it
+/// rather than panic if a manifest somehow reached disk unvalidated.
+pub fn validate_credential_value(field: &AuthFieldDef, value: &str) -> Result<(), String> {
+    let Some(validation) = &field.validation else {
+        return Ok(());
+    };
+    if value.is_empty() {
+        return Ok(());
+    }
+    let pattern = ValidatedPattern::compile(&validation.pattern)
+        .map_err(|e| format!("auth_field '{}' {e}", field.key))?;
+    if pattern.is_match(value) {
+        Ok(())
+    } else {
+        Err(validation.message.clone().unwrap_or_else(|| {
+            format!(
+                "value for '{}' does not match the required format",
+                field.label
+            )
+        }))
+    }
 }
 
 fn default_required() -> bool {
@@ -76,6 +184,13 @@ pub struct PluginManifest {
     pub slug: String,
     pub version: String,
     pub description: String,
+    /// Optional long-form Markdown shown on the plugin's Dashboard tab in
+    /// Desktop — setup/usage guidance (how to obtain a token, post-install
+    /// steps, etc.) that doesn't fit the one-line `description` (which also
+    /// serves as the plugin-list tagline). Omitted manifests deserialize to
+    /// `None`. Length-capped at [`consts::PLUGIN_INSTRUCTIONS_MAX_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     /// Ignored by the compose emitter — all workers listen on
     /// [`consts::PORT_WORKER`] (ADR-038). Field kept `Option<u16>` so already-signed
     /// plugin manifests still deserialize; a non-zero value emits a warning at
@@ -619,6 +734,18 @@ pub(crate) fn validate_manifest(
     validate_slug(&manifest.slug)?;
     validate_speedwave_compat(manifest.speedwave_compat.as_deref())?;
 
+    // Bound the optional long-form instructions text (rendered on the
+    // Dashboard). Caps in-memory `PluginStatusEntry` size and what a
+    // manifest can wedge into the webview.
+    if let Some(instructions) = &manifest.instructions {
+        if instructions.len() > consts::PLUGIN_INSTRUCTIONS_MAX_BYTES {
+            anyhow::bail!(
+                "manifest `instructions` exceeds {} bytes",
+                consts::PLUGIN_INSTRUCTIONS_MAX_BYTES
+            );
+        }
+    }
+
     // If service_id present, slug must equal service_id
     if let Some(ref sid) = manifest.service_id {
         if manifest.slug != *sid {
@@ -718,7 +845,6 @@ pub(crate) fn validate_manifest(
     }
 
     // Validate auth_fields keys are safe filesystem names and field_type is known
-    const ALLOWED_FIELD_TYPES: &[&str] = &["text", "password", "textarea"];
     for field in &manifest.auth_fields {
         if field.key.contains('/')
             || field.key.contains('\\')
@@ -731,13 +857,21 @@ pub(crate) fn validate_manifest(
                 field.key
             );
         }
-        if !ALLOWED_FIELD_TYPES.contains(&field.field_type.as_str()) {
+        if !ALLOWED_AUTH_FIELD_TYPES.contains(&field.field_type.as_str()) {
             anyhow::bail!(
                 "auth_field '{}' has unknown field_type '{}'. Allowed: {:?}",
                 field.key,
                 field.field_type,
-                ALLOWED_FIELD_TYPES
+                ALLOWED_AUTH_FIELD_TYPES
             );
+        }
+        // Validate the optional regex constraint at install time through the
+        // single ValidatedPattern gate (length cap + anchored compile), so a
+        // broken or oversized pattern is rejected here — never at
+        // credential-save time, and never shipped to the browser's JS engine.
+        if let Some(validation) = &field.validation {
+            ValidatedPattern::compile(&validation.pattern)
+                .map_err(|e| anyhow::anyhow!("auth_field '{}' {e}", field.key))?;
         }
     }
 
@@ -2205,6 +2339,8 @@ mod tests {
                 placeholder: "sk-...".to_string(),
                 is_secret: true,
                 required: true,
+                description: None,
+                validation: None,
             }],
             settings_schema: None,
             speedwave_compat: Some(">=0.1.0".to_string()),
@@ -2213,6 +2349,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec!["sharepoint".to_string()],
             host_bridge: None,
+            instructions: None,
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: PluginManifest = serde_json::from_str(&json).unwrap();
@@ -2323,6 +2460,7 @@ mod tests {
                 cpu_limit: None,
                 requires_integrations: vec![],
                 host_bridge: None,
+                instructions: None,
             };
             let tmp = tempfile::tempdir().unwrap();
             let result = validate_manifest(&manifest, tmp.path());
@@ -2354,6 +2492,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -2381,6 +2520,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         // No Containerfile created
@@ -2413,6 +2553,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -2455,6 +2596,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -2521,6 +2663,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
@@ -2562,6 +2705,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -2681,6 +2825,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:2.0.0");
     }
@@ -2705,6 +2850,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:custom-tag");
     }
@@ -2847,6 +2993,8 @@ mod tests {
                     placeholder: "sk-...".to_string(),
                     is_secret: true,
                     required: true,
+                    description: None,
+                    validation: None,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -2855,6 +3003,8 @@ mod tests {
                     placeholder: "tok-...".to_string(),
                     is_secret: true,
                     required: true,
+                    description: None,
+                    validation: None,
                 },
                 AuthFieldDef {
                     key: "label".to_string(),
@@ -2863,6 +3013,8 @@ mod tests {
                     placeholder: "My Label".to_string(),
                     is_secret: false,
                     required: true,
+                    description: None,
+                    validation: None,
                 },
             ],
             settings_schema: None,
@@ -2872,6 +3024,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2911,6 +3064,8 @@ mod tests {
                     placeholder: "sk-...".to_string(),
                     is_secret: true,
                     required: true,
+                    description: None,
+                    validation: None,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -2919,6 +3074,8 @@ mod tests {
                     placeholder: "tok-...".to_string(),
                     is_secret: true,
                     required: true,
+                    description: None,
+                    validation: None,
                 },
             ],
             settings_schema: None,
@@ -2928,6 +3085,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2962,6 +3120,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -2990,6 +3149,8 @@ mod tests {
                 placeholder: "https://...".to_string(),
                 is_secret: false,
                 required: true,
+                description: None,
+                validation: None,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -2998,6 +3159,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3035,6 +3197,8 @@ mod tests {
                 placeholder: "sk-...".to_string(),
                 is_secret: true,
                 required: true,
+                description: None,
+                validation: None,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -3043,6 +3207,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -4045,6 +4210,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         // Replicate the duplicate check from install_plugin
@@ -4082,6 +4248,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let conflict_found = if let Some(ref sid) = conflict_manifest.service_id {
@@ -4130,6 +4297,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -4233,6 +4401,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -4263,6 +4432,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4288,6 +4458,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4313,6 +4484,7 @@ mod tests {
             cpu_limit: Some("2.0'; injected".to_string()),
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4338,6 +4510,7 @@ mod tests {
             cpu_limit: Some("4.0".to_string()),
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4363,6 +4536,7 @@ mod tests {
             cpu_limit: Some("4.0".to_string()),
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
@@ -4399,6 +4573,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4423,6 +4598,8 @@ mod tests {
                 placeholder: "".to_string(),
                 is_secret: false,
                 required: true,
+                description: None,
+                validation: None,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4431,6 +4608,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4455,6 +4633,8 @@ mod tests {
                 placeholder: "".to_string(),
                 is_secret: true,
                 required: true,
+                description: None,
+                validation: None,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4463,6 +4643,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -4493,6 +4674,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4521,6 +4703,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4546,6 +4729,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4580,6 +4764,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4611,6 +4796,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec!["nonexistent-service".to_string()],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4642,6 +4828,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![consts::BUILT_IN_SERVICE_IDS[0].to_string()],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4666,6 +4853,8 @@ mod tests {
                 placeholder: "".to_string(),
                 is_secret: false,
                 required: true,
+                description: None,
+                validation: None,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4674,6 +4863,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4682,6 +4872,365 @@ mod tests {
         assert!(
             err.contains("null bytes"),
             "should reject null byte in auth_field key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn auth_field_description_defaults_to_none_when_omitted() {
+        let json = r#"{
+            "key": "figma_pat",
+            "label": "Token",
+            "field_type": "password",
+            "placeholder": "figd_...",
+            "is_secret": true
+        }"#;
+        let field: AuthFieldDef = serde_json::from_str(json).unwrap();
+        assert_eq!(field.description, None);
+        // required also defaults to true when omitted (regression guard)
+        assert!(field.required);
+    }
+
+    #[test]
+    fn auth_field_description_parses_when_present() {
+        let json = r#"{
+            "key": "figma_pat",
+            "label": "Token",
+            "field_type": "password",
+            "placeholder": "figd_...",
+            "is_secret": true,
+            "description": "Generate at figma.com → Settings → Security."
+        }"#;
+        let field: AuthFieldDef = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            field.description.as_deref(),
+            Some("Generate at figma.com → Settings → Security.")
+        );
+    }
+
+    #[test]
+    fn auth_field_description_empty_string_is_preserved_not_none() {
+        // An explicit empty string must round-trip as Some(""), not be
+        // coerced to None — the author chose to render nothing deliberately.
+        let json = r#"{
+            "key": "figma_pat",
+            "label": "Token",
+            "field_type": "password",
+            "placeholder": "",
+            "is_secret": true,
+            "description": ""
+        }"#;
+        let field: AuthFieldDef = serde_json::from_str(json).unwrap();
+        assert_eq!(field.description.as_deref(), Some(""));
+    }
+
+    // ── #5: auth_field validation (regex pattern + message) ────────────────
+
+    /// Builds a minimal valid manifest carrying a single secret auth field
+    /// with the supplied optional validation, for `validate_manifest` tests.
+    fn manifest_with_validation(validation: Option<AuthFieldValidation>) -> PluginManifest {
+        PluginManifest {
+            name: "Test".to_string(),
+            // service_id: None so validate_manifest doesn't require a
+            // Containerfile on disk — the pattern check runs regardless.
+            service_id: None,
+            slug: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![AuthFieldDef {
+                key: "token".to_string(),
+                label: "Token".to_string(),
+                field_type: "password".to_string(),
+                placeholder: "".to_string(),
+                is_secret: true,
+                required: true,
+                description: None,
+                validation,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+        }
+    }
+
+    fn field_with_validation(validation: Option<AuthFieldValidation>) -> AuthFieldDef {
+        AuthFieldDef {
+            key: "token".to_string(),
+            label: "Figma Token".to_string(),
+            field_type: "password".to_string(),
+            placeholder: "".to_string(),
+            is_secret: true,
+            required: true,
+            description: None,
+            validation,
+        }
+    }
+
+    #[test]
+    fn auth_field_validation_defaults_to_none_when_omitted() {
+        let json = r#"{
+            "key": "token", "label": "T", "field_type": "password",
+            "placeholder": "", "is_secret": true
+        }"#;
+        let field: AuthFieldDef = serde_json::from_str(json).unwrap();
+        assert!(field.validation.is_none());
+    }
+
+    #[test]
+    fn auth_field_validation_parses_pattern_and_message() {
+        let json = r#"{
+            "key": "token", "label": "T", "field_type": "password",
+            "placeholder": "", "is_secret": true,
+            "validation": { "pattern": "^figd_[A-Za-z0-9_-]+$", "message": "Must start with figd_" }
+        }"#;
+        let field: AuthFieldDef = serde_json::from_str(json).unwrap();
+        let v = field.validation.expect("validation should parse");
+        assert_eq!(v.pattern, "^figd_[A-Za-z0-9_-]+$");
+        assert_eq!(v.message.as_deref(), Some("Must start with figd_"));
+    }
+
+    #[test]
+    fn auth_field_validation_message_optional() {
+        let json = r#"{
+            "key": "token", "label": "T", "field_type": "password",
+            "placeholder": "", "is_secret": true,
+            "validation": { "pattern": "^x+$" }
+        }"#;
+        let field: AuthFieldDef = serde_json::from_str(json).unwrap();
+        assert!(field.validation.unwrap().message.is_none());
+    }
+
+    #[test]
+    fn validate_manifest_accepts_valid_pattern() {
+        let m = manifest_with_validation(Some(AuthFieldValidation {
+            pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
+            message: Some("bad".to_string()),
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&m, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_empty_pattern() {
+        let m = manifest_with_validation(Some(AuthFieldValidation {
+            pattern: "".to_string(),
+            message: None,
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&m, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("empty validation.pattern"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_manifest_rejects_oversized_pattern() {
+        let huge = "a".repeat(consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN + 1);
+        let m = manifest_with_validation(Some(AuthFieldValidation {
+            pattern: huge,
+            message: None,
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&m, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("exceeds"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_manifest_rejects_uncompilable_pattern() {
+        // Unbalanced group — invalid in the Rust regex crate.
+        let m = manifest_with_validation(Some(AuthFieldValidation {
+            pattern: "^(figd_".to_string(),
+            message: None,
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&m, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("invalid validation.pattern"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_credential_value_ok_when_no_validation() {
+        let field = field_with_validation(None);
+        assert!(validate_credential_value(&field, "anything at all").is_ok());
+    }
+
+    #[test]
+    fn validate_credential_value_ok_for_empty_value() {
+        // Empty == "leave stored value untouched"; required-ness is enforced
+        // elsewhere, so the pattern must not fire on an empty submission.
+        let field = field_with_validation(Some(AuthFieldValidation {
+            pattern: "^figd_.+$".to_string(),
+            message: None,
+        }));
+        assert!(validate_credential_value(&field, "").is_ok());
+    }
+
+    #[test]
+    fn validate_credential_value_accepts_matching() {
+        let field = field_with_validation(Some(AuthFieldValidation {
+            pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
+            message: Some("nope".to_string()),
+        }));
+        assert!(validate_credential_value(&field, "figd_abc-123_XYZ").is_ok());
+    }
+
+    #[test]
+    fn validate_credential_value_rejects_mismatch_with_author_message() {
+        let field = field_with_validation(Some(AuthFieldValidation {
+            pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
+            message: Some("Token must start with figd_".to_string()),
+        }));
+        let err = validate_credential_value(&field, "ghp_wrongprefix").unwrap_err();
+        assert_eq!(err, "Token must start with figd_");
+    }
+
+    #[test]
+    fn validate_credential_value_rejects_mismatch_with_generic_fallback() {
+        let field = field_with_validation(Some(AuthFieldValidation {
+            pattern: "^figd_.+$".to_string(),
+            message: None,
+        }));
+        let err = validate_credential_value(&field, "bad").unwrap_err();
+        // Falls back to a message naming the field's label, not its key.
+        assert!(err.contains("Figma Token"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_credential_value_is_anchored_full_match() {
+        // A value that only *contains* a match (but has extra chars) must be
+        // rejected — anchoring mirrors the HTML pattern's full-match rule.
+        let field = field_with_validation(Some(AuthFieldValidation {
+            pattern: "figd_[a-z]+".to_string(), // intentionally un-anchored by author
+            message: Some("bad".to_string()),
+        }));
+        assert!(validate_credential_value(&field, "figd_abc").is_ok());
+        assert!(
+            validate_credential_value(&field, "prefix_figd_abc_suffix").is_err(),
+            "partial match must be rejected by the anchoring wrapper"
+        );
+    }
+
+    // ── instructions (long-form Markdown for the Dashboard) ────────────────
+
+    #[test]
+    fn manifest_instructions_defaults_to_none_when_omitted() {
+        let json = r#"{ "name": "T", "slug": "t", "version": "1.0.0", "description": "d" }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.instructions, None);
+    }
+
+    #[test]
+    fn manifest_instructions_parses_when_present() {
+        // r##"…"## so the markdown `"#` heading doesn't close the raw string.
+        let json = r##"{
+            "name": "T", "slug": "t", "version": "1.0.0", "description": "d",
+            "instructions": "# Setup\n1. Do the thing"
+        }"##;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.instructions.as_deref(), Some("# Setup\n1. Do the thing"));
+    }
+
+    #[test]
+    fn validate_manifest_accepts_instructions_within_cap() {
+        let mut m = manifest_with_validation(None);
+        m.instructions = Some("## How to configure\n- step one\n- step two".to_string());
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&m, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_oversized_instructions() {
+        let mut m = manifest_with_validation(None);
+        m.instructions = Some("a".repeat(consts::PLUGIN_INSTRUCTIONS_MAX_BYTES + 1));
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&m, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("`instructions` exceeds"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_credential_value_surfaces_invalid_pattern_error() {
+        // The map_err arm of validate_credential_value: a pattern that fails
+        // to compile (unbalanced group) must surface a clear error, not panic.
+        // Unreachable post-install (validate_manifest gates it) but defended.
+        let field = field_with_validation(Some(AuthFieldValidation {
+            pattern: "(".to_string(),
+            message: Some("nope".to_string()),
+        }));
+        let err = validate_credential_value(&field, "anything").unwrap_err();
+        assert!(err.contains("invalid validation.pattern"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_manifest_accepts_pattern_at_cap() {
+        // Boundary: len == cap is allowed; only > cap is rejected.
+        let at_cap = "a".repeat(consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN);
+        let m = manifest_with_validation(Some(AuthFieldValidation {
+            pattern: at_cap,
+            message: None,
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&m, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_accepts_instructions_at_cap() {
+        // Boundary: len == cap is allowed; only > cap is rejected.
+        let mut m = manifest_with_validation(None);
+        m.instructions = Some("a".repeat(consts::PLUGIN_INSTRUCTIONS_MAX_BYTES));
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&m, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn allowed_auth_field_types_match_ts_union() {
+        // Cross-language SSOT guard (cf. host_gateway_alias_matches_mcp_shared_ts):
+        // the TS `PluginAuthFieldType` union must list exactly the Rust
+        // ALLOWED_AUTH_FIELD_TYPES, so the credentials form can't silently
+        // diverge from what validate_manifest accepts.
+        let src = include_str!("../../../desktop/src/src/app/models/plugin.ts");
+        let re = regex::Regex::new(r"export\s+type\s+PluginAuthFieldType\s*=\s*([^;]+);").unwrap();
+        let cap = re
+            .captures(src)
+            .expect("plugin.ts must declare `export type PluginAuthFieldType`");
+        let mut ts_types: Vec<String> = cap[1]
+            .split('|')
+            .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts_types.sort();
+        let mut rust_types: Vec<String> = ALLOWED_AUTH_FIELD_TYPES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        rust_types.sort();
+        assert_eq!(
+            ts_types, rust_types,
+            "TS PluginAuthFieldType must match Rust ALLOWED_AUTH_FIELD_TYPES"
+        );
+    }
+
+    #[test]
+    fn validated_pattern_compile_enforces_invariants() {
+        // empty / oversized / uncompilable all rejected; valid compiles and
+        // matches anchored (full-match only).
+        assert!(ValidatedPattern::compile("").unwrap_err().contains("empty"));
+        let huge = "a".repeat(consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN + 1);
+        assert!(ValidatedPattern::compile(&huge)
+            .unwrap_err()
+            .contains("exceeds"));
+        assert!(ValidatedPattern::compile("(")
+            .unwrap_err()
+            .contains("invalid"));
+        let p = ValidatedPattern::compile("figd_[a-z]+").unwrap();
+        assert!(p.is_match("figd_abc"));
+        assert!(
+            !p.is_match("x figd_abc"),
+            "ValidatedPattern must anchor to a full match"
         );
     }
 
@@ -4904,6 +5453,7 @@ mod tests {
                 cpu_limit: None,
                 requires_integrations: vec![],
                 host_bridge: None,
+                instructions: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("ReadWrite must be rejected for plugins");
@@ -4941,6 +5491,7 @@ mod tests {
                 cpu_limit: None,
                 requires_integrations: vec![],
                 host_bridge: None,
+                instructions: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("slug colliding with built-in compose name must be rejected");
@@ -4999,6 +5550,7 @@ mod tests {
                 cpu_limit: None,
                 requires_integrations: vec![],
                 host_bridge: None,
+                instructions: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("dangerous env key must be rejected");
@@ -5051,6 +5603,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: Some(bridge),
+            instructions: None,
         }
     }
 
@@ -5396,6 +5949,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("mem_limit beyond cap must be rejected");
@@ -5427,6 +5981,7 @@ mod tests {
             cpu_limit: Some("16".to_string()),
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("cpu_limit beyond cap must be rejected");
@@ -5462,6 +6017,7 @@ mod tests {
                 cpu_limit: Some(bad.to_string()),
                 requires_integrations: vec![],
                 host_bridge: None,
+                instructions: None,
             };
             let err =
                 validate_manifest(&manifest, dir.path()).expect_err("cpu_limit must be rejected");
@@ -5503,6 +6059,7 @@ mod tests {
                 cpu_limit: None,
                 requires_integrations: vec![],
                 host_bridge: None,
+                instructions: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("non-object settings_schema must be rejected");
@@ -5541,6 +6098,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("oversized settings_schema must be rejected");
@@ -5578,6 +6136,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         validate_manifest(&manifest, dir.path()).expect("valid schema must pass");
     }
@@ -6274,6 +6833,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         }
     }
 

@@ -21,10 +21,21 @@ pub(crate) struct PluginStatusEntry {
     pub(crate) service_id: Option<String>,
     pub(crate) version: String,
     pub(crate) description: String,
+    /// Optional long-form Markdown setup/usage guide from the manifest,
+    /// rendered on the Dashboard tab. `None` when the manifest omits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) instructions: Option<String>,
     pub(crate) enabled: bool,
     pub(crate) configured: bool,
     pub(crate) auth_fields: Vec<plugin::AuthFieldDef>,
     pub(crate) current_values: HashMap<String, String>,
+    /// Keys of `auth_fields` that currently have a non-empty value stored
+    /// on disk. **Metadata only** — the secret contents are NOT read, only
+    /// the file's existence + non-zero length is checked. This lets the UI
+    /// show a per-field "configured" indicator for secret fields without
+    /// ever exposing the secret (unlike `current_values`, which skips
+    /// secrets entirely and so can't drive that indicator).
+    pub(crate) configured_fields: Vec<String>,
     pub(crate) token_mount: String,
     pub(crate) settings_schema: Option<serde_json::Value>,
     pub(crate) requires_integrations: Vec<String>,
@@ -53,6 +64,28 @@ pub(crate) struct PluginsResponse {
 /// Returns the token directory path for a service, delegating to the runtime SSOT.
 fn token_dir_for(project: &str, service_id: &str) -> Result<std::path::PathBuf, String> {
     plugin::token_dir(project, service_id).map_err(|e| e.to_string())
+}
+
+/// True when a credential file exists on disk with non-zero length.
+///
+/// Metadata-only: never reads the file contents, so it is safe to call
+/// for secret fields. Backs the per-field "configured" indicator. A
+/// zero-byte file counts as not-configured (matches `save_plugin_credentials`,
+/// which only writes non-empty values).
+fn field_has_stored_value(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) => m.len() > 0,
+        // A missing file legitimately means "not configured".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        // Permission/IO errors are NOT "not configured" — the file may well
+        // exist. We still report false (the UI degrades to "set it"), but log
+        // so the cause is visible instead of silently swallowed. The path is
+        // a token-dir filename, not the secret contents.
+        Err(e) => {
+            log::warn!("could not stat credential file {}: {e}", path.display());
+            false
+        }
+    }
 }
 
 /// Validates a credential field name and value for safety.
@@ -107,10 +140,12 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
                 service_id: None,
                 version: String::new(),
                 description: String::new(),
+                instructions: None,
                 enabled: false,
                 configured: false,
                 auth_fields: Vec::new(),
                 current_values: HashMap::new(),
+                configured_fields: Vec::new(),
                 token_mount: "ro".to_string(),
                 settings_schema: None,
                 requires_integrations: Vec::new(),
@@ -139,11 +174,20 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
         );
 
         let mut current_values = HashMap::new();
+        let mut configured_fields = Vec::new();
         for field in &manifest.auth_fields {
+            let path = svc_token_dir.join(&field.key);
+            // Metadata-only existence + non-empty check — drives the
+            // per-field "configured" indicator for ALL fields (secret or
+            // not) without reading secret contents.
+            if field_has_stored_value(&path) {
+                configured_fields.push(field.key.clone());
+            }
+            // current_values exposes only NON-secret values (host URLs etc.)
+            // so the form can prefill them; secrets stay write-only.
             if field.is_secret {
                 continue;
             }
-            let path = svc_token_dir.join(&field.key);
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let trimmed = content.trim().to_string();
                 if !trimmed.is_empty() {
@@ -165,10 +209,21 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             service_id: manifest.service_id.clone(),
             version: manifest.version.clone(),
             description: manifest.description.clone(),
+            // Trust boundary: only surface free-form Markdown instructions for
+            // a verified plugin. An unverified/tampered manifest must not get
+            // its `instructions` rendered (the frontend binds it via
+            // [innerHTML]); withholding it here is the authoritative gate, the
+            // frontend's verification check is defence-in-depth.
+            instructions: if verified {
+                manifest.instructions.clone()
+            } else {
+                None
+            },
             enabled,
             configured,
             auth_fields,
             current_values,
+            configured_fields,
             token_mount,
             settings_schema: manifest.settings_schema.clone(),
             requires_integrations: manifest.requires_integrations.clone(),
@@ -479,6 +534,20 @@ pub fn save_plugin_credentials(
             return Err(format!("field '{}' not allowed for plugin '{}'", key, slug));
         }
         validate_credential_field(key, value)?;
+        // Enforce the field's optional regex constraint host-side — the UI's
+        // HTML `pattern` check is advisory (a crafted IPC call bypasses it),
+        // so the authoritative check lives here, sharing the runtime SSOT so
+        // the anchoring matches the browser's full-match semantics exactly.
+        // The key passed the allow-list above, so it MUST resolve to a field;
+        // a miss is a logic error, not a reason to silently skip validation.
+        let field = manifest
+            .auth_fields
+            .iter()
+            .find(|f| f.key == *key)
+            .ok_or_else(|| {
+                format!("internal: '{key}' passed the allow-list but is missing from auth_fields")
+            })?;
+        plugin::validate_credential_value(field, value)?;
 
         let file_path = svc_dir.join(key);
         std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
@@ -696,6 +765,81 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     .map_err(|e| e.to_string())
 }
 
+/// Deletes a SINGLE stored credential field for a plugin.
+///
+/// Unlike `delete_plugin_credentials` (which clears every field and
+/// auto-disables the plugin — a recovery action), this removes just one
+/// token file and leaves the plugin enabled. It backs the per-field
+/// "clear" button in the credentials form, letting a user rotate or
+/// remove one secret without wiping the rest.
+///
+/// Verified-only (this is normal configuration, not tamper recovery),
+/// allowlist-checked (the key must be a declared `auth_field`), and
+/// path-traversal-guarded — identical security posture to
+/// `save_plugin_credentials`. Deleting a non-existent file is a no-op
+/// success (idempotent).
+#[tauri::command]
+pub fn delete_plugin_credential_field(
+    project: String,
+    slug: String,
+    key: String,
+) -> Result<(), String> {
+    check_project(&project)?;
+    log::info!("delete_plugin_credential_field: project={project} slug={slug} key={key}");
+
+    let manifest = require_verified_with_manifest(&slug)?;
+    let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
+
+    // The key must be a declared auth_field — refuse arbitrary deletions
+    // even for a verified plugin.
+    if !manifest.auth_fields.iter().any(|f| f.key == key) {
+        return Err(format!(
+            "field '{}' is not declared in plugin '{}' auth_fields",
+            key, slug
+        ));
+    }
+    // Reuse the field-name safety check (rejects '/', '\\', '..', null).
+    // The empty value arg only exercises the key checks here.
+    validate_credential_field(&key, "")?;
+
+    let svc_dir = token_dir_for(&project, sid)?;
+    remove_credential_file_guarded(&svc_dir, &key)
+}
+
+/// Removes a single credential file under `svc_dir`, refusing any path that
+/// resolves **outside** that directory (symlink target or `..` escape) —
+/// defence-in-depth on top of the `validate_credential_field` key check.
+///
+/// Idempotent: a genuinely missing file (`NotFound`) is success. Other IO
+/// errors on `canonicalize` (e.g. permission denied) are surfaced rather than
+/// silently treated as "already gone", and a symlink whose target escapes the
+/// token dir is refused without deleting it.
+///
+/// Extracted from `delete_plugin_credential_field` so the path-safety guard
+/// is unit-testable without standing up a verified on-disk plugin fixture.
+fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Result<(), String> {
+    let path = svc_dir.join(key);
+    match path.canonicalize() {
+        Ok(canon) => {
+            let svc_canon = svc_dir.canonicalize().map_err(|e| e.to_string())?;
+            if !canon.starts_with(&svc_canon) {
+                return Err(format!(
+                    "refusing to delete '{}': resolves outside the plugin's token dir",
+                    canon.display()
+                ));
+            }
+            std::fs::remove_file(&canon).map_err(|e| e.to_string())
+        }
+        // No such file — nothing to delete; idempotent success.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // Permission/other IO error: the file may exist but be inaccessible —
+        // surface it instead of pretending the delete succeeded.
+        Err(e) => Err(format!(
+            "could not resolve credential path for '{key}': {e}"
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -713,6 +857,7 @@ mod tests {
             service_id: Some("test-plugin".into()),
             version: "1.0.0".into(),
             description: "A test plugin".into(),
+            instructions: None,
             enabled: true,
             configured: false,
             auth_fields: vec![plugin::AuthFieldDef {
@@ -722,8 +867,11 @@ mod tests {
                 placeholder: "Enter key".into(),
                 is_secret: true,
                 required: true,
+                description: None,
+                validation: None,
             }],
             current_values: HashMap::new(),
+            configured_fields: Vec::new(),
             token_mount: "ro".into(),
             settings_schema: None,
             requires_integrations: vec![],
@@ -738,6 +886,36 @@ mod tests {
         // on the snake_case wire literals — pin one here so a mis-annotated
         // `VerificationStatus` enum (e.g. PascalCase) is caught.
         assert!(json.contains(r#""verification_status":"verified""#));
+        // instructions is None here → omitted from the wire (skip_serializing_if).
+        assert!(
+            !json.contains("instructions"),
+            "None instructions must not serialize a key"
+        );
+    }
+
+    #[test]
+    fn plugin_status_entry_serializes_instructions_when_present() {
+        let entry = PluginStatusEntry {
+            slug: "figma".into(),
+            name: "Figma".into(),
+            service_id: Some("figma".into()),
+            version: "0.1.4".into(),
+            description: "short".into(),
+            instructions: Some("# Setup\n1. Import the bridge plugin".into()),
+            enabled: false,
+            configured: false,
+            auth_fields: vec![],
+            current_values: HashMap::new(),
+            configured_fields: Vec::new(),
+            token_mount: "ro".into(),
+            settings_schema: None,
+            requires_integrations: vec![],
+            verification_status: plugin::VerificationStatus::Verified,
+            verification_error: None,
+            has_host_bridge: true,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r##""instructions":"# Setup"##));
     }
 
     #[test]
@@ -759,10 +937,12 @@ mod tests {
             service_id: Some("presale".into()),
             version: "1.2.0".into(),
             description: "CRM integration".into(),
+            instructions: None,
             enabled: true,
             configured: true,
             auth_fields: vec![],
             current_values: HashMap::new(),
+            configured_fields: Vec::new(),
             token_mount: "ro".into(),
             settings_schema: Some(schema),
             requires_integrations: vec!["sharepoint".into()],
@@ -850,6 +1030,8 @@ mod tests {
             placeholder: "".into(),
             is_secret: false,
             required: true,
+            description: None,
+            validation: None,
         }];
         assert!(is_plugin_configured(
             std::path::Path::new("/nonexistent"),
@@ -878,6 +1060,8 @@ mod tests {
             placeholder: "".into(),
             is_secret: true,
             required: true,
+            description: None,
+            validation: None,
         }];
         assert!(!is_plugin_configured(
             std::path::Path::new("/nonexistent/path"),
@@ -900,6 +1084,8 @@ mod tests {
             placeholder: "".into(),
             is_secret: true,
             required: true,
+            description: None,
+            validation: None,
         }];
         assert!(is_plugin_configured(
             dir.path(),
@@ -922,6 +1108,8 @@ mod tests {
             placeholder: "".into(),
             is_secret: true,
             required: true,
+            description: None,
+            validation: None,
         }];
         assert!(!is_plugin_configured(
             dir.path(),
@@ -941,6 +1129,8 @@ mod tests {
             placeholder: "".into(),
             is_secret: true,
             required: false,
+            description: None,
+            validation: None,
         }];
         assert!(is_plugin_configured(
             dir.path(),
@@ -961,6 +1151,8 @@ mod tests {
                 placeholder: "".into(),
                 is_secret: true,
                 required: true,
+                description: None,
+                validation: None,
             },
             plugin::AuthFieldDef {
                 key: "extra_token".into(),
@@ -969,6 +1161,8 @@ mod tests {
                 placeholder: "".into(),
                 is_secret: true,
                 required: false,
+                description: None,
+                validation: None,
             },
         ];
         assert!(!is_plugin_configured(
@@ -977,6 +1171,126 @@ mod tests {
             &[],
             "any-project"
         ));
+    }
+
+    #[test]
+    fn field_has_stored_value_true_for_non_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("figma_pat");
+        std::fs::write(&path, "figd_abc").unwrap();
+        assert!(field_has_stored_value(&path));
+    }
+
+    #[test]
+    fn field_has_stored_value_false_for_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("figma_pat");
+        std::fs::write(&path, "").unwrap();
+        assert!(
+            !field_has_stored_value(&path),
+            "zero-byte file must count as not-configured"
+        );
+    }
+
+    #[test]
+    fn field_has_stored_value_false_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does_not_exist");
+        assert!(
+            !field_has_stored_value(&path),
+            "absent file must count as not-configured"
+        );
+    }
+
+    #[test]
+    fn remove_credential_file_guarded_deletes_within_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("api_key");
+        std::fs::write(&f, "secret").unwrap();
+        assert!(remove_credential_file_guarded(dir.path(), "api_key").is_ok());
+        assert!(!f.exists(), "file inside the token dir must be deleted");
+    }
+
+    #[test]
+    fn remove_credential_file_guarded_idempotent_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            remove_credential_file_guarded(dir.path(), "never_existed").is_ok(),
+            "deleting a missing file must be an idempotent success"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_credential_file_guarded_refuses_symlink_escape() {
+        // The canonicalize + starts_with guard: a key that is a symlink whose
+        // target lives OUTSIDE the token dir must be refused, and the target
+        // must survive. This is the security-critical path the old test never
+        // exercised (it only checked Vec membership).
+        let svc = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, "must NOT be deleted").unwrap();
+        std::os::unix::fs::symlink(&victim, svc.path().join("evil")).unwrap();
+
+        let err = remove_credential_file_guarded(svc.path(), "evil").unwrap_err();
+        assert!(err.contains("outside"), "got: {err}");
+        assert!(
+            victim.exists(),
+            "a file outside the token dir must never be deleted via a symlink"
+        );
+    }
+
+    #[test]
+    fn delete_field_rejects_key_not_in_auth_fields_allowlist() {
+        // Mirror of save_plugin_credentials_rejects_field_not_in_auth_fields:
+        // delete_plugin_credential_field builds the same allowlist from the
+        // verified manifest's auth_fields and rejects anything outside it.
+        let manifest = plugin::PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-plugin".to_string()),
+            slug: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(5000),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![plugin::AuthFieldDef {
+                key: "api_key".to_string(),
+                label: "API Key".to_string(),
+                field_type: "password".to_string(),
+                placeholder: "".to_string(),
+                is_secret: true,
+                required: true,
+                description: None,
+                validation: None,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+        };
+
+        let allowed_keys: Vec<&str> = manifest
+            .auth_fields
+            .iter()
+            .map(|f| f.key.as_str())
+            .collect();
+
+        assert!(allowed_keys.contains(&"api_key"));
+        assert!(
+            !allowed_keys.contains(&"other_key"),
+            "clearing a field not in auth_fields must be rejected"
+        );
+        assert!(
+            !allowed_keys.contains(&"../../etc/passwd"),
+            "path traversal key must be rejected"
+        );
     }
 
     #[test]
@@ -1389,6 +1703,8 @@ mod tests {
             placeholder: "".into(),
             is_secret: true,
             required: true,
+            description: None,
+            validation: None,
         }];
         assert!(blocks_auto_enable(&auth_fields));
     }
@@ -1402,6 +1718,8 @@ mod tests {
             placeholder: "".into(),
             is_secret: true,
             required: false,
+            description: None,
+            validation: None,
         }];
         assert!(
             !blocks_auto_enable(&auth_fields),
@@ -1418,6 +1736,8 @@ mod tests {
             placeholder: "".into(),
             is_secret: false,
             required: true,
+            description: None,
+            validation: None,
         }];
         assert!(!blocks_auto_enable(&auth_fields));
     }
@@ -1462,6 +1782,8 @@ mod tests {
                 placeholder: "".to_string(),
                 is_secret: true,
                 required: true,
+                description: None,
+                validation: None,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -1470,6 +1792,7 @@ mod tests {
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let allowed_keys: Vec<&str> = manifest
@@ -1490,6 +1813,64 @@ mod tests {
             !allowed_keys.contains(&"../../etc/passwd"),
             "path traversal field must be rejected"
         );
+    }
+
+    #[test]
+    fn save_credentials_enforces_field_validation_pattern() {
+        // Mirrors the per-field check inside save_plugin_credentials: locate
+        // the AuthFieldDef by key, then run the runtime regex validator. The
+        // full command needs a verified on-disk plugin, so this isolates the
+        // wiring the same way save_plugin_credentials_rejects_* does.
+        let field = plugin::AuthFieldDef {
+            key: "figma_pat".to_string(),
+            label: "Figma Token".to_string(),
+            field_type: "password".to_string(),
+            placeholder: "figd_...".to_string(),
+            is_secret: true,
+            required: false,
+            description: None,
+            validation: Some(plugin::AuthFieldValidation {
+                pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
+                message: Some("Personal Access Tokens start with figd_".to_string()),
+            }),
+        };
+        let manifest = plugin::PluginManifest {
+            name: "Figma".to_string(),
+            service_id: Some("figma".to_string()),
+            slug: "figma".to_string(),
+            version: "0.1.2".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![field],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+        };
+
+        let lookup = |key: &str, value: &str| -> Result<(), String> {
+            match manifest.auth_fields.iter().find(|f| f.key == key) {
+                Some(f) => plugin::validate_credential_value(f, value),
+                None => Ok(()),
+            }
+        };
+
+        // Good value passes.
+        assert!(lookup("figma_pat", "figd_abc-123_XYZ").is_ok());
+        // Wrong prefix is rejected, surfacing the author's message.
+        assert_eq!(
+            lookup("figma_pat", "ghp_wrong").unwrap_err(),
+            "Personal Access Tokens start with figd_"
+        );
+        // Empty value (leave-as-is) is never rejected by the pattern.
+        assert!(lookup("figma_pat", "").is_ok());
     }
 
     #[test]

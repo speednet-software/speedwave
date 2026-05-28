@@ -2107,6 +2107,7 @@ fn main() {
             plugin_cmd::set_plugin_enabled,
             plugin_cmd::save_plugin_credentials,
             plugin_cmd::delete_plugin_credentials,
+            plugin_cmd::delete_plugin_credential_field,
             plugin_cmd::plugin_save_settings,
             plugin_cmd::plugin_load_settings,
             // Slash menu discovery
