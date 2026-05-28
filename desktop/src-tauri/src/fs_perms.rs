@@ -221,7 +221,7 @@ fn set_windows_acl_owner_only(path: &std::path::Path) -> Result<(), String> {
             return Err("GetTokenInformation failed".to_string());
         }
         let user = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut ea = EXPLICIT_ACCESS_W {
+        let ea = EXPLICIT_ACCESS_W {
             grfAccessPermissions: GENERIC_ALL,
             grfAccessMode: GRANT_ACCESS,
             grfInheritance: NO_INHERITANCE,
@@ -234,7 +234,7 @@ fn set_windows_acl_owner_only(path: &std::path::Path) -> Result<(), String> {
             },
         };
         let mut new_acl: *mut ACL = std::ptr::null_mut();
-        if SetEntriesInAclW(1, &mut ea, std::ptr::null_mut(), &mut new_acl) != 0 {
+        if SetEntriesInAclW(1, &ea, std::ptr::null_mut(), &mut new_acl) != 0 {
             CloseHandle(token_handle);
             return Err("SetEntriesInAclW failed".to_string());
         }

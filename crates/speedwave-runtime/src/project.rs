@@ -131,7 +131,7 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
                     "Cannot use the WSL distribution root '{}' as a project directory. \
                      Choose a subdirectory like \\\\wsl.localhost\\{}\\projects\\<name>.",
                     dir,
-                    crate::consts::WSL_DISTRO_NAME
+                    crate::consts::wsl_distro_name()
                 );
             }
             if !std::fs::metadata(dir_path)

@@ -40,6 +40,7 @@ impl Backend {
 /// The acceleration backends compiled into this binary (not what the host
 /// hardware supports — backends are a build-time choice).
 pub fn compiled_backends() -> Vec<Backend> {
+    #[allow(unused_mut)]
     let mut v = vec![Backend::Cpu];
     #[cfg(all(feature = "audio-transcription", target_os = "macos"))]
     v.push(Backend::Metal);

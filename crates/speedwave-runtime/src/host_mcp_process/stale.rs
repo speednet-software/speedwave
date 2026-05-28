@@ -6,6 +6,7 @@
 //! `is_node_process` so a recycled PID for a non-node process is not
 //! touched.
 
+#[cfg(unix)]
 use std::process::Command;
 
 /// Check whether a PID belongs to a `node` process. Used as a safety

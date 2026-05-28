@@ -22,6 +22,16 @@
 # (git hooks and CI run /bin/sh which does not source ~/.zshenv)
 export PATH := $(HOME)/.cargo/bin:/opt/homebrew/bin:$(PATH)
 
+# Windows (Git Bash + GnuWin32 make): npm/npx are bash scripts that the
+# bash-via-execve-from-make path cannot invoke directly. Use .cmd variants.
+ifeq ($(OS),Windows_NT)
+NPM := npm.cmd
+NPX := npx.cmd
+else
+NPM := npm
+NPX := npx
+endif
+
 # Isolate dev builds from production (~/.speedwave/).
 # Unit tests use fake_home/tmpdir — they ignore this variable.
 # E2E tests backup/restore this directory (not production ~/.speedwave/).
@@ -42,7 +52,8 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
-        download-wsl-resources clean-wsl-resources
+        download-wsl-resources clean-wsl-resources \
+        download-sherpa-onnx
 
 # ── Developer setup (run once after cloning) ─────────────────────────────────
 
@@ -144,14 +155,14 @@ setup-dev:
 	@echo "── Cargo dependencies (desktop) ──"
 	cd desktop/src-tauri && cargo fetch
 	@echo "── MCP server dependencies ──"
-	cd mcp-servers && npm ci
+	cd mcp-servers && $(NPM) ci
 	@echo "── Angular dependencies ──"
-	cd desktop/src && npm ci
+	cd desktop/src && $(NPM) ci
 	@echo "── E2E test dependencies ──"
-	cd desktop/e2e && npm ci
+	cd desktop/e2e && $(NPM) ci
 	@echo "── Git hooks (husky, commitlint) ──"
-	npm ci
-	npx husky
+	$(NPM) ci
+	$(NPX) husky
 	@echo "\n✅ Dev environment ready. Next:"
 	@echo "  make test    # verify everything works"
 	@echo "  make dev     # start desktop in dev mode"
@@ -182,8 +193,8 @@ install-deps: setup-dev
 # ── Git hooks ────────────────────────────────────────────────────────────────
 
 install-hooks:
-	npm install
-	npx husky
+	$(NPM) install
+	$(NPX) husky
 	@echo "✅ Git hooks installed"
 
 # ── Rust builds ──────────────────────────────────────────────────────────────
@@ -204,15 +215,22 @@ build-cli:
 build-cli-release:
 	cargo build -p speedwave-cli --release
 
-build-desktop:
+# Regenerates desktop/src-tauri/windows/installer-hooks.nsh from its template
+# + sweep.ps1 + firewall.ps1 (see scripts/generate-installer-nsh.sh). Cheap and
+# idempotent — safe to call unconditionally before any build that ships an
+# installer (Windows NSIS or MSI) or runs installer_hooks drift detector tests.
+generate-installer-nsh:
+	@bash scripts/generate-installer-nsh.sh
+
+build-desktop: generate-installer-nsh
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs
-	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
-	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
-	@scripts/bundle-build-context.sh
-	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
-	@$(MAKE) bundle-static-licenses
+build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh
+	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
+	@if [ "$(OS)" = "Windows_NT" ]; then "$(MAKE)" download-wsl-resources; fi
+	@bash scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" bundle-native-assets; fi
+	@"$(MAKE)" bundle-static-licenses
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe
@@ -220,7 +238,7 @@ else
 	cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
 endif
-	@$(MAKE) verify-bundled-assets
+	@"$(MAKE)" verify-bundled-assets
 	cd desktop/src-tauri && cargo tauri build
 	@echo "\n✅ Tauri production bundle built"
 
@@ -253,7 +271,7 @@ test-swift:
 	fi
 
 bundle-native-assets:
-	@scripts/bundle-native-assets.sh
+	@bash scripts/bundle-native-assets.sh
 
 # Copy the static third-party licenses we keep in-repo (whisper.cpp, sherpa-onnx,
 # onnxruntime, cpal, transcription model weights — ADR-056) into the bundled
@@ -267,10 +285,10 @@ bundle-static-licenses:
 
 verify-bundled-assets:
 ifeq ($(OS),Windows_NT)
-	@scripts/verify-bundled-assets.sh windows
+	@bash scripts/verify-bundled-assets.sh windows
 else
 	@if [ "$$(uname)" = "Darwin" ]; then \
-		scripts/verify-bundled-assets.sh macos; \
+		bash scripts/verify-bundled-assets.sh macos; \
 	else \
 		echo "Unsupported host for bundled asset verification"; \
 		exit 1; \
@@ -280,12 +298,12 @@ endif
 # ── MCP servers ──────────────────────────────────────────────────────────────
 
 build-mcp:
-	cd mcp-servers && npm run build
+	cd mcp-servers && $(NPM) run build
 
 # ── Angular frontend ─────────────────────────────────────────────────────────
 
 build-angular:
-	cd desktop/src && npx ng build
+	cd desktop/src && $(NPX) ng build
 
 # ── Rust tests ───────────────────────────────────────────────────────────────
 
@@ -298,7 +316,7 @@ test-rust:
 	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
 	@# is off by default — the CLI never enables it — so the default run above
 	@# doesn't compile the `transcription` module. Test it explicitly here.
-	$(MAKE) test-transcription
+	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
 test-transcription:
@@ -318,12 +336,12 @@ test-cli:
 	@cargo test -p speedwave-cli
 	@echo "✅ CLI tests passed"
 
-test-desktop: build-cli build-angular build-mcp build-os-cli
-	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
-	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
-	@scripts/bundle-build-context.sh
-	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
+test-desktop: build-cli build-angular build-mcp build-os-cli generate-installer-nsh
+	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
+	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
+	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then "$(MAKE)" download-nodejs; fi
+	@bash scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" bundle-native-assets; fi
 	@mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
@@ -331,24 +349,24 @@ else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
-	@$(MAKE) verify-bundled-assets
+	@"$(MAKE)" verify-bundled-assets
 	cd desktop/src-tauri && SPEEDWAVE_DATA_DIR= cargo test
 	@echo "✅ Desktop tests passed"
 
 # ── Angular tests ───────────────────────────────────────────────────────────
 
 test-angular:
-	cd desktop/src && npx ng test --no-watch --runner-config vitest.config.ts
+	cd desktop/src && $(NPX) ng test --no-watch --runner-config vitest.config.ts
 	@echo "✅ Angular tests passed"
 
 # ── MCP server tests ────────────────────────────────────────────────────────
 
 test-mcp: build-mcp
-	cd mcp-servers && npm test
+	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
 test-os: build-mcp
-	cd mcp-servers/os && npx vitest run
+	cd mcp-servers/os && $(NPX) vitest run
 	@echo "✅ OS MCP server tests passed"
 
 # pytest for the office worker's Python support-scripts. Builds a throwaway venv from
@@ -376,18 +394,18 @@ coverage-rust:
 	@echo "✅ Rust coverage passed (≥70% lines)"
 
 coverage-mcp: build-mcp
-	cd mcp-servers && npm run test:coverage
+	cd mcp-servers && $(NPM) run test:coverage
 	@echo "✅ MCP coverage passed"
 
 coverage-angular:
-	cd desktop/src && npx ng test --no-watch --coverage
+	cd desktop/src && $(NPX) ng test --no-watch --coverage
 	@echo "✅ Angular coverage passed"
 
 coverage-html: build-mcp
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
 	cargo llvm-cov -p speedwave-runtime -p speedwave-cli --html --output-dir target/coverage/rust
-	cd mcp-servers && npm run test:coverage
-	cd desktop/src && npx ng test --no-watch --coverage
+	cd mcp-servers && $(NPM) run test:coverage
+	cd desktop/src && $(NPX) ng test --no-watch --coverage
 	@echo "\n✅ Coverage reports generated:"
 	@echo "  Rust:    target/coverage/rust/html/index.html"
 	@echo "  MCP:     mcp-servers/coverage/index.html"
@@ -456,11 +474,11 @@ test-release-gate:
 # Build only: download deps, compile CLI + MCP + Tauri binary. No test run.
 # Used by e2e-vm.sh (build as root, test as desktop user with display access).
 test-e2e-desktop-build: build-cli build-mcp build-os-cli
-	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
-	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
-	@scripts/bundle-build-context.sh
-	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
+	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
+	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
+	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then "$(MAKE)" download-nodejs; fi
+	@bash scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" bundle-native-assets; fi
 	@mkdir -p desktop/src-tauri/cli
 	@cargo build -p speedwave-cli --release
 ifeq ($(OS),Windows_NT)
@@ -469,16 +487,16 @@ else
 	@cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
-	@$(MAKE) verify-bundled-assets
+	@"$(MAKE)" verify-bundled-assets
 	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
 	cd desktop/src-tauri && cargo tauri build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
 	@echo "── Installing E2E deps..."
-	cd desktop/e2e && npm install --prefer-offline
+	cd desktop/e2e && $(NPM) install --prefer-offline
 
 # Full E2E: build + run tests using the installed app artifact.
 test-e2e-desktop: test-e2e-desktop-build
 	@echo "── Running E2E specs..."
-	@$(MAKE) _e2e-run
+	@"$(MAKE)" _e2e-run
 	@echo "✅ Desktop E2E tests passed"
 
 E2E_BINARY = desktop/src-tauri/target/release/speedwave-desktop
@@ -533,18 +551,18 @@ _e2e-run:
 
 # Run E2E on a single platform via SSH to dedicated test machines
 _e2e-macos:
-	@scripts/e2e-vm.sh macos
+	@bash scripts/e2e-vm.sh macos
 
 _e2e-windows:
-	@scripts/e2e-vm.sh windows
+	@bash scripts/e2e-vm.sh windows
 
 # Run E2E on all platforms via SSH to dedicated test machines
 test-e2e-all:
-	@scripts/e2e-vm.sh all
+	@bash scripts/e2e-vm.sh all
 
 # Provision test machines for E2E testing (one-time setup)
 setup-e2e-vms:
-	@scripts/e2e-vm-setup.sh all
+	@bash scripts/e2e-vm-setup.sh all
 
 # ── Linting ──────────────────────────────────────────────────────────────────
 
@@ -556,37 +574,37 @@ check-clippy:
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
-	@scripts/bundle-build-context.sh
-	@scripts/create-desktop-stubs.sh
+	@bash scripts/bundle-build-context.sh
+	@bash scripts/create-desktop-stubs.sh
 	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy -- -D warnings
 	@echo "✅ Desktop clippy: 0 warnings"
 
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
-	@cd mcp-servers/shared && npx tsc
+	@cd mcp-servers/shared && $(NPX) tsc
 	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os host_exec oauth; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
-		(cd mcp-servers/$$ws && npx tsc --noEmit) || exit 1; \
+		(cd mcp-servers/$$ws && $(NPX) tsc --noEmit) || exit 1; \
 	done
 	@echo "✅ MCP type-check done"
 
 check-angular:
-	cd desktop/src && npx ng build --configuration production
+	cd desktop/src && $(NPX) ng build --configuration production
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	bats _tests/desktop/desktop-build.bats
 	@echo "✅ Angular production build + desktop path verification OK"
 
 check-fmt:
 	cargo fmt --all -- --check
-	npx prettier --check 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+	$(NPX) prettier --check 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
 	@echo "✅ Format check passed"
 
 check-mcp-lint:
-	cd mcp-servers && npx eslint .
+	cd mcp-servers && $(NPX) eslint .
 	@echo "✅ MCP ESLint passed"
 
 check-angular-lint:
-	cd desktop/src && npx eslint 'src/**/*.ts'
+	cd desktop/src && $(NPX) eslint 'src/**/*.ts'
 	@echo "✅ Angular ESLint passed"
 
 # ── Security audit ────────────────────────────────────────────────────────────
@@ -601,11 +619,11 @@ audit-rust:
 	@echo "✅ Rust dependencies: no vulnerabilities"
 
 audit-mcp:
-	cd mcp-servers && npm audit --omit=dev
+	cd mcp-servers && $(NPM) audit --omit=dev
 	@echo "✅ MCP dependencies: no vulnerabilities"
 
 audit-desktop:
-	cd desktop/src && npm audit --omit=dev
+	cd desktop/src && $(NPM) audit --omit=dev
 	@echo "✅ Desktop dependencies: no vulnerabilities"
 
 # ── Full quality gate (run before push) ──────────────────────────────────────
@@ -617,14 +635,14 @@ check-all: check test coverage audit
 
 fmt:
 	cargo fmt --all
-	npx prettier --write 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+	$(NPX) prettier --write 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
 	@echo "✅ Formatted"
 
 lint:
 	cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
-	cd mcp-servers && npx eslint --fix .
-	cd desktop/src && npx eslint --fix 'src/**/*.ts'
+	cd mcp-servers && $(NPX) eslint --fix .
+	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'
 	@echo "✅ All lints passed"
 
 # ── Lima bundling (macOS Desktop .app only) ──────────────────────────────────
@@ -668,7 +686,7 @@ NODE_VERSION := $(shell cat .node-version 2>/dev/null || echo 24.14.0)
 
 download-nodejs:
 	@echo "Downloading Node.js $(NODE_VERSION)..."
-	@mkdir -p desktop/src-tauri/nodejs/bin desktop/src-tauri/THIRD-PARTY-LICENSES
+	@mkdir -p desktop/src-tauri/nodejs desktop/src-tauri/nodejs/bin desktop/src-tauri/THIRD-PARTY-LICENSES
 	@ARCH=$$(uname -m); \
 	case "$$ARCH" in \
 		arm64|aarch64) NODE_ARCH="arm64" ;; \
@@ -676,30 +694,42 @@ download-nodejs:
 		*) echo "Unsupported architecture: $$ARCH"; exit 1 ;; \
 	esac; \
 	case "$$(uname -s)" in \
-		Darwin) NODE_PLATFORM="darwin" ;; \
+		Darwin) NODE_PLATFORM="darwin"; NODE_EXT="tar.gz"; NODE_BIN="bin/node"; NODE_DEST="desktop/src-tauri/nodejs/bin/node" ;; \
+		MINGW*|MSYS*|CYGWIN*) NODE_PLATFORM="win"; NODE_EXT="zip"; NODE_BIN="node.exe"; NODE_DEST="desktop/src-tauri/nodejs/node.exe" ;; \
 		*) echo "Unsupported OS: $$(uname -s)"; exit 1 ;; \
 	esac; \
-	TARBALL="node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH.tar.gz"; \
-	URL="https://nodejs.org/dist/v$(NODE_VERSION)/$$TARBALL"; \
+	ARCHIVE="node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH.$$NODE_EXT"; \
+	URL="https://nodejs.org/dist/v$(NODE_VERSION)/$$ARCHIVE"; \
 	SUMS_URL="https://nodejs.org/dist/v$(NODE_VERSION)/SHASUMS256.txt"; \
 	echo "  Downloading $$URL"; \
-	curl -fsSL "$$URL" -o "/tmp/$$TARBALL" && \
+	curl -fsSL "$$URL" -o "/tmp/$$ARCHIVE" && \
 	curl -fsSL "$$SUMS_URL" -o /tmp/nodejs-SHASUMS256.txt && \
 	echo "  Verifying SHA256 checksum..." && \
-	EXPECTED=$$(grep "$$TARBALL" /tmp/nodejs-SHASUMS256.txt | awk '{print $$1}') && \
-	[ -n "$$EXPECTED" ] || { echo "CHECKSUM NOT FOUND for $$TARBALL in SHASUMS256.txt"; exit 1; } && \
-	ACTUAL=$$( (sha256sum "/tmp/$$TARBALL" 2>/dev/null || shasum -a 256 "/tmp/$$TARBALL") | awk '{print $$1}') && \
+	EXPECTED=$$(grep "$$ARCHIVE" /tmp/nodejs-SHASUMS256.txt | awk '{print $$1}') && \
+	[ -n "$$EXPECTED" ] || { echo "CHECKSUM NOT FOUND for $$ARCHIVE in SHASUMS256.txt"; exit 1; } && \
+	ACTUAL=$$( (sha256sum "/tmp/$$ARCHIVE" 2>/dev/null || shasum -a 256 "/tmp/$$ARCHIVE") | awk '{print $$1}') && \
 	if [ "$$EXPECTED" != "$$ACTUAL" ]; then \
 		echo "CHECKSUM MISMATCH! Expected $$EXPECTED, got $$ACTUAL"; exit 1; \
 	fi && \
 	echo "  Checksum OK" && \
-	tar -xzf "/tmp/$$TARBALL" --strip-components=2 -C desktop/src-tauri/nodejs/bin/ \
-		"node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH/bin/node" && \
-	chmod +x desktop/src-tauri/nodejs/bin/node && \
-	tar -xzf "/tmp/$$TARBALL" --strip-components=1 -C /tmp/ \
-		"node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH/LICENSE" 2>/dev/null && \
-	cp /tmp/LICENSE desktop/src-tauri/THIRD-PARTY-LICENSES/nodejs-LICENSE 2>/dev/null || true && \
-	rm -f "/tmp/$$TARBALL" /tmp/nodejs-SHASUMS256.txt /tmp/LICENSE
+	if [ "$$NODE_PLATFORM" = "win" ]; then \
+		mkdir -p /tmp/nodejs-extract && \
+		unzip -q "/tmp/$$ARCHIVE" "node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH/$$NODE_BIN" -d /tmp/nodejs-extract && \
+		cp "/tmp/nodejs-extract/node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH/$$NODE_BIN" "$$NODE_DEST" && \
+		unzip -q "/tmp/$$ARCHIVE" "node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH/LICENSE" -d /tmp/nodejs-extract 2>/dev/null || true && \
+		[ -f "/tmp/nodejs-extract/node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH/LICENSE" ] && \
+			cp "/tmp/nodejs-extract/node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH/LICENSE" desktop/src-tauri/THIRD-PARTY-LICENSES/nodejs-LICENSE || true; \
+		rm -rf /tmp/nodejs-extract; \
+	else \
+		tar -xzf "/tmp/$$ARCHIVE" --strip-components=2 -C desktop/src-tauri/nodejs/bin/ \
+			"node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH/$$NODE_BIN" && \
+		chmod +x "$$NODE_DEST" && \
+		tar -xzf "/tmp/$$ARCHIVE" --strip-components=1 -C /tmp/ \
+			"node-v$(NODE_VERSION)-$$NODE_PLATFORM-$$NODE_ARCH/LICENSE" 2>/dev/null && \
+		cp /tmp/LICENSE desktop/src-tauri/THIRD-PARTY-LICENSES/nodejs-LICENSE 2>/dev/null || true; \
+		rm -f /tmp/LICENSE; \
+	fi; \
+	rm -f "/tmp/$$ARCHIVE" /tmp/nodejs-SHASUMS256.txt
 	@echo "  ✅ Node.js $(NODE_VERSION) ready"
 
 clean-nodejs:
@@ -734,24 +764,51 @@ download-wsl-resources:
 clean-wsl-resources:
 	rm -rf desktop/src-tauri/wsl
 
-# ── Development ──────────────────────────────────────────────────────────────
-
-dev: build-cli build-os-cli build-mcp download-nodejs
-	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
-	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
-	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
-	@echo "Preparing build context..."
-	@scripts/bundle-build-context.sh
-	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
-	mkdir -p desktop/src-tauri/cli
+# ── Windows: pre-fetch sherpa-onnx MD-Release prebuilt for CRT alignment ────
+# See ADR-061. No-op on non-Windows platforms.
+# Writes the resolved lib dir to a cache file so consumers (dev, build-tauri)
+# can read it back as SHERPA_ONNX_LIB_DIR for the cargo invocation.
+# Extracts to a persistent location under target/ (not /tmp — which is wiped on
+# reboot and not visible to cargo as a Windows path).
+SHERPA_LIB_CACHE := desktop/src-tauri/.sherpa-onnx-lib-dir
+SHERPA_FETCH_DIR := $(CURDIR)/target/sherpa-onnx-md
+download-sherpa-onnx:
 ifeq ($(OS),Windows_NT)
-	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@echo "Pre-fetching sherpa-onnx MD-Release for Windows CRT alignment (ADR-061)..."
+	@mkdir -p $(SHERPA_FETCH_DIR)
+	@bash scripts/dev-fetch-sherpa-cache.sh "$(SHERPA_FETCH_DIR)" "$(SHERPA_LIB_CACHE)"
 else
+	@echo "  ⬚ download-sherpa-onnx skipped (not Windows)"
+endif
+
+# ── Development ──────────────────────────────────────────────────────────────
+# On Windows, build-cli must see SHERPA_ONNX_LIB_DIR — so the prereq order is:
+# (1) download-sherpa-onnx writes cache file, (2) recipe exports the var and
+# invokes the actual builds explicitly.
+
+ifeq ($(OS),Windows_NT)
+dev: download-nodejs download-sherpa-onnx download-wsl-resources generate-installer-nsh
+	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
+	@sh -c 'export SHERPA_ONNX_LIB_DIR=$$(cat $(SHERPA_LIB_CACHE)); echo "Building with SHERPA_ONNX_LIB_DIR=$$SHERPA_ONNX_LIB_DIR"; "$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp'
+	@echo "Preparing build context..."
+	@bash scripts/bundle-build-context.sh
+	mkdir -p desktop/src-tauri/cli
+	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@"$(MAKE)" verify-bundled-assets
+	@bash scripts/dev-tauri-windows.sh $(SHERPA_LIB_CACHE)
+else
+dev: build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
+	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
+	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
+	@echo "Preparing build context..."
+	@bash scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" bundle-native-assets; fi
+	mkdir -p desktop/src-tauri/cli
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
-endif
-	@$(MAKE) verify-bundled-assets
+	@"$(MAKE)" verify-bundled-assets
 	cd desktop/src-tauri && SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}' cargo tauri dev
+endif
 
 # ── Quick status ─────────────────────────────────────────────────────────────
 
@@ -761,6 +818,6 @@ status:
 	@echo "\n=== Clippy ==="
 	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli 2>&1 | grep -c '^warning' || echo 0)"
 	@echo "\n=== MCP Servers ==="
-	@cd mcp-servers && npm test 2>&1 | grep -E "Tests|Test Files" | tail -2 || true
+	@cd mcp-servers && $(NPM) test 2>&1 | grep -E "Tests|Test Files" | tail -2 || true
 	@echo "\n=== Angular ==="
-	@cd desktop/src && npx ng build 2>&1 | tail -1 || true
+	@cd desktop/src && $(NPX) ng build 2>&1 | tail -1 || true

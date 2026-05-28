@@ -217,7 +217,7 @@ fn build_stream(
     let err_fn = |e| log::warn!(target: "transcription::capture", "wasapi stream error: {e}");
     macro_rules! make {
         ($t:ty, $to_f32:expr) => {{
-            let mut to_f32 = $to_f32;
+            let to_f32 = $to_f32;
             device.build_input_stream(
                 config,
                 move |data: &[$t], _: &cpal::InputCallbackInfo| {

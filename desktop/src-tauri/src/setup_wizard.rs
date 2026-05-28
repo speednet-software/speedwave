@@ -462,7 +462,7 @@ fn init_vm_windows() -> anyhow::Result<()> {
     let list_str = decode_wsl_output(&list.stdout);
     let distro_exists = list_str
         .lines()
-        .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+        .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name());
 
     if !distro_exists {
         import_wsl_distro()?;
@@ -602,7 +602,7 @@ fn merge_wslconfig_vpn_keys(input: &str) -> String {
     out
 }
 
-/// Verifies that an existing WSL2 distro named [`consts::WSL_DISTRO_NAME`] was
+/// Verifies that an existing WSL2 distro named [`consts::wsl_distro_name`] was
 /// created by Speedwave, not pre-registered by an attacker.
 ///
 /// WSL stores the virtual disk at the install directory passed to `wsl --import`.
@@ -618,9 +618,9 @@ fn verify_wsl_distro_origin() -> anyhow::Result<()> {
              NOT created by Speedwave (expected disk image at {} is missing). \
              This may indicate a malicious distro was pre-registered. \
              Please run 'wsl --unregister {}' to remove it, then retry Speedwave setup.",
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
             expected_vhdx.display(),
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
         );
     }
     Ok(())
@@ -632,7 +632,7 @@ fn verify_wsl_distro_origin() -> anyhow::Result<()> {
 fn expected_wsl_vhdx_path() -> anyhow::Result<PathBuf> {
     Ok(consts::data_dir()
         .join("wsl")
-        .join(consts::WSL_DISTRO_NAME)
+        .join(consts::wsl_distro_name())
         .join("ext4.vhdx"))
 }
 
@@ -723,12 +723,12 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         }
     }
 
-    let install_dir = wsl_dir.join(consts::WSL_DISTRO_NAME);
+    let install_dir = wsl_dir.join(consts::wsl_distro_name());
     std::fs::create_dir_all(&install_dir)?;
     let status = speedwave_runtime::binary::system_command("wsl.exe")
         .args([
             "--import",
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
             &install_dir.to_string_lossy(),
             &rootfs_path.to_string_lossy(),
         ])
@@ -741,7 +741,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         let recheck_str = decode_wsl_output(&recheck.stdout);
         if recheck_str
             .lines()
-            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME)
+            .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name())
         {
             // Distro exists but we didn't create it — verify it's ours before
             // trusting it. An attacker could pre-register a malicious distro
@@ -749,7 +749,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
             verify_wsl_distro_origin()?;
             log::warn!(
                 "WSL2 import failed but distro '{}' already exists and is verified — continuing",
-                consts::WSL_DISTRO_NAME
+                consts::wsl_distro_name()
             );
         } else {
             anyhow::bail!("Failed to import Speedwave WSL2 distribution");
@@ -765,7 +765,13 @@ fn import_wsl_distro() -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 fn install_nerdctl_full() -> anyhow::Result<()> {
     let nerdctl_check = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", consts::WSL_DISTRO_NAME, "--", "nerdctl", "--version"])
+        .args([
+            "-d",
+            consts::wsl_distro_name(),
+            "--",
+            "nerdctl",
+            "--version",
+        ])
         .output()?;
     if nerdctl_check.status.success() {
         return Ok(());
@@ -782,7 +788,7 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
             let wslpath_output = speedwave_runtime::binary::system_command("wsl.exe")
                 .args([
                     "-d",
-                    consts::WSL_DISTRO_NAME,
+                    consts::wsl_distro_name(),
                     "--",
                     "wslpath",
                     "-u",
@@ -882,7 +888,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
     // length/escaping issues with wsl.exe -- bash -c "...".
     // Pipe the script through stdin: echo "$script" | wsl bash -s
     let install = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", consts::WSL_DISTRO_NAME, "--", "bash", "-s"])
+        .args(["-d", consts::wsl_distro_name(), "--", "bash", "-s"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -905,7 +911,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
         );
         anyhow::bail!(
             "Failed to install nerdctl-full inside {} WSL2 distribution: {}",
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
             stderr.trim()
         );
     }
@@ -931,13 +937,19 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
 // Setup completeness check
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when all required setup steps have been completed.
+/// Returns `true` when all required setup steps have been completed AND the
+/// VM / WSL distro still physically exists. `cli_linked` is excluded — CLI
+/// symlink creation is optional. The runtime check catches external removal
+/// (factory reset, manual unregister, data_dir rename) that leaves stale state.
 ///
-/// `cli_linked` is intentionally excluded — CLI symlink creation is optional
-/// (the Desktop app works without it) and may fail on restricted systems.
+/// **Cost:** `is_installed()` spawns `limactl list` (macOS) or `wsl.exe --list`
+/// (Windows) per call. Safe for navigation/route guards; do not poll.
 pub fn is_setup_complete() -> bool {
     let state = SetupState::load();
-    state.is_complete()
+    if !state.is_complete() {
+        return false;
+    }
+    runtime::detect_runtime().is_installed()
 }
 
 // ---------------------------------------------------------------------------
@@ -1659,7 +1671,9 @@ fn cli_install_path() -> Option<std::path::PathBuf> {
         .join(consts::CLI_BINARY);
 
     #[cfg(target_os = "windows")]
-    let path = consts::data_dir().join("bin").join("speedwave.exe");
+    let path = consts::data_dir()
+        .join(consts::CLI_BIN_SUBDIR)
+        .join("speedwave.exe");
 
     Some(path)
 }
@@ -1709,6 +1723,94 @@ pub fn link_cli() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolves `windows/sweep.ps1` from the Tauri bundle on Windows. Mirrors
+/// `resolve_cli_source_from` semantics: prefer `SPEEDWAVE_RESOURCES_DIR`,
+/// then the production bundle layout, then dev fallbacks.
+#[cfg(target_os = "windows")]
+fn resolve_sweep_script() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
+        let bundled = std::path::PathBuf::from(&resources_dir)
+            .join("windows")
+            .join("sweep.ps1");
+        if bundled.exists() {
+            return Some(bundled);
+        }
+    }
+    let resources = exe_dir.join("resources").join("windows").join("sweep.ps1");
+    if resources.exists() {
+        return Some(resources);
+    }
+    let dev = exe_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("windows").join("sweep.ps1"));
+    if let Some(ref path) = dev {
+        if path.exists() {
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
+/// Defense-in-depth: kill any stale Speedwave / Node / CLI process holding
+/// the binaries we are about to overwrite. Runs at every Tauri Desktop
+/// startup, complementing the install-time sweep in NSIS + WiX. Fails open
+/// (logs warn, returns) so AppLocker / WDAC policy cannot brick startup.
+/// SSOT for the kill predicate is `windows/sweep.ps1`.
+#[cfg(target_os = "windows")]
+fn run_pre_link_sweep() {
+    let Some(sweep) = resolve_sweep_script() else {
+        log::warn!("pre-link sweep skipped: sweep.ps1 not found in bundle");
+        return;
+    };
+    let inst_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_default();
+    let data_dir = consts::data_dir();
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+    let powershell = std::path::PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+
+    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe. Full mode is
+    // reserved for install-time hooks (NSIS/MSI) — Tauri Desktop must not
+    // target its own workers or self.
+    let result = std::process::Command::new(&powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&sweep)
+        .args(["-Mode", "runtime"])
+        .env("SPW_INSTDIR", &inst_dir)
+        .env("SPW_DATA_DIR", &data_dir)
+        .output();
+    match result {
+        Ok(out) if out.status.success() => {
+            log::info!("pre-link sweep: ok");
+        }
+        Ok(out) => {
+            log::warn!(
+                "pre-link sweep exited {:?} (non-fatal): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            log::warn!("pre-link sweep spawn failed (non-fatal): {e}");
+        }
+    }
+}
+
 /// Inner implementation that copies the CLI binary and configures PATH using explicit paths.
 ///
 /// Separated from [`link_cli`] for unit testing without depending on `current_exe()` or
@@ -1724,7 +1826,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
     #[cfg(target_os = "windows")]
     {
         let _ = home;
-        let cli_dir = consts::data_dir().join("bin");
+        let cli_dir = consts::data_dir().join(consts::CLI_BIN_SUBDIR);
 
         let cli_dir_str = cli_dir.to_string_lossy().to_string();
 
@@ -1740,6 +1842,12 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
                 cli_dir_str
             );
         }
+
+        // Defense-in-depth: kill any stale CLI / worker process holding
+        // ~/.speedwave/bin/speedwave.exe before we try to overwrite it.
+        // Covers MSI users (no NSIS PRE-INSTALL sweep), AppLocker failures,
+        // and post-install processes spawned by containers (ADR-048).
+        run_pre_link_sweep();
 
         copy_cli_binary(cli_source, &cli_dir)?;
 
@@ -3357,7 +3465,7 @@ mod tests {
         let decoded = decode_wsl_output(&bytes);
         let found = decoded
             .lines()
-            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+            .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name());
         assert!(
             found,
             "imported decode_wsl_output should decode UTF-16LE correctly, got: {decoded:?}"
@@ -3375,7 +3483,9 @@ mod tests {
     #[serial]
     fn verify_wsl_distro_origin_passes_when_vhdx_exists() {
         // Create the expected vhdx file under the real data_dir() (OnceLock-cached).
-        let vhdx_dir = consts::data_dir().join("wsl").join(consts::WSL_DISTRO_NAME);
+        let vhdx_dir = consts::data_dir()
+            .join("wsl")
+            .join(consts::wsl_distro_name());
         std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
         let vhdx_file = vhdx_dir.join("ext4.vhdx");
         let existed_before = vhdx_file.exists();
@@ -3404,7 +3514,7 @@ mod tests {
         // file doesn't exist there (it shouldn't in dev/test environments).
         let vhdx_path = consts::data_dir()
             .join("wsl")
-            .join(consts::WSL_DISTRO_NAME)
+            .join(consts::wsl_distro_name())
             .join("ext4.vhdx");
         if vhdx_path.exists() {
             // Skip: can't test "missing" when file genuinely exists
@@ -3424,7 +3534,9 @@ mod tests {
     #[serial]
     fn verify_wsl_distro_origin_rejects_empty_directory() {
         // Create the wsl distro directory without the ext4.vhdx file.
-        let vhdx_dir = consts::data_dir().join("wsl").join(consts::WSL_DISTRO_NAME);
+        let vhdx_dir = consts::data_dir()
+            .join("wsl")
+            .join(consts::wsl_distro_name());
         let dir_existed = vhdx_dir.exists();
         std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
 
@@ -3465,7 +3577,7 @@ mod tests {
             "path should contain 'wsl': {path_str}"
         );
         assert!(
-            path_str.contains(consts::WSL_DISTRO_NAME),
+            path_str.contains(consts::wsl_distro_name()),
             "path should contain distro name: {path_str}"
         );
         assert!(

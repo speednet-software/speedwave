@@ -157,8 +157,6 @@ pub const HOST_GATEWAY_ALIAS: &str = "host.docker.internal";
 /// IP of the macOS host as seen from inside nerdctl containers in the Lima vzNAT network.
 /// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
 pub const LIMA_VZ_HOST_IP: &str = "192.168.5.2";
-/// IP of the Windows host as seen from inside WSL2 containers.
-pub const WSL_HOST_IP: &str = "192.168.65.1";
 
 /// Container user for unprivileged mode (macOS Lima, Windows WSL2).
 /// containerd runs as root inside the VM → UID 1000 maps to UID 1000 on host.
@@ -170,8 +168,21 @@ pub const NERDCTL_FULL_SUBDIR: &str = "nerdctl-full";
 /// Subdirectory within resources for the bundled Node.js binary.
 pub const NODEJS_SUBDIR: &str = "nodejs";
 
+/// `data_dir()/bin/` — Windows CLI install dir; SSOT for `windows/sweep.ps1`.
+pub const CLI_BIN_SUBDIR: &str = "bin";
+
 /// WSL2 distribution name used by Speedwave on Windows.
-pub const WSL_DISTRO_NAME: &str = "Speedwave";
+///
+/// Derived from [`data_dir()`] basename — the production default
+/// (`~/.speedwave`) maps to `"Speedwave"`, the dev default
+/// (`~/.speedwave-dev`) maps to `"Speedwave-dev"`. The mapping mirrors
+/// [`lima_vm_name`] on macOS so dev and production cannot share state on
+/// either platform. See [`derive_wsl_distro_name_from`] for the rules.
+pub fn wsl_distro_name() -> &'static str {
+    use std::sync::OnceLock;
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| derive_wsl_distro_name_from(data_dir()))
+}
 
 /// nerdctl-full bundle version installed inside WSL2 on Windows.
 /// Contains containerd + nerdctl + CNI plugins + BuildKit.
@@ -282,7 +293,7 @@ pub fn wsl_other_distro_msg(other_distro: &str) -> String {
          3. Use Claude Code natively in your '{other_distro}' distribution without Speedwave \
          (loses MCP integrations).\n\n\
          See https://github.com/speednet-software/speedwave/blob/main/docs/getting-started/installation.md#wsl-native-workflow",
-        own = WSL_DISTRO_NAME,
+        own = wsl_distro_name(),
     )
 }
 
@@ -1158,6 +1169,21 @@ pub fn derive_instance_name_from(data_dir: &std::path::Path) -> String {
     name.to_string()
 }
 
+/// Derives the WSL2 distro name from a data directory path.
+///
+/// Production `~/.speedwave` → `"Speedwave"` (back-compat with the installer).
+/// Dev `~/.speedwave-dev` → `"Speedwave-dev"`.
+/// Custom `~/foo` → `"Speedwave-foo"`.
+/// Already-prefixed `~/.speedwave-foo` → `"Speedwave-foo"` (no double prefix).
+pub fn derive_wsl_distro_name_from(data_dir: &std::path::Path) -> String {
+    let basename = derive_instance_name_from(data_dir);
+    if basename == "speedwave" {
+        return "Speedwave".to_string();
+    }
+    let suffix = basename.strip_prefix("speedwave-").unwrap_or(&basename);
+    format!("Speedwave-{suffix}")
+}
+
 /// Derives the Lima VM name from the data directory basename.
 ///
 /// Default: `"speedwave"` (when data_dir is `~/.speedwave`).
@@ -1924,6 +1950,39 @@ mod tests {
     }
 
     #[test]
+    fn test_derive_wsl_distro_name_production_default() {
+        assert_eq!(
+            derive_wsl_distro_name_from(std::path::Path::new("/home/user/.speedwave")),
+            "Speedwave"
+        );
+    }
+
+    #[test]
+    fn test_derive_wsl_distro_name_dev_default() {
+        assert_eq!(
+            derive_wsl_distro_name_from(std::path::Path::new("/home/user/.speedwave-dev")),
+            "Speedwave-dev"
+        );
+    }
+
+    #[test]
+    fn test_derive_wsl_distro_name_custom_basename() {
+        assert_eq!(
+            derive_wsl_distro_name_from(std::path::Path::new("/opt/sw-test")),
+            "Speedwave-sw-test"
+        );
+    }
+
+    #[test]
+    fn test_derive_wsl_distro_name_strips_speedwave_prefix() {
+        // `.speedwave-anything` → `Speedwave-anything`, not `Speedwave-speedwave-anything`.
+        assert_eq!(
+            derive_wsl_distro_name_from(std::path::Path::new("/home/user/.speedwave-staging")),
+            "Speedwave-staging"
+        );
+    }
+
+    #[test]
     fn test_derive_instance_name_trailing_slash_normalised() {
         // Rust Path normalises trailing slashes: "/some/path/" → basename "path"
         assert_eq!(
@@ -2059,18 +2118,37 @@ mod tests {
         }
     }
 
-    // SSOT alignment guards (ADR-048, CLAUDE.md "WSL distro name" row).
-    // If WSL_DISTRO_NAME is renamed, at least one of these will fail at compile
-    // time (include_str! produces a compile error if the file is missing) or
-    // at test time. Update all four locations together in the same commit.
+    // SSOT alignment guards (CLAUDE.md "WSL distro name" row).
+    //
+    // The production install path always uses the default data_dir
+    // (`~/.speedwave`), so `derive_wsl_distro_name_from` returns the literal
+    // `"Speedwave"` for it. The installer, E2E provisioning script, and
+    // installation guide all hard-code that production name. These guards
+    // catch accidental renames in any of the three files; non-production
+    // distro names (e.g. dev's `Speedwave-dev`) are derived dynamically and
+    // do not need a sync guard.
+
+    const PRODUCTION_WSL_DISTRO: &str = "Speedwave";
+
+    #[test]
+    fn production_wsl_distro_name_is_default() {
+        // Sanity check that the literal below matches what
+        // `derive_wsl_distro_name_from` produces for the production data_dir.
+        assert_eq!(
+            derive_wsl_distro_name_from(std::path::Path::new("/home/user/.speedwave")),
+            PRODUCTION_WSL_DISTRO
+        );
+    }
 
     #[test]
     fn wsl_distro_name_appears_in_installer_hooks() {
-        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
+        // Hand-edited source. The committed installer-hooks.nsh is generated
+        // from this template + sweep.ps1 + firewall.ps1 — see CLAUDE.md.
+        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks-template.nsh");
         assert!(
-            src.contains(WSL_DISTRO_NAME),
-            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in installer-hooks.nsh; \
-             rename it there too (CLAUDE.md SSOT alignment)"
+            src.contains(PRODUCTION_WSL_DISTRO),
+            "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
+             installer-hooks-template.nsh; rename it there too (CLAUDE.md SSOT alignment)"
         );
     }
 
@@ -2078,9 +2156,9 @@ mod tests {
     fn wsl_distro_name_appears_in_e2e_vm_script() {
         let src = include_str!("../../../scripts/e2e-vm.sh");
         assert!(
-            src.contains(WSL_DISTRO_NAME),
-            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in scripts/e2e-vm.sh; \
-             rename it there too (CLAUDE.md SSOT alignment)"
+            src.contains(PRODUCTION_WSL_DISTRO),
+            "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
+             scripts/e2e-vm.sh; rename it there too (CLAUDE.md SSOT alignment)"
         );
     }
 
@@ -2088,31 +2166,34 @@ mod tests {
     fn wsl_distro_name_appears_in_installation_doc() {
         let src = include_str!("../../../docs/getting-started/installation.md");
         assert!(
-            src.contains(WSL_DISTRO_NAME),
-            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in docs/getting-started/installation.md; \
-             rename it there too (CLAUDE.md SSOT alignment)"
+            src.contains(PRODUCTION_WSL_DISTRO),
+            "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
+             docs/getting-started/installation.md; rename it there too \
+             (CLAUDE.md SSOT alignment)"
         );
     }
 
     #[test]
-    fn data_dir_appears_in_installer_hooks() {
-        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
+    fn data_dir_appears_in_installer_hooks_template() {
         // DATA_DIR = ".speedwave"; the NSIS hook hard-codes "$PROFILE\.speedwave"
+        // in the hand-edited template.
+        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks-template.nsh");
         assert!(
             src.contains(DATA_DIR),
-            "DATA_DIR ({DATA_DIR}) not found in installer-hooks.nsh; \
+            "DATA_DIR ({DATA_DIR}) not found in installer-hooks-template.nsh; \
              rename it there too (CLAUDE.md SSOT alignment)"
         );
     }
 
     #[test]
-    fn nodejs_subdir_appears_in_installer_hooks() {
-        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
-        // NODEJS_SUBDIR = "nodejs"; the NSIS PRE-INSTALL sweep filters
-        // processes whose ExecutablePath starts with $INSTDIR\nodejs\.
+    fn nodejs_subdir_appears_in_sweep_script() {
+        // NODEJS_SUBDIR = "nodejs"; the sweep script (consumed by NSIS, MSI,
+        // and Tauri runtime) filters processes whose ExecutablePath starts
+        // with $instDir\nodejs\.
+        let src = include_str!("../../../desktop/src-tauri/windows/sweep.ps1");
         assert!(
             src.contains(NODEJS_SUBDIR),
-            "NODEJS_SUBDIR ({NODEJS_SUBDIR}) not found in installer-hooks.nsh; \
+            "NODEJS_SUBDIR ({NODEJS_SUBDIR}) not found in sweep.ps1; \
              rename it there too (ADR-048 SSOT alignment)"
         );
     }

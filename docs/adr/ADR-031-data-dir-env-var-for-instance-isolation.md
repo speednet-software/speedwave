@@ -53,6 +53,20 @@ The `Makefile` sets `SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-dev` so that `make
 
 `scripts/e2e-vm.sh` derives the instance name using `basename "$SPEEDWAVE_DATA_DIR" | sed 's/^\.//'` — functionally identical to `derive_instance_name_from()`. Both locations carry SSOT comments pointing at each other.
 
+### 6. Windows: per-data-dir WSL2 distro
+
+The same per-data-dir isolation extends to WSL2 on Windows via `wsl_distro_name()` (`consts.rs`), built on top of `derive_wsl_distro_name_from(data_dir)`:
+
+| `SPEEDWAVE_DATA_DIR` | Basename         | WSL distro          |
+| -------------------- | ---------------- | ------------------- |
+| `~/.speedwave`       | `.speedwave`     | `Speedwave`         |
+| `~/.speedwave-dev`   | `.speedwave-dev` | `Speedwave-dev`     |
+| `/opt/sw-test`       | `sw-test`        | `Speedwave-sw-test` |
+
+`Speedwave` (production basename) is the legacy literal — installer, E2E provisioning, and install docs reference it directly; SSOT-alignment tests in `consts.rs` pin it. All other basenames map to `Speedwave-<basename>`, with the `speedwave-` prefix stripped to avoid `Speedwave-speedwave-foo`.
+
+Every runtime consumer (`runtime/wsl.rs`, `project.rs::add_project_with_data_dir`, `setup_wizard.rs`) calls `consts::wsl_distro_name()` instead of duplicating the literal, so prod and dev distros never collide on containerd image namespace, compose project prefix, or `host.docker.internal` resolution.
+
 ## Consequences
 
 ### Positive

@@ -74,6 +74,8 @@ case "$platform" in
     require_file "$root/wsl/ubuntu-rootfs.tar.gz"
     require_file "$root/nodejs/node.exe"
     require_file "$root/cli/speedwave.exe"
+    require_file "$root/windows/sweep.ps1"
+    require_file "$root/windows/firewall.ps1"
     ;;
 esac
 

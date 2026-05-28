@@ -87,9 +87,12 @@ impl LivenessProbe {
         if port == 0 {
             return false;
         }
+        let bind = super::probe::host_bind_address_for_probe();
         match self {
-            LivenessProbe::TcpSingle => probe_tcp(port, 1, Duration::ZERO),
-            LivenessProbe::TcpRetry { attempts, backoff } => probe_tcp(port, *attempts, *backoff),
+            LivenessProbe::TcpSingle => probe_tcp(&bind, port, 1, Duration::ZERO),
+            LivenessProbe::TcpRetry { attempts, backoff } => {
+                probe_tcp(&bind, port, *attempts, *backoff)
+            }
             LivenessProbe::Custom(f) => f(state_dir),
         }
     }
@@ -183,6 +186,9 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
         let mut cmd = crate::binary::command("node");
         cmd.arg(script_path);
         apply_child_env(&mut cmd, spec.path_override(), &CurrentProcessEnv);
+        // SSOT: macOS 127.0.0.1, Windows WSL adapter IP — must match host_gateway_ip
+        // so container reaches the worker via extra_hosts: host.docker.internal:<gateway>.
+        cmd.env("MCP_LISTEN_HOST", crate::compose::host_bind_address()?);
         spec.apply_env(&mut cmd, &ctx);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())

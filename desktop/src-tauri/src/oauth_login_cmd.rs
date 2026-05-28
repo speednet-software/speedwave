@@ -153,6 +153,13 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     spawn_apple_terminal(cmd)
 }
 
+/// Argv for `cmd.exe /c start "" <ps> -NoExit -Command <cmd>`. Empty title
+/// is mandatory — `start` treats the first quoted arg as the window title.
+#[cfg(any(target_os = "windows", test))]
+fn build_windows_terminal_argv<'a>(ps_exe: &'a str, cmd: &'a str) -> [&'a str; 7] {
+    ["/c", "start", "", ps_exe, "-NoExit", "-Command", cmd]
+}
+
 /// Spawns a new PowerShell console window running `cmd`.
 /// `build_auth_command_for_platform` emits PowerShell syntax (`Set-Location`,
 /// `$env:`, `;`) on Windows, so we must spawn PowerShell — not `cmd.exe`.
@@ -165,9 +172,8 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     } else {
         "powershell.exe"
     };
-    let status = std::process::Command::new("cmd.exe")
-        .args(["/c", "start", ps, "-NoExit", "-Command", cmd])
-        .status()?;
+    let argv = build_windows_terminal_argv(ps, cmd);
+    let status = std::process::Command::new("cmd.exe").args(argv).status()?;
     if !status.success() {
         anyhow::bail!("{ps} exited with status {status}");
     }
@@ -208,6 +214,31 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
 mod tests {
     #[cfg(target_os = "macos")]
     use super::*;
+
+    // -- Windows terminal argv (cross-platform: pure pattern) --
+
+    #[test]
+    fn windows_terminal_argv_includes_empty_title_after_start() {
+        let argv = super::build_windows_terminal_argv(
+            "powershell.exe",
+            "Set-Location 'C:\\proj'; speedwave login --project 'p'",
+        );
+        // Empty title MUST be argv[2] — otherwise `start` consumes the next
+        // quoted token as the window title and drops the actual command.
+        assert_eq!(argv[0], "/c");
+        assert_eq!(argv[1], "start");
+        assert_eq!(argv[2], "", "empty title required between `start` and exe");
+        assert_eq!(argv[3], "powershell.exe");
+        assert_eq!(argv[4], "-NoExit");
+        assert_eq!(argv[5], "-Command");
+        assert!(argv[6].contains("speedwave login"));
+    }
+
+    #[test]
+    fn windows_terminal_argv_passes_pwsh7_when_selected() {
+        let argv = super::build_windows_terminal_argv("pwsh.exe", "echo hi");
+        assert_eq!(argv[3], "pwsh.exe");
+    }
 
     // -- escape_for_applescript (macOS only) --
 

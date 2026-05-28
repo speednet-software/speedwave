@@ -42,7 +42,7 @@ The HTTP probe itself runs through reqwest with: `redirect::Policy::none()`, 5-s
 
 ## Container-host alias rewrite
 
-`host.docker.internal` resolves **inside the container** (injected via Compose `extra_hosts` per-service) but not from the Desktop host process — Speedwave does not bundle Docker Desktop. Host-side code that probes a base URL must call `speedwave_runtime::compose::rewrite_container_alias_to_loopback`. The single SSOT is `consts::HOST_GATEWAY_ALIAS`. Do not reintroduce per-platform aliases (`host.lima.internal`, `host.speedwave.internal`, `host.containers.internal`) — one canonical hostname; per-platform divergence is in the gateway IP only (`LIMA_VZ_HOST_IP` / `WSL_HOST_IP`).
+`host.docker.internal` resolves **inside the container** (injected via Compose `extra_hosts` per-service) but not from the Desktop host process — Speedwave does not bundle Docker Desktop. Host-side code that probes a base URL must call `speedwave_runtime::compose::rewrite_container_alias_to_loopback`. The single SSOT is `consts::HOST_GATEWAY_ALIAS`. Do not reintroduce per-platform aliases (`host.lima.internal`, `host.speedwave.internal`, `host.containers.internal`) — one canonical hostname; per-platform divergence is in the gateway IP only, resolved at runtime by `compose::host_addressing` (macOS: static `LIMA_VZ_HOST_IP`; Windows: detected from `wsl.exe -d <distro> -- sh -c 'ip -4 route show default'`, see ADR-067).
 
 ## Authentication bypass
 

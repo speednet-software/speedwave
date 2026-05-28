@@ -53,9 +53,9 @@ A third macro, `NSIS_HOOK_PREINSTALL`, was added to the same `installer-hooks.ns
 
 The sweep is strictly scoped — it never touches `node.exe` instances from other locations (VS Code, nvm, user shells). Both `Speedwave.exe` and `node.exe` are filtered by `ExecutablePath` against `$INSTDIR`, never by image name alone. Regression tests in `desktop/src-tauri/src/installer_hooks.rs` pin all security-critical invariants (env-var passing, CIM enumeration, ordinal comparison, absolute powershell.exe path, no global `/IM` taskkill, `FileShare::None` lock probe, exit-code surfacing).
 
-### MSI parity (deferred)
+### MSI parity (resolved)
 
-Speedwave publishes both NSIS `.exe` and MSI for managed deployments (`docs/getting-started/installation.md` line 60).[^3] MSI custom actions require a `<CustomAction>` element, a `<InstallExecuteSequence>` entry, impersonation (`Impersonate="yes"`), and an opt-in checkbox in the UI — substantially more work than the NSIS hook and outside the scope of this fix. MSI parity is tracked as a follow-up issue; until it ships, MSI users must run `wsl --unregister Speedwave` manually after uninstall (same as current v0.10.0 behaviour).
+Speedwave publishes both NSIS `.exe` and MSI for managed deployments (`docs/getting-started/installation.md` line 60).[^3] MSI parity is now achieved through a shared PowerShell sweep script (`windows/sweep.ps1`) and a thin WiX fragment (`windows/sweep.wxs`). The sweep logic lives in **one** PowerShell file; both NSIS PRE-INSTALL and the MSI WiX CustomAction invoke it (`scripts/generate-installer-nsh.sh` embeds it into the NSIS hook at build time; the MSI ships it as a bundled resource and calls it via a deferred `CAQuietExec64` CustomAction after `InstallFiles`). Tauri Desktop additionally invokes the same script at every startup (`setup_wizard::run_pre_link_sweep`) as defense-in-depth for the post-install window where the installer has finished but a stale CLI was spawned by a container. Drift between the NSIS hook and its inputs is caught by the Rust pin tests in `desktop/src-tauri/src/installer_hooks.rs`.
 
 ## Consequences
 
@@ -63,7 +63,7 @@ Speedwave publishes both NSIS `.exe` and MSI for managed deployments (`docs/gett
 - **Before this change (users on v0.10.0):** One-time manual `wsl --unregister Speedwave` is still required for users who already have a phantom distro. The fix prevents the next occurrence but does not auto-clean pre-existing phantom distros.
 - **Idempotency:** `wsl --unregister` on a non-existent distro returns a "no distribution" error, which both the Rust `reset_vm()` implementation and the NSIS hook treat as success.
 - **`SPEEDWAVE_DATA_DIR` (ADR-031):** Users with a redirected data directory get a distinct NSIS prompt that names the env var and instructs manual removal of the override path. The uninstaller does not attempt `RMDir /r` on an env-var-sourced path to avoid path injection.
-- **MSI users:** Unaffected by this PR — existing manual-cleanup behaviour until follow-up issue ships.
+- **MSI users:** Receive the same PRE-INSTALL sweep + Hyper-V firewall rule as NSIS users; the SSOT for both is `windows/sweep.ps1` + `windows/firewall.ps1`.
 - **Per-user scope:** WSL2 distros are per-user; `$PROFILE\.speedwave` resolves to the uninstalling user's home. The hook does not require elevation.
 - **Repair mode (Tauri 2.x NSIS template):** The standard MUI2 maintenance flow routes "Repair" to a separate Maintenance section that does not invoke `un.Uninstall` and therefore does not invoke the uninstall hooks.[^4] This must be verified during the manual smoke test (see `docs/contributing/testing.md`) before merge. If "Repair" unexpectedly invokes the hooks, this ADR will be updated with a mitigation.
 

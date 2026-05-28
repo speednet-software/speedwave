@@ -73,6 +73,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-064](ADR-064-canonicalize-bypass-for-wsl-unc.md)                  | Bypass `canonicalize()` for WSL UNC project paths on Windows                             | Accepted              |
 | [ADR-065](ADR-065-image-attachments-structured-input.md)               | Image attachments via structured `WireContentBlock[]` user input                         | Accepted              |
 | [ADR-066](ADR-066-locked-runtime-per-project-compose-lock.md)          | `LockedRuntime` wrapper enforcing per-project compose transaction lock                   | Accepted              |
+| [ADR-067](ADR-067-host-addressing-ssot-windows-wsl2-mirrored.md)       | `HostAddressing` SSOT — host bind / container gateway under WSL2 mirrored networking     | Accepted              |
 
 ## Creating a New ADR
 
