@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { ProjectSwitcherComponent } from './project-switcher.component';
+import { ProjectSwitcherComponent, cleanRemoveErrorMessage } from './project-switcher.component';
 import { LoggerService } from '../services/logger.service';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -51,7 +51,7 @@ describe('ProjectSwitcherComponent', () => {
     expect(component.projects()).toEqual([]);
     expect(component.activeProject()).toBeNull();
     expect(component.showAddForm()).toBe(false);
-    expect(component.filter()).toBe('');
+    expect(component.pendingDeleteName()).toBeNull();
   });
 
   describe('visibility binding (UiStateService.projectSwitcherOpen)', () => {
@@ -175,7 +175,7 @@ describe('ProjectSwitcherComponent', () => {
     });
   });
 
-  describe('search filter', () => {
+  describe('project list rendering', () => {
     beforeEach(async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_projects')
@@ -183,7 +183,6 @@ describe('ProjectSwitcherComponent', () => {
             projects: [
               { name: 'speedwave', dir: '/tmp/sw' },
               { name: 'speedwave-plugins', dir: '/tmp/sw-plugins' },
-              { name: 'speednet-backend', dir: '/tmp/sn-backend' },
               { name: 'experiments', dir: '/tmp/exp' },
             ],
             active_project: 'speedwave',
@@ -193,70 +192,48 @@ describe('ProjectSwitcherComponent', () => {
       await component.ngOnInit();
     });
 
-    it('returns all projects when filter is empty', () => {
-      expect(component.visibleProjects().length).toBe(4);
+    it('returns every project unfiltered', () => {
+      expect(component.visibleProjects().length).toBe(3);
     });
 
-    it('narrows the list by case-insensitive substring match', () => {
-      component.filter.set('PLUGIN');
-      const visible = component.visibleProjects();
-      expect(visible.length).toBe(1);
-      expect(visible[0].project.name).toBe('speedwave-plugins');
-    });
-
-    it('returns an empty list when nothing matches', () => {
-      component.filter.set('zzz');
-      expect(component.visibleProjects()).toEqual([]);
-    });
-
-    it('marks the active project with isActive=true and current pill', () => {
+    it('marks the active project with isActive=true and disables its row', () => {
       ui.toggleProjectSwitcher();
       fixture.detectChanges();
-      const visible = component.visibleProjects();
-      const active = visible.find((v) => v.isActive);
+      const active = component.visibleProjects().find((v) => v.isActive);
       expect(active?.project.name).toBe('speedwave');
-      const pill = fixture.nativeElement.querySelector(
+      const row = fixture.nativeElement.querySelector(
         '[data-testid="project-switcher-item-speedwave"]'
-      );
-      expect(pill).not.toBeNull();
-      expect(pill.textContent).toContain('current');
+      ) as HTMLButtonElement;
+      expect(row).not.toBeNull();
+      expect(row.disabled).toBe(true);
     });
 
-    it('renders an info tooltip glyph for every project row', () => {
+    it('marks the active row with aria-current="true" on the focusable button and an sr-only label', () => {
       ui.toggleProjectSwitcher();
       fixture.detectChanges();
-      // Active row also exposes the info glyph carrying the project directory.
+      const row = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-speedwave"]'
+      ) as HTMLButtonElement;
+      expect(row.getAttribute('aria-current')).toBe('true');
+      const srOnly = row.querySelector('.sr-only');
+      expect(srOnly?.textContent).toContain('current project');
+      const inactive = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-speedwave-plugins"]'
+      ) as HTMLButtonElement;
+      expect(inactive.getAttribute('aria-current')).toBeNull();
+    });
+
+    it('renders the info glyph for every project row', () => {
+      ui.toggleProjectSwitcher();
+      fixture.detectChanges();
       const activeInfo = fixture.nativeElement.querySelector(
         '[data-testid="project-switcher-item-info-speedwave"]'
       );
       expect(activeInfo).not.toBeNull();
-      // Non-active row exposes its own info glyph alongside the row button.
       const inactiveInfo = fixture.nativeElement.querySelector(
         '[data-testid="project-switcher-item-info-speedwave-plugins"]'
       );
       expect(inactiveInfo).not.toBeNull();
-    });
-
-    it('shows the empty placeholder when filter has no matches', () => {
-      ui.toggleProjectSwitcher();
-      component.filter.set('nope');
-      fixture.detectChanges();
-      const empty = fixture.nativeElement.querySelector('[data-testid="project-switcher-empty"]');
-      expect(empty).not.toBeNull();
-      expect(empty.textContent).toContain('no projects match');
-    });
-  });
-
-  describe('search input behavior', () => {
-    it('updates the filter signal from the input event', () => {
-      ui.toggleProjectSwitcher();
-      fixture.detectChanges();
-      const input = fixture.nativeElement.querySelector(
-        '[data-testid="project-switcher-search"]'
-      ) as HTMLInputElement;
-      input.value = 'edge';
-      input.dispatchEvent(new Event('input'));
-      expect(component.filter()).toBe('edge');
     });
   });
 
@@ -300,18 +277,142 @@ describe('ProjectSwitcherComponent', () => {
     it('cleans up project settled listener on destroy', async () => {
       await projectState.init();
       await component.ngOnInit();
-
-      // Verify the unsub function exists before destroy
       expect(
         (component as unknown as { unsubProjectSettled: unknown })['unsubProjectSettled']
       ).not.toBeNull();
-
       component.ngOnDestroy();
-
-      // Verify unsub was called and nulled
       expect(
         (component as unknown as { unsubProjectSettled: unknown })['unsubProjectSettled']
       ).toBeNull();
     });
+  });
+
+  describe('remove project', () => {
+    beforeEach(async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_projects')
+          return {
+            projects: [
+              { name: 'alpha', dir: '/tmp/alpha' },
+              { name: 'beta', dir: '/tmp/beta' },
+            ],
+            active_project: 'alpha',
+          };
+        return undefined;
+      };
+      await projectState.init();
+      await component.ngOnInit();
+      ui.toggleProjectSwitcher();
+      fixture.detectChanges();
+    });
+
+    it('requestRemove() swaps the row into the confirm prompt', () => {
+      component.requestRemove('beta');
+      fixture.detectChanges();
+      expect(component.pendingDeleteName()).toBe('beta');
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-confirm-beta"]')
+      ).not.toBeNull();
+    });
+
+    it('cancelRemove() restores the row without invoking the backend', () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      component.requestRemove('beta');
+      component.cancelRemove();
+      fixture.detectChanges();
+      expect(component.pendingDeleteName()).toBeNull();
+      expect(invokeSpy).not.toHaveBeenCalledWith('remove_project', expect.anything());
+    });
+
+    it('confirmRemove() invokes remove_project and clears the pending state', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      component.requestRemove('beta');
+      await component.confirmRemove('beta');
+      expect(invokeSpy).toHaveBeenCalledWith('remove_project', { name: 'beta' });
+      expect(component.pendingDeleteName()).toBeNull();
+    });
+
+    it('surfaces backend error inline and strips the runtime sentinel prefix', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'remove_project')
+          throw new Error(
+            "active_project_removal: Cannot remove the active project 'beta'. Switch first."
+          );
+        if (cmd === 'list_projects')
+          return {
+            projects: [
+              { name: 'alpha', dir: '/tmp/alpha' },
+              { name: 'beta', dir: '/tmp/beta' },
+            ],
+            active_project: 'alpha',
+          };
+        return undefined;
+      };
+      await component.confirmRemove('beta');
+      fixture.detectChanges();
+      expect(component.removeError()).toEqual({
+        msg: "Cannot remove the active project 'beta'. Switch first.",
+        project: 'beta',
+      });
+      const inline = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-remove-error-beta"]'
+      );
+      expect(inline).not.toBeNull();
+      expect(mockLogError).toHaveBeenCalled();
+    });
+
+    it('clears pendingDeleteName and removeError when the dropdown closes', () => {
+      component.requestRemove('beta');
+      component.removeError.set({ msg: 'boom', project: 'beta' });
+      ui.closeProjectSwitcher();
+      fixture.detectChanges();
+      expect(component.pendingDeleteName()).toBeNull();
+      expect(component.removeError()).toBeNull();
+    });
+
+    it('clears pendingDeleteName when the pending project disappears from the list', async () => {
+      component.requestRemove('beta');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_projects')
+          return {
+            projects: [{ name: 'alpha', dir: '/tmp/alpha' }],
+            active_project: 'alpha',
+          };
+        return undefined;
+      };
+      const refreshed = await mockTauri.invoke<{
+        projects: { name: string; dir: string }[];
+        active_project: string;
+      }>('list_projects');
+      component.projects.set(refreshed.projects);
+      fixture.detectChanges();
+      expect(component.pendingDeleteName()).toBeNull();
+    });
+
+    it('does not render trash button or confirm UI on the active row', () => {
+      const activeTrash = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-remove-alpha"]'
+      );
+      expect(activeTrash).toBeNull();
+      const inactiveTrash = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-remove-beta"]'
+      );
+      expect(inactiveTrash).not.toBeNull();
+    });
+  });
+});
+
+describe('cleanRemoveErrorMessage', () => {
+  it('strips the sentinel prefix', () => {
+    expect(
+      cleanRemoveErrorMessage("active_project_removal: Cannot remove the active project 'beta'.")
+    ).toBe("Cannot remove the active project 'beta'.");
+  });
+
+  it('returns the message unchanged when no sentinel prefix is present', () => {
+    expect(cleanRemoveErrorMessage('Some other backend failure')).toBe(
+      'Some other backend failure'
+    );
+    expect(cleanRemoveErrorMessage('')).toBe('');
   });
 });

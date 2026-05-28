@@ -115,6 +115,16 @@ There is no client-side gate on the active model — every provider gets a chanc
 
 The CLI (`speedwave run`, which launches Claude Code's TUI in the container) does **not** yet support image paste — the TUI's native paste reads the host clipboard, which the container cannot see. A host-side clipboard watcher is planned in a separate spike + PR.
 
+## Project switcher
+
+The project pill in the top-right of every view opens the project switcher dropdown — the single entry point for selecting, adding, and removing projects.
+
+- **Switch:** click any inactive row. The active row is rendered disabled (no `current` pill — color and disabled state are the only signals) so it never reads as a clickable target.
+- **Add:** the `+ add project…` footer opens the shared create-project modal.
+- **Remove:** the trash icon appears on inactive rows on hover or keyboard focus. Clicking it swaps the row into an inline **Sure?** confirm with `delete` / `cancel` (same pattern as the conversation-history sidebar). Removing a project unregisters it from `~/.speedwave/config.json`, stops its containers, tears down its host-exec drain, and deletes every per-project subdirectory under `~/.speedwave/` (tokens, compose, context, claude-home, secrets, snapshots, oauth, host-exec). **The user's project files on the host are not touched** — only Speedwave-managed state is removed.
+- The active project cannot be removed; switch to a different one first. The runtime layer enforces this regardless of caller, and the trash icon is hidden on the active row in the UI.
+- If a backend error reaches the UI (compose-down failure, runtime guard), it surfaces inline under the row as a red `role="alert"` message — the config wipe is aborted so the user can retry.
+
 ## System Tray
 
 ## Logs & system health

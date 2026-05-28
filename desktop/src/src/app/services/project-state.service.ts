@@ -403,6 +403,16 @@ export class ProjectStateService {
     await this.tauri.invoke('add_project', { name, dir });
   }
 
+  /**
+   * The ONLY way to remove projects from the frontend.
+   * @param name - The project to remove.
+   */
+  async removeProject(name: string): Promise<void> {
+    await this.tauri.invoke('remove_project', { name });
+    await this.refreshProjectList();
+    this.notifySettled();
+  }
+
   private async setupListeners(): Promise<void> {
     try {
       await this.tauri.listen<{ project: string }>('project_switch_started', (event) => {

@@ -5,6 +5,7 @@ import {
   OnDestroy,
   OnInit,
   computed,
+  effect,
   inject,
   signal,
 } from '@angular/core';
@@ -14,16 +15,25 @@ import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import type { ProjectEntry, ProjectList } from '../models/update';
 import { CreateProjectModalComponent } from '../shared/create-project-modal/create-project-modal.component';
+import { IconComponent } from '../shared/icon.component';
 import { TooltipDirective } from '../shared/tooltip.directive';
+import { swatchFor } from './project-swatch';
 
 /**
- * Color swatches cycled through in the row left-edge tile.
- *
- * The mockup paints up to four projects (violet / teal / amber / accent). The
- * order is deterministic — same project always gets the same color regardless
- * of how the underlying list is sorted.
+ * Sentinel prefix used by the runtime to mark "active project removal rejected".
+ * Must match crates/speedwave-runtime/src/project.rs::REMOVE_ACTIVE_PROJECT_ERR_PREFIX.
  */
-const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--accent)'] as const;
+const ACTIVE_PROJECT_ERR_PREFIX = 'active_project_removal: ';
+
+/**
+ * Strips the runtime sentinel prefix so the user sees the human-readable message.
+ * Exported for unit testing.
+ * @param msg - Raw backend error message that may carry the sentinel prefix.
+ */
+export function cleanRemoveErrorMessage(msg: string): string {
+  const idx = msg.indexOf(ACTIVE_PROJECT_ERR_PREFIX);
+  return idx >= 0 ? msg.slice(idx + ACTIVE_PROJECT_ERR_PREFIX.length) : msg;
+}
 
 /**
  * Project switcher dropdown — toggled from the chat header / command palette.
@@ -35,7 +45,7 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
  */
 @Component({
   selector: 'app-project-switcher',
-  imports: [CreateProjectModalComponent, TooltipDirective],
+  imports: [CreateProjectModalComponent, IconComponent, TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (ui.projectSwitcherOpen()) {
@@ -54,63 +64,49 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
         aria-label="Switch project"
       >
         <div class="rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-2xl">
-          <!-- Header: search input -->
-          <div class="border-b border-[var(--line)] p-2">
-            <div
-              class="flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1"
-            >
-              <span class="mono text-[11px] text-[var(--ink-mute)]">&gt;</span>
-              <input
-                type="text"
-                class="mono w-full bg-transparent text-[11px] text-[var(--ink)] focus:outline-none"
-                placeholder="search projects..."
-                aria-label="Search projects"
-                data-testid="project-switcher-search"
-                [value]="filter()"
-                (input)="onFilterInput($event)"
-              />
-            </div>
-          </div>
-
           <!-- Body: project rows -->
           <div class="max-h-64 overflow-y-auto p-1">
-            @for (entry of visibleProjects(); track entry.project.name; let i = $index) {
-              @if (entry.isActive) {
-                <div
-                  class="flex items-center gap-1 rounded px-2 py-1.5"
-                  [class]="rowActiveClasses"
-                  [attr.data-testid]="'project-switcher-item-' + entry.project.name"
-                >
+            @for (entry of visibleProjects(); track entry.project.name) {
+              @let pendingDelete = entry.project.name === pendingDeleteName();
+              <div
+                class="group flex items-center gap-1 rounded px-2 py-1.5"
+                [class]="entry.isActive ? rowActiveClasses : rowInactiveClasses"
+              >
+                @if (pendingDelete) {
                   <div
-                    class="mono inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm px-0.5 text-[8px] font-bold leading-none text-[#07090f]"
-                    [style.background]="entry.swatch"
-                    aria-hidden="true"
+                    class="flex min-w-0 flex-1 items-center justify-between gap-2"
+                    [attr.data-testid]="'project-switcher-confirm-' + entry.project.name"
+                    role="alertdialog"
+                    aria-label="Confirm remove project"
                   >
-                    {{ entry.project.name.slice(0, 2).toLowerCase() }}
+                    <span class="mono truncate text-[11.5px] text-[var(--ink-dim)]">Sure?</span>
+                    <div class="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        class="mono rounded border border-red-500/40 px-2 py-0.5 text-[11px] text-red-300 hover:bg-red-500/10"
+                        [attr.data-testid]="'project-switcher-confirm-yes-' + entry.project.name"
+                        (click)="confirmRemove(entry.project.name)"
+                      >
+                        delete
+                      </button>
+                      <button
+                        type="button"
+                        class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                        [attr.data-testid]="'project-switcher-confirm-no-' + entry.project.name"
+                        (click)="cancelRemove()"
+                      >
+                        cancel
+                      </button>
+                    </div>
                   </div>
-                  <span class="mono flex-1 truncate text-[12px] text-[var(--ink)]">{{
-                    entry.project.name
-                  }}</span>
-                  <span class="pill accent mr-1.5">current</span>
-                  <span
-                    class="mono flex h-3.5 w-3.5 flex-shrink-0 cursor-default select-none items-center justify-center rounded-full border border-[var(--line-strong)] text-[9px] text-[var(--ink-mute)]"
-                    [appTooltip]="entry.project.dir"
-                    placement="top"
-                    [attr.aria-label]="'Project directory: ' + entry.project.dir"
-                    [attr.data-testid]="'project-switcher-item-info-' + entry.project.name"
-                    tabindex="0"
-                    >i</span
-                  >
-                </div>
-              } @else {
-                <div
-                  class="flex items-center gap-1 rounded px-2 py-1.5"
-                  [class]="rowInactiveClasses"
-                >
+                } @else {
                   <button
                     type="button"
                     class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    [class.cursor-default]="entry.isActive"
                     [attr.data-testid]="'project-switcher-item-' + entry.project.name"
+                    [disabled]="entry.isActive"
+                    [attr.aria-current]="entry.isActive ? 'true' : null"
                     (click)="switchProject(entry.project.name)"
                   >
                     <div
@@ -120,10 +116,28 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
                     >
                       {{ entry.project.name.slice(0, 2).toLowerCase() }}
                     </div>
-                    <span class="mono truncate text-[12px] text-[var(--ink-dim)]">{{
-                      entry.project.name
-                    }}</span>
+                    <span
+                      class="mono truncate text-[12px]"
+                      [class]="entry.isActive ? 'text-[var(--ink-mute)]' : 'text-[var(--ink-dim)]'"
+                      >{{ entry.project.name }}</span
+                    >
+                    @if (entry.isActive) {
+                      <span class="sr-only">current project</span>
+                    }
                   </button>
+                  @if (!entry.isActive) {
+                    <button
+                      type="button"
+                      class="flex shrink-0 items-center px-1 text-[var(--ink-mute)] opacity-0 hover:text-red-300 focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+                      [attr.data-testid]="'project-switcher-remove-' + entry.project.name"
+                      [attr.aria-label]="'Remove project ' + entry.project.name"
+                      appTooltip="Remove from list?"
+                      placement="top"
+                      (click)="requestRemove(entry.project.name)"
+                    >
+                      <app-icon name="trash" class="h-3.5 w-3.5" />
+                    </button>
+                  }
                   <span
                     class="mono flex h-3.5 w-3.5 flex-shrink-0 cursor-default select-none items-center justify-center rounded-full border border-[var(--line-strong)] text-[9px] text-[var(--ink-mute)]"
                     [appTooltip]="entry.project.dir"
@@ -133,6 +147,15 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
                     tabindex="0"
                     >i</span
                   >
+                }
+              </div>
+              @if (removeError()?.project === entry.project.name) {
+                <div
+                  class="mono px-2 pb-1.5 text-[10px] text-red-300"
+                  [attr.data-testid]="'project-switcher-remove-error-' + entry.project.name"
+                  role="alert"
+                >
+                  {{ removeError()?.msg }}
                 </div>
               }
             } @empty {
@@ -140,7 +163,7 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
                 class="mono px-2 py-2 text-[11px] text-[var(--ink-mute)]"
                 data-testid="project-switcher-empty"
               >
-                no projects match
+                no projects
               </div>
             }
           </div>
@@ -182,8 +205,11 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   /** Whether the shared create-project modal is currently visible. */
   readonly showAddForm = signal<boolean>(false);
 
-  /** Search input value — filters {@link visibleProjects} by case-insensitive substring. */
-  readonly filter = signal('');
+  /** Name of the row pending remove confirmation; `null` when none. */
+  readonly pendingDeleteName = signal<string | null>(null);
+
+  /** Backend error to surface inline under a row; `null` when none. */
+  readonly removeError = signal<{ msg: string; project: string } | null>(null);
 
   /** Tailwind class string for the active row (highlighted bg, no hover-bg). */
   readonly rowActiveClasses = 'bg-[var(--bg-2)]';
@@ -200,6 +226,30 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   private projectState = inject(ProjectStateService);
   private logger = inject(LoggerService);
   private unsubProjectSettled: (() => void) | null = null;
+
+  /** Registers reactive cleanup of transient pending/error state. */
+  constructor() {
+    // Reset transient pending/error state when the dropdown closes or when
+    // the row disappears from the list — otherwise reopening would render
+    // a stale "Sure?" confirm prompt or an error for a missing project.
+    effect(() => {
+      if (!this.ui.projectSwitcherOpen()) {
+        this.pendingDeleteName.set(null);
+        this.removeError.set(null);
+      }
+    });
+    effect(() => {
+      const names = new Set(this.projects().map((p) => p.name));
+      const pending = this.pendingDeleteName();
+      if (pending !== null && !names.has(pending)) {
+        this.pendingDeleteName.set(null);
+      }
+      const err = this.removeError();
+      if (err !== null && !names.has(err.project)) {
+        this.removeError.set(null);
+      }
+    });
+  }
 
   /** Loads available projects from the backend on initialization. */
   async ngOnInit(): Promise<void> {
@@ -267,36 +317,49 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Updates the search filter signal from the input event.
-   * @param event - The native input event from the search field.
+   * Swaps the row into the confirm prompt.
+   * @param name - The project to mark as pending removal.
    */
-  onFilterInput(event: Event): void {
-    const target = event.target as HTMLInputElement;
-    this.filter.set(target.value);
+  requestRemove(name: string): void {
+    this.pendingDeleteName.set(name);
+    this.removeError.set(null);
+    this.cdr.markForCheck();
+  }
+
+  /** Dismisses the confirm prompt without removing. */
+  cancelRemove(): void {
+    this.pendingDeleteName.set(null);
+    this.cdr.markForCheck();
   }
 
   /**
-   * Annotates the current `projects` list with the swatch color and the
-   * `isActive` flag, then filters by the search input.
+   * Confirms removal and calls the backend.
+   * @param name - The project to remove.
    */
+  async confirmRemove(name: string): Promise<void> {
+    this.pendingDeleteName.set(null);
+    try {
+      await this.projectState.removeProject(name);
+      this.removeError.set(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.removeError.set({ msg: cleanRemoveErrorMessage(msg), project: name });
+      this.logger.error(`Failed to remove project: ${msg}`);
+    }
+    this.cdr.markForCheck();
+  }
+
+  /** Decorates the project list with swatch color and active flag. */
   private projectsWithMeta(): ReadonlyArray<{
     project: ProjectEntry;
     swatch: string;
     isActive: boolean;
   }> {
-    const needle = this.filter().trim().toLowerCase();
-    return this.projects()
-      .map((project, index) => ({
-        project,
-        swatch: SWATCH_TOKENS[index % SWATCH_TOKENS.length],
-        isActive: this.isActive(project),
-      }))
-      .filter(({ project }) =>
-        needle === '' ? true : project.name.toLowerCase().includes(needle)
-      );
-  }
-
-  private isActive(project: ProjectEntry): boolean {
-    return project.name === this.activeProject();
+    const active = this.activeProject();
+    return this.projects().map((project, index) => ({
+      project,
+      swatch: swatchFor(index),
+      isActive: project.name === active,
+    }));
   }
 }
