@@ -658,16 +658,14 @@ fn bind_with_retry(
             speedwave_runtime::compose::invalidate_host_addressing_cache();
             let second = speedwave_runtime::compose::host_bind_address()
                 .with_context(|| format!("HostBridge '{name}': re-resolving bind address"))?;
-            attempt(&second).with_context(|| {
-                format!(
-                    "HostBridge '{name}': bind on {second} failed after retry (preferred_port={preferred_port:?})"
-                )
+            attempt(&second).with_context(|| match preferred_port {
+                Some(p) => format!("HostBridge '{name}': preferred_port {p} unavailable"),
+                None => format!("HostBridge '{name}': bind on {second}:0 failed after retry"),
             })
         }
-        Err(e) => Err(anyhow::Error::from(e)).with_context(|| {
-            format!(
-                "HostBridge '{name}': bind on {first} failed (preferred_port={preferred_port:?})"
-            )
+        Err(e) => Err(anyhow::Error::from(e)).with_context(|| match preferred_port {
+            Some(p) => format!("HostBridge '{name}': preferred_port {p} unavailable"),
+            None => format!("HostBridge '{name}': bind on {first}:0 failed"),
         }),
     }
 }
