@@ -192,16 +192,19 @@ export class ThemeService implements OnDestroy {
     if (this.modeSignal() === mode) return;
     this.modeSignal.set(mode);
     this.applyMode(mode);
+    safePersist(MODE_STORAGE_KEY, mode);
   }
 
   /**
-   * Resolves, applies the DOM class, syncs native chrome, and persists the mode.
+   * Resolves the effective mode, applies the DOM class, and syncs native chrome.
+   * Does NOT persist — the OS-driven `auto` listener calls this on every system
+   * theme change, and re-writing the unchanged `'auto'` value would be storage
+   * noise. Persistence lives in {@link setMode} (explicit user intent only).
    * @param mode Mode to apply (light/dark/auto).
    */
   private applyMode(mode: ThemeMode): void {
     const effective = resolveEffectiveMode(mode);
     applyModeClass(effective);
     this.native.syncWindowTheme(effective);
-    safePersist(MODE_STORAGE_KEY, mode);
   }
 }

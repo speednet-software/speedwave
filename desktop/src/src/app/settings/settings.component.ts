@@ -175,7 +175,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
               >
                 <span
                   class="inline-flex gap-0.5 rounded border border-[var(--line)] p-0.5"
-                  [attr.data-theme]="card.id === 'crimson' ? null : card.id"
+                  [attr.data-theme]="card.id"
                 >
                   <span class="bg-[var(--bg)]" [style.width.px]="12" [style.height.px]="18"></span>
                   <span

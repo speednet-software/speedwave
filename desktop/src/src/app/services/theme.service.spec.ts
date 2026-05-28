@@ -362,5 +362,53 @@ describe('ThemeService', () => {
     it('THEME_MODES is the canonical list', () => {
       expect(THEME_MODES).toEqual(['light', 'dark', 'auto']);
     });
+
+    // Pins the literal the anti-FOUC script in index.html depends on — a rename
+    // of MODE_STORAGE_KEY without updating index.html would flash on every boot.
+    it('MODE_STORAGE_KEY matches the literal used by the anti-FOUC script', () => {
+      expect(MODE_STORAGE_KEY).toBe('speedwave-theme-mode');
+    });
+
+    it('does not re-persist while in auto mode on system theme changes', () => {
+      const svc = create();
+      svc.setMode('auto');
+      localStorage.removeItem(MODE_STORAGE_KEY);
+      media.fireChange(true);
+      // The OS-driven listener must apply the class but not re-write storage.
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
+    });
+
+    it('cleans up via removeListener when addEventListener is absent (legacy WebKit)', () => {
+      media.restore();
+      // A legacy MediaQueryList exposes only addListener/removeListener.
+      const listeners = new Set<(e: MediaQueryListEvent) => void>();
+      const legacyMq = {
+        matches: false,
+        media: '(prefers-color-scheme: dark)',
+        onchange: null,
+        addListener: (fn: (e: MediaQueryListEvent) => void) => listeners.add(fn),
+        removeListener: (fn: (e: MediaQueryListEvent) => void) => listeners.delete(fn),
+        dispatchEvent: () => false,
+      } as unknown as MediaQueryList;
+      const original = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        writable: true,
+        value: () => legacyMq,
+      });
+      try {
+        const svc = create();
+        svc.setMode('auto');
+        expect(listeners.size).toBe(1); // constructor used the addListener branch
+        svc.ngOnDestroy();
+        expect(listeners.size).toBe(0); // ngOnDestroy used the removeListener branch
+        // Firing after teardown must not flip the class.
+        for (const fn of listeners) fn({ matches: true } as MediaQueryListEvent);
+        expect(document.documentElement.classList.contains('dark')).toBe(false);
+      } finally {
+        if (original) Object.defineProperty(window, 'matchMedia', original);
+      }
+    });
   });
 });

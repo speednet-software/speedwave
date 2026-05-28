@@ -7,6 +7,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <script>
       // Anti-FOUC: reflect persisted theme mode onto <html> before app boot.
+      // The 'speedwave-theme-mode' literal must stay in sync with
+      // MODE_STORAGE_KEY in services/theme.service.ts (pinned by a unit test).
       (function () {
         try {
           var mode = localStorage.getItem('speedwave-theme-mode') || 'dark';

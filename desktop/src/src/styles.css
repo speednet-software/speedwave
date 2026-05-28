@@ -110,12 +110,14 @@
   --ink-dim: #9aa3ba;
   --ink-mute: #707a96;
 
-  /* Accent (rotates per theme; --on-accent rotates too — pastels keep dark ink,
-     saturated reds/violets flip to white for WCAG AA contrast). */
+  /* Accent (rotates per theme). --on-accent is the text/icon drawn on a filled
+     accent; dark ink (#07090f) clears WCAG AA on every dark-mode accent
+     (crimson 6.19:1, iris 7.31:1, pastels higher) — white would fail crimson
+     (3.21:1) and iris (2.72:1). */
   --accent: #ff4d6d;
   --accent-dim: #c9304e;
   --accent-soft: rgba(255, 77, 109, 0.1);
-  --on-accent: #ffffff;
+  --on-accent: #07090f;
 
   /* Semantic palette */
   --teal: #22d3b7;
@@ -132,6 +134,14 @@
 
 /* ── Theme variants — accent rotates per [data-theme]; backgrounds rotate per
       `.dark` class on <html> (see light overlay below). ── */
+/* Crimson is the :root default, but an explicit rule lets a scoped element
+   (e.g. the Appearance swatch) force crimson regardless of the active theme. */
+[data-theme='crimson'] {
+  --accent: #ff4d6d;
+  --accent-dim: #c9304e;
+  --accent-soft: rgba(255, 77, 109, 0.1);
+  --on-accent: #07090f;
+}
 [data-theme='mint'] {
   --accent: #5eead4;
   --accent-dim: #2dd4bf;
@@ -148,7 +158,7 @@
   --accent: #a78bfa;
   --accent-dim: #8b5cf6;
   --accent-soft: rgba(167, 139, 250, 0.12);
-  --on-accent: #ffffff;
+  --on-accent: #07090f;
 }
 [data-theme='cyan'] {
   --accent: #38bdf8;
@@ -194,8 +204,16 @@
   --accent-soft: rgba(196, 19, 58, 0.14);
   --on-accent: #ffffff;
 }
+:root:not(.dark)[data-theme='crimson'] {
+  --accent: #c4133a;
+  --accent-dim: #9a0e2d;
+  --accent-soft: rgba(196, 19, 58, 0.14);
+  --on-accent: #ffffff;
+}
 :root:not(.dark)[data-theme='mint'] {
-  --accent: #0d8a72;
+  /* #0a7a64 (not #0d8a72) — the lighter teal was 4.29:1 on #ffffff, just under
+     AA; this clears 5.28:1 both as text-accent and as a filled-button bg. */
+  --accent: #0a7a64;
   --accent-dim: #0a6e5b;
   --accent-soft: rgba(13, 138, 114, 0.16);
   --on-accent: #ffffff;
