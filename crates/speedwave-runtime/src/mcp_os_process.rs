@@ -16,7 +16,6 @@
 //!   Order matters: token lands on disk *before* lock.json so a crash
 //!   in between leaves either zero files or a complete pair.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -142,8 +141,8 @@ pub fn is_mcp_os_alive_in(data_dir: &Path) -> bool {
     if !crate::host_mcp_process::is_pid_alive(lock.pid) {
         return false;
     }
-    let addr = SocketAddr::from(([127, 0, 0, 1], lock.port));
-    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+    let bind = crate::host_mcp_process::probe::host_bind_address_for_probe();
+    crate::host_mcp_process::probe::probe_tcp(&bind, lock.port, 1, Duration::from_millis(500))
 }
 
 #[cfg(test)]

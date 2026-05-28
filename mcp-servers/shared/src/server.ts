@@ -134,7 +134,9 @@ export interface MCPServer {
  * @returns MCP server instance
  */
 export function createMCPServer(options: MCPServerOptions): MCPServer {
-  const { name, version, port, host = '127.0.0.1', tools = [] } = options;
+  // Default 127.0.0.1 is macOS-only; Windows supervisor always sets MCP_LISTEN_HOST
+  // to the WSL adapter IP (compose::host_bind_address). See ADR-066 / SSOT row.
+  const { name, version, port, host = process.env.MCP_LISTEN_HOST ?? '127.0.0.1', tools = [] } = options;
 
   const app = express();
   app.disable('x-powered-by');

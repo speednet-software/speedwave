@@ -145,16 +145,13 @@ pub fn is_oauth_alive(port: u16) -> bool {
     if port == 0 {
         return false;
     }
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    for attempt in 0..consts::PORT_PROBE_ATTEMPTS {
-        if std::net::TcpStream::connect_timeout(&addr, consts::PORT_PROBE_TIMEOUT).is_ok() {
-            return true;
-        }
-        if attempt + 1 < consts::PORT_PROBE_ATTEMPTS {
-            std::thread::sleep(consts::PORT_PROBE_BACKOFF);
-        }
-    }
-    false
+    let bind = crate::host_mcp_process::probe::host_bind_address_for_probe();
+    crate::host_mcp_process::probe::probe_tcp(
+        &bind,
+        port,
+        consts::PORT_PROBE_ATTEMPTS.into(),
+        consts::PORT_PROBE_BACKOFF,
+    )
 }
 
 /// Set owner-only permissions on the per-project state dir.
