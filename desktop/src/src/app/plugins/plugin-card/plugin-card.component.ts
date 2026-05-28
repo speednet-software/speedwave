@@ -47,7 +47,7 @@ export interface SavePluginCredentialsEvent {
         <div class="flex items-center gap-3">
           <button
             type="button"
-            class="px-3 py-1 bg-transparent text-sw-accent border border-sw-accent rounded text-xs font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
+            class="btn-outline-accent px-3 py-1 text-xs"
             [attr.data-testid]="'plugin-open-' + plugin().slug"
             (click)="openPlugin.emit(plugin().slug); $event.stopPropagation()"
           >
@@ -111,7 +111,7 @@ export interface SavePluginCredentialsEvent {
               <div class="flex gap-3 mt-4">
                 <button
                   type="submit"
-                  class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-darkest"
+                  class="btn-outline-accent px-5 py-1.5 text-[13px]"
                   [attr.data-testid]="'plugin-save-' + plugin().slug"
                 >
                   Save

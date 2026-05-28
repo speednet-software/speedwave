@@ -6,6 +6,7 @@ import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
 import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 
@@ -514,6 +515,13 @@ describe('ShellComponent', () => {
       fixture.destroy();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', metaKey: true }));
       expect(ui.sidebarOpen()).toBe(false);
+    });
+
+    it('does not cycle the accent theme on Cmd+T (shortcut removed)', () => {
+      const theme = TestBed.inject(ThemeService);
+      const before = theme.theme();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', metaKey: true }));
+      expect(theme.theme()).toBe(before);
     });
   });
 });

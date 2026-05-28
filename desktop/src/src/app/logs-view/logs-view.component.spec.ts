@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { LogsViewComponent, parseLogLine, sortLogLinesByTime } from './logs-view.component';
+import {
+  LogsViewComponent,
+  parseLogLine,
+  sortLogLinesByTime,
+  type LogLine,
+} from './logs-view.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { HEALTH_REFRESH_INTERVAL_MS } from '../services/system-health.service';
@@ -402,6 +407,29 @@ describe('LogsViewComponent', () => {
     fixture.detectChanges();
 
     expect(component.filters().source).toBe('all');
+  });
+
+  describe('log-line colours', () => {
+    const line = (level: LogLine['level']): LogLine => ({
+      time: '12:00:00',
+      source: 'mcp_hub',
+      level,
+      message: 'x',
+    });
+
+    it('sourceColour: error → var(--red), warn → var(--amber), else → var(--accent)', () => {
+      expect(component['sourceColour'](line('error'))).toBe('var(--red)');
+      expect(component['sourceColour'](line('warn'))).toBe('var(--amber)');
+      expect(component['sourceColour'](line('info'))).toBe('var(--accent)');
+      expect(component['sourceColour'](line('debug'))).toBe('var(--accent)');
+    });
+
+    it('levelColour: error → var(--red), warn → var(--amber), else → var(--ink-mute)', () => {
+      expect(component['levelColour'](line('error'))).toBe('var(--red)');
+      expect(component['levelColour'](line('warn'))).toBe('var(--amber)');
+      expect(component['levelColour'](line('info'))).toBe('var(--ink-mute)');
+      expect(component['levelColour'](line('debug'))).toBe('var(--ink-mute)');
+    });
   });
 });
 

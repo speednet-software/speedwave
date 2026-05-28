@@ -5,15 +5,10 @@
  * initial render, and asserts zero WCAG 2.1 AA violations. Any new
  * view must be added to VIEWS so the sweep remains comprehensive.
  *
- * Themes: the terminal-minimal design ships SIX accent variants on a
- * single dark base (`crimson`, `mint`, `amber`, `iris`, `cyan`, `sand`
- * — see `desktop/src/src/app/services/theme.service.ts`). There is no
- * separate light theme; backgrounds stay dark and only the accent
- * family rotates. Per the implementation prompt's acceptance criterion
- * #3 (AXE clean "in both light and dark modes if both exist"), the
- * sweep iterates every accent variant the app actually ships so the
- * coverage matches the production surface, not a hypothetical light
- * mode that does not exist.
+ * Sweep matrix: each view is rendered in every (effective-mode × accent) pair
+ * the app ships, so contrast regressions cannot land silently. `auto` mode is
+ * covered by the ThemeService unit tests; here we only assert the deterministic
+ * effective modes.
  *
  * Waivers (with justification) go in docs/accessibility/contrast-report.md.
  */
@@ -42,7 +37,48 @@ import { ToolBlockComponent } from './chat/blocks/tool-block.component';
 
 import { TauriService } from './services/tauri.service';
 import { MockTauriService } from './testing/mock-tauri.service';
-import { THEME_IDS, type ThemeId } from './services/theme.service';
+import { THEME_IDS, THEME_MODES, type ThemeId, type EffectiveMode } from './services/theme.service';
+
+// Derived from THEME_MODES so a future explicit (non-auto) mode is swept automatically.
+const EFFECTIVE_MODES: readonly EffectiveMode[] = THEME_MODES.filter(
+  (m): m is EffectiveMode => m !== 'auto'
+);
+
+/**
+ * Stubs `window.matchMedia` so ThemeService can construct in jsdom even though
+ * jsdom does not implement the media query API. We don't rely on the listener
+ * for axe assertions — accents and `.dark` are set directly via
+ * activateTheme/activateMode.
+ */
+function stubMatchMedia(): void {
+  if (typeof window.matchMedia === 'function') return;
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: () => ({
+      matches: false,
+      media: '(prefers-color-scheme: dark)',
+      onchange: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => false,
+    }),
+  });
+}
+
+/**
+ * Toggles `.dark` on <html> to match the effective mode under test.
+ * @param mode Effective appearance mode (`auto` is resolved upstream).
+ */
+function activateMode(mode: EffectiveMode): void {
+  if (mode === 'dark') {
+    document.documentElement.classList.add('dark');
+  } else {
+    document.documentElement.classList.remove('dark');
+  }
+}
 
 interface ViewUnderTest {
   readonly name: string;
@@ -225,38 +261,43 @@ describe('A11y sweep — axe-core on every reachable view', () => {
   let mockTauri: MockTauriService;
 
   beforeEach(() => {
+    stubMatchMedia();
     mockTauri = buildMockTauri();
   });
 
   afterEach(() => {
     TestBed.resetTestingModule();
     activateTheme('crimson');
+    activateMode('dark');
   });
 
-  for (const themeId of THEME_IDS) {
-    describe(`theme=${themeId}`, () => {
-      beforeEach(() => {
-        activateTheme(themeId);
-      });
-
-      for (const view of VIEWS) {
-        it(`${view.name} has zero serious axe violations`, async () => {
-          const root = await render(view, mockTauri);
-          const results = await axe.run(root, {
-            runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
-          });
-          const blocking = seriousViolations(results);
-          if (blocking.length) {
-            const summary = blocking
-              .map((v) => `  - [${v.impact}] ${v.id}: ${v.help} (${v.nodes.length} nodes)`)
-              .join('\n');
-            throw new Error(
-              `axe found ${blocking.length} violations in ${view.name} (theme=${themeId}):\n${summary}`
-            );
-          }
-          expect(blocking).toEqual([]);
+  for (const mode of EFFECTIVE_MODES) {
+    for (const themeId of THEME_IDS) {
+      describe(`mode=${mode} theme=${themeId}`, () => {
+        beforeEach(() => {
+          activateMode(mode);
+          activateTheme(themeId);
         });
-      }
-    });
+
+        for (const view of VIEWS) {
+          it(`${view.name} has zero serious axe violations`, async () => {
+            const root = await render(view, mockTauri);
+            const results = await axe.run(root, {
+              runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
+            });
+            const blocking = seriousViolations(results);
+            if (blocking.length) {
+              const summary = blocking
+                .map((v) => `  - [${v.impact}] ${v.id}: ${v.help} (${v.nodes.length} nodes)`)
+                .join('\n');
+              throw new Error(
+                `axe found ${blocking.length} violations in ${view.name} (mode=${mode}, theme=${themeId}):\n${summary}`
+              );
+            }
+            expect(blocking).toEqual([]);
+          });
+        }
+      });
+    }
   }
 });

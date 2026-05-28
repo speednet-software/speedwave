@@ -1,9 +1,12 @@
-import { Injectable, signal, type Signal } from '@angular/core';
+import { inject, Injectable, OnDestroy, signal, type Signal } from '@angular/core';
+import { NativeThemeAdapter, type EffectiveMode } from './native-theme-adapter';
+
+export type { EffectiveMode } from './native-theme-adapter';
 
 /** Identifiers for every accent theme exposed in Settings → Appearance. */
 export type ThemeId = 'crimson' | 'mint' | 'amber' | 'iris' | 'cyan' | 'sand';
 
-/** Display order for the ⌘T cycle and the Appearance picker. */
+/** Display order for the Appearance accent picker. */
 export const THEME_IDS: readonly ThemeId[] = [
   'crimson',
   'mint',
@@ -13,12 +16,49 @@ export const THEME_IDS: readonly ThemeId[] = [
   'sand',
 ] as const;
 
-/** localStorage key — kept out of the public API to avoid drift between read/write. */
-const STORAGE_KEY = 'speedwave-theme';
+/** Appearance modes — light/dark are explicit, auto follows `prefers-color-scheme`. */
+export type ThemeMode = 'light' | 'dark' | 'auto';
+
+/** Display order for the MODE picker in Appearance. */
+export const THEME_MODES: readonly ThemeMode[] = ['light', 'dark', 'auto'] as const;
+
+/** localStorage key for the accent theme. Exported so tests assert the real key (no drift). */
+export const THEME_STORAGE_KEY = 'speedwave-theme';
+/** localStorage key for the appearance mode. Exported so tests assert the real key (no drift). */
+export const MODE_STORAGE_KEY = 'speedwave-theme-mode';
+
+/**
+ * Persists a value to localStorage, tolerating private-mode / quota failures.
+ * @param key localStorage key to write.
+ * @param value Value to store.
+ */
+function safePersist(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* private mode / disabled storage — ignore. */
+  }
+}
+
+/**
+ * Reads a persisted choice, validating it against an allowlist.
+ * @param key localStorage key to read.
+ * @param allowlist Permitted values; anything else falls back.
+ * @param fallback Value returned for missing / unknown / unreadable entries.
+ */
+function readStoredChoice<T extends string>(key: string, allowlist: readonly T[], fallback: T): T {
+  let saved: string | null;
+  try {
+    saved = localStorage.getItem(key);
+  } catch {
+    saved = null;
+  }
+  return (allowlist as readonly string[]).includes(saved ?? '') ? (saved as T) : fallback;
+}
 
 /**
  * Applies a theme to <html> and persists it. Crimson is the default → no attr written.
- * @param id Theme to activate and persist to localStorage.
+ * @param id Accent theme to activate and persist.
  */
 function writeTheme(id: ThemeId): void {
   const html = document.documentElement;
@@ -27,57 +67,116 @@ function writeTheme(id: ThemeId): void {
   } else {
     html.setAttribute('data-theme', id);
   }
-  try {
-    localStorage.setItem(STORAGE_KEY, id);
-  } catch {
-    /* private mode / disabled storage — ignore. */
-  }
+  safePersist(THEME_STORAGE_KEY, id);
 }
 
-/** Reads the persisted theme, falling back to crimson on unknown / missing values. */
-function readInitialTheme(): ThemeId {
-  let saved: string | null;
+/** Defensive matchMedia accessor — undefined in SSR and some test environments. */
+function getDarkMQ(): MediaQueryList | null {
   try {
-    saved = localStorage.getItem(STORAGE_KEY);
-  } catch {
-    saved = null;
+    return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-color-scheme: dark)')
+      : null;
+  } catch (err) {
+    console.warn('ThemeService: matchMedia unavailable', err);
+    return null;
   }
-  return (THEME_IDS as readonly string[]).includes(saved ?? '') ? (saved as ThemeId) : 'crimson';
 }
 
 /**
- * SSOT for the active accent theme.
+ * Resolves `auto` to the effective mode via `prefers-color-scheme`; light/dark pass through.
+ * @param mode User-selected appearance mode.
+ */
+function resolveEffectiveMode(mode: ThemeMode): EffectiveMode {
+  if (mode === 'light' || mode === 'dark') return mode;
+  return getDarkMQ()?.matches ? 'dark' : 'light';
+}
+
+/**
+ * Toggles `.dark` on <html> to match the effective mode.
+ * @param effective Resolved light/dark mode.
+ */
+function applyModeClass(effective: EffectiveMode): void {
+  const html = document.documentElement;
+  if (effective === 'dark') {
+    html.classList.add('dark');
+  } else {
+    html.classList.remove('dark');
+  }
+}
+
+/**
+ * SSOT for the active accent theme and appearance mode.
  *
- * The mockup ships six themes (`crimson` default + five named variants) selected
- * by `data-theme` on the document element. Backgrounds stay neutral; only the
- * accent family rotates. Persistence lives in localStorage so the choice
- * survives reloads.
+ * Two orthogonal axes:
+ * - **Accent** ({@link theme}) — six named variants selected by `[data-theme]`
+ *   on <html>, chosen from the Appearance picker.
+ * - **Mode** ({@link mode}) — light/dark/auto, toggling `.dark` on <html>.
+ *   `auto` reacts to `prefers-color-scheme` changes at runtime.
  *
- * Consumers:
- * - `SettingsComponent → Appearance` renders a card grid bound to {@link theme}
- *   and calls {@link setTheme}.
- * - `ShellComponent` registers the ⌘T keyboard shortcut and calls {@link cycle}.
- * - `CommandPaletteComponent` exposes "change accent color..." which routes to
- *   the same setter.
+ * Native window chrome sync is delegated to {@link NativeThemeAdapter}.
  */
 @Injectable({ providedIn: 'root' })
-export class ThemeService {
-  private readonly themeSignal = signal<ThemeId>(readInitialTheme());
+export class ThemeService implements OnDestroy {
+  private readonly native = inject(NativeThemeAdapter);
 
-  /** Read-only signal of the current theme id. */
+  private readonly themeSignal = signal<ThemeId>(
+    readStoredChoice(THEME_STORAGE_KEY, THEME_IDS, 'crimson')
+  );
+  private readonly modeSignal = signal<ThemeMode>(
+    readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, 'dark')
+  );
+
+  /** Read-only signal of the current accent theme id. */
   readonly theme: Signal<ThemeId> = this.themeSignal.asReadonly();
+  /** Read-only signal of the current appearance mode (light/dark/auto). */
+  readonly mode: Signal<ThemeMode> = this.modeSignal.asReadonly();
+
+  private readonly mediaQuery = getDarkMQ();
+  private readonly mediaListener = (): void => {
+    if (this.modeSignal() === 'auto') this.applyMode('auto');
+  };
+  private readonly abortController = new AbortController();
 
   /**
-   * Reflects the persisted theme choice on the DOM at app startup.
+   * Reflects the persisted theme + mode onto the DOM and subscribes to system
+   * theme changes (active only while {@link mode} === `'auto'`).
    */
   constructor() {
-    // Reflect the persisted choice to the DOM on app startup.
     writeTheme(this.themeSignal());
+    this.applyMode(this.modeSignal());
+
+    if (this.mediaQuery) {
+      if (typeof this.mediaQuery.addEventListener === 'function') {
+        this.mediaQuery.addEventListener('change', this.mediaListener, {
+          signal: this.abortController.signal,
+        });
+      } else if (typeof this.mediaQuery.addListener === 'function') {
+        // Legacy WebView fallback — addListener is deprecated but still required
+        // on older WebKit builds shipped in some Tauri targets. Cleaned up by
+        // the matching removeListener in ngOnDestroy (the AbortController only
+        // unregisters the addEventListener path).
+        this.mediaQuery.addListener(this.mediaListener);
+      }
+    }
+  }
+
+  /** Removes the matchMedia listener when the root service is torn down. */
+  ngOnDestroy(): void {
+    this.abortController.abort();
+    // Legacy fallback teardown — only needed when addEventListener was unavailable
+    // (otherwise the AbortController above already removed the listener).
+    if (this.mediaQuery && typeof this.mediaQuery.addEventListener !== 'function') {
+      try {
+        this.mediaQuery.removeListener?.(this.mediaListener);
+      } catch {
+        /* removeListener may be a hard error on some legacy hosts — ignore. */
+      }
+    }
   }
 
   /**
-   * Switches to a specific theme and persists the choice.
-   * @param id Theme to activate; no-op if already active.
+   * Switches to a specific accent theme and persists the choice.
+   * @param id Accent theme to activate; no-op if already active.
    */
   setTheme(id: ThemeId): void {
     if (this.themeSignal() === id) return;
@@ -85,10 +184,27 @@ export class ThemeService {
     writeTheme(id);
   }
 
-  /** Advances to the next theme in {@link THEME_IDS}, wrapping at the end. ⌘T binds here. */
-  cycle(): void {
-    const current = this.themeSignal();
-    const next = THEME_IDS[(THEME_IDS.indexOf(current) + 1) % THEME_IDS.length];
-    this.setTheme(next);
+  /**
+   * Switches the appearance mode and persists the choice.
+   * @param mode Mode to activate; no-op if already active.
+   */
+  setMode(mode: ThemeMode): void {
+    if (this.modeSignal() === mode) return;
+    this.modeSignal.set(mode);
+    this.applyMode(mode);
+    safePersist(MODE_STORAGE_KEY, mode);
+  }
+
+  /**
+   * Resolves the effective mode, applies the DOM class, and syncs native chrome.
+   * Does NOT persist — the OS-driven `auto` listener calls this on every system
+   * theme change, and re-writing the unchanged `'auto'` value would be storage
+   * noise. Persistence lives in {@link setMode} (explicit user intent only).
+   * @param mode Mode to apply (light/dark/auto).
+   */
+  private applyMode(mode: ThemeMode): void {
+    const effective = resolveEffectiveMode(mode);
+    applyModeClass(effective);
+    this.native.syncWindowTheme(effective);
   }
 }

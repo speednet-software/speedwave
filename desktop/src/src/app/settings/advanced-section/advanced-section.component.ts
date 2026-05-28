@@ -19,10 +19,12 @@ import { TauriService } from '../../services/tauri.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
-    <section id="section-danger" class="border-t border-red-500/20 pt-6">
-      <h2 class="view-title view-title-section text-red-300">Danger Zone</h2>
-      <div class="mt-3 rounded border border-red-500/30 bg-red-500/5 p-4">
-        <div class="mono text-[12px] text-red-200">factory reset</div>
+    <section id="section-danger" class="border-t border-red-700/30 pt-6 dark:border-red-500/20">
+      <h2 class="view-title view-title-section text-red-700 dark:text-red-300">Danger Zone</h2>
+      <div
+        class="mt-3 rounded border border-red-700/40 bg-red-700/[0.06] p-4 dark:border-red-500/30 dark:bg-red-500/5"
+      >
+        <div class="mono text-[12px] text-red-700 dark:text-red-200">factory reset</div>
         <p class="mt-1 text-[12px] leading-relaxed text-[var(--ink-dim)]">
           Stops all containers, destroys the VM (macOS), and removes all Speedwave data including
           tokens and plugins. The application will restart and the Setup Wizard will run again.
@@ -31,7 +33,7 @@ import { TauriService } from '../../services/tauri.service';
           @if (!confirmReset) {
             <button
               type="button"
-              class="mono rounded border border-red-500/50 bg-red-500/10 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+              class="mono rounded border border-red-700/60 bg-red-700/10 px-3 py-1 text-[11px] text-red-800 hover:bg-red-700/20 disabled:opacity-40 disabled:cursor-not-allowed dark:border-red-500/50 dark:bg-red-500/10 dark:text-red-300 dark:hover:bg-red-500/20"
               data-testid="settings-reset-btn"
               (click)="confirmReset = true"
               [disabled]="resetting"
@@ -42,7 +44,7 @@ import { TauriService } from '../../services/tauri.service';
             <div class="flex flex-wrap gap-2">
               <button
                 type="button"
-                class="mono rounded border border-red-500/50 bg-red-500/10 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+                class="mono rounded border border-red-700/60 bg-red-700/10 px-3 py-1 text-[11px] text-red-800 hover:bg-red-700/20 disabled:opacity-40 disabled:cursor-not-allowed dark:border-red-500/50 dark:bg-red-500/10 dark:text-red-300 dark:hover:bg-red-500/20"
                 data-testid="settings-confirm-reset"
                 (click)="resetEnvironment()"
                 [disabled]="resetting"
