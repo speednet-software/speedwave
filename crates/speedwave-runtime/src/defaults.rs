@@ -80,7 +80,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
 /// honest hint like *"Default — Opus 4.7 (switchable via /model)"* instead
 /// of the previous vague *"let Claude Code choose"* placeholder.
 ///
-/// Reads from `ANTHROPIC_MODELS` (the SSOT) so a future Opus bump (e.g. 4.8)
+/// Reads from `ANTHROPIC_MODELS` (the SSOT) so a future Opus bump (e.g. 4.9)
 /// updates the UI hint without touching this helper. Returns `None` if the
 /// catalog has no `latest = true` Opus entry — frontend falls back to the
 /// generic placeholder in that case.
@@ -154,7 +154,7 @@ pub fn base_env() -> HashMap<String, String> {
 /// upstream issue ships a fix and the alias resolves to the upgraded window
 /// natively.
 ///
-/// Future model bumps (e.g. Opus 4.8) only require editing `ANTHROPIC_MODELS`
+/// Future model bumps (e.g. Opus 4.9) only require editing `ANTHROPIC_MODELS`
 /// in this file: the env vars track the SSOT automatically. Families with no
 /// `latest: true` entry are skipped (no env var emitted) so a partial catalog
 /// never produces a malformed model id.
@@ -290,7 +290,7 @@ mod tests {
         // Workaround for anthropics/claude-code#34083 — without `[1m]` suffix
         // on the model id, Max/Team subscribers see their 1M-context models
         // capped at 200k. The function must derive these env vars from the
-        // SSOT so a future model bump (Opus 4.8 etc.) propagates by editing
+        // SSOT so a future model bump (Opus 4.9 etc.) propagates by editing
         // `ANTHROPIC_MODELS` alone.
         let env = anthropic_default_models_env();
         // Cross-check every emitted var against SSOT — independent of which
