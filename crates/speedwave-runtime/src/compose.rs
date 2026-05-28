@@ -4409,6 +4409,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
@@ -8061,6 +8062,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         }
     }
 
@@ -8340,6 +8342,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
@@ -8389,6 +8392,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let svc = plugin::generate_plugin_service(
             &manifest,
@@ -8485,6 +8489,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -8860,6 +8865,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         // generate_plugin_service requires a port for MCP plugins,
@@ -9793,6 +9799,7 @@ networks:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         }];
 
         // Compose with plugin service already present (as apply_plugins would leave it)
@@ -9905,6 +9912,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let violations = SecurityCheck::run(&yaml, "test", &[manifest], &test_expected_paths());
         assert!(
@@ -10939,6 +10947,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge,
+            instructions: None,
         };
         plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
     }

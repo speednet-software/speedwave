@@ -1046,6 +1046,25 @@ pub const PLUGIN_CPU_LIMIT_MAX: f32 = 4.0;
 /// still bounding what an attacker can wedge into the shared config file.
 pub const PLUGIN_SETTINGS_MAX_BYTES: usize = 64 * 1024;
 
+/// Max byte length of a manifest's `instructions` field — the optional
+/// long-form (Markdown) setup/usage text shown on the plugin's Dashboard.
+/// 16 KiB is roomy for a setup guide (~16k chars / several screens) while
+/// bounding what a manifest can wedge into the UI and the in-memory
+/// `PluginStatusEntry` returned to the webview. Rendered through `marked`
+/// + Angular's `DomSanitizer`, so the cap is about size, not safety.
+pub const PLUGIN_INSTRUCTIONS_MAX_BYTES: usize = 16 * 1024;
+
+/// Max length of an `auth_fields[].validation.pattern` regex string. The
+/// Rust `regex` crate is linear-time (RE2-style, no catastrophic
+/// backtracking), but the same pattern is also handed to the browser's
+/// JavaScript engine via the `<input pattern>` attribute, which *can*
+/// backtrack catastrophically. Capping the source string is the cheap,
+/// engine-agnostic guard: 512 chars is far more than any credential-format
+/// check needs (the longest real-world token regexes are well under 100)
+/// while bounding what a malicious manifest can ship for the browser to
+/// compile.
+pub const PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN: usize = 512;
+
 /// Max length of `host_bridge.url_env` / `host_bridge.token_env` env var
 /// names. POSIX env var names are typically &lt;64 chars; 128 leaves headroom
 /// for plugin authors without letting a manifest ship a megabyte-long name

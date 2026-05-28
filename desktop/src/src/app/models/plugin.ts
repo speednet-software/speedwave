@@ -1,11 +1,60 @@
+/**
+ * Allowed `auth_fields[].field_type` values. Mirrors `ALLOWED_AUTH_FIELD_TYPES`
+ * in `crates/speedwave-runtime/src/plugin.rs` — kept in sync by the Rust test
+ * `allowed_auth_field_types_match_ts_union`. As a literal union, the compiler
+ * flags any unhandled case in the credentials form's render switch.
+ */
+export type PluginAuthFieldType = 'text' | 'password' | 'textarea';
+
+/** Allowed `token_mount` wire values returned by the backend. */
+export type PluginTokenMount = 'ro' | 'rw';
+
 /** Describes a single credential/configuration field for a plugin. */
 export interface PluginAuthField {
   key: string;
   label: string;
-  field_type: string;
+  field_type: PluginAuthFieldType;
   placeholder: string;
   is_secret: boolean;
   required: boolean;
+  /** Optional help text shown under the field label. Absent when the manifest omits it. */
+  description?: string;
+  /**
+   * Optional regex format constraint. Mirrors the Rust `AuthFieldValidation`
+   * (`plugin.rs`). `pattern` is treated as anchored (full-match) to agree
+   * with the HTML `<input pattern>` attribute and the host-side check in
+   * `save_plugin_credentials`; `message` is shown on mismatch.
+   */
+  validation?: PluginAuthFieldValidation;
+}
+
+/** Regex constraint for a {@link PluginAuthField} value. */
+export interface PluginAuthFieldValidation {
+  pattern: string;
+  message?: string;
+}
+
+/**
+ * Maximum byte length of a single plugin credential value.
+ *
+ * Mirrors `MAX_CREDENTIAL_BYTES` in
+ * `desktop/src-tauri/src/types.rs` — the Rust `save_plugin_credentials`
+ * command rejects anything longer. Surfaced here so the credentials form
+ * can cap input via `maxlength` and fail in the UI before a round-trip.
+ */
+export const MAX_PLUGIN_CREDENTIAL_BYTES = 4096;
+
+/**
+ * Payload emitted by `PluginCredentialsFormComponent` when the user
+ * submits filled credential fields. Only non-empty (post-trim) fields
+ * appear in `credentials`.
+ *
+ * Named `Plugin…` to avoid collision with the `SaveCredentialsEvent`
+ * in `integrations/service-card/service-card.component.ts`, which has a
+ * different shape (service + credentials + mappings).
+ */
+export interface PluginSaveCredentialsEvent {
+  credentials: Record<string, string>;
 }
 
 /**
@@ -34,11 +83,22 @@ export interface PluginStatusEntry {
   service_id: string | null;
   version: string;
   description: string;
+  /**
+   * Optional long-form Markdown setup/usage guide from the manifest,
+   * rendered on the Dashboard tab. Absent when the manifest omits it.
+   */
+  instructions?: string;
   enabled: boolean;
   configured: boolean;
   auth_fields: PluginAuthField[];
   current_values: Record<string, string>;
-  token_mount: string;
+  /**
+   * Keys of `auth_fields` that have a non-empty value stored on disk.
+   * Metadata-only — secret contents are never exposed. Drives the
+   * per-field "configured" indicator in the credentials form.
+   */
+  configured_fields: string[];
+  token_mount: PluginTokenMount;
   settings_schema: JsonSchema | null;
   requires_integrations: string[];
   /** Verdict from the runtime audit. `'verified'` means usable. */
