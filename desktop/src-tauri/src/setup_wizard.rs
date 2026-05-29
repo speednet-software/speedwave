@@ -756,20 +756,37 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         }
     }
 
-    ensure_wsl_distro_metadata()?;
+    // Import path: distro is freshly created, no containers run yet, so a
+    // terminate to apply the new wsl.conf is safe.
+    ensure_wsl_distro_metadata(TerminateOnChange::Yes)?;
 
     Ok(())
+}
+
+/// Whether `ensure_wsl_distro_metadata` may `wsl --terminate` the distro after
+/// it edits `/etc/wsl.conf`. Terminating applies the new config immediately but
+/// kills every process in the distro — fatal if containers are running.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TerminateOnChange {
+    /// Safe only when no Speedwave containers run (e.g. right after import).
+    Yes,
+    /// Leave the distro running; the new wsl.conf applies on its next restart.
+    No,
 }
 
 /// Ensures the Speedwave distro's `/etc/wsl.conf` enables the `metadata`
 /// automount option. Without it, the C:\ drvfs/9p mount rejects `chmod`
 /// ("Operation not permitted"), so Claude Code's `/login` cannot write
 /// `.credentials.json` with the 0600 perms it requires — the login silently
-/// fails to persist (ADR-052 credential mount). We set it right after import,
-/// before the distro runs containers, then terminate so the new wsl.conf is
-/// applied on the next start. Fail-open: a write failure must not block setup.
+/// fails to persist (ADR-052 credential mount).
+///
+/// `terminate` MUST be `No` on any path where containers may be running
+/// (startup migration for existing distros): a `--terminate` there kills the
+/// running containers mid-start ("cannot exec in a stopped state"). Pass `Yes`
+/// only at import time, before any container exists. Fail-open throughout.
 #[cfg(target_os = "windows")]
-pub fn ensure_wsl_distro_metadata() -> anyhow::Result<()> {
+pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Result<()> {
     let distro = consts::wsl_distro_name();
     // Append [automount] options=metadata only if absent. Run as root inside
     // the distro; `/etc/wsl.conf` is distro-internal (not the host .wslconfig).
@@ -784,12 +801,24 @@ pub fn ensure_wsl_distro_metadata() -> anyhow::Result<()> {
         Ok(o) if o.status.success() => {
             let changed = String::from_utf8_lossy(&o.stdout).contains("speedwave-metadata-added");
             if changed {
-                // Terminate so the new wsl.conf is applied on the next start.
-                // Safe at import time: no Speedwave containers run yet.
-                let _ = speedwave_runtime::binary::system_command("wsl.exe")
-                    .args(["--terminate", distro])
-                    .status();
-                log::info!("ensure_wsl_distro_metadata: enabled metadata automount for {distro}");
+                match terminate {
+                    TerminateOnChange::Yes => {
+                        // Safe at import time: no Speedwave containers run yet.
+                        let _ = speedwave_runtime::binary::system_command("wsl.exe")
+                            .args(["--terminate", distro])
+                            .status();
+                        log::info!(
+                            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
+                        );
+                    }
+                    TerminateOnChange::No => {
+                        // Containers may be running; do NOT terminate. The new
+                        // wsl.conf applies on the distro's next natural restart.
+                        log::info!(
+                            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (applies on next WSL restart)"
+                        );
+                    }
+                }
             }
         }
         Ok(o) => log::warn!(
@@ -2794,6 +2823,30 @@ mod tests {
             let (url, sha) = result.unwrap();
             assert!(url.starts_with("https://"));
             assert_eq!(sha.len(), 64, "SHA256 hash must be 64 hex chars");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    mod terminate_on_change_tests {
+        use super::super::TerminateOnChange;
+
+        // Regression guard for the E2E "cannot exec in a stopped state"
+        // failure: the import path may terminate (no containers yet), the
+        // startup-migration path must not (containers may be running).
+        #[test]
+        fn variants_are_distinct() {
+            assert_ne!(TerminateOnChange::Yes, TerminateOnChange::No);
+            assert_eq!(TerminateOnChange::Yes, TerminateOnChange::Yes);
+            assert_eq!(TerminateOnChange::No, TerminateOnChange::No);
+        }
+
+        #[test]
+        fn is_copy_and_debug() {
+            let y = TerminateOnChange::Yes;
+            let copied = y; // Copy: original still usable below
+            assert_eq!(y, copied);
+            assert_eq!(format!("{:?}", TerminateOnChange::No), "No");
+            assert_eq!(format!("{:?}", TerminateOnChange::Yes), "Yes");
         }
     }
 

@@ -1786,11 +1786,17 @@ fn main() {
 
                 // Existing distros (created before the metadata fix) need the
                 // automount=metadata option too, or claude /login cannot chmod
-                // its credentials on the 9p mount. Idempotent; terminates the
-                // distro only on first change to apply the new wsl.conf.
+                // its credentials on the 9p mount. Idempotent. NEVER terminate
+                // here: containers may already be running, and a `wsl
+                // --terminate` would kill them mid-start ("cannot exec in a
+                // stopped state"). The new wsl.conf applies on the next natural
+                // WSL restart.
                 #[cfg(target_os = "windows")]
-                if let Err(e) = setup_wizard::ensure_wsl_distro_metadata() {
-                    log::warn!("wsl.conf metadata migration failed: {e}");
+                {
+                    use setup_wizard::TerminateOnChange;
+                    if let Err(e) = setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::No) {
+                        log::warn!("wsl.conf metadata migration failed: {e}");
+                    }
                 }
 
                 if let Err(e) = setup_wizard::link_cli() {
