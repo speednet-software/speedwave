@@ -775,21 +775,17 @@ pub enum TerminateOnChange {
     No,
 }
 
-/// drvfs automount options for the Speedwave distro's `/etc/wsl.conf`.
-///
-/// `metadata` makes the C:\ 9p mount honor Linux mode bits so Claude Code's
-/// `/login` can `chmod 0600` `.credentials.json` (ADR-052). `uid=1000,gid=1000`
-/// makes the mount owned by the container user — without it the mount defaults
-/// to uid 0 (the imported distro has no default user) and, once `metadata`
-/// enforces ownership, the uid-1000 entrypoint hits EACCES on its first write
-/// and the container exits under `set -e` ("cannot exec in a stopped state").
-#[cfg(target_os = "windows")]
-const WSL_AUTOMOUNT_OPTIONS: &str = "metadata,uid=1000,gid=1000,umask=022";
-
 /// Ensures the Speedwave distro's `/etc/wsl.conf` sets the drvfs automount
-/// options to [`WSL_AUTOMOUNT_OPTIONS`]. Both halves matter: `metadata` for
-/// `/login`'s chmod (ADR-052), `uid=1000,gid=1000` so the uid-1000 container
-/// can write `/home/speedwave` (else the entrypoint dies under `set -e`).
+/// options to [`consts::wsl_automount_options`]: `metadata` for `/login`'s
+/// chmod (ADR-052) and `uid`/`gid` (from the [`consts::CONTAINER_USER_UNPRIVILEGED`]
+/// SSOT) requesting the mount be owned by the container user.
+///
+/// NOTE: the `uid=`/`gid=` automount option is **not** load-bearing — WSL
+/// prepends the distro default user's uid (root → 0) ahead of it and that wins,
+/// so on imported distros (no `[user]` default) the mount stays uid 0. The
+/// actual fix for the uid-1000 entrypoint's EACCES is the per-project `chown`
+/// in [`ensure_claude_home_owner`]; this option still helps fresh imports and
+/// keeps `/login`'s chmod working.
 ///
 /// Idempotent and self-upgrading: adds the `[automount]` block if absent, and
 /// rewrites a bare `options = "metadata"` line (written by an earlier build)
@@ -805,18 +801,21 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
     let distro = consts::wsl_distro_name();
     // Run as root inside the distro; `/etc/wsl.conf` is distro-internal (not the
     // host .wslconfig). Two branches: add the block if `[automount]` is absent,
-    // else upgrade a uid-less options line in place. Both emit the change marker
-    // so the caller's terminate/restart logic fires.
+    // else upgrade an options line that lacks our uid in place. Both emit the
+    // change marker so the caller's terminate/restart logic fires.
+    let opts = consts::wsl_automount_options();
+    let (uid, _gid) = consts::container_uid_gid();
     let script = format!(
         "f=/etc/wsl.conf; \
          if ! grep -q '\\[automount\\]' \"$f\" 2>/dev/null; then \
            printf '\\n[automount]\\noptions = \"{opts}\"\\n' >> \"$f\"; \
            echo speedwave-metadata-added; \
-         elif ! grep -q 'uid=1000' \"$f\" 2>/dev/null; then \
+         elif ! grep -q 'uid={uid}' \"$f\" 2>/dev/null; then \
            sed -i 's|^[[:space:]]*options[[:space:]]*=.*|options = \"{opts}\"|' \"$f\"; \
            echo speedwave-metadata-added; \
          fi",
-        opts = WSL_AUTOMOUNT_OPTIONS
+        opts = opts,
+        uid = uid,
     );
     let script = script.as_str();
     let out = speedwave_runtime::binary::system_command("wsl.exe")
@@ -851,6 +850,52 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
             String::from_utf8_lossy(&o.stderr).trim()
         ),
         Err(e) => log::warn!("ensure_wsl_distro_metadata: spawn failed (non-fatal): {e}"),
+    }
+    Ok(())
+}
+
+/// Makes the project's `claude-home` tree owned by the container user so the
+/// uid-1000 entrypoint can write `/home/speedwave` (mkdir/ln under `set -e`).
+///
+/// This is the **load-bearing** half of the Windows mount-ownership fix. The
+/// WSL drvfs `/mnt/c` mount is owned by uid 0 (the imported distro has no
+/// default user, and WSL's prepended default-user uid beats the `uid=` automount
+/// option), so a uid-1000 mkdir under a root-owned parent gets EACCES and the
+/// container exits ("cannot exec in a stopped state"). With `metadata` on,
+/// `chown` writes per-file ownership that drvfs honors for access — so chowning
+/// the claude-home dir to uid 1000 lets the container create and write beneath
+/// it regardless of the mount's default uid. Verified on the live distro.
+///
+/// uid/gid come from the [`consts::container_uid_gid`] SSOT (same value as the
+/// compose `user:` field). Idempotent and cheap — call before every container
+/// start. Fail-open: a chown failure only logs.
+#[cfg(target_os = "windows")]
+pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
+    let distro = consts::wsl_distro_name();
+    let (uid, gid) = consts::container_uid_gid();
+    let host_path = speedwave_runtime::claude_home::claude_home_dir(consts::data_dir(), project);
+    let wsl_path = speedwave_runtime::runtime::windows_to_wsl_path(&host_path)?;
+    let wsl_path = wsl_path.to_string_lossy();
+    // Run as root inside the distro: chown the tree to the container uid:gid and
+    // ensure the owner has rwX so the entrypoint can create children.
+    let script = format!(
+        "d='{wsl_path}'; mkdir -p \"$d\"; chown -R {uid}:{gid} \"$d\"; chmod -R u+rwX \"$d\"",
+        wsl_path = wsl_path,
+        uid = uid,
+        gid = gid,
+    );
+    let out = speedwave_runtime::binary::system_command("wsl.exe")
+        .args(["-d", distro, "-u", "root", "--", "sh", "-c", &script])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            log::info!("ensure_claude_home_owner: chowned {wsl_path} to {uid}:{gid}");
+        }
+        Ok(o) => log::warn!(
+            "ensure_claude_home_owner: chown failed (non-fatal): {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log::warn!("ensure_claude_home_owner: spawn failed (non-fatal): {e}"),
     }
     Ok(())
 }
@@ -1116,6 +1161,16 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 
     log::info!("ensuring runtime is ready");
     rt.ensure_ready()?;
+
+    // Windows: the claude-home drvfs mount is owned by uid 0, so the uid-1000
+    // entrypoint cannot write /home/speedwave and the container exits. Chown the
+    // tree to the container user before starting (load-bearing fix; ADR-052).
+    // Fail-open so a chown hiccup never blocks container start.
+    #[cfg(target_os = "windows")]
+    if let Err(e) = ensure_claude_home_owner(project) {
+        log::warn!("ensure_claude_home_owner failed (non-fatal): {e}");
+    }
+
     log::info!("runtime ready, rendering compose");
 
     // Re-render compose.yml before every start. Dynamic config (mcp-os token,
@@ -2877,26 +2932,29 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     mod wsl_automount_options_tests {
-        use super::super::WSL_AUTOMOUNT_OPTIONS;
+        use speedwave_runtime::consts;
 
         // Regression guard for the claude container early-exit: the automount
-        // options MUST carry both `metadata` (so /login's chmod 0600 works,
-        // ADR-052) AND `uid=1000,gid=1000` (so the uid-1000 container can write
-        // /home/speedwave — verified on the Windows host: with metadata ON,
-        // uid != mount-owner => EACCES on mkdir => entrypoint dies under set -e).
+        // options carry `metadata` (so /login's chmod 0600 works, ADR-052) and
+        // the container uid/gid — derived from the CONTAINER_USER_UNPRIVILEGED
+        // SSOT, NOT a re-typed literal, so the mount owner and the compose
+        // `user:` cannot drift. The load-bearing fix is the chown in
+        // ensure_claude_home_owner; this option is best-effort (see its docs).
         #[test]
-        fn options_carry_metadata_and_container_uid() {
+        fn options_derive_metadata_and_container_uid_from_ssot() {
+            let opts = consts::wsl_automount_options();
+            let (uid, gid) = consts::container_uid_gid();
             assert!(
-                WSL_AUTOMOUNT_OPTIONS.contains("metadata"),
+                opts.contains("metadata"),
                 "metadata required for /login chmod 0600 (ADR-052)"
             );
             assert!(
-                WSL_AUTOMOUNT_OPTIONS.contains("uid=1000"),
-                "uid=1000 required so the container user owns the mount"
+                opts.contains(&format!("uid={uid}")),
+                "automount uid must equal container uid {uid}"
             );
             assert!(
-                WSL_AUTOMOUNT_OPTIONS.contains("gid=1000"),
-                "gid=1000 required so the container group owns the mount"
+                opts.contains(&format!("gid={gid}")),
+                "automount gid must equal container gid {gid}"
             );
         }
     }

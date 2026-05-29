@@ -162,6 +162,38 @@ pub const LIMA_VZ_HOST_IP: &str = "192.168.5.2";
 /// containerd runs as root inside the VM → UID 1000 maps to UID 1000 on host.
 pub const CONTAINER_USER_UNPRIVILEGED: &str = "1000:1000";
 
+/// (uid, gid) parsed from [`CONTAINER_USER_UNPRIVILEGED`] — the single source
+/// for the compose `user:` field, the WSL drvfs `chown`, and any other place
+/// that must match the uid the container runs as. Parsing the const (rather
+/// than re-typing `1000`) keeps the container uid and the host-side mount owner
+/// from drifting (see ADR-052: the Windows claude-home mount must be owned by
+/// this uid or the uid-1000 entrypoint hits EACCES and the container exits).
+pub fn container_uid_gid() -> (u32, u32) {
+    let (uid, gid) = CONTAINER_USER_UNPRIVILEGED
+        .split_once(':')
+        .expect("CONTAINER_USER_UNPRIVILEGED must be UID:GID");
+    (
+        uid.parse()
+            .expect("CONTAINER_USER_UNPRIVILEGED uid must be numeric"),
+        gid.parse()
+            .expect("CONTAINER_USER_UNPRIVILEGED gid must be numeric"),
+    )
+}
+
+/// drvfs `[automount]` options for the Speedwave WSL distro, derived from
+/// [`container_uid_gid`]. `metadata` makes the C:\ 9p mount honor Linux mode
+/// bits (so `/login` can `chmod 0600` `.credentials.json`, ADR-052); the
+/// `uid`/`gid` request that the mount be owned by the container user. NOTE:
+/// the `uid=`/`gid=` here is best-effort — WSL prepends the distro default
+/// user's uid (root → 0) and that wins, so the load-bearing fix is the
+/// per-project `chown` (see `setup_wizard::ensure_claude_home_owner`); this
+/// option still helps fresh imports and `/login`'s chmod.
+#[cfg(target_os = "windows")]
+pub fn wsl_automount_options() -> String {
+    let (uid, gid) = container_uid_gid();
+    format!("metadata,uid={uid},gid={gid},umask=022")
+}
+
 /// Subdirectory within resources for nerdctl-full binaries.
 pub const NERDCTL_FULL_SUBDIR: &str = "nerdctl-full";
 
@@ -1408,6 +1440,30 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn test_container_uid_gid_parses_ssot() {
+        let (uid, gid) = container_uid_gid();
+        // Derived from CONTAINER_USER_UNPRIVILEGED, not re-typed.
+        let (expect_uid, expect_gid) = {
+            let (u, g) = CONTAINER_USER_UNPRIVILEGED.split_once(':').unwrap();
+            (u.parse::<u32>().unwrap(), g.parse::<u32>().unwrap())
+        };
+        assert_eq!(uid, expect_uid);
+        assert_eq!(gid, expect_gid);
+        // Current value pin — changing the container user is a deliberate act.
+        assert_eq!((uid, gid), (1000, 1000));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_automount_options_uses_ssot_uid() {
+        let (uid, gid) = container_uid_gid();
+        let opts = wsl_automount_options();
+        assert!(opts.contains("metadata"));
+        assert!(opts.contains(&format!("uid={uid}")));
+        assert!(opts.contains(&format!("gid={gid}")));
     }
 
     #[test]
