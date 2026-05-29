@@ -43,14 +43,18 @@ if ($Mode -eq 'install') {
   try {
     Get-NetFirewallHyperVRule -DisplayName $RuleName -ErrorAction SilentlyContinue |
       Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue
-    New-NetFirewallHyperVRule `
-      -DisplayName $RuleName `
-      -Direction Inbound `
-      -Action Allow `
-      -VMCreatorId $WslVmCreatorId `
-      -Protocol TCP `
-      -LocalPorts Any `
-      -ErrorAction Stop | Out-Null
+    # Splatting (no backtick line-continuation): a backtick is the NSIS
+    # FileWrite string delimiter and has no escape, so it breaks makensis.
+    $params = @{
+      DisplayName = $RuleName
+      Direction   = 'Inbound'
+      Action      = 'Allow'
+      VMCreatorId = $WslVmCreatorId
+      Protocol    = 'TCP'
+      LocalPorts  = 'Any'
+      ErrorAction = 'Stop'
+    }
+    New-NetFirewallHyperVRule @params | Out-Null
     Write-Status "Hyper-V rule installed for VMCreatorId $WslVmCreatorId"
     exit 0
   } catch {

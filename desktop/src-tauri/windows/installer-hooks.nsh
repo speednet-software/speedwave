@@ -169,14 +169,18 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `  try {$\r$\n`
   FileWrite $0 `    Get-NetFirewallHyperVRule -DisplayName $$RuleName -ErrorAction SilentlyContinue |$\r$\n`
   FileWrite $0 `      Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue$\r$\n`
-  FileWrite $0 `    New-NetFirewallHyperVRule ``$\r$\n`
-  FileWrite $0 `      -DisplayName $$RuleName ``$\r$\n`
-  FileWrite $0 `      -Direction Inbound ``$\r$\n`
-  FileWrite $0 `      -Action Allow ``$\r$\n`
-  FileWrite $0 `      -VMCreatorId $$WslVmCreatorId ``$\r$\n`
-  FileWrite $0 `      -Protocol TCP ``$\r$\n`
-  FileWrite $0 `      -LocalPorts Any ``$\r$\n`
-  FileWrite $0 `      -ErrorAction Stop | Out-Null$\r$\n`
+  FileWrite $0 `    # Splatting (no backtick line-continuation): a backtick is the NSIS$\r$\n`
+  FileWrite $0 `    # FileWrite string delimiter and has no escape, so it breaks makensis.$\r$\n`
+  FileWrite $0 `    $$params = @{$\r$\n`
+  FileWrite $0 `      DisplayName = $$RuleName$\r$\n`
+  FileWrite $0 `      Direction   = 'Inbound'$\r$\n`
+  FileWrite $0 `      Action      = 'Allow'$\r$\n`
+  FileWrite $0 `      VMCreatorId = $$WslVmCreatorId$\r$\n`
+  FileWrite $0 `      Protocol    = 'TCP'$\r$\n`
+  FileWrite $0 `      LocalPorts  = 'Any'$\r$\n`
+  FileWrite $0 `      ErrorAction = 'Stop'$\r$\n`
+  FileWrite $0 `    }$\r$\n`
+  FileWrite $0 `    New-NetFirewallHyperVRule @params | Out-Null$\r$\n`
   FileWrite $0 `    Write-Status $\"Hyper-V rule installed for VMCreatorId $$WslVmCreatorId$\"$\r$\n`
   FileWrite $0 `    exit 0$\r$\n`
   FileWrite $0 `  } catch {$\r$\n`
