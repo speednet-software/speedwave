@@ -1723,35 +1723,53 @@ pub fn link_cli() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolves `windows/sweep.ps1` from the Tauri bundle on Windows. Mirrors
-/// `resolve_cli_source_from` semantics: prefer `SPEEDWAVE_RESOURCES_DIR`,
-/// then the production bundle layout, then dev fallbacks.
+/// Resolves a `windows/<name>` script from the Tauri bundle on Windows: prefer
+/// `SPEEDWAVE_RESOURCES_DIR`, then the production bundle layout, then dev
+/// fallbacks. Shared by the sweep and firewall consumers.
 #[cfg(target_os = "windows")]
-fn resolve_sweep_script() -> Option<std::path::PathBuf> {
+pub(crate) fn resolve_bundled_windows_script(name: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
     if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         let bundled = std::path::PathBuf::from(&resources_dir)
             .join("windows")
-            .join("sweep.ps1");
+            .join(name);
         if bundled.exists() {
             return Some(bundled);
         }
     }
-    let resources = exe_dir.join("resources").join("windows").join("sweep.ps1");
+    let resources = exe_dir.join("resources").join("windows").join(name);
     if resources.exists() {
         return Some(resources);
     }
     let dev = exe_dir
         .parent()
         .and_then(|p| p.parent())
-        .map(|p| p.join("windows").join("sweep.ps1"));
+        .map(|p| p.join("windows").join(name));
     if let Some(ref path) = dev {
         if path.exists() {
             return Some(path.clone());
         }
     }
     None
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_sweep_script() -> Option<std::path::PathBuf> {
+    resolve_bundled_windows_script("sweep.ps1")
+}
+
+/// Absolute path to the system PowerShell (`%SystemRoot%\System32\...`).
+/// Never the bare `powershell` from PATH — avoids hijack on multi-install hosts.
+#[cfg(target_os = "windows")]
+pub(crate) fn system_powershell_path() -> std::path::PathBuf {
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+    std::path::PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
 }
 
 /// Defense-in-depth: kill any stale Speedwave / Node / CLI process holding
@@ -1770,13 +1788,7 @@ fn run_pre_link_sweep() {
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_default();
     let data_dir = consts::data_dir();
-    let system_root =
-        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
-    let powershell = std::path::PathBuf::from(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
+    let powershell = system_powershell_path();
 
     // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe. Full mode is
     // reserved for install-time hooks (NSIS/MSI) — Tauri Desktop must not

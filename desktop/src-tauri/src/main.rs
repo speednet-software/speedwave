@@ -16,6 +16,7 @@ mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
+mod firewall;
 mod fs_perms;
 mod git_cmd;
 mod health;
@@ -1058,6 +1059,9 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
 /// Start IDE Bridge if not already running. Holds the mutex for the entire
 /// init+start to prevent races (two callers both seeing None and double-starting).
 fn ensure_ide_bridge_running(ide_bridge: &SharedIdeBridge, app_handle: &tauri::AppHandle) {
+    // Ensure the WSL Hyper-V firewall rule before binding the host listener
+    // (ADR-067). No-op off Windows; runs at most once per process.
+    firewall::ensure_firewall_rule();
     let mut guard = match ide_bridge.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1078,6 +1082,7 @@ fn ensure_ide_bridge_running(ide_bridge: &SharedIdeBridge, app_handle: &tauri::A
 /// This can block up to `PORT_READ_TIMEOUT` (10 s) — acceptable for a
 /// single-user desktop app where concurrent Tauri commands are rare.
 fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
+    firewall::ensure_firewall_rule();
     let mut guard = match mcp_os.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1111,6 +1116,7 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
 /// Spawn the project's `host_exec` worker if enabled and not running.
 /// Writes the chmod-600 config snapshot first. Returns `true` on fresh spawn.
 pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str) -> bool {
+    firewall::ensure_firewall_rule();
     let mut map = match host_exec.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1206,6 +1212,7 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
 /// integration with `uses_oauth_refresh = true` is enabled, or if the worker
 /// is already running. Returns true if a new worker was started this call.
 pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bool {
+    firewall::ensure_firewall_rule();
     let mut map = match oauth_arc.lock() {
         Ok(g) => g,
         Err(e) => {

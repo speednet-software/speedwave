@@ -124,29 +124,72 @@ Var SpeedwaveDataDirOverride
     DetailPrint "Speedwave: could not create firewall.ps1 in $PLUGINSDIR — skipping."
     Goto sw_firewall_write_done_${SW_FIREWALL_ID}
   sw_firewall_write_ok_${SW_FIREWALL_ID}:
-  FileWrite $0 `# SSOT: Hyper-V firewall rule for the Speedwave WSL VM.$\r$\n`
-  FileWrite $0 `# Consumed by: NSIS POSTINSTALL/POSTUNINSTALL, WiX CustomAction.$\r$\n`
-  FileWrite $0 `# Usage: firewall.ps1 -Mode install|uninstall$\r$\n`
+  FileWrite $0 `# SSOT: Windows firewall rules for Speedwave under WSL2 mirrored networking.$\r$\n`
+  FileWrite $0 `# Two layers (ADR-067): (1) a Hyper-V firewall rule scoped to the WSL$\r$\n`
+  FileWrite $0 `# VMCreatorId governs container<->host traffic across the WSL VM boundary;$\r$\n`
+  FileWrite $0 `# (2) host Windows Defender Firewall (WDF) per-program ALLOW rules suppress the$\r$\n`
+  FileWrite $0 `# $\"allow an app to access the network$\" consent prompt for the HOST listeners$\r$\n`
+  FileWrite $0 `# (bundled node.exe workers + speedwave-desktop.exe) that bind the WSL adapter$\r$\n`
+  FileWrite $0 `# IP. The Hyper-V rule alone does NOT stop that prompt — it is a separate$\r$\n`
+  FileWrite $0 `# firewall engine; both are required.$\r$\n`
+  FileWrite $0 `# Consumed by: NSIS POSTINSTALL/POSTUNINSTALL, WiX CustomAction, Desktop runtime.$\r$\n`
+  FileWrite $0 `# Modes: install|uninstall (installer, never self-elevate) ; ensure|install-elevated (Desktop runtime).$\r$\n`
   FileWrite $0 `# Fail-open: log warn and exit 0 on policy/permission failure.$\r$\n`
-  FileWrite $0 `# Ref: https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall$\r$\n`
+  FileWrite $0 `# Refs: https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall$\r$\n`
+  FileWrite $0 `#       https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/rules$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `param($\r$\n`
-  FileWrite $0 `  [ValidateSet('install', 'uninstall')]$\r$\n`
-  FileWrite $0 `  [string]$$Mode = 'install'$\r$\n`
+  FileWrite $0 `  [ValidateSet('install', 'uninstall', 'ensure', 'install-elevated')]$\r$\n`
+  FileWrite $0 `  [string]$$Mode = 'install',$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `  # Semicolon-separated absolute paths of host listener binaries to pre-authorize$\r$\n`
+  FileWrite $0 `  # at the WDF layer (node.exe, speedwave-desktop.exe). Resolved per-install by$\r$\n`
+  FileWrite $0 `  # the caller (paths differ between perUser and per-machine installs). A single$\r$\n`
+  FileWrite $0 `  # string (not [string[]]) because PowerShell -File cannot bind a multi-element$\r$\n`
+  FileWrite $0 `  # array; ';' is a safe separator (illegal in Windows file paths). Wildcards are$\r$\n`
+  FileWrite $0 `  # NOT supported by WDF application rules — must be exact paths.$\r$\n`
+  FileWrite $0 `  [string]$$Programs = ''$\r$\n`
   FileWrite $0 `)$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `$$ErrorActionPreference = 'Continue'$\r$\n`
   FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Split the semicolon-separated program list into an array, dropping blanks.$\r$\n`
+  FileWrite $0 `$$ProgramList = @($$Programs -split ';' | Where-Object { $$_ -ne '' })$\r$\n`
+  FileWrite $0 `$\r$\n`
   FileWrite $0 `# WSL VMCreatorId is fixed by Microsoft for all WSL2 distros.$\r$\n`
   FileWrite $0 `$$WslVmCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'$\r$\n`
   FileWrite $0 `$$RuleName = 'Speedwave WSL Inbound'$\r$\n`
+  FileWrite $0 `$$WdfRulePrefix = 'Speedwave Host Allow'$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `function Write-Status($$msg) { Write-Output $\"speedwave-firewall: $$msg$\" }$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `if ($$Mode -eq 'install') {$\r$\n`
-  FileWrite $0 `  # Remove stale WDF block rules left by users who clicked $\"Anuluj/Cancel$\"$\r$\n`
-  FileWrite $0 `  # on prior WDF prompts before the Hyper-V rule existed. Block rules in WDF$\r$\n`
-  FileWrite $0 `  # do not interact with Hyper-V firewall but mislead diagnostics.$\r$\n`
+  FileWrite $0 `function Test-IsAdmin {$\r$\n`
+  FileWrite $0 `  $$id = [Security.Principal.WindowsIdentity]::GetCurrent()$\r$\n`
+  FileWrite $0 `  return ([Security.Principal.WindowsPrincipal]$$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Read-only existence check; works without admin (free idempotency gate, no UAC).$\r$\n`
+  FileWrite $0 `# Ready only when BOTH the Hyper-V rule and a WDF allow rule for every requested$\r$\n`
+  FileWrite $0 `# program exist — so 'ensure' re-creates whatever is missing.$\r$\n`
+  FileWrite $0 `function Test-RuleExists {$\r$\n`
+  FileWrite $0 `  if (-not (Get-NetFirewallHyperVRule -DisplayName $$RuleName -ErrorAction SilentlyContinue)) {$\r$\n`
+  FileWrite $0 `    return $$false$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `  foreach ($$prog in $$ProgramList) {$\r$\n`
+  FileWrite $0 `    $$rule = Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |$\r$\n`
+  FileWrite $0 `      Where-Object { $$_.Program -eq $$prog } |$\r$\n`
+  FileWrite $0 `      Get-NetFirewallRule -ErrorAction SilentlyContinue |$\r$\n`
+  FileWrite $0 `      Where-Object { $$_.Action -eq 'Allow' -and $$_.Direction -eq 'Inbound' }$\r$\n`
+  FileWrite $0 `    if (-not $$rule) { return $$false }$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `  return $$true$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Removes any stale WDF Block rules for our binaries (left by a user who clicked$\r$\n`
+  FileWrite $0 `# Anuluj/Cancel on a prior prompt). Explicit Block beats Allow, so this MUST run$\r$\n`
+  FileWrite $0 `# before creating the Allow rules. Matches both the legacy patterns and the$\r$\n`
+  FileWrite $0 `# exact requested program paths.$\r$\n`
+  FileWrite $0 `function Remove-StaleBlockRules {$\r$\n`
   FileWrite $0 `  try {$\r$\n`
   FileWrite $0 `    $$stale = Get-NetFirewallRule -Action Block -ErrorAction SilentlyContinue | Where-Object {$\r$\n`
   FileWrite $0 `      $$app = $$_ | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue$\r$\n`
@@ -154,7 +197,8 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `        $$app.Program -match 'speedwave-desktop\.exe$$' -or$\r$\n`
   FileWrite $0 `        $$app.Program -match 'Speedwave\.exe$$' -or$\r$\n`
   FileWrite $0 `        $$app.Program -match '\\nodejs\\node\.exe$$' -or$\r$\n`
-  FileWrite $0 `        $$app.Program -match '\\\.speedwave[^\\]*\\bin\\speedwave\.exe$$'$\r$\n`
+  FileWrite $0 `        $$app.Program -match '\\\.speedwave[^\\]*\\bin\\speedwave\.exe$$' -or$\r$\n`
+  FileWrite $0 `        ($$ProgramList -contains $$app.Program)$\r$\n`
   FileWrite $0 `      )$\r$\n`
   FileWrite $0 `    }$\r$\n`
   FileWrite $0 `    foreach ($$r in $$stale) {$\r$\n`
@@ -162,10 +206,45 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `      Remove-NetFirewallRule -Name $$r.Name -ErrorAction SilentlyContinue$\r$\n`
   FileWrite $0 `    }$\r$\n`
   FileWrite $0 `  } catch {$\r$\n`
-  FileWrite $0 `    Write-Status $\"WDF cleanup failed (non-fatal): $$_$\"$\r$\n`
+  FileWrite $0 `    Write-Status $\"WDF block-rule cleanup failed (non-fatal): $$_$\"$\r$\n`
   FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `}$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `  # Create / re-create Hyper-V firewall rule. Idempotent.$\r$\n`
+  FileWrite $0 `# Creates a host WDF inbound ALLOW rule per program so Windows never prompts for$\r$\n`
+  FileWrite $0 `# that binary. Idempotent: removes our own prior allow rule for the path first.$\r$\n`
+  FileWrite $0 `function Install-WdfAllowRules {$\r$\n`
+  FileWrite $0 `  foreach ($$prog in $$ProgramList) {$\r$\n`
+  FileWrite $0 `    try {$\r$\n`
+  FileWrite $0 `      Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |$\r$\n`
+  FileWrite $0 `        Where-Object { $$_.Program -eq $$prog } |$\r$\n`
+  FileWrite $0 `        Get-NetFirewallRule -ErrorAction SilentlyContinue |$\r$\n`
+  FileWrite $0 `        Where-Object { $$_.DisplayName -like $\"$$WdfRulePrefix*$\" } |$\r$\n`
+  FileWrite $0 `        Remove-NetFirewallRule -ErrorAction SilentlyContinue$\r$\n`
+  FileWrite $0 `      $$leaf = Split-Path $$prog -Leaf$\r$\n`
+  FileWrite $0 `      $$params = @{$\r$\n`
+  FileWrite $0 `        DisplayName = $\"$$WdfRulePrefix ($$leaf)$\"$\r$\n`
+  FileWrite $0 `        Program     = $$prog$\r$\n`
+  FileWrite $0 `        Direction   = 'Inbound'$\r$\n`
+  FileWrite $0 `        Action      = 'Allow'$\r$\n`
+  FileWrite $0 `        Profile     = 'Any'$\r$\n`
+  FileWrite $0 `        Enabled     = 'True'$\r$\n`
+  FileWrite $0 `        ErrorAction = 'Stop'$\r$\n`
+  FileWrite $0 `      }$\r$\n`
+  FileWrite $0 `      New-NetFirewallRule @params | Out-Null$\r$\n`
+  FileWrite $0 `      Write-Status $\"WDF allow rule installed for $$prog$\"$\r$\n`
+  FileWrite $0 `    } catch {$\r$\n`
+  FileWrite $0 `      Write-Status $\"WDF allow rule failed for $${prog} (non-fatal): $$_$\"$\r$\n`
+  FileWrite $0 `    }$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Privileged body (requires admin): stale-block cleanup, then the Hyper-V rule$\r$\n`
+  FileWrite $0 `# (VM-boundary reachability) and the WDF allow rules (suppress host prompt).$\r$\n`
+  FileWrite $0 `# Returns $$true on Hyper-V success, $$false on caught failure (fail-open).$\r$\n`
+  FileWrite $0 `function Install-FirewallRule {$\r$\n`
+  FileWrite $0 `  Remove-StaleBlockRules$\r$\n`
+  FileWrite $0 `  Install-WdfAllowRules$\r$\n`
+  FileWrite $0 `$\r$\n`
   FileWrite $0 `  try {$\r$\n`
   FileWrite $0 `    Get-NetFirewallHyperVRule -DisplayName $$RuleName -ErrorAction SilentlyContinue |$\r$\n`
   FileWrite $0 `      Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue$\r$\n`
@@ -182,23 +261,59 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `    }$\r$\n`
   FileWrite $0 `    New-NetFirewallHyperVRule @params | Out-Null$\r$\n`
   FileWrite $0 `    Write-Status $\"Hyper-V rule installed for VMCreatorId $$WslVmCreatorId$\"$\r$\n`
-  FileWrite $0 `    exit 0$\r$\n`
+  FileWrite $0 `    return $$true$\r$\n`
   FileWrite $0 `  } catch {$\r$\n`
   FileWrite $0 `    Write-Status $\"Hyper-V rule install failed (fail-open): $$_$\"$\r$\n`
+  FileWrite $0 `    return $$false$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Installer mode (NSIS/MSI): never self-elevate. Relies on the installer's own$\r$\n`
+  FileWrite $0 `# elevation (MSI runs as LocalSystem; perUser NSIS may lack admin and the$\r$\n`
+  FileWrite $0 `# Desktop runtime 'ensure' fallback then creates the rules). Always exit 0.$\r$\n`
+  FileWrite $0 `if ($$Mode -eq 'install') {$\r$\n`
+  FileWrite $0 `  if (Test-RuleExists) {$\r$\n`
+  FileWrite $0 `    Write-Status $\"rules already present$\"$\r$\n`
   FileWrite $0 `    exit 0$\r$\n`
   FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `  Install-FirewallRule | Out-Null$\r$\n`
+  FileWrite $0 `  exit 0$\r$\n`
   FileWrite $0 `}$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `if ($$Mode -eq 'uninstall') {$\r$\n`
   FileWrite $0 `  try {$\r$\n`
   FileWrite $0 `    Get-NetFirewallHyperVRule -DisplayName $$RuleName -ErrorAction SilentlyContinue |$\r$\n`
   FileWrite $0 `      Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue$\r$\n`
-  FileWrite $0 `    Write-Status $\"Hyper-V rule removed$\"$\r$\n`
+  FileWrite $0 `    Get-NetFirewallRule -ErrorAction SilentlyContinue |$\r$\n`
+  FileWrite $0 `      Where-Object { $$_.DisplayName -like $\"$$WdfRulePrefix*$\" } |$\r$\n`
+  FileWrite $0 `      Remove-NetFirewallRule -ErrorAction SilentlyContinue$\r$\n`
+  FileWrite $0 `    Write-Status $\"firewall rules removed$\"$\r$\n`
   FileWrite $0 `    exit 0$\r$\n`
   FileWrite $0 `  } catch {$\r$\n`
-  FileWrite $0 `    Write-Status $\"Hyper-V rule uninstall failed (fail-open): $$_$\"$\r$\n`
+  FileWrite $0 `    Write-Status $\"firewall rule uninstall failed (fail-open): $$_$\"$\r$\n`
   FileWrite $0 `    exit 0$\r$\n`
   FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Internal mode: run the privileged body directly. NO admin check, NO relaunch$\r$\n`
+  FileWrite $0 `# (prevents an infinite UAC loop). Invoked only by 'ensure' self-elevation.$\r$\n`
+  FileWrite $0 `if ($$Mode -eq 'install-elevated') {$\r$\n`
+  FileWrite $0 `  if (Install-FirewallRule) { exit 0 } else { exit 2 }$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Desktop runtime mode: existence-check first (non-admin, no UAC). If missing,$\r$\n`
+  FileWrite $0 `# create directly when already admin, else signal the Rust caller (exit 3) that$\r$\n`
+  FileWrite $0 `# elevation is required so it can decide whether to prompt.$\r$\n`
+  FileWrite $0 `if ($$Mode -eq 'ensure') {$\r$\n`
+  FileWrite $0 `  if (Test-RuleExists) {$\r$\n`
+  FileWrite $0 `    Write-Status $\"rules already present$\"$\r$\n`
+  FileWrite $0 `    exit 0$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `  if (Test-IsAdmin) {$\r$\n`
+  FileWrite $0 `    if (Install-FirewallRule -and (Test-RuleExists)) { exit 0 } else { exit 2 }$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `  Write-Status $\"rules missing and elevation required$\"$\r$\n`
+  FileWrite $0 `  exit 3$\r$\n`
   FileWrite $0 `}$\r$\n`
   FileClose $0
   sw_firewall_write_done_${SW_FIREWALL_ID}:

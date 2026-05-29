@@ -184,21 +184,113 @@ mod tests {
     }
 
     #[test]
-    fn firewall_ps1_fails_open() {
-        // Exits 0 on every path so a policy-locked machine cannot brick install.
-        let exits = FIREWALL_PS1.matches("exit 0").count();
+    fn firewall_ps1_creates_wdf_allow_rules() {
+        // The actual fix for the per-binary WDF prompt: host application ALLOW
+        // rules (New-NetFirewallRule -Program), separate from the Hyper-V rule.
         assert!(
-            exits >= 4,
-            "firewall.ps1 must exit 0 on success AND on catch branches (fail-open); found {exits}"
+            FIREWALL_PS1.contains("New-NetFirewallRule")
+                && FIREWALL_PS1.contains("Action      = 'Allow'")
+                && FIREWALL_PS1.contains("Program     = $prog"),
+            "firewall.ps1 must create host WDF -Program allow rules to suppress the prompt"
         );
     }
 
     #[test]
-    fn firewall_ps1_supports_both_modes() {
+    fn firewall_ps1_accepts_programs_param_split_on_semicolon() {
+        // Paths arrive as one ';'-joined string ([string], not [string[]]) because
+        // PowerShell -File cannot bind a multi-element array. Verified on Windows.
         assert!(
-            FIREWALL_PS1.contains("'install', 'uninstall'"),
-            "firewall.ps1 must validate Mode against install|uninstall"
+            FIREWALL_PS1.contains("[string]$Programs")
+                && FIREWALL_PS1.contains("$Programs -split ';'"),
+            "firewall.ps1 must accept a single ';'-separated -Programs string and split it"
         );
+    }
+
+    #[test]
+    fn firewall_ps1_uninstall_removes_wdf_allow_rules() {
+        let idx = FIREWALL_PS1
+            .find("$Mode -eq 'uninstall'")
+            .expect("uninstall branch must exist");
+        let branch = &FIREWALL_PS1[idx..];
+        assert!(
+            branch.contains("$WdfRulePrefix") && branch.contains("Remove-NetFirewallRule"),
+            "uninstall must remove the WDF allow rules ($WdfRulePrefix) it created"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_installer_modes_fail_open() {
+        // The installer-invoked modes (install/uninstall) must never brick a
+        // policy-locked machine. Several exit-0 paths cover success + catch.
+        let exits = FIREWALL_PS1.matches("exit 0").count();
+        assert!(
+            exits >= 4,
+            "firewall.ps1 must exit 0 on success AND catch branches (fail-open); found {exits}"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_supports_all_modes() {
+        assert!(
+            FIREWALL_PS1.contains("'install', 'uninstall', 'ensure', 'install-elevated'"),
+            "firewall.ps1 must validate Mode against install|uninstall|ensure|install-elevated"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_ensure_checks_existence_before_signalling_elevation() {
+        // Runtime 'ensure' must do the non-admin existence check (no UAC) and
+        // only exit 3 (needs-elevation) when the rule is genuinely missing.
+        let ensure_idx = FIREWALL_PS1
+            .find("$Mode -eq 'ensure'")
+            .expect("ensure branch must exist");
+        let ensure_branch = &FIREWALL_PS1[ensure_idx..];
+        let check_pos = ensure_branch
+            .find("Test-RuleExists")
+            .expect("ensure must call Test-RuleExists");
+        let exit3_pos = ensure_branch
+            .find("exit 3")
+            .expect("ensure must exit 3 when elevation required");
+        assert!(
+            check_pos < exit3_pos,
+            "ensure must check rule existence BEFORE signalling needs-elevation"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_elevated_mode_does_not_self_relaunch() {
+        // install-elevated runs the privileged body directly; self-elevation is
+        // driven from Rust, so the script must NOT contain -Verb RunAs (no UAC
+        // loop) and must NOT re-check admin in the elevated branch.
+        assert!(
+            !FIREWALL_PS1.contains("-Verb RunAs") && !FIREWALL_PS1.contains("RunAs"),
+            "firewall.ps1 must not self-elevate; elevation is driven from Rust"
+        );
+    }
+
+    #[test]
+    fn installers_invoke_only_install_and_uninstall_modes() {
+        // The self-elevating/runtime modes (ensure, install-elevated) are
+        // reachable only from the Desktop runtime. The installers must INVOKE
+        // firewall.ps1 only with -Mode install / -Mode uninstall. Note: the
+        // mode strings legitimately appear inside the materialized firewall.ps1
+        // body (ValidateSet) in installer-hooks.nsh — so we assert on the
+        // invocation pattern (`firewall.ps1...-Mode <runtime>`), not presence.
+        for needle in [
+            "firewall.ps1\" -Mode ensure",
+            "firewall.ps1\" -Mode install-elevated",
+            "firewall.ps1&quot; -Mode ensure",
+            "firewall.ps1&quot; -Mode install-elevated",
+        ] {
+            assert!(
+                !HOOKS.contains(needle),
+                "installer-hooks.nsh must not invoke runtime-only mode: {needle}"
+            );
+            assert!(
+                !FIREWALL_WXS.contains(needle),
+                "firewall.wxs must not invoke runtime-only mode: {needle}"
+            );
+        }
     }
 
     #[test]
