@@ -7585,6 +7585,17 @@ services:
             has_effort_level,
             "CLAUDE_CODE_EFFORT_LEVEL=auto must be in claude service environment"
         );
+
+        // Auto-connect to the Speedwave IDE Bridge on start, so the user does
+        // not have to run /ide and pick "Speedwave" manually. Value is the
+        // string `true` (not 1) per the Claude Code env-vars reference.
+        let has_auto_connect = claude_env
+            .iter()
+            .any(|v| v.as_str() == Some("CLAUDE_CODE_AUTO_CONNECT_IDE=true"));
+        assert!(
+            has_auto_connect,
+            "CLAUDE_CODE_AUTO_CONNECT_IDE=true must be in claude service environment"
+        );
     }
 
     #[test]
