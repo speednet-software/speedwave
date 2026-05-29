@@ -53,6 +53,14 @@ emit_materialize_macro() {
     exit 1
   fi
 
+  # A backtick is the NSIS FileWrite string delimiter and has no escape, so a
+  # literal backtick in the .ps1 silently truncates the NSIS string and aborts
+  # makensis. Fail loudly here instead. Use splatting, not backtick-continuation.
+  if grep -q '`' "$src"; then
+    echo "ERROR: $src contains a backtick — breaks NSIS FileWrite. Use splatting." >&2
+    exit 1
+  fi
+
   # Strip UTF-8 BOM before embedding — NSIS writes literal bytes, and the
   # materialized .ps1 does not need a BOM (PowerShell handles ASCII fine).
   local stripped
@@ -78,15 +86,13 @@ emit_materialize_macro() {
 
   # Escape each line for NSIS backtick-delimited FileWrite literal:
   #   $  -> $$
-  #   `  -> `` (NSIS backtick doubling inside backtick string)
   #   "  -> $\"  (NSIS escape for double quote)
-  # Backslashes are literal in backtick strings. Line endings emitted as
-  # NSIS escape sequences $\r$\n (Windows line ending).
+  # Backticks are rejected upstream (no NSIS escape exists). Backslashes are
+  # literal in backtick strings. Line endings emitted as $\r$\n.
   local line esc
   while IFS= read -r line || [[ -n "$line" ]]; do
     esc="$line"
     esc="${esc//\$/\$\$}"
-    esc="${esc//\`/\`\`}"
     esc="${esc//\"/\$\\\"}"
     printf '  FileWrite $0 `%s$\\r$\\n`\n' "$esc"
   done < "$stripped"

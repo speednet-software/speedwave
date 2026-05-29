@@ -201,6 +201,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn materialized_ps1_scripts_contain_no_backtick() {
+        // A backtick is the NSIS FileWrite string delimiter and has no escape,
+        // so a literal backtick truncates the NSIS string and aborts makensis.
+        // The generator rejects such scripts; this guards the SSOT sources.
+        for (name, ps1) in [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)] {
+            assert!(
+                !ps1.contains('`'),
+                "{name} contains a backtick — breaks NSIS FileWrite (use splatting)"
+            );
+        }
+    }
+
     // ── WiX fragments: MSI parity ────────────────────────────────────────
 
     #[test]
@@ -338,7 +351,8 @@ mod tests {
             for c in line.chars() {
                 match c {
                     '$' => esc.push_str("$$"),
-                    '`' => esc.push_str("``"),
+                    // Backtick has no NSIS escape; the generator rejects any
+                    // .ps1 containing one, so it never reaches here.
                     '"' => esc.push_str("$\\\""),
                     other => esc.push(other),
                 }
