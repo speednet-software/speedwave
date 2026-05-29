@@ -482,12 +482,15 @@ impl ContainerRuntime for WslRuntime {
         // arguments containing `(`, `)`, `'`, etc. break remote bash.
         let distro = self.distro();
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+        // Propagate the host's real TERM so Claude Code can negotiate the
+        // keyboard protocol (Shift+Enter) instead of seeing a forced xterm.
+        let term_env = super::resolved_term_env();
         let nerdctl_argv: Vec<&str> = [
             "nerdctl",
             "exec",
             "-it",
             "-e",
-            "TERM=xterm-256color",
+            term_env.as_str(),
             "-e",
             "COLORTERM=truecolor",
             "-e",
@@ -1178,6 +1181,7 @@ mod tests {
     /// `wsl.exe` joins everything after `--` and execs through bash inside the
     /// distro, so prompts with `(`, `'`, backticks must shell-quote correctly.
     #[test]
+    #[serial_test::serial(env_term)]
     fn test_container_exec_remote_cmd_survives_shell_roundtrip() {
         let nasty_args: &[&[&str]] = &[
             &[
@@ -1191,6 +1195,11 @@ mod tests {
             &["sh", "-c", r#"echo "hello \"world\"""#],
         ];
 
+        // Pin TERM so the interactive prefix is deterministic — container_exec
+        // now propagates the host's real TERM. Guard restores it on drop.
+        let _term_guard = crate::runtime::TermGuard::set("xterm-256color");
+        let term_env = crate::runtime::resolved_term_env();
+
         for args in nasty_args {
             let path_env = format!("PATH={}", consts::CONTAINER_PATH);
             let interactive_prefix: Vec<&str> = vec![
@@ -1198,7 +1207,7 @@ mod tests {
                 "exec",
                 "-it",
                 "-e",
-                "TERM=xterm-256color",
+                term_env.as_str(),
                 "-e",
                 "COLORTERM=truecolor",
                 "-e",

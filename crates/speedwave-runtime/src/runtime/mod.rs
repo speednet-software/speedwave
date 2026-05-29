@@ -1011,6 +1011,45 @@ pub(crate) fn detect_runtime_inner() -> Box<dyn ContainerRuntime> {
     compile_error!("Speedwave requires macOS or Windows");
 }
 
+/// Default `TERM` used when the host advertises nothing usable.
+pub(crate) const FALLBACK_TERM: &str = "xterm-256color";
+
+/// Builds the `TERM=<value>` arg for interactive `nerdctl exec`, propagating the
+/// host terminal's real `TERM` so Claude Code can negotiate the keyboard protocol
+/// (e.g. Shift+Enter). Falls back to `xterm-256color` when `TERM` is unset, empty,
+/// or `dumb`.
+pub(crate) fn resolved_term_env() -> String {
+    let term = std::env::var("TERM")
+        .ok()
+        .filter(|t| !t.is_empty() && t != "dumb")
+        .unwrap_or_else(|| FALLBACK_TERM.to_string());
+    format!("TERM={term}")
+}
+
+/// Test-only RAII guard: pins `TERM` to `value` and restores the prior value on
+/// drop — even on panic/unwind. Pair with `#[serial_test::serial(env_term)]`.
+#[cfg(test)]
+pub(crate) struct TermGuard(Option<String>);
+
+#[cfg(test)]
+impl TermGuard {
+    pub(crate) fn set(value: &str) -> Self {
+        let prev = std::env::var("TERM").ok();
+        std::env::set_var("TERM", value);
+        Self(prev)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(v) => std::env::set_var("TERM", v),
+            None => std::env::remove_var("TERM"),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::CommandRunner;
@@ -2172,6 +2211,42 @@ services:
         assert!(is_propagation_error(&anyhow::anyhow!(
             "INVALID COMPOSE PROJECT: ..."
         )));
+    }
+
+    /// Env mutation here is gated `#[serial(env_term)]` so no other test
+    /// reads/writes `TERM` concurrently. The `TermGuard` restores the prior
+    /// value on drop, even if `f` panics.
+    fn with_term<F: FnOnce()>(value: Option<&str>, f: F) {
+        let _guard = TermGuard::set(value.unwrap_or(""));
+        if value.is_none() {
+            std::env::remove_var("TERM");
+        }
+        f();
+    }
+
+    #[test]
+    #[serial_test::serial(env_term)]
+    fn resolved_term_env_propagates_real_term() {
+        with_term(Some("xterm-kitty"), || {
+            assert_eq!(resolved_term_env(), "TERM=xterm-kitty");
+        });
+        with_term(Some("xterm-ghostty"), || {
+            assert_eq!(resolved_term_env(), "TERM=xterm-ghostty");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env_term)]
+    fn resolved_term_env_falls_back_when_unusable() {
+        with_term(None, || {
+            assert_eq!(resolved_term_env(), format!("TERM={FALLBACK_TERM}"));
+        });
+        with_term(Some(""), || {
+            assert_eq!(resolved_term_env(), format!("TERM={FALLBACK_TERM}"));
+        });
+        with_term(Some("dumb"), || {
+            assert_eq!(resolved_term_env(), format!("TERM={FALLBACK_TERM}"));
+        });
     }
 }
 

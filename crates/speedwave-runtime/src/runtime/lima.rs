@@ -461,6 +461,9 @@ impl ContainerRuntime for LimaRuntime {
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command {
         let vm = consts::lima_vm_name();
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+        // Propagate the host's real TERM so Claude Code can negotiate the
+        // keyboard protocol (Shift+Enter) instead of seeing a forced xterm.
+        let term_env = super::resolved_term_env();
 
         // Both transports below (direct SSH, `limactl shell`) round-trip the
         // remote command through a POSIX shell on the VM side, so every
@@ -474,7 +477,7 @@ impl ContainerRuntime for LimaRuntime {
             "exec",
             "-it",
             "-e",
-            "TERM=xterm-256color",
+            term_env.as_str(),
             "-e",
             "COLORTERM=truecolor",
             "-e",
@@ -1415,6 +1418,7 @@ mod tests {
     /// into `bash -nc` (syntax check, no execution) for every transport
     /// and asserts the parser accepts it.
     #[test]
+    #[serial_test::serial(env_term)]
     fn test_container_exec_remote_cmd_survives_shell_roundtrip() {
         // Pull the smallest set of nasty inputs that historically bit us:
         // - parens, em-dash, periods (the local-LLM identity prompt)
@@ -1440,6 +1444,11 @@ mod tests {
             &["sh", "-c", r#"echo "hello \"world\"""#],
         ];
 
+        // Pin TERM so the interactive prefix is deterministic — container_exec
+        // now propagates the host's real TERM. Guard restores it on drop.
+        let _term_guard = crate::runtime::TermGuard::set("xterm-256color");
+        let term_env = crate::runtime::resolved_term_env();
+
         for args in nasty_args {
             let path_env = format!("PATH={}", consts::CONTAINER_PATH);
             let interactive_prefix: Vec<&str> = vec![
@@ -1448,7 +1457,7 @@ mod tests {
                 "exec",
                 "-it",
                 "-e",
-                "TERM=xterm-256color",
+                term_env.as_str(),
                 "-e",
                 "COLORTERM=truecolor",
                 "-e",
