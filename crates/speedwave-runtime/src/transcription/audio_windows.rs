@@ -66,7 +66,9 @@ impl Default for WasapiAudioCapture {
 /// `cmd /c ver` output (`Microsoft Windows [Version 10.0.22631.xxxx]`). Cheap
 /// and dependency-free; `None` on any parse failure.
 fn detect_windows_build() -> Option<u32> {
-    let out = std::process::Command::new("cmd")
+    // system_command applies CREATE_NO_WINDOW so this probe (run on audio/
+    // transcription init) does not flash a console over the Desktop UI.
+    let out = crate::binary::system_command("cmd")
         .args(["/c", "ver"])
         .output()
         .ok()?;
