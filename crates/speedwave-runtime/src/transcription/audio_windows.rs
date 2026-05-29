@@ -3,7 +3,7 @@
 //! device — that's our "System (everything)" source, available on Windows 7+.
 //!
 //! Per-process loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) needs
-//! Windows 10 build 20348+. cpal 0.16 doesn't expose it, so v1 ships
+//! Windows 10 build 20348+. cpal 0.17 doesn't expose it, so v1 ships
 //! system-wide-only: `capabilities().supports_per_process` is `false` and a
 //! `Process` source is rejected with a clear "use System audio" error. (A
 //! future iteration can add a `windows-sys` shim — see ADR-056.)
@@ -281,7 +281,7 @@ fn open_capture_stream(
 ) -> Result<cpal::Stream, CaptureError> {
     let supported = kind.supported_config()?;
     let sample_format = supported.sample_format();
-    let src_rate = supported.sample_rate().0;
+    let src_rate = supported.sample_rate();
     let src_channels = supported.channels() as usize;
     let config: cpal::StreamConfig = supported.into();
     let resampler = Resampler::new(src_rate, src_channels);
