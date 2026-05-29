@@ -1445,12 +1445,13 @@ mod tests {
         ];
 
         // Pin TERM so the interactive prefix is deterministic — container_exec
-        // now propagates the host's real TERM.
+        // now propagates the host's real TERM. Restored at the end.
+        let prev_term = std::env::var("TERM").ok();
         std::env::set_var("TERM", "xterm-256color");
+        let term_env = crate::runtime::resolved_term_env();
 
         for args in nasty_args {
             let path_env = format!("PATH={}", consts::CONTAINER_PATH);
-            let term_env = crate::runtime::resolved_term_env();
             let interactive_prefix: Vec<&str> = vec![
                 "sudo",
                 "nerdctl",
@@ -1508,6 +1509,11 @@ mod tests {
                 .chain(args.iter().copied())
                 .collect();
             assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec_piped");
+        }
+
+        match prev_term {
+            Some(v) => std::env::set_var("TERM", v),
+            None => std::env::remove_var("TERM"),
         }
     }
 
