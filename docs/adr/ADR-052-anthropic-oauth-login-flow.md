@@ -26,6 +26,12 @@ We need a login surface reachable from both the CLI (`speedwave login`) and the 
 
 `entrypoint.sh` pre-creates `~/.claude.json` with `{ "hasCompletedOnboarding": true, "installMethod": "native" }` if absent. Without this, Claude Code treats every fresh container as a brand-new install and re-prompts for login even when `.credentials.json` is in place[^2].
 
+### Windows: the `metadata` automount requirement
+
+On Windows the `CLAUDE_HOME` bind-mount resolves to a path under `C:\` (`~/.speedwave/claude-home/<project>`), exposed inside the WSL2 distro via the drvfs/9p automount of `/mnt/c`. By default that mount is `uid=0;gid=0` and **rejects `chmod`** (`Operation not permitted`). Claude Code writes `.credentials.json` and then `chmod 0600`s it; on a non-`metadata` mount that chmod fails and the login does not persist — the TUI may report "Login successful" yet the next session shows "Not logged in". The container itself is fine (verified: uid 1000, `HOME=/home/speedwave`); only the chmod-on-9p step fails.
+
+Fix: the Speedwave distro's internal `/etc/wsl.conf` must declare `[automount]\noptions = "metadata"`, which makes drvfs honor Linux permission bits. `setup_wizard::ensure_wsl_distro_metadata()` writes this right after `wsl --import` (before any container runs) and, for distros created before this fix, idempotently on startup (terminating the distro once so the new `wsl.conf` applies). This is distro-internal config — distinct from the host `%USERPROFILE%\.wslconfig` managed by `ensure_wslconfig_vpn_compat` (ADR-067). macOS (Lima VirtioFS) is unaffected; it honors chmod natively.
+
 `speedwave logout [--project <name>]` deletes both `.credentials.json` and `.claude.json` from the project's `CLAUDE_HOME` mount.
 
 ### Surface

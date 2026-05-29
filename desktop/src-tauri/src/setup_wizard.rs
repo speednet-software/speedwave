@@ -756,6 +756,48 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         }
     }
 
+    ensure_wsl_distro_metadata()?;
+
+    Ok(())
+}
+
+/// Ensures the Speedwave distro's `/etc/wsl.conf` enables the `metadata`
+/// automount option. Without it, the C:\ drvfs/9p mount rejects `chmod`
+/// ("Operation not permitted"), so Claude Code's `/login` cannot write
+/// `.credentials.json` with the 0600 perms it requires — the login silently
+/// fails to persist (ADR-052 credential mount). We set it right after import,
+/// before the distro runs containers, then terminate so the new wsl.conf is
+/// applied on the next start. Fail-open: a write failure must not block setup.
+#[cfg(target_os = "windows")]
+pub fn ensure_wsl_distro_metadata() -> anyhow::Result<()> {
+    let distro = consts::wsl_distro_name();
+    // Append [automount] options=metadata only if absent. Run as root inside
+    // the distro; `/etc/wsl.conf` is distro-internal (not the host .wslconfig).
+    let script = "if ! grep -q '\\[automount\\]' /etc/wsl.conf 2>/dev/null; then \
+         printf '\\n[automount]\\noptions = \"metadata\"\\n' >> /etc/wsl.conf; \
+         echo speedwave-metadata-added; \
+       fi";
+    let out = speedwave_runtime::binary::system_command("wsl.exe")
+        .args(["-d", distro, "-u", "root", "--", "sh", "-c", script])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let changed = String::from_utf8_lossy(&o.stdout).contains("speedwave-metadata-added");
+            if changed {
+                // Terminate so the new wsl.conf is applied on the next start.
+                // Safe at import time: no Speedwave containers run yet.
+                let _ = speedwave_runtime::binary::system_command("wsl.exe")
+                    .args(["--terminate", distro])
+                    .status();
+                log::info!("ensure_wsl_distro_metadata: enabled metadata automount for {distro}");
+            }
+        }
+        Ok(o) => log::warn!(
+            "ensure_wsl_distro_metadata: wsl.conf update failed (non-fatal): {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log::warn!("ensure_wsl_distro_metadata: spawn failed (non-fatal): {e}"),
+    }
     Ok(())
 }
 

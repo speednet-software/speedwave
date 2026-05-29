@@ -1784,6 +1784,15 @@ fn main() {
                     log::warn!(".wslconfig VPN-compat migration failed: {e}");
                 }
 
+                // Existing distros (created before the metadata fix) need the
+                // automount=metadata option too, or claude /login cannot chmod
+                // its credentials on the 9p mount. Idempotent; terminates the
+                // distro only on first change to apply the new wsl.conf.
+                #[cfg(target_os = "windows")]
+                if let Err(e) = setup_wizard::ensure_wsl_distro_metadata() {
+                    log::warn!("wsl.conf metadata migration failed: {e}");
+                }
+
                 if let Err(e) = setup_wizard::link_cli() {
                     log::warn!("CLI re-link on startup failed: {e}");
                 }

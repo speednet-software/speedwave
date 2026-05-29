@@ -153,18 +153,37 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     spawn_apple_terminal(cmd)
 }
 
-/// Argv for `cmd.exe /c start "" <ps> -NoExit -Command <cmd>`. Empty title
-/// is mandatory — `start` treats the first quoted arg as the window title.
+/// Argv for launching the login terminal via Windows Terminal:
+/// `wt.exe new-tab <ps> -NoExit -Command <cmd>`. Preferred because wt.exe uses
+/// a ConPTY pipeline that pumps stdin to the child from the start. The old
+/// `cmd.exe /c start "" <ps> ...` pattern created a detached console whose
+/// ConPTY input buffer was not pumped to the interactive wsl.exe child until
+/// the window received focus — so Enter was dropped until the user clicked the
+/// window (ADR-052 login terminal; Windows-only bug).
 #[cfg(any(target_os = "windows", test))]
-fn build_windows_terminal_argv<'a>(ps_exe: &'a str, cmd: &'a str) -> [&'a str; 7] {
-    ["/c", "start", "", ps_exe, "-NoExit", "-Command", cmd]
+fn build_wt_terminal_argv<'a>(ps_exe: &'a str, cmd: &'a str) -> [&'a str; 5] {
+    ["new-tab", ps_exe, "-NoExit", "-Command", cmd]
 }
 
-/// Spawns a new PowerShell console window running `cmd`.
+/// Argv for launching PowerShell directly (no `cmd /c start`, no wt.exe):
+/// `<ps> -NoExit -Command <cmd>`. Spawned as its own process so it attaches a
+/// console that pumps input immediately. Fallback when wt.exe is unavailable.
+#[cfg(any(target_os = "windows", test))]
+fn build_powershell_argv<'a>(cmd: &'a str) -> [&'a str; 3] {
+    ["-NoExit", "-Command", cmd]
+}
+
+/// Spawns a new terminal window running `cmd` (PowerShell syntax).
 /// `build_auth_command_for_platform` emits PowerShell syntax (`Set-Location`,
-/// `$env:`, `;`) on Windows, so we must spawn PowerShell — not `cmd.exe`.
-/// Prefers `pwsh.exe` (PowerShell 7+) when on PATH. `-NoExit` keeps the window
-/// open so the user can read output and paste.
+/// `$env:`, `;`) on Windows, so we spawn PowerShell. Prefers `pwsh.exe`
+/// (PowerShell 7+) when on PATH. `-NoExit` keeps the window open so the user
+/// can read output and paste the OAuth code.
+///
+/// Prefers Windows Terminal (`wt.exe`) so the interactive `wsl.exe` child gets
+/// keystrokes without needing a focus/mouse event first (see argv docs above);
+/// falls back to launching PowerShell directly when wt.exe is not installed
+/// (older Windows / locked-down hosts). We do NOT use `cmd /c start` — its
+/// detached console is the cause of the Enter-not-registered bug.
 #[cfg(target_os = "windows")]
 fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     let ps = if crate::path_util::which_in_path("pwsh.exe").is_some() {
@@ -172,11 +191,21 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     } else {
         "powershell.exe"
     };
-    let argv = build_windows_terminal_argv(ps, cmd);
-    let status = std::process::Command::new("cmd.exe").args(argv).status()?;
-    if !status.success() {
-        anyhow::bail!("{ps} exited with status {status}");
+
+    if crate::path_util::which_in_path("wt.exe").is_some() {
+        // wt.exe returns immediately after opening the tab; a non-zero status
+        // means it could not launch, so fall through to the direct spawn.
+        let argv = build_wt_terminal_argv(ps, cmd);
+        match std::process::Command::new("wt.exe").args(argv).status() {
+            Ok(s) if s.success() => return Ok(()),
+            Ok(s) => log::warn!("wt.exe exited {s}; falling back to direct PowerShell"),
+            Err(e) => log::warn!("wt.exe spawn failed ({e}); falling back to direct PowerShell"),
+        }
     }
+
+    // Direct PowerShell spawn (its own console window) — pumps input from start.
+    let argv = build_powershell_argv(cmd);
+    std::process::Command::new(ps).args(argv).spawn()?;
     Ok(())
 }
 
@@ -218,26 +247,31 @@ mod tests {
     // -- Windows terminal argv (cross-platform: pure pattern) --
 
     #[test]
-    fn windows_terminal_argv_includes_empty_title_after_start() {
-        let argv = super::build_windows_terminal_argv(
+    fn wt_terminal_argv_opens_tab_with_powershell_command() {
+        let argv = super::build_wt_terminal_argv(
             "powershell.exe",
             "Set-Location 'C:\\proj'; speedwave login --project 'p'",
         );
-        // Empty title MUST be argv[2] — otherwise `start` consumes the next
-        // quoted token as the window title and drops the actual command.
-        assert_eq!(argv[0], "/c");
-        assert_eq!(argv[1], "start");
-        assert_eq!(argv[2], "", "empty title required between `start` and exe");
-        assert_eq!(argv[3], "powershell.exe");
-        assert_eq!(argv[4], "-NoExit");
-        assert_eq!(argv[5], "-Command");
-        assert!(argv[6].contains("speedwave login"));
+        // No `cmd /c start` / detached console — wt.exe pumps stdin from start.
+        assert_eq!(argv[0], "new-tab");
+        assert_eq!(argv[1], "powershell.exe");
+        assert_eq!(argv[2], "-NoExit");
+        assert_eq!(argv[3], "-Command");
+        assert!(argv[4].contains("speedwave login"));
     }
 
     #[test]
-    fn windows_terminal_argv_passes_pwsh7_when_selected() {
-        let argv = super::build_windows_terminal_argv("pwsh.exe", "echo hi");
-        assert_eq!(argv[3], "pwsh.exe");
+    fn powershell_argv_is_direct_no_start_wrapper() {
+        let argv = super::build_powershell_argv("echo hi");
+        assert_eq!(argv[0], "-NoExit");
+        assert_eq!(argv[1], "-Command");
+        assert_eq!(argv[2], "echo hi");
+    }
+
+    #[test]
+    fn wt_terminal_argv_passes_pwsh7_when_selected() {
+        let argv = super::build_wt_terminal_argv("pwsh.exe", "echo hi");
+        assert_eq!(argv[1], "pwsh.exe");
     }
 
     // -- escape_for_applescript (macOS only) --
