@@ -1026,6 +1026,30 @@ pub(crate) fn resolved_term_env() -> String {
     format!("TERM={term}")
 }
 
+/// Test-only RAII guard: pins `TERM` to `value` and restores the prior value on
+/// drop — even on panic/unwind. Pair with `#[serial_test::serial(env_term)]`.
+#[cfg(test)]
+pub(crate) struct TermGuard(Option<String>);
+
+#[cfg(test)]
+impl TermGuard {
+    pub(crate) fn set(value: &str) -> Self {
+        let prev = std::env::var("TERM").ok();
+        std::env::set_var("TERM", value);
+        Self(prev)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(v) => std::env::set_var("TERM", v),
+            None => std::env::remove_var("TERM"),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::CommandRunner;
@@ -2190,18 +2214,14 @@ services:
     }
 
     /// Env mutation here is gated `#[serial(env_term)]` so no other test
-    /// reads/writes `TERM` concurrently. Restores the prior value.
+    /// reads/writes `TERM` concurrently. The `TermGuard` restores the prior
+    /// value on drop, even if `f` panics.
     fn with_term<F: FnOnce()>(value: Option<&str>, f: F) {
-        let prev = std::env::var("TERM").ok();
-        match value {
-            Some(v) => std::env::set_var("TERM", v),
-            None => std::env::remove_var("TERM"),
+        let _guard = TermGuard::set(value.unwrap_or(""));
+        if value.is_none() {
+            std::env::remove_var("TERM");
         }
         f();
-        match prev {
-            Some(v) => std::env::set_var("TERM", v),
-            None => std::env::remove_var("TERM"),
-        }
     }
 
     #[test]

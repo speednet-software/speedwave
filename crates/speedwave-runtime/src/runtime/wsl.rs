@@ -1196,9 +1196,8 @@ mod tests {
         ];
 
         // Pin TERM so the interactive prefix is deterministic — container_exec
-        // now propagates the host's real TERM. Restored at the end.
-        let prev_term = std::env::var("TERM").ok();
-        std::env::set_var("TERM", "xterm-256color");
+        // now propagates the host's real TERM. Guard restores it on drop.
+        let _term_guard = crate::runtime::TermGuard::set("xterm-256color");
         let term_env = crate::runtime::resolved_term_env();
 
         for args in nasty_args {
@@ -1252,11 +1251,6 @@ mod tests {
                 .chain(args.iter().copied())
                 .collect();
             assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec_piped");
-        }
-
-        match prev_term {
-            Some(v) => std::env::set_var("TERM", v),
-            None => std::env::remove_var("TERM"),
         }
     }
 
