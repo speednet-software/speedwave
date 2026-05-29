@@ -394,10 +394,25 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# ~/.claude.json onboarding pre-seed (ADR-051)
+# ~/.claude.json onboarding pre-seed — conditional on credentials (ADR-052)
+#
+# Onboarding is skipped (pre-seeded .claude.json) ONLY when the user is already
+# logged in. With credentials absent we leave .claude.json uncreated so `claude`
+# opens the OAuth login flow itself instead of the user having to type /login.
 # ---------------------------------------------------------------------------
 
-@test "creates ~/.claude.json with hasCompletedOnboarding when absent" {
+@test "does NOT create ~/.claude.json when credentials are absent (so auto-login shows)" {
+    [ ! -e "${TEST_HOME}/.claude.json" ]
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # No credentials → onboarding NOT skipped → claude shows the login prompt.
+    [ ! -e "${TEST_HOME}/.claude.json" ]
+}
+
+@test "creates ~/.claude.json with hasCompletedOnboarding when credentials exist" {
+    # Simulate a logged-in user: credentials present, no .claude.json yet.
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
     [ ! -e "${TEST_HOME}/.claude.json" ]
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
@@ -405,7 +420,8 @@ EOF
     grep -q '"hasCompletedOnboarding": true' "${TEST_HOME}/.claude.json"
 }
 
-@test "does not overwrite an existing ~/.claude.json" {
+@test "does not overwrite an existing ~/.claude.json (even with credentials)" {
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
     printf '{"my":"existing-state"}' > "${TEST_HOME}/.claude.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]

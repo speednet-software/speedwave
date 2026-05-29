@@ -219,11 +219,14 @@ cat > "${HOME}/.claude/mcp-config.json" << EOF
 }
 EOF
 
-# Pre-create .claude.json so Claude Code skips the onboarding flow on start.
-# Without this, Claude treats the session as a fresh install and re-prompts
-# for login even when ~/.claude/.credentials.json exists.
-# See: https://github.com/tfvchow/field-notes-public/issues/10
-if [ ! -f "${HOME}/.claude.json" ]; then
+# Pre-create .claude.json to skip the onboarding flow — but ONLY when the user
+# is already logged in (credentials present). Skipping onboarding also suppresses
+# Claude Code's automatic login prompt on a fresh `claude` start, so doing it
+# unconditionally forced the user to type `/login` by hand. When credentials are
+# absent we leave .claude.json uncreated so `claude` opens the OAuth flow itself.
+# When present, we still pre-create it so a logged-in user is not re-onboarded
+# every session (the original bug — see https://github.com/tfvchow/field-notes-public/issues/10).
+if [ -f "${HOME}/.claude/.credentials.json" ] && [ ! -f "${HOME}/.claude.json" ]; then
     cat > "${HOME}/.claude.json" << 'EOF'
 {
   "hasCompletedOnboarding": true,
