@@ -123,6 +123,30 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# set -e kills the entrypoint when HOME is not writable (the Windows bug)
+#
+# On Windows the CLAUDE_HOME 9p mount defaulted to uid 0 while the container
+# runs as uid 1000; with metadata enforcing ownership, the entrypoint's first
+# write to ${HOME} hit EACCES and `set -euo pipefail` exited non-zero BEFORE
+# `exec sleep infinity`, so the container went Exited ("cannot exec in a
+# stopped state"). The host-side fix is uid=1000 in the wsl.conf automount
+# options; this test pins the invariant that a non-writable HOME is fatal, so
+# the entrypoint can never silently "succeed" into a half-set-up home.
+# ---------------------------------------------------------------------------
+
+@test "exits non-zero when HOME is not writable (mimics uid-mismatch EACCES)" {
+    # root ignores DAC mode bits, so this assertion is only meaningful as a
+    # non-root user (the real container is uid 1000, never root).
+    [ "$(id -u)" -ne 0 ] || skip "must run as non-root to enforce mode bits"
+
+    chmod 0555 "$HOME"  # readable+executable, NOT writable by the owner
+    run bash "$ENTRYPOINT" true
+    chmod 0755 "$HOME"  # restore so teardown's rm -rf works
+
+    [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # Command passthrough
 # ---------------------------------------------------------------------------
 

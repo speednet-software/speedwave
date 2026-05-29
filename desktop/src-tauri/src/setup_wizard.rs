@@ -775,11 +775,26 @@ pub enum TerminateOnChange {
     No,
 }
 
-/// Ensures the Speedwave distro's `/etc/wsl.conf` enables the `metadata`
-/// automount option. Without it, the C:\ drvfs/9p mount rejects `chmod`
-/// ("Operation not permitted"), so Claude Code's `/login` cannot write
-/// `.credentials.json` with the 0600 perms it requires — the login silently
-/// fails to persist (ADR-052 credential mount).
+/// drvfs automount options for the Speedwave distro's `/etc/wsl.conf`.
+///
+/// `metadata` makes the C:\ 9p mount honor Linux mode bits so Claude Code's
+/// `/login` can `chmod 0600` `.credentials.json` (ADR-052). `uid=1000,gid=1000`
+/// makes the mount owned by the container user — without it the mount defaults
+/// to uid 0 (the imported distro has no default user) and, once `metadata`
+/// enforces ownership, the uid-1000 entrypoint hits EACCES on its first write
+/// and the container exits under `set -e` ("cannot exec in a stopped state").
+#[cfg(target_os = "windows")]
+const WSL_AUTOMOUNT_OPTIONS: &str = "metadata,uid=1000,gid=1000,umask=022";
+
+/// Ensures the Speedwave distro's `/etc/wsl.conf` sets the drvfs automount
+/// options to [`WSL_AUTOMOUNT_OPTIONS`]. Both halves matter: `metadata` for
+/// `/login`'s chmod (ADR-052), `uid=1000,gid=1000` so the uid-1000 container
+/// can write `/home/speedwave` (else the entrypoint dies under `set -e`).
+///
+/// Idempotent and self-upgrading: adds the `[automount]` block if absent, and
+/// rewrites a bare `options = "metadata"` line (written by an earlier build)
+/// to include the uid/gid — otherwise distros installed by that build stay
+/// broken.
 ///
 /// `terminate` MUST be `No` on any path where containers may be running
 /// (startup migration for existing distros): a `--terminate` there kills the
@@ -788,12 +803,22 @@ pub enum TerminateOnChange {
 #[cfg(target_os = "windows")]
 pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Result<()> {
     let distro = consts::wsl_distro_name();
-    // Append [automount] options=metadata only if absent. Run as root inside
-    // the distro; `/etc/wsl.conf` is distro-internal (not the host .wslconfig).
-    let script = "if ! grep -q '\\[automount\\]' /etc/wsl.conf 2>/dev/null; then \
-         printf '\\n[automount]\\noptions = \"metadata\"\\n' >> /etc/wsl.conf; \
-         echo speedwave-metadata-added; \
-       fi";
+    // Run as root inside the distro; `/etc/wsl.conf` is distro-internal (not the
+    // host .wslconfig). Two branches: add the block if `[automount]` is absent,
+    // else upgrade a uid-less options line in place. Both emit the change marker
+    // so the caller's terminate/restart logic fires.
+    let script = format!(
+        "f=/etc/wsl.conf; \
+         if ! grep -q '\\[automount\\]' \"$f\" 2>/dev/null; then \
+           printf '\\n[automount]\\noptions = \"{opts}\"\\n' >> \"$f\"; \
+           echo speedwave-metadata-added; \
+         elif ! grep -q 'uid=1000' \"$f\" 2>/dev/null; then \
+           sed -i 's|^[[:space:]]*options[[:space:]]*=.*|options = \"{opts}\"|' \"$f\"; \
+           echo speedwave-metadata-added; \
+         fi",
+        opts = WSL_AUTOMOUNT_OPTIONS
+    );
+    let script = script.as_str();
     let out = speedwave_runtime::binary::system_command("wsl.exe")
         .args(["-d", distro, "-u", "root", "--", "sh", "-c", script])
         .output();
@@ -2847,6 +2872,32 @@ mod tests {
             assert_eq!(y, copied);
             assert_eq!(format!("{:?}", TerminateOnChange::No), "No");
             assert_eq!(format!("{:?}", TerminateOnChange::Yes), "Yes");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    mod wsl_automount_options_tests {
+        use super::super::WSL_AUTOMOUNT_OPTIONS;
+
+        // Regression guard for the claude container early-exit: the automount
+        // options MUST carry both `metadata` (so /login's chmod 0600 works,
+        // ADR-052) AND `uid=1000,gid=1000` (so the uid-1000 container can write
+        // /home/speedwave — verified on the Windows host: with metadata ON,
+        // uid != mount-owner => EACCES on mkdir => entrypoint dies under set -e).
+        #[test]
+        fn options_carry_metadata_and_container_uid() {
+            assert!(
+                WSL_AUTOMOUNT_OPTIONS.contains("metadata"),
+                "metadata required for /login chmod 0600 (ADR-052)"
+            );
+            assert!(
+                WSL_AUTOMOUNT_OPTIONS.contains("uid=1000"),
+                "uid=1000 required so the container user owns the mount"
+            );
+            assert!(
+                WSL_AUTOMOUNT_OPTIONS.contains("gid=1000"),
+                "gid=1000 required so the container group owns the mount"
+            );
         }
     }
 
