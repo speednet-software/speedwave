@@ -153,24 +153,80 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     spawn_apple_terminal(cmd)
 }
 
-/// Argv for launching the login terminal via Windows Terminal:
-/// `wt.exe new-tab <ps> -NoExit -Command <cmd>`. Preferred because wt.exe uses
-/// a ConPTY pipeline that pumps stdin to the child from the start. The old
-/// `cmd.exe /c start "" <ps> ...` pattern created a detached console whose
-/// ConPTY input buffer was not pumped to the interactive wsl.exe child until
-/// the window received focus — so Enter was dropped until the user clicked the
-/// window (ADR-052 login terminal; Windows-only bug).
+/// Encodes a PowerShell command for `-EncodedCommand`: UTF-16LE then base64.
+///
+/// `-EncodedCommand` sidesteps every quoting/splitting hazard: the base64 output
+/// is `[A-Za-z0-9+/=]` only — no spaces, no `;` — so neither wt.exe's argument
+/// parser (which treats a literal `;` as an action delimiter) nor PowerShell's
+/// own parser can mangle the command. Our auth command contains `;`
+/// (`Set-Location '...'; speedwave login ...`); passed raw via `-Command`, wt.exe
+/// split it on the `;` and tried to launch the tail as a separate action,
+/// failing with "file not found" (0x80070002).
 #[cfg(any(target_os = "windows", test))]
-fn build_wt_terminal_argv<'a>(ps_exe: &'a str, cmd: &'a str) -> [&'a str; 5] {
-    ["new-tab", ps_exe, "-NoExit", "-Command", cmd]
+fn encode_powershell_command(cmd: &str) -> String {
+    let utf16le: Vec<u8> = cmd.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    base64_standard(&utf16le)
+}
+
+/// Minimal RFC 4648 base64 (standard alphabet, `=` padding). Inlined to avoid
+/// pulling a crate for the single `-EncodedCommand` call site.
+#[cfg(any(target_os = "windows", test))]
+fn base64_standard(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Argv for launching the login terminal via Windows Terminal:
+/// `wt.exe new-tab <ps> -NoExit -EncodedCommand <b64>`. Preferred because
+/// wt.exe uses a ConPTY pipeline that pumps stdin to the child from the start.
+/// The old `cmd.exe /c start "" <ps> ...` pattern created a detached console
+/// whose ConPTY input buffer was not pumped to the interactive wsl.exe child
+/// until the window received focus — so Enter was dropped until the user clicked
+/// the window (ADR-052 login terminal; Windows-only bug). `-EncodedCommand`
+/// (vs `-Command`) keeps the `;` in the auth command from being eaten by
+/// wt.exe's action-delimiter parser.
+#[cfg(any(target_os = "windows", test))]
+fn build_wt_terminal_argv(ps_exe: &str, cmd: &str) -> [String; 5] {
+    [
+        "new-tab".to_string(),
+        ps_exe.to_string(),
+        "-NoExit".to_string(),
+        "-EncodedCommand".to_string(),
+        encode_powershell_command(cmd),
+    ]
 }
 
 /// Argv for launching PowerShell directly (no `cmd /c start`, no wt.exe):
-/// `<ps> -NoExit -Command <cmd>`. Spawned as its own process so it attaches a
-/// console that pumps input immediately. Fallback when wt.exe is unavailable.
+/// `<ps> -NoExit -EncodedCommand <b64>`. Spawned as its own process so it
+/// attaches a console that pumps input immediately. Fallback when wt.exe is
+/// unavailable. Uses `-EncodedCommand` for the same quoting-safety reason as the
+/// wt.exe path, so both code paths run an identical command.
 #[cfg(any(target_os = "windows", test))]
-fn build_powershell_argv<'a>(cmd: &'a str) -> [&'a str; 3] {
-    ["-NoExit", "-Command", cmd]
+fn build_powershell_argv(cmd: &str) -> [String; 3] {
+    [
+        "-NoExit".to_string(),
+        "-EncodedCommand".to_string(),
+        encode_powershell_command(cmd),
+    ]
 }
 
 /// Spawns a new terminal window running `cmd` (PowerShell syntax).
@@ -246,32 +302,90 @@ mod tests {
 
     // -- Windows terminal argv (cross-platform: pure pattern) --
 
+    // Decode a base64 (standard alphabet) string back to bytes — test helper to
+    // prove encode_powershell_command round-trips.
+    fn base64_decode(s: &str) -> Vec<u8> {
+        fn val(c: u8) -> u32 {
+            match c {
+                b'A'..=b'Z' => (c - b'A') as u32,
+                b'a'..=b'z' => (c - b'a' + 26) as u32,
+                b'0'..=b'9' => (c - b'0' + 52) as u32,
+                b'+' => 62,
+                b'/' => 63,
+                _ => panic!("invalid base64 char {c}"),
+            }
+        }
+        let symbols: Vec<u8> = s.bytes().filter(|b| *b != b'=').collect();
+        let mut out = Vec::new();
+        for chunk in symbols.chunks(4) {
+            // Each base64 symbol carries 6 bits; a chunk of n symbols decodes to
+            // n-1 bytes (4→3, 3→2, 2→1).
+            let mut n = 0u32;
+            for &c in chunk {
+                n = (n << 6) | val(c);
+            }
+            n <<= 6 * (4 - chunk.len()); // left-align to a full 24-bit group
+            for i in 0..(chunk.len() - 1) {
+                out.push(((n >> (16 - 8 * i)) & 0xff) as u8);
+            }
+        }
+        out
+    }
+
+    // Reconstruct the original UTF-16LE-encoded command from the base64 payload.
+    fn decode_ps_encoded(b64: &str) -> String {
+        let bytes = base64_decode(b64);
+        let u16s: Vec<u16> = bytes
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], *c.get(1).unwrap_or(&0)]))
+            .collect();
+        String::from_utf16(&u16s).expect("valid utf16")
+    }
+
     #[test]
-    fn wt_terminal_argv_opens_tab_with_powershell_command() {
-        let argv = super::build_wt_terminal_argv(
-            "powershell.exe",
-            "Set-Location 'C:\\proj'; speedwave login --project 'p'",
-        );
+    fn wt_terminal_argv_opens_tab_with_encoded_command() {
+        let cmd = "Set-Location 'C:\\proj'; speedwave login --project 'p'";
+        let argv = super::build_wt_terminal_argv("powershell.exe", cmd);
         // No `cmd /c start` / detached console — wt.exe pumps stdin from start.
         assert_eq!(argv[0], "new-tab");
         assert_eq!(argv[1], "powershell.exe");
         assert_eq!(argv[2], "-NoExit");
-        assert_eq!(argv[3], "-Command");
-        assert!(argv[4].contains("speedwave login"));
+        // -EncodedCommand, NOT -Command: the `;` in cmd must survive wt.exe's
+        // action-delimiter parser (regression: 0x80070002 file-not-found).
+        assert_eq!(argv[3], "-EncodedCommand");
+        // The encoded payload has no `;` or space for wt.exe to split on.
+        assert!(!argv[4].contains(';'));
+        assert!(!argv[4].contains(' '));
+        // …and round-trips back to the exact command, semicolon intact.
+        assert_eq!(decode_ps_encoded(&argv[4]), cmd);
     }
 
     #[test]
-    fn powershell_argv_is_direct_no_start_wrapper() {
+    fn powershell_argv_is_direct_encoded_no_start_wrapper() {
         let argv = super::build_powershell_argv("echo hi");
         assert_eq!(argv[0], "-NoExit");
-        assert_eq!(argv[1], "-Command");
-        assert_eq!(argv[2], "echo hi");
+        assert_eq!(argv[1], "-EncodedCommand");
+        assert_eq!(decode_ps_encoded(&argv[2]), "echo hi");
     }
 
     #[test]
     fn wt_terminal_argv_passes_pwsh7_when_selected() {
         let argv = super::build_wt_terminal_argv("pwsh.exe", "echo hi");
         assert_eq!(argv[1], "pwsh.exe");
+    }
+
+    #[test]
+    fn encode_powershell_command_is_utf16le_base64() {
+        // "A" => UTF-16LE bytes 0x41 0x00 => base64 "QQA="
+        assert_eq!(super::encode_powershell_command("A"), "QQA=");
+        // empty string => empty base64
+        assert_eq!(super::encode_powershell_command(""), "");
+        // round-trip a command with a semicolon (the actual bug trigger)
+        let cmd = "Set-Location 'C:\\x'; speedwave login --project 'p'";
+        assert_eq!(
+            decode_ps_encoded(&super::encode_powershell_command(cmd)),
+            cmd
+        );
     }
 
     // -- escape_for_applescript (macOS only) --
