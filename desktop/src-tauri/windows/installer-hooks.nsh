@@ -22,7 +22,7 @@ Var SpeedwaveDataDirOverride
 
 ; ============================================================================
 ; GENERATED CONTENT BELOW — DO NOT EDIT BY HAND.
-; Sources: windows/sweep.ps1, windows/firewall.ps1
+; Sources: windows/sweep.ps1, windows/firewall.ps1, windows/run-hidden.vbs
 ; Regenerate: make generate-installer-nsh
 ; ============================================================================
 
@@ -31,10 +31,10 @@ Var SpeedwaveDataDirOverride
   InitPluginsDir
   ClearErrors
   FileOpen $0 "$PLUGINSDIR\sweep.ps1" w
-  IfErrors 0 sw_sweep_write_ok_${SW_SWEEP_ID}
+  IfErrors 0 sw_SWEEP_write_ok_${SW_SWEEP_ID}
     DetailPrint "Speedwave: could not create sweep.ps1 in $PLUGINSDIR — skipping."
-    Goto sw_sweep_write_done_${SW_SWEEP_ID}
-  sw_sweep_write_ok_${SW_SWEEP_ID}:
+    Goto sw_SWEEP_write_done_${SW_SWEEP_ID}
+  sw_SWEEP_write_ok_${SW_SWEEP_ID}:
   FileWrite $0 `# SSOT: process sweep for Speedwave Windows upgrades.$\r$\n`
   FileWrite $0 `# Consumed by: NSIS PREINSTALL hook, WiX CustomAction, setup_wizard::link_cli.$\r$\n`
   FileWrite $0 `# Env: SPW_INSTDIR (Tauri app dir) + SPW_DATA_DIR (speedwave data dir).$\r$\n`
@@ -111,7 +111,7 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `Write-Error 'targets still locked after 20 s'$\r$\n`
   FileWrite $0 `exit 4$\r$\n`
   FileClose $0
-  sw_sweep_write_done_${SW_SWEEP_ID}:
+  sw_SWEEP_write_done_${SW_SWEEP_ID}:
   !undef SW_SWEEP_ID
 !macroend
 
@@ -120,10 +120,10 @@ Var SpeedwaveDataDirOverride
   InitPluginsDir
   ClearErrors
   FileOpen $0 "$PLUGINSDIR\firewall.ps1" w
-  IfErrors 0 sw_firewall_write_ok_${SW_FIREWALL_ID}
+  IfErrors 0 sw_FIREWALL_write_ok_${SW_FIREWALL_ID}
     DetailPrint "Speedwave: could not create firewall.ps1 in $PLUGINSDIR — skipping."
-    Goto sw_firewall_write_done_${SW_FIREWALL_ID}
-  sw_firewall_write_ok_${SW_FIREWALL_ID}:
+    Goto sw_FIREWALL_write_done_${SW_FIREWALL_ID}
+  sw_FIREWALL_write_ok_${SW_FIREWALL_ID}:
   FileWrite $0 `# SSOT: Windows firewall rules for Speedwave under WSL2 mirrored networking.$\r$\n`
   FileWrite $0 `# Two layers (ADR-067): (1) a Hyper-V firewall rule scoped to the WSL$\r$\n`
   FileWrite $0 `# VMCreatorId governs container<->host traffic across the WSL VM boundary;$\r$\n`
@@ -316,8 +316,35 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `  exit 3$\r$\n`
   FileWrite $0 `}$\r$\n`
   FileClose $0
-  sw_firewall_write_done_${SW_FIREWALL_ID}:
+  sw_FIREWALL_write_done_${SW_FIREWALL_ID}:
   !undef SW_FIREWALL_ID
+!macroend
+
+!macro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
+  !define SW_RUN_HIDDEN_ID ${__LINE__}
+  InitPluginsDir
+  ClearErrors
+  FileOpen $0 "$PLUGINSDIR\run-hidden.vbs" w
+  IfErrors 0 sw_RUN_HIDDEN_write_ok_${SW_RUN_HIDDEN_ID}
+    DetailPrint "Speedwave: could not create run-hidden.vbs in $PLUGINSDIR — skipping."
+    Goto sw_RUN_HIDDEN_write_done_${SW_RUN_HIDDEN_ID}
+  sw_RUN_HIDDEN_write_ok_${SW_RUN_HIDDEN_ID}:
+  FileWrite $0 `' SSOT: hidden-window launcher for NSIS install hooks.$\r$\n`
+  FileWrite $0 `' nsExec runs PowerShell with CREATE_NEW_CONSOLE + SW_HIDE, but modern conhost$\r$\n`
+  FileWrite $0 `' paints its window before honoring SW_HIDE, so powershell.exe flashes a black$\r$\n`
+  FileWrite $0 `' console during install. wscript.exe is a GUI-subsystem host (no console), and$\r$\n`
+  FileWrite $0 `' WshShell.Run(cmd, 0, True) starts the child hidden (window style 0) and waits,$\r$\n`
+  FileWrite $0 `' returning the child exit code. So the flash is gone and Pop $$0 still works.$\r$\n`
+  FileWrite $0 `' Usage: wscript.exe run-hidden.vbs $\"<full command line>$\"$\r$\n`
+  FileWrite $0 `' Encoding: plain ASCII, NO BOM (wscript fails to parse a UTF-8 BOM).$\r$\n`
+  FileWrite $0 `Option Explicit$\r$\n`
+  FileWrite $0 `Dim sh, rc$\r$\n`
+  FileWrite $0 `Set sh = CreateObject($\"WScript.Shell$\")$\r$\n`
+  FileWrite $0 `rc = sh.Run(WScript.Arguments(0), 0, True)$\r$\n`
+  FileWrite $0 `WScript.Quit rc$\r$\n`
+  FileClose $0
+  sw_RUN_HIDDEN_write_done_${SW_RUN_HIDDEN_ID}:
+  !undef SW_RUN_HIDDEN_ID
 !macroend
 ; Generator replaces the marker above with materialize macros derived from
 ; windows/sweep.ps1 + firewall.ps1. See scripts/generate-installer-nsh.sh.
@@ -342,7 +369,12 @@ Var SpeedwaveDataDirOverride
   sw_data_dir_ok:
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", t "$1")i'
 
-  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\sweep.ps1"`
+  ; Run via the wscript hidden-window shim so PowerShell does not flash a black
+  ; console during install (nsExec hides via SW_HIDE only, which conhost paints
+  ; before honoring — see windows/run-hidden.vbs). The shim returns the child
+  ; exit code, so Pop $0 is unchanged.
+  !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
+  nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\sweep.ps1$\""`
   Pop $0
   ${If} $0 != 0
     DetailPrint "Speedwave PRE-INSTALL: sweep exited $0 — install may fail with 'file in use'."
@@ -360,7 +392,9 @@ Var SpeedwaveDataDirOverride
 ; See CLAUDE.md SSOT row for windows/firewall.ps1.
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
-  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\firewall.ps1" -Mode install`
+  !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
+  ; Hidden-window shim (see PRE-INSTALL): no console flash, exit code preserved.
+  nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\firewall.ps1$\" -Mode install"`
   Pop $0
   ${If} $0 != 0
     DetailPrint "Speedwave POST-INSTALL: firewall rule install exited $0 (non-fatal)."
@@ -402,9 +436,11 @@ Var SpeedwaveDataDirOverride
   RMDir /r "$LOCALAPPDATA\Speedwave\nodejs"
   RMDir "$LOCALAPPDATA\Speedwave"
 
-  ; Always remove Hyper-V firewall rule — it is app config, not user data.
+  ; Always remove the firewall rules — they are app config, not user data.
   !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
-  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\firewall.ps1" -Mode uninstall`
+  !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
+  ; Hidden-window shim (see PRE-INSTALL): no console flash, exit code preserved.
+  nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\firewall.ps1$\" -Mode uninstall"`
   Pop $0
   ${If} $0 != 0
     DetailPrint "Speedwave POST-UNINSTALL: firewall rule remove exited $0 (non-fatal)."

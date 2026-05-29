@@ -1,9 +1,12 @@
-//! Windows WSL Hyper-V firewall rule (ADR-067) — Desktop runtime fallback.
+//! Windows firewall rules (ADR-067) — Desktop runtime fallback.
 //!
-//! perUser NSIS installs run un-elevated, so the install-time hook cannot
-//! create the rule. This ensures it exists before any host listener binds the
-//! WSL adapter IP, eliminating Windows Defender Firewall prompts. Runs at most
-//! once per process via `FIREWALL_RULE_ONCE`. Fail-open: never blocks startup.
+//! Ensures both firewall layers exist before any host listener binds the WSL
+//! adapter IP: the Hyper-V rule (container↔host reachability) and host WDF
+//! per-program allow rules that suppress the "allow an app" prompt for the
+//! bundled node.exe workers + this exe. perUser NSIS installs run un-elevated
+//! so the install-time hook cannot create the (admin-only) rules — this is the
+//! fallback. Runs at most once per process via `FIREWALL_RULE_ONCE`. Fail-open:
+//! never blocks startup.
 //!
 //! No "declined" state is persisted: rule presence is the only source of truth,
 //! checked live each session. The `Once` caps the prompt at one per app launch,
@@ -136,7 +139,9 @@ mod windows_impl {
             ps = ps_quote(&powershell.to_string_lossy()),
             argv = args.join(","),
         );
-        let result = std::process::Command::new(&powershell)
+        // system_command applies CREATE_NO_WINDOW so the launcher PowerShell does
+        // not flash a console; the elevated child uses -WindowStyle Hidden above.
+        let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
             .arg(&inner)
             .status();
@@ -176,7 +181,9 @@ mod windows_impl {
         programs: &[String],
     ) -> EnsureOutcome {
         let powershell = system_powershell_path();
-        let mut cmd = std::process::Command::new(&powershell);
+        // system_command applies CREATE_NO_WINDOW so PowerShell does not flash a
+        // console window over the Desktop UI (SSOT: binary.rs).
+        let mut cmd = speedwave_runtime::binary::system_command(&powershell.to_string_lossy());
         cmd.args([
             "-NoProfile",
             "-NonInteractive",

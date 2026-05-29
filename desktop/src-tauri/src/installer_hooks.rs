@@ -11,6 +11,7 @@ mod tests {
     const FIREWALL_PS1: &str = include_str!("../windows/firewall.ps1");
     const SWEEP_WXS: &str = include_str!("../windows/sweep.wxs");
     const FIREWALL_WXS: &str = include_str!("../windows/firewall.wxs");
+    const RUN_HIDDEN_VBS: &str = include_str!("../windows/run-hidden.vbs");
 
     // ── Hook shape ──────────────────────────────────────────────────────
 
@@ -37,12 +38,16 @@ mod tests {
             "PREINSTALL must !insertmacro SPEEDWAVE_MATERIALIZE_SWEEP"
         );
         assert!(
-            pre.contains(r#""$PLUGINSDIR\sweep.ps1""#),
-            "PREINSTALL must run the materialized $PLUGINSDIR\\sweep.ps1"
+            pre.contains(r#"$\"$PLUGINSDIR\sweep.ps1$\""#),
+            "PREINSTALL must run the materialized $PLUGINSDIR\\sweep.ps1 (via the shim)"
         );
         assert!(
             pre.contains("$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe"),
             "PREINSTALL must use the absolute powershell path to defeat PATH hijack"
+        );
+        assert!(
+            pre.contains(r#""$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs""#),
+            "PREINSTALL must run PowerShell via the wscript hidden-window shim"
         );
         for env_name in ["SPW_INSTDIR", "SPW_DATA_DIR"] {
             assert!(
@@ -68,8 +73,8 @@ mod tests {
             "POSTINSTALL must materialize firewall.ps1"
         );
         assert!(
-            post.contains(r#""$PLUGINSDIR\firewall.ps1" -Mode install"#),
-            "POSTINSTALL must invoke firewall.ps1 -Mode install"
+            post.contains(r#"$\"$PLUGINSDIR\firewall.ps1$\" -Mode install"#),
+            "POSTINSTALL must invoke firewall.ps1 -Mode install (via the shim)"
         );
     }
 
@@ -77,7 +82,7 @@ mod tests {
     fn postuninstall_removes_firewall_rule_before_wsl_unregister() {
         let post = section(HOOKS, "NSIS_HOOK_POSTUNINSTALL");
         let firewall_idx = post
-            .find("firewall.ps1\" -Mode uninstall")
+            .find("firewall.ps1$\\\" -Mode uninstall")
             .expect("POSTUNINSTALL must remove firewall rule");
         let wsl_idx = post
             .find("wsl.exe\" --unregister")
@@ -97,10 +102,46 @@ mod tests {
         // We re-derive the expected output here so any drift between the
         // committed installer-hooks.nsh and its inputs fails CI with a clear
         // "run make generate-installer-nsh" message.
-        let expected = render_expected_hooks(TEMPLATE, SWEEP_PS1, FIREWALL_PS1);
+        let expected = render_expected_hooks(TEMPLATE, SWEEP_PS1, FIREWALL_PS1, RUN_HIDDEN_VBS);
         assert_eq!(
             HOOKS, expected,
             "installer-hooks.nsh is out of sync with its inputs — run `make generate-installer-nsh` and commit"
+        );
+    }
+
+    #[test]
+    fn run_hidden_vbs_has_no_bom() {
+        // wscript.exe fails to parse a .vbs with a UTF-8 BOM. The generator
+        // strips BOM on materialize, but the source must also be BOM-free.
+        assert!(
+            !RUN_HIDDEN_VBS.starts_with('\u{feff}'),
+            "run-hidden.vbs must be ANSI/BOM-free (wscript chokes on a BOM)"
+        );
+    }
+
+    #[test]
+    fn install_hooks_run_powershell_via_hidden_shim() {
+        // All three PowerShell-invoking hooks must go through the wscript shim
+        // (no console flash) and materialize the vbs first.
+        let shim_calls = HOOKS
+            .matches("wscript.exe\" \"$PLUGINSDIR\\run-hidden.vbs")
+            .count();
+        assert_eq!(
+            shim_calls, 3,
+            "expected 3 hooks invoking PowerShell via the wscript shim, found {shim_calls}"
+        );
+        assert_eq!(
+            HOOKS
+                .matches("!insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN")
+                .count(),
+            3,
+            "each shim hook must materialize run-hidden.vbs first"
+        );
+        // No hook may launch powershell.exe directly via nsExec — that is the
+        // flash path. powershell.exe appears ONLY inside the wscript argument.
+        assert!(
+            !HOOKS.contains("nsExec::ExecToLog `\"$SYSDIR\\WindowsPowerShell"),
+            "no hook may call powershell.exe directly via nsExec — must use the wscript shim"
         );
     }
 
@@ -393,20 +434,29 @@ mod tests {
     /// Re-derives the expected `installer-hooks.nsh` from the template +
     /// the two `.ps1` sources, mirroring `scripts/generate-installer-nsh.sh`.
     /// Drift between the committed file and this derivation fails the test.
-    fn render_expected_hooks(template: &str, sweep_ps1: &str, firewall_ps1: &str) -> String {
+    fn render_expected_hooks(
+        template: &str,
+        sweep_ps1: &str,
+        firewall_ps1: &str,
+        run_hidden_vbs: &str,
+    ) -> String {
         let mut embed = String::new();
         embed.push_str(
             "; ============================================================================\n",
         );
         embed.push_str("; GENERATED CONTENT BELOW — DO NOT EDIT BY HAND.\n");
-        embed.push_str("; Sources: windows/sweep.ps1, windows/firewall.ps1\n");
+        embed.push_str(
+            "; Sources: windows/sweep.ps1, windows/firewall.ps1, windows/run-hidden.vbs\n",
+        );
         embed.push_str("; Regenerate: make generate-installer-nsh\n");
         embed.push_str(
             "; ============================================================================\n\n",
         );
-        embed.push_str(&emit_materialize_macro("sweep", sweep_ps1));
+        embed.push_str(&emit_materialize_macro("sweep", "ps1", sweep_ps1));
         embed.push('\n');
-        embed.push_str(&emit_materialize_macro("firewall", firewall_ps1));
+        embed.push_str(&emit_materialize_macro("firewall", "ps1", firewall_ps1));
+        embed.push('\n');
+        embed.push_str(&emit_materialize_macro("run-hidden", "vbs", run_hidden_vbs));
 
         let mut out = String::new();
         for line in template.lines() {
@@ -420,23 +470,26 @@ mod tests {
         out
     }
 
-    fn emit_materialize_macro(name: &str, ps1: &str) -> String {
-        let upper = name.to_uppercase();
+    fn emit_materialize_macro(name: &str, ext: &str, src: &str) -> String {
+        // NSIS !define/label tokens cannot contain '-'; the generator normalizes
+        // name -> UPPER with '-' replaced by '_'.
+        let upper = name.to_uppercase().replace('-', "_");
+        let file = format!("{name}.{ext}");
         let id = format!("SW_{upper}_ID");
         let mut s = String::new();
         s.push_str(&format!("!macro SPEEDWAVE_MATERIALIZE_{upper}\n"));
         s.push_str(&format!("  !define {id} ${{__LINE__}}\n"));
         s.push_str("  InitPluginsDir\n");
         s.push_str("  ClearErrors\n");
-        s.push_str(&format!("  FileOpen $0 \"$PLUGINSDIR\\{name}.ps1\" w\n"));
-        s.push_str(&format!("  IfErrors 0 sw_{name}_write_ok_${{{id}}}\n"));
+        s.push_str(&format!("  FileOpen $0 \"$PLUGINSDIR\\{file}\" w\n"));
+        s.push_str(&format!("  IfErrors 0 sw_{upper}_write_ok_${{{id}}}\n"));
         s.push_str(&format!(
-            "    DetailPrint \"Speedwave: could not create {name}.ps1 in $PLUGINSDIR — skipping.\"\n"
+            "    DetailPrint \"Speedwave: could not create {file} in $PLUGINSDIR — skipping.\"\n"
         ));
-        s.push_str(&format!("    Goto sw_{name}_write_done_${{{id}}}\n"));
-        s.push_str(&format!("  sw_{name}_write_ok_${{{id}}}:\n"));
+        s.push_str(&format!("    Goto sw_{upper}_write_done_${{{id}}}\n"));
+        s.push_str(&format!("  sw_{upper}_write_ok_${{{id}}}:\n"));
 
-        let stripped = ps1.strip_prefix('\u{feff}').unwrap_or(ps1);
+        let stripped = src.strip_prefix('\u{feff}').unwrap_or(src);
         for line in stripped.split_inclusive('\n') {
             let line = line.strip_suffix('\n').unwrap_or(line);
             let mut esc = String::new();
@@ -444,7 +497,7 @@ mod tests {
                 match c {
                     '$' => esc.push_str("$$"),
                     // Backtick has no NSIS escape; the generator rejects any
-                    // .ps1 containing one, so it never reaches here.
+                    // source containing one, so it never reaches here.
                     '"' => esc.push_str("$\\\""),
                     other => esc.push(other),
                 }
@@ -455,7 +508,7 @@ mod tests {
         }
 
         s.push_str("  FileClose $0\n");
-        s.push_str(&format!("  sw_{name}_write_done_${{{id}}}:\n"));
+        s.push_str(&format!("  sw_{upper}_write_done_${{{id}}}:\n"));
         s.push_str(&format!("  !undef {id}\n"));
         s.push_str("!macroend\n");
         s

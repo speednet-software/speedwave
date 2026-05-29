@@ -41,12 +41,17 @@ if ! grep -q "$MARKER" "$TEMPLATE"; then
   exit 1
 fi
 
-# Emit one !macro SPEEDWAVE_MATERIALIZE_<NAME> that writes <name>.ps1 to
-# $PLUGINSDIR\<name>.ps1 at install time via FileWrite literals.
+# Emit one !macro SPEEDWAVE_MATERIALIZE_<NAME> that writes <name>.<ext> to
+# $PLUGINSDIR\<name>.<ext> at install time via FileWrite literals.
+# Args: <name> [<ext>]  (ext defaults to ps1; e.g. "run-hidden" "vbs").
 emit_materialize_macro() {
   local name="$1"
-  local upper="${name^^}"
-  local src="$WIN_DIR/${name}.ps1"
+  local ext="${2:-ps1}"
+  local file="${name}.${ext}"
+  # NSIS !define / label tokens cannot contain '-', so normalize for the id.
+  local upper
+  upper="$(echo "$name" | tr '[:lower:]-' '[:upper:]_')"
+  local src="$WIN_DIR/${file}"
 
   if [[ ! -f "$src" ]]; then
     echo "ERROR: $src missing" >&2
@@ -54,7 +59,7 @@ emit_materialize_macro() {
   fi
 
   # A backtick is the NSIS FileWrite string delimiter and has no escape, so a
-  # literal backtick in the .ps1 silently truncates the NSIS string and aborts
+  # literal backtick in the source silently truncates the NSIS string and aborts
   # makensis. Fail loudly here instead. Use splatting, not backtick-continuation.
   if grep -q '`' "$src"; then
     echo "ERROR: $src contains a backtick — breaks NSIS FileWrite. Use splatting." >&2
@@ -62,7 +67,8 @@ emit_materialize_macro() {
   fi
 
   # Strip UTF-8 BOM before embedding — NSIS writes literal bytes, and the
-  # materialized .ps1 does not need a BOM (PowerShell handles ASCII fine).
+  # materialized file needs none (PowerShell handles ASCII fine; wscript REQUIRES
+  # no BOM for .vbs). So the materialized .vbs is always ANSI/BOM-free here.
   local stripped
   stripped="$(mktemp)"
   if head -c 3 "$src" | od -An -t x1 | tr -d ' \n' | grep -qi '^efbbbf$'; then
@@ -78,11 +84,11 @@ emit_materialize_macro() {
   echo "  !define SW_${upper}_ID \${__LINE__}"
   echo "  InitPluginsDir"
   echo "  ClearErrors"
-  echo "  FileOpen \$0 \"\$PLUGINSDIR\\${name}.ps1\" w"
-  echo "  IfErrors 0 sw_${name}_write_ok_\${SW_${upper}_ID}"
-  echo "    DetailPrint \"Speedwave: could not create ${name}.ps1 in \$PLUGINSDIR — skipping.\""
-  echo "    Goto sw_${name}_write_done_\${SW_${upper}_ID}"
-  echo "  sw_${name}_write_ok_\${SW_${upper}_ID}:"
+  echo "  FileOpen \$0 \"\$PLUGINSDIR\\${file}\" w"
+  echo "  IfErrors 0 sw_${upper}_write_ok_\${SW_${upper}_ID}"
+  echo "    DetailPrint \"Speedwave: could not create ${file} in \$PLUGINSDIR — skipping.\""
+  echo "    Goto sw_${upper}_write_done_\${SW_${upper}_ID}"
+  echo "  sw_${upper}_write_ok_\${SW_${upper}_ID}:"
 
   # Escape each line for NSIS backtick-delimited FileWrite literal:
   #   $  -> $$
@@ -98,7 +104,7 @@ emit_materialize_macro() {
   done < "$stripped"
 
   echo "  FileClose \$0"
-  echo "  sw_${name}_write_done_\${SW_${upper}_ID}:"
+  echo "  sw_${upper}_write_done_\${SW_${upper}_ID}:"
   echo "  !undef SW_${upper}_ID"
   echo "!macroend"
 
@@ -112,13 +118,15 @@ trap 'rm -f "$EMBED"' EXIT
 {
   echo "; ============================================================================"
   echo "; GENERATED CONTENT BELOW — DO NOT EDIT BY HAND."
-  echo "; Sources: windows/sweep.ps1, windows/firewall.ps1"
+  echo "; Sources: windows/sweep.ps1, windows/firewall.ps1, windows/run-hidden.vbs"
   echo "; Regenerate: make generate-installer-nsh"
   echo "; ============================================================================"
   echo ""
   emit_materialize_macro sweep
   echo ""
   emit_materialize_macro firewall
+  echo ""
+  emit_materialize_macro run-hidden vbs
 } > "$EMBED"
 
 # Replace the marker line in the template with the embedded block.

@@ -1792,8 +1792,9 @@ fn run_pre_link_sweep() {
 
     // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe. Full mode is
     // reserved for install-time hooks (NSIS/MSI) — Tauri Desktop must not
-    // target its own workers or self.
-    let result = std::process::Command::new(&powershell)
+    // target its own workers or self. system_command applies CREATE_NO_WINDOW
+    // so PowerShell does not flash a console over the Desktop UI.
+    let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
         .args([
             "-NoProfile",
             "-NonInteractive",
