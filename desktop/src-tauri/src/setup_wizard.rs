@@ -763,33 +763,24 @@ fn import_wsl_distro() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether `ensure_wsl_distro_metadata` may `wsl --terminate` the distro after
-/// it edits `/etc/wsl.conf`. Terminating applies the new config immediately but
-/// kills every process in the distro — fatal if containers are running.
+/// May `ensure_wsl_distro_metadata` `wsl --terminate` to apply the wsl.conf
+/// change? Terminating is immediate but kills every distro process.
 #[cfg(any(target_os = "windows", test))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TerminateOnChange {
-    /// Import path only: no Speedwave containers run yet, so terminating is safe.
+    /// Import path: no containers run yet, so terminating is always safe.
     Yes,
-    /// Never terminate. Prefer `IfIdle` — `No` defers even when terminating
-    /// would be safe (it has no production caller; kept for explicit deferral).
-    No,
-    /// Startup/post-update path: terminate only if no containers run, so the
-    /// `metadata` mount applies before the first container start (else uid-1000
-    /// hits EACCES on the uid=0 mount and login breaks). Falls back to `No` when
-    /// containers run.
+    /// Startup/post-update: terminate only when no container runs (else the
+    /// `metadata` mount can't apply before the first start → uid-1000 EACCES).
     IfIdle,
 }
 
-/// Pure decision: should the distro be `wsl --terminate`d to apply a wsl.conf
-/// change? `has_running` is only meaningful for `IfIdle` (whether any Speedwave
-/// container is currently up). Extracted from the I/O so the policy is testable
-/// without Windows.
+/// Pure terminate policy (extracted from the I/O so it is testable without
+/// Windows). `has_running` only matters for `IfIdle`.
 #[cfg(any(target_os = "windows", test))]
 fn terminate_decision(terminate: TerminateOnChange, has_running: bool) -> bool {
     match terminate {
         TerminateOnChange::Yes => true,
-        TerminateOnChange::No => false,
         TerminateOnChange::IfIdle => !has_running,
     }
 }
@@ -840,6 +831,8 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
             if stdout.contains("speedwave-metadata-present") {
                 log::debug!("ensure_wsl_distro_metadata: uid={uid} already present in {distro}");
             } else if stdout.contains("speedwave-metadata-added") {
+                // Deferral (terminate_decision == false) only happens for
+                // IfIdle while containers run, so the message is unambiguous.
                 if terminate_decision(terminate, has_running) {
                     let _ = speedwave_runtime::binary::system_command("wsl.exe")
                         .args(["--terminate", distro])
@@ -847,13 +840,9 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
                     log::info!(
                         "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
                     );
-                } else if has_running {
-                    log::info!(
-                        "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (containers running; applies on next WSL restart)"
-                    );
                 } else {
                     log::info!(
-                        "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (applies on next WSL restart)"
+                        "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (containers running; applies on next WSL restart)"
                     );
                 }
             }
@@ -3016,8 +3005,6 @@ mod tests {
         // run, so the metadata mount applies before the first start).
         #[test]
         fn variants_are_distinct() {
-            assert_ne!(TerminateOnChange::Yes, TerminateOnChange::No);
-            assert_ne!(TerminateOnChange::IfIdle, TerminateOnChange::No);
             assert_ne!(TerminateOnChange::IfIdle, TerminateOnChange::Yes);
             assert_eq!(TerminateOnChange::IfIdle, TerminateOnChange::IfIdle);
         }
@@ -3027,24 +3014,16 @@ mod tests {
             let y = TerminateOnChange::Yes;
             let copied = y; // Copy: original still usable below
             assert_eq!(y, copied);
-            assert_eq!(format!("{:?}", TerminateOnChange::No), "No");
             assert_eq!(format!("{:?}", TerminateOnChange::Yes), "Yes");
             assert_eq!(format!("{:?}", TerminateOnChange::IfIdle), "IfIdle");
         }
 
-        // The terminate policy: Yes always, No never, IfIdle only when the
-        // distro has no running containers (so the metadata mount applies before
-        // the first start without killing live containers).
+        // Yes always terminates; IfIdle only when no container runs (so the
+        // metadata mount applies before the first start without killing any).
         #[test]
         fn yes_always_terminates() {
             assert!(terminate_decision(TerminateOnChange::Yes, false));
             assert!(terminate_decision(TerminateOnChange::Yes, true));
-        }
-
-        #[test]
-        fn no_never_terminates() {
-            assert!(!terminate_decision(TerminateOnChange::No, false));
-            assert!(!terminate_decision(TerminateOnChange::No, true));
         }
 
         #[test]
