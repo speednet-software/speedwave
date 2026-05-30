@@ -20,11 +20,17 @@ const PATH_SEP: char = ':';
 const ALWAYS_SYSTEM_COMMANDS: &[&str] = &["wsl.exe", "powershell.exe", "cmd.exe"];
 
 /// `true` if `cmd` is a never-bundled Windows OS command (case-insensitive).
+/// Matches on the file name, so an absolute path (e.g. the
+/// `C:\Windows\System32\wsl.exe` that `reset_vm` builds) is recognised too.
 #[cfg(windows)]
 fn is_always_system_command(cmd: &str) -> bool {
+    let name = std::path::Path::new(cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(cmd);
     ALWAYS_SYSTEM_COMMANDS
         .iter()
-        .any(|c| c.eq_ignore_ascii_case(cmd))
+        .any(|c| c.eq_ignore_ascii_case(name))
 }
 
 /// Resolves the path to a binary command.
@@ -301,9 +307,13 @@ pub(crate) mod tests {
         assert!(is_always_system_command("WSL.EXE"));
         assert!(is_always_system_command("powershell.exe"));
         assert!(is_always_system_command("cmd.exe"));
+        // Absolute path (reset_vm builds C:\Windows\System32\wsl.exe).
+        assert!(is_always_system_command("C:\\Windows\\System32\\wsl.exe"));
+        assert!(is_always_system_command("C:\\Windows\\System32\\WSL.EXE"));
         assert!(!is_always_system_command("limactl"));
         assert!(!is_always_system_command("nerdctl"));
         assert!(!is_always_system_command("node"));
+        assert!(!is_always_system_command("C:\\bundle\\limactl.exe"));
     }
 
     // Suppression must not change resolution — wsl.exe still resolves to the bare name.
