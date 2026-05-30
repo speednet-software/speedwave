@@ -123,6 +123,30 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# set -e kills the entrypoint when HOME is not writable (the Windows bug)
+#
+# On Windows the CLAUDE_HOME 9p mount defaulted to uid 0 while the container
+# runs as uid 1000; with metadata enforcing ownership, the entrypoint's first
+# write to ${HOME} hit EACCES and `set -euo pipefail` exited non-zero BEFORE
+# `exec sleep infinity`, so the container went Exited ("cannot exec in a
+# stopped state"). The host-side fix is uid=1000 in the wsl.conf automount
+# options; this test pins the invariant that a non-writable HOME is fatal, so
+# the entrypoint can never silently "succeed" into a half-set-up home.
+# ---------------------------------------------------------------------------
+
+@test "exits non-zero when HOME is not writable (mimics uid-mismatch EACCES)" {
+    # root ignores DAC mode bits, so this assertion is only meaningful as a
+    # non-root user (the real container is uid 1000, never root).
+    [ "$(id -u)" -ne 0 ] || skip "must run as non-root to enforce mode bits"
+
+    chmod 0555 "$HOME"  # readable+executable, NOT writable by the owner
+    run bash "$ENTRYPOINT" true
+    chmod 0755 "$HOME"  # restore so teardown's rm -rf works
+
+    [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # Command passthrough
 # ---------------------------------------------------------------------------
 
@@ -370,10 +394,25 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# ~/.claude.json onboarding pre-seed (ADR-051)
+# ~/.claude.json onboarding pre-seed — conditional on credentials (ADR-052)
+#
+# Onboarding is skipped (pre-seeded .claude.json) ONLY when the user is already
+# logged in. With credentials absent we leave .claude.json uncreated so `claude`
+# opens the OAuth login flow itself instead of the user having to type /login.
 # ---------------------------------------------------------------------------
 
-@test "creates ~/.claude.json with hasCompletedOnboarding when absent" {
+@test "does NOT create ~/.claude.json when credentials are absent (so auto-login shows)" {
+    [ ! -e "${TEST_HOME}/.claude.json" ]
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # No credentials → onboarding NOT skipped → claude shows the login prompt.
+    [ ! -e "${TEST_HOME}/.claude.json" ]
+}
+
+@test "creates ~/.claude.json with hasCompletedOnboarding when credentials exist" {
+    # Simulate a logged-in user: credentials present, no .claude.json yet.
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
     [ ! -e "${TEST_HOME}/.claude.json" ]
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
@@ -381,7 +420,8 @@ EOF
     grep -q '"hasCompletedOnboarding": true' "${TEST_HOME}/.claude.json"
 }
 
-@test "does not overwrite an existing ~/.claude.json" {
+@test "does not overwrite an existing ~/.claude.json (even with credentials)" {
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
     printf '{"my":"existing-state"}' > "${TEST_HOME}/.claude.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]

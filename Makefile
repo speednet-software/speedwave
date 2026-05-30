@@ -699,9 +699,15 @@ clean-lima:
 NODE_VERSION := $(shell cat .node-version 2>/dev/null || echo 24.14.0)
 
 download-nodejs:
-	@echo "Downloading Node.js $(NODE_VERSION)..."
-	@mkdir -p desktop/src-tauri/nodejs desktop/src-tauri/nodejs/bin desktop/src-tauri/THIRD-PARTY-LICENSES
-	@ARCH=$$(uname -m); \
+	@NODE_BIN=desktop/src-tauri/nodejs/bin/node; \
+	case "$$(uname -s)" in MINGW*|MSYS*|CYGWIN*) NODE_BIN=desktop/src-tauri/nodejs/node.exe ;; esac; \
+	if [ -s "$$NODE_BIN" ] && "$$NODE_BIN" --version >/dev/null 2>&1; then \
+		echo "  ✅ Node.js already present — skipping download"; \
+		exit 0; \
+	fi; \
+	echo "Downloading Node.js $(NODE_VERSION)..."; \
+	mkdir -p desktop/src-tauri/nodejs desktop/src-tauri/nodejs/bin desktop/src-tauri/THIRD-PARTY-LICENSES; \
+	ARCH=$$(uname -m); \
 	case "$$ARCH" in \
 		arm64|aarch64) NODE_ARCH="arm64" ;; \
 		x86_64) NODE_ARCH="x64" ;; \

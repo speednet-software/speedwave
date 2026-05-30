@@ -756,6 +756,178 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         }
     }
 
+    // Import path: distro is freshly created, no containers run yet, so a
+    // terminate to apply the new wsl.conf is safe.
+    ensure_wsl_distro_metadata(TerminateOnChange::Yes)?;
+
+    Ok(())
+}
+
+/// Whether `ensure_wsl_distro_metadata` may `wsl --terminate` the distro after
+/// it edits `/etc/wsl.conf`. Terminating applies the new config immediately but
+/// kills every process in the distro — fatal if containers are running.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TerminateOnChange {
+    /// Safe only when no Speedwave containers run (e.g. right after import).
+    Yes,
+    /// Leave the distro running; the new wsl.conf applies on its next restart.
+    No,
+}
+
+/// Ensures the Speedwave distro's `/etc/wsl.conf` sets the drvfs automount
+/// options to [`consts::wsl_automount_options`]: `metadata` for `/login`'s
+/// chmod (ADR-052) and `uid`/`gid` (from the [`consts::CONTAINER_USER_UNPRIVILEGED`]
+/// SSOT) requesting the mount be owned by the container user.
+///
+/// NOTE: the `uid=`/`gid=` automount option is **not** load-bearing — WSL
+/// prepends the distro default user's uid (root → 0) ahead of it and that wins,
+/// so on imported distros (no `[user]` default) the mount stays uid 0. The
+/// actual fix for the uid-1000 entrypoint's EACCES is the per-project `chown`
+/// in [`ensure_claude_home_owner`]; this option still helps fresh imports and
+/// keeps `/login`'s chmod working.
+///
+/// Idempotent and self-upgrading: adds the `[automount]` block if absent, and
+/// rewrites a bare `options = "metadata"` line (written by an earlier build)
+/// to include the uid/gid — otherwise distros installed by that build stay
+/// broken.
+///
+/// `terminate` MUST be `No` on any path where containers may be running
+/// (startup migration for existing distros): a `--terminate` there kills the
+/// running containers mid-start ("cannot exec in a stopped state"). Pass `Yes`
+/// only at import time, before any container exists. Fail-open throughout.
+#[cfg(target_os = "windows")]
+pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Result<()> {
+    let distro = consts::wsl_distro_name();
+    // Run as root inside the distro; `/etc/wsl.conf` is distro-internal (not the
+    // host .wslconfig). Two branches: add the block if `[automount]` is absent,
+    // else upgrade an options line that lacks our uid in place. Both emit the
+    // change marker so the caller's terminate/restart logic fires.
+    let opts = consts::wsl_automount_options();
+    let (uid, _gid) = consts::container_uid_gid();
+    let script = format!(
+        "f=/etc/wsl.conf; \
+         if ! grep -q '\\[automount\\]' \"$f\" 2>/dev/null; then \
+           printf '\\n[automount]\\noptions = \"{opts}\"\\n' >> \"$f\"; \
+           echo speedwave-metadata-added; \
+         elif ! grep -q 'uid={uid}' \"$f\" 2>/dev/null; then \
+           sed -i '/\\[automount\\]/,/^[[:space:]]*\\[/ s|^[[:space:]]*options[[:space:]]*=.*|options = \"{opts}\"|' \"$f\"; \
+           if grep -q 'uid={uid}' \"$f\" 2>/dev/null; then echo speedwave-metadata-added; \
+           else echo speedwave-metadata-noop; fi; \
+         fi",
+        opts = opts,
+        uid = uid,
+    );
+    let script = script.as_str();
+    let out = speedwave_runtime::binary::system_command("wsl.exe")
+        .args(["-d", distro, "-u", "root", "--", "sh", "-c", script])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.contains("speedwave-metadata-noop") {
+                log::warn!(
+                    "ensure_wsl_distro_metadata: wsl.conf options line could not be upgraded for {distro} (malformed [automount]?); uid not applied"
+                );
+            }
+            let changed = stdout.contains("speedwave-metadata-added");
+            if changed {
+                match terminate {
+                    TerminateOnChange::Yes => {
+                        // Safe at import time: no Speedwave containers run yet.
+                        let _ = speedwave_runtime::binary::system_command("wsl.exe")
+                            .args(["--terminate", distro])
+                            .status();
+                        log::info!(
+                            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
+                        );
+                    }
+                    TerminateOnChange::No => {
+                        // Containers may be running; do NOT terminate. The new
+                        // wsl.conf applies on the distro's next natural restart.
+                        log::info!(
+                            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (applies on next WSL restart)"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(o) => log::warn!(
+            "ensure_wsl_distro_metadata: wsl.conf update failed (non-fatal): {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log::warn!("ensure_wsl_distro_metadata: spawn failed (non-fatal): {e}"),
+    }
+    Ok(())
+}
+
+/// Makes the project's `claude-home` tree owned by the container user so the
+/// uid-1000 entrypoint can write `/home/speedwave` (mkdir/ln under `set -e`).
+///
+/// This is the **load-bearing** half of the Windows mount-ownership fix. The
+/// WSL drvfs `/mnt/c` mount is owned by uid 0 (the imported distro has no
+/// default user, and WSL's prepended default-user uid beats the `uid=` automount
+/// option), so a uid-1000 mkdir under a root-owned parent gets EACCES and the
+/// container exits(1) ("cannot exec in a stopped state"). With `metadata` on,
+/// `chown` writes per-file ownership that drvfs honors for access.
+///
+/// MUST run **after** `compose_up_recreate`: `compose up` auto-creates the
+/// `/home/speedwave/.claude` bind mount-point (for the read-only ide-bridge
+/// mount) as ROOT, so a chown done *before* compose is silently undone by the
+/// start. Chowning after the mount-points exist, then letting
+/// `ensure_exec_healthy`'s recovery recreate re-run the entrypoint against the
+/// now-1000-owned tree, is what actually fixes it. Verified on the live distro.
+///
+/// uid/gid come from the [`consts::container_uid_gid`] SSOT (same value as the
+/// compose `user:` field). Idempotent and cheap. Fail-open: a chown failure
+/// only logs.
+#[cfg(target_os = "windows")]
+pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
+    let distro = consts::wsl_distro_name();
+    let (uid, gid) = consts::container_uid_gid();
+    let host_path = speedwave_runtime::claude_home::claude_home_dir(consts::data_dir(), project);
+    let wsl_path = speedwave_runtime::runtime::windows_to_wsl_path(&host_path)?;
+    let wsl_path = wsl_path.to_string_lossy().to_string();
+    let uidgid = format!("{uid}:{gid}");
+    // Pass the path as its OWN argv token to each tool (mkdir/chown/chmod) — no
+    // `sh -c` wrapper, no shell variable. `wsl.exe` re-parses a `sh -c "<script>"`
+    // string and drops the `$d` variable, so inlining via argv (the way compose
+    // passes mount paths) is the reliable form. Three small invocations.
+    let run = |args: &[&str]| {
+        speedwave_runtime::binary::system_command("wsl.exe")
+            .args(["-d", distro, "-u", "root", "--"])
+            .args(args)
+            .output()
+    };
+    let steps: [(&str, Vec<&str>); 3] = [
+        ("mkdir", vec!["mkdir", "-p", &wsl_path]),
+        ("chown", vec!["chown", "-R", &uidgid, &wsl_path]),
+        ("chmod", vec!["chmod", "-R", "u+rwX", &wsl_path]),
+    ];
+    let mut all_ok = true;
+    for (name, args) in &steps {
+        match run(args) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                all_ok = false;
+                log::warn!(
+                    "ensure_claude_home_owner: {name} failed (non-fatal): {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+            }
+            Err(e) => {
+                all_ok = false;
+                log::warn!("ensure_claude_home_owner: {name} spawn failed (non-fatal): {e}");
+            }
+        }
+    }
+    if all_ok {
+        log::info!("ensure_claude_home_owner: chowned {wsl_path} to {uidgid}");
+    } else {
+        log::warn!(
+            "ensure_claude_home_owner: {wsl_path} NOT fully chowned to {uidgid} (see warnings)"
+        );
+    }
     Ok(())
 }
 
@@ -1066,6 +1238,18 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Ok(())
     })?;
     log::info!("containers started, verifying health");
+
+    // Windows: `compose up` auto-creates the `/home/speedwave/.claude` bind
+    // mount-point (for the read-only ide-bridge mount) as ROOT, even after we
+    // chowned claude-home — so the uid-1000 entrypoint's `mkdir .claude/skills`
+    // hits EACCES and the container exits(1). Chown the tree AFTER compose
+    // created the mount-points, then ensure_exec_healthy's recovery recreate
+    // re-runs the entrypoint against the now-1000-owned tree. Verified on the
+    // live distro. Fail-open. (ADR-052 mount ownership.)
+    #[cfg(target_os = "windows")]
+    if let Err(e) = ensure_claude_home_owner(project) {
+        log::warn!("ensure_claude_home_owner failed (non-fatal): {e}");
+    }
 
     // Verify containers are actually functional before marking as started.
     // Only probes the claude container — MCP workers are health-checked
@@ -1723,35 +1907,53 @@ pub fn link_cli() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolves `windows/sweep.ps1` from the Tauri bundle on Windows. Mirrors
-/// `resolve_cli_source_from` semantics: prefer `SPEEDWAVE_RESOURCES_DIR`,
-/// then the production bundle layout, then dev fallbacks.
+/// Resolves a `windows/<name>` script from the Tauri bundle on Windows: prefer
+/// `SPEEDWAVE_RESOURCES_DIR`, then the production bundle layout, then dev
+/// fallbacks. Shared by the sweep and firewall consumers.
 #[cfg(target_os = "windows")]
-fn resolve_sweep_script() -> Option<std::path::PathBuf> {
+pub(crate) fn resolve_bundled_windows_script(name: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
     if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         let bundled = std::path::PathBuf::from(&resources_dir)
             .join("windows")
-            .join("sweep.ps1");
+            .join(name);
         if bundled.exists() {
             return Some(bundled);
         }
     }
-    let resources = exe_dir.join("resources").join("windows").join("sweep.ps1");
+    let resources = exe_dir.join("resources").join("windows").join(name);
     if resources.exists() {
         return Some(resources);
     }
     let dev = exe_dir
         .parent()
         .and_then(|p| p.parent())
-        .map(|p| p.join("windows").join("sweep.ps1"));
+        .map(|p| p.join("windows").join(name));
     if let Some(ref path) = dev {
         if path.exists() {
             return Some(path.clone());
         }
     }
     None
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_sweep_script() -> Option<std::path::PathBuf> {
+    resolve_bundled_windows_script("sweep.ps1")
+}
+
+/// Absolute path to the system PowerShell (`%SystemRoot%\System32\...`).
+/// Never the bare `powershell` from PATH — avoids hijack on multi-install hosts.
+#[cfg(target_os = "windows")]
+pub(crate) fn system_powershell_path() -> std::path::PathBuf {
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+    std::path::PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
 }
 
 /// Defense-in-depth: kill any stale Speedwave / Node / CLI process holding
@@ -1770,18 +1972,13 @@ fn run_pre_link_sweep() {
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_default();
     let data_dir = consts::data_dir();
-    let system_root =
-        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
-    let powershell = std::path::PathBuf::from(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
+    let powershell = system_powershell_path();
 
     // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe. Full mode is
     // reserved for install-time hooks (NSIS/MSI) — Tauri Desktop must not
-    // target its own workers or self.
-    let result = std::process::Command::new(&powershell)
+    // target its own workers or self. system_command applies CREATE_NO_WINDOW
+    // so PowerShell does not flash a console over the Desktop UI.
+    let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -2739,6 +2936,59 @@ mod tests {
             let (url, sha) = result.unwrap();
             assert!(url.starts_with("https://"));
             assert_eq!(sha.len(), 64, "SHA256 hash must be 64 hex chars");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    mod terminate_on_change_tests {
+        use super::super::TerminateOnChange;
+
+        // Regression guard for the E2E "cannot exec in a stopped state"
+        // failure: the import path may terminate (no containers yet), the
+        // startup-migration path must not (containers may be running).
+        #[test]
+        fn variants_are_distinct() {
+            assert_ne!(TerminateOnChange::Yes, TerminateOnChange::No);
+            assert_eq!(TerminateOnChange::Yes, TerminateOnChange::Yes);
+            assert_eq!(TerminateOnChange::No, TerminateOnChange::No);
+        }
+
+        #[test]
+        fn is_copy_and_debug() {
+            let y = TerminateOnChange::Yes;
+            let copied = y; // Copy: original still usable below
+            assert_eq!(y, copied);
+            assert_eq!(format!("{:?}", TerminateOnChange::No), "No");
+            assert_eq!(format!("{:?}", TerminateOnChange::Yes), "Yes");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    mod wsl_automount_options_tests {
+        use speedwave_runtime::consts;
+
+        // Regression guard for the claude container early-exit: the automount
+        // options carry `metadata` (so /login's chmod 0600 works, ADR-052) and
+        // the container uid/gid — derived from the CONTAINER_USER_UNPRIVILEGED
+        // SSOT, NOT a re-typed literal, so the mount owner and the compose
+        // `user:` cannot drift. The load-bearing fix is the chown in
+        // ensure_claude_home_owner; this option is best-effort (see its docs).
+        #[test]
+        fn options_derive_metadata_and_container_uid_from_ssot() {
+            let opts = consts::wsl_automount_options();
+            let (uid, gid) = consts::container_uid_gid();
+            assert!(
+                opts.contains("metadata"),
+                "metadata required for /login chmod 0600 (ADR-052)"
+            );
+            assert!(
+                opts.contains(&format!("uid={uid}")),
+                "automount uid must equal container uid {uid}"
+            );
+            assert!(
+                opts.contains(&format!("gid={gid}")),
+                "automount gid must equal container gid {gid}"
+            );
         }
     }
 
