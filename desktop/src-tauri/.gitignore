@@ -1,1 +1,4 @@
 cli/
+
+# Per-machine path written by scripts/dev-fetch-sherpa-cache.sh (make dev / make download-sherpa-onnx).
+.sherpa-onnx-lib-dir

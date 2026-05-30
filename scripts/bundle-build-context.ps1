@@ -14,6 +14,50 @@ $ErrorActionPreference = 'Stop'
 # Default to the in-repo Tauri resource dir. Tests override via $env:BUNDLE_DEST
 # so concurrent test + dev runs do not race on the same files (mirrors the .sh).
 $dest = if ($env:BUNDLE_DEST) { $env:BUNDLE_DEST } else { 'desktop\src-tauri' }
+New-Item -ItemType Directory -Path $dest -Force | Out-Null
+
+# Serialize concurrent runs on the same DEST (mirrors the .sh mkdir-mutex). The
+# body does Remove-Item + non-atomic copies; a parallel image build can read a
+# half-written tree and bake a 0-byte package.json into a worker image. Directory
+# create is atomic; a lock whose holder PID is gone is reclaimed so a killed run
+# cannot deadlock future bundles.
+$lockDir = "$dest\.bundle.lock"
+
+# Is the PID in a lock dir a live process? Returns $true only when we can prove
+# the holder is gone (Get-Process reports "not found"); any other error or a
+# missing/blank PID is treated as ALIVE so a transient fault never reclaims a
+# live lock.
+function Test-LockHolderDead {
+    param([string]$dir)
+    $holder = (Get-Content "$dir\pid" -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if (-not $holder) { return $false }  # no PID yet — assume alive, wait
+    try {
+        $null = Get-Process -Id ([int]$holder) -ErrorAction Stop
+        return $false                      # holder is running
+    } catch [Microsoft.PowerShell.Commands.ProcessCommandException] {
+        return $true                       # "no process with that Id" — dead
+    } catch {
+        return $false                      # any other fault — be safe, wait
+    }
+}
+
+while ($true) {
+    try {
+        New-Item -ItemType Directory -Path $lockDir -ErrorAction Stop | Out-Null
+        break
+    } catch {
+        if (Test-LockHolderDead $lockDir) {
+            Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
+            continue
+        }
+        Start-Sleep -Milliseconds 300
+    }
+}
+
+# From here the lock is held; the finally releases it on ANY exit. Writing the PID
+# is inside the try so a failed write still releases the lock (no deadlock).
+try {
+    "$PID" | Out-File -FilePath "$lockDir\pid" -Encoding ascii
 
 # Clean destination
 Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\host_exec","$dest\oauth" -ErrorAction SilentlyContinue
@@ -100,3 +144,8 @@ Stage-Host-Worker -worker host_exec -bundle host_exec
 Stage-Host-Worker -worker oauth -bundle oauth
 
 Write-Host "Build context bundled into $dest"
+
+} finally {
+    # Release the mutex on any exit (mirrors the .sh trap).
+    Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
+}

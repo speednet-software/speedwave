@@ -3,7 +3,7 @@
 //! device — that's our "System (everything)" source, available on Windows 7+.
 //!
 //! Per-process loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) needs
-//! Windows 10 build 20348+. cpal 0.16 doesn't expose it, so v1 ships
+//! Windows 10 build 20348+. cpal 0.17 doesn't expose it, so v1 ships
 //! system-wide-only: `capabilities().supports_per_process` is `false` and a
 //! `Process` source is rejected with a clear "use System audio" error. (A
 //! future iteration can add a `windows-sys` shim — see ADR-056.)
@@ -66,7 +66,9 @@ impl Default for WasapiAudioCapture {
 /// `cmd /c ver` output (`Microsoft Windows [Version 10.0.22631.xxxx]`). Cheap
 /// and dependency-free; `None` on any parse failure.
 fn detect_windows_build() -> Option<u32> {
-    let out = std::process::Command::new("cmd")
+    // system_command applies CREATE_NO_WINDOW so this probe (run on audio/
+    // transcription init) does not flash a console over the Desktop UI.
+    let out = crate::binary::system_command("cmd")
         .args(["/c", "ver"])
         .output()
         .ok()?;
@@ -217,7 +219,7 @@ fn build_stream(
     let err_fn = |e| log::warn!(target: "transcription::capture", "wasapi stream error: {e}");
     macro_rules! make {
         ($t:ty, $to_f32:expr) => {{
-            let mut to_f32 = $to_f32;
+            let to_f32 = $to_f32;
             device.build_input_stream(
                 config,
                 move |data: &[$t], _: &cpal::InputCallbackInfo| {
@@ -281,7 +283,7 @@ fn open_capture_stream(
 ) -> Result<cpal::Stream, CaptureError> {
     let supported = kind.supported_config()?;
     let sample_format = supported.sample_format();
-    let src_rate = supported.sample_rate().0;
+    let src_rate = supported.sample_rate();
     let src_channels = supported.channels() as usize;
     let config: cpal::StreamConfig = supported.into();
     let resampler = Resampler::new(src_rate, src_channels);

@@ -4,7 +4,6 @@ import { Router, RouterModule } from '@angular/router';
 import { CommandPaletteComponent } from './command-palette.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
-import { ThemeService } from '../../services/theme.service';
 import { UiStateService } from '../../services/ui-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 
@@ -35,7 +34,6 @@ describe('CommandPaletteComponent', () => {
   let fixture: ComponentFixture<CommandPaletteComponent>;
   let mockTauri: MockTauriService;
   let ui: UiStateService;
-  let theme: ThemeService;
   let projectState: ProjectStateService;
   let router: Router;
 
@@ -71,7 +69,6 @@ describe('CommandPaletteComponent', () => {
     fixture = TestBed.createComponent(CommandPaletteComponent);
     component = fixture.componentInstance;
     ui = TestBed.inject(UiStateService);
-    theme = TestBed.inject(ThemeService);
     projectState = TestBed.inject(ProjectStateService);
     router = TestBed.inject(Router);
     ui.closePalette();
@@ -134,7 +131,7 @@ describe('CommandPaletteComponent', () => {
       expect(q('[data-testid="palette-item-nav-logs"]')).not.toBeNull();
     });
 
-    it('renders the actions section with 6 actions', () => {
+    it('renders the actions section with 5 actions', () => {
       const section = q('[data-testid="palette-section-actions"]');
       expect(section).not.toBeNull();
       expect(q('[data-testid="palette-item-action-new-conversation"]')).not.toBeNull();
@@ -142,7 +139,6 @@ describe('CommandPaletteComponent', () => {
       expect(q('[data-testid="palette-item-action-restart-containers"]')).not.toBeNull();
       expect(q('[data-testid="palette-item-action-check-updates"]')).not.toBeNull();
       expect(q('[data-testid="palette-item-action-toggle-sidebar"]')).not.toBeNull();
-      expect(q('[data-testid="palette-item-action-change-accent"]')).not.toBeNull();
     });
 
     it('renders dynamic projects section excluding the active project', () => {
@@ -260,14 +256,6 @@ describe('CommandPaletteComponent', () => {
       expect(navSpy).toHaveBeenCalledWith('/integrations');
       expect(ui.paletteOpen()).toBe(false);
       navSpy.mockRestore();
-    });
-
-    it('clicking "change accent color" cycles ThemeService', async () => {
-      const before = theme.theme();
-      const btn = q('[data-testid="palette-item-action-change-accent"]') as HTMLElement;
-      btn.click();
-      await fixture.whenStable();
-      expect(theme.theme()).not.toBe(before);
     });
 
     it('clicking "restart containers" requests a restart', async () => {

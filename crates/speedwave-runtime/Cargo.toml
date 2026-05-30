@@ -34,7 +34,7 @@ futures-core = "0.3"
 async-stream = "0.3"
 parking_lot = "0.12"
 dashmap = "6"
-shlex = "1.3"
+shlex = "2.0"
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
 # Used for atomic plugin install staging — `tempdir_in(plugins_dir)`
@@ -53,7 +53,7 @@ hound = { version = "3", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "stream"], optional = true }
 # Untar the sherpa-onnx diarization-model archives (`.tar.bz2`).
 tar = { version = "0.4", optional = true }
-bzip2 = { version = "0.4", optional = true }
+bzip2 = { version = "0.6", optional = true }
 # Whisper (transcription) — links libwhisper, built from whisper.cpp's vendored
 # submodule via cmake at build time (so CI needs `cmake`). The `metal` backend
 # is added on macOS only via the target-specific block below; CPU elsewhere.
@@ -73,7 +73,7 @@ whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 # Windows capture (Phase 4-W): WASAPI loopback via cpal. Windows-only — macOS
 # uses the bundled audio-capture-cli, so cpal is dead weight there. Still gated
 # behind `audio-transcription` so the CLI build stays lean.
-cpal = { version = "0.16", optional = true }
+cpal = { version = "0.17", optional = true }
 # Job Object kill-on-parent-close for host MCP workers
 # (`host_mcp_process::job_object`). `Win32_Security` is required to gate
 # `CreateJobObjectW` in windows-sys 0.61.x. Same major version as in

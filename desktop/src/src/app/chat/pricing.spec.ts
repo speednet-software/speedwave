@@ -8,15 +8,26 @@ describe('calculateCost', () => {
     _resetUnknownModelWarnings();
   });
 
-  it('computes Opus 4.7 cost from input + output tokens (no cache)', () => {
-    // 1M in + 1M out @ $15/$75 = $90
+  it('computes Opus 4.8 cost from input + output tokens (no cache)', () => {
+    // 1M in + 1M out @ $5/$25 = $30
     const usage: TurnUsage = {
       input_tokens: 1_000_000,
       output_tokens: 1_000_000,
       cache_read_tokens: 0,
       cache_write_tokens: 0,
     };
-    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(90, 6);
+    expect(calculateCost('claude-opus-4-8', usage)).toBeCloseTo(30, 6);
+  });
+
+  it('computes Opus 4.7 cost from input + output tokens (no cache)', () => {
+    // 1M in + 1M out @ $5/$25 = $30
+    const usage: TurnUsage = {
+      input_tokens: 1_000_000,
+      output_tokens: 1_000_000,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    };
+    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(30, 6);
   });
 
   it('computes Sonnet 4.6 cost from input + output tokens (no cache)', () => {
@@ -42,7 +53,7 @@ describe('calculateCost', () => {
   });
 
   it('charges cache-read at cachedInput rate (10% of input)', () => {
-    // Opus: 1M cache-read @ $1.5 = $1.5
+    // Opus: 1M cache-read @ $0.5 = $0.5
     // The 1M in the input_tokens count, when >= cache_read, treats the
     // overlap as already-cached (billedInput = max(0, in - cache_read) = 0).
     const usage: TurnUsage = {
@@ -51,34 +62,34 @@ describe('calculateCost', () => {
       cache_read_tokens: 1_000_000,
       cache_write_tokens: 0,
     };
-    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(1.5, 6);
+    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(0.5, 6);
   });
 
   it('charges cache-write at cacheWrite rate (125% of input)', () => {
-    // Opus: 1M cache-write @ $18.75 = $18.75
+    // Opus: 1M cache-write @ $6.25 = $6.25
     const usage: TurnUsage = {
       input_tokens: 0,
       output_tokens: 0,
       cache_read_tokens: 0,
       cache_write_tokens: 1_000_000,
     };
-    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(18.75, 6);
+    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(6.25, 6);
   });
 
   it('sums all four components for a realistic turn', () => {
     // Opus: input 11_000 (1000 billed after subtracting cache_read) + 10k cache-read +
     //   5k cache-write + 500 output
     //   billedInput = max(0, 11000 - 10000) = 1000
-    //   = 1000 * 15 / 1e6 + 10000 * 1.5 / 1e6 + 5000 * 18.75 / 1e6 + 500 * 75 / 1e6
-    //   = 0.015 + 0.015 + 0.09375 + 0.0375
-    //   = 0.16125
+    //   = 1000 * 5 / 1e6 + 10000 * 0.5 / 1e6 + 5000 * 6.25 / 1e6 + 500 * 25 / 1e6
+    //   = 0.005 + 0.005 + 0.03125 + 0.0125
+    //   = 0.05375
     const usage: TurnUsage = {
       input_tokens: 11_000,
       output_tokens: 500,
       cache_read_tokens: 10_000,
       cache_write_tokens: 5_000,
     };
-    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(0.16125, 6);
+    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(0.05375, 6);
   });
 
   it('returns 0 for zero-usage input', () => {
@@ -100,8 +111,8 @@ describe('calculateCost', () => {
       cache_read_tokens: 5_000,
       cache_write_tokens: 0,
     };
-    // billed = max(0, 1000 - 5000) = 0 → only cache_read cost: 5000 * 1.5 / 1e6 = 0.0075
-    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(0.0075, 6);
+    // billed = max(0, 1000 - 5000) = 0 → only cache_read cost: 5000 * 0.5 / 1e6 = 0.0025
+    expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(0.0025, 6);
   });
 
   it('returns null and logs exactly one warning for an unknown model', () => {

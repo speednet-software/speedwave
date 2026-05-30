@@ -35,15 +35,18 @@ export interface NavRailEntry {
     class: 'flex w-14 flex-col items-center border-r border-[var(--line)] bg-[var(--bg-1)]',
   },
   template: `
-    <!-- Logo band aligned with chat header (44px). -->
+    <!-- Logo band aligned with chat header (44px). Mask-image lets a single
+         asset adapt color per mode via currentColor (white in dark, ink in light). -->
     <div class="flex h-11 w-14 items-center justify-center border-b border-[var(--line)]">
-      <img
-        src="assets/speedwave-mark-white@2x.png"
-        alt="Speedwave"
-        width="28"
-        height="28"
-        class="h-7 w-7"
-      />
+      <span
+        role="img"
+        aria-label="Speedwave"
+        class="block h-7 w-7 bg-current text-[var(--ink)] dark:text-white"
+        style="
+          -webkit-mask: url('assets/speedwave-mark-white.svg') center / contain no-repeat;
+          mask: url('assets/speedwave-mark-white.svg') center / contain no-repeat;
+        "
+      ></span>
     </div>
 
     <nav class="mt-4 flex flex-col gap-1" data-testid="nav-rail">

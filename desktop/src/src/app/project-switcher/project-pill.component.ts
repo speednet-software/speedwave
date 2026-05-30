@@ -9,6 +9,7 @@ import {
 } from '@angular/core';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
+import { swatchFor } from './project-swatch';
 
 /**
  * Project switcher trigger — the small monogram + name pill rendered in the
@@ -35,7 +36,8 @@ import { UiStateService } from '../services/ui-state.service';
       (click)="ui.toggleProjectSwitcher()"
     >
       <span
-        class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]"
+        class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm text-[8px] font-bold text-[#07090f]"
+        [style.background]="swatch()"
         aria-hidden="true"
         >{{ monogram() }}</span
       >
@@ -50,12 +52,18 @@ export class ProjectPillComponent implements OnInit, OnDestroy {
   /** Active project name — kept in a signal so OnPush re-renders on change. */
   protected readonly projectName = signal<string>('');
 
+  /** Position of the active project in the list — drives the swatch. -1 when no project. */
+  protected readonly activeIndex = signal<number>(-1);
+
   /** First two letters of the active project name, lowercased. Falls back to a dot. */
   protected readonly monogram = computed(() => {
     const name = this.projectName().trim();
     if (!name) return '·';
     return name.slice(0, 2).toLowerCase();
   });
+
+  /** Swatch color matching the same project's row in the switcher dropdown. */
+  protected readonly swatch = computed(() => swatchFor(this.activeIndex()));
 
   private unsubscribe: (() => void) | null = null;
 
@@ -65,10 +73,10 @@ export class ProjectPillComponent implements OnInit, OnDestroy {
     this.unsubscribe = this.projectState.onChange(() => this.refresh());
   }
 
-  /** Pulls the active project name out of the shared state into a local signal. */
   private refresh(): void {
     const name = this.projectState.activeProject ?? '';
     this.projectName.set(name);
+    this.activeIndex.set(this.projectState.projects.findIndex((p) => p.name === name));
   }
 
   /** Tears down the project state subscription. */

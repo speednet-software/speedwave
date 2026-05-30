@@ -75,6 +75,9 @@ pub fn render_compose(
     bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
+    // Windows: WSL adapter IP can drift; re-detect before it lands in extra_hosts.
+    #[cfg(target_os = "windows")]
+    invalidate_host_addressing_cache();
     let data_dir = consts::data_dir();
     let tokens_dir = resolve_tokens_dir(project_name);
     let claude_home = crate::claude_home::claude_home_dir(data_dir, project_name);
@@ -151,7 +154,7 @@ pub fn render_compose(
         std::fs::set_permissions(&ide_lock_dir, std::fs::Permissions::from_mode(0o700))?;
     }
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
-    yaml = yaml.replace("${HOST_GATEWAY}", host_gateway_ip());
+    yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
@@ -966,7 +969,7 @@ fn apply_plugins_from_verified(
                         &registration.token_env,
                         &registration.auth_token,
                     )?;
-                    ensure_host_gateway_extra_host(&mut doc, &compose_name);
+                    ensure_host_gateway_extra_host(&mut doc, &compose_name)?;
                 }
             }
         }
@@ -1473,7 +1476,7 @@ fn apply_oauth_config_with_paths(
                 continue;
             }
         }
-        ensure_host_gateway_extra_host(&mut doc, compose_service);
+        ensure_host_gateway_extra_host(&mut doc, compose_service)?;
         inject_env_into(&mut doc, compose_service, "WORKER_OAUTH_URL", &url);
         let mount = format!(
             "{}:/secrets/oauth-auth-token-{service_id}:ro",
@@ -1526,7 +1529,7 @@ fn apply_worker_config(
     let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-    ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+    ensure_host_gateway_extra_host(&mut doc, "mcp-hub")?;
     inject_worker_env(&mut doc, env_var, &url);
     add_hub_volume(
         &mut doc,
@@ -1590,19 +1593,244 @@ fn host_exec_gateway_url(port: u16) -> String {
     worker_gateway_url(port)
 }
 
-/// Returns the host IP/hostname reachable from inside the container/VM.
-/// Used for `extra_hosts` entries and constructing wsUrls in lock files.
-///
-/// macOS: Lima vzNAT always assigns 192.168.5.2 to the macOS host — static, not DHCP.
-/// Windows: nerdctl in WSL2 uses 192.168.65.1.
-pub fn host_gateway_ip() -> &'static str {
-    #[cfg(target_os = "macos")]
+/// Container-side `gateway_ip` + host-side `bind_address`. On Windows both
+/// equal the WSL vEthernet adapter IP (mirrored-mode 127.0.0.1 broken — WSL#11312).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostAddressing {
+    pub gateway_ip: String,
+    pub bind_address: String,
+}
+
+/// Test seam. Production: `LimaStatic` (macOS) / `WslDetector` (Windows).
+pub trait HostAddressingComputer: Send + Sync {
+    fn compute(&self) -> anyhow::Result<HostAddressing>;
+}
+
+static HOST_ADDRESSING: std::sync::RwLock<Option<HostAddressing>> = std::sync::RwLock::new(None);
+
+static COMPUTER: std::sync::RwLock<Option<std::sync::Arc<dyn HostAddressingComputer>>> =
+    std::sync::RwLock::new(None);
+
+/// Cached `HostAddressing`; on Windows returns `Err` on detection failure.
+pub fn host_addressing() -> anyhow::Result<HostAddressing> {
+    if let Some(addr) = HOST_ADDRESSING
+        .read()
+        .map_err(|e| anyhow::anyhow!("host_addressing cache poisoned: {e}"))?
+        .clone()
     {
-        consts::LIMA_VZ_HOST_IP // "192.168.5.2"
+        return Ok(addr);
     }
+    let computer = current_computer();
+    let addr = computer.compute()?;
+    let mut write = HOST_ADDRESSING
+        .write()
+        .map_err(|e| anyhow::anyhow!("host_addressing cache poisoned: {e}"))?;
+    if let Some(existing) = write.clone() {
+        return Ok(existing);
+    }
+    *write = Some(addr.clone());
+    Ok(addr)
+}
+
+/// Container-side gateway IP (compose `extra_hosts` target).
+pub fn host_gateway_ip() -> anyhow::Result<String> {
+    Ok(host_addressing()?.gateway_ip)
+}
+
+/// Host-side `TcpListener::bind` address (macOS: 127.0.0.1; Windows: WSL adapter IP).
+pub fn host_bind_address() -> anyhow::Result<String> {
+    Ok(host_addressing()?.bind_address)
+}
+
+/// Clears the cached `HostAddressing` so the next call recomputes.
+pub fn invalidate_host_addressing_cache() {
+    if let Ok(mut write) = HOST_ADDRESSING.write() {
+        *write = None;
+    }
+}
+
+fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
+    if let Ok(slot) = COMPUTER.read() {
+        if let Some(c) = slot.as_ref() {
+            return std::sync::Arc::clone(c);
+        }
+    }
+    // Install the default computer for this platform.
+    let default: std::sync::Arc<dyn HostAddressingComputer> = {
+        #[cfg(target_os = "macos")]
+        {
+            std::sync::Arc::new(host_addressing_impls::LimaStatic)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::sync::Arc::new(host_addressing_impls::WslDetector)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            std::sync::Arc::new(host_addressing_impls::Unsupported)
+        }
+    };
+    if let Ok(mut slot) = COMPUTER.write() {
+        if slot.is_none() {
+            *slot = Some(std::sync::Arc::clone(&default));
+        }
+        if let Some(c) = slot.as_ref() {
+            return std::sync::Arc::clone(c);
+        }
+    }
+    default
+}
+
+/// Test-only: inject a fixture computer. Pair with `#[serial_test::serial]`.
+#[cfg(test)]
+pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAddressingComputer>) {
+    *COMPUTER.write().expect("COMPUTER write lock") = Some(computer);
+    invalidate_host_addressing_cache();
+}
+
+/// Test-only: restore the platform default computer.
+#[cfg(test)]
+pub fn reset_host_addressing_computer_for_test() {
+    *COMPUTER.write().expect("COMPUTER write lock") = None;
+    invalidate_host_addressing_cache();
+}
+
+mod host_addressing_impls {
+    use super::HostAddressing;
+
+    #[cfg(target_os = "macos")]
+    pub(super) struct LimaStatic;
+
+    #[cfg(target_os = "macos")]
+    impl super::HostAddressingComputer for LimaStatic {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            Ok(HostAddressing {
+                gateway_ip: crate::consts::LIMA_VZ_HOST_IP.to_string(),
+                bind_address: "127.0.0.1".to_string(),
+            })
+        }
+    }
+
     #[cfg(target_os = "windows")]
-    {
-        consts::WSL_HOST_IP // "192.168.65.1"
+    pub(super) struct WslDetector;
+
+    #[cfg(target_os = "windows")]
+    impl super::HostAddressingComputer for WslDetector {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            let ip = detect_wsl_gateway_ip()?;
+            Ok(HostAddressing {
+                gateway_ip: ip.clone(),
+                bind_address: ip,
+            })
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn detect_wsl_gateway_ip() -> anyhow::Result<String> {
+        let distro = crate::consts::wsl_distro_name();
+        let output = crate::binary::system_command("wsl.exe")
+            .args(["-d", distro, "--", "sh", "-c", "ip -4 route show default"])
+            .output()
+            .map_err(|e| anyhow::anyhow!("wsl.exe probe failed for distro '{distro}': {e}"))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "wsl.exe -d {distro} ip route returned status {} (stderr: {})",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let decoded = crate::runtime::wsl::decode_wsl_output(&output.stdout);
+        parse_default_route_gateway(&decoded).ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not parse WSL gateway IP from default route output of distro '{distro}': {decoded:?}"
+            )
+        })
+    }
+
+    /// Extracts the first IPv4 gateway from `ip -4 route show default` output.
+    /// Rejects loopback / unspecified / link-local / multicast.
+    #[cfg(any(target_os = "windows", test))]
+    pub(super) fn parse_default_route_gateway(output: &str) -> Option<String> {
+        for line in output.lines() {
+            let line = line.trim();
+            if !line.starts_with("default") {
+                continue;
+            }
+            let mut tokens = line.split_whitespace();
+            // `default via X.X.X.X ...`
+            while let Some(tok) = tokens.next() {
+                if tok == "via" {
+                    if let Some(ip_str) = tokens.next() {
+                        if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                            if is_acceptable_gateway(ip) {
+                                return Some(ip.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    fn is_acceptable_gateway(ip: std::net::Ipv4Addr) -> bool {
+        !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() && !ip.is_multicast()
+    }
+
+    #[cfg(test)]
+    mod parse_tests {
+        use super::parse_default_route_gateway;
+
+        #[test]
+        fn extracts_ipv4_from_default_route_line() {
+            let out = "default via 172.24.48.1 dev eth0 proto kernel\n";
+            assert_eq!(
+                parse_default_route_gateway(out),
+                Some("172.24.48.1".to_string())
+            );
+        }
+
+        #[test]
+        fn returns_none_when_no_default_route() {
+            assert_eq!(
+                parse_default_route_gateway("10.4.1.0/24 dev br-xxx\n"),
+                None
+            );
+        }
+
+        #[test]
+        fn rejects_loopback_via() {
+            let out = "default via 127.0.0.1 dev lo proto kernel\n";
+            assert_eq!(parse_default_route_gateway(out), None);
+        }
+
+        #[test]
+        fn picks_first_default_route_when_multiple() {
+            let out = "default via 172.24.48.1 dev eth0\n\
+                       default via 10.0.0.1 dev eth1 metric 100\n";
+            assert_eq!(
+                parse_default_route_gateway(out),
+                Some("172.24.48.1".to_string())
+            );
+        }
+
+        #[test]
+        fn rejects_unspecified_via() {
+            let out = "default via 0.0.0.0 dev eth0\n";
+            assert_eq!(parse_default_route_gateway(out), None);
+        }
+
+        #[test]
+        fn ignores_non_default_lines() {
+            let out = "10.4.1.0/24 dev br-xxx proto kernel scope link src 10.4.1.1\n\
+                       default via 172.30.96.1 dev eth0\n\
+                       172.30.96.0/20 dev eth0 proto kernel scope link src 172.30.99.123\n";
+            assert_eq!(
+                parse_default_route_gateway(out),
+                Some("172.30.96.1".to_string())
+            );
+        }
     }
 }
 
@@ -1746,22 +1974,25 @@ fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
 /// substitution — inserts a literal IP, not a placeholder.
 /// Idempotency by hostname prefix: replaces an existing canonical entry (any IP)
 /// rather than appending a duplicate.
-fn ensure_host_gateway_extra_host(doc: &mut serde_yaml_ng::Value, service: &str) {
-    let canonical_entry = format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip());
+fn ensure_host_gateway_extra_host(
+    doc: &mut serde_yaml_ng::Value,
+    service: &str,
+) -> anyhow::Result<()> {
+    let canonical_entry = format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip()?);
     let hostname_prefix = format!("{}:", consts::HOST_GATEWAY_ALIAS);
     let Some(services) = doc.get_mut("services") else {
-        return;
+        return Ok(());
     };
     let Some(svc) = services.get_mut(service) else {
-        return;
+        return Ok(());
     };
     if svc.get("extra_hosts").is_none() {
         svc["extra_hosts"] =
             serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(canonical_entry)]);
-        return;
+        return Ok(());
     }
     let Some(seq) = svc["extra_hosts"].as_sequence_mut() else {
-        return;
+        return Ok(());
     };
     if let Some(existing) = seq
         .iter_mut()
@@ -1771,6 +2002,7 @@ fn ensure_host_gateway_extra_host(doc: &mut serde_yaml_ng::Value, service: &str)
     } else {
         seq.push(serde_yaml_ng::Value::String(canonical_entry));
     }
+    Ok(())
 }
 
 /// Adds a volume mount to an arbitrary service. No-op if the service is absent.
@@ -3097,6 +3329,7 @@ mod tests {
     /// `inject_claude_env_multiline_value_keeps_yaml_parseable`, the bug
     /// is elsewhere in the pipeline (token reader, env merger, host_tz, …).
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn render_compose_with_multiline_custom_headers_is_valid_yaml() {
         // Use the same locking pattern as the existing token-touching tests
         // — they share a global `~/.speedwave/tokens` namespace and would
@@ -3186,6 +3419,7 @@ mod tests {
     /// to smuggle a header that collides with `ANTHROPIC_AUTH_TOKEN` Bearer.
     /// Mirrors the defensive reject in `build_llm_probe_client_with_auth`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn render_compose_strips_authorization_from_custom_headers() {
         use std::sync::Mutex;
         static LOCK: Mutex<()> = Mutex::new(());
@@ -3689,6 +3923,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitution() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3724,6 +3959,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_uses_bundle_scoped_image_refs() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3784,6 +4020,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_has_sharepoint_workspace_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3813,6 +4050,7 @@ services:
     /// carries the hardening profile (cap_drop: ALL, read_only, no-new-privileges,
     /// shm_size: 2g), and has `PORT=PORT_WORKER`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_service_present() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3881,7 +4119,7 @@ services:
             .get("extra_hosts")
             .and_then(|v| v.as_sequence())
             .expect("mcp-playwright must have extra_hosts (ADR-062)");
-        let gateway_ip = crate::compose::host_gateway_ip();
+        let gateway_ip = crate::compose::host_gateway_ip().expect("test host addressing");
         let expected_entry = format!("host.docker.internal:{gateway_ip}");
         assert!(
             extra_hosts
@@ -3895,6 +4133,7 @@ services:
     /// volume, must mount `/workspace:rw`, and must be attached only to its egress-less
     /// `{NETWORK_NAME}_office` network (ADR-055).
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_office_no_token_mount_workspace_rw_office_network_only() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3953,6 +4192,7 @@ services:
     /// mcp-playwright has no credentials — the generated compose must not mount
     /// any `/tokens` volume (attack-surface reduction per ADR).
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_no_token_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3990,6 +4230,7 @@ services:
     /// v1 explicitly refuses the `/workspace` mount — outputs return as base64
     /// so a compromised Chromium cannot exfiltrate repo contents.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_no_workspace_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4028,6 +4269,7 @@ services:
     /// Hub must know where to reach the Playwright worker. The URL is injected
     /// from the compose template and must point at `:PORT_WORKER`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_playwright_worker_url_in_hub_env() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4065,6 +4307,7 @@ services:
     /// other API workers use — see the comment in compose.template.yml). Also verifies
     /// the read-only, project-scoped `/tokens` mount and `PORT=PORT_WORKER`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_github_service_present() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4158,6 +4401,7 @@ services:
     /// Hub must know where to reach the GitHub worker — `WORKER_GITHUB_URL` injected
     /// from the compose template, pointing at `:PORT_WORKER`.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_github_worker_url_in_hub_env() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4243,6 +4487,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_has_mcp_hub_port() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4269,6 +4514,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_hub_port_matches_port_base() {
         // MCP_HUB_PORT in the claude container must equal PORT_BASE (hub port).
         // If these drift apart, entrypoint.sh generates wrong mcp-config.json URL.
@@ -4298,6 +4544,7 @@ services:
     /// `PORT_WORKER` (3000). The hub itself is exempt — it listens on
     /// `PORT_BASE` (4000).
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_all_workers_use_port_worker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4345,6 +4592,7 @@ services:
     /// at `:{PORT_WORKER}`. `WORKER_OS_URL` is exempt: mcp-os runs on the host
     /// and uses a dynamic port allocated by the OS, not PORT_WORKER.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_hub_worker_urls_use_port_worker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4409,6 +4657,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
@@ -4445,6 +4694,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_hub_port_survives_inject_claude_env() {
         // Regression: inject_claude_env re-parses YAML via serde_yaml_ng.
         // MCP_HUB_PORT must survive the parse → serialize roundtrip.
@@ -4560,6 +4810,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_hub_port_in_claude_service_env() {
         // Verify MCP_HUB_PORT is specifically in the claude service environment,
         // not somewhere else in the compose file.
@@ -4628,6 +4879,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_passes_security_check() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4969,6 +5221,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_ollama_provider() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5000,6 +5253,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_local_provider_requires_model() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5034,6 +5288,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_default_anthropic() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5093,6 +5348,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_ollama_direct_injection() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5174,6 +5430,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_lmstudio_default_url() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5208,6 +5465,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_llamacpp_default_url() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5242,6 +5500,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_unsupported_provider_rejected() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5272,6 +5531,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_custom_provider_rejected_after_removal() {
         // Regression guard: the `custom` provider value was removed end-to-end.
         // Any lingering config that still sets `provider = "custom"` must now
@@ -5436,6 +5696,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn compose_template_claude_has_canonical_host_gateway_entry() {
         // Static template guard — `claude` and `mcp-playwright` must list the
         // canonical host gateway alias in extra_hosts (ADR-062). Other services
@@ -5508,7 +5769,7 @@ services:
     // ---- ensure_host_gateway_extra_host + per-consumer injection tests ----
 
     fn render_substituted_template() -> String {
-        COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", host_gateway_ip())
+        COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", &host_gateway_ip().expect("test"))
     }
 
     /// Write a fixture lock.json + standalone token mount file, for the
@@ -5551,6 +5812,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn apply_mcp_os_config_adds_host_gateway_to_hub() {
         let tmp = tempfile::tempdir().unwrap();
         let (token_path, lock_path) = write_lock_and_token_mount(
@@ -5568,6 +5830,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn apply_host_exec_config_adds_host_gateway_to_hub() {
         let tmp = tempfile::tempdir().unwrap();
         let (token_path, port_path) = write_token_and_port(tmp.path());
@@ -5582,6 +5845,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn apply_oauth_config_adds_host_gateway_to_each_consumer() {
         use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
@@ -5612,11 +5876,12 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn ensure_host_gateway_extra_host_is_idempotent() {
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
-        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
-        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub").expect("test");
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub").expect("test");
         let yaml = serde_yaml_ng::to_string(&doc).unwrap();
         let entries = extra_hosts_for(&yaml, "mcp-hub");
         assert_eq!(
@@ -5627,6 +5892,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn ensure_host_gateway_extra_host_replaces_existing_canonical_entry() {
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
@@ -5636,7 +5902,7 @@ services:
                 "{}:9.9.9.9",
                 consts::HOST_GATEWAY_ALIAS
             ))]);
-        ensure_host_gateway_extra_host(&mut doc, "mcp-hub");
+        ensure_host_gateway_extra_host(&mut doc, "mcp-hub").expect("test");
         let yaml = serde_yaml_ng::to_string(&doc).unwrap();
         let entries = extra_hosts_for(&yaml, "mcp-hub");
         assert_eq!(
@@ -5646,7 +5912,11 @@ services:
         );
         assert_eq!(
             entries[0],
-            format!("{}:{}", consts::HOST_GATEWAY_ALIAS, host_gateway_ip())
+            format!(
+                "{}:{}",
+                consts::HOST_GATEWAY_ALIAS,
+                host_gateway_ip().expect("test")
+            )
         );
     }
 
@@ -5828,6 +6098,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_llamacpp_custom_model_option_labels() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5859,6 +6130,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_lmstudio_custom_model_option_labels() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -5890,6 +6162,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_claude_version_is_pinned() {
         // Regression guard: CLAUDE_VERSION must be the pinned semver from defaults.
         let config = ResolvedClaudeConfig {
@@ -5897,19 +6170,22 @@ services:
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let result = render_compose(
             "test-project",
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
             &HostBridgesInfo::default(),
-        )
-        .unwrap();
+        );
+        // CodeQL: avoid {result:?} / {yaml} in panic — anyhow chain may carry
+        // apply_oauth_config / init_secrets_dir traces. See project.rs:700.
+        let yaml = result.expect("render_compose must succeed in test env");
         let expected = format!("CLAUDE_VERSION={}", crate::defaults::CLAUDE_VERSION);
         assert!(
             yaml.contains(&expected),
-            "render_compose must inject {expected}, got:\n{yaml}"
+            "render_compose must inject {expected} (rendered length: {} chars)",
+            yaml.len()
         );
         assert!(
             !yaml.contains("CLAUDE_VERSION=latest"),
@@ -5922,6 +6198,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_workspace_mount_is_readwrite() {
         // The workspace must be read-write so Claude can create/edit files.
         // This guards against accidentally adding :ro to the workspace mount.
@@ -6815,6 +7092,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_enables_host_exec_in_hub_when_project_has_it() {
         // End-to-end: render_compose with host_exec enabled puts it in
         // ENABLED_SERVICES. (WORKER_HOST_EXEC_URL is NOT injected here because
@@ -7020,6 +7298,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_contains_ide_lock_mount() {
         // render_compose must substitute ${IDE_LOCK_DIR} so the claude container
         // has the ide-bridge directory mounted as /home/speedwave/.claude/ide:ro.
@@ -7087,6 +7366,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_container_user() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7119,6 +7399,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_host_gateway() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7139,9 +7420,9 @@ services:
             "render_compose must substitute ${{HOST_GATEWAY}}"
         );
         // Must contain a valid IP (not the placeholder)
-        let expected_ip = host_gateway_ip();
+        let expected_ip = host_gateway_ip().expect("test");
         assert!(
-            result.contains(expected_ip),
+            result.contains(&expected_ip),
             "rendered compose must contain host gateway IP {expected_ip}"
         );
     }
@@ -7155,6 +7436,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_ide_host_override() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7198,6 +7480,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_claude_env_has_ide_host_override() {
         // CLAUDE_CODE_IDE_HOST_OVERRIDE must be in the claude service environment.
         let config = ResolvedClaudeConfig {
@@ -7234,6 +7517,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_claude_env_has_no_flicker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7269,6 +7553,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_claude_env_has_effort_level() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7295,10 +7580,21 @@ services:
 
         let has_effort_level = claude_env
             .iter()
-            .any(|v| v.as_str() == Some("CLAUDE_CODE_EFFORT_LEVEL=max"));
+            .any(|v| v.as_str() == Some("CLAUDE_CODE_EFFORT_LEVEL=auto"));
         assert!(
             has_effort_level,
-            "CLAUDE_CODE_EFFORT_LEVEL=max must be in claude service environment"
+            "CLAUDE_CODE_EFFORT_LEVEL=auto must be in claude service environment"
+        );
+
+        // Auto-connect to the Speedwave IDE Bridge on start, so the user does
+        // not have to run /ide and pick "Speedwave" manually. Value is the
+        // string `true` (not 1) per the Claude Code env-vars reference.
+        let has_auto_connect = claude_env
+            .iter()
+            .any(|v| v.as_str() == Some("CLAUDE_CODE_AUTO_CONNECT_IDE=true"));
+        assert!(
+            has_auto_connect,
+            "CLAUDE_CODE_AUTO_CONNECT_IDE=true must be in claude service environment"
         );
     }
 
@@ -7402,6 +7698,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_rejects_invalid_project_name() {
         let resolved = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7719,6 +8016,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_with_mixed_enabled_disabled_end_to_end() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -7741,12 +8039,9 @@ services:
             None,
             &HostBridgesInfo::default(),
         );
-        assert!(
-            result.is_ok(),
-            "render_compose should succeed: {:?}",
-            result
-        );
-        let yaml = result.unwrap();
+        // CodeQL: avoid {result:?} — anyhow chain may carry apply_oauth_config
+        // / init_secrets_dir traces. See project.rs:700.
+        let yaml = result.expect("render_compose should succeed in test env");
 
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
@@ -7937,6 +8232,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_all_services_have_container_user() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -8061,6 +8357,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         }
     }
 
@@ -8340,6 +8637,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
@@ -8389,6 +8687,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let svc = plugin::generate_plugin_service(
             &manifest,
@@ -8485,6 +8784,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -8860,6 +9160,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
 
         // generate_plugin_service requires a port for MCP plugins,
@@ -9793,6 +10094,7 @@ networks:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         }];
 
         // Compose with plugin service already present (as apply_plugins would leave it)
@@ -9905,6 +10207,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge: None,
+            instructions: None,
         };
         let violations = SecurityCheck::run(&yaml, "test", &[manifest], &test_expected_paths());
         assert!(
@@ -10529,6 +10832,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_ensure_plugin_images_called_before_apply_plugins() {
         // Structural test: verify render_compose() uses ensure_plugin_images (not
         // build_pending_plugin_images) and calls it BEFORE apply_plugins.
@@ -10669,6 +10973,7 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_propagates_tz_to_all_services() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -10939,6 +11244,7 @@ services:
             cpu_limit: None,
             requires_integrations: vec![],
             host_bridge,
+            instructions: None,
         };
         plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
     }
@@ -11833,5 +12139,128 @@ networks:
 "#;
         super::FORCE_DISK_GARBAGE.with(|c| *c.borrow_mut() = Some(valid_yaml.to_string()));
         super::save_compose(&project, valid_yaml).unwrap();
+    }
+
+    // ── HostAddressing resolver tests ───────────────────────────────────────
+
+    struct FixedComputer(HostAddressing);
+    impl HostAddressingComputer for FixedComputer {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct CountingComputer {
+        addr: HostAddressing,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl HostAddressingComputer for CountingComputer {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.addr.clone())
+        }
+    }
+
+    struct FailingComputer(String);
+    impl HostAddressingComputer for FailingComputer {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            Err(anyhow::anyhow!(self.0.clone()))
+        }
+    }
+
+    fn sample_addr() -> HostAddressing {
+        HostAddressing {
+            gateway_ip: "172.24.48.1".into(),
+            bind_address: "172.24.48.1".into(),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn host_addressing_caches_after_first_call() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        set_host_addressing_computer_for_test(std::sync::Arc::new(CountingComputer {
+            addr: sample_addr(),
+            calls: std::sync::Arc::clone(&calls),
+        }));
+
+        let a = host_addressing().unwrap();
+        let b = host_addressing().unwrap();
+        assert_eq!(a, b);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        reset_host_addressing_computer_for_test();
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn host_addressing_recomputes_after_invalidation() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        set_host_addressing_computer_for_test(std::sync::Arc::new(CountingComputer {
+            addr: sample_addr(),
+            calls: std::sync::Arc::clone(&calls),
+        }));
+
+        host_addressing().unwrap();
+        invalidate_host_addressing_cache();
+        host_addressing().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        reset_host_addressing_computer_for_test();
+    }
+
+    // FailingComputer is exercised directly (not via the global slot) so this
+    // test cannot poison concurrent render_compose tests that consume the
+    // production computer through host_gateway_ip(). The Err propagation path
+    // in host_addressing() is identical regardless of which computer raised.
+    #[test]
+    fn failing_computer_returns_err() {
+        let computer = FailingComputer("wsl probe failed".into());
+        let err = computer.compute().unwrap_err();
+        assert!(err.to_string().contains("wsl probe failed"));
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn host_gateway_ip_and_bind_address_split_correctly() {
+        set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(HostAddressing {
+            gateway_ip: "192.168.5.2".into(),
+            bind_address: "127.0.0.1".into(),
+        })));
+        assert_eq!(host_gateway_ip().unwrap(), "192.168.5.2");
+        assert_eq!(host_bind_address().unwrap(), "127.0.0.1");
+
+        reset_host_addressing_computer_for_test();
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn host_addressing_concurrent_callers_share_one_computation() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        set_host_addressing_computer_for_test(std::sync::Arc::new(CountingComputer {
+            addr: sample_addr(),
+            calls: std::sync::Arc::clone(&calls),
+        }));
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let b = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    b.wait();
+                    host_addressing().unwrap()
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let n = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            n >= 1 && n <= 4,
+            "computer called {n} times — expected 1..=4 (one wins; losers see cached or recompute under race)"
+        );
+
+        reset_host_addressing_computer_for_test();
     }
 }

@@ -6,7 +6,7 @@ import { SettingsComponent } from './settings.component';
 import { TauriService } from '../services/tauri.service';
 import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
-import { ThemeService, THEME_IDS } from '../services/theme.service';
+import { ThemeService, THEME_IDS, THEME_MODES } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 function setupMockTauri(mockTauri: MockTauriService): void {
@@ -254,18 +254,13 @@ describe('SettingsComponent', () => {
       expect(theme.theme()).toBe('cyan');
     });
 
-    it('renders the heading, accent-color label, and ⌘T shortcut hint', () => {
+    it('renders the heading and accent-color label', () => {
       fixture.detectChanges();
       const section = fixture.nativeElement.querySelector(
         '[data-testid="settings-section-appearance"]'
       );
       expect(section.textContent).toContain('Appearance');
       expect(section.textContent).toContain('accent color');
-      // Mockup shortcut copy: "shortcut: ⌘T cycles themes"
-      expect(section.textContent).toContain('cycles themes');
-      const kbd = section.querySelector('.kbd');
-      expect(kbd).not.toBeNull();
-      expect(kbd.textContent).toContain('⌘T');
     });
 
     it('does not toggle theme when the same card is clicked twice (no-op)', () => {
@@ -277,6 +272,56 @@ describe('SettingsComponent', () => {
       ) as HTMLButtonElement;
       amberBtn.click();
       expect(theme.theme()).toBe('amber');
+    });
+
+    it('renders one MODE button per ThemeMode', () => {
+      fixture.detectChanges();
+      const section = fixture.nativeElement.querySelector(
+        '[data-testid="settings-section-appearance"]'
+      );
+      const buttons = section.querySelectorAll('button[data-mode-btn]');
+      expect(buttons.length).toBe(THEME_MODES.length);
+      const ids = Array.from(buttons).map((b) => (b as HTMLElement).getAttribute('data-mode-btn'));
+      expect(ids).toEqual([...THEME_MODES]);
+    });
+
+    it('marks the MODE button matching ThemeService.mode() as active', () => {
+      const theme = TestBed.inject(ThemeService);
+      theme.setMode('light');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const active = fixture.nativeElement.querySelector(
+        'button[data-mode-btn="light"]'
+      ) as HTMLButtonElement;
+      const inactive = fixture.nativeElement.querySelector(
+        'button[data-mode-btn="dark"]'
+      ) as HTMLButtonElement;
+      expect(active.getAttribute('aria-pressed')).toBe('true');
+      expect(inactive.getAttribute('aria-pressed')).toBe('false');
+      // Reset for other tests in the same suite.
+      theme.setMode('dark');
+    });
+
+    it('clicking a MODE button calls ThemeService.setMode(id)', () => {
+      const theme = TestBed.inject(ThemeService);
+      fixture.detectChanges();
+      const lightBtn = fixture.nativeElement.querySelector(
+        'button[data-mode-btn="light"]'
+      ) as HTMLButtonElement;
+      lightBtn.click();
+      expect(theme.mode()).toBe('light');
+      theme.setMode('dark');
+    });
+
+    it('renders the MODE label above the accent grid', () => {
+      fixture.detectChanges();
+      const section: HTMLElement = fixture.nativeElement.querySelector(
+        '[data-testid="settings-section-appearance"]'
+      );
+      // Lower-cased mode label per mono uppercase styling.
+      expect(section.textContent?.toLowerCase()).toContain('mode');
+      // The "Backgrounds stay dark" copy must be gone.
+      expect(section.textContent).not.toContain('Backgrounds stay dark');
     });
   });
 });

@@ -738,13 +738,16 @@ fn main() -> anyhow::Result<()> {
 
     // Sanitise any v1 SharePoint secrets still sitting in the worker-mounted
     // token dir (refresh_token / client_id / tenant_id). Idempotent — no-op
-    // when no project has the legacy layout. Users with v1 state see the
-    // "Re-authorize SharePoint" banner instead of getting a silent data
-    // migration (decision: post-OAuthProvider refactor, no backward compat).
+    // when no project has the legacy layout. Secrets are never migrated.
     let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
     if cleaned > 0 {
         log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
     }
+
+    // Self-heal legacy/partial oauth.json whose clientId/tenantId sit top-level
+    // instead of under providerData (ADR-060 addendum). Shape-only, idempotent.
+    // It logs its own summary; do not re-log the return value (CodeQL taints it).
+    let _ = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
     // Spawn host_exec BEFORE render_compose — hub needs port/auth-token files (ADR-054).
     let _host_exec_worker =
@@ -1327,6 +1330,32 @@ mod tests {
         assert!(
             spawn_idx < render_idx,
             "the host_exec worker must be spawned before render_compose"
+        );
+    }
+
+    #[test]
+    fn oauth_state_migration_runs_after_cleanup_and_before_worker_spawn() {
+        // Structural guard (ADR-060 addendum): the providerData self-heal must run
+        // after legacy_token_cleanup (both are best-effort startup sanitation) and
+        // before any worker that reads oauth.json is spawned, so the oauth worker
+        // never refreshes against a pre-migration (malformed) file.
+        let source = include_str!("main.rs");
+        let cleanup_idx = source
+            .find("run_legacy_token_cleanup_at_startup()")
+            .expect("the CLI must call run_legacy_token_cleanup_at_startup in main()");
+        let migration_idx = source
+            .find("run_oauth_state_migration_at_startup()")
+            .expect("the CLI must call run_oauth_state_migration_at_startup in main()");
+        let spawn_idx = source
+            .find("maybe_spawn_host_exec_worker(&project_name")
+            .expect("the CLI must spawn workers in main()");
+        assert!(
+            cleanup_idx < migration_idx,
+            "oauth_state_migration must run after legacy_token_cleanup"
+        );
+        assert!(
+            migration_idx < spawn_idx,
+            "oauth_state_migration must run before any worker is spawned"
         );
     }
 

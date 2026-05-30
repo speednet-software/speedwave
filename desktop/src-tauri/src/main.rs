@@ -16,6 +16,7 @@ mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
+mod firewall;
 mod fs_perms;
 mod git_cmd;
 mod health;
@@ -1058,6 +1059,9 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
 /// Start IDE Bridge if not already running. Holds the mutex for the entire
 /// init+start to prevent races (two callers both seeing None and double-starting).
 fn ensure_ide_bridge_running(ide_bridge: &SharedIdeBridge, app_handle: &tauri::AppHandle) {
+    // Ensure the WSL Hyper-V firewall rule before binding the host listener
+    // (ADR-067). No-op off Windows; runs at most once per process.
+    firewall::ensure_firewall_rule();
     let mut guard = match ide_bridge.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1078,6 +1082,7 @@ fn ensure_ide_bridge_running(ide_bridge: &SharedIdeBridge, app_handle: &tauri::A
 /// This can block up to `PORT_READ_TIMEOUT` (10 s) — acceptable for a
 /// single-user desktop app where concurrent Tauri commands are rare.
 fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
+    firewall::ensure_firewall_rule();
     let mut guard = match mcp_os.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1111,6 +1116,7 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
 /// Spawn the project's `host_exec` worker if enabled and not running.
 /// Writes the chmod-600 config snapshot first. Returns `true` on fresh spawn.
 pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str) -> bool {
+    firewall::ensure_firewall_rule();
     let mut map = match host_exec.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1206,6 +1212,7 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
 /// integration with `uses_oauth_refresh = true` is enabled, or if the worker
 /// is already running. Returns true if a new worker was started this call.
 pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bool {
+    firewall::ensure_firewall_rule();
     let mut map = match oauth_arc.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1699,13 +1706,19 @@ fn main() {
             if setup_started {
                 // Sanitise any v1 SharePoint secrets still in the worker-mounted
                 // token dir (refresh_token / client_id / tenant_id). Best-effort,
-                // idempotent. Users with v1 state see the "Re-authorize SharePoint"
-                // banner — see legacy_token_cleanup module docs.
+                // idempotent. Secrets are never migrated — see module docs.
                 let cleaned =
                     speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
                 if cleaned > 0 {
                     log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
                 }
+
+                // Self-heal legacy/partial oauth.json whose clientId/tenantId sit
+                // top-level instead of under providerData (ADR-060 addendum).
+                // Shape-only, idempotent — never moves secrets. It logs its own
+                // summary; do not re-log the return value (CodeQL taints it).
+                let _ =
+                    speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
                 // Start IDE Bridge
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
@@ -1775,6 +1788,21 @@ fn main() {
                 #[cfg(target_os = "windows")]
                 if let Err(e) = setup_wizard::ensure_wslconfig_vpn_compat() {
                     log::warn!(".wslconfig VPN-compat migration failed: {e}");
+                }
+
+                // Existing distros (created before the metadata fix) need the
+                // automount=metadata option too, or claude /login cannot chmod
+                // its credentials on the 9p mount. Idempotent. NEVER terminate
+                // here: containers may already be running, and a `wsl
+                // --terminate` would kill them mid-start ("cannot exec in a
+                // stopped state"). The new wsl.conf applies on the next natural
+                // WSL restart.
+                #[cfg(target_os = "windows")]
+                {
+                    use setup_wizard::TerminateOnChange;
+                    if let Err(e) = setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::No) {
+                        log::warn!("wsl.conf metadata migration failed: {e}");
+                    }
                 }
 
                 if let Err(e) = setup_wizard::link_cli() {
@@ -2037,6 +2065,7 @@ fn main() {
             list_projects,
             switch_project,
             containers_cmd::add_project,
+            containers_cmd::remove_project,
             // Health
             get_health,
             // Container logs
@@ -2107,6 +2136,7 @@ fn main() {
             plugin_cmd::set_plugin_enabled,
             plugin_cmd::save_plugin_credentials,
             plugin_cmd::delete_plugin_credentials,
+            plugin_cmd::delete_plugin_credential_field,
             plugin_cmd::plugin_save_settings,
             plugin_cmd::plugin_load_settings,
             // Slash menu discovery

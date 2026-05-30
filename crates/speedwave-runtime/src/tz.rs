@@ -27,12 +27,15 @@ fn detect_platform() -> Option<String> {
 #[cfg(target_os = "windows")]
 fn detect_platform() -> Option<String> {
     use std::io::Read;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     // 5 s deadline; slow PowerShell startup (cold boot, AV scan) must not stall caller.
     let timeout = Duration::from_secs(5);
-    let mut child = Command::new("powershell")
+    // system_command applies CREATE_NO_WINDOW on Windows so this PowerShell
+    // probe (runs on every render_compose → add/switch project) does not flash
+    // a console window over the Desktop UI.
+    let mut child = crate::binary::system_command("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",

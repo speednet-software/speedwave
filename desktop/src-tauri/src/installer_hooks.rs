@@ -1,102 +1,403 @@
 //! Regression tests pinning security/correctness invariants of
-//! `windows/installer-hooks.nsh`. See ADR-048 for the full rationale.
+//! `windows/installer-hooks.nsh` (and its inputs:
+//! `installer-hooks-template.nsh`, `sweep.ps1`, `firewall.ps1`).
+//! See ADR-048 for the full design.
 
 #[cfg(test)]
 mod tests {
     const HOOKS: &str = include_str!("../windows/installer-hooks.nsh");
+    const TEMPLATE: &str = include_str!("../windows/installer-hooks-template.nsh");
+    const SWEEP_PS1: &str = include_str!("../windows/sweep.ps1");
+    const FIREWALL_PS1: &str = include_str!("../windows/firewall.ps1");
+    const SWEEP_WXS: &str = include_str!("../windows/sweep.wxs");
+    const FIREWALL_WXS: &str = include_str!("../windows/firewall.wxs");
+    const RUN_HIDDEN_VBS: &str = include_str!("../windows/run-hidden.vbs");
+
+    // ── Hook shape ──────────────────────────────────────────────────────
 
     #[test]
-    fn has_preinstall_macro() {
+    fn has_all_required_hook_macros() {
+        for macro_name in [
+            "NSIS_HOOK_PREINSTALL",
+            "NSIS_HOOK_POSTINSTALL",
+            "NSIS_HOOK_PREUNINSTALL",
+            "NSIS_HOOK_POSTUNINSTALL",
+        ] {
+            assert!(
+                HOOKS.contains(&format!("!macro {macro_name}")),
+                "installer-hooks.nsh missing !macro {macro_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn preinstall_materializes_sweep_and_invokes_powershell() {
+        let pre = section(HOOKS, "NSIS_HOOK_PREINSTALL");
         assert!(
-            HOOKS.contains("!macro NSIS_HOOK_PREINSTALL"),
-            "PRE-INSTALL hook is the only thing that releases node.exe before overwrite"
+            pre.contains("!insertmacro SPEEDWAVE_MATERIALIZE_SWEEP"),
+            "PREINSTALL must !insertmacro SPEEDWAVE_MATERIALIZE_SWEEP"
+        );
+        assert!(
+            pre.contains(r#"$\"$PLUGINSDIR\sweep.ps1$\""#),
+            "PREINSTALL must run the materialized $PLUGINSDIR\\sweep.ps1 (via the shim)"
+        );
+        assert!(
+            pre.contains("$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe"),
+            "PREINSTALL must use the absolute powershell path to defeat PATH hijack"
+        );
+        assert!(
+            pre.contains(r#""$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs""#),
+            "PREINSTALL must run PowerShell via the wscript hidden-window shim"
+        );
+        for env_name in ["SPW_INSTDIR", "SPW_DATA_DIR"] {
+            assert!(
+                pre.contains(&format!(r#"SetEnvironmentVariable(t "{env_name}", t"#)),
+                "PREINSTALL must pass {env_name} via SetEnvironmentVariable"
+            );
+            assert!(
+                pre.contains(&format!(r#"SetEnvironmentVariable(t "{env_name}", i 0)"#)),
+                "PREINSTALL must clear {env_name} after the sweep"
+            );
+        }
+        assert!(
+            pre.contains(r#"StrCpy $1 "$PROFILE\.speedwave""#),
+            "PREINSTALL must fall back to $PROFILE\\.speedwave for SPW_DATA_DIR"
         );
     }
 
     #[test]
-    fn passes_instdir_via_environment_variable_not_command_line() {
+    fn postinstall_installs_firewall_rule() {
+        let post = section(HOOKS, "NSIS_HOOK_POSTINSTALL");
         assert!(
-            HOOKS.contains("SetEnvironmentVariable") && HOOKS.contains("SPW_INSTDIR"),
-            "$INSTDIR must be passed via SetEnvironmentVariable, not on the cmd line \
-             (apostrophe in path breaks pwsh -Command parsing — see ADR-048)"
+            post.contains("!insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL"),
+            "POSTINSTALL must materialize firewall.ps1"
         );
         assert!(
-            HOOKS.contains("$$env:SPW_INSTDIR"),
-            "the PS script must read $env:SPW_INSTDIR (NSIS-escaped as $$env:)"
-        );
-        assert!(
-            !HOOKS.contains("-File \"$PLUGINSDIR\\speedwave-sweep.ps1\" \""),
-            "no positional path arg to the .ps1 — env var is the only channel"
+            post.contains(r#"$\"$PLUGINSDIR\firewall.ps1$\" -Mode install"#),
+            "POSTINSTALL must invoke firewall.ps1 -Mode install (via the shim)"
         );
     }
 
     #[test]
-    fn writes_sweep_script_to_pluginsdir() {
+    fn postuninstall_removes_firewall_rule_before_wsl_unregister() {
+        let post = section(HOOKS, "NSIS_HOOK_POSTUNINSTALL");
+        let firewall_idx = post
+            .find("firewall.ps1$\\\" -Mode uninstall")
+            .expect("POSTUNINSTALL must remove firewall rule");
+        let wsl_idx = post
+            .find("wsl.exe\" --unregister")
+            .expect("POSTUNINSTALL must wsl --unregister");
         assert!(
-            HOOKS.contains("InitPluginsDir") && HOOKS.contains("$PLUGINSDIR\\speedwave-sweep.ps1"),
-            "sweep script must be materialized in $PLUGINSDIR"
+            firewall_idx < wsl_idx,
+            "firewall rule removal must precede wsl --unregister"
         );
-        assert!(
-            HOOKS.contains("-File \"$PLUGINSDIR\\speedwave-sweep.ps1\""),
-            "powershell.exe must be invoked with -File, not -Command, to avoid concat hazards"
+    }
+
+    // ── Drift detection: generator output stays in sync with .ps1 sources ──
+
+    #[test]
+    fn installer_hooks_nsh_matches_template_plus_generated_macros() {
+        // installer-hooks.nsh = template (with @@SPEEDWAVE_EMBEDDED_MACROS@@
+        // replaced) + macros emitted by scripts/generate-installer-nsh.sh.
+        // We re-derive the expected output here so any drift between the
+        // committed installer-hooks.nsh and its inputs fails CI with a clear
+        // "run make generate-installer-nsh" message.
+        let expected = render_expected_hooks(TEMPLATE, SWEEP_PS1, FIREWALL_PS1, RUN_HIDDEN_VBS);
+        assert_eq!(
+            HOOKS, expected,
+            "installer-hooks.nsh is out of sync with its inputs — run `make generate-installer-nsh` and commit"
         );
     }
 
     #[test]
-    fn uses_ordinal_string_comparison_not_wildcard_like() {
+    fn run_hidden_vbs_has_no_bom() {
+        // wscript.exe fails to parse a .vbs with a UTF-8 BOM. The generator
+        // strips BOM on materialize, but the source must also be BOM-free.
         assert!(
-            HOOKS.contains("StartsWith") && HOOKS.contains("OrdinalIgnoreCase"),
-            "use String.StartsWith(.., OrdinalIgnoreCase) — `-like` treats brackets as wildcards"
-        );
-        assert!(
-            !HOOKS.contains("-like (Join-Path"),
-            "do not use -like for path matching — brackets in $INSTDIR break it"
+            !RUN_HIDDEN_VBS.starts_with('\u{feff}'),
+            "run-hidden.vbs must be ANSI/BOM-free (wscript chokes on a BOM)"
         );
     }
 
     #[test]
-    fn enumerates_via_cim_for_cross_session_visibility() {
+    fn install_hooks_run_powershell_via_hidden_shim() {
+        // All three PowerShell-invoking hooks must go through the wscript shim
+        // (no console flash) and materialize the vbs first.
+        let shim_calls = HOOKS
+            .matches("wscript.exe\" \"$PLUGINSDIR\\run-hidden.vbs")
+            .count();
+        assert_eq!(
+            shim_calls, 3,
+            "expected 3 hooks invoking PowerShell via the wscript shim, found {shim_calls}"
+        );
+        assert_eq!(
+            HOOKS
+                .matches("!insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN")
+                .count(),
+            3,
+            "each shim hook must materialize run-hidden.vbs first"
+        );
+        // No hook may launch powershell.exe directly via nsExec — that is the
+        // flash path. powershell.exe appears ONLY inside the wscript argument.
         assert!(
-            HOOKS.contains("Get-CimInstance") && HOOKS.contains("Win32_Process"),
-            "process enumeration must use Get-CimInstance Win32_Process, not Get-Process \
-             (Get-Process is session-scoped)"
+            !HOOKS.contains("nsExec::ExecToLog `\"$SYSDIR\\WindowsPowerShell"),
+            "no hook may call powershell.exe directly via nsExec — must use the wscript shim"
         );
     }
 
     #[test]
-    fn polls_file_lock_does_not_use_fixed_sleep() {
+    fn template_contains_embed_marker() {
         assert!(
-            HOOKS.contains("[System.IO.File]::Open"),
-            "poll write access via [System.IO.File]::Open, not a fixed Sleep"
+            TEMPLATE.contains("@@SPEEDWAVE_EMBEDDED_MACROS@@"),
+            "template must contain the @@SPEEDWAVE_EMBEDDED_MACROS@@ marker for the generator"
+        );
+    }
+
+    // ── PowerShell scripts: contract surface ─────────────────────────────
+
+    #[test]
+    fn sweep_ps1_reads_required_env_vars() {
+        for env in ["$env:SPW_INSTDIR", "$env:SPW_DATA_DIR"] {
+            assert!(SWEEP_PS1.contains(env), "sweep.ps1 must consume {env}");
+        }
+    }
+
+    #[test]
+    fn sweep_ps1_kills_all_three_target_categories() {
+        // Speedwave.exe (Tauri) + nodejs/* (host workers) + bin/speedwave.exe (CLI).
+        assert!(
+            SWEEP_PS1.contains(r"\Speedwave.exe"),
+            "sweep.ps1 must target Speedwave.exe"
         );
         assert!(
-            HOOKS.contains("FileShare]::None"),
-            "open with FileShare::None to detect any held handle"
+            SWEEP_PS1.contains(r"\nodejs\"),
+            "sweep.ps1 must target $instDir\\nodejs\\ workers"
         );
         assert!(
-            !HOOKS.contains("  Sleep 500\n"),
-            "the NSIS macro must not use a fixed Sleep — the PS loop polls"
+            SWEEP_PS1.contains(r"\bin\speedwave.exe"),
+            "sweep.ps1 must target $dataDir\\bin\\speedwave.exe (CLI)"
         );
     }
 
     #[test]
-    fn checks_sweep_exit_code_and_emits_detailprint() {
+    fn sweep_ps1_uses_ordinal_comparison_not_wildcard() {
         assert!(
-            HOOKS.contains("Pop $0") && HOOKS.contains("$0 != 0") && HOOKS.contains("DetailPrint"),
-            "the sweep exit code must be checked and surfaced via DetailPrint"
+            SWEEP_PS1.contains("OrdinalIgnoreCase"),
+            "sweep.ps1 must compare with OrdinalIgnoreCase (brackets in paths break -like)"
         );
     }
 
     #[test]
-    fn uses_absolute_powershell_path() {
+    fn sweep_ps1_enumerates_via_cim() {
         assert!(
-            HOOKS.contains("$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe"),
-            "use absolute $SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe — PATH not trusted"
+            SWEEP_PS1.contains("Get-CimInstance") && SWEEP_PS1.contains("Win32_Process"),
+            "sweep.ps1 must enumerate processes via Get-CimInstance Win32_Process (cross-session)"
         );
     }
 
     #[test]
-    fn scopes_kill_to_instdir_not_global_image_name() {
+    fn sweep_ps1_polls_file_lock_via_fileshare_none() {
+        assert!(
+            SWEEP_PS1.contains("[System.IO.File]::Open") && SWEEP_PS1.contains("FileShare]::None"),
+            "sweep.ps1 must probe write lock via System.IO.File::Open with FileShare::None"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_uses_wsl_vmcreator_id() {
+        assert!(
+            FIREWALL_PS1.contains("{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"),
+            "firewall.ps1 must scope the rule to the WSL VMCreatorId"
+        );
+        assert!(
+            FIREWALL_PS1.contains("New-NetFirewallHyperVRule"),
+            "firewall.ps1 must call New-NetFirewallHyperVRule (Hyper-V layer, not WDF)"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_cleans_stale_wdf_block_rules() {
+        assert!(
+            FIREWALL_PS1.contains("Action Block")
+                && FIREWALL_PS1.contains("Remove-NetFirewallRule"),
+            "firewall.ps1 install must remove stale WDF Block rules for our binaries"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_creates_wdf_allow_rules() {
+        // The actual fix for the per-binary WDF prompt: host application ALLOW
+        // rules (New-NetFirewallRule -Program), separate from the Hyper-V rule.
+        assert!(
+            FIREWALL_PS1.contains("New-NetFirewallRule")
+                && FIREWALL_PS1.contains("Action      = 'Allow'")
+                && FIREWALL_PS1.contains("Program     = $prog"),
+            "firewall.ps1 must create host WDF -Program allow rules to suppress the prompt"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_accepts_programs_param_split_on_semicolon() {
+        // Paths arrive as one ';'-joined string ([string], not [string[]]) because
+        // PowerShell -File cannot bind a multi-element array. Verified on Windows.
+        assert!(
+            FIREWALL_PS1.contains("[string]$Programs")
+                && FIREWALL_PS1.contains("$Programs -split ';'"),
+            "firewall.ps1 must accept a single ';'-separated -Programs string and split it"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_uninstall_removes_wdf_allow_rules() {
+        let idx = FIREWALL_PS1
+            .find("$Mode -eq 'uninstall'")
+            .expect("uninstall branch must exist");
+        let branch = &FIREWALL_PS1[idx..];
+        assert!(
+            branch.contains("$WdfRulePrefix") && branch.contains("Remove-NetFirewallRule"),
+            "uninstall must remove the WDF allow rules ($WdfRulePrefix) it created"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_installer_modes_fail_open() {
+        // The installer-invoked modes (install/uninstall) must never brick a
+        // policy-locked machine. Several exit-0 paths cover success + catch.
+        let exits = FIREWALL_PS1.matches("exit 0").count();
+        assert!(
+            exits >= 4,
+            "firewall.ps1 must exit 0 on success AND catch branches (fail-open); found {exits}"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_supports_all_modes() {
+        assert!(
+            FIREWALL_PS1.contains("'install', 'uninstall', 'ensure', 'install-elevated'"),
+            "firewall.ps1 must validate Mode against install|uninstall|ensure|install-elevated"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_ensure_checks_existence_before_signalling_elevation() {
+        // Runtime 'ensure' must do the non-admin existence check (no UAC) and
+        // only exit 3 (needs-elevation) when the rule is genuinely missing.
+        let ensure_idx = FIREWALL_PS1
+            .find("$Mode -eq 'ensure'")
+            .expect("ensure branch must exist");
+        let ensure_branch = &FIREWALL_PS1[ensure_idx..];
+        let check_pos = ensure_branch
+            .find("Test-RuleExists")
+            .expect("ensure must call Test-RuleExists");
+        let exit3_pos = ensure_branch
+            .find("exit 3")
+            .expect("ensure must exit 3 when elevation required");
+        assert!(
+            check_pos < exit3_pos,
+            "ensure must check rule existence BEFORE signalling needs-elevation"
+        );
+    }
+
+    #[test]
+    fn firewall_ps1_elevated_mode_does_not_self_relaunch() {
+        // install-elevated runs the privileged body directly; self-elevation is
+        // driven from Rust, so the script must NOT contain -Verb RunAs (no UAC
+        // loop) and must NOT re-check admin in the elevated branch.
+        assert!(
+            !FIREWALL_PS1.contains("-Verb RunAs") && !FIREWALL_PS1.contains("RunAs"),
+            "firewall.ps1 must not self-elevate; elevation is driven from Rust"
+        );
+    }
+
+    #[test]
+    fn installers_invoke_only_install_and_uninstall_modes() {
+        // The self-elevating/runtime modes (ensure, install-elevated) are
+        // reachable only from the Desktop runtime. The installers must INVOKE
+        // firewall.ps1 only with -Mode install / -Mode uninstall. Note: the
+        // mode strings legitimately appear inside the materialized firewall.ps1
+        // body (ValidateSet) in installer-hooks.nsh — so we assert on the
+        // invocation pattern (`firewall.ps1...-Mode <runtime>`), not presence.
+        for needle in [
+            "firewall.ps1\" -Mode ensure",
+            "firewall.ps1\" -Mode install-elevated",
+            "firewall.ps1&quot; -Mode ensure",
+            "firewall.ps1&quot; -Mode install-elevated",
+        ] {
+            assert!(
+                !HOOKS.contains(needle),
+                "installer-hooks.nsh must not invoke runtime-only mode: {needle}"
+            );
+            assert!(
+                !FIREWALL_WXS.contains(needle),
+                "firewall.wxs must not invoke runtime-only mode: {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn materialized_ps1_scripts_contain_no_backtick() {
+        // A backtick is the NSIS FileWrite string delimiter and has no escape,
+        // so a literal backtick truncates the NSIS string and aborts makensis.
+        // The generator rejects such scripts; this guards the SSOT sources.
+        for (name, ps1) in [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)] {
+            assert!(
+                !ps1.contains('`'),
+                "{name} contains a backtick — breaks NSIS FileWrite (use splatting)"
+            );
+        }
+    }
+
+    // ── WiX fragments: MSI parity ────────────────────────────────────────
+
+    #[test]
+    fn sweep_wxs_runs_after_install_files_and_calls_powershell() {
+        assert!(
+            SWEEP_WXS.contains("After=\"InstallFiles\""),
+            "sweep.wxs must sequence the CA after InstallFiles (resources extracted)"
+        );
+        assert!(
+            SWEEP_WXS.contains("WindowsPowerShell\\v1.0\\powershell.exe"),
+            "sweep.wxs must invoke the absolute powershell.exe path"
+        );
+        assert!(
+            SWEEP_WXS.contains("sweep.ps1"),
+            "sweep.wxs must reference sweep.ps1"
+        );
+        assert!(
+            SWEEP_WXS.contains("CAQuietExec64"),
+            "sweep.wxs must use CAQuietExec64 (WixCA helper) so no cmd window flashes"
+        );
+        assert!(
+            SWEEP_WXS.contains(r#"Execute="deferred""#)
+                && SWEEP_WXS.contains(r#"Impersonate="no""#),
+            "sweep.wxs must run deferred + non-impersonated (System context)"
+        );
+    }
+
+    #[test]
+    fn firewall_wxs_install_and_uninstall_both_sequenced() {
+        assert!(
+            FIREWALL_WXS.contains("-Mode install") && FIREWALL_WXS.contains("-Mode uninstall"),
+            "firewall.wxs must cover both install and uninstall modes"
+        );
+        assert!(
+            FIREWALL_WXS.contains("After=\"InstallFiles\""),
+            "firewall.wxs install must run after InstallFiles"
+        );
+        assert!(
+            FIREWALL_WXS.contains("Before=\"RemoveFiles\""),
+            "firewall.wxs uninstall must run before RemoveFiles (firewall.ps1 still on disk)"
+        );
+        assert!(
+            FIREWALL_WXS.contains(r#"REMOVE="ALL""#),
+            "firewall.wxs uninstall must be conditioned on REMOVE=ALL"
+        );
+    }
+
+    // ── Negative invariants from the pre-refactor era ────────────────────
+
+    #[test]
+    fn no_global_image_name_kill() {
         let lower = HOOKS.to_lowercase();
         assert!(
             !lower.contains("/im node.exe"),
@@ -104,48 +405,112 @@ mod tests {
         );
         assert!(
             !lower.contains("/im speedwave.exe"),
-            "global taskkill /IM Speedwave.exe is unscoped — filter by ExecutablePath"
-        );
-        assert!(
-            HOOKS.contains("ExecutablePath"),
-            "the sweep must filter by ExecutablePath"
-        );
-        assert!(
-            HOOKS.contains("Speedwave.exe") && HOOKS.contains("nodejs"),
-            "both Speedwave.exe and the nodejs prefix must be in the sweep"
+            "global taskkill /IM Speedwave.exe is unscoped"
         );
     }
 
     #[test]
-    fn clears_spw_instdir_env_var_after_sweep() {
+    fn sweep_ps1_uses_string_concat_not_join_path() {
         assert!(
-            HOOKS.contains(r#"SetEnvironmentVariable(t "SPW_INSTDIR", i 0)"#),
-            "SPW_INSTDIR must be cleared after sweep (SetEnvironmentVariable with NULL)"
+            !SWEEP_PS1.contains("Join-Path $instDir"),
+            "sweep.ps1 must use string concat, not Join-Path (ADR-048)"
         );
     }
 
-    #[test]
-    fn file_existence_check_uses_literal_path() {
-        assert!(
-            HOOKS.contains("Test-Path -LiteralPath"),
-            "Test-Path must use -LiteralPath to handle brackets/wildcards in $INSTDIR"
-        );
+    // ── helpers ─────────────────────────────────────────────────────────
+
+    /// Returns the body of a `!macro NAME ... !macroend` block.
+    fn section<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("!macro {name}"))
+            .unwrap_or_else(|| panic!("missing !macro {name}"));
+        let after = &src[start..];
+        let end = after
+            .find("!macroend")
+            .unwrap_or_else(|| panic!("unterminated !macro {name}"));
+        &after[..end]
     }
 
-    #[test]
-    fn fileopen_failure_is_handled_with_iferrors() {
-        assert!(
-            HOOKS.contains("IfErrors"),
-            "FileOpen must be guarded by IfErrors so disk-full / ACL failures \
-             surface via DetailPrint instead of silently writing an empty sweep"
+    /// Re-derives the expected `installer-hooks.nsh` from the template +
+    /// the two `.ps1` sources, mirroring `scripts/generate-installer-nsh.sh`.
+    /// Drift between the committed file and this derivation fails the test.
+    fn render_expected_hooks(
+        template: &str,
+        sweep_ps1: &str,
+        firewall_ps1: &str,
+        run_hidden_vbs: &str,
+    ) -> String {
+        let mut embed = String::new();
+        embed.push_str(
+            "; ============================================================================\n",
         );
+        embed.push_str("; GENERATED CONTENT BELOW — DO NOT EDIT BY HAND.\n");
+        embed.push_str(
+            "; Sources: windows/sweep.ps1, windows/firewall.ps1, windows/run-hidden.vbs\n",
+        );
+        embed.push_str("; Regenerate: make generate-installer-nsh\n");
+        embed.push_str(
+            "; ============================================================================\n\n",
+        );
+        embed.push_str(&emit_materialize_macro("sweep", "ps1", sweep_ps1));
+        embed.push('\n');
+        embed.push_str(&emit_materialize_macro("firewall", "ps1", firewall_ps1));
+        embed.push('\n');
+        embed.push_str(&emit_materialize_macro("run-hidden", "vbs", run_hidden_vbs));
+
+        let mut out = String::new();
+        for line in template.lines() {
+            if line.contains("@@SPEEDWAVE_EMBEDDED_MACROS@@") {
+                out.push_str(&embed);
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
     }
 
-    #[test]
-    fn sweep_avoids_join_path_with_error_action_stop() {
-        assert!(
-            !HOOKS.contains("Join-Path $$instDir"),
-            "do not use Join-Path on $instDir — string concat is locale/error-action safe"
-        );
+    fn emit_materialize_macro(name: &str, ext: &str, src: &str) -> String {
+        // NSIS !define/label tokens cannot contain '-'; the generator normalizes
+        // name -> UPPER with '-' replaced by '_'.
+        let upper = name.to_uppercase().replace('-', "_");
+        let file = format!("{name}.{ext}");
+        let id = format!("SW_{upper}_ID");
+        let mut s = String::new();
+        s.push_str(&format!("!macro SPEEDWAVE_MATERIALIZE_{upper}\n"));
+        s.push_str(&format!("  !define {id} ${{__LINE__}}\n"));
+        s.push_str("  InitPluginsDir\n");
+        s.push_str("  ClearErrors\n");
+        s.push_str(&format!("  FileOpen $0 \"$PLUGINSDIR\\{file}\" w\n"));
+        s.push_str(&format!("  IfErrors 0 sw_{upper}_write_ok_${{{id}}}\n"));
+        s.push_str(&format!(
+            "    DetailPrint \"Speedwave: could not create {file} in $PLUGINSDIR — skipping.\"\n"
+        ));
+        s.push_str(&format!("    Goto sw_{upper}_write_done_${{{id}}}\n"));
+        s.push_str(&format!("  sw_{upper}_write_ok_${{{id}}}:\n"));
+
+        let stripped = src.strip_prefix('\u{feff}').unwrap_or(src);
+        for line in stripped.split_inclusive('\n') {
+            let line = line.strip_suffix('\n').unwrap_or(line);
+            let mut esc = String::new();
+            for c in line.chars() {
+                match c {
+                    '$' => esc.push_str("$$"),
+                    // Backtick has no NSIS escape; the generator rejects any
+                    // source containing one, so it never reaches here.
+                    '"' => esc.push_str("$\\\""),
+                    other => esc.push(other),
+                }
+            }
+            s.push_str("  FileWrite $0 `");
+            s.push_str(&esc);
+            s.push_str("$\\r$\\n`\n");
+        }
+
+        s.push_str("  FileClose $0\n");
+        s.push_str(&format!("  sw_{upper}_write_done_${{{id}}}:\n"));
+        s.push_str(&format!("  !undef {id}\n"));
+        s.push_str("!macroend\n");
+        s
     }
 }

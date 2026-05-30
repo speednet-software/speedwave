@@ -205,7 +205,7 @@ SharePoint integration combines two Microsoft Graph surfaces: a SharePoint docum
 
 **Configuration.** The Desktop integration form collects `client_id`, `tenant_id`, `site_id`. The OAuth device-code flow runs once at setup and writes two locations: the worker-mounted token directory (read-only mount) holds `access_token` and `site_id`; the host-only OAuth state directory holds `{ provider, providerData: { clientId, tenantId }, refreshToken, scopes, grantedScopes, expiresAt, lastRefreshAt }`. The `provider` field selects the IdP implementation registered in the worker; IdP-specific keys live under `providerData` so future OAuth integrations (e.g. Atlassian) plug in without touching this schema.
 
-**Upgrading from a v1 SharePoint setup.** Pre-ADR-060 builds (and the first pass of ADR-060 before the OAuthProvider refactor) stored `clientId` / `tenantId` at the top level of `oauth/<project>/sharepoint.json` instead of under `providerData`. The new validator surfaces such files as `malformed_state` and the Integrations page shows the "Re-authorize SharePoint" banner — clicking "Sign in" reruns the device-code flow and writes the file in the new shape. The startup cleanup also removes any legacy `refresh_token` / `client_id` / `tenant_id` files left over inside the worker-mounted token directory. No manual migration steps are required.
+**Upgrading from a v1 SharePoint setup.** Pre-ADR-060 builds (and the first pass of ADR-060 before the OAuthProvider refactor) stored `clientId` / `tenantId` at the top level of `oauth/<project>/sharepoint.json` instead of under `providerData`. On startup, a shape-only self-heal migration nests any such top-level identity under `providerData` (preserving every other field, never touching secrets), so the worker refresh succeeds and the Integrations page shows the correct Client ID / Tenant ID. If the file is too damaged to recover (no usable identity, or no refresh token because the original sign-in never completed), the Integrations page shows the "Re-authorize SharePoint" banner even while the card reads "Not Configured" — clicking "Sign in" reruns the device-code flow and rewrites the file in the new shape. The startup cleanup also removes any legacy `refresh_token` / `client_id` / `tenant_id` files left over inside the worker-mounted token directory. No manual migration steps are required.
 
 **Site ID format.** `site_id` must be a Graph site id — either path form (e.g. `acme.sharepoint.com:/sites/Marketing:` — note both colons: one after the hostname and one at the end) or composite form (`{hostname},{site-guid},{web-guid}`, obtained by calling `GET /sites/{hostname}:/sites/{path}` in Graph Explorer and copying the `id` field). A raw SharePoint URL (`https://{tenant}.sharepoint.com/sites/{name}`) is rejected at worker startup with a guidance message; the worker reports `configured: false` until a valid value is provided. Validation is fail-closed (no URL normalization in the worker) to keep the token mount at a clear trust boundary.
 
@@ -425,6 +425,72 @@ rm -rf ~/.speedwave/plugin-state/<slug>      # mutable per-plugin state, if any
 After cleanup, restart Speedwave. The Desktop app will start normally if no other plugin fails verification.
 
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design and [ADR-036](../adr/ADR-036-self-declaring-worker-policy.md) for the tool policy model.
+
+### Plugin instructions (Dashboard)
+
+A plugin may ship an optional `instructions` field in `plugin.json` — long-form
+**Markdown** with setup or usage guidance (how to obtain a token, post-install
+steps such as importing a companion desktop app, troubleshooting). When present,
+it appears on the plugin's **Dashboard** tab as a collapsible **"Setup & usage"**
+disclosure, **collapsed by default** so it stays out of the way until the user
+expands it. It is distinct from `description` (the one-line tagline in the plugin
+list). The Markdown is rendered with `marked` and sanitised by Angular before
+display; the field is capped at 16 KiB and the content comes from the signed
+manifest.
+
+### Configuring plugin credentials
+
+Plugins that declare `auth_fields` in `plugin.json` (e.g. a REST API token)
+are configured from the plugin detail page in Speedwave Desktop: open the
+plugin, switch to the **Settings** tab, and fill in the **Credentials**
+section. Saving writes each field to
+`~/.speedwave/tokens/<project>/<service_id>/<key>` with `chmod 600`; the
+plugin's container mounts that directory read-only at `/tokens`.
+
+Behaviour to know:
+
+- **Write-only.** Stored values are never displayed back — the form always
+  renders empty inputs. This is intentional: the tokens are secrets and no
+  Tauri command exposes their contents.
+- **Blank preserves.** Leaving a field empty on save keeps whatever value is
+  already stored. Only fields you actually type into are overwritten. This
+  lets you update one credential without re-entering the others.
+- **Reset all** deletes every stored credential for the plugin (the whole
+  per-plugin tokens directory). It is gated behind an inline confirm prompt
+  and cannot be undone — you will need to re-enter the credentials before
+  the plugin runs again.
+- **Per-field limit.** Each value is capped at 4096 bytes (the form enforces
+  this via `maxlength`; the backend rejects anything longer). Mirrors
+  `MAX_CREDENTIAL_BYTES` in `desktop/src-tauri/src/types.rs`.
+- **Verified plugins only.** The credentials form is shown only when the
+  plugin's Ed25519 signature verifies (`verification_status === 'verified'`).
+  A plugin in any other state surfaces its verification error instead — fix
+  that first (see "Plugin verification & recovery" above).
+- **Optional vs required.** Fields marked `required: false` in the manifest
+  do not block the plugin from running; the plugin auto-enables on install
+  and you add the credential later when a tool needs it. Tools that require
+  the missing credential return a clear error (e.g. `AUTH_PAT_MISSING`)
+  pointing back to this Settings tab.
+- **"✓ set" indicator + clear.** Each field that already has a value stored
+  shows a green **✓ set** badge next to its label and a **clear** link. The
+  badge is driven by a metadata-only check (the file's existence and non-zero
+  length) — secret contents are never read, so even write-only secrets show
+  their configured state. **clear** removes just that one field's stored value
+  (idempotent; it does not disable the plugin), unlike **Reset all**.
+- **Field help text.** When a manifest field declares a `description`, it is
+  rendered under the field label — use it for where to generate the token, the
+  required scopes, and so on.
+- **Format validation.** A field may declare a
+  `validation: { "pattern": "<regex>", "message": "<hint>" }` constraint. The
+  value you type must fully match the (anchored) pattern; on mismatch the form
+  shows `message` and blocks the save. The same check runs again host-side in
+  `save_plugin_credentials`, so a crafted call cannot bypass it. Patterns are
+  capped in length and must compile under Rust's `regex` crate (the RE2 subset
+  — no backreferences or lookaround), which is validated when the plugin is
+  installed.
+
+After saving or resetting, Speedwave requests a container restart so the
+worker picks up the change.
 
 ### Bridge plugins — dev UX
 

@@ -6,7 +6,6 @@
 // this to display `<branch icon> main` next to the session cost.
 
 use std::path::Path;
-use std::process::Command;
 
 use speedwave_runtime::config;
 
@@ -29,7 +28,9 @@ pub(crate) fn get_git_branch(project: String) -> Result<Option<String>, String> 
 /// branch name. Any non-zero exit (not a git repo, git missing, etc.) maps
 /// to `None` so the UI silently hides the branch chip.
 fn read_branch(dir: &Path) -> Option<String> {
-    let output = Command::new("git")
+    // system_command applies CREATE_NO_WINDOW on Windows so the git probe (run
+    // on chat status-bar init) does not flash a console over the Desktop UI.
+    let output = speedwave_runtime::binary::system_command("git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -50,6 +51,7 @@ fn read_branch(dir: &Path) -> Option<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn run(args: &[&str], dir: &Path) {
         let status = Command::new("git")

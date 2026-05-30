@@ -497,4 +497,28 @@ mod tests {
             "context_tokens must be skipped when None, got: {json}"
         );
     }
+
+    #[test]
+    fn max_credential_bytes_matches_ts_constant() {
+        // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union
+        // in plugin.rs): TS `MAX_PLUGIN_CREDENTIAL_BYTES` must equal Rust
+        // `MAX_CREDENTIAL_BYTES` so the form's <input maxlength=…> exactly
+        // mirrors the server-side reject threshold. Bumping one without the
+        // other = silent drift.
+        let src = include_str!("../../src/src/app/models/plugin.ts");
+        let needle = "export const MAX_PLUGIN_CREDENTIAL_BYTES";
+        let idx = src
+            .find(needle)
+            .expect("plugin.ts must declare `export const MAX_PLUGIN_CREDENTIAL_BYTES = N`");
+        // Take the rest of the line after the marker and extract the integer.
+        let line = src[idx + needle.len()..].lines().next().unwrap_or("");
+        let digits: String = line.chars().filter(|c| c.is_ascii_digit()).collect();
+        let ts_val: usize = digits
+            .parse()
+            .expect("MAX_PLUGIN_CREDENTIAL_BYTES must be assigned an integer literal");
+        assert_eq!(
+            ts_val, MAX_CREDENTIAL_BYTES,
+            "TS MAX_PLUGIN_CREDENTIAL_BYTES must match Rust types::MAX_CREDENTIAL_BYTES"
+        );
+    }
 }

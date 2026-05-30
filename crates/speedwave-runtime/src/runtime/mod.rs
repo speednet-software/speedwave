@@ -14,6 +14,8 @@ pub(crate) mod wsl;
 
 pub use locked::LockedRuntime;
 pub use wsl::decode_wsl_output;
+#[cfg(any(target_os = "windows", test))]
+pub use wsl::windows_to_wsl_path;
 
 /// Integration-test hook: returns the global lock-acquisition counter.
 /// Compiled under `#[cfg(test)]` or when the `test-support` feature is on.
@@ -78,6 +80,16 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// gate before [`ensure_ready`] — a stopped Lima VM returns `false` here but
     /// `ensure_ready()` can start it successfully.
     fn is_available(&self) -> bool;
+
+    /// `true` if the VM / WSL distro exists, regardless of running state.
+    /// Used by `is_setup_complete` to detect external removal.
+    ///
+    /// WSL uses the default impl: `is_available` already checks `wsl --list`
+    /// (registration, not running). Lima overrides because its `is_available`
+    /// requires `Status == Running`.
+    fn is_installed(&self) -> bool {
+        self.is_available()
+    }
 
     /// Brings the runtime to a fully operational state, or returns a descriptive error.
     ///
@@ -748,6 +760,34 @@ fn probe_container_exec(runtime: &LockedRuntime, container: &str) -> anyhow::Res
 ///
 /// Call this between `compose_up()` and the real `container_exec()` to
 /// transparently recover from container failures.
+/// Logs each container's name + state from `compose_ps`. Called on the recovery
+/// path so a "cannot exec in a stopped state" failure records which containers
+/// were actually up vs stopped/created — the difference between a crashed
+/// entrypoint and a container that never started.
+fn log_container_states(runtime: &LockedRuntime, project: &str, when: &str) {
+    match runtime.compose_ps(project) {
+        Ok(rows) => {
+            let states: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    let name = r.get("Name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let state = r
+                        .get("State")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| r.get("Status").and_then(|v| v.as_str()))
+                        .unwrap_or("?");
+                    format!("{name}={state}")
+                })
+                .collect();
+            log::info!(
+                "ensure_exec_healthy[{when}]: states=[{}]",
+                states.join(", ")
+            );
+        }
+        Err(e) => log::info!("ensure_exec_healthy[{when}]: compose_ps failed: {e}"),
+    }
+}
+
 pub fn ensure_exec_healthy(
     runtime: &LockedRuntime,
     project: &str,
@@ -796,6 +836,7 @@ pub fn ensure_exec_healthy(
             )
         }
     })?;
+    log_container_states(runtime, project, "after-recovery");
     probe_container_exec(runtime, container).map_err(|e| {
         anyhow::anyhow!(
             "Containers still broken after recovery: {e}. \
@@ -999,6 +1040,45 @@ pub(crate) fn detect_runtime_inner() -> Box<dyn ContainerRuntime> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     compile_error!("Speedwave requires macOS or Windows");
+}
+
+/// Default `TERM` used when the host advertises nothing usable.
+pub(crate) const FALLBACK_TERM: &str = "xterm-256color";
+
+/// Builds the `TERM=<value>` arg for interactive `nerdctl exec`, propagating the
+/// host terminal's real `TERM` so Claude Code can negotiate the keyboard protocol
+/// (e.g. Shift+Enter). Falls back to `xterm-256color` when `TERM` is unset, empty,
+/// or `dumb`.
+pub(crate) fn resolved_term_env() -> String {
+    let term = std::env::var("TERM")
+        .ok()
+        .filter(|t| !t.is_empty() && t != "dumb")
+        .unwrap_or_else(|| FALLBACK_TERM.to_string());
+    format!("TERM={term}")
+}
+
+/// Test-only RAII guard: pins `TERM` to `value` and restores the prior value on
+/// drop — even on panic/unwind. Pair with `#[serial_test::serial(env_term)]`.
+#[cfg(test)]
+pub(crate) struct TermGuard(Option<String>);
+
+#[cfg(test)]
+impl TermGuard {
+    pub(crate) fn set(value: &str) -> Self {
+        let prev = std::env::var("TERM").ok();
+        std::env::set_var("TERM", value);
+        Self(prev)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(v) => std::env::set_var("TERM", v),
+            None => std::env::remove_var("TERM"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2162,6 +2242,42 @@ services:
         assert!(is_propagation_error(&anyhow::anyhow!(
             "INVALID COMPOSE PROJECT: ..."
         )));
+    }
+
+    /// Env mutation here is gated `#[serial(env_term)]` so no other test
+    /// reads/writes `TERM` concurrently. The `TermGuard` restores the prior
+    /// value on drop, even if `f` panics.
+    fn with_term<F: FnOnce()>(value: Option<&str>, f: F) {
+        let _guard = TermGuard::set(value.unwrap_or(""));
+        if value.is_none() {
+            std::env::remove_var("TERM");
+        }
+        f();
+    }
+
+    #[test]
+    #[serial_test::serial(env_term)]
+    fn resolved_term_env_propagates_real_term() {
+        with_term(Some("xterm-kitty"), || {
+            assert_eq!(resolved_term_env(), "TERM=xterm-kitty");
+        });
+        with_term(Some("xterm-ghostty"), || {
+            assert_eq!(resolved_term_env(), "TERM=xterm-ghostty");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env_term)]
+    fn resolved_term_env_falls_back_when_unusable() {
+        with_term(None, || {
+            assert_eq!(resolved_term_env(), format!("TERM={FALLBACK_TERM}"));
+        });
+        with_term(Some(""), || {
+            assert_eq!(resolved_term_env(), format!("TERM={FALLBACK_TERM}"));
+        });
+        with_term(Some("dumb"), || {
+            assert_eq!(resolved_term_env(), format!("TERM={FALLBACK_TERM}"));
+        });
     }
 }
 

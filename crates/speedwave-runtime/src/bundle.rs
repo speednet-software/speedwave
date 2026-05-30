@@ -221,11 +221,19 @@ pub fn load_current_bundle_manifest() -> anyhow::Result<BundleManifest> {
         let data = std::fs::read_to_string(&manifest_path)?;
         return serde_json::from_str(&data).map_err(anyhow::Error::from);
     }
-    generate_bundle_manifest(env!("CARGO_PKG_VERSION"), &build_root)
+    generate_bundle_manifest(
+        env!("CARGO_PKG_VERSION"),
+        crate::defaults::CLAUDE_VERSION,
+        &build_root,
+    )
 }
 
+/// `claude_version` is mixed into `bundle_id` because it's a build-arg to
+/// Containerfile.claude — not covered by `build_context_hash`. Bumping the pin
+/// must trigger image rebuild on the next reconciliation.
 pub fn generate_bundle_manifest(
     app_version: &str,
+    claude_version: &str,
     build_root: &Path,
 ) -> anyhow::Result<BundleManifest> {
     let build_context_hash = digest_paths(&[
@@ -243,6 +251,8 @@ pub fn generate_bundle_manifest(
     bundle_hasher.update(build_context_hash.as_bytes());
     bundle_hasher.update(b":");
     bundle_hasher.update(claude_resources_hash.as_bytes());
+    bundle_hasher.update(b":");
+    bundle_hasher.update(claude_version.as_bytes());
     let mut bundle_id = bytes_to_hex(&bundle_hasher.finalize());
     bundle_id.truncate(16);
 
@@ -682,8 +692,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         write_resource_tree(temp.path());
 
-        let a = generate_bundle_manifest("1.2.3", temp.path()).unwrap();
-        let b = generate_bundle_manifest("1.2.3", temp.path()).unwrap();
+        let a = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+        let b = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
 
         assert_eq!(a, b);
         assert_eq!(a.bundle_id.len(), 16);
@@ -694,16 +704,34 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         write_resource_tree(temp.path());
 
-        let before = generate_bundle_manifest("1.2.3", temp.path()).unwrap();
+        let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
         std::fs::write(
             temp.path().join("containers/Containerfile.claude"),
             "FROM changed",
         )
         .unwrap();
-        let after = generate_bundle_manifest("1.2.3", temp.path()).unwrap();
+        let after = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
 
         assert_ne!(before.bundle_id, after.bundle_id);
         assert_ne!(before.build_context_hash, after.build_context_hash);
+    }
+
+    #[test]
+    fn manifest_generation_changes_with_claude_version() {
+        let temp = tempfile::tempdir().unwrap();
+        write_resource_tree(temp.path());
+
+        let before = generate_bundle_manifest("1.2.3", "2.1.143", temp.path()).unwrap();
+        let after = generate_bundle_manifest("1.2.3", "2.1.153", temp.path()).unwrap();
+
+        assert_ne!(
+            before.bundle_id, after.bundle_id,
+            "bumping CLAUDE_VERSION must change bundle_id so the claude image is rebuilt"
+        );
+        assert_eq!(
+            before.build_context_hash, after.build_context_hash,
+            "build_context_hash covers files only — CLAUDE_VERSION is mixed into bundle_id directly"
+        );
     }
 
     #[test]

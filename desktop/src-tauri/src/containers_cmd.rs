@@ -505,6 +505,45 @@ pub async fn add_project(
     Ok(())
 }
 
+/// Core: compose_down → runtime::remove_project. Extracted for tests; on compose_down
+/// failure the config wipe is skipped so the user can retry.
+pub(crate) fn remove_project_core(
+    name: &str,
+    rt: &speedwave_runtime::runtime::LockedRuntime,
+    remove_fn: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    if rt.is_available() {
+        rt.compose_down(name).map_err(|e| {
+            log::error!("remove_project: compose_down('{name}') failed: {e}");
+            format!("Failed to stop containers for '{name}': {e}")
+        })?;
+    }
+    log::info!("remove_project: name={name}");
+    remove_fn(name)
+}
+
+/// Tears down a project's containers, host_exec drain, and unregisters it.
+/// Runtime layer rejects the active project (sentinel-prefixed error for the UI).
+#[tauri::command]
+pub async fn remove_project(
+    name: String,
+    host_exec: tauri::State<'_, crate::reconcile::SharedHostExec>,
+) -> Result<(), String> {
+    crate::reconcile::teardown_host_exec_for_project(host_exec.inner(), &name);
+
+    tokio::task::spawn_blocking(move || {
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        remove_project_core(&name, &rt, &|n| {
+            speedwave_runtime::project::remove_project(n).map_err(|e| {
+                log::error!("remove_project: error: {e}");
+                e.to_string()
+            })
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // Container lifecycle commands
 // ---------------------------------------------------------------------------
@@ -646,6 +685,16 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
             Ok(())
         })
         .map_err(|e| e.to_string())?;
+
+        // Windows: `compose up` re-creates the root-owned /home/speedwave/.claude
+        // mount-point, so the uid-1000 entrypoint EACCESes; chown the claude-home
+        // tree after compose, same as start_containers (ADR-052). Fail-open.
+        #[cfg(target_os = "windows")]
+        if let Err(e) = crate::setup_wizard::ensure_claude_home_owner(&project) {
+            log::warn!(
+                "recreate_project_containers: ensure_claude_home_owner failed (non-fatal): {e}"
+            );
+        }
 
         log::info!("recreate_project_containers: done for project={project}");
         Ok(())
@@ -2233,5 +2282,45 @@ mod tests {
     fn validate_custom_headers_rejects_oversize() {
         let oversize = format!("X-A: {}", "x".repeat(16 * 1024));
         assert!(super::validate_custom_headers(&oversize).is_err());
+    }
+
+    // -- remove_project_core tests --
+
+    use std::cell::RefCell;
+
+    #[test]
+    fn remove_project_core_happy_path() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let removed = RefCell::new(Vec::<String>::new());
+        let result = remove_project_core("alpha", &rt, &|n| {
+            removed.borrow_mut().push(n.to_string());
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(handles.down_projects(), vec!["alpha"]);
+        assert_eq!(*removed.borrow(), vec!["alpha"]);
+    }
+
+    #[test]
+    fn remove_project_core_compose_down_failure_aborts_remove() {
+        let (rt, _handles) = MockRuntimeBuilder::new()
+            .with_fail_on_down(&["alpha"])
+            .build();
+        let remove_calls = RefCell::new(0u32);
+        let result = remove_project_core("alpha", &rt, &|_| {
+            *remove_calls.borrow_mut() += 1;
+            Ok(())
+        });
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to stop containers for 'alpha'"),
+            "expected user-facing teardown error, got: {err}"
+        );
+        assert_eq!(
+            *remove_calls.borrow(),
+            0,
+            "runtime project removal must not run after compose_down failure"
+        );
     }
 }

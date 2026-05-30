@@ -7,32 +7,64 @@ import {
   inject,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { Marked } from 'marked';
 import { ActivatedRoute, Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
-import { PluginStatusEntry, PluginsResponse } from '../../models/plugin';
+import {
+  PluginStatusEntry,
+  PluginsResponse,
+  PluginSaveCredentialsEvent,
+} from '../../models/plugin';
 import { IntegrationsResponse } from '../../models/integration';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
+import { PluginCredentialsFormComponent } from '../plugin-credentials-form/plugin-credentials-form.component';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { BridgeConnectionComponent } from '../bridge-connection/bridge-connection.component';
 
 /** Tabs available in the plugin-detail view. */
-export type PluginDetailTab = 'dashboard' | 'settings' | 'tools' | 'logs';
+export type PluginDetailTab = 'dashboard' | 'settings' | 'logs';
 
-/** A single tool exposed by a plugin worker (placeholder data until backend exposes). */
-interface ExposedTool {
-  name: string;
-  calls: number;
-  errors: number;
+/** Shown when a mutation is attempted with no active project / loaded plugin. */
+const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project first.';
+
+/**
+ * Scoped `marked` instance for the Dashboard `instructions` block. Forces
+ * every rendered `<a>` to open in a new tab with `rel="noopener noreferrer"`
+ * so a click inside the Tauri webview can't navigate the SPA away (state
+ * loss) nor leak `window.opener` to the linked page. Scoped — does not
+ * touch other markdown call sites (e.g. chat text-block).
+ */
+/**
+ * Escape user-supplied strings before interpolating into an HTML attribute
+ * value. Angular's `DomSanitizer` still applies at bind time (so this is
+ * defence-in-depth, not the primary XSS gate), but a manifest author writing
+ * `[x](url "It's a \"quote\"")` would otherwise produce structurally
+ * malformed HTML that breaks subsequent attributes on the same `<a>`.
+ * @param s the string to escape
+ * @returns `s` with `&` → `&amp;` and `"` → `&quot;`
+ */
+function escAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
 
-/** Detail page for a single plugin with Dashboard / Settings / Tools / Logs tabs. */
+const instructionsMarked = new Marked({
+  renderer: {
+    link({ href, title, text }) {
+      const titleAttr = title ? ` title="${escAttr(title)}"` : '';
+      return `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer"${titleAttr}>${text}</a>`;
+    },
+  },
+});
+
+/** Detail page for a single plugin with Dashboard / Settings / Logs tabs. */
 @Component({
   selector: 'app-plugin-detail',
   imports: [
     CommonModule,
     PluginSettingsFormComponent,
+    PluginCredentialsFormComponent,
     ProjectPillComponent,
     TooltipDirective,
     BridgeConnectionComponent,
@@ -156,19 +188,6 @@ interface ExposedTool {
               role="tab"
               class="px-1 pb-2"
               [class.border-b-2]="true"
-              [style.borderBottomColor]="activeTab === 'tools' ? 'var(--accent)' : 'transparent'"
-              [style.color]="activeTab === 'tools' ? 'var(--ink)' : 'var(--ink-mute)'"
-              [attr.aria-selected]="activeTab === 'tools'"
-              data-testid="tab-tools"
-              (click)="selectTab('tools')"
-            >
-              tools · {{ exposedTools.length }}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              class="px-1 pb-2"
-              [class.border-b-2]="true"
               [style.borderBottomColor]="activeTab === 'logs' ? 'var(--accent)' : 'transparent'"
               [style.color]="activeTab === 'logs' ? 'var(--ink)' : 'var(--ink-mute)'"
               [attr.aria-selected]="activeTab === 'logs'"
@@ -187,6 +206,37 @@ interface ExposedTool {
               >
                 {{ plugin.description }}
               </p>
+
+              @if (plugin.instructions && plugin.verification_status === 'verified') {
+                <details
+                  class="mb-4 rounded border border-[var(--line)] bg-[var(--bg-1)]"
+                  data-testid="plugin-instructions-details"
+                  [attr.open]="plugin.configured ? null : ''"
+                >
+                  <summary
+                    class="mono flex cursor-pointer items-center gap-2 px-4 py-2.5 text-[10px] uppercase tracking-widest text-[var(--ink-mute)] hover:text-[var(--ink-dim)]"
+                    data-testid="plugin-instructions-toggle"
+                  >
+                    Setup &amp; usage
+                  </summary>
+                  <div
+                    class="prose-sw border-t border-[var(--line)] px-4 py-3 text-[13px] leading-relaxed"
+                    data-testid="plugin-instructions"
+                    [innerHTML]="renderedInstructions()"
+                  ></div>
+                </details>
+              }
+              @if (plugin.verification_status !== 'verified' && plugin.verification_error) {
+                <p
+                  class="mb-4 rounded border border-red-500/30 bg-red-500/[0.04] px-4 py-3 text-[12px] leading-relaxed text-red-300"
+                  data-testid="plugin-verification-error"
+                >
+                  <strong class="mono mr-1 uppercase tracking-widest text-[10px]"
+                    >{{ plugin.verification_status }}:</strong
+                  >
+                  {{ plugin.verification_error }}
+                </p>
+              }
 
               <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div
@@ -214,52 +264,7 @@ interface ExposedTool {
                     {{ statusDetail() }}
                   </div>
                 </div>
-
-                <div
-                  class="rounded border border-[var(--line)] bg-[var(--bg-1)] p-4"
-                  data-testid="invocations-card"
-                >
-                  <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-                    invocations
-                  </div>
-                  <div class="mt-1 text-[20px] text-[var(--ink)]" data-testid="invocations-value">
-                    {{ totalInvocations() }}
-                  </div>
-                  <div
-                    class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
-                    data-testid="invocations-detail"
-                  >
-                    last 24h · {{ totalErrors() }} errors
-                  </div>
-                </div>
               </div>
-
-              @if (exposedTools.length > 0) {
-                <div
-                  class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)]"
-                  data-testid="tools-card"
-                >
-                  <div
-                    class="mono border-b border-[var(--line)] px-4 py-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  >
-                    exposed tools
-                  </div>
-                  <div class="divide-y divide-[var(--line)]">
-                    @for (tool of exposedTools; track tool.name) {
-                      <div
-                        class="mono flex items-center gap-3 px-4 py-2 text-[12px]"
-                        [attr.data-testid]="'tool-row-' + tool.name"
-                      >
-                        <span class="text-[var(--accent)]">fn</span>
-                        <span class="text-[var(--teal)]">{{ tool.name }}</span>
-                        <span class="ml-auto text-[var(--ink-mute)]"
-                          >{{ tool.calls }} calls · {{ tool.errors }} err</span
-                        >
-                      </div>
-                    }
-                  </div>
-                </div>
-              }
 
               @if (plugin.requires_integrations.length > 0) {
                 <div class="mt-4" data-testid="integration-requirements">
@@ -301,13 +306,6 @@ interface ExposedTool {
                     </button>
                   }
                 </div>
-              } @else {
-                <p
-                  class="mono mt-4 text-[12px] italic text-[var(--ink-mute)]"
-                  data-testid="dashboard-placeholder"
-                >
-                  Plugin dashboard content will appear here.
-                </p>
               }
 
               @if (plugin.has_host_bridge) {
@@ -367,37 +365,63 @@ interface ExposedTool {
 
           @if (activeTab === 'settings') {
             <div data-testid="settings-content">
-              <app-plugin-settings-form
-                [schema]="plugin.settings_schema"
-                [values]="settings"
-                (save)="onSaveSettings($event)"
-              />
-            </div>
-          }
-
-          @if (activeTab === 'tools') {
-            <div data-testid="tools-content">
-              @if (exposedTools.length === 0) {
-                <p class="mono text-[12px] text-[var(--ink-mute)]" data-testid="tools-empty">
-                  This plugin does not expose tools.
-                </p>
-              } @else {
-                <div class="rounded border border-[var(--line)] bg-[var(--bg-1)]">
-                  <div class="divide-y divide-[var(--line)]">
-                    @for (tool of exposedTools; track tool.name) {
-                      <div
-                        class="mono flex items-center gap-3 px-4 py-2 text-[12px]"
-                        [attr.data-testid]="'tools-tab-row-' + tool.name"
+              @if (plugin.auth_fields.length > 0 && plugin.verification_status === 'verified') {
+                <section class="mb-8" data-testid="credentials-section">
+                  <h3 class="mono mb-3 text-[14px] text-[var(--ink)]">Credentials</h3>
+                  <app-plugin-credentials-form
+                    [authFields]="plugin.auth_fields"
+                    [configuredFields]="plugin.configured_fields"
+                    [inFlight]="saving"
+                    (save)="onSaveCredentials($event)"
+                    (clear)="confirmingReset = true"
+                    (clearField)="onClearField($event)"
+                  />
+                  @if (confirmingReset) {
+                    <div class="mt-4 flex items-center gap-3">
+                      <span class="mono text-[12px] text-red-300" data-testid="reset-confirm-prompt"
+                        >Delete all stored credentials? They cannot be recovered.</span
                       >
-                        <span class="text-[var(--accent)]">fn</span>
-                        <span class="text-[var(--teal)]">{{ tool.name }}</span>
-                        <span class="ml-auto text-[var(--ink-mute)]"
-                          >{{ tool.calls }} calls · {{ tool.errors }} err</span
-                        >
-                      </div>
-                    }
-                  </div>
-                </div>
+                      <button
+                        type="button"
+                        class="mono rounded border border-red-500/40 bg-red-500/[0.08] px-3 py-1 text-[11px] font-medium text-red-300 hover:bg-red-500/[0.12] disabled:opacity-50"
+                        data-testid="reset-confirm-btn"
+                        [disabled]="resetting"
+                        (click)="onResetCredentials()"
+                      >
+                        $ yes, reset
+                      </button>
+                      <button
+                        type="button"
+                        class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)] disabled:opacity-50"
+                        data-testid="reset-cancel-btn"
+                        [disabled]="resetting"
+                        (click)="confirmingReset = false"
+                      >
+                        cancel
+                      </button>
+                    </div>
+                  }
+                </section>
+              }
+
+              @if (plugin.settings_schema) {
+                <section data-testid="schema-settings-section">
+                  <h3 class="mono mb-3 text-[14px] text-[var(--ink)]">Settings</h3>
+                  <app-plugin-settings-form
+                    [schema]="plugin.settings_schema"
+                    [values]="settings"
+                    (save)="onSaveSettings($event)"
+                  />
+                </section>
+              }
+
+              @if (
+                (plugin.auth_fields.length === 0 || plugin.verification_status !== 'verified') &&
+                !plugin.settings_schema
+              ) {
+                <p class="mono text-[12px] text-[var(--ink-mute)]" data-testid="no-settings-msg">
+                  This plugin exposes no credentials or settings.
+                </p>
               }
             </div>
           }
@@ -432,13 +456,26 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   error = '';
   success = '';
   integrationStatuses = new Map<string, boolean>();
-  /** Exposed tools — currently always empty until the backend reports them. */
-  exposedTools: ExposedTool[] = [];
 
   /** True when the user clicked "uninstall" and we're showing the confirm prompt. */
   confirmingRemove = false;
   /** True while `remove_plugin` is in flight; disables the confirm/cancel buttons. */
   removing = false;
+
+  /** True when the user clicked "Reset all" credentials and we're showing the confirm prompt. */
+  confirmingReset = false;
+  /** True while `delete_plugin_credentials` is in flight; disables confirm/cancel. */
+  resetting = false;
+
+  /**
+   * True while any credential/settings mutation is in flight via
+   * `runPluginMutation`. Bound to the credentials form's `inFlight` input so
+   * Save disables + flips to "Saving…" — blocks double-submit + signals work.
+   */
+  saving = false;
+
+  /** Handle for the M9 auto-fade timeout on `success` — cancelled on new mutations. */
+  private successFadeTimer: ReturnType<typeof setTimeout> | null = null;
 
   private route = inject(ActivatedRoute);
   private router = inject(Router);
@@ -452,6 +489,29 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   get missingIntegrations(): string[] {
     if (!this.plugin) return [];
     return this.plugin.requires_integrations.filter((i) => !this.integrationStatuses.get(i));
+  }
+
+  /** Memo for {@link renderedInstructions} keyed on the raw Markdown source. */
+  private instructionsCache: { src: string; html: string } | null = null;
+
+  /**
+   * Renders the manifest's `instructions` Markdown. Result is bound via
+   * `[innerHTML]`, sanitised at bind-time by Angular's default `SecurityContext.HTML`
+   * (only holds while the binding is NOT wrapped in `bypassSecurityTrustHtml`).
+   * Memoised on the source string so OnPush ticks don't re-parse.
+   * @returns HTML string (sanitised at bind time), or `''`
+   */
+  renderedInstructions(): string {
+    const src = this.plugin?.instructions ?? '';
+    if (!src) return '';
+    if (this.instructionsCache?.src !== src) {
+      const html = instructionsMarked.parse(src, { async: false });
+      if (typeof html !== 'string') {
+        throw new Error('marked.parse returned a Promise; async option must remain false');
+      }
+      this.instructionsCache = { src, html };
+    }
+    return this.instructionsCache.html;
   }
 
   /** Loads plugin data, settings, and integration status from the backend. */
@@ -487,6 +547,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
       this.unsubProjectReady();
       this.unsubProjectReady = null;
     }
+    this.cancelSuccessFade();
   }
 
   /** Navigates back to the plugins list. */
@@ -567,14 +628,75 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     return `${sid} · v${this.plugin.version}`;
   }
 
-  /** Total invocations across all exposed tools. */
-  totalInvocations(): number {
-    return this.exposedTools.reduce((sum, t) => sum + t.calls, 0);
+  /**
+   * Shared skeleton for credentials/settings mutations: guard → clear status
+   * → invoke → set success → reload. Captures slug/project before the first
+   * await (project-switch mid-flight would otherwise null `this.plugin`). On
+   * reload failure the success message survives (the mutation already won)
+   * with a "view may be stale" caveat.
+   * @param command - Tauri command name to invoke
+   * @param buildPayload - given validated (slug, project), returns the payload
+   * @param successMsg - message to show on success
+   * @returns true if the invoke succeeded, false otherwise
+   */
+  private async runPluginMutation(
+    command: string,
+    buildPayload: (slug: string, project: string) => Record<string, unknown>,
+    successMsg: string
+  ): Promise<boolean> {
+    if (!this.plugin || !this.activeProject) {
+      this.error = NO_ACTIVE_PROJECT_MSG;
+      this.cdr.markForCheck();
+      return false;
+    }
+    const slug = this.plugin.slug;
+    const project = this.activeProject;
+    this.error = '';
+    this.success = '';
+    this.cancelSuccessFade(); // any pending fade from a prior mutation
+    this.saving = true;
+    this.cdr.markForCheck();
+    try {
+      await this.tauri.invoke(command, buildPayload(slug, project));
+    } catch (e: unknown) {
+      this.error = e instanceof Error ? e.message : String(e);
+      this.saving = false;
+      this.cdr.markForCheck();
+      return false;
+    }
+    this.success = successMsg;
+    this.projectState.requestRestart();
+    // Refresh state (e.g. configured badge). `loadPlugin` swallows its error
+    // into `this.error`; downgrade to a caveat on the success line + console
+    // so a stale view is signalled rather than hidden under the success msg.
+    await this.loadPlugin(slug);
+    if (this.error) {
+      console.warn('plugin reload after mutation failed:', this.error);
+      this.error = '';
+      this.success = `${successMsg} — but the view could not refresh; reopen the plugin to see the latest state.`;
+    }
+    this.saving = false;
+    this.scheduleSuccessFade();
+    this.cdr.markForCheck();
+    return true;
   }
 
-  /** Total errors across all exposed tools. */
-  totalErrors(): number {
-    return this.exposedTools.reduce((sum, t) => sum + t.errors, 0);
+  /** Clear an in-flight fade timer (success was overwritten by a new mutation). */
+  private cancelSuccessFade(): void {
+    if (this.successFadeTimer !== null) {
+      clearTimeout(this.successFadeTimer);
+      this.successFadeTimer = null;
+    }
+  }
+
+  /** Auto-fade the green success banner after a short window (M9). */
+  private scheduleSuccessFade(): void {
+    this.cancelSuccessFade();
+    this.successFadeTimer = setTimeout(() => {
+      this.success = '';
+      this.successFadeTimer = null;
+      this.cdr.markForCheck();
+    }, 5000);
   }
 
   /**
@@ -582,20 +704,70 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
    * @param values - the settings key-value pairs to save
    */
   async onSaveSettings(values: Record<string, unknown>): Promise<void> {
-    if (!this.plugin || !this.activeProject) return;
-    this.error = '';
-    this.success = '';
-    try {
-      await this.tauri.invoke('plugin_save_settings', {
-        project: this.activeProject,
-        slug: this.plugin.slug,
-        settings: values,
-      });
-      this.settings = values;
-      this.success = 'Settings saved';
-    } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-    }
+    const ok = await this.runPluginMutation(
+      'plugin_save_settings',
+      (slug, project) => ({ project, slug, settings: values }),
+      'Settings saved'
+    );
+    if (ok) this.settings = values;
+  }
+
+  /**
+   * Persists filled credential fields to disk via the Rust-side
+   * `save_plugin_credentials` Tauri command. The command writes each
+   * accepted key as `~/.speedwave/tokens/<project>/<service_id>/<key>`
+   * with chmod 600, having first verified the plugin's Ed25519 signature
+   * and validated that every key is in the manifest's `auth_fields`
+   * allow-list. On success, requests a container restart so workers pick
+   * up the new tokens, then reloads the plugin entry to refresh the
+   * `configured` status badge.
+   * @param event - filled credentials emitted by PluginCredentialsFormComponent
+   */
+  async onSaveCredentials(event: PluginSaveCredentialsEvent): Promise<void> {
+    const fieldCount = Object.keys(event.credentials).length;
+    await this.runPluginMutation(
+      'save_plugin_credentials',
+      (slug, project) => ({ project, slug, credentials: event.credentials }),
+      `Credentials saved (${fieldCount} field${fieldCount === 1 ? '' : 's'})`
+    );
+  }
+
+  /**
+   * Clears a SINGLE stored credential field via `delete_plugin_credential_field`.
+   * Unlike the full reset, this is not gated behind a confirm prompt — it
+   * removes just one token (trivially re-entered) and leaves the rest plus
+   * the plugin's enabled state intact.
+   * @param key - the auth_field key to clear (emitted by the form's per-field
+   *   "clear" button)
+   */
+  async onClearField(key: string): Promise<void> {
+    await this.runPluginMutation(
+      'delete_plugin_credential_field',
+      (slug, project) => ({ project, slug, key }),
+      `Cleared "${key}"`
+    );
+  }
+
+  /**
+   * Deletes every stored credential for this plugin via the Rust-side
+   * `delete_plugin_credentials` Tauri command (which removes the per-plugin
+   * tokens directory). The destructive confirm is handled in the template
+   * via `confirmingReset` (mirrors the uninstall confirm pattern), so this
+   * method is only reached after the user clicked "yes, reset".
+   */
+  async onResetCredentials(): Promise<void> {
+    // `resetting` is set unconditionally and always cleared after the call
+    // (runPluginMutation returns rather than throwing on a guard failure), so
+    // the flag can never stick on an early exit.
+    this.resetting = true;
+    this.cdr.markForCheck();
+    await this.runPluginMutation(
+      'delete_plugin_credentials',
+      (slug, project) => ({ project, slug }),
+      'All credentials cleared'
+    );
+    this.resetting = false;
+    this.confirmingReset = false;
     this.cdr.markForCheck();
   }
 
@@ -638,8 +810,11 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
         const svc = resp.services.find((s) => s.service === integration);
         this.integrationStatuses.set(integration, svc?.configured ?? false);
       }
-    } catch {
-      /* non-critical — UI will default to not configured */
+    } catch (e: unknown) {
+      // Non-fatal: the integration badges fall back to "not configured". Log
+      // so the failure isn't invisible — a swallowed get_integrations error
+      // would otherwise masquerade as genuinely unconfigured integrations.
+      console.warn('loadIntegrationStatuses: get_integrations failed:', e);
     }
   }
 }

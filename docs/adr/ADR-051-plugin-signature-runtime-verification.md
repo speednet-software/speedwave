@@ -79,7 +79,7 @@ The Desktop dialog deliberately does not say "open Settings" — Settings is beh
 
 ### Verified-only commands
 
-Tauri commands that mutate plugin state (`set_plugin_enabled` for enable, `save_plugin_credentials`, `plugin_save_settings`, `plugin_load_settings`) call the new `require_verified` helper. Disable, remove, and credential deletion stay tolerant — those are recovery actions. `plugin_save_settings` additionally caps payload at 64 KiB to prevent a runaway plugin from bloating `user_config.json`.
+Tauri commands that mutate plugin state (`set_plugin_enabled` for enable, `save_plugin_credentials`, `delete_plugin_credential_field`, `plugin_save_settings`, `plugin_load_settings`) call the new `require_verified` helper. Disable, remove, and clear-all credential deletion (`delete_plugin_credentials`) stay tolerant — those are recovery actions. Per-field deletion (`delete_plugin_credential_field`) is the exception: it must read the verified manifest to resolve the `service_id` token path and to confirm the key is a declared `auth_field`, so it is verified-only by construction. `plugin_save_settings` additionally caps payload at 64 KiB to prevent a runaway plugin from bloating `user_config.json`.
 
 ### Build hygiene
 

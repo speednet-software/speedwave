@@ -59,6 +59,7 @@ presale-1.2.0/
   "service_id": "presale",
   "version": "1.2.0",
   "description": "CRM integration for pre-sales workflow automation",
+  "instructions": "## Setup\n\n1. Generate an API key in CRM Settings → Developer.\n2. Paste it in the **Settings → Credentials** tab.",
   "port": 4010,
   "image_tag": null,
   "resources": ["skills", "commands", "agents"],
@@ -69,7 +70,12 @@ presale-1.2.0/
       "label": "API Key",
       "field_type": "password",
       "placeholder": "Enter your CRM API key",
-      "is_secret": true
+      "is_secret": true,
+      "description": "Generate under CRM Settings → Developer → API Keys.",
+      "validation": {
+        "pattern": "^[A-Za-z0-9_-]{20,}$",
+        "message": "API keys are 20+ characters of letters, digits, '-' and '_'."
+      }
     },
     {
       "key": "workspace_url",
@@ -100,24 +106,25 @@ presale-1.2.0/
 
 ### Field Reference
 
-| Field                   | Type     | Required | Description                                                                                          |
-| ----------------------- | -------- | -------- | ---------------------------------------------------------------------------------------------------- |
-| `name`                  | string   | Yes      | Human-readable display name                                                                          |
-| `slug`                  | string   | Yes      | Unique identifier, `^[a-z][a-z0-9-]{0,63}$`                                                          |
-| `service_id`            | string?  | MCP only | Must equal `slug` when present                                                                       |
-| `version`               | string   | Yes      | Semantic version                                                                                     |
-| `description`           | string   | Yes      | Short description                                                                                    |
-| `port`                  | u16?     | MCP only | Container listening port                                                                             |
-| `image_tag`             | string?  | No       | Custom image tag (default: `version`)                                                                |
-| `resources`             | string[] | No       | Subset of `["skills", "commands", "agents", "hooks"]`                                                |
-| `token_mount`           | object   | No       | `{"mode": "read_only"}` only — `read_write` is rejected (reserved for built-ins, ADR-009)            |
-| `auth_fields`           | object[] | No       | Credential field definitions for the Desktop UI                                                      |
-| `settings_schema`       | JSON?    | No       | JSON Schema (object, ≤ 64 KiB) for per-project plugin settings; payloads are validated against it    |
-| `speedwave_compat`      | string?  | No       | Semver `VersionReq` (e.g. `">=0.8, <1"`). Validated at install; mismatch rejects the install.        |
-| `extra_env`             | map?     | No       | Additional environment variables; reserved/dangerous keys (see `consts::RESERVED_ENV_KEYS`) rejected |
-| `mem_limit`             | string?  | No       | Container memory limit (default: `128m`); must be > 0 and ≤ 16 GiB                                   |
-| `cpu_limit`             | f32?     | No       | Container CPU limit in cores; must be ≤ 4                                                            |
-| `requires_integrations` | string[] | No       | Core integrations the plugin depends on (e.g. `["sharepoint"]`)                                      |
+| Field                   | Type     | Required | Description                                                                                                                                                           |
+| ----------------------- | -------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                  | string   | Yes      | Human-readable display name                                                                                                                                           |
+| `slug`                  | string   | Yes      | Unique identifier, `^[a-z][a-z0-9-]{0,63}$`                                                                                                                           |
+| `service_id`            | string?  | MCP only | Must equal `slug` when present                                                                                                                                        |
+| `version`               | string   | Yes      | Semantic version                                                                                                                                                      |
+| `description`           | string   | Yes      | Short description (also used as the plugin-list tagline)                                                                                                              |
+| `instructions`          | string?  | No       | Long-form Markdown setup/usage guide; shown as a collapsible "Setup & usage" disclosure (collapsed by default) on the Dashboard tab. ≤ 16 KiB; rendered via `marked`. |
+| `port`                  | u16?     | MCP only | Container listening port                                                                                                                                              |
+| `image_tag`             | string?  | No       | Custom image tag (default: `version`)                                                                                                                                 |
+| `resources`             | string[] | No       | Subset of `["skills", "commands", "agents", "hooks"]`                                                                                                                 |
+| `token_mount`           | object   | No       | `{"mode": "read_only"}` only — `read_write` is rejected (reserved for built-ins, ADR-009)                                                                             |
+| `auth_fields`           | object[] | No       | Credential field definitions for the Desktop UI                                                                                                                       |
+| `settings_schema`       | JSON?    | No       | JSON Schema (object, ≤ 64 KiB) for per-project plugin settings; payloads are validated against it                                                                     |
+| `speedwave_compat`      | string?  | No       | Semver `VersionReq` (e.g. `">=0.8, <1"`). Validated at install; mismatch rejects the install.                                                                         |
+| `extra_env`             | map?     | No       | Additional environment variables; reserved/dangerous keys (see `consts::RESERVED_ENV_KEYS`) rejected                                                                  |
+| `mem_limit`             | string?  | No       | Container memory limit (default: `128m`); must be > 0 and ≤ 16 GiB                                                                                                    |
+| `cpu_limit`             | f32?     | No       | Container CPU limit in cores; must be ≤ 4                                                                                                                             |
+| `requires_integrations` | string[] | No       | Core integrations the plugin depends on (e.g. `["sharepoint"]`)                                                                                                       |
 
 ### Compatibility enforcement
 
@@ -129,14 +136,48 @@ If present, the value MUST NOT be empty or whitespace, and MUST parse as a `semv
 
 ### auth_fields entry
 
-| Field         | Type   | Description                                                                                                |
-| ------------- | ------ | ---------------------------------------------------------------------------------------------------------- |
-| `key`         | string | File name under `tokens/<project>/<slug>/`                                                                 |
-| `label`       | string | Label shown in Desktop UI                                                                                  |
-| `field_type`  | string | `"password"` or `"text"`                                                                                   |
-| `placeholder` | string | Placeholder text in the input field                                                                        |
-| `is_secret`   | bool   | If `true`, stored as a token file with `0o600` permissions                                                 |
-| `required`    | bool   | Defaults to `true`. If `false`, missing value does not block auto-enable or the `configured` status check. |
+| Field         | Type    | Description                                                                                                |
+| ------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `key`         | string  | File name under `tokens/<project>/<slug>/`                                                                 |
+| `label`       | string  | Label shown in Desktop UI                                                                                  |
+| `field_type`  | string  | `"text"`, `"password"`, or `"textarea"`                                                                    |
+| `placeholder` | string  | Placeholder text in the input field                                                                        |
+| `is_secret`   | bool    | If `true`, stored as a token file with `0o600` permissions                                                 |
+| `required`    | bool    | Defaults to `true`. If `false`, missing value does not block auto-enable or the `configured` status check. |
+| `description` | string? | Optional help text rendered under the field label (e.g. where to generate the token, required scopes).     |
+| `validation`  | object? | Optional `{ "pattern", "message"? }` format constraint. See **auth_fields validation** below.              |
+
+#### auth_fields validation
+
+A field may declare a regex constraint enforced both in the Desktop form and host-side at save time:
+
+```json
+"validation": { "pattern": "^[A-Za-z0-9_-]{20,}$", "message": "Expected a long token of letters, digits, '-' and '_'." }
+```
+
+| Field     | Type    | Description                                                                                          |
+| --------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `pattern` | string  | Regex the value must **fully** match (treated as `^(?:…)$`, mirroring the HTML `pattern` attribute). |
+| `message` | string? | Shown on mismatch. Falls back to a generic "does not match the required format" message when absent. |
+
+Enforcement and limits:
+
+- **Anchored full-match** everywhere — the host wraps the pattern in `^(?:…)$` so a partial match never passes; UI (`<input pattern>`) and backend agree.
+- **Two-sided.** The form blocks submit and shows `message`; `save_plugin_credentials` re-checks host-side, so a crafted IPC call cannot bypass it. An empty value (leave-stored-untouched) is never rejected — emptiness is governed by `required`.
+- **Capped + RE2-only.** `pattern` is length-capped (`consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN`, 512) and must compile under the Rust `regex` crate, which is a linear-time RE2-style engine with no backreferences or look-around[^13]. Both are checked at install (`validate_manifest`), so JS-only patterns are rejected before a plugin ships rather than diverging between browser and host.
+
+#### Regex flavour vs `settings_schema`
+
+A plugin manifest can carry **two** regex surfaces:
+
+| Surface                                           | Engine                                                                                   | Flavour                                                                                          | Where checked                                                                |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `auth_fields[].validation.pattern`                | Rust `regex` crate (compiled in `plugin.rs`) + native HTML `pattern` (browser JS engine) | **RE2 subset** — no backreferences, no look-around, no atomic groups; linear-time guarantee[^13] | install (`validate_manifest`) + save (`save_plugin_credentials`) + UI submit |
+| `settings_schema` (JSON Schema `pattern` keyword) | JSON Schema validator on save                                                            | **ECMA-262** (JavaScript regex) — backreferences and look-around allowed[^14]                    | install (size/shape) + save (`plugin_save_settings`)                         |
+
+The two are deliberately separate: `auth_fields` are _credentials_ (secret tokens, host URLs — single value per field, strict format), while `settings` are _user-settable preferences_ (structured payload, often shaped by JSON Schema's full vocabulary). A plugin author writing `(?=.*\d)` works in `settings_schema` and fails at `auth_fields[].validation` install time — the cleaner alternative (extend `settings_schema` to auth_fields) was rejected because the two surfaces have different lifecycle and storage (per-field token files vs. one JSON blob in `plugin_settings`).
+
+**Practical guidance:** if a credential pattern needs look-around or backreferences, it is too restrictive for a regex anyway — declare the field `is_secret` and validate inside the worker after `/tokens/<key>` read.
 
 ---
 
@@ -464,30 +505,32 @@ speedwave plugin disable <slug> --project <name>      # Disable per-project
 | Restart            | Banner prompts for container restart after changes                           |
 | Integration status | Shows required integration status on dashboard with link to Integrations tab |
 
-Tauri commands: `get_plugins`, `install_plugin`, `remove_plugin`, `set_plugin_enabled`, `save_plugin_credentials`, `delete_plugin_credentials`, `plugin_save_settings`, `plugin_load_settings`.
+Tauri commands: `get_plugins`, `peek_plugin_manifest`, `install_plugin`, `remove_plugin`, `set_plugin_enabled`, `save_plugin_credentials`, `delete_plugin_credentials`, `delete_plugin_credential_field`, `plugin_save_settings`, `plugin_load_settings`.
 
 ---
 
 ## Implementation Files
 
-| File                                      | Change                                                                            |
-| ----------------------------------------- | --------------------------------------------------------------------------------- |
-| `crates/speedwave-runtime/src/plugin.rs`  | New — manifest, install, remove, list, build, generate service, tokens            |
-| `crates/speedwave-runtime/src/signing.rs` | New — Ed25519 verification, dev-only signing                                      |
-| `crates/speedwave-runtime/src/compose.rs` | `render_compose()` +runtime param, `apply_plugins()`, 4 SecurityChecks            |
-| `crates/speedwave-runtime/src/config.rs`  | `plugins` field, `set_plugin_enabled()`, `is_plugin_enabled()`, `plugin_settings` |
-| `crates/speedwave-runtime/src/consts.rs`  | `BUILT_IN_SERVICE_IDS` constant                                                   |
-| `crates/speedwave-runtime/src/lib.rs`     | `pub mod plugin; pub mod signing;` (replaces `pub mod addon;`)                    |
-| `crates/speedwave-runtime/Cargo.toml`     | +zip, ed25519-dalek, sha2, base64                                                 |
-| `crates/speedwave-cli/src/main.rs`        | Plugin subcommands (install/list/remove/enable/disable)                           |
-| `containers/entrypoint.sh`                | `SPEEDWAVE_PLUGINS` block (replaces `SPEEDWAVE_ADDONS`)                           |
-| `mcp-servers/hub/src/service-list.ts`     | New — dynamic service list from env                                               |
-| `mcp-servers/hub/src/hub-tool-policy.ts`  | `getPluginToolPolicy()`                                                           |
-| `mcp-servers/hub/src/tool-discovery.ts`   | Plugin service branch (accept all tools)                                          |
-| `mcp-servers/hub/src/tool-registry.ts`    | Dynamic `SERVICE_NAMES`                                                           |
-| `mcp-servers/hub/src/http-bridge.ts`      | Dynamic `AllBridges`                                                              |
-| `mcp-servers/hub/src/auth-tokens.ts`      | Iterate all services dynamically                                                  |
-| `desktop/src-tauri/src/plugin_cmd.rs`     | New — 8 Tauri commands                                                            |
+| File                                                                                       | Change                                                                            |
+| ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- |
+| `crates/speedwave-runtime/src/plugin.rs`                                                   | New — manifest, install, remove, list, build, generate service, tokens            |
+| `crates/speedwave-runtime/src/signing.rs`                                                  | New — Ed25519 verification, dev-only signing                                      |
+| `crates/speedwave-runtime/src/compose.rs`                                                  | `render_compose()` +runtime param, `apply_plugins()`, 4 SecurityChecks            |
+| `crates/speedwave-runtime/src/config.rs`                                                   | `plugins` field, `set_plugin_enabled()`, `is_plugin_enabled()`, `plugin_settings` |
+| `crates/speedwave-runtime/src/consts.rs`                                                   | `BUILT_IN_SERVICE_IDS` constant                                                   |
+| `crates/speedwave-runtime/src/lib.rs`                                                      | `pub mod plugin; pub mod signing;` (replaces `pub mod addon;`)                    |
+| `crates/speedwave-runtime/Cargo.toml`                                                      | +zip, ed25519-dalek, sha2, base64                                                 |
+| `crates/speedwave-cli/src/main.rs`                                                         | Plugin subcommands (install/list/remove/enable/disable)                           |
+| `containers/entrypoint.sh`                                                                 | `SPEEDWAVE_PLUGINS` block (replaces `SPEEDWAVE_ADDONS`)                           |
+| `mcp-servers/hub/src/service-list.ts`                                                      | New — dynamic service list from env                                               |
+| `mcp-servers/hub/src/hub-tool-policy.ts`                                                   | `getPluginToolPolicy()`                                                           |
+| `mcp-servers/hub/src/tool-discovery.ts`                                                    | Plugin service branch (accept all tools)                                          |
+| `mcp-servers/hub/src/tool-registry.ts`                                                     | Dynamic `SERVICE_NAMES`                                                           |
+| `mcp-servers/hub/src/http-bridge.ts`                                                       | Dynamic `AllBridges`                                                              |
+| `mcp-servers/hub/src/auth-tokens.ts`                                                       | Iterate all services dynamically                                                  |
+| `desktop/src-tauri/src/plugin_cmd.rs`                                                      | New — 10 Tauri commands (incl. per-field credential clear)                        |
+| `desktop/src/src/app/plugins/plugin-credentials-form/plugin-credentials-form.component.ts` | New — auth_fields credentials form (description, validation, per-field status)    |
+| `desktop/src/src/app/plugins/plugin-detail/plugin-detail.component.ts`                     | Settings/Dashboard tabs (credentials form, instructions disclosure)               |
 
 ---
 
@@ -530,3 +573,7 @@ Tauri commands: `get_plugins`, `install_plugin`, `remove_plugin`, `set_plugin_en
 [^11]: https://docs.rs/semver/1/semver/struct.VersionReq.html
 
 [^12]: https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#version-requirement-syntax
+
+[^13]: [`regex` crate documentation — Syntax & guarantees (no backreferences or look-around; linear-time matching)](https://docs.rs/regex/latest/regex/#syntax)
+
+[^14]: [JSON Schema Validation — `pattern` keyword (uses ECMA-262 regex)](https://json-schema.org/draft/2020-12/json-schema-validation#name-pattern)

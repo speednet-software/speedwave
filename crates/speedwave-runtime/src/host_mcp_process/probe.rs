@@ -6,7 +6,8 @@
 //! retry+backoff — oauth needs the retry (compose cascades on a
 //! flaky probe); host_exec uses a single attempt.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
+#[cfg(unix)]
 use std::process::Command;
 use std::time::Duration;
 
@@ -42,14 +43,21 @@ pub fn is_pid_alive(_pid: u32) -> bool {
     false
 }
 
-/// Probe loopback `127.0.0.1:port` over TCP with `attempts` tries and
-/// `backoff` between them. Returns true on the first successful connect.
-/// `port == 0` always returns false (invalid bind target).
-pub fn probe_tcp(port: u16, attempts: u32, backoff: Duration) -> bool {
+/// Probe `<bind_address>:port` over TCP with `attempts` tries and `backoff`
+/// between them. Returns true on the first successful connect. `port == 0`
+/// or an unparseable address always returns false.
+pub fn probe_tcp(bind_address: &str, port: u16, attempts: u32, backoff: Duration) -> bool {
     if port == 0 {
         return false;
     }
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let ip: IpAddr = match bind_address.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            log::warn!("probe_tcp: invalid bind address {bind_address:?}");
+            return false;
+        }
+    };
+    let addr = SocketAddr::new(ip, port);
     let connect_timeout = Duration::from_millis(500);
     for attempt in 0..attempts.max(1) {
         if TcpStream::connect_timeout(&addr, connect_timeout).is_ok() {
@@ -60,6 +68,18 @@ pub fn probe_tcp(port: u16, attempts: u32, backoff: Duration) -> bool {
         }
     }
     false
+}
+
+/// Helper: resolve `compose::host_bind_address()` with a 127.0.0.1 fallback for
+/// diagnostics. Logs a warning so watchdogs can surface the underlying issue.
+pub fn host_bind_address_for_probe() -> String {
+    match crate::compose::host_bind_address() {
+        Ok(addr) => addr,
+        Err(e) => {
+            log::warn!("probe_tcp: host_bind_address failed ({e}); falling back to 127.0.0.1");
+            "127.0.0.1".to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -85,19 +105,19 @@ mod tests {
 
     #[test]
     fn probe_tcp_returns_false_for_port_zero() {
-        assert!(!probe_tcp(0, 3, Duration::from_millis(10)));
+        assert!(!probe_tcp("127.0.0.1", 0, 3, Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn probe_tcp_returns_false_for_invalid_bind_address() {
+        assert!(!probe_tcp("not-an-ip", 4242, 1, Duration::ZERO));
     }
 
     #[test]
     fn probe_tcp_applies_backoff_between_attempts() {
-        // Probe a port that is highly unlikely to be listening (1 — a
-        // privileged port that on most hosts gets immediate RST). With
-        // 3 attempts the function must sleep `backoff` twice between
-        // them. Lower-bound only: a wall-clock upper bound flakes
-        // under heavy CI load and slow OS connect timeouts.
         let backoff = Duration::from_millis(50);
         let start = std::time::Instant::now();
-        let _ = probe_tcp(1, 3, backoff);
+        let _ = probe_tcp("127.0.0.1", 1, 3, backoff);
         assert!(
             start.elapsed() >= backoff * 2,
             "3 attempts must include 2 backoff sleeps; got {:?}",
@@ -109,8 +129,7 @@ mod tests {
     fn probe_tcp_returns_true_for_live_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        // Listener stays alive for the duration of the test.
-        assert!(probe_tcp(port, 1, Duration::ZERO));
+        assert!(probe_tcp("127.0.0.1", port, 1, Duration::ZERO));
         drop(listener);
     }
 }

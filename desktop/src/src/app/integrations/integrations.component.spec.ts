@@ -1974,6 +1974,24 @@ describe('IntegrationsComponent', () => {
       expect(button).toBeTruthy();
     });
 
+    it('renders the banner even when sharepoint reads as NOT configured (stale providerData)', async () => {
+      // Malformed/legacy providerData makes the service read as unconfigured,
+      // yet the backend now reports scope_mismatch regardless. The user must
+      // still be led to re-authorise — the banner must not hinge on configured.
+      const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
+      sharepointSvc.configured = false;
+      sharepointSvc.oauth_action_required = 'scope_mismatch';
+
+      component.toggleExpand('sharepoint');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="integrations-oauth-reauth-banner"]')
+      ).toBeTruthy();
+    });
+
     it('does NOT render the banner when oauth_action_required is undefined', async () => {
       const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
       sharepointSvc.configured = true;

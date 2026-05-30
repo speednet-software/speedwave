@@ -193,6 +193,10 @@ impl MockRuntimeBuilder {
         self.ensure_ready_result = ResultCell::Err(msg.to_string());
         self
     }
+    pub fn with_is_available(mut self, available: bool) -> Self {
+        self.is_available = available;
+        self
+    }
     pub fn with_fail_on_up(mut self, projects: &[&str]) -> Self {
         self.fail_on_up = projects.iter().map(|s| s.to_string()).collect();
         self

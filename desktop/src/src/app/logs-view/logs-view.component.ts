@@ -470,7 +470,7 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
                 {{ formatTime(line.time) }}
               </span>
               <span
-                class="hidden w-80 flex-shrink-0 truncate md:inline-block"
+                class="hidden w-32 flex-shrink-0 truncate md:inline-block lg:w-48"
                 [style.color]="sourceColour(line)"
                 [title]="line.source"
                 data-testid="logs-source"
@@ -486,7 +486,7 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
               </span>
               <span
                 class="min-w-0 flex-1 break-words"
-                [style.color]="line.level === 'error' ? '#fca5a5' : 'var(--ink-dim)'"
+                [style.color]="line.level === 'error' ? 'var(--red)' : 'var(--ink-dim)'"
                 data-testid="logs-message"
               >
                 {{ line.message }}
@@ -913,9 +913,9 @@ export class LogsViewComponent implements OnInit, OnDestroy {
    * @param line - the parsed log line
    */
   protected sourceColour(line: LogLine): string {
-    if (line.level === 'error') return '#f87171';
+    if (line.level === 'error') return 'var(--red)';
     if (line.level === 'warn') return 'var(--amber)';
-    return 'var(--teal)';
+    return 'var(--accent)';
   }
 
   /**
@@ -923,9 +923,8 @@ export class LogsViewComponent implements OnInit, OnDestroy {
    * @param line - the parsed log line
    */
   protected levelColour(line: LogLine): string {
-    if (line.level === 'error') return '#f87171';
+    if (line.level === 'error') return 'var(--red)';
     if (line.level === 'warn') return 'var(--amber)';
-    if (line.level === 'debug') return 'var(--ink-mute)';
     return 'var(--ink-mute)';
   }
 

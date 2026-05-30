@@ -76,7 +76,7 @@ impl WslRuntime {
             restart_ready_delay: std::time::Duration::from_secs(
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
-            distro_name: consts::WSL_DISTRO_NAME.to_string(),
+            distro_name: consts::wsl_distro_name().to_string(),
         }
     }
 
@@ -88,7 +88,7 @@ impl WslRuntime {
             restart_ready_delay: std::time::Duration::from_secs(
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
-            distro_name: consts::WSL_DISTRO_NAME.to_string(),
+            distro_name: consts::wsl_distro_name().to_string(),
         }
     }
 
@@ -198,7 +198,7 @@ impl WslUncInfo {
     /// Returns `true` if `distro` matches Speedwave's own runtime distro
     /// (case-insensitive).
     pub fn is_runtime_distro(&self) -> bool {
-        self.distro.eq_ignore_ascii_case(consts::WSL_DISTRO_NAME)
+        self.distro.eq_ignore_ascii_case(consts::wsl_distro_name())
     }
 }
 
@@ -372,7 +372,7 @@ pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
              (e.g. C:\\Users\\...) or copy it into the Speedwave WSL distribution \
              (\\\\wsl.localhost\\{}\\projects\\...).",
             s,
-            consts::WSL_DISTRO_NAME
+            consts::wsl_distro_name()
         );
     }
 
@@ -482,12 +482,15 @@ impl ContainerRuntime for WslRuntime {
         // arguments containing `(`, `)`, `'`, etc. break remote bash.
         let distro = self.distro();
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+        // Propagate the host's real TERM so Claude Code can negotiate the
+        // keyboard protocol (Shift+Enter) instead of seeing a forced xterm.
+        let term_env = super::resolved_term_env();
         let nerdctl_argv: Vec<&str> = [
             "nerdctl",
             "exec",
             "-it",
             "-e",
-            "TERM=xterm-256color",
+            term_env.as_str(),
             "-e",
             "COLORTERM=truecolor",
             "-e",
@@ -1178,6 +1181,7 @@ mod tests {
     /// `wsl.exe` joins everything after `--` and execs through bash inside the
     /// distro, so prompts with `(`, `'`, backticks must shell-quote correctly.
     #[test]
+    #[serial_test::serial(env_term)]
     fn test_container_exec_remote_cmd_survives_shell_roundtrip() {
         let nasty_args: &[&[&str]] = &[
             &[
@@ -1191,6 +1195,11 @@ mod tests {
             &["sh", "-c", r#"echo "hello \"world\"""#],
         ];
 
+        // Pin TERM so the interactive prefix is deterministic — container_exec
+        // now propagates the host's real TERM. Guard restores it on drop.
+        let _term_guard = crate::runtime::TermGuard::set("xterm-256color");
+        let term_env = crate::runtime::resolved_term_env();
+
         for args in nasty_args {
             let path_env = format!("PATH={}", consts::CONTAINER_PATH);
             let interactive_prefix: Vec<&str> = vec![
@@ -1198,7 +1207,7 @@ mod tests {
                 "exec",
                 "-it",
                 "-e",
-                "TERM=xterm-256color",
+                term_env.as_str(),
                 "-e",
                 "COLORTERM=truecolor",
                 "-e",
@@ -2140,11 +2149,11 @@ mod tests {
         let decoded = decode_wsl_output(&bytes);
         let found = decoded
             .lines()
-            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+            .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name());
         assert!(
             found,
             "distro name '{}' should be found in decoded output, lines: {:?}",
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
             decoded.lines().collect::<Vec<_>>()
         );
     }
@@ -2159,11 +2168,11 @@ mod tests {
         let decoded = decode_wsl_output(&bytes);
         let found = decoded
             .lines()
-            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+            .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name());
         assert!(
             found,
             "distro name '{}' should be found in decoded UTF-16LE (no BOM) output, lines: {:?}",
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
             decoded.lines().collect::<Vec<_>>()
         );
     }
@@ -2296,7 +2305,7 @@ mod tests {
             runner: Box::new(runner),
             retry_delay: std::time::Duration::ZERO,
             restart_ready_delay: std::time::Duration::ZERO,
-            distro_name: consts::WSL_DISTRO_NAME.to_string(),
+            distro_name: consts::wsl_distro_name().to_string(),
         };
         assert!(rt.ensure_ready().is_ok());
     }
@@ -2331,7 +2340,7 @@ mod tests {
             runner: Box::new(runner),
             retry_delay: std::time::Duration::ZERO,
             restart_ready_delay: std::time::Duration::ZERO,
-            distro_name: consts::WSL_DISTRO_NAME.to_string(),
+            distro_name: consts::wsl_distro_name().to_string(),
         };
         assert!(rt.ensure_ready().is_ok());
     }
@@ -2371,7 +2380,7 @@ mod tests {
             runner: Box::new(runner),
             retry_delay: std::time::Duration::ZERO,
             restart_ready_delay: std::time::Duration::ZERO,
-            distro_name: consts::WSL_DISTRO_NAME.to_string(),
+            distro_name: consts::wsl_distro_name().to_string(),
         };
         let result = rt.ensure_ready();
         assert!(result.is_err());

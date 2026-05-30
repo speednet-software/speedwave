@@ -53,6 +53,11 @@ describe('NavRailComponent', () => {
     expect(buttons.length).toBe(3);
   });
 
+  it('renders the Speedwave logo with role="img" and an accessible name', () => {
+    const logo = fixture.nativeElement.querySelector('[role="img"][aria-label="Speedwave"]');
+    expect(logo).not.toBeNull();
+  });
+
   it('marks the active entry with .active and aria-current="page"', () => {
     const active = fixture.nativeElement.querySelector('[data-testid="nav-chat"]');
     const inactive = fixture.nativeElement.querySelector('[data-testid="nav-settings"]');

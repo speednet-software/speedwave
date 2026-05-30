@@ -82,7 +82,7 @@ describe('SessionStatsComponent', () => {
         session_id: 'abc',
         total_cost: 0.05,
         usage: {
-          input_tokens: 3,
+          input_tokens: 1234,
           output_tokens: 65,
           cache_read_tokens: 22562,
           cache_write_tokens: 75,
@@ -92,9 +92,11 @@ describe('SessionStatsComponent', () => {
       });
       fixture.detectChanges();
       const txt = rootText();
-      // in: <totalInput> = 3 + 22,562 + 75 = 22,640
+      // in: = input_tokens only (new uncached input), NOT input + cache.
+      // cache_read (22,562 = re-sent history) must NOT inflate `in:`.
       expect(txt).toContain('in:');
-      expect(txt).toContain('22,640');
+      expect(txt).toContain('1,234');
+      expect(txt).not.toContain('23,871'); // 1234 + 22562 + 75 — the old (wrong) totalInput
       expect(txt).toContain('out:');
       expect(txt).toContain('65');
     });
@@ -151,6 +153,93 @@ describe('SessionStatsComponent', () => {
       });
       fixture.detectChanges();
       expect(rootText()).toContain('116k/200k');
+    });
+  });
+
+  // ── regression: `in:` must not echo the context numerator ───────────────
+  describe('in: vs ctx separation (regression)', () => {
+    it('reproduces the screenshot: short chat shows small `in:` but full ctx gauge', () => {
+      // Real session: a tiny new message (181 input) on top of a large
+      // re-sent prompt served from cache (181,532). The ctx gauge correctly
+      // shows the full occupancy (~182k / 1M = 18%), but `in:` must show only
+      // the 181 new tokens — NOT the 181,713 it used to echo from the gauge.
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0.5,
+        usage: {
+          input_tokens: 181,
+          output_tokens: 65,
+          cache_read_tokens: 181_532,
+          cache_write_tokens: 0,
+        },
+        context_window_size: 1_000_000,
+        total_output_tokens: 1621,
+      });
+      fixture.detectChanges();
+      // ctx gauge unchanged — full occupancy is correct.
+      expect(component.ctxTotal()).toBe(181_713);
+      expect(component.ctxPct()).toBe(18);
+      expect(component.ctxUsedMax()).toBe('182k/1M');
+      // `in:` shows only the new uncached input, not the gauge numerator.
+      expect(component.inboundTokens()).toBe(181);
+      const txt = rootText();
+      expect(txt).toContain('181');
+      expect(txt).not.toContain('181,713');
+    });
+
+    it('does not sum input across turns — gauge reflects only the latest turn', () => {
+      // Each turn re-sends history, so cache_read grows turn over turn. The
+      // gauge must track the LATEST turn (replacement), never the running sum.
+      const set = (cacheRead: number) =>
+        fixture.componentRef.setInput('stats', {
+          session_id: 'abc',
+          total_cost: 0,
+          usage: { input_tokens: 200, output_tokens: 50, cache_read_tokens: cacheRead },
+          context_window_size: 1_000_000,
+          total_output_tokens: 50,
+        });
+      set(20_000);
+      fixture.detectChanges();
+      expect(component.ctxPct()).toBe(2);
+      set(90_000);
+      fixture.detectChanges();
+      expect(component.ctxPct()).toBe(9);
+      set(181_000);
+      fixture.detectChanges();
+      // Latest turn → 181,200 / 1M = 18%. NOT the sum (~291k → 29%).
+      expect(component.ctxTotal()).toBe(181_200);
+      expect(component.ctxPct()).toBe(18);
+    });
+
+    it('handles a local model (no prompt cache): in: equals the whole prompt', () => {
+      // Local LLM has no prompt cache — cache fields are absent. `in:` then
+      // equals input_tokens (the whole prompt), and the gauge matches it.
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0,
+        usage: { input_tokens: 4500, output_tokens: 120 },
+        context_window_size: 32_768,
+        total_output_tokens: 120,
+      });
+      fixture.detectChanges();
+      expect(component.inboundTokens()).toBe(4500);
+      expect(component.ctxTotal()).toBe(4500);
+      expect(component.ctxPct()).toBe(14); // 4500 / 32768
+    });
+
+    it('hides the ctx gauge for a local model with unknown window (ADR-041)', () => {
+      // No advertised window → ctxPct null → gauge hidden, never fabricated.
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0,
+        usage: { input_tokens: 4500, output_tokens: 120 },
+        context_window_size: null,
+        total_output_tokens: 120,
+      });
+      fixture.detectChanges();
+      expect(component.inboundTokens()).toBe(4500);
+      expect(component.ctxPct()).toBeNull();
+      expect(rootText()).toContain('in:');
     });
   });
 

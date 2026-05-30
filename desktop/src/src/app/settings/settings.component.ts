@@ -9,7 +9,7 @@ import {
 import { Router, RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
-import { ThemeService, type ThemeId } from '../services/theme.service';
+import { ThemeService, THEME_MODES, type ThemeId, type ThemeMode } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { BetaService } from '../services/beta.service';
 import { AuthSectionComponent } from './auth-section/auth-section.component';
@@ -20,25 +20,48 @@ import { UpdateSectionComponent } from './update-section/update-section.componen
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ProjectList } from '../models/update';
 
-/** Display copy + accent hex for one theme card in the Appearance section. */
+/**
+ * One theme card in the Appearance accent grid. The preview swatch reads the
+ * live `--accent` value per theme via `data-theme`, so it stays correct in
+ * both light and dark mode without duplicating CSS hex values here.
+ */
 interface ThemeCard {
   /** Theme identifier — drives `ThemeService.setTheme()` and the active-state binding. */
   readonly id: ThemeId;
   /** Lowercase label rendered in mono next to the swatch. */
   readonly label: string;
-  /** Hex string painted in the right half of the 2-stripe preview. */
-  readonly hex: string;
 }
 
 /** Cards rendered in the Appearance section grid — order matches the mockup. */
 const THEME_CARDS: readonly ThemeCard[] = [
-  { id: 'crimson', label: 'crimson', hex: '#ff4d6d' },
-  { id: 'mint', label: 'mint', hex: '#5eead4' },
-  { id: 'amber', label: 'amber', hex: '#f5b942' },
-  { id: 'iris', label: 'iris', hex: '#a78bfa' },
-  { id: 'cyan', label: 'cyan', hex: '#38bdf8' },
-  { id: 'sand', label: 'sand', hex: '#d4a574' },
+  { id: 'crimson', label: 'crimson' },
+  { id: 'mint', label: 'mint' },
+  { id: 'amber', label: 'amber' },
+  { id: 'iris', label: 'iris' },
+  { id: 'cyan', label: 'cyan' },
+  { id: 'sand', label: 'sand' },
 ] as const;
+
+/** Display copy + glyph for one mode card (light/dark/auto). */
+interface ModeCard {
+  readonly id: ThemeMode;
+  readonly label: string;
+  readonly glyph: string;
+}
+
+/** Per-mode glyph — `Record<ThemeMode, …>` makes a new mode a compile error here. */
+const MODE_GLYPHS: Record<ThemeMode, string> = {
+  light: '◯',
+  dark: '●',
+  auto: '◐',
+};
+
+/** Cards rendered in the MODE row — derived from THEME_MODES so order + membership stay in sync. */
+const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
+  id,
+  label: id,
+  glyph: MODE_GLYPHS[id],
+}));
 
 /** Displays application settings and provides factory reset functionality. */
 @Component({
@@ -112,9 +135,30 @@ const THEME_CARDS: readonly ThemeCard[] = [
         >
           <h2 class="view-title view-title-section text-[var(--ink)]">Appearance</h2>
           <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-            Choose an accent color for buttons, links and syntax highlighting. Backgrounds stay dark
-            across all themes.
+            Choose appearance mode and accent color. Auto follows your system.
           </p>
+
+          <div class="mono mb-2 mt-4 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+            mode
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            @for (card of modeCards; track card.id) {
+              <button
+                type="button"
+                [attr.data-mode-btn]="card.id"
+                [class.active]="theme.mode() === card.id"
+                [attr.aria-pressed]="theme.mode() === card.id"
+                class="theme-card flex items-center gap-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]"
+                (click)="theme.setMode(card.id)"
+              >
+                <span class="mono w-4 text-center text-[14px] text-[var(--ink-dim)]">{{
+                  card.glyph
+                }}</span>
+                <span class="mono text-[12px] text-[var(--ink)]">{{ card.label }}</span>
+                <span class="check ml-auto text-[var(--accent)]">&#9679;</span>
+              </button>
+            }
+          </div>
 
           <div class="mono mb-2 mt-4 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
             accent color
@@ -129,16 +173,15 @@ const THEME_CARDS: readonly ThemeCard[] = [
                 class="theme-card flex items-center gap-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]"
                 (click)="theme.setTheme(card.id)"
               >
-                <span class="inline-flex gap-0.5 rounded border border-[var(--line)] p-0.5">
+                <span
+                  class="inline-flex gap-0.5 rounded border border-[var(--line)] p-0.5"
+                  [attr.data-theme]="card.id"
+                >
+                  <span class="bg-[var(--bg)]" [style.width.px]="12" [style.height.px]="18"></span>
                   <span
+                    class="bg-[var(--accent)]"
                     [style.width.px]="12"
                     [style.height.px]="18"
-                    [style.background]="'#07090f'"
-                  ></span>
-                  <span
-                    [style.width.px]="12"
-                    [style.height.px]="18"
-                    [style.background]="card.hex"
                   ></span>
                 </span>
                 <span class="mono text-[12px] text-[var(--ink)]">{{ card.label }}</span>
@@ -146,9 +189,6 @@ const THEME_CARDS: readonly ThemeCard[] = [
               </button>
             }
           </div>
-          <p class="mono mt-3 text-[10px] text-[var(--ink-mute)]">
-            shortcut: <span class="kbd">&#8984;T</span> cycles themes
-          </p>
         </section>
 
         @if (beta.enabled()) {
@@ -170,6 +210,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
 
   /** Static catalog of accent themes — bound 1:1 by the Appearance card grid. */
   readonly themeCards: readonly ThemeCard[] = THEME_CARDS;
+  /** Static catalog of appearance modes — bound 1:1 by the MODE row. */
+  readonly modeCards: readonly ModeCard[] = MODE_CARDS;
   /** Theme service exposed to the template so card click handlers can switch accents. */
   readonly theme = inject(ThemeService);
   /** UI state service exposed for the project switcher trigger in the header. */

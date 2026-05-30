@@ -462,7 +462,7 @@ fn init_vm_windows() -> anyhow::Result<()> {
     let list_str = decode_wsl_output(&list.stdout);
     let distro_exists = list_str
         .lines()
-        .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+        .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name());
 
     if !distro_exists {
         import_wsl_distro()?;
@@ -602,7 +602,7 @@ fn merge_wslconfig_vpn_keys(input: &str) -> String {
     out
 }
 
-/// Verifies that an existing WSL2 distro named [`consts::WSL_DISTRO_NAME`] was
+/// Verifies that an existing WSL2 distro named [`consts::wsl_distro_name`] was
 /// created by Speedwave, not pre-registered by an attacker.
 ///
 /// WSL stores the virtual disk at the install directory passed to `wsl --import`.
@@ -618,9 +618,9 @@ fn verify_wsl_distro_origin() -> anyhow::Result<()> {
              NOT created by Speedwave (expected disk image at {} is missing). \
              This may indicate a malicious distro was pre-registered. \
              Please run 'wsl --unregister {}' to remove it, then retry Speedwave setup.",
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
             expected_vhdx.display(),
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
         );
     }
     Ok(())
@@ -632,7 +632,7 @@ fn verify_wsl_distro_origin() -> anyhow::Result<()> {
 fn expected_wsl_vhdx_path() -> anyhow::Result<PathBuf> {
     Ok(consts::data_dir()
         .join("wsl")
-        .join(consts::WSL_DISTRO_NAME)
+        .join(consts::wsl_distro_name())
         .join("ext4.vhdx"))
 }
 
@@ -723,12 +723,12 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         }
     }
 
-    let install_dir = wsl_dir.join(consts::WSL_DISTRO_NAME);
+    let install_dir = wsl_dir.join(consts::wsl_distro_name());
     std::fs::create_dir_all(&install_dir)?;
     let status = speedwave_runtime::binary::system_command("wsl.exe")
         .args([
             "--import",
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
             &install_dir.to_string_lossy(),
             &rootfs_path.to_string_lossy(),
         ])
@@ -741,7 +741,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         let recheck_str = decode_wsl_output(&recheck.stdout);
         if recheck_str
             .lines()
-            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME)
+            .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name())
         {
             // Distro exists but we didn't create it — verify it's ours before
             // trusting it. An attacker could pre-register a malicious distro
@@ -749,13 +749,185 @@ fn import_wsl_distro() -> anyhow::Result<()> {
             verify_wsl_distro_origin()?;
             log::warn!(
                 "WSL2 import failed but distro '{}' already exists and is verified — continuing",
-                consts::WSL_DISTRO_NAME
+                consts::wsl_distro_name()
             );
         } else {
             anyhow::bail!("Failed to import Speedwave WSL2 distribution");
         }
     }
 
+    // Import path: distro is freshly created, no containers run yet, so a
+    // terminate to apply the new wsl.conf is safe.
+    ensure_wsl_distro_metadata(TerminateOnChange::Yes)?;
+
+    Ok(())
+}
+
+/// Whether `ensure_wsl_distro_metadata` may `wsl --terminate` the distro after
+/// it edits `/etc/wsl.conf`. Terminating applies the new config immediately but
+/// kills every process in the distro — fatal if containers are running.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TerminateOnChange {
+    /// Safe only when no Speedwave containers run (e.g. right after import).
+    Yes,
+    /// Leave the distro running; the new wsl.conf applies on its next restart.
+    No,
+}
+
+/// Ensures the Speedwave distro's `/etc/wsl.conf` sets the drvfs automount
+/// options to [`consts::wsl_automount_options`]: `metadata` for `/login`'s
+/// chmod (ADR-052) and `uid`/`gid` (from the [`consts::CONTAINER_USER_UNPRIVILEGED`]
+/// SSOT) requesting the mount be owned by the container user.
+///
+/// NOTE: the `uid=`/`gid=` automount option is **not** load-bearing — WSL
+/// prepends the distro default user's uid (root → 0) ahead of it and that wins,
+/// so on imported distros (no `[user]` default) the mount stays uid 0. The
+/// actual fix for the uid-1000 entrypoint's EACCES is the per-project `chown`
+/// in [`ensure_claude_home_owner`]; this option still helps fresh imports and
+/// keeps `/login`'s chmod working.
+///
+/// Idempotent and self-upgrading: adds the `[automount]` block if absent, and
+/// rewrites a bare `options = "metadata"` line (written by an earlier build)
+/// to include the uid/gid — otherwise distros installed by that build stay
+/// broken.
+///
+/// `terminate` MUST be `No` on any path where containers may be running
+/// (startup migration for existing distros): a `--terminate` there kills the
+/// running containers mid-start ("cannot exec in a stopped state"). Pass `Yes`
+/// only at import time, before any container exists. Fail-open throughout.
+#[cfg(target_os = "windows")]
+pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Result<()> {
+    let distro = consts::wsl_distro_name();
+    // Run as root inside the distro; `/etc/wsl.conf` is distro-internal (not the
+    // host .wslconfig). Two branches: add the block if `[automount]` is absent,
+    // else upgrade an options line that lacks our uid in place. Both emit the
+    // change marker so the caller's terminate/restart logic fires.
+    let opts = consts::wsl_automount_options();
+    let (uid, _gid) = consts::container_uid_gid();
+    let script = format!(
+        "f=/etc/wsl.conf; \
+         if ! grep -q '\\[automount\\]' \"$f\" 2>/dev/null; then \
+           printf '\\n[automount]\\noptions = \"{opts}\"\\n' >> \"$f\"; \
+           echo speedwave-metadata-added; \
+         elif ! grep -q 'uid={uid}' \"$f\" 2>/dev/null; then \
+           sed -i '/\\[automount\\]/,/^[[:space:]]*\\[/ s|^[[:space:]]*options[[:space:]]*=.*|options = \"{opts}\"|' \"$f\"; \
+           if grep -q 'uid={uid}' \"$f\" 2>/dev/null; then echo speedwave-metadata-added; \
+           else echo speedwave-metadata-noop; fi; \
+         fi",
+        opts = opts,
+        uid = uid,
+    );
+    let script = script.as_str();
+    let out = speedwave_runtime::binary::system_command("wsl.exe")
+        .args(["-d", distro, "-u", "root", "--", "sh", "-c", script])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.contains("speedwave-metadata-noop") {
+                log::warn!(
+                    "ensure_wsl_distro_metadata: wsl.conf options line could not be upgraded for {distro} (malformed [automount]?); uid not applied"
+                );
+            }
+            let changed = stdout.contains("speedwave-metadata-added");
+            if changed {
+                match terminate {
+                    TerminateOnChange::Yes => {
+                        // Safe at import time: no Speedwave containers run yet.
+                        let _ = speedwave_runtime::binary::system_command("wsl.exe")
+                            .args(["--terminate", distro])
+                            .status();
+                        log::info!(
+                            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
+                        );
+                    }
+                    TerminateOnChange::No => {
+                        // Containers may be running; do NOT terminate. The new
+                        // wsl.conf applies on the distro's next natural restart.
+                        log::info!(
+                            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (applies on next WSL restart)"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(o) => log::warn!(
+            "ensure_wsl_distro_metadata: wsl.conf update failed (non-fatal): {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log::warn!("ensure_wsl_distro_metadata: spawn failed (non-fatal): {e}"),
+    }
+    Ok(())
+}
+
+/// Makes the project's `claude-home` tree owned by the container user so the
+/// uid-1000 entrypoint can write `/home/speedwave` (mkdir/ln under `set -e`).
+///
+/// This is the **load-bearing** half of the Windows mount-ownership fix. The
+/// WSL drvfs `/mnt/c` mount is owned by uid 0 (the imported distro has no
+/// default user, and WSL's prepended default-user uid beats the `uid=` automount
+/// option), so a uid-1000 mkdir under a root-owned parent gets EACCES and the
+/// container exits(1) ("cannot exec in a stopped state"). With `metadata` on,
+/// `chown` writes per-file ownership that drvfs honors for access.
+///
+/// MUST run **after** `compose_up_recreate`: `compose up` auto-creates the
+/// `/home/speedwave/.claude` bind mount-point (for the read-only ide-bridge
+/// mount) as ROOT, so a chown done *before* compose is silently undone by the
+/// start. Chowning after the mount-points exist, then letting
+/// `ensure_exec_healthy`'s recovery recreate re-run the entrypoint against the
+/// now-1000-owned tree, is what actually fixes it. Verified on the live distro.
+///
+/// uid/gid come from the [`consts::container_uid_gid`] SSOT (same value as the
+/// compose `user:` field). Idempotent and cheap. Fail-open: a chown failure
+/// only logs.
+#[cfg(target_os = "windows")]
+pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
+    let distro = consts::wsl_distro_name();
+    let (uid, gid) = consts::container_uid_gid();
+    let host_path = speedwave_runtime::claude_home::claude_home_dir(consts::data_dir(), project);
+    let wsl_path = speedwave_runtime::runtime::windows_to_wsl_path(&host_path)?;
+    let wsl_path = wsl_path.to_string_lossy().to_string();
+    let uidgid = format!("{uid}:{gid}");
+    // Pass the path as its OWN argv token to each tool (mkdir/chown/chmod) — no
+    // `sh -c` wrapper, no shell variable. `wsl.exe` re-parses a `sh -c "<script>"`
+    // string and drops the `$d` variable, so inlining via argv (the way compose
+    // passes mount paths) is the reliable form. Three small invocations.
+    let run = |args: &[&str]| {
+        speedwave_runtime::binary::system_command("wsl.exe")
+            .args(["-d", distro, "-u", "root", "--"])
+            .args(args)
+            .output()
+    };
+    let steps: [(&str, Vec<&str>); 3] = [
+        ("mkdir", vec!["mkdir", "-p", &wsl_path]),
+        ("chown", vec!["chown", "-R", &uidgid, &wsl_path]),
+        ("chmod", vec!["chmod", "-R", "u+rwX", &wsl_path]),
+    ];
+    let mut all_ok = true;
+    for (name, args) in &steps {
+        match run(args) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                all_ok = false;
+                log::warn!(
+                    "ensure_claude_home_owner: {name} failed (non-fatal): {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+            }
+            Err(e) => {
+                all_ok = false;
+                log::warn!("ensure_claude_home_owner: {name} spawn failed (non-fatal): {e}");
+            }
+        }
+    }
+    if all_ok {
+        log::info!("ensure_claude_home_owner: chowned {wsl_path} to {uidgid}");
+    } else {
+        log::warn!(
+            "ensure_claude_home_owner: {wsl_path} NOT fully chowned to {uidgid} (see warnings)"
+        );
+    }
     Ok(())
 }
 
@@ -765,7 +937,13 @@ fn import_wsl_distro() -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 fn install_nerdctl_full() -> anyhow::Result<()> {
     let nerdctl_check = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", consts::WSL_DISTRO_NAME, "--", "nerdctl", "--version"])
+        .args([
+            "-d",
+            consts::wsl_distro_name(),
+            "--",
+            "nerdctl",
+            "--version",
+        ])
         .output()?;
     if nerdctl_check.status.success() {
         return Ok(());
@@ -782,7 +960,7 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
             let wslpath_output = speedwave_runtime::binary::system_command("wsl.exe")
                 .args([
                     "-d",
-                    consts::WSL_DISTRO_NAME,
+                    consts::wsl_distro_name(),
                     "--",
                     "wslpath",
                     "-u",
@@ -882,7 +1060,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
     // length/escaping issues with wsl.exe -- bash -c "...".
     // Pipe the script through stdin: echo "$script" | wsl bash -s
     let install = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", consts::WSL_DISTRO_NAME, "--", "bash", "-s"])
+        .args(["-d", consts::wsl_distro_name(), "--", "bash", "-s"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -905,7 +1083,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
         );
         anyhow::bail!(
             "Failed to install nerdctl-full inside {} WSL2 distribution: {}",
-            consts::WSL_DISTRO_NAME,
+            consts::wsl_distro_name(),
             stderr.trim()
         );
     }
@@ -931,13 +1109,19 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
 // Setup completeness check
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when all required setup steps have been completed.
+/// Returns `true` when all required setup steps have been completed AND the
+/// VM / WSL distro still physically exists. `cli_linked` is excluded — CLI
+/// symlink creation is optional. The runtime check catches external removal
+/// (factory reset, manual unregister, data_dir rename) that leaves stale state.
 ///
-/// `cli_linked` is intentionally excluded — CLI symlink creation is optional
-/// (the Desktop app works without it) and may fail on restricted systems.
+/// **Cost:** `is_installed()` spawns `limactl list` (macOS) or `wsl.exe --list`
+/// (Windows) per call. Safe for navigation/route guards; do not poll.
 pub fn is_setup_complete() -> bool {
     let state = SetupState::load();
-    state.is_complete()
+    if !state.is_complete() {
+        return false;
+    }
+    runtime::detect_runtime().is_installed()
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,6 +1238,18 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Ok(())
     })?;
     log::info!("containers started, verifying health");
+
+    // Windows: `compose up` auto-creates the `/home/speedwave/.claude` bind
+    // mount-point (for the read-only ide-bridge mount) as ROOT, even after we
+    // chowned claude-home — so the uid-1000 entrypoint's `mkdir .claude/skills`
+    // hits EACCES and the container exits(1). Chown the tree AFTER compose
+    // created the mount-points, then ensure_exec_healthy's recovery recreate
+    // re-runs the entrypoint against the now-1000-owned tree. Verified on the
+    // live distro. Fail-open. (ADR-052 mount ownership.)
+    #[cfg(target_os = "windows")]
+    if let Err(e) = ensure_claude_home_owner(project) {
+        log::warn!("ensure_claude_home_owner failed (non-fatal): {e}");
+    }
 
     // Verify containers are actually functional before marking as started.
     // Only probes the claude container — MCP workers are health-checked
@@ -1659,7 +1855,9 @@ fn cli_install_path() -> Option<std::path::PathBuf> {
         .join(consts::CLI_BINARY);
 
     #[cfg(target_os = "windows")]
-    let path = consts::data_dir().join("bin").join("speedwave.exe");
+    let path = consts::data_dir()
+        .join(consts::CLI_BIN_SUBDIR)
+        .join("speedwave.exe");
 
     Some(path)
 }
@@ -1709,6 +1907,107 @@ pub fn link_cli() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolves a `windows/<name>` script from the Tauri bundle on Windows: prefer
+/// `SPEEDWAVE_RESOURCES_DIR`, then the production bundle layout, then dev
+/// fallbacks. Shared by the sweep and firewall consumers.
+#[cfg(target_os = "windows")]
+pub(crate) fn resolve_bundled_windows_script(name: &str) -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
+        let bundled = std::path::PathBuf::from(&resources_dir)
+            .join("windows")
+            .join(name);
+        if bundled.exists() {
+            return Some(bundled);
+        }
+    }
+    let resources = exe_dir.join("resources").join("windows").join(name);
+    if resources.exists() {
+        return Some(resources);
+    }
+    let dev = exe_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("windows").join(name));
+    if let Some(ref path) = dev {
+        if path.exists() {
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_sweep_script() -> Option<std::path::PathBuf> {
+    resolve_bundled_windows_script("sweep.ps1")
+}
+
+/// Absolute path to the system PowerShell (`%SystemRoot%\System32\...`).
+/// Never the bare `powershell` from PATH — avoids hijack on multi-install hosts.
+#[cfg(target_os = "windows")]
+pub(crate) fn system_powershell_path() -> std::path::PathBuf {
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+    std::path::PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+/// Defense-in-depth: kill any stale Speedwave / Node / CLI process holding
+/// the binaries we are about to overwrite. Runs at every Tauri Desktop
+/// startup, complementing the install-time sweep in NSIS + WiX. Fails open
+/// (logs warn, returns) so AppLocker / WDAC policy cannot brick startup.
+/// SSOT for the kill predicate is `windows/sweep.ps1`.
+#[cfg(target_os = "windows")]
+fn run_pre_link_sweep() {
+    let Some(sweep) = resolve_sweep_script() else {
+        log::warn!("pre-link sweep skipped: sweep.ps1 not found in bundle");
+        return;
+    };
+    let inst_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_default();
+    let data_dir = consts::data_dir();
+    let powershell = system_powershell_path();
+
+    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe. Full mode is
+    // reserved for install-time hooks (NSIS/MSI) — Tauri Desktop must not
+    // target its own workers or self. system_command applies CREATE_NO_WINDOW
+    // so PowerShell does not flash a console over the Desktop UI.
+    let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&sweep)
+        .args(["-Mode", "runtime"])
+        .env("SPW_INSTDIR", &inst_dir)
+        .env("SPW_DATA_DIR", &data_dir)
+        .output();
+    match result {
+        Ok(out) if out.status.success() => {
+            log::info!("pre-link sweep: ok");
+        }
+        Ok(out) => {
+            log::warn!(
+                "pre-link sweep exited {:?} (non-fatal): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            log::warn!("pre-link sweep spawn failed (non-fatal): {e}");
+        }
+    }
+}
+
 /// Inner implementation that copies the CLI binary and configures PATH using explicit paths.
 ///
 /// Separated from [`link_cli`] for unit testing without depending on `current_exe()` or
@@ -1724,7 +2023,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
     #[cfg(target_os = "windows")]
     {
         let _ = home;
-        let cli_dir = consts::data_dir().join("bin");
+        let cli_dir = consts::data_dir().join(consts::CLI_BIN_SUBDIR);
 
         let cli_dir_str = cli_dir.to_string_lossy().to_string();
 
@@ -1740,6 +2039,12 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
                 cli_dir_str
             );
         }
+
+        // Defense-in-depth: kill any stale CLI / worker process holding
+        // ~/.speedwave/bin/speedwave.exe before we try to overwrite it.
+        // Covers MSI users (no NSIS PRE-INSTALL sweep), AppLocker failures,
+        // and post-install processes spawned by containers (ADR-048).
+        run_pre_link_sweep();
 
         copy_cli_binary(cli_source, &cli_dir)?;
 
@@ -2634,6 +2939,59 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    mod terminate_on_change_tests {
+        use super::super::TerminateOnChange;
+
+        // Regression guard for the E2E "cannot exec in a stopped state"
+        // failure: the import path may terminate (no containers yet), the
+        // startup-migration path must not (containers may be running).
+        #[test]
+        fn variants_are_distinct() {
+            assert_ne!(TerminateOnChange::Yes, TerminateOnChange::No);
+            assert_eq!(TerminateOnChange::Yes, TerminateOnChange::Yes);
+            assert_eq!(TerminateOnChange::No, TerminateOnChange::No);
+        }
+
+        #[test]
+        fn is_copy_and_debug() {
+            let y = TerminateOnChange::Yes;
+            let copied = y; // Copy: original still usable below
+            assert_eq!(y, copied);
+            assert_eq!(format!("{:?}", TerminateOnChange::No), "No");
+            assert_eq!(format!("{:?}", TerminateOnChange::Yes), "Yes");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    mod wsl_automount_options_tests {
+        use speedwave_runtime::consts;
+
+        // Regression guard for the claude container early-exit: the automount
+        // options carry `metadata` (so /login's chmod 0600 works, ADR-052) and
+        // the container uid/gid — derived from the CONTAINER_USER_UNPRIVILEGED
+        // SSOT, NOT a re-typed literal, so the mount owner and the compose
+        // `user:` cannot drift. The load-bearing fix is the chown in
+        // ensure_claude_home_owner; this option is best-effort (see its docs).
+        #[test]
+        fn options_derive_metadata_and_container_uid_from_ssot() {
+            let opts = consts::wsl_automount_options();
+            let (uid, gid) = consts::container_uid_gid();
+            assert!(
+                opts.contains("metadata"),
+                "metadata required for /login chmod 0600 (ADR-052)"
+            );
+            assert!(
+                opts.contains(&format!("uid={uid}")),
+                "automount uid must equal container uid {uid}"
+            );
+            assert!(
+                opts.contains(&format!("gid={gid}")),
+                "automount gid must equal container gid {gid}"
+            );
+        }
+    }
+
     // ── copy_cli_binary tests ─────────────────────────────────────────────
 
     #[test]
@@ -3357,7 +3715,7 @@ mod tests {
         let decoded = decode_wsl_output(&bytes);
         let found = decoded
             .lines()
-            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+            .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name());
         assert!(
             found,
             "imported decode_wsl_output should decode UTF-16LE correctly, got: {decoded:?}"
@@ -3375,7 +3733,9 @@ mod tests {
     #[serial]
     fn verify_wsl_distro_origin_passes_when_vhdx_exists() {
         // Create the expected vhdx file under the real data_dir() (OnceLock-cached).
-        let vhdx_dir = consts::data_dir().join("wsl").join(consts::WSL_DISTRO_NAME);
+        let vhdx_dir = consts::data_dir()
+            .join("wsl")
+            .join(consts::wsl_distro_name());
         std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
         let vhdx_file = vhdx_dir.join("ext4.vhdx");
         let existed_before = vhdx_file.exists();
@@ -3404,7 +3764,7 @@ mod tests {
         // file doesn't exist there (it shouldn't in dev/test environments).
         let vhdx_path = consts::data_dir()
             .join("wsl")
-            .join(consts::WSL_DISTRO_NAME)
+            .join(consts::wsl_distro_name())
             .join("ext4.vhdx");
         if vhdx_path.exists() {
             // Skip: can't test "missing" when file genuinely exists
@@ -3424,7 +3784,9 @@ mod tests {
     #[serial]
     fn verify_wsl_distro_origin_rejects_empty_directory() {
         // Create the wsl distro directory without the ext4.vhdx file.
-        let vhdx_dir = consts::data_dir().join("wsl").join(consts::WSL_DISTRO_NAME);
+        let vhdx_dir = consts::data_dir()
+            .join("wsl")
+            .join(consts::wsl_distro_name());
         let dir_existed = vhdx_dir.exists();
         std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
 
@@ -3465,7 +3827,7 @@ mod tests {
             "path should contain 'wsl': {path_str}"
         );
         assert!(
-            path_str.contains(consts::WSL_DISTRO_NAME),
+            path_str.contains(consts::wsl_distro_name()),
             "path should contain distro name: {path_str}"
         );
         assert!(

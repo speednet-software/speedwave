@@ -57,12 +57,12 @@ The Desktop chat UI launches `claude -p --output-format stream-json` inside the 
 The bar at the bottom of the chat shows the current state of the session, mirroring the container statusline layout:
 
 ```
-claude-opus-4-7 │ CTX ██░░░ 2% │ 116k/1M │ Limit ░░░░░ 30% reset 16:42 │ $0.1409 │ In: 3 CR: 22,560 CW: 75 Out: 825
+claude-opus-4-8 │ CTX ██░░░ 2% │ 116k/1M │ Limit ░░░░░ 30% reset 16:42 │ $0.1409 │ In: 3 CR: 22,560 CW: 75 Out: 825
 ```
 
 | Element      | Source                                     | Meaning                                                                                                                                                                 |
 | ------------ | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`      | `system.init.model`                        | Model id (e.g. `claude-opus-4-7`, `llama3.3`).                                                                                                                          |
+| `model`      | `system.init.model`                        | Model id (e.g. `claude-opus-4-8`, `llama3.3`).                                                                                                                          |
 | `CTX N%`     | `resolveContextWindow` (see below)         | Percentage of the context window used by the current turn (`input_tokens + cache_read + cache_creation`) ÷ window. Bar turns amber at 50%, red at 76%, bold red at 90%. |
 | `used / max` | `formatContextLabel` (`models/llm.ts`)     | Short-form ratio (`116k/1M`, `42k/200k`). The label is `1M` for ≥ 1_000_000, `Xk` for ≥ 1_000.                                                                          |
 | `Limit N%`   | `rate_limit_event.rate_limit_info`         | 5-hour subscription quota utilisation (Pro/Max only — absent for API-key users).                                                                                        |
@@ -72,7 +72,7 @@ claude-opus-4-7 │ CTX ██░░░ 2% │ 116k/1M │ Limit ░░░░░
 | `CW: N`      | `result.usage.cache_creation_input_tokens` | Tokens written to prompt cache during the last turn.                                                                                                                    |
 | `Out: N`     | Cumulative `result.usage.output_tokens`    | Total tokens generated across all turns in the session.                                                                                                                 |
 
-**Per-step vs. cumulative.** Claude Code's result message contains two usage sources: `result.usage` (flat — per-step, resets each API call) and `result.modelUsage` (cumulative — grows over the session). The CTX % uses the flat per-step value so it reflects actual context window consumption; the total cost uses `total_cost_usd` (cumulative) because cost accumulates.
+**Latest-turn vs. cumulative.** Claude Code's result message contains two usage sources: `result.usage` (flat — the latest turn's full-prompt usage, _not_ summed across turns) and `result.modelUsage` (cumulative — grows over the session). The CTX % uses the flat value (`input_tokens + cache_read + cache_creation`) because each turn re-sends the whole conversation, so the latest turn already reflects total context occupancy — summing across turns would double-count the re-sent history. The total cost uses `total_cost_usd` (cumulative) because cost accumulates. In the Desktop footer, `in:` shows `input_tokens` only (the new uncached input) so a short chat doesn't read as the full context size; the CTX gauge keeps the additive total.
 
 **Context window resolution.** `ChatStateService.resolveContextWindow` walks a five-step fallback chain so the footer always has a concrete value:
 
@@ -115,6 +115,16 @@ There is no client-side gate on the active model — every provider gets a chanc
 
 The CLI (`speedwave run`, which launches Claude Code's TUI in the container) does **not** yet support image paste — the TUI's native paste reads the host clipboard, which the container cannot see. A host-side clipboard watcher is planned in a separate spike + PR.
 
+## Project switcher
+
+The project pill in the top-right of every view opens the project switcher dropdown — the single entry point for selecting, adding, and removing projects.
+
+- **Switch:** click any inactive row. The active row is rendered disabled (no `current` pill — color and disabled state are the only signals) so it never reads as a clickable target.
+- **Add:** the `+ add project…` footer opens the shared create-project modal.
+- **Remove:** the trash icon appears on inactive rows on hover or keyboard focus. Clicking it swaps the row into an inline **Sure?** confirm with `delete` / `cancel` (same pattern as the conversation-history sidebar). Removing a project unregisters it from `~/.speedwave/config.json`, stops its containers, tears down its host-exec drain, and deletes every per-project subdirectory under `~/.speedwave/` (tokens, compose, context, claude-home, secrets, snapshots, oauth, host-exec). **The user's project files on the host are not touched** — only Speedwave-managed state is removed.
+- The active project cannot be removed; switch to a different one first. The runtime layer enforces this regardless of caller, and the trash icon is hidden on the active row in the UI.
+- If a backend error reaches the UI (compose-down failure, runtime guard), it surfaces inline under the row as a red `role="alert"` message — the config wipe is aborted so the user can retry.
+
 ## System Tray
 
 ## Logs & system health
@@ -154,6 +164,17 @@ A separate, **opt-in** Desktop integration that records system audio + microphon
 **Acceleration.** v1 ships CPU + Metal backends (the recording controls show "Acceleration: Metal" or "Acceleration: CPU only"). CUDA / Vulkan are explicitly out of scope for v1 — they need a separate CI toolchain and bundling strategy, tracked as follow-up.
 
 See [ADR-056](../adr/ADR-056-host-side-audio-transcription.md) for the full design and trade-offs.
+
+## Appearance
+
+Settings → Appearance controls two independent choices:
+
+- **Mode** — `light`, `dark`, or `auto`. `auto` follows the operating system's `prefers-color-scheme` and switches live when the system theme changes. The choice persists locally (browser `localStorage`, key `speedwave-theme-mode`); on first run the app defaults to `dark`. An inline script in `index.html` applies the persisted mode before the app boots, so the first paint never flashes the wrong scheme.
+- **Accent color** — one of six accent palettes (crimson, mint, amber, iris, cyan, sand) used for buttons, links, active-state indicators, and syntax highlighting. Persisted under `speedwave-theme`.
+
+The two axes are orthogonal: any accent works in either mode. Accent colors are tuned per mode so text and icons meet WCAG AA contrast against the active background. The native window titlebar stays system-native and is not themed by the app. Both axes are managed by `ThemeService`; accent values live in `desktop/src/src/styles.css` as CSS custom properties (the single source of truth — components read `var(--accent)` etc., never hard-coded hex).
+
+WCAG contrast waivers, if any, are recorded in [accessibility/contrast-report.md](../accessibility/contrast-report.md).
 
 ## See Also
 

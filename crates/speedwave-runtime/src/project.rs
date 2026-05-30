@@ -8,16 +8,21 @@ pub fn cleanup_project_dirs(project: &str) {
 }
 
 /// Best-effort cleanup of project directories under a given data directory.
+/// Subdir set mirrors fs_security's per-project list — when adding state under data_dir/<sub>/<project>/, add it here too.
 fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
     for sub in &[
         "tokens",
         "compose",
         "context",
         crate::consts::CLAUDE_HOME_SUBDIR,
+        "secrets",
+        "snapshots",
+        crate::consts::OAUTH_SUBDIR,
+        crate::consts::HOST_EXEC_SUBDIR,
     ] {
         let dir = data_dir.join(sub).join(project);
-        if dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&dir) {
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
                 log::warn!(
                     "cleanup_project_dirs: failed to remove '{}': {e}",
                     dir.display()
@@ -126,7 +131,7 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
                     "Cannot use the WSL distribution root '{}' as a project directory. \
                      Choose a subdirectory like \\\\wsl.localhost\\{}\\projects\\<name>.",
                     dir,
-                    crate::consts::WSL_DISTRO_NAME
+                    crate::consts::wsl_distro_name()
                 );
             }
             if !std::fs::metadata(dir_path)
@@ -226,6 +231,42 @@ fn add_project_with_validated_dir(
         return Err(e);
     }
 
+    Ok(())
+}
+
+/// Sentinel prefix on the error message when the caller tried to remove the active project.
+/// Stable string — UI may match on it to surface a tailored toast.
+pub const REMOVE_ACTIVE_PROJECT_ERR_PREFIX: &str = "active_project_removal: ";
+
+/// Unregisters a project and cleans its Speedwave-managed dirs. Source tree on disk is not touched.
+pub fn remove_project(name: &str) -> anyhow::Result<()> {
+    config::with_config_lock(|| remove_project_with_data_dir(name, crate::consts::data_dir()))
+}
+
+fn remove_project_with_data_dir(name: &str, data_dir: &Path) -> anyhow::Result<()> {
+    validation::validate_project_name(name)?;
+
+    let config_path = data_dir.join("config.json");
+    let mut user_config = config::load_user_config_from(&config_path)?;
+
+    if user_config.active_project.as_deref() == Some(name) {
+        anyhow::bail!(
+            "{}Cannot remove the active project '{}'. Switch to a different project first.",
+            REMOVE_ACTIVE_PROJECT_ERR_PREFIX,
+            name
+        );
+    }
+
+    let pos = user_config
+        .projects
+        .iter()
+        .position(|p| p.name == name)
+        .ok_or_else(|| anyhow::anyhow!("Project '{}' not found", name))?;
+
+    user_config.projects.remove(pos);
+
+    config::save_user_config_to(&user_config, &config_path)?;
+    cleanup_project_dirs_in(name, data_dir);
     Ok(())
 }
 
@@ -730,6 +771,172 @@ mod tests {
             .join(crate::consts::CLAUDE_HOME_SUBDIR)
             .join("luke-helm")
             .is_dir());
+    }
+
+    // -- remove_project tests --
+
+    #[test]
+    fn remove_project_happy_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let canon_a = std::fs::canonicalize(&dir_a).unwrap();
+        let canon_b = std::fs::canonicalize(&dir_b).unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        add_project_with_validated_dir(
+            "alpha",
+            canon_a.clone(),
+            canon_a.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+        add_project_with_validated_dir(
+            "beta",
+            canon_b.clone(),
+            canon_b.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+
+        // Seed long-lived per-project dirs alongside the ones add_project created.
+        for sub in &[
+            "secrets",
+            "snapshots",
+            crate::consts::OAUTH_SUBDIR,
+            crate::consts::HOST_EXEC_SUBDIR,
+        ] {
+            let d = data_dir.join(sub).join("alpha");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("secret"), b"x").unwrap();
+        }
+
+        remove_project_with_data_dir("alpha", &data_dir).unwrap();
+
+        let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        assert!(cfg.find_project("alpha").is_none());
+        assert_eq!(cfg.active_project.as_deref(), Some("beta"));
+        for sub in &[
+            "tokens",
+            "compose",
+            "context",
+            crate::consts::CLAUDE_HOME_SUBDIR,
+            "secrets",
+            "snapshots",
+            crate::consts::OAUTH_SUBDIR,
+            crate::consts::HOST_EXEC_SUBDIR,
+        ] {
+            assert!(
+                !data_dir.join(sub).join("alpha").exists(),
+                "subdir '{sub}/alpha' must be cleaned up"
+            );
+        }
+        assert!(dir_a.exists(), "user's source tree must NOT be deleted");
+    }
+
+    #[test]
+    fn remove_project_rejects_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pd = tmp.path().join("proj");
+        std::fs::create_dir_all(&pd).unwrap();
+        let canonical = std::fs::canonicalize(&pd).unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        add_project_with_validated_dir(
+            "only",
+            canonical.clone(),
+            canonical.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+
+        let result = remove_project_with_data_dir("only", &data_dir);
+        let err = result.unwrap_err().to_string();
+        assert!(err.starts_with(REMOVE_ACTIVE_PROJECT_ERR_PREFIX));
+        let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        assert!(cfg.find_project("only").is_some());
+        assert_eq!(cfg.active_project.as_deref(), Some("only"));
+    }
+
+    #[test]
+    fn remove_project_rejects_invalid_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let result = remove_project_with_data_dir("../escape", &data_dir);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_project_missing_errors() {
+        // Exercises the "populated config, name not in list" branch — distinct
+        // from "missing config.json" which load_user_config_from treats as default.
+        let tmp = tempfile::tempdir().unwrap();
+        let pd = tmp.path().join("real");
+        std::fs::create_dir_all(&pd).unwrap();
+        let canonical = std::fs::canonicalize(&pd).unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        add_project_with_validated_dir(
+            "real",
+            canonical.clone(),
+            canonical.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+
+        let result = remove_project_with_data_dir("ghost", &data_dir);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "expected 'not found', got: {err}"
+        );
+        // Sanity: the real project must remain untouched.
+        let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        assert!(cfg.find_project("real").is_some());
+    }
+
+    #[test]
+    fn remove_project_preserves_other_active_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let canon_a = std::fs::canonicalize(&dir_a).unwrap();
+        let canon_b = std::fs::canonicalize(&dir_b).unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        add_project_with_validated_dir(
+            "first",
+            canon_a.clone(),
+            canon_a.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+        add_project_with_validated_dir(
+            "second",
+            canon_b.clone(),
+            canon_b.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+        // After two adds, `second` is active.
+        let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        assert_eq!(cfg.active_project.as_deref(), Some("second"));
+
+        // Removing the non-active project must leave active_project intact.
+        remove_project_with_data_dir("first", &data_dir).unwrap();
+        let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        assert!(cfg.find_project("first").is_none());
+        assert_eq!(cfg.active_project.as_deref(), Some("second"));
+        assert!(data_dir.join("compose").join("second").exists());
     }
 
     #[test]

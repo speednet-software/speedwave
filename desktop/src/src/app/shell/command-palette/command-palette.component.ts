@@ -18,7 +18,6 @@ import {
 import { Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
-import { ThemeService } from '../../services/theme.service';
 import { UiStateService } from '../../services/ui-state.service';
 import type { ProjectEntry, ProjectList } from '../../models/update';
 
@@ -180,7 +179,6 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
   private readonly tauri = inject(TauriService);
   private readonly projectState = inject(ProjectStateService);
-  private readonly theme = inject(ThemeService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly dialog = inject(Dialog);
   private readonly positionBuilder = inject(OverlayPositionBuilder);
@@ -260,17 +258,6 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
         action: () => {
           this.ui.toggleSidebar();
           this.ui.closePalette();
-        },
-      },
-      {
-        id: 'action-change-accent',
-        section: 'actions',
-        glyph: '◐',
-        glyphColor: 'dim',
-        label: 'change accent color...',
-        shortcut: '⌘T',
-        action: () => {
-          this.theme.cycle();
         },
       },
     ];

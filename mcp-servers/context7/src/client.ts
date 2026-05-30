@@ -180,7 +180,7 @@ export class Context7Client {
     let lastError: Context7Error | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // undici v7: redirects opt-in via the `redirect` interceptor —
+        // undici v7/v8: redirects opt-in via the `redirect` interceptor —
         // we never set it, so 3xx surfaces as a status we treat as an error
         // in mapErrorStatus (defence-in-depth, mirrors ADR-041 host policy).
         const response = await request(url, {
