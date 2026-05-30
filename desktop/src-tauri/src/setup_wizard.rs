@@ -759,8 +759,9 @@ fn import_wsl_distro() -> anyhow::Result<()> {
     // Import path: distro is freshly created, no containers run yet, so a
     // terminate to apply the new wsl.conf is safe. The distro stays registered
     // on error; the next launch's IfIdle migration retries the write (ADR-052).
-    ensure_wsl_distro_metadata(TerminateOnChange::Yes)
-        .context("configuring the imported WSL distro's automount failed")?;
+    ensure_wsl_distro_metadata(TerminateOnChange::Yes).map_err(|e| {
+        anyhow::anyhow!("configuring the imported WSL distro's automount failed: {e}")
+    })?;
 
     Ok(())
 }
