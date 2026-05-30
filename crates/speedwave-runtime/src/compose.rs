@@ -279,9 +279,6 @@ pub fn compose_output_path_in(
     Ok(data_dir.join("compose").join(project).join("compose.yml"))
 }
 
-/// Atomic 0o600 write. Validates network refs in-memory + post-read-back
-/// (catches macOS virtiofs lag; no-op on ext4/NTFS). 0o600 because YAML
-/// may carry `ANTHROPIC_AUTH_TOKEN` (ADR-040).
 #[cfg(test)]
 thread_local! {
     /// Test seam: when set, overrides the post-write read-back with this string
@@ -304,6 +301,9 @@ fn read_back_compose(path: &std::path::Path) -> std::io::Result<String> {
     std::fs::read_to_string(path)
 }
 
+/// Atomic 0o600 write. Validates network refs in-memory + post-read-back
+/// (catches macOS virtiofs lag; no-op on ext4/NTFS). 0o600 because YAML
+/// may carry `ANTHROPIC_AUTH_TOKEN` (ADR-040).
 pub fn save_compose(project: &str, yaml: &str) -> anyhow::Result<()> {
     validate_compose_network_refs(yaml)
         .map_err(|e| anyhow::anyhow!("save_compose: in-memory YAML failed validation: {e}"))?;
