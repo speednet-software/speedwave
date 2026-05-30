@@ -958,7 +958,9 @@ fn options_has_uid(options: &str, uid: u32) -> bool {
 fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
     let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
     let mut out = String::with_capacity(input.len() + 64);
-    let mut current_section: Option<String> = None;
+    // `Some(true)` = first [automount] (keep its keys); `Some(false)` = a
+    // duplicate [automount] (drop its whole body); `None` = some other section.
+    let mut in_automount: Option<bool> = None;
     let mut automount_seen = false;
     let mut options_written = false;
 
@@ -970,12 +972,12 @@ fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
             .map(|s| s.trim().to_ascii_lowercase())
         {
             if sec == "automount" {
-                current_section = Some(sec);
                 if automount_seen {
-                    // Drop a duplicate header; its body keys still flow through.
+                    in_automount = Some(false); // duplicate — drop header + body
                     continue;
                 }
                 automount_seen = true;
+                in_automount = Some(true);
                 out.push_str(line);
                 // Emit our options line right after the first header.
                 let line_nl = if line.ends_with('\n') { nl } else { "" };
@@ -983,20 +985,24 @@ fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
                 options_written = true;
                 continue;
             }
-            current_section = Some(sec);
+            in_automount = None;
             out.push_str(line);
             continue;
         }
-        // Inside [automount]: drop only the old options line, keep other keys.
-        if current_section.as_deref() == Some("automount") {
-            let is_options = trimmed
-                .split_once('=')
-                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("options"));
-            if is_options {
-                continue;
+        match in_automount {
+            // First [automount] body: drop only the old options line, keep the rest.
+            Some(true) => {
+                let is_options = trimmed
+                    .split_once('=')
+                    .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("options"));
+                if !is_options {
+                    out.push_str(line);
+                }
             }
+            // Duplicate [automount] body — drop entirely.
+            Some(false) => {}
+            None => out.push_str(line),
         }
-        out.push_str(line);
     }
 
     if !options_written {
@@ -3234,7 +3240,8 @@ mod tests {
             assert!(wsl_conf_automount_has_uid(&out, 1000));
         }
 
-        // Duplicate [automount] sections collapse to one.
+        // Interleaved duplicate [automount]: collapse to one, and a key from the
+        // dropped duplicate must NOT be misplaced under the intervening section.
         #[test]
         fn merge_dedups_duplicate_sections() {
             let input = "[automount]\nenabled=true\n[network]\nx=1\n[automount]\nroot=/m/\n";
@@ -3242,6 +3249,12 @@ mod tests {
             assert_eq!(out.matches("[automount]").count(), 1);
             assert_eq!(out.matches("options =").count(), 1);
             assert!(out.contains("[network]"), "other sections preserved");
+            // The duplicate's `root=/m/` must not leak under [network].
+            let net = out.find("[network]").unwrap();
+            assert!(
+                !out[net..].contains("root=/m/"),
+                "duplicate-section body must not be reattributed to [network]: {out:?}"
+            );
         }
 
         #[test]
