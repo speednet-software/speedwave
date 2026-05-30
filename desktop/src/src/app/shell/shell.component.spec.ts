@@ -339,6 +339,19 @@ describe('ShellComponent', () => {
       expect(overlay!.textContent).toContain('Container config changed');
     });
 
+    it('shows overlay when needsRestart is true and status is auth_required', () => {
+      // Toggling an integration is valid before Anthropic login; the restart
+      // prompt must still surface in auth_required, not only in ready.
+      projectState.status = 'auth_required';
+      projectState.needsRestart = true;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const overlay = q('[data-testid="restart-overlay"]');
+      expect(overlay).not.toBeNull();
+      expect(overlay!.textContent).toContain('restart required');
+    });
+
     it('hides overlay when needsRestart is false', () => {
       projectState.needsRestart = false;
       component['cdr'].markForCheck();
@@ -367,15 +380,6 @@ describe('ShellComponent', () => {
           `overlay should be hidden for status=${status}`
         ).toBeNull();
       }
-    });
-
-    it('hides overlay when status is auth_required', () => {
-      projectState.needsRestart = true;
-      projectState.status = 'auth_required';
-      component['cdr'].markForCheck();
-      fixture.detectChanges();
-
-      expect(q('[data-testid="restart-overlay"]')).toBeNull();
     });
 
     it('hides overlay when status is error', () => {
