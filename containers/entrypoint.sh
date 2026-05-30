@@ -266,7 +266,7 @@ if [ -z "${SPEEDWAVE_SKIP_HUB_WAIT:-}" ]; then
 fi
 
 # Health check marker
-touch /tmp/claude-ready
+touch "${CLAUDE_READY_MARKER:-/tmp/claude-ready}"
 
 # Execute the passed command (or keep container alive waiting for exec)
 if [ $# -gt 0 ]; then

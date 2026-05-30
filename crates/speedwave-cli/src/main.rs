@@ -25,11 +25,11 @@ enum CliAction {
     PluginDisable { service_id: String, project: String },
     Check,
     Init(Option<String>), // optional explicit project name (default: derive from dir name)
-    Login(Option<String>), // optional --project override (default: resolve from CWD)
-    Logout(Option<String>), // optional --project override (default: resolve from CWD)
+    Login(Option<String>), // optional --project override (default: active project)
+    Logout(Option<String>), // optional --project override (default: active project)
     SelfUpdate,
-    Update,
-    Run, // default: compose_up + exec
+    Update(Option<String>), // optional --project override (default: active project)
+    Run(Option<String>), // optional --project override (default: active project); compose_up + exec
     Help,
 }
 
@@ -44,20 +44,43 @@ fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, Strin
     ))
 }
 
-/// Parses optional `--project <value>` for `login`/`logout`. The flag itself
-/// is optional; if present it must carry a value. Returns Ok(None) when the
-/// flag is absent.
-fn parse_optional_project_flag(
-    args: &[String],
+/// Parses an optional `--project <value>` / `--project=<value>` flag from the
+/// argv tail that follows a subcommand. `tail` is the slice *after* the
+/// subcommand token (e.g. `args[2..]` for `login`, `args[1..]` for the leading
+/// bare-run form). The only accepted token is the project flag; any other
+/// token — a stray positional, an unknown flag, a second `--project` — is a
+/// hard error. Returns `Ok(None)` when the tail is empty.
+fn parse_optional_project_tail(
+    tail: &[String],
     subcommand: &str,
 ) -> Result<Option<String>, String> {
-    let Some(flag_pos) = args.iter().position(|a| a == "--project") else {
+    let usage = || format!("usage: speedwave {subcommand} [--project <project>]");
+    let mut iter = tail.iter();
+    let Some(first) = iter.next() else {
         return Ok(None);
     };
-    args.get(flag_pos + 1)
-        .cloned()
-        .map(Some)
-        .ok_or_else(|| format!("usage: speedwave {subcommand} [--project <project>]"))
+    let project = if let Some(value) = first.strip_prefix("--project=") {
+        if value.is_empty() {
+            return Err(usage());
+        }
+        value.to_string()
+    } else if first == "--project" {
+        iter.next().cloned().ok_or_else(usage)?
+    } else {
+        return Err(format!("unexpected argument: '{first}'. {}", usage()));
+    };
+    if let Some(extra) = iter.next() {
+        return Err(format!("unexpected argument: '{extra}'. {}", usage()));
+    }
+    Ok(Some(project))
+}
+
+/// Rejects any token beyond `expected_len` for subcommands that take no args.
+fn reject_extra_args(args: &[String], expected_len: usize, usage: &str) -> Result<(), String> {
+    match args.get(expected_len) {
+        Some(extra) => Err(format!("unexpected argument: '{extra}'. usage: {usage}")),
+        None => Ok(()),
+    }
 }
 
 fn parse_action(args: &[String]) -> Result<CliAction, String> {
@@ -68,13 +91,18 @@ fn parse_action(args: &[String]) -> Result<CliAction, String> {
                 let path = args
                     .get(3)
                     .ok_or("usage: speedwave plugin install <zip-path>".to_string())?;
+                reject_extra_args(args, 4, "speedwave plugin install <zip-path>")?;
                 Ok(CliAction::PluginInstall(path.clone()))
             }
-            Some("list") => Ok(CliAction::PluginList),
+            Some("list") => {
+                reject_extra_args(args, 3, "speedwave plugin list")?;
+                Ok(CliAction::PluginList)
+            }
             Some("remove") => {
                 let slug = args
                     .get(3)
                     .ok_or("usage: speedwave plugin remove <slug>".to_string())?;
+                reject_extra_args(args, 4, "speedwave plugin remove <slug>")?;
                 Ok(CliAction::PluginRemove(slug.clone()))
             }
             Some("enable") => {
@@ -99,20 +127,43 @@ fn parse_action(args: &[String]) -> Result<CliAction, String> {
             }
             _ => Err("usage: speedwave plugin [install|list|remove|enable|disable]".to_string()),
         },
-        Some("check") => Ok(CliAction::Check),
+        Some("check") => {
+            reject_extra_args(args, 2, "speedwave check")?;
+            Ok(CliAction::Check)
+        }
         Some("init") => {
             let name = args.get(2).cloned();
+            reject_extra_args(args, 3, "speedwave init [name]")?;
             Ok(CliAction::Init(name))
         }
-        Some("self-update") => Ok(CliAction::SelfUpdate),
-        Some("update") => Ok(CliAction::Update),
-        Some("login") => Ok(CliAction::Login(parse_optional_project_flag(
-            args, "login",
+        Some("self-update") => {
+            reject_extra_args(args, 2, "speedwave self-update")?;
+            Ok(CliAction::SelfUpdate)
+        }
+        Some("update") => Ok(CliAction::Update(parse_optional_project_tail(
+            &args[2..],
+            "update",
         )?)),
-        Some("logout") => Ok(CliAction::Logout(parse_optional_project_flag(
-            args, "logout",
+        Some("login") => Ok(CliAction::Login(parse_optional_project_tail(
+            &args[2..],
+            "login",
         )?)),
-        _ => Ok(CliAction::Run),
+        Some("logout") => Ok(CliAction::Logout(parse_optional_project_tail(
+            &args[2..],
+            "logout",
+        )?)),
+        // A leading flag with no subcommand is the bare-run project override:
+        // `speedwave --project acme` / `speedwave --project=acme`.
+        Some(flag) if flag.starts_with('-') => Ok(CliAction::Run(parse_optional_project_tail(
+            &args[1..],
+            "run",
+        )?)),
+        // A non-flag token that matched no subcommand is a typo, not a silent
+        // `run` — reject it so `speedwave updatte` fails loudly.
+        Some(unknown) => Err(format!(
+            "unknown command: '{unknown}'. Run 'speedwave --help' for usage."
+        )),
+        None => Ok(CliAction::Run(None)),
     }
 }
 
@@ -260,7 +311,7 @@ fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
         anyhow::bail!(
             "Container image rebuild failed (exit {}). \
              Ensure Speedwave Desktop is running, then run `speedwave update` \
-             in your project directory.",
+             again.",
             status.code().unwrap_or(-1)
         );
     }
@@ -327,12 +378,12 @@ fn print_help() {
 speedwave — run Claude Code in a hardened container per project
 
 USAGE:
-    speedwave                         Start Claude Code for the current project
+    speedwave         [--project <p>] Start Claude Code for the active project (or <p>)
     speedwave check                   Run security + OS prerequisite checks
     speedwave init [name]             Register the current directory as a project
     speedwave login   [--project <p>] Run Anthropic OAuth login (type /login at Claude's prompt)
     speedwave logout  [--project <p>] Delete Claude Code credentials for the project
-    speedwave update                  Rebuild container images for the current bundle
+    speedwave update                  Rebuild container images for the active project
     speedwave self-update             Download the latest speedwave CLI binary
 
     speedwave plugin install <zip>    Install a plugin from a signed ZIP
@@ -342,6 +393,9 @@ USAGE:
     speedwave plugin disable <id> --project <project>   Disable a plugin per-project
 
     speedwave --help | -h | help      Show this help and exit
+
+The active project is the one selected in Speedwave Desktop; `--project <p>`
+overrides it. The working directory does not select the project.
 
 Most commands require Speedwave Desktop to be running. See docs/guides/cli.md.",
     );
@@ -353,7 +407,7 @@ fn runtime_not_available() -> ! {
     eprintln!("1. Open Speedwave.app");
     eprintln!("2. Complete the Setup Wizard");
     eprintln!("3. Start your project");
-    eprintln!("Then run `speedwave` again in your project directory.");
+    eprintln!("Then run `speedwave` again.");
     std::process::exit(1);
 }
 
@@ -485,7 +539,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Handle `speedwave update` — rebuild images + recreate containers
-    if action == CliAction::Update {
+    if let CliAction::Update(_) = action {
         let runtime = detect_runtime();
         if !runtime.is_available() {
             runtime_not_available();
@@ -494,7 +548,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!("Failed to load config: {e}");
             std::process::exit(1);
         });
-        let project_name = resolve_project(&user_config)?;
+        let project_name = resolve_action_project(&action, &user_config)?;
         println!("Updating containers for project '{}'...", project_name);
         match update::update_containers(&runtime, &project_name) {
             Ok(result) => {
@@ -514,15 +568,12 @@ fn main() -> anyhow::Result<()> {
     // Handle `speedwave logout` — deletes Claude Code's credential files
     // (~/.claude/.credentials.json and ~/.claude.json) from the per-project
     // CLAUDE_HOME mount. No runtime needed.
-    if let CliAction::Logout(ref project_override) = action {
+    if let CliAction::Logout(_) = action {
         let user_config = config::load_user_config().unwrap_or_else(|e| {
             eprintln!("Failed to load config: {e}");
             std::process::exit(1);
         });
-        let project_name = match project_override {
-            Some(name) => name.clone(),
-            None => resolve_project(&user_config)?,
-        };
+        let project_name = resolve_action_project(&action, &user_config)?;
         validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
         let removed = speedwave_runtime::claude_home::remove_claude_credentials(
             consts::data_dir(),
@@ -711,27 +762,29 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
-    // `speedwave login --project=foo` overrides CWD-based project resolution
-    // so users can log in from any working directory.
-    let project_name = match &action {
-        CliAction::Login(Some(name)) => name.clone(),
-        _ => resolve_project(&user_config)?,
-    };
+    let project_name = resolve_action_project(&action, &user_config)?;
 
     // Validate project name is safe for container naming
     validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
 
-    // Use project dir from config (authoritative), fall back to CWD
-    let project_dir = match user_config.find_project(&project_name) {
-        Some(p) => std::path::PathBuf::from(&p.dir),
-        None => std::env::current_dir().map_err(|e| {
+    // Project dir comes from config (authoritative). resolve_action_project
+    // already rejected an explicit `--project` naming a missing project; an
+    // unresolved name here means a stale active/first entry, which we reject
+    // with a clear error rather than silently mounting the working directory.
+    let project_dir = user_config
+        .find_project(&project_name)
+        .map(|p| std::path::PathBuf::from(&p.dir))
+        .ok_or_else(|| {
+            let available = user_config
+                .projects
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             anyhow::anyhow!(
-                "project '{}' not found in config and cannot determine current directory: {}",
-                project_name,
-                e
+                "project '{project_name}' not found in config. Available projects: {available}"
             )
-        })?,
-    };
+        })?;
 
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
@@ -997,71 +1050,35 @@ fn maybe_spawn_oauth_worker(
     }
 }
 
-/// Resolves project name from CWD path matching against configured projects.
-/// Falls back to active_project with a warning if no path matches.
-fn resolve_project(user_config: &config::SpeedwaveUserConfig) -> anyhow::Result<String> {
-    if let Ok(cwd) = std::env::current_dir() {
-        return resolve_project_for_cwd(&cwd, user_config);
-    }
-    resolve_project_fallback(user_config)
-}
-
-/// Testable project resolution: matches CWD (or a subdirectory) against
-/// registered project paths using canonicalization and longest-prefix match.
-fn resolve_project_for_cwd(
-    cwd: &Path,
+/// Picks the project an action operates on. An explicit `--project` override
+/// on `run`/`login`/`logout`/`update` wins and must name a real project
+/// (`require_project`); otherwise the active project (Desktop selector) is
+/// used, then the first configured project. The working directory is never
+/// consulted.
+fn resolve_action_project(
+    action: &CliAction,
     user_config: &config::SpeedwaveUserConfig,
 ) -> anyhow::Result<String> {
-    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let cwd_str = canonical_cwd.to_string_lossy();
-
-    // Exact match — CWD is exactly a project directory
-    for p in &user_config.projects {
-        if let Ok(canonical_dir) = std::fs::canonicalize(&p.dir) {
-            if canonical_dir == canonical_cwd {
-                return Ok(p.name.clone());
-            }
-        } else {
-            eprintln!(
-                "Warning: cannot resolve configured path '{}' for project '{}' — skipping",
-                p.dir, p.name
-            );
+    match action {
+        CliAction::Run(Some(name))
+        | CliAction::Login(Some(name))
+        | CliAction::Logout(Some(name))
+        | CliAction::Update(Some(name)) => {
+            // An explicit `--project` must name a real project. Without this
+            // guard a typo'd name passes syntactic validation and main()
+            // silently mounts the working directory instead (defect #6).
+            user_config.require_project(name)?;
+            Ok(name.clone())
         }
+        _ => resolve_project_fallback(user_config),
     }
-
-    // Longest-prefix match — CWD is inside a project directory
-    let mut best: Option<(&str, usize)> = None;
-    for p in &user_config.projects {
-        if let Ok(canonical_dir) = std::fs::canonicalize(&p.dir) {
-            let dir_str = canonical_dir.to_string_lossy();
-            let prefix = format!("{}/", dir_str.trim_end_matches('/'));
-            if cwd_str.starts_with(&prefix) {
-                let len = prefix.len();
-                if best.is_none_or(|(_, best_len)| len > best_len) {
-                    best = Some((&p.name, len));
-                }
-            }
-        } else {
-            eprintln!(
-                "Warning: cannot resolve configured path '{}' for project '{}' — skipping",
-                p.dir, p.name
-            );
-        }
-    }
-    if let Some((name, _)) = best {
-        return Ok(name.to_string());
-    }
-
-    // Fallback with warning
-    let result = resolve_project_fallback(user_config)?;
-    eprintln!(
-        "Warning: current directory does not match any registered project. Using '{}'.",
-        result
-    );
-    eprintln!("Hint: run `speedwave init` to register this directory as a project.");
-    Ok(result)
 }
 
+/// Resolves the project to act on when no explicit `--project` was given.
+/// The active project (set by the Desktop selector) is authoritative; the
+/// first configured project is the fallback when none is active. The working
+/// directory is intentionally NOT consulted — the selector is the single
+/// source of truth.
 fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow::Result<String> {
     user_config
         .active_project
@@ -1082,7 +1099,7 @@ mod tests {
     #[test]
     fn parse_action_no_args_returns_run() {
         let args = vec!["speedwave".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Run);
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Run(None));
     }
 
     #[test]
@@ -1199,9 +1216,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_action_unknown_command_returns_run() {
-        let args = vec!["speedwave".to_string(), "unknown".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Run);
+    fn parse_action_unknown_command_errors() {
+        let args = vec!["speedwave".to_string(), "updatte".to_string()];
+        let err = parse_action(&args).unwrap_err();
+        assert!(
+            err.contains("unknown command") && err.contains("updatte"),
+            "expected unknown-command error, got: {err}"
+        );
     }
 
     // ── login / logout ─────────────────────────────────────────────────────
@@ -1268,6 +1289,155 @@ mod tests {
             "--project".to_string(),
         ];
         assert!(parse_action(&args).is_err());
+    }
+
+    // ── hardened parser: 6 defects + compatibility ──────────────────────────
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_action_leading_flag_before_subcommand_errors() {
+        // Defect #1: `speedwave --project acme login` must NOT silently run
+        // acme and drop `login`. The leading `--project acme` is consumed as
+        // the bare-run override, then `login` is trailing garbage → error.
+        let args = argv(&["speedwave", "--project", "acme", "login"]);
+        let err = parse_action(&args).unwrap_err();
+        assert!(
+            err.contains("unexpected argument") && err.contains("login"),
+            "expected trailing-garbage error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_action_update_with_project_space_form() {
+        // Defect #3: update now accepts --project (was silently ignored).
+        let args = argv(&["speedwave", "update", "--project", "acme"]);
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::Update(Some("acme".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_action_login_equals_form() {
+        // Defect #4: `--project=acme` was silently ignored; now supported.
+        let args = argv(&["speedwave", "login", "--project=acme"]);
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::Login(Some("acme".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_action_bare_run_equals_form() {
+        let args = argv(&["speedwave", "--project=acme"]);
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::Run(Some("acme".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_action_equals_form_empty_value_errors() {
+        let args = argv(&["speedwave", "login", "--project="]);
+        let err = parse_action(&args).unwrap_err();
+        assert!(err.contains("speedwave login"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_action_login_extra_positional_errors() {
+        // Defect #5: garbage after a valid subcommand is rejected.
+        let args = argv(&["speedwave", "login", "extra", "junk"]);
+        let err = parse_action(&args).unwrap_err();
+        assert!(
+            err.contains("unexpected argument") && err.contains("extra"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_action_login_extra_after_project_value_errors() {
+        let args = argv(&["speedwave", "login", "--project", "acme", "junk"]);
+        let err = parse_action(&args).unwrap_err();
+        assert!(
+            err.contains("unexpected argument") && err.contains("junk"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_action_check_rejects_extra_args() {
+        let args = argv(&["speedwave", "check", "junk"]);
+        let err = parse_action(&args).unwrap_err();
+        assert!(err.contains("speedwave check"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_action_self_update_rejects_extra_args() {
+        let args = argv(&["speedwave", "self-update", "junk"]);
+        assert!(parse_action(&args).is_err());
+    }
+
+    #[test]
+    fn parse_action_init_rejects_extra_args() {
+        let args = argv(&["speedwave", "init", "name", "junk"]);
+        let err = parse_action(&args).unwrap_err();
+        assert!(err.contains("speedwave init"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_action_plugin_install_rejects_extra_args() {
+        let args = argv(&["speedwave", "plugin", "install", "x.zip", "junk"]);
+        assert!(parse_action(&args).is_err());
+    }
+
+    #[test]
+    fn parse_action_compat_desktop_login_project_space_form() {
+        // HARD CONSTRAINT: Desktop generates `speedwave login --project <name>`.
+        let args = argv(&["speedwave", "login", "--project", "My Project"]);
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::Login(Some("My Project".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_action_compat_bare_run_with_project() {
+        // HARD CONSTRAINT: `speedwave --project acme` → Run(Some).
+        let args = argv(&["speedwave", "--project", "acme"]);
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::Run(Some("acme".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_action_compat_bare_run_no_args() {
+        // HARD CONSTRAINT: `speedwave` → Run(None).
+        let args = argv(&["speedwave"]);
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Run(None));
+    }
+
+    #[test]
+    fn parse_action_compat_plugin_enable_shape() {
+        // HARD CONSTRAINT: plugin enable shape unchanged.
+        let args = argv(&[
+            "speedwave",
+            "plugin",
+            "enable",
+            "slack",
+            "--project",
+            "acme",
+        ]);
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::PluginEnable {
+                service_id: "slack".to_string(),
+                project: "acme".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1371,153 +1541,135 @@ mod tests {
         assert!(exec_cmd.contains(&"--strict-mcp-config"));
     }
 
-    #[test]
-    fn test_resolve_project_exact_path_match() {
-        let tmp = tempfile::tempdir().unwrap();
-        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+    /// Builds a project entry with the given name; dir is irrelevant now that
+    /// resolution ignores CWD, so a fixed placeholder keeps the tests terse.
+    fn proj(name: &str) -> config::ProjectUserEntry {
+        config::ProjectUserEntry {
+            name: name.to_string(),
+            dir: format!("/projects/{name}"),
+            claude: None,
+            integrations: None,
+            plugin_settings: None,
+        }
+    }
 
-        let user_config = config::SpeedwaveUserConfig {
-            projects: vec![config::ProjectUserEntry {
-                name: "my-proj".to_string(),
-                dir: canonical.to_string_lossy().to_string(),
-                claude: None,
-                integrations: None,
-                plugin_settings: None,
-            }],
-            active_project: None,
+    fn config_with(
+        projects: Vec<config::ProjectUserEntry>,
+        active: Option<&str>,
+    ) -> config::SpeedwaveUserConfig {
+        config::SpeedwaveUserConfig {
+            projects,
+            active_project: active.map(str::to_string),
             selected_ide: None,
             transcription: None,
             ui: None,
-        };
-
-        let result = resolve_project_for_cwd(&canonical, &user_config).unwrap();
-        assert_eq!(result, "my-proj");
+        }
     }
 
     #[test]
-    fn test_resolve_project_subdirectory_match() {
-        let tmp = tempfile::tempdir().unwrap();
-        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
-        let sub = canonical.join("src").join("lib");
-        std::fs::create_dir_all(&sub).unwrap();
-
-        let user_config = config::SpeedwaveUserConfig {
-            projects: vec![config::ProjectUserEntry {
-                name: "my-proj".to_string(),
-                dir: canonical.to_string_lossy().to_string(),
-                claude: None,
-                integrations: None,
-                plugin_settings: None,
-            }],
-            active_project: None,
-            selected_ide: None,
-            transcription: None,
-            ui: None,
-        };
-
-        let result = resolve_project_for_cwd(&sub, &user_config).unwrap();
-        assert_eq!(result, "my-proj");
+    fn resolve_fallback_prefers_active_project() {
+        // active_project wins even when it is not first in the list — the
+        // Desktop selector is authoritative.
+        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("beta"));
+        assert_eq!(resolve_project_fallback(&cfg).unwrap(), "beta");
     }
 
     #[test]
-    fn test_resolve_project_longest_prefix_wins() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let nested = root.join("apps").join("web");
-        std::fs::create_dir_all(&nested).unwrap();
-        let deep = nested.join("src");
-        std::fs::create_dir_all(&deep).unwrap();
-
-        let user_config = config::SpeedwaveUserConfig {
-            projects: vec![
-                config::ProjectUserEntry {
-                    name: "root-proj".to_string(),
-                    dir: root.to_string_lossy().to_string(),
-                    claude: None,
-                    integrations: None,
-                    plugin_settings: None,
-                },
-                config::ProjectUserEntry {
-                    name: "web-proj".to_string(),
-                    dir: nested.to_string_lossy().to_string(),
-                    claude: None,
-                    integrations: None,
-                    plugin_settings: None,
-                },
-            ],
-            active_project: None,
-            selected_ide: None,
-            transcription: None,
-            ui: None,
-        };
-
-        // CWD inside nested project should match web-proj (longer prefix)
-        let result = resolve_project_for_cwd(&deep, &user_config).unwrap();
-        assert_eq!(result, "web-proj");
+    fn resolve_fallback_uses_first_when_active_none() {
+        let cfg = config_with(vec![proj("alpha"), proj("beta")], None);
+        assert_eq!(resolve_project_fallback(&cfg).unwrap(), "alpha");
     }
 
     #[test]
-    fn test_resolve_project_fallback_to_active() {
-        let user_config = config::SpeedwaveUserConfig {
-            projects: vec![config::ProjectUserEntry {
-                name: "fallback-project".to_string(),
-                dir: "/nonexistent/path/that/wont/match/cwd".to_string(),
-                claude: None,
-                integrations: None,
-                plugin_settings: None,
-            }],
-            active_project: Some("fallback-project".to_string()),
-            selected_ide: None,
-            transcription: None,
-            ui: None,
-        };
-
-        // Use a tempdir as CWD that doesn't match any project
-        let tmp = tempfile::tempdir().unwrap();
-        let result = resolve_project_for_cwd(tmp.path(), &user_config).unwrap();
-        assert_eq!(result, "fallback-project");
+    fn resolve_fallback_errors_when_no_projects() {
+        let cfg = config_with(vec![], None);
+        assert!(resolve_project_fallback(&cfg).is_err());
     }
 
     #[test]
-    fn test_resolve_project_no_projects_errors() {
-        let user_config = config::SpeedwaveUserConfig {
-            projects: vec![],
-            active_project: None,
-            selected_ide: None,
-            transcription: None,
-            ui: None,
+    fn resolve_fallback_ignores_cwd() {
+        // A project dir equal to the real CWD must NOT win over active_project:
+        // resolution never consults the working directory.
+        let cwd = std::env::current_dir().unwrap();
+        let cwd_project = config::ProjectUserEntry {
+            name: "here".to_string(),
+            dir: cwd.to_string_lossy().to_string(),
+            claude: None,
+            integrations: None,
+            plugin_settings: None,
         };
-
-        let tmp = tempfile::tempdir().unwrap();
-        let result = resolve_project_for_cwd(tmp.path(), &user_config);
-        assert!(result.is_err());
+        let cfg = config_with(vec![proj("alpha"), cwd_project], Some("alpha"));
+        assert_eq!(resolve_project_fallback(&cfg).unwrap(), "alpha");
     }
 
     #[test]
-    fn test_resolve_project_trailing_slash_in_config() {
-        let tmp = tempfile::tempdir().unwrap();
-        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
-        // Store with trailing slash — should still match
-        let dir_with_slash = format!("{}/", canonical.to_string_lossy());
+    fn parse_action_project_flag_overrides_run() {
+        let args = vec![
+            "speedwave".to_string(),
+            "--project".to_string(),
+            "beta".to_string(),
+        ];
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::Run(Some("beta".to_string()))
+        );
+    }
 
-        let user_config = config::SpeedwaveUserConfig {
-            projects: vec![config::ProjectUserEntry {
-                name: "slashed".to_string(),
-                dir: dir_with_slash,
-                claude: None,
-                integrations: None,
-                plugin_settings: None,
-            }],
-            active_project: None,
-            selected_ide: None,
-            transcription: None,
-            ui: None,
-        };
+    #[test]
+    fn parse_action_project_flag_without_value_errors() {
+        let args = vec!["speedwave".to_string(), "--project".to_string()];
+        assert!(parse_action(&args).is_err());
+    }
 
-        // canonicalize strips trailing slash, so exact match should work
-        // because we canonicalize both sides
-        let result = resolve_project_for_cwd(&canonical, &user_config).unwrap();
-        assert_eq!(result, "slashed");
+    #[test]
+    fn resolve_action_project_uses_run_override() {
+        // `speedwave --project beta` targets beta even when alpha is active.
+        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("alpha"));
+        let action = CliAction::Run(Some("beta".to_string()));
+        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
+    }
+
+    #[test]
+    fn resolve_action_project_bare_run_uses_active() {
+        // Regression guard: bare `speedwave` follows the active project (the
+        // Desktop selector), never the working directory.
+        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("beta"));
+        let action = CliAction::Run(None);
+        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
+    }
+
+    #[test]
+    fn resolve_action_project_login_override_wins() {
+        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("alpha"));
+        let action = CliAction::Login(Some("beta".to_string()));
+        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
+    }
+
+    #[test]
+    fn resolve_action_project_explicit_missing_errors() {
+        // Defect #6: an explicit --project naming a project not in config is a
+        // hard error, not a silent fallback to the working directory.
+        let cfg = config_with(vec![proj("alpha")], Some("alpha"));
+        let action = CliAction::Run(Some("typo".to_string()));
+        let err = resolve_action_project(&action, &cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("not found in config"),
+            "expected not-found error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_action_project_update_override_wins() {
+        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("alpha"));
+        let action = CliAction::Update(Some("beta".to_string()));
+        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
+    }
+
+    #[test]
+    fn resolve_action_project_logout_override_wins() {
+        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("alpha"));
+        let action = CliAction::Logout(Some("beta".to_string()));
+        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
     }
 
     #[test]
@@ -1559,7 +1711,7 @@ mod tests {
     #[test]
     fn parse_action_update() {
         let args = vec!["speedwave".to_string(), "update".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Update);
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Update(None));
     }
 
     #[test]
@@ -1867,9 +2019,9 @@ mod tests {
         // on every installed plugin being trusted. The audit must
         // gate them — a regression that flips any of these to `true`
         // silently disables the runtime-invariant promise.
-        assert!(!skip_plugin_audit(&CliAction::Run));
+        assert!(!skip_plugin_audit(&CliAction::Run(None)));
         assert!(!skip_plugin_audit(&CliAction::Check));
-        assert!(!skip_plugin_audit(&CliAction::Update));
+        assert!(!skip_plugin_audit(&CliAction::Update(None)));
         assert!(!skip_plugin_audit(&CliAction::PluginEnable {
             project: "p".into(),
             service_id: "s".into(),

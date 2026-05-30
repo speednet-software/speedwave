@@ -215,7 +215,14 @@ impl BundleReconcilePhase {
 }
 
 pub fn load_current_bundle_manifest() -> anyhow::Result<BundleManifest> {
-    let build_root = build::resolve_build_root()?;
+    load_current_bundle_manifest_from(&build::resolve_build_root()?)
+}
+
+/// Env-free core of [`load_current_bundle_manifest`]: takes an explicit build
+/// root so tests can inject a path and never read the process-global
+/// `SPEEDWAVE_RESOURCES_DIR` (which other tests mutate — see the test-isolation
+/// guard). The public no-arg shim resolves the root from env at the call site.
+pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<BundleManifest> {
     let manifest_path = build_root.join(BUNDLE_MANIFEST_FILE);
     if manifest_path.exists() {
         let data = std::fs::read_to_string(&manifest_path)?;
@@ -224,7 +231,7 @@ pub fn load_current_bundle_manifest() -> anyhow::Result<BundleManifest> {
     generate_bundle_manifest(
         env!("CARGO_PKG_VERSION"),
         crate::defaults::CLAUDE_VERSION,
-        &build_root,
+        build_root,
     )
 }
 

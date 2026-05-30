@@ -1066,11 +1066,14 @@ describe('server', () => {
     });
 
     describe('Server Lifecycle', () => {
+      // All lifecycle tests bind port 0 (OS-assigned ephemeral) so parallel
+      // vitest workers / multiple worktrees never collide on a fixed port
+      // (EADDRINUSE). start() returns the actual port for assertions.
       it('starts server successfully', async () => {
         const server = createMCPServer({
           name: 'test-server',
           version: '1.0.0',
-          port: 3100,
+          port: 0,
         });
 
         await server.start();
@@ -1085,7 +1088,7 @@ describe('server', () => {
         const server = createMCPServer({
           name: 'test-server',
           version: '1.0.0',
-          port: 3101,
+          port: 0,
           onStart,
         });
 
@@ -1099,7 +1102,7 @@ describe('server', () => {
         const server = createMCPServer({
           name: 'test-server',
           version: '1.0.0',
-          port: 3102,
+          port: 0,
         });
 
         await server.start();
@@ -1112,22 +1115,25 @@ describe('server', () => {
         const server = createMCPServer({
           name: 'test-server',
           version: '1.0.0',
-          port: 3103,
+          port: 0,
         });
 
         await expect(server.stop()).resolves.not.toThrow();
       });
 
-      it('binds to 127.0.0.1 by default', async () => {
+      it('binds to 127.0.0.1 by default and returns the actual port', async () => {
         const server = createMCPServer({
           name: 'bind-test',
           version: '1.0.0',
-          port: 3120,
+          port: 0,
         });
 
-        await server.start();
+        const actualPort = await server.start();
 
-        expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('127.0.0.1:3120'));
+        expect(actualPort).toBeGreaterThan(0);
+        expect(consoleLogSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`127.0.0.1:${actualPort}`)
+        );
 
         await server.stop();
       }, 10000);
@@ -1136,13 +1142,15 @@ describe('server', () => {
         const server = createMCPServer({
           name: 'custom-bind-test',
           version: '1.0.0',
-          port: 3121,
+          port: 0,
           host: '0.0.0.0',
         });
 
-        await server.start();
+        const actualPort = await server.start();
 
-        expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('0.0.0.0:3121'));
+        expect(consoleLogSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`0.0.0.0:${actualPort}`)
+        );
 
         await server.stop();
       }, 10000);
@@ -1151,14 +1159,14 @@ describe('server', () => {
         const server = createMCPServer({
           name: 'startup-test',
           version: '2.0.0',
-          port: 3104,
+          port: 0,
         });
 
-        await server.start();
+        const actualPort = await server.start();
 
         expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('startup-test'));
         expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('2.0.0'));
-        expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('3104'));
+        expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining(String(actualPort)));
 
         await server.stop();
       }, 10000);
@@ -1167,7 +1175,7 @@ describe('server', () => {
         const server = createMCPServer({
           name: 'shutdown-test',
           version: '1.0.0',
-          port: 3105,
+          port: 0,
         });
 
         await server.start();
@@ -1181,7 +1189,7 @@ describe('server', () => {
         const server = createMCPServer({
           name: 'stop-error-test',
           version: '1.0.0',
-          port: 3122,
+          port: 0,
         });
 
         await server.start();
@@ -1920,7 +1928,7 @@ describe('server', () => {
       const server = createMCPServer({
         name: 'rate-cleanup',
         version: '1.0.0',
-        port: 3106,
+        port: 0,
         rateLimit: { maxRequests: 10 },
       });
 

@@ -1,6 +1,5 @@
 pub const APP_NAME: &str = "speedwave";
 pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
-pub const LIMA_VM_NAME: &str = "speedwave";
 pub const LIMA_SUBDIR: &str = "lima";
 pub const DATA_DIR: &str = ".speedwave";
 /// Per-project Claude Code home directory under the data dir

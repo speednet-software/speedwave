@@ -89,13 +89,23 @@ describe('AuthSectionComponent', () => {
     expect(note?.textContent).toContain('No authentication needed for local model providers');
   });
 
+  it('shows local provider note when llmProvider is the canonical local', () => {
+    fixture.componentRef.setInput('llmProvider', 'local');
+    fixture.detectChanges();
+    const note = fixture.nativeElement.querySelector('[data-testid="auth-note"]');
+    expect(note?.textContent).toContain('No authentication needed for local model providers');
+  });
+
   it.each([
     ['ollama', true],
     ['lmstudio', true],
     ['llamacpp', true],
-    ['custom', true],
+    ['local', true],
+    ['custom', false],
     ['anthropic', false],
   ])('isLocalProvider() returns %s for provider %s', (provider, expected) => {
+    // Mirrors the SSOT LOCAL_PROVIDERS (models/llm.ts → runtime config.rs):
+    // canonical `local` is local; `custom` is not a real provider.
     fixture.componentRef.setInput('llmProvider', provider);
     expect(component.isLocalProvider()).toBe(expected);
   });

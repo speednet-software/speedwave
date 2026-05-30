@@ -105,7 +105,10 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
           </div>
         }
       }
-      @if (projectState.needsRestart && projectState.status === 'ready') {
+      @if (
+        projectState.needsRestart &&
+        (projectState.status === 'ready' || projectState.status === 'auth_required')
+      ) {
         @if (projectState.restarting) {
           <div
             class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"

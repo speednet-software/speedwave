@@ -1153,61 +1153,6 @@ pub(crate) mod test_support {
         }
     }
 
-    /// `CommandRunner` that records every command into a shared `Vec<String>`
-    /// and resolves responses from a pre-seeded `HashMap`. Used by tests that
-    /// need to assert command sequence AND control return values. Previously
-    /// 5 separate inline `struct RecordingRunner` blocks scattered across the
-    /// test module — consolidated here (Rule of Three passed at 5 sites).
-    pub struct TestRecordingRunner {
-        pub commands: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-        pub responses: std::collections::HashMap<String, anyhow::Result<String>>,
-    }
-
-    impl Default for TestRecordingRunner {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl TestRecordingRunner {
-        pub fn new() -> Self {
-            Self {
-                commands: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-                responses: std::collections::HashMap::new(),
-            }
-        }
-
-        /// Returns a shared handle to the commands log so callers can keep
-        /// inspecting it after the runner is boxed into a `LockedRuntime`.
-        pub fn commands_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
-            std::sync::Arc::clone(&self.commands)
-        }
-
-        pub fn with_response(mut self, key: &str, response: &str) -> Self {
-            self.responses
-                .insert(key.to_string(), Ok(response.to_string()));
-            self
-        }
-
-        pub fn with_error(mut self, key: &str, msg: &str) -> Self {
-            self.responses
-                .insert(key.to_string(), Err(anyhow::anyhow!("{msg}")));
-            self
-        }
-    }
-
-    impl CommandRunner for TestRecordingRunner {
-        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-            let key = format!("{} {}", cmd, args.join(" "));
-            self.commands.lock().unwrap().push(key.clone());
-            match self.responses.get(&key) {
-                Some(Ok(val)) => Ok(val.clone()),
-                Some(Err(e)) => Err(anyhow::anyhow!("{e}")),
-                None => Err(anyhow::anyhow!("unexpected command: {key}")),
-            }
-        }
-    }
-
     pub struct SequentialMockRunner {
         pub responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<String>>>,
         pub calls: std::sync::Mutex<Vec<(String, Vec<String>, Option<std::time::Duration>)>>,
@@ -1711,8 +1656,11 @@ services:
                 .subsec_nanos()
         );
 
-        // Write compose file at the path that compose_file_path() will resolve
-        // via the OnceLock-cached data_dir() (no HOME manipulation needed).
+        // `force_remove_project_containers` reads the compose file through the
+        // production `compose_file_path()` → OnceLock `data_dir()`; the write and
+        // the read must agree on the same dir, so we deliberately resolve it. The
+        // RAII guard below removes the uniquely-named project subdir afterward.
+        // SSOT-allow: production read path is keyed on the OnceLock data_dir().
         let compose_dir = crate::consts::data_dir().join("compose").join(&project);
         std::fs::create_dir_all(&compose_dir).unwrap();
 

@@ -427,14 +427,20 @@ pub(crate) mod tests {
 
     #[test]
     fn lima_home_returns_expected_path() {
-        let home = lima_home();
-        assert!(home.is_some());
-        let path = home.unwrap();
-        // Compare path components (separator-agnostic): on Windows the path uses
-        // `\`, so a string `ends_with(".speedwave/lima")` would wrongly fail.
+        // Assert the structural invariant (`<data_dir>/lima`) without naming the
+        // production `data_dir()` singleton: the final component is LIMA_SUBDIR
+        // and a non-empty data-dir parent precedes it. Holds under any isolated
+        // tempdir data dir, and is separator-agnostic (Path tail, not string).
+        let path = lima_home().expect("lima_home should resolve");
         assert!(
-            path.ends_with(std::path::Path::new(".speedwave").join("lima")),
-            "expected path ending with .speedwave/lima, got: {}",
+            path.ends_with(consts::LIMA_SUBDIR),
+            "lima_home should end with {}, got: {}",
+            consts::LIMA_SUBDIR,
+            path.display()
+        );
+        assert!(
+            path.parent().is_some_and(|p| p.file_name().is_some()),
+            "lima_home should have a data-dir parent, got: {}",
             path.display()
         );
     }
@@ -453,10 +459,15 @@ pub(crate) mod tests {
             .expect("LIMA_HOME env should be set for limactl");
 
         let value = lima_home_env.1.expect("LIMA_HOME should have a value");
-        // Separator-agnostic (Windows uses `\`): compare path components.
+        // Structural invariant only (`<data_dir>/lima`), tempdir-safe — no bare
+        // `data_dir()` resolution. `command("limactl")` creates the dir, so the
+        // value is the canonicalized LIMA_HOME; checking the tail is portable
+        // and separator-agnostic (Path tail, not string).
+        let value_path = std::path::Path::new(value);
         assert!(
-            std::path::Path::new(value).ends_with(std::path::Path::new(".speedwave").join("lima")),
-            "LIMA_HOME should end with .speedwave/lima, got: {}",
+            value_path.ends_with(consts::LIMA_SUBDIR),
+            "LIMA_HOME should end with {}, got: {}",
+            consts::LIMA_SUBDIR,
             value.to_string_lossy()
         );
     }

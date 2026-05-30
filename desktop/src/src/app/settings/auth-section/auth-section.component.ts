@@ -11,6 +11,7 @@ import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService, AuthStatusResponse } from '../../services/project-state.service';
 import { AuthTerminalComponent } from '../auth-terminal.component';
+import { isLocalProvider as isLocalProviderName } from '../../models/llm';
 
 /** Displays authentication status and controls for API key / OAuth login. */
 @Component({
@@ -166,7 +167,7 @@ export class AuthSectionComponent {
 
   /** Returns true if the selected provider is a local model (no Anthropic auth needed). */
   isLocalProvider(): boolean {
-    return ['ollama', 'lmstudio', 'llamacpp', 'custom'].includes(this.llmProvider());
+    return isLocalProviderName(this.llmProvider());
   }
 
   /** Loads the current authentication status from the backend. */

@@ -24,7 +24,17 @@ fn validate_container_name(container: &str) -> Result<(), String> {
 /// Parse the project name from a Claude container name.
 /// Expected format: `{compose_prefix()}_{project}_claude`.
 fn parse_claude_project(container: &str) -> Result<String, String> {
-    let prefix = format!("{}_", speedwave_runtime::consts::compose_prefix());
+    parse_claude_project_with_prefix(speedwave_runtime::consts::compose_prefix(), container)
+}
+
+/// Parameterised by `compose_prefix` so unit tests avoid the
+/// `consts::compose_prefix()` `OnceLock`, which resolves the process-global
+/// `data_dir()` basename.
+fn parse_claude_project_with_prefix(
+    compose_prefix: &str,
+    container: &str,
+) -> Result<String, String> {
+    let prefix = format!("{compose_prefix}_");
     let without_prefix = container
         .strip_prefix(&prefix)
         .ok_or_else(|| "Not a claude container".to_string())?;
@@ -548,35 +558,56 @@ mod tests {
     }
 
     // -- Claude session logs: project parsing from container name --
+    //
+    // Tests use the `_with_prefix` variant with the fixed `COMPOSE_PREFIX`
+    // literal so they do not depend on the process-global `data_dir()` basename.
 
     #[test]
     fn parse_project_from_claude_container() {
-        let project = parse_claude_project("speedwave_myproject_claude").unwrap();
+        let project = parse_claude_project_with_prefix(
+            speedwave_runtime::consts::COMPOSE_PREFIX,
+            "speedwave_myproject_claude",
+        )
+        .unwrap();
         assert_eq!(project, "myproject");
     }
 
     #[test]
     fn parse_project_from_dotted_container_name() {
-        let project = parse_claude_project("speedwave_proj.v1_claude").unwrap();
+        let project = parse_claude_project_with_prefix(
+            speedwave_runtime::consts::COMPOSE_PREFIX,
+            "speedwave_proj.v1_claude",
+        )
+        .unwrap();
         assert_eq!(project, "proj.v1");
     }
 
     #[test]
     fn parse_project_rejects_non_claude_container() {
-        let result = parse_claude_project("speedwave_myproject_mcp-hub");
+        let result = parse_claude_project_with_prefix(
+            speedwave_runtime::consts::COMPOSE_PREFIX,
+            "speedwave_myproject_mcp-hub",
+        );
         assert!(result.is_err(), "non-claude container should be rejected");
     }
 
     #[test]
     fn parse_project_rejects_missing_prefix() {
-        let result = parse_claude_project("other_myproject_claude");
+        let result = parse_claude_project_with_prefix(
+            speedwave_runtime::consts::COMPOSE_PREFIX,
+            "other_myproject_claude",
+        );
         assert!(result.is_err(), "missing prefix should be rejected");
     }
 
     #[test]
     fn parse_project_validates_extracted_project() {
         // Container with ".." in project name → check_project rejects it
-        let project = parse_claude_project("speedwave_.._claude").unwrap();
+        let project = parse_claude_project_with_prefix(
+            speedwave_runtime::consts::COMPOSE_PREFIX,
+            "speedwave_.._claude",
+        )
+        .unwrap();
         let result = crate::types::check_project(&project);
         assert!(
             result.is_err(),
@@ -586,7 +617,11 @@ mod tests {
 
     #[test]
     fn parse_project_dotted_name_passes_check_project() {
-        let project = parse_claude_project("speedwave_proj.v1_claude").unwrap();
+        let project = parse_claude_project_with_prefix(
+            speedwave_runtime::consts::COMPOSE_PREFIX,
+            "speedwave_proj.v1_claude",
+        )
+        .unwrap();
         let result = crate::types::check_project(&project);
         assert!(
             result.is_ok(),

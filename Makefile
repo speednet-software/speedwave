@@ -40,6 +40,11 @@ export SPEEDWAVE_DATA_DIR
 
 LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
+# bats runs serially. `--jobs N` is unsafe here: bundle-build-context.bats mutates
+# shared repo paths (mcp-servers/{os,shared}/dist) that cannot be tempdir-isolated,
+# so concurrent siblings in one file race and fail. The suites are small; the real
+# parallelism win is lane-level (separate task), not per-file bats jobs.
+
 # Hard floor: dev/test must never run against the production data dir, even if a
 # user exported SPEEDWAVE_DATA_DIR=~/.speedwave (the `?=` default above only
 # applies when it is unset). A data dir whose basename is exactly `.speedwave` is
@@ -57,6 +62,7 @@ guard-not-prod-data-dir:
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
+        test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
@@ -187,7 +193,22 @@ all: build
 build: build-runtime build-cli build-os-cli build-mcp build-angular
 	@echo "\n✅ All builds complete"
 
-test: guard-not-prod-data-dir test-rust test-angular test-mcp test-entrypoint test-desktop-config test-desktop-build test-desktop test-ci
+# build-once + parallel-run. CI never calls this aggregate (it calls standalone
+# test-X targets, which keep their own build prereqs and are left untouched).
+# Phase 1 (sequential): guard + test-build-phase stage every shared artifact
+#   exactly once, so no two lanes ever build the same dist/target concurrently.
+# Phase 2 (parallel): a recursive `$(MAKE) -jN test-run-lanes` fans out the
+#   pure run-only lanes. test-mcp-run + test-desktop-build-run + test-desktop-run
+#   are grouped SERIAL (they share-mutate mcp-servers/*/dist via
+#   bundle-build-context.sh reads + bundle-build-context.bats's --ci rebuild —
+#   the same footgun that broke bats --jobs). A failing lane fails the whole
+#   `make test`: each `$(MAKE)` is its own recipe line, and the sub-make runs
+#   without -k, so the first non-zero exit aborts. Override fan-out width with
+#   `make test TEST_LANES_JOBS=N`.
+TEST_LANES_JOBS ?= 4
+test: guard-not-prod-data-dir
+	@"$(MAKE)" test-build-phase
+	@"$(MAKE)" -j$(TEST_LANES_JOBS) test-run-lanes
 	@echo "\n✅ All tests passed"
 
 check: check-clippy check-desktop-clippy check-fmt check-mcp check-mcp-lint check-angular-lint
@@ -320,12 +341,89 @@ build-angular:
 
 # ── Rust tests ───────────────────────────────────────────────────────────────
 
+# Run a cargo command ($(1)) against an isolated throwaway data dir, then clean
+# up. Each run gets its OWN dir so tests never touch the shared production
+# ~/.speedwave and parallel worktrees never collide. We capture the `mktemp -d`
+# result DIRECTLY and guard it (`|| exit 1`), then put the data dir UNDER it —
+# so cleanup always removes the captured dir, never a path derived via dirname.
+# (A `mktemp -d` that returns empty must not let cleanup expand to `rm -rf /`.)
+# The basename `speedwave-test` is regex-valid (^[a-z][a-z0-9-]{0,63}$) — a bare
+# `mktemp -d` basename (tmp.XXXX) is NOT and would panic instance-name
+# derivation. With isolation the suite is parallel-safe, so the old
+# `--test-threads=1` cap is gone.
+define RUN_CARGO_ISOLATED
+	d=$$(mktemp -d) || exit 1; mkdir -p "$$d/speedwave-test"; \
+	  SPEEDWAVE_DATA_DIR="$$d/speedwave-test" $(1); \
+	  rc=$$?; rm -rf "$$d"; exit $$rc
+endef
+
+# ── Aggregate-only parallel infrastructure (used ONLY by `make test`) ─────────
+# CI invokes the standalone test-X targets, which keep their own build prereqs.
+# These build-once + run-only variants exist so the aggregate can build shared
+# artifacts ONCE (sequentially) then fan the run phases out in parallel.
+
+# Sequential build phase: every shared build the run lanes need, once, in
+# dependency order. Mirrors the build-side of test-desktop (the heaviest lane)
+# so its run variant can assume everything is staged. NOT used by CI.
+test-build-phase: generate-installer-nsh build-cli build-angular build-mcp build-os-cli
+	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
+	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
+	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then "$(MAKE)" download-nodejs; fi
+	@bash scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" bundle-native-assets; fi
+	@mkdir -p desktop/src-tauri/cli
+ifeq ($(OS),Windows_NT)
+	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+else
+	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
+	@chmod +x desktop/src-tauri/cli/speedwave
+endif
+	@"$(MAKE)" verify-bundled-assets
+	@echo "✅ Build phase complete"
+
+# Pure run-only lanes — NO build prereqs (test-build-phase staged everything).
+test-rust-run:
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
+	"$(MAKE)" test-transcription
+	@echo "✅ Rust tests passed"
+
+test-angular-run: test-angular
+
+test-mcp-run:
+	cd mcp-servers && $(NPM) test
+	@echo "✅ MCP server tests passed"
+
+test-desktop-build-run:
+	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
+	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
+	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
+	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats
+	@echo "✅ Desktop build tests passed"
+
+test-desktop-run:
+	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
+	@echo "✅ Desktop tests passed"
+
+# Serial group: every lane that touches REAL repo paths. test-desktop-run's
+# bundle-build-context.sh READS mcp-servers/*/dist; bundle-build-context.bats's
+# `--ci` test (in test-desktop-build-run) transiently RENAMES + rebuilds those
+# same dirs; test-mcp-run consumes them. Concurrent = the bats --jobs footgun,
+# so run these three back-to-back. Each `$(MAKE)` is its own command — first
+# non-zero exit aborts the recipe, so failures propagate.
+test-desktop-group-run:
+	@"$(MAKE)" test-mcp-run
+	@"$(MAKE)" test-desktop-build-run
+	@"$(MAKE)" test-desktop-run
+
+# The fan-out set parallelized by `make test`. Everything here is mutually
+# shared-path-safe after test-build-phase; the one lane that touches real repo
+# paths is the serial test-desktop-group-run.
+test-run-lanes: test-rust-run test-angular-run test-entrypoint \
+                test-desktop-config test-ci test-desktop-group-run
+
 test-rust:
-	@# Tests share `consts::data_dir()` (~/.speedwave/); several of them write
-	@# into `~/.speedwave/secrets/<project>/` or read mcp-os state files.
-	@# Parallel cargo-test threads race on those paths and surface `os error 2`
-	@# from `render_compose`. Run serially to keep the suite deterministic.
-	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime -p speedwave-cli -- --test-threads=1
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
 	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
 	@# is off by default — the CLI never enables it — so the default run above
 	@# doesn't compile the `transcription` module. Test it explicitly here.
@@ -339,9 +437,8 @@ test-transcription:
 	@# The rest of the crate (compose, plugin, build, …) is identical with or
 	@# without the feature and is already exercised by `test-rust`. Without the
 	@# `transcription::` filter, cargo re-runs the whole suite a second time
-	@# (~100 compose tests at ~5s each under `--test-threads=1`), which alone
-	@# blows past the 15-minute CI job budget.
-	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime --features audio-transcription transcription:: -- --test-threads=1
+	@# (~100 compose tests at ~5s each), which alone blows past the CI job budget.
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription transcription::)
 	@echo "✅ audio-transcription tests passed"
 
 test-cli:
@@ -363,7 +460,7 @@ else
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@"$(MAKE)" verify-bundled-assets
-	cd desktop/src-tauri && SPEEDWAVE_DATA_DIR= cargo test
+	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
 	@echo "✅ Desktop tests passed"
 
 # ── Angular tests ───────────────────────────────────────────────────────────
@@ -388,12 +485,13 @@ test-os: build-mcp
 # Tests that need a real matplotlib render self-skip on too-new Python interpreters.
 test-mcp-office-py:
 	@PY=$$(command -v python3.12 || command -v python3.11 || command -v python3); \
-	echo "  building office Python test venv ($$PY)..."; \
-	rm -rf .office-test-venv && "$$PY" -m venv .office-test-venv; \
-	.office-test-venv/bin/pip install -q --upgrade pip; \
-	.office-test-venv/bin/pip install -q -r mcp-servers/office/requirements.txt pytest; \
-	.office-test-venv/bin/python -m pytest mcp-servers/office/scripts -q; \
-	rm -rf .office-test-venv
+	VENV="$${TMPDIR:-/tmp}/office-test-venv-$$$$"; \
+	echo "  building office Python test venv ($$PY) at $$VENV..."; \
+	"$$PY" -m venv --clear "$$VENV"; \
+	"$$VENV/bin/pip" install -q --upgrade pip; \
+	"$$VENV/bin/pip" install -q -r mcp-servers/office/requirements.txt pytest; \
+	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; \
+	rm -rf "$$VENV"
 	@echo "✅ Office Python script tests passed"
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
@@ -442,35 +540,27 @@ test-e2e-plugin-tamper-release: build-cli-release
 
 test-entrypoint:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/entrypoint/entrypoint.bats
-	bats _tests/entrypoint/install-claude.bats
-	bats _tests/entrypoint/statusline.bats
-	bats _tests/entrypoint/osc52-copy.bats
+	bats _tests/entrypoint/entrypoint.bats _tests/entrypoint/install-claude.bats \
+	  _tests/entrypoint/statusline.bats _tests/entrypoint/osc52-copy.bats
 	@echo "✅ Entrypoint tests passed"
 
 test-ci:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/ci/validate-pr-title-main.bats
-	bats _tests/ci/plan-loop-context.bats
+	bats _tests/ci/validate-pr-title-main.bats _tests/ci/plan-loop-context.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/desktop-build.bats
-	bats _tests/desktop/bundle-build-context.bats
-	bats _tests/desktop/guard-prod-data-dir.bats
-	bats _tests/desktop/verify-bundled-assets.bats
-	bats _tests/desktop/sign-bundled-binaries.bats
-	bats _tests/desktop/release-workflow-signing.bats
-	bats _tests/desktop/info-plist.bats
-	bats _tests/desktop/entitlements-reminders.bats
+	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
+	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
+	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
+	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.
 test-desktop-config:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/updater-config.bats
-	bats _tests/desktop/version-consistency.bats
+	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats
 	@echo "✅ Desktop config tests passed"
 
 # Release gate — uses gh shim, CI-only. NOT in `make test` to prevent shim
@@ -530,9 +620,11 @@ _e2e-run:
 	@pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 	@pkill -9 -f limactl 2>/dev/null || true
 	@sleep 1
-	@rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
-	@mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
-	@E2E_BAK=$$SPEEDWAVE_DATA_DIR.e2e-bak; \
+	@E2E_PROJECT_DIR="$${TMPDIR:-/tmp}/speedwave-e2e-project-$$$$"; \
+	E2E_SECOND_PROJECT_DIR="$$E2E_PROJECT_DIR-2"; \
+	rm -rf "$$E2E_PROJECT_DIR" "$$E2E_SECOND_PROJECT_DIR"; \
+	mkdir -p "$$E2E_PROJECT_DIR" "$$E2E_SECOND_PROJECT_DIR"; \
+	E2E_BAK=$$SPEEDWAVE_DATA_DIR.e2e-bak; \
 	backup_dir() { \
 		if [ -d "$$1" ]; then rm -rf "$$2"; mv "$$1" "$$2"; fi; \
 	}; \
@@ -552,11 +644,12 @@ _e2e-run:
 		if [ "$$(uname)" = "Darwin" ]; then \
 			restore_dir "$$HOME/Library/Caches/lima" "$$HOME/Library/Caches/lima.e2e-bak"; \
 		fi; \
+		rm -rf "$$E2E_PROJECT_DIR" "$$E2E_SECOND_PROJECT_DIR"; \
 	}; \
 	$(E2E_BINARY) & APP_PID=$$!; \
 	trap "kill $$APP_PID 2>/dev/null; restore_state" EXIT; \
 	for i in $$(seq 1 30); do curl -sf http://127.0.0.1:4445/status >/dev/null 2>&1 && break; sleep 1; done; \
-	cd desktop/e2e && E2E_PROJECT_DIR=/tmp/speedwave-e2e-project E2E_SECOND_PROJECT_DIR=/tmp/speedwave-e2e-project-2 npx wdio run wdio.conf.ts; \
+	cd desktop/e2e && E2E_PROJECT_DIR="$$E2E_PROJECT_DIR" E2E_SECOND_PROJECT_DIR="$$E2E_SECOND_PROJECT_DIR" npx wdio run wdio.conf.ts; \
 	E2E_EXIT=$$?; \
 	kill $$APP_PID 2>/dev/null; \
 	restore_state; \
