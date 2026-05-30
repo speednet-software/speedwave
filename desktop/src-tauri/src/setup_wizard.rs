@@ -756,12 +756,10 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         }
     }
 
-    // Import path: distro is freshly created, no containers run yet, so a
-    // terminate to apply the new wsl.conf is safe. The distro stays registered
-    // on error; the next launch's IfIdle migration retries the write (ADR-052).
-    ensure_wsl_distro_metadata(TerminateOnChange::Yes).map_err(|e| {
-        anyhow::anyhow!("configuring the imported WSL distro's automount failed: {e}")
-    })?;
+    // Import path: safe to terminate (no containers yet); Err retried by IfIdle on next launch (ADR-052).
+    use anyhow::Context as _;
+    ensure_wsl_distro_metadata(TerminateOnChange::Yes)
+        .context("configuring the imported WSL distro's automount failed")?;
 
     Ok(())
 }
@@ -802,8 +800,7 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
 
     write_wsl_conf(distro, &updated)?;
 
-    // Verify the change landed by re-reading and parsing the options line —
-    // a silently-failed write (read-only wsl.conf) must surface, not be assumed.
+    // Verify the change landed; a read-only wsl.conf silently fails otherwise.
     let verify = read_wsl_conf(distro).unwrap_or_default();
     if !wsl_conf_automount_has_uid(&verify, uid) {
         anyhow::bail!(
