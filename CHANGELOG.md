@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.13.2](https://github.com/speednet-software/speedwave/compare/v0.13.1...v0.13.2) (2026-05-30)
+
+
+### Bug Fixes
+
+* project selector, theme logo, plugin digest, test isolation ([#758](https://github.com/speednet-software/speedwave/issues/758)) ([05ab24b](https://github.com/speednet-software/speedwave/commit/05ab24b26ca60450112589aab3e96e61a20cc2e6))
+
 ## [0.13.1](https://github.com/speednet-software/speedwave/compare/v0.13.0...v0.13.1) (2026-05-30)
 
 
