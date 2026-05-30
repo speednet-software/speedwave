@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-cli"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2599,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-runtime"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "async-stream",

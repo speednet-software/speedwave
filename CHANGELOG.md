@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.13.1](https://github.com/speednet-software/speedwave/compare/v0.13.0...v0.13.1) (2026-05-30)
+
+
+### Bug Fixes
+
+* **desktop:** Windows wsl.conf automount, theme-aware logo, and wsl.exe log spam ([#752](https://github.com/speednet-software/speedwave/issues/752)) ([2deb41a](https://github.com/speednet-software/speedwave/commit/2deb41ae28d1f275647e0321828d6698bbb501e9))
+
 ## [0.13.0](https://github.com/speednet-software/speedwave/compare/v0.12.1...v0.13.0) (2026-05-30)
 
 
