@@ -36,8 +36,7 @@ export interface NavRailEntry {
     class: 'flex w-14 flex-col items-center border-r border-[var(--line)] bg-[var(--bg-1)]',
   },
   template: `
-    <!-- Logo band aligned with chat header (44px). Inline SVG adapts per theme
-         via currentColor (white in dark, ink in light). -->
+    <!-- Logo band (44px, header-aligned): inline SVG adapts via currentColor. -->
     <div class="flex h-11 w-14 items-center justify-center border-b border-[var(--line)]">
       <app-logo class="h-7 w-7" />
     </div>
