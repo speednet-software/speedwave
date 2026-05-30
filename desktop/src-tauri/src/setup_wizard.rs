@@ -811,8 +811,9 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
            printf '\\n[automount]\\noptions = \"{opts}\"\\n' >> \"$f\"; \
            echo speedwave-metadata-added; \
          elif ! grep -q 'uid={uid}' \"$f\" 2>/dev/null; then \
-           sed -i 's|^[[:space:]]*options[[:space:]]*=.*|options = \"{opts}\"|' \"$f\"; \
-           echo speedwave-metadata-added; \
+           sed -i '/\\[automount\\]/,/^[[:space:]]*\\[/ s|^[[:space:]]*options[[:space:]]*=.*|options = \"{opts}\"|' \"$f\"; \
+           if grep -q 'uid={uid}' \"$f\" 2>/dev/null; then echo speedwave-metadata-added; \
+           else echo speedwave-metadata-noop; fi; \
          fi",
         opts = opts,
         uid = uid,
@@ -823,7 +824,13 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            let changed = String::from_utf8_lossy(&o.stdout).contains("speedwave-metadata-added");
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.contains("speedwave-metadata-noop") {
+                log::warn!(
+                    "ensure_wsl_distro_metadata: wsl.conf options line could not be upgraded for {distro} (malformed [automount]?); uid not applied"
+                );
+            }
+            let changed = stdout.contains("speedwave-metadata-added");
             if changed {
                 match terminate {
                     TerminateOnChange::Yes => {
@@ -861,41 +868,65 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
 /// WSL drvfs `/mnt/c` mount is owned by uid 0 (the imported distro has no
 /// default user, and WSL's prepended default-user uid beats the `uid=` automount
 /// option), so a uid-1000 mkdir under a root-owned parent gets EACCES and the
-/// container exits ("cannot exec in a stopped state"). With `metadata` on,
-/// `chown` writes per-file ownership that drvfs honors for access — so chowning
-/// the claude-home dir to uid 1000 lets the container create and write beneath
-/// it regardless of the mount's default uid. Verified on the live distro.
+/// container exits(1) ("cannot exec in a stopped state"). With `metadata` on,
+/// `chown` writes per-file ownership that drvfs honors for access.
+///
+/// MUST run **after** `compose_up_recreate`: `compose up` auto-creates the
+/// `/home/speedwave/.claude` bind mount-point (for the read-only ide-bridge
+/// mount) as ROOT, so a chown done *before* compose is silently undone by the
+/// start. Chowning after the mount-points exist, then letting
+/// `ensure_exec_healthy`'s recovery recreate re-run the entrypoint against the
+/// now-1000-owned tree, is what actually fixes it. Verified on the live distro.
 ///
 /// uid/gid come from the [`consts::container_uid_gid`] SSOT (same value as the
-/// compose `user:` field). Idempotent and cheap — call before every container
-/// start. Fail-open: a chown failure only logs.
+/// compose `user:` field). Idempotent and cheap. Fail-open: a chown failure
+/// only logs.
 #[cfg(target_os = "windows")]
 pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
     let distro = consts::wsl_distro_name();
     let (uid, gid) = consts::container_uid_gid();
     let host_path = speedwave_runtime::claude_home::claude_home_dir(consts::data_dir(), project);
     let wsl_path = speedwave_runtime::runtime::windows_to_wsl_path(&host_path)?;
-    let wsl_path = wsl_path.to_string_lossy();
-    // Run as root inside the distro: chown the tree to the container uid:gid and
-    // ensure the owner has rwX so the entrypoint can create children.
-    let script = format!(
-        "d='{wsl_path}'; mkdir -p \"$d\"; chown -R {uid}:{gid} \"$d\"; chmod -R u+rwX \"$d\"",
-        wsl_path = wsl_path,
-        uid = uid,
-        gid = gid,
-    );
-    let out = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", distro, "-u", "root", "--", "sh", "-c", &script])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            log::info!("ensure_claude_home_owner: chowned {wsl_path} to {uid}:{gid}");
+    let wsl_path = wsl_path.to_string_lossy().to_string();
+    let uidgid = format!("{uid}:{gid}");
+    // Pass the path as its OWN argv token to each tool (mkdir/chown/chmod) — no
+    // `sh -c` wrapper, no shell variable. `wsl.exe` re-parses a `sh -c "<script>"`
+    // string and drops the `$d` variable, so inlining via argv (the way compose
+    // passes mount paths) is the reliable form. Three small invocations.
+    let run = |args: &[&str]| {
+        speedwave_runtime::binary::system_command("wsl.exe")
+            .args(["-d", distro, "-u", "root", "--"])
+            .args(args)
+            .output()
+    };
+    let steps: [(&str, Vec<&str>); 3] = [
+        ("mkdir", vec!["mkdir", "-p", &wsl_path]),
+        ("chown", vec!["chown", "-R", &uidgid, &wsl_path]),
+        ("chmod", vec!["chmod", "-R", "u+rwX", &wsl_path]),
+    ];
+    let mut all_ok = true;
+    for (name, args) in &steps {
+        match run(args) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                all_ok = false;
+                log::warn!(
+                    "ensure_claude_home_owner: {name} failed (non-fatal): {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+            }
+            Err(e) => {
+                all_ok = false;
+                log::warn!("ensure_claude_home_owner: {name} spawn failed (non-fatal): {e}");
+            }
         }
-        Ok(o) => log::warn!(
-            "ensure_claude_home_owner: chown failed (non-fatal): {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => log::warn!("ensure_claude_home_owner: spawn failed (non-fatal): {e}"),
+    }
+    if all_ok {
+        log::info!("ensure_claude_home_owner: chowned {wsl_path} to {uidgid}");
+    } else {
+        log::warn!(
+            "ensure_claude_home_owner: {wsl_path} NOT fully chowned to {uidgid} (see warnings)"
+        );
     }
     Ok(())
 }
@@ -1161,16 +1192,6 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 
     log::info!("ensuring runtime is ready");
     rt.ensure_ready()?;
-
-    // Windows: the claude-home drvfs mount is owned by uid 0, so the uid-1000
-    // entrypoint cannot write /home/speedwave and the container exits. Chown the
-    // tree to the container user before starting (load-bearing fix; ADR-052).
-    // Fail-open so a chown hiccup never blocks container start.
-    #[cfg(target_os = "windows")]
-    if let Err(e) = ensure_claude_home_owner(project) {
-        log::warn!("ensure_claude_home_owner failed (non-fatal): {e}");
-    }
-
     log::info!("runtime ready, rendering compose");
 
     // Re-render compose.yml before every start. Dynamic config (mcp-os token,
@@ -1217,6 +1238,18 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Ok(())
     })?;
     log::info!("containers started, verifying health");
+
+    // Windows: `compose up` auto-creates the `/home/speedwave/.claude` bind
+    // mount-point (for the read-only ide-bridge mount) as ROOT, even after we
+    // chowned claude-home — so the uid-1000 entrypoint's `mkdir .claude/skills`
+    // hits EACCES and the container exits(1). Chown the tree AFTER compose
+    // created the mount-points, then ensure_exec_healthy's recovery recreate
+    // re-runs the entrypoint against the now-1000-owned tree. Verified on the
+    // live distro. Fail-open. (ADR-052 mount ownership.)
+    #[cfg(target_os = "windows")]
+    if let Err(e) = ensure_claude_home_owner(project) {
+        log::warn!("ensure_claude_home_owner failed (non-fatal): {e}");
+    }
 
     // Verify containers are actually functional before marking as started.
     // Only probes the claude container — MCP workers are health-checked

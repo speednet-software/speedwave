@@ -760,6 +760,34 @@ fn probe_container_exec(runtime: &LockedRuntime, container: &str) -> anyhow::Res
 ///
 /// Call this between `compose_up()` and the real `container_exec()` to
 /// transparently recover from container failures.
+/// Logs each container's name + state from `compose_ps`. Called on the recovery
+/// path so a "cannot exec in a stopped state" failure records which containers
+/// were actually up vs stopped/created — the difference between a crashed
+/// entrypoint and a container that never started.
+fn log_container_states(runtime: &LockedRuntime, project: &str, when: &str) {
+    match runtime.compose_ps(project) {
+        Ok(rows) => {
+            let states: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    let name = r.get("Name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let state = r
+                        .get("State")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| r.get("Status").and_then(|v| v.as_str()))
+                        .unwrap_or("?");
+                    format!("{name}={state}")
+                })
+                .collect();
+            log::info!(
+                "ensure_exec_healthy[{when}]: states=[{}]",
+                states.join(", ")
+            );
+        }
+        Err(e) => log::info!("ensure_exec_healthy[{when}]: compose_ps failed: {e}"),
+    }
+}
+
 pub fn ensure_exec_healthy(
     runtime: &LockedRuntime,
     project: &str,
@@ -808,6 +836,7 @@ pub fn ensure_exec_healthy(
             )
         }
     })?;
+    log_container_states(runtime, project, "after-recovery");
     probe_container_exec(runtime, container).map_err(|e| {
         anyhow::anyhow!(
             "Containers still broken after recovery: {e}. \
