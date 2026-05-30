@@ -813,9 +813,7 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
         );
     }
 
-    // The change landed; now decide whether to terminate so it applies before
-    // the first container start. Probe lazily — only IfIdle needs it, only now
-    // that a real change exists.
+    // Probe lazily (only IfIdle, only now that a real change exists) then decide.
     let has_running =
         matches!(terminate, TerminateOnChange::IfIdle) && wsl_distro_has_running_containers(distro);
     if terminate_decision(terminate, has_running) {
@@ -841,8 +839,7 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
     Ok(())
 }
 
-/// Reads `/etc/wsl.conf` from inside the distro as root. `Ok("")` when the file
-/// does not exist yet; `Err` only on a spawn/exec failure.
+/// Reads `/etc/wsl.conf` as root; `Ok("")` if absent, `Err` only on spawn failure.
 #[cfg(target_os = "windows")]
 fn read_wsl_conf(distro: &str) -> anyhow::Result<String> {
     let out = speedwave_runtime::binary::system_command("wsl.exe")
@@ -878,10 +875,7 @@ fn write_wsl_conf(distro: &str, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `true` if any container runs in the distro. Distinguishes "containerd is
-/// down" (→ idle, terminating is safe and lets metadata apply) from
-/// "containerd is up and has running containers" (→ busy, don't terminate).
-/// A genuine spawn failure fails safe to busy.
+/// `true` if any container runs in the distro (containerd-down ⇒ idle; spawn failure ⇒ fail-safe busy).
 #[cfg(target_os = "windows")]
 fn wsl_distro_has_running_containers(distro: &str) -> bool {
     // Session is already `-u root`, so no `sudo` (not always in root's PATH).
@@ -903,10 +897,7 @@ fn wsl_distro_has_running_containers(distro: &str) -> bool {
     }
 }
 
-/// Interprets a `nerdctl ps -q` probe. Success + non-empty stdout ⇒ running.
-/// Success + empty ⇒ idle. Failure whose stderr looks like the containerd
-/// daemon being unreachable ⇒ idle (the daemon hasn't started yet, so nothing
-/// is running). Any other failure ⇒ busy (fail-safe: never terminate on doubt).
+/// Interprets a `nerdctl ps -q` probe: running, idle, or (on containerd-down stderr) idle; else fail-safe busy.
 #[cfg(any(target_os = "windows", test))]
 fn running_containers_from_probe(success: bool, stdout: &str, stderr: &str) -> bool {
     if success {
@@ -919,8 +910,7 @@ fn running_containers_from_probe(success: bool, stdout: &str, stderr: &str) -> b
         || lower.contains("no such file or directory") // containerd.sock absent
         || lower.contains("is the containerd daemon running");
     if daemon_down {
-        // Daemon not up ⇒ nothing can be running ⇒ idle.
-        false
+        false // daemon not up ⇒ nothing running ⇒ idle
     } else {
         log::warn!(
             "wsl_distro_has_running_containers: nerdctl ps failed (assuming busy): {stderr}"
@@ -929,16 +919,13 @@ fn running_containers_from_probe(success: bool, stdout: &str, stderr: &str) -> b
     }
 }
 
-/// `true` if `/etc/wsl.conf` content has an `[automount]` section whose
-/// `options =` line contains `uid={uid}` as a full token (anchored — not a
-/// substring, so `uid=10000` and a commented `uid=1000` do NOT match).
+/// `true` if `[automount].options` contains `uid={uid}` as a full token (anchored, not substring).
 #[cfg(any(target_os = "windows", test))]
 fn wsl_conf_automount_has_uid(content: &str, uid: u32) -> bool {
     automount_options_line(content).is_some_and(|opts| options_has_uid(opts, uid))
 }
 
-/// Returns the value of the `options =` key inside the first `[automount]`
-/// section, ignoring comments. `None` if absent.
+/// Value of the `options =` key in the first `[automount]` section (comments ignored); `None` if absent.
 #[cfg(any(target_os = "windows", test))]
 fn automount_options_line(content: &str) -> Option<&str> {
     let mut in_automount = false;
@@ -962,18 +949,14 @@ fn automount_options_line(content: &str) -> Option<&str> {
     None
 }
 
-/// `true` if a comma-separated drvfs options string contains `uid={uid}` as a
-/// whole token (so `uid=10000` does not match `uid=1000`).
+/// `true` if a comma-separated options string contains `uid={uid}` as a whole token.
 #[cfg(any(target_os = "windows", test))]
 fn options_has_uid(options: &str, uid: u32) -> bool {
     let needle = format!("uid={uid}");
     options.split(',').any(|tok| tok.trim() == needle)
 }
 
-/// Pure transform: returns `input` with the `[automount]` section's `options`
-/// key set to `opts`. Adds the section if absent, replaces the options line if
-/// present, dedups multiple `[automount]` sections to one. CRLF-aware. All
-/// other sections/keys are preserved. Idempotent.
+/// Sets `[automount].options` to `opts`, replacing only that key; all other keys/sections preserved. CRLF-aware, idempotent.
 #[cfg(any(target_os = "windows", test))]
 fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
     let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
@@ -989,18 +972,15 @@ fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
             .and_then(|s| s.strip_suffix(']'))
             .map(|s| s.trim().to_ascii_lowercase())
         {
-            // Entering a new section header.
             if sec == "automount" {
+                current_section = Some(sec);
                 if automount_seen {
-                    // Drop a duplicate [automount] header (dedup); its body
-                    // lines are dropped by the in-automount guard below.
-                    current_section = Some(sec);
+                    // Drop a duplicate header; its body keys still flow through.
                     continue;
                 }
                 automount_seen = true;
-                current_section = Some(sec);
                 out.push_str(line);
-                // Emit our options line right after the header.
+                // Emit our options line right after the first header.
                 let line_nl = if line.ends_with('\n') { nl } else { "" };
                 out.push_str(&format!("options = \"{opts}\"{line_nl}"));
                 options_written = true;
@@ -1010,10 +990,14 @@ fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
             out.push_str(line);
             continue;
         }
-        // Body line: drop any options/* lines inside [automount] (we already
-        // wrote ours); keep everything else.
+        // Inside [automount]: drop only the old options line, keep other keys.
         if current_section.as_deref() == Some("automount") {
-            continue;
+            let is_options = trimmed
+                .split_once('=')
+                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("options"));
+            if is_options {
+                continue;
+            }
         }
         out.push_str(line);
     }
@@ -3156,8 +3140,7 @@ mod tests {
             assert!(running_containers_from_probe(true, "abc123\n", ""));
         }
 
-        // containerd not up yet (the cold-start case) ⇒ nothing running ⇒ idle,
-        // so IfIdle can terminate and let the new mount apply before first start.
+        // containerd down (cold start) ⇒ idle, so IfIdle can terminate and apply.
         #[test]
         fn probe_daemon_down_means_idle() {
             assert!(!running_containers_from_probe(
@@ -3231,14 +3214,19 @@ mod tests {
             assert!(wsl_conf_automount_has_uid(&out, 1000));
         }
 
-        // [automount] present but with NO options line → insert it.
+        // [automount] present but with NO options line → insert it, keeping other keys.
         #[test]
-        fn merge_inserts_options_when_section_lacks_them() {
-            let out = merge_wsl_conf_automount("[automount]\nenabled = true\n", OPTS);
-            assert!(wsl_conf_automount_has_uid(&out, 1000));
-            // enabled is preserved is NOT guaranteed (we drop body lines) — but the
-            // option must be present and parseable.
+        fn merge_inserts_options_and_keeps_other_keys() {
+            let out = merge_wsl_conf_automount("[automount]\nenabled = false\nroot = /m/\n", OPTS);
             assert_eq!(automount_options_line(&out), Some(OPTS));
+            assert!(
+                out.contains("enabled = false"),
+                "other [automount] keys preserved"
+            );
+            assert!(
+                out.contains("root = /m/"),
+                "other [automount] keys preserved"
+            );
         }
 
         // Existing wrong options line is replaced, not duplicated.
