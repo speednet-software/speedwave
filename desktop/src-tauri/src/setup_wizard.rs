@@ -763,20 +763,17 @@ fn import_wsl_distro() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// May `ensure_wsl_distro_metadata` `wsl --terminate` to apply the wsl.conf
-/// change? Terminating is immediate but kills every distro process.
+/// Whether `ensure_wsl_distro_metadata` may `wsl --terminate` to apply the change.
 #[cfg(any(target_os = "windows", test))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TerminateOnChange {
-    /// Import path: no containers run yet, so terminating is always safe.
+    /// Import path: no container runs yet, so terminating is always safe.
     Yes,
-    /// Startup/post-update: terminate only when no container runs (else the
-    /// `metadata` mount can't apply before the first start → uid-1000 EACCES).
+    /// Startup/post-update: terminate only when idle, else uid-1000 EACCES (ADR-052).
     IfIdle,
 }
 
-/// Pure terminate policy (extracted from the I/O so it is testable without
-/// Windows). `has_running` only matters for `IfIdle`.
+/// Pure terminate policy (testable without Windows); `has_running` only for `IfIdle`.
 #[cfg(any(target_os = "windows", test))]
 fn terminate_decision(terminate: TerminateOnChange, has_running: bool) -> bool {
     match terminate {
@@ -785,23 +782,15 @@ fn terminate_decision(terminate: TerminateOnChange, has_running: bool) -> bool {
     }
 }
 
-/// Ensures the Speedwave distro's `/etc/wsl.conf` sets the drvfs automount
-/// options to [`consts::wsl_automount_options`]: `metadata` for `/login`'s
-/// chmod (ADR-052) and `uid`/`gid` (from the [`consts::CONTAINER_USER_UNPRIVILEGED`]
-/// SSOT) requesting the mount be owned by the container user.
-///
-/// Idempotent: adds the `[automount]` block if absent, else upgrades an options
-/// line missing the uid (see [`ADR-052`]). Pass `Yes` at import, `IfIdle` on the
-/// startup/migration path; `No` only for explicit deferral. Returns `Err` when
-/// the write did not land (the mount stays uid=0 → login breaks).
+/// Sets `/etc/wsl.conf` automount to [`consts::wsl_automount_options`] (`metadata`
+/// + uid/gid; ADR-052). `Yes` at import, `IfIdle` at startup; `Err` if the write
+/// didn't land (mount stays uid=0 → login breaks).
 #[cfg(target_os = "windows")]
 pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Result<()> {
     let distro = consts::wsl_distro_name();
     let opts = consts::wsl_automount_options();
     let (uid, _gid) = consts::container_uid_gid();
-    // Probe BEFORE the write so the terminate decision is fixed before any state
-    // change — minimizes the probe→terminate window (a container could otherwise
-    // start in the gap). Only IfIdle cares about running containers.
+    // Probe before the write so the IfIdle decision predates any state change.
     let has_running =
         matches!(terminate, TerminateOnChange::IfIdle) && wsl_distro_has_running_containers(distro);
 
@@ -831,8 +820,7 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
             if stdout.contains("speedwave-metadata-present") {
                 log::debug!("ensure_wsl_distro_metadata: uid={uid} already present in {distro}");
             } else if stdout.contains("speedwave-metadata-added") {
-                // Deferral (terminate_decision == false) only happens for
-                // IfIdle while containers run, so the message is unambiguous.
+                // Deferral happens only for IfIdle while containers run.
                 if terminate_decision(terminate, has_running) {
                     let _ = speedwave_runtime::binary::system_command("wsl.exe")
                         .args(["--terminate", distro])
@@ -856,9 +844,7 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
     Ok(())
 }
 
-/// Interprets a `nerdctl ps -q` probe: non-empty stdout on success ⇒ running.
-/// Fail-safe: any probe failure (`success == false`) assumes busy (`true`) so we
-/// never `--terminate` a distro with live containers on uncertainty.
+/// Interprets `nerdctl ps -q`: non-empty stdout ⇒ running; any failure ⇒ assume busy.
 #[cfg(any(target_os = "windows", test))]
 fn running_containers_from_probe(success: bool, stdout: &str) -> bool {
     if success {
@@ -868,14 +854,12 @@ fn running_containers_from_probe(success: bool, stdout: &str) -> bool {
     }
 }
 
-/// `true` if any container is currently running in the Speedwave distro (probes
-/// `nerdctl ps -q`; fail-safe to busy — see [`running_containers_from_probe`]).
+/// `true` if any container runs in the distro (fail-safe to busy; see [`running_containers_from_probe`]).
 #[cfg(target_os = "windows")]
 fn wsl_distro_has_running_containers(distro: &str) -> bool {
+    // Session is already `-u root`, so no `sudo` (not always in root's PATH).
     let out = speedwave_runtime::binary::system_command("wsl.exe")
-        .args([
-            "-d", distro, "-u", "root", "--", "sudo", "nerdctl", "ps", "-q",
-        ])
+        .args(["-d", distro, "-u", "root", "--", "nerdctl", "ps", "-q"])
         .output();
     match out {
         Ok(o) => {
@@ -3018,8 +3002,7 @@ mod tests {
             assert_eq!(format!("{:?}", TerminateOnChange::IfIdle), "IfIdle");
         }
 
-        // Yes always terminates; IfIdle only when no container runs (so the
-        // metadata mount applies before the first start without killing any).
+        // Yes always terminates; IfIdle only when no container runs.
         #[test]
         fn yes_always_terminates() {
             assert!(terminate_decision(TerminateOnChange::Yes, false));
@@ -3063,12 +3046,7 @@ mod tests {
     mod wsl_automount_options_tests {
         use speedwave_runtime::consts;
 
-        // Regression guard for the claude container early-exit: the automount
-        // options carry `metadata` (so /login's chmod 0600 works, ADR-052) and
-        // the container uid/gid — derived from the CONTAINER_USER_UNPRIVILEGED
-        // SSOT, NOT a re-typed literal, so the mount owner and the compose
-        // `user:` cannot drift. The load-bearing fix is the chown in
-        // ensure_claude_home_owner; this option is best-effort (see its docs).
+        // Automount opts carry `metadata` + the uid/gid from the SSOT (ADR-052).
         #[test]
         fn options_derive_metadata_and_container_uid_from_ssot() {
             let opts = consts::wsl_automount_options();
