@@ -515,14 +515,14 @@ pub fn set_integration_enabled(
 // ---------------------------------------------------------------------------
 
 /// Resolves the absolute path to a native macOS CLI binary.
-///
-/// Production: `BUNDLE_RESOURCES_ENV` → `<dir>/<binary-name>`
-/// Dev: `CARGO_MANIFEST_DIR` → `../../native/macos/<pkg>/.build/release/<binary-name>`
-///
-/// No fallback to Resources/ subdir — `BUNDLE_RESOURCES_ENV` is always set by
-/// Desktop `main.rs` in production.
+/// `resources_dir` is `Some(<BUNDLE_RESOURCES_ENV dir>)` in production (set by
+/// main.rs); `None` selects the dev fallback `CARGO_MANIFEST_DIR ->
+/// ../../native/macos/<pkg>/.build/release/<binary>`. Tests pass a tempdir.
 // SYNC: binary paths must match mcp-servers/os/src/platform-runner.ts::resolveDarwinPaths()
-fn resolve_native_cli_binary(service: &str) -> Result<std::path::PathBuf, String> {
+fn resolve_native_cli_binary_in(
+    service: &str,
+    resources_dir: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, String> {
     let (binary_name, pkg_dir) = match service {
         "reminders" => ("reminders-cli", "reminders"),
         "calendar" => ("calendar-cli", "calendar"),
@@ -531,9 +531,8 @@ fn resolve_native_cli_binary(service: &str) -> Result<std::path::PathBuf, String
         _ => return Err(format!("unknown OS service: {service}")),
     };
 
-    // Production: env var set by main.rs via resolve_resources_dir()
-    if let Ok(resources_dir) = std::env::var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV) {
-        return Ok(std::path::PathBuf::from(resources_dir).join(binary_name));
+    if let Some(dir) = resources_dir {
+        return Ok(dir.join(binary_name));
     }
 
     // Dev fallback: compile-time path from CARGO_MANIFEST_DIR (desktop/src-tauri/)
@@ -605,7 +604,26 @@ fn check_os_permission_with_timeout(
     launch_if_needed: bool,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
-    let binary_path = resolve_native_cli_binary(service)?;
+    let resources_dir = std::env::var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV)
+        .ok()
+        .map(std::path::PathBuf::from);
+    check_os_permission_with_timeout_in(
+        service,
+        launch_if_needed,
+        timeout,
+        resources_dir.as_deref(),
+    )
+}
+
+/// Parameterised by `resources_dir` so unit tests pass a tempdir directly
+/// instead of mutating the global `BUNDLE_RESOURCES_ENV`.
+fn check_os_permission_with_timeout_in(
+    service: &str,
+    launch_if_needed: bool,
+    timeout: std::time::Duration,
+    resources_dir: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let binary_path = resolve_native_cli_binary_in(service, resources_dir)?;
     log::info!(
         "check_os_permission: spawning {service}-cli check_permission launch={launch_if_needed} (binary={})",
         binary_path.display()
@@ -1019,10 +1037,26 @@ fn merge_oauth_state_json(
     service: &str,
     fields: &std::collections::HashMap<&str, (speedwave_runtime::consts::FieldStorage, &str)>,
 ) -> Result<(), String> {
+    merge_oauth_state_json_in(
+        speedwave_runtime::consts::data_dir(),
+        project,
+        service,
+        fields,
+    )
+}
+
+/// Parameterised by `data_dir` so unit tests avoid the `consts::data_dir()`
+/// `OnceLock` cache. Production callers go through `merge_oauth_state_json`.
+fn merge_oauth_state_json_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+    fields: &std::collections::HashMap<&str, (speedwave_runtime::consts::FieldStorage, &str)>,
+) -> Result<(), String> {
     use speedwave_runtime::consts::FieldStorage;
     let provider = provider_id_for_service(service)
         .ok_or_else(|| format!("service '{service}' has no provider id mapping"))?;
-    let path = speedwave_runtime::plugin::oauth_state_file(project, service);
+    let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, service);
     let parent = path.parent().ok_or_else(|| "no parent".to_string())?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     #[cfg(unix)]
@@ -1370,7 +1404,6 @@ pub async fn restart_integration_containers(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use serial_test::serial;
 
     /// Drift guard: the camelCase JSON keys the Desktop save-path derives from the
     /// `OAuthStateProviderData` descriptors (via `snake_to_oauth_json_key`, which
@@ -2415,7 +2448,7 @@ mod tests {
             ("mail", "mail-cli"),
             ("notes", "notes-cli"),
         ] {
-            let path = resolve_native_cli_binary(service).unwrap();
+            let path = resolve_native_cli_binary_in(service, None).unwrap();
             assert!(
                 path.to_string_lossy().contains(expected_binary),
                 "path for {service} should contain {expected_binary}, got: {}",
@@ -2426,7 +2459,7 @@ mod tests {
 
     #[test]
     fn resolve_native_cli_binary_rejects_unknown() {
-        assert!(resolve_native_cli_binary("unknown").is_err());
+        assert!(resolve_native_cli_binary_in("unknown", None).is_err());
     }
 
     #[test]
@@ -2441,8 +2474,8 @@ mod tests {
 
         for service in &os_services {
             assert!(
-                resolve_native_cli_binary(service).is_ok(),
-                "resolve_native_cli_binary must handle OS service '{service}'"
+                resolve_native_cli_binary_in(service, None).is_ok(),
+                "resolve_native_cli_binary_in must handle OS service '{service}'"
             );
         }
 
@@ -2473,14 +2506,14 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    #[serial]
     fn check_os_permission_handles_binary_not_found() {
-        std::env::set_var(
-            speedwave_runtime::consts::BUNDLE_RESOURCES_ENV,
-            "/nonexistent/path",
+        let dir = std::path::Path::new("/nonexistent/path");
+        let result = check_os_permission_with_timeout_in(
+            "reminders",
+            false,
+            std::time::Duration::from_secs(60),
+            Some(dir),
         );
-        let result = check_os_permission("reminders", false);
-        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -2491,7 +2524,6 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    #[serial]
     fn check_os_permission_handles_non_executable_binary() {
         let tmp = tempfile::tempdir().unwrap();
         let binary_path = tmp.path().join("reminders-cli");
@@ -2500,9 +2532,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission("reminders", false);
-        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
+        let result = check_os_permission_with_timeout_in(
+            "reminders",
+            false,
+            std::time::Duration::from_secs(60),
+            Some(tmp.path()),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -2513,7 +2548,6 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    #[serial]
     fn check_os_permission_handles_nonzero_exit() {
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("reminders-cli");
@@ -2521,16 +2555,18 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission("reminders", false);
-        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
+        let result = check_os_permission_with_timeout_in(
+            "reminders",
+            false,
+            std::time::Duration::from_secs(60),
+            Some(tmp.path()),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("crash info"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    #[serial]
     fn check_os_permission_handles_exit_0_garbage_stdout() {
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("reminders-cli");
@@ -2538,16 +2574,18 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission("reminders", false);
-        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
+        let result = check_os_permission_with_timeout_in(
+            "reminders",
+            false,
+            std::time::Duration::from_secs(60),
+            Some(tmp.path()),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to parse"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    #[serial]
     fn check_os_permission_timeout_kills_child() {
         // Intentionally slow test (~5s) — spawns a script that sleeps 60s,
         // but we set a 2s timeout so it gets killed quickly.
@@ -2557,10 +2595,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result =
-            check_os_permission_with_timeout("reminders", false, std::time::Duration::from_secs(2));
-        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
+        let result = check_os_permission_with_timeout_in(
+            "reminders",
+            false,
+            std::time::Duration::from_secs(2),
+            Some(tmp.path()),
+        );
         assert!(result.is_err());
         assert!(
             result.unwrap_err().contains("timed out"),
@@ -2763,11 +2803,9 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn merge_oauth_state_json_initializes_with_provider_data_object() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+        let data_dir = tmp.path();
 
         let fields: std::collections::HashMap<_, _> = [
             merge_field("client_id", "cid"),
@@ -2776,9 +2814,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+        merge_oauth_state_json_in(data_dir, "p", "sharepoint", &fields).unwrap();
 
-        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, "p", "sharepoint");
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(json["provider"], "microsoft");
@@ -2795,25 +2833,18 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "oauth.json must be created with chmod 600");
         }
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn merge_oauth_state_json_merges_into_existing_provider_data() {
         // Existing file already has a populated providerData node (typical
         // read-modify-write: user updates one field via UI, the others stay).
         // The merge must add the new field, preserve the old one, and keep
         // top-level fields intact.
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+        let data_dir = tmp.path();
 
-        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, "p", "sharepoint");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -2832,7 +2863,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+        merge_oauth_state_json_in(data_dir, "p", "sharepoint", &fields).unwrap();
 
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -2855,21 +2886,14 @@ mod tests {
                 "oauth.json must remain chmod 600 across merges"
             );
         }
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn merge_oauth_state_json_repairs_scalar_provider_data() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+        let data_dir = tmp.path();
 
-        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, "p", "sharepoint");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -2879,55 +2903,41 @@ mod tests {
 
         let fields: std::collections::HashMap<_, _> =
             [merge_field("client_id", "cid")].into_iter().collect();
-        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+        merge_oauth_state_json_in(data_dir, "p", "sharepoint", &fields).unwrap();
 
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(json["providerData"].is_object());
         assert_eq!(json["providerData"]["clientId"], "cid");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn merge_oauth_state_json_preserves_existing_fields_on_corrupt_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+        let data_dir = tmp.path();
 
-        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, "p", "sharepoint");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "not json at all").unwrap();
 
         let fields: std::collections::HashMap<_, _> =
             [merge_field("client_id", "cid")].into_iter().collect();
-        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+        merge_oauth_state_json_in(data_dir, "p", "sharepoint", &fields).unwrap();
 
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(json["provider"], "microsoft");
         assert_eq!(json["providerData"]["clientId"], "cid");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn merge_oauth_state_json_repairs_missing_provider_data_node() {
         // Existing file lacks `providerData` (e.g. corrupted at that node).
         // The merge must repair it rather than silently drop client_id/tenant_id.
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+        let data_dir = tmp.path();
 
-        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, "p", "sharepoint");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -2937,31 +2947,24 @@ mod tests {
 
         let fields: std::collections::HashMap<_, _> =
             [merge_field("client_id", "cid")].into_iter().collect();
-        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+        merge_oauth_state_json_in(data_dir, "p", "sharepoint", &fields).unwrap();
 
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(json["providerData"]["clientId"], "cid");
         // Pre-existing top-level fields preserved.
         assert_eq!(json["refreshToken"], "old");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn merge_oauth_state_json_lifts_legacy_top_level_identity() {
         // Legacy file with clientId/tenantId at top level (pre-providerData).
         // A re-save must lift them under providerData AND remove the top-level
         // copies — not leave them orphaned next to an empty providerData.
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+        let data_dir = tmp.path();
 
-        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, "p", "sharepoint");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -2978,7 +2981,7 @@ mod tests {
         // Re-save only tenant_id; client_id must survive via the lift.
         let fields: std::collections::HashMap<_, _> =
             [merge_field("tenant_id", "new-tid")].into_iter().collect();
-        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+        merge_oauth_state_json_in(data_dir, "p", "sharepoint", &fields).unwrap();
 
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -2988,10 +2991,5 @@ mod tests {
         assert!(json.get("clientId").is_none());
         assert!(json.get("tenantId").is_none());
         assert_eq!(json["refreshToken"], "rt");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 }

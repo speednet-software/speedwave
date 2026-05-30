@@ -29,9 +29,30 @@ fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
     to_engine_path(std::path::Path::new(path))
 }
 
-/// Returns the tokens directory for a project using `consts::data_dir()`.
-fn resolve_tokens_dir(project_name: &str) -> PathBuf {
-    consts::data_dir().join("tokens").join(project_name)
+/// Returns the tokens directory for a project under an explicit data dir.
+fn resolve_tokens_dir_in(data_dir: &Path, project_name: &str) -> PathBuf {
+    data_dir.join("tokens").join(project_name)
+}
+
+// Test-only override for the bundle build root, so `render_compose_in` resolves
+// the manifest from an injected path instead of the process-global
+// `SPEEDWAVE_RESOURCES_DIR` env var (which other tests mutate). Thread-local so
+// parallel tests don't perturb each other.
+#[cfg(test)]
+thread_local! {
+    static TEST_BUILD_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Resolves the bundle manifest: production reads the env-derived build root;
+/// tests read the injected `TEST_BUILD_ROOT` so they never touch global env.
+fn resolve_bundle_manifest() -> anyhow::Result<bundle::BundleManifest> {
+    #[cfg(test)]
+    {
+        if let Some(root) = TEST_BUILD_ROOT.with(|r| r.borrow().clone()) {
+            return bundle::load_current_bundle_manifest_from(&root);
+        }
+    }
+    bundle::load_current_bundle_manifest()
 }
 
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
@@ -74,19 +95,42 @@ pub fn render_compose(
     runtime: Option<&crate::runtime::LockedRuntime>,
     bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
+    render_compose_in(
+        consts::data_dir(),
+        project_name,
+        project_dir,
+        resolved_config,
+        integrations,
+        runtime,
+        bridges,
+    )
+}
+
+/// Env-free core of [`render_compose`]: every data-dir-rooted path is derived
+/// from the explicit `data_dir`, so tests pass a tempdir and never touch the
+/// production `~/.speedwave`. The public no-arg shim resolves `data_dir()` from
+/// the global singleton at the call site.
+pub fn render_compose_in(
+    data_dir: &Path,
+    project_name: &str,
+    project_dir: &str,
+    resolved_config: &ResolvedClaudeConfig,
+    integrations: &ResolvedIntegrationsConfig,
+    runtime: Option<&crate::runtime::LockedRuntime>,
+    bridges: &HostBridgesInfo,
+) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
     // Windows: WSL adapter IP can drift; re-detect before it lands in extra_hosts.
     #[cfg(target_os = "windows")]
     invalidate_host_addressing_cache();
-    let data_dir = consts::data_dir();
-    let tokens_dir = resolve_tokens_dir(project_name);
+    let tokens_dir = resolve_tokens_dir_in(data_dir, project_name);
     let claude_home = crate::claude_home::claude_home_dir(data_dir, project_name);
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
     let port_hub = consts::PORT_BASE;
     let port_worker = consts::PORT_WORKER;
-    let bundle_manifest = bundle::load_current_bundle_manifest()?;
+    let bundle_manifest = resolve_bundle_manifest()?;
 
     let mut yaml = COMPOSE_TEMPLATE.to_string();
     yaml = yaml.replace("${COMPOSE_PREFIX}", consts::compose_prefix());
@@ -167,7 +211,7 @@ pub fn render_compose(
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
     // Handle LLM provider switching
-    yaml = apply_llm_config(&yaml, &resolved_config.llm, project_name)?;
+    yaml = apply_llm_config_in(data_dir, &yaml, &resolved_config.llm, project_name)?;
 
     // Ensure plugin images exist (builds pending and missing) before compose generation.
     // Scoped to plugins enabled for this project — a broken plugin in another project
@@ -205,22 +249,22 @@ pub fn render_compose(
         .as_deref()
         .unwrap_or("anthropic");
     if provider == "anthropic" {
-        yaml = apply_auth_config(&yaml, project_name)?;
+        yaml = apply_auth_config_in(&yaml, project_name, data_dir)?;
     }
 
     // Inject mcp-os config into hub if auth token exists
-    yaml = apply_mcp_os_config(&yaml)?;
+    yaml = apply_mcp_os_config_in(data_dir, &yaml)?;
 
     // Inject host_exec WORKER URL + token if the worker is running (ADR-054). No-op otherwise.
-    yaml = apply_host_exec_config(&yaml, project_name)?;
+    yaml = apply_host_exec_config_in(data_dir, &yaml, project_name)?;
 
     // Inject oauth worker URL + per-service bearer mount into OAuth-consuming worker
     // containers (today: mcp-sharepoint). No-op if the oauth worker is not running
     // for this project (ADR-060). Hub is NOT touched — the oauth worker is internal.
-    yaml = apply_oauth_config(&yaml, project_name)?;
+    yaml = apply_oauth_config_in(data_dir, &yaml, project_name)?;
 
     // Inject per-worker Bearer auth tokens (SEC-035)
-    yaml = apply_worker_auth_tokens(&yaml, project_name, integrations)?;
+    yaml = apply_worker_auth_tokens_in(data_dir, &yaml, project_name, integrations)?;
 
     // Filter services based on integrations config
     yaml = apply_integrations_filter(&yaml, integrations, &network_name)?;
@@ -268,15 +312,11 @@ pub(crate) fn init_secrets_dir_in(
 
 /// Returns the path where the rendered compose file should be saved.
 pub fn compose_output_path(project: &str) -> anyhow::Result<PathBuf> {
-    crate::validation::validate_project_name(project)?;
-    Ok(consts::data_dir()
-        .join("compose")
-        .join(project)
-        .join("compose.yml"))
+    compose_output_path_in(consts::data_dir(), project)
 }
 
-/// Testable variant: resolves compose output path under an explicit data directory.
-#[cfg(test)]
+/// Resolves the compose output path under an explicit data directory — the
+/// env-free core used by `save_compose_in` and by tests.
 pub fn compose_output_path_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -311,10 +351,17 @@ fn read_back_compose(path: &std::path::Path) -> std::io::Result<String> {
 /// (catches macOS virtiofs lag; no-op on ext4/NTFS). 0o600 because YAML
 /// may carry `ANTHROPIC_AUTH_TOKEN` (ADR-040).
 pub fn save_compose(project: &str, yaml: &str) -> anyhow::Result<()> {
+    save_compose_in(consts::data_dir(), project, yaml)
+}
+
+/// Env-free core of [`save_compose`]: writes the per-project compose file under
+/// an explicit `data_dir` so tests use a tempdir and never write the production
+/// `~/.speedwave`. The public no-arg shim resolves `data_dir()` at the call site.
+pub fn save_compose_in(data_dir: &Path, project: &str, yaml: &str) -> anyhow::Result<()> {
     validate_compose_network_refs(yaml)
         .map_err(|e| anyhow::anyhow!("save_compose: in-memory YAML failed validation: {e}"))?;
 
-    let path = compose_output_path(project)?;
+    let path = compose_output_path_in(data_dir, project)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -582,7 +629,16 @@ fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
         .map_err(|e| anyhow::anyhow!("inject_host_timezone: failed to serialize compose YAML: {e}"))
 }
 
-fn apply_llm_config(yaml: &str, llm: &LlmConfig, project: &str) -> anyhow::Result<String> {
+/// Applies LLM provider switching. Local-LLM token reads resolve under the
+/// explicit `data_dir` so callers (and tests) never touch the production
+/// `~/.speedwave/tokens`. The only caller is `render_compose_in`, which
+/// already threads the data dir.
+fn apply_llm_config_in(
+    data_dir: &Path,
+    yaml: &str,
+    llm: &LlmConfig,
+    project: &str,
+) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
     if !crate::config::LOCAL_PROVIDERS.contains(&provider) && provider != "anthropic" {
         anyhow::bail!(
@@ -630,7 +686,7 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig, project: &str) -> anyhow::Resul
             // servers expect *any* non-empty Bearer).
             const DUMMY_TOKEN: &str = "sk-no-key-required";
             let auth_token = if llm.has_api_key {
-                read_local_llm_token_opt(project, "api_key").unwrap_or_else(|| {
+                read_local_llm_token_opt_in(data_dir, project, "api_key").unwrap_or_else(|| {
                     log::warn!("local-llm api_key flagged but unreadable — using dummy");
                     DUMMY_TOKEN.to_string()
                 })
@@ -671,7 +727,9 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig, project: &str) -> anyhow::Resul
             // defensively (a stale token file must not smuggle a header that
             // would collide with the `ANTHROPIC_AUTH_TOKEN` Bearer).
             if llm.has_custom_headers {
-                if let Some(headers) = read_local_llm_token_opt(project, "custom_headers") {
+                if let Some(headers) =
+                    read_local_llm_token_opt_in(data_dir, project, "custom_headers")
+                {
                     let flattened = headers
                         .lines()
                         .map(str::trim)
@@ -703,7 +761,12 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig, project: &str) -> anyhow::Resul
 /// file, I/O error, empty content). Callers decide whether to fall back to
 /// a dummy or skip env injection.
 pub fn read_local_llm_token_opt(project: &str, file: &str) -> Option<String> {
-    let path = tokens_path(project, "local-llm", file).ok()?;
+    read_local_llm_token_opt_in(consts::data_dir().as_path(), project, file)
+}
+
+/// Testable variant: resolves the token file under an explicit data directory.
+pub fn read_local_llm_token_opt_in(data_dir: &Path, project: &str, file: &str) -> Option<String> {
+    let path = tokens_path_in(data_dir, project, "local-llm", file).ok()?;
     let content = std::fs::read_to_string(&path).ok()?;
     let trimmed = content.trim_end_matches(['\n', '\r']).to_string();
     if trimmed.is_empty() {
@@ -1091,12 +1154,7 @@ fn apply_plugins_from_verified(
 /// Claude Code itself inside the `CLAUDE_HOME` bind-mount — Speedwave never
 /// reads or writes them. On the host they live at
 /// `<data_dir>/claude-home/<project>/.claude/.credentials.json`. See ADR-052.
-pub fn apply_auth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
-    apply_auth_config_in(yaml, project, consts::data_dir())
-}
-
-/// Testable variant: resolves the legacy API key path under an explicit
-/// data directory.
+/// Resolves the legacy API key path under an explicit data directory.
 pub(crate) fn apply_auth_config_in(
     yaml: &str,
     project: &str,
@@ -1167,12 +1225,15 @@ fn add_service_env_var(
 ///
 /// Hub reads tokens from `/secrets/` files (auth-tokens.ts), not env vars.
 /// Workers read tokens from env vars. This asymmetry is enforced by `check_no_tokens_in_hub`.
-fn apply_worker_auth_tokens(
+/// Creates the per-project secrets dir under an explicit data dir so render
+/// under a tempdir never writes the global `~/.speedwave/secrets`.
+fn apply_worker_auth_tokens_in(
+    data_dir: &std::path::Path,
     yaml: &str,
     project_name: &str,
     integrations: &ResolvedIntegrationsConfig,
 ) -> anyhow::Result<String> {
-    let secrets_dir = init_secrets_dir(project_name)?;
+    let secrets_dir = init_secrets_dir_in(data_dir, project_name)?;
     let plugins = plugin::list_installed_plugins().unwrap_or_default();
     apply_worker_auth_tokens_with_dir(yaml, &secrets_dir, integrations, &plugins)
 }
@@ -1445,8 +1506,9 @@ fn remove_env_from(doc: &mut serde_yaml_ng::Value, service: &str, env_name: &str
 ///   - /secrets/os-auth-token:ro bind-mount (token as file, not env var)
 ///
 /// Claude container is NOT modified — it only sees the hub.
-fn apply_mcp_os_config(yaml: &str) -> anyhow::Result<String> {
-    let data_dir = consts::data_dir();
+/// Resolves the mcp-os lock/token paths under an explicit data dir so render
+/// under a tempdir never reads the global `~/.speedwave`.
+fn apply_mcp_os_config_in(data_dir: &std::path::Path, yaml: &str) -> anyhow::Result<String> {
     let lock_path = data_dir.join(consts::MCP_OS_LOCK_FILE);
     let token_mount_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
     apply_mcp_os_config_with_path(yaml, &token_mount_path, &lock_path)
@@ -1473,8 +1535,13 @@ fn apply_mcp_os_config_with_path(
 }
 
 /// Injects `WORKER_HOST_EXEC_URL` + bearer-token mount into the hub if the worker is up.
-fn apply_host_exec_config(yaml: &str, project: &str) -> anyhow::Result<String> {
-    let state_dir = crate::host_exec::host_exec_project_dir(consts::data_dir(), project);
+/// Resolves the host_exec state paths under an explicit data dir.
+fn apply_host_exec_config_in(
+    data_dir: &std::path::Path,
+    yaml: &str,
+    project: &str,
+) -> anyhow::Result<String> {
+    let state_dir = crate::host_exec::host_exec_project_dir(data_dir, project);
     let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
     let token_mount_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
     apply_host_exec_config_with_paths(yaml, &token_mount_path, &lock_path)
@@ -1506,8 +1573,12 @@ fn apply_host_exec_config_with_paths(
 /// Per-service bearer: each consumer gets its own bearer at
 /// `/secrets/oauth-auth-token-<config_key>:ro`. The bearer values come from
 /// `<oauth-state-dir>/.bearer-map.json` (bearer → service).
-fn apply_oauth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
-    let state_dir = crate::oauth_process::oauth_project_dir(consts::data_dir(), project);
+fn apply_oauth_config_in(
+    data_dir: &std::path::Path,
+    yaml: &str,
+    project: &str,
+) -> anyhow::Result<String> {
+    let state_dir = crate::oauth_process::oauth_project_dir(data_dir, project);
     let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
     let bearer_map_path = state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
     apply_oauth_config_with_paths(yaml, &state_dir, &lock_path, &bearer_map_path)
@@ -2136,7 +2207,7 @@ impl SecurityExpectedPaths {
     }
 
     pub fn compute(project_name: &str, project_dir: &str) -> anyhow::Result<Self> {
-        let tokens_dir = resolve_tokens_dir(project_name);
+        let tokens_dir = resolve_tokens_dir_in(consts::data_dir(), project_name);
         Ok(Self {
             project_engine_path: to_engine_path(std::path::Path::new(project_dir))?,
             tokens_engine_dir: to_engine_path(&tokens_dir)?,
@@ -3409,6 +3480,51 @@ mod tests {
 
     const SECURITY_RULE_COUNT: usize = 31;
 
+    /// Repo root (workspace dir holding `containers/`, `mcp-servers/`), derived
+    /// from this crate's manifest dir — used as the injected bundle build root
+    /// so manifest resolution never reads the process-global env.
+    fn test_build_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crate manifest dir has a workspace grandparent")
+            .to_path_buf()
+    }
+
+    /// Isolated `render_compose` for tests: roots every data-dir path at the
+    /// caller's `data_dir` (a tempdir) and resolves the bundle manifest from the
+    /// repo build root via `TEST_BUILD_ROOT` — so the test touches neither the
+    /// production `~/.speedwave` nor the global `SPEEDWAVE_RESOURCES_DIR` env.
+    fn render_compose_isolated(
+        data_dir: &Path,
+        project_name: &str,
+        project_dir: &str,
+        resolved_config: &ResolvedClaudeConfig,
+        integrations: &ResolvedIntegrationsConfig,
+        runtime: Option<&crate::runtime::LockedRuntime>,
+        bridges: &HostBridgesInfo,
+    ) -> anyhow::Result<String> {
+        // RAII guard clears the thread-local on scope exit (even on panic), so a
+        // later test reusing this libtest thread never inherits a stale build root.
+        struct BuildRootGuard;
+        impl Drop for BuildRootGuard {
+            fn drop(&mut self) {
+                TEST_BUILD_ROOT.with(|r| *r.borrow_mut() = None);
+            }
+        }
+        TEST_BUILD_ROOT.with(|r| *r.borrow_mut() = Some(test_build_root()));
+        let _guard = BuildRootGuard;
+        render_compose_in(
+            data_dir,
+            project_name,
+            project_dir,
+            resolved_config,
+            integrations,
+            runtime,
+            bridges,
+        )
+    }
+
     /// Render the same compose template via `render_compose` with a local
     /// LLM provider + multi-line custom_headers token, and check the result
     /// re-parses. This is the production code path; if it diverges from
@@ -3417,6 +3533,7 @@ mod tests {
     #[test]
     #[serial_test::serial(host_addressing)]
     fn render_compose_with_multiline_custom_headers_is_valid_yaml() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Use the same locking pattern as the existing token-touching tests
         // — they share a global `~/.speedwave/tokens` namespace and would
         // otherwise race when run in parallel.
@@ -3425,7 +3542,7 @@ mod tests {
         let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let project = format!("render-multiline-headers-{}", std::process::id());
-        let tokens_dir = ensure_token_dir(&project, "local-llm")
+        let tokens_dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
             .expect("ensure_token_dir must succeed in test env");
         std::fs::write(tokens_dir.join("api_key"), "sk-test-key").unwrap();
         std::fs::write(
@@ -3451,7 +3568,8 @@ mod tests {
         };
         let integrations = ResolvedIntegrationsConfig::default();
 
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             &project,
             project_dir.to_str().unwrap(),
             &resolved,
@@ -3511,6 +3629,7 @@ mod tests {
     #[test]
     #[serial_test::serial(host_addressing)]
     fn render_compose_quotes_bracketed_model_env_and_round_trips() {
+        let data_dir = tempfile::tempdir().unwrap();
         let project = format!("render-1m-suffix-{}", std::process::id());
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path().join("project");
@@ -3531,7 +3650,8 @@ mod tests {
             },
         };
 
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             &project,
             project_dir.to_str().unwrap(),
             &resolved,
@@ -3589,12 +3709,13 @@ mod tests {
     #[test]
     #[serial_test::serial(host_addressing)]
     fn render_compose_strips_authorization_from_custom_headers() {
+        let data_dir = tempfile::tempdir().unwrap();
         use std::sync::Mutex;
         static LOCK: Mutex<()> = Mutex::new(());
         let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let project = format!("authz-strip-{}", std::process::id());
-        let tokens_dir = ensure_token_dir(&project, "local-llm")
+        let tokens_dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
             .expect("ensure_token_dir must succeed in test env");
         std::fs::write(tokens_dir.join("api_key"), "sk-test").unwrap();
         std::fs::write(
@@ -3618,7 +3739,8 @@ mod tests {
                 has_custom_headers: true,
             },
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             &project,
             project_dir.to_str().unwrap(),
             &resolved,
@@ -3938,6 +4060,7 @@ networks:
 
     #[test]
     fn test_security_check_missing_cap_drop() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -3951,7 +4074,13 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::CapDropAll));
@@ -3959,6 +4088,7 @@ services:
 
     #[test]
     fn test_security_check_missing_no_new_privileges() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -3972,7 +4102,13 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::NoNewPrivs));
@@ -3980,6 +4116,7 @@ services:
 
     #[test]
     fn test_security_check_claude_read_only_missing() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -3994,7 +4131,13 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::ReadOnlyFs && v.container == "claude"));
@@ -4002,6 +4145,7 @@ services:
 
     #[test]
     fn test_security_check_tmpfs_missing() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -4015,7 +4159,13 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::TmpfsNoexec));
@@ -4023,6 +4173,7 @@ services:
 
     #[test]
     fn test_security_check_tokens_in_claude() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -4039,7 +4190,13 @@ services:
       - CLAUDE_VERSION=1.0.3
       - SLACK_TOKEN=xoxb-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::NoTokensClaude));
@@ -4047,6 +4204,7 @@ services:
 
     #[test]
     fn test_security_check_ports_not_localhost() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -4062,7 +4220,13 @@ services:
     ports:
       - "0.0.0.0:4000:4000"
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::PortsLocalhost));
@@ -4070,6 +4234,7 @@ services:
 
     #[test]
     fn test_security_check_claude_docker_socket() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -4087,7 +4252,13 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::NoSocketClaude));
@@ -4095,6 +4266,7 @@ services:
 
     #[test]
     fn test_security_check_external_llm_keys_in_claude() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -4111,7 +4283,13 @@ services:
       - CLAUDE_VERSION=1.0.3
       - OPENAI_API_KEY=sk-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::NoExternalLlmKeysClaude));
@@ -4119,6 +4297,7 @@ services:
 
     #[test]
     fn test_security_check_external_llm_keys_covers_major_providers() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Each prefix on its own line — one violation per leaked key. We assert the
         // rule fires for every major third-party LLM vendor, not just the four
         // originally hard-coded.
@@ -4150,7 +4329,13 @@ services:
       - {key}
 "#
             );
-            let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+            let violations = SecurityCheck::run_with_data_dir(
+                &yaml,
+                "test",
+                &[],
+                &test_expected_paths(),
+                data_dir.path(),
+            );
             assert!(
                 violations
                     .iter()
@@ -4162,8 +4347,14 @@ services:
 
     #[test]
     fn test_security_check_invalid_yaml() {
-        let violations =
-            SecurityCheck::run("not: valid: yaml: [[[", "test", &[], &test_expected_paths());
+        let data_dir = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            "not: valid: yaml: [[[",
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::YamlParseError));
@@ -4172,12 +4363,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitution() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4187,8 +4380,11 @@ services:
         );
         assert!(result.is_ok());
         let yaml = result.unwrap();
-        assert!(yaml.contains("speedwave_test-project_claude"));
-        assert!(yaml.contains("speedwave_test-project_mcp_hub"));
+        // Derive the prefix from the SSOT rather than hardcoding "speedwave",
+        // so the test holds whatever data_dir basename the process resolved.
+        let prefix = consts::compose_prefix();
+        assert!(yaml.contains(&format!("{prefix}_test-project_claude")));
+        assert!(yaml.contains(&format!("{prefix}_test-project_mcp_hub")));
         assert!(yaml.contains("/workspace"));
         // ${CLAUDE_MEMORY} must be substituted with a concrete value (e.g. "8g")
         assert!(
@@ -4208,14 +4404,16 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_uses_bundle_scoped_image_refs() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let manifest = bundle::load_current_bundle_manifest().unwrap();
+        let manifest = bundle::load_current_bundle_manifest_from(&test_build_root()).unwrap();
 
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4269,12 +4467,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_has_sharepoint_workspace_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4299,6 +4499,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_service_present() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -4308,7 +4509,8 @@ services:
             playwright: true,
             ..Default::default()
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4382,6 +4584,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_office_no_token_mount_workspace_rw_office_network_only() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -4391,7 +4594,8 @@ services:
             office: true,
             ..Default::default()
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4441,6 +4645,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_no_token_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -4450,7 +4655,8 @@ services:
             playwright: true,
             ..Default::default()
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4479,6 +4685,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_no_workspace_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -4488,7 +4695,8 @@ services:
             playwright: true,
             ..Default::default()
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4518,6 +4726,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_playwright_worker_url_in_hub_env() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -4527,7 +4736,8 @@ services:
             playwright: true,
             ..Default::default()
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4556,6 +4766,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_github_service_present() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -4565,7 +4776,8 @@ services:
             github: true,
             ..Default::default()
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4650,6 +4862,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_github_worker_url_in_hub_env() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -4659,7 +4872,8 @@ services:
             github: true,
             ..Default::default()
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4736,12 +4950,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_has_mcp_hub_port() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4763,6 +4979,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_mcp_hub_port_matches_port_base() {
+        let data_dir = tempfile::tempdir().unwrap();
         // MCP_HUB_PORT in the claude container must equal PORT_BASE (hub port).
         // If these drift apart, entrypoint.sh generates wrong mcp-config.json URL.
         let config = ResolvedClaudeConfig {
@@ -4770,7 +4987,8 @@ services:
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4793,12 +5011,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_all_workers_use_port_worker() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4841,12 +5061,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_hub_worker_urls_use_port_worker() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -4943,6 +5165,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_mcp_hub_port_survives_inject_claude_env() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Regression: inject_claude_env re-parses YAML via serde_yaml_ng.
         // MCP_HUB_PORT must survive the parse → serialize roundtrip.
         let config = ResolvedClaudeConfig {
@@ -4950,7 +5173,8 @@ services:
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5059,6 +5283,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_mcp_hub_port_in_claude_service_env() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Verify MCP_HUB_PORT is specifically in the claude service environment,
         // not somewhere else in the compose file.
         let config = ResolvedClaudeConfig {
@@ -5066,7 +5291,8 @@ services:
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5128,12 +5354,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_passes_security_check() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5357,6 +5585,7 @@ services:
 
     #[test]
     fn test_security_check_ports_integer_rejected() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -5372,7 +5601,13 @@ services:
     ports:
       - 4000
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -5383,6 +5618,7 @@ services:
 
     #[test]
     fn test_security_check_ports_long_form_no_host_ip() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -5400,7 +5636,13 @@ services:
         published: 4000
         protocol: tcp
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -5411,6 +5653,7 @@ services:
 
     #[test]
     fn test_security_check_ports_long_form_with_localhost() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -5429,7 +5672,13 @@ services:
         host_ip: "127.0.0.1"
         protocol: tcp
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         let port_violations: Vec<_> = violations
             .iter()
             .filter(|v| v.rule == SecurityRule::PortsLocalhost)
@@ -5442,6 +5691,7 @@ services:
 
     #[test]
     fn test_security_check_anthropic_api_key_allowed() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -5458,7 +5708,13 @@ services:
       - CLAUDE_VERSION=1.0.3
       - ANTHROPIC_API_KEY=sk-ant-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             !violations
                 .iter()
@@ -5470,6 +5726,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_ollama_provider() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -5482,7 +5739,8 @@ services:
                 has_custom_headers: false,
             },
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5502,6 +5760,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_local_provider_requires_model() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -5514,7 +5773,8 @@ services:
                 has_custom_headers: false,
             },
         };
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5537,12 +5797,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_default_anthropic() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(), // provider = None → defaults to "anthropic"
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5597,6 +5859,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_ollama_direct_injection() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -5609,7 +5872,8 @@ services:
                 has_custom_headers: false,
             },
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5679,6 +5943,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_lmstudio_default_url() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -5691,7 +5956,8 @@ services:
                 has_custom_headers: false,
             },
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5714,6 +5980,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_llamacpp_default_url() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -5726,7 +5993,8 @@ services:
                 has_custom_headers: false,
             },
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5749,6 +6017,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_unsupported_provider_rejected() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -5761,7 +6030,8 @@ services:
                 has_custom_headers: false,
             },
         };
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5780,6 +6050,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_custom_provider_rejected_after_removal() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Regression guard: the `custom` provider value was removed end-to-end.
         // Any lingering config that still sets `provider = "custom"` must now
         // fall through to the same unknown-provider path used by any other
@@ -5796,7 +6067,8 @@ services:
                 has_custom_headers: false,
             },
         };
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -5832,6 +6104,7 @@ services:
 
     #[test]
     fn test_idempotent_render() {
+        let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
@@ -5840,8 +6113,9 @@ services:
             has_api_key: false,
             has_custom_headers: false,
         };
-        let result1 = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
-        let result2 = apply_llm_config(&result1, &llm, "test-project").unwrap();
+        let result1 =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let result2 = apply_llm_config_in(data_dir.path(), &result1, &llm, "test-project").unwrap();
         assert_eq!(
             result1, result2,
             "apply_llm_config must be idempotent (no UUID injection)"
@@ -5943,7 +6217,6 @@ services:
     }
 
     #[test]
-    #[serial_test::serial(host_addressing)]
     fn compose_template_claude_has_canonical_host_gateway_entry() {
         // Static template guard — `claude` and `mcp-playwright` must list the
         // canonical host gateway alias in extra_hosts (ADR-062). Other services
@@ -6198,6 +6471,7 @@ services:
 
     #[test]
     fn test_anthropic_with_model_injects_anthropic_model_env() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Settings → LLM Provider → Model dropdown writes the chosen value
         // into claude.llm.model. compose must translate that into the
         // ANTHROPIC_MODEL env var so Claude Code respects the user's pick
@@ -6211,7 +6485,8 @@ services:
             has_api_key: false,
             has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
             env.iter().any(|e| e == "ANTHROPIC_MODEL=claude-sonnet-4-6"),
@@ -6226,6 +6501,7 @@ services:
 
     #[test]
     fn test_anthropic_without_model_does_not_inject_anthropic_model() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Empty/unset model = "let Claude Code pick its default". compose
         // must keep base_env() free of ANTHROPIC_MODEL so the fallback path
         // documented in defaults.rs::base_env_does_not_set_model holds.
@@ -6237,7 +6513,8 @@ services:
             has_api_key: false,
             has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
             !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
@@ -6254,8 +6531,13 @@ services:
             has_api_key: false,
             has_custom_headers: false,
         };
-        let rendered_blank =
-            apply_llm_config(COMPOSE_TEMPLATE, &llm_blank, "test-project").unwrap();
+        let rendered_blank = apply_llm_config_in(
+            data_dir.path(),
+            COMPOSE_TEMPLATE,
+            &llm_blank,
+            "test-project",
+        )
+        .unwrap();
         let env_blank = get_claude_env(&rendered_blank);
         assert!(
             !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
@@ -6265,6 +6547,7 @@ services:
 
     #[test]
     fn test_anthropic_injects_default_alias_env_vars() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Workaround for anthropics/claude-code#34083 — without
         // ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL pointing to the
         // `[1m]` variant, Max/Team subscribers see their 1M models capped
@@ -6279,7 +6562,8 @@ services:
             has_api_key: false,
             has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
 
         let expected = crate::defaults::anthropic_default_models_env();
@@ -6298,6 +6582,7 @@ services:
 
     #[test]
     fn test_switching_provider_ollama_to_anthropic() {
+        let data_dir = tempfile::tempdir().unwrap();
         let llm_ollama = LlmConfig {
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
@@ -6308,9 +6593,20 @@ services:
         };
         let llm_anthropic = LlmConfig::default();
 
-        let with_ollama = apply_llm_config(COMPOSE_TEMPLATE, &llm_ollama, "test-project").unwrap();
-        let with_anthropic =
-            apply_llm_config(COMPOSE_TEMPLATE, &llm_anthropic, "test-project").unwrap();
+        let with_ollama = apply_llm_config_in(
+            data_dir.path(),
+            COMPOSE_TEMPLATE,
+            &llm_ollama,
+            "test-project",
+        )
+        .unwrap();
+        let with_anthropic = apply_llm_config_in(
+            data_dir.path(),
+            COMPOSE_TEMPLATE,
+            &llm_anthropic,
+            "test-project",
+        )
+        .unwrap();
 
         let env_ollama = get_claude_env(&with_ollama);
         let env_anthropic = get_claude_env(&with_anthropic);
@@ -6347,6 +6643,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_llamacpp_custom_model_option_labels() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -6359,7 +6656,8 @@ services:
                 has_custom_headers: false,
             },
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -6379,6 +6677,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_lmstudio_custom_model_option_labels() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -6391,7 +6690,8 @@ services:
                 has_custom_headers: false,
             },
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -6411,13 +6711,15 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_claude_version_is_pinned() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Regression guard: CLAUDE_VERSION must be the pinned semver from defaults.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -6447,6 +6749,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_workspace_mount_is_readwrite() {
+        let data_dir = tempfile::tempdir().unwrap();
         // The workspace must be read-write so Claude can create/edit files.
         // This guards against accidentally adding :ro to the workspace mount.
         let config = ResolvedClaudeConfig {
@@ -6454,7 +6757,8 @@ services:
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "testproj",
             "/tmp/test",
             &config,
@@ -7341,6 +7645,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_enables_host_exec_in_hub_when_project_has_it() {
+        let data_dir = tempfile::tempdir().unwrap();
         // End-to-end: render_compose with host_exec enabled puts it in
         // ENABLED_SERVICES. (WORKER_HOST_EXEC_URL is NOT injected here because
         // no worker is running in a test — that's correct: the hub still knows
@@ -7353,7 +7658,8 @@ services:
         };
         let mut integrations = all_enabled_integrations();
         integrations.host_exec = true;
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -7384,6 +7690,7 @@ services:
 
     #[test]
     fn test_security_check_mcp_os_auth_token_forbidden_in_claude() {
+        let data_dir = tempfile::tempdir().unwrap();
         // MCP_OS_AUTH_TOKEN must now trigger a security violation in claude
         // container — it should never be injected there anymore.
         let yaml = r#"
@@ -7402,7 +7709,13 @@ services:
       - CLAUDE_VERSION=1.0.3
       - MCP_OS_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -7413,6 +7726,7 @@ services:
 
     #[test]
     fn test_security_check_no_tokens_in_hub() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Hub env must not contain TOKEN/KEY/SECRET vars (except WORKER_*_URL).
         let yaml = r#"
 version: "3"
@@ -7431,7 +7745,13 @@ services:
       - WORKER_SLACK_URL=http://mcp-slack:3000
       - SLACK_TOKEN=xoxb-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -7442,9 +7762,16 @@ services:
 
     #[test]
     fn test_security_check_hub_worker_urls_allowed() {
+        let data_dir = tempfile::tempdir().unwrap();
         // WORKER_*_URL vars in hub env should pass the security check.
         let yaml = valid_compose_yaml();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             !violations
                 .iter()
@@ -7455,6 +7782,7 @@ services:
 
     #[test]
     fn test_security_check_missing_user_field() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -7470,7 +7798,13 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -7481,6 +7815,7 @@ services:
 
     #[test]
     fn test_security_check_wrong_user_value() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -7494,7 +7829,13 @@ services:
       - no-new-privileges:true
 "#
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -7505,6 +7846,7 @@ services:
 
     #[test]
     fn test_security_check_correct_user_passes() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -7519,7 +7861,13 @@ services:
 "#,
             user = container_user()
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             !violations
                 .iter()
@@ -7547,6 +7895,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_contains_ide_lock_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
         // render_compose must substitute ${IDE_LOCK_DIR} so the claude container
         // has the ide-bridge directory mounted as /home/speedwave/.claude/ide:ro.
         // Read-only — container only reads the lock file; Speedwave host writes it.
@@ -7555,7 +7904,8 @@ services:
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -7615,12 +7965,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_container_user() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: crate::config::LlmConfig::default(),
         };
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/workspace",
             &config,
@@ -7648,12 +8000,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_host_gateway() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: crate::config::LlmConfig::default(),
         };
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/workspace",
             &config,
@@ -7685,12 +8039,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_ide_host_override() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: crate::config::LlmConfig::default(),
         };
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/workspace",
             &config,
@@ -7729,13 +8085,15 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_claude_env_has_ide_host_override() {
+        let data_dir = tempfile::tempdir().unwrap();
         // CLAUDE_CODE_IDE_HOST_OVERRIDE must be in the claude service environment.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -7766,12 +8124,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_claude_env_has_no_flicker() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -7802,12 +8162,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_claude_env_has_effort_level() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -7847,6 +8209,7 @@ services:
 
     #[test]
     fn test_security_no_ports_on_each_worker() {
+        let data_dir = tempfile::tempdir().unwrap();
         for name in [
             "claude",
             "mcp-hub",
@@ -7869,7 +8232,13 @@ services:
       - "127.0.0.1:4000:4000"
 "#
             );
-            let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+            let violations = SecurityCheck::run_with_data_dir(
+                &yaml,
+                "test",
+                &[],
+                &test_expected_paths(),
+                data_dir.path(),
+            );
             assert!(
                 violations
                     .iter()
@@ -7881,6 +8250,7 @@ services:
 
     #[test]
     fn test_security_worker_without_ports_passes() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -7893,7 +8263,13 @@ services:
     environment:
       - PORT=3000
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             !violations
                 .iter()
@@ -7923,6 +8299,7 @@ services:
 
     #[test]
     fn test_security_addon_service_ports_allowed() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -7935,7 +8312,13 @@ services:
     ports:
       - "127.0.0.1:4006:4006"
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             !violations
                 .iter()
@@ -7947,13 +8330,15 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_rejects_invalid_project_name() {
+        let data_dir = tempfile::tempdir().unwrap();
         let resolved = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig::default();
-        assert!(render_compose(
+        assert!(render_compose_isolated(
+            data_dir.path(),
             "",
             "/tmp/proj",
             &resolved,
@@ -7962,7 +8347,8 @@ services:
             &HostBridgesInfo::default()
         )
         .is_err());
-        assert!(render_compose(
+        assert!(render_compose_isolated(
+            data_dir.path(),
             "../evil",
             "/tmp/proj",
             &resolved,
@@ -7971,7 +8357,8 @@ services:
             &HostBridgesInfo::default()
         )
         .is_err());
-        assert!(render_compose(
+        assert!(render_compose_isolated(
+            data_dir.path(),
             &"a".repeat(64),
             "/tmp/proj",
             &resolved,
@@ -7984,9 +8371,10 @@ services:
 
     #[test]
     fn test_init_secrets_dir_rejects_invalid_name() {
-        assert!(init_secrets_dir("").is_err());
-        assert!(init_secrets_dir("../evil").is_err());
-        assert!(init_secrets_dir(&"a".repeat(64)).is_err());
+        let data_dir = tempfile::tempdir().unwrap();
+        assert!(init_secrets_dir_in(data_dir.path(), "").is_err());
+        assert!(init_secrets_dir_in(data_dir.path(), "../evil").is_err());
+        assert!(init_secrets_dir_in(data_dir.path(), &"a".repeat(64)).is_err());
     }
 
     #[cfg(unix)]
@@ -8027,9 +8415,10 @@ services:
 
     #[test]
     fn test_compose_output_path_rejects_invalid_name() {
-        assert!(compose_output_path("").is_err());
-        assert!(compose_output_path("../evil").is_err());
-        assert!(compose_output_path(&"a".repeat(64)).is_err());
+        let data_dir = tempfile::tempdir().unwrap();
+        assert!(compose_output_path_in(data_dir.path(), "").is_err());
+        assert!(compose_output_path_in(data_dir.path(), "../evil").is_err());
+        assert!(compose_output_path_in(data_dir.path(), &"a".repeat(64)).is_err());
     }
 
     #[test]
@@ -8265,6 +8654,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_with_mixed_enabled_disabled_end_to_end() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -8278,7 +8668,8 @@ services:
         // slack, redmine remain disabled (default)
         // os_reminders, os_mail, os_notes remain disabled (default)
 
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-e2e",
             "/home/user/projects/test",
             &config,
@@ -8481,6 +8872,7 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_all_services_have_container_user() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: vec![],
@@ -8499,7 +8891,8 @@ services:
             context7: true,
             ..ResolvedIntegrationsConfig::default()
         };
-        let result = render_compose(
+        let result = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/workspace",
             &config,
@@ -8531,6 +8924,7 @@ services:
 
     #[test]
     fn test_security_check_plugin_no_privileged() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -8548,7 +8942,13 @@ services:
 "#,
             user = container_user()
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -8559,6 +8959,7 @@ services:
 
     #[test]
     fn test_security_check_plugin_no_host_network() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -8576,7 +8977,13 @@ services:
 "#,
             user = container_user()
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations.iter().any(
                 |v| v.rule == SecurityRule::PluginNoHostNetwork && v.container == "mcp-presale"
@@ -8641,6 +9048,7 @@ services:
 
     #[test]
     fn test_security_check_plugin_no_extra_volumes() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -8662,7 +9070,13 @@ services:
             user = container_user()
         );
         let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &manifests,
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -8674,9 +9088,16 @@ services:
 
     #[test]
     fn test_security_check_plugin_no_extra_volumes_clean() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = valid_plugin_yaml("ro");
         let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &manifests,
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             !violations
                 .iter()
@@ -8687,9 +9108,16 @@ services:
 
     #[test]
     fn test_security_check_plugin_token_mount_mode_ro_violation() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = valid_plugin_yaml("rw");
         let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &manifests,
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -8701,11 +9129,18 @@ services:
 
     #[test]
     fn test_security_check_plugin_token_mount_mode_rw_pass() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = valid_plugin_yaml("rw");
         let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadWrite {
             justification: "OAuth token refresh".to_string(),
         })];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &manifests,
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             !violations
                 .iter()
@@ -8716,6 +9151,7 @@ services:
 
     #[test]
     fn test_security_check_plugin_workspace_path_mismatch() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -8738,7 +9174,13 @@ services:
             user = container_user()
         );
         let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &manifests,
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -8749,6 +9191,7 @@ services:
 
     #[test]
     fn test_security_check_plugin_workspace_mount_mode_ro() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -8771,7 +9214,13 @@ services:
             user = container_user()
         );
         let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &manifests,
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -8782,6 +9231,7 @@ services:
 
     #[test]
     fn test_security_check_plugin_token_path_mismatch() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -8804,7 +9254,13 @@ services:
             user = container_user()
         );
         let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &manifests,
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -8815,6 +9271,7 @@ services:
 
     #[test]
     fn test_security_check_plugin_volume_long_form() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -8838,7 +9295,13 @@ services:
             user = container_user()
         );
         let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &manifests,
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -8849,9 +9312,16 @@ services:
 
     #[test]
     fn test_security_check_plugin_manifest_missing() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = valid_plugin_yaml("ro");
         // Pass empty manifests — should detect missing manifest
-        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -9089,6 +9559,7 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_correct_mounts_pass() {
+        let data_dir = tempfile::tempdir().unwrap();
         // ADR-060 / PR3: SharePoint tokens mount is :ro (refresh is delegated to
         // the host-side `oauth` worker). The legacy :rw mount is now a violation
         // — see `test_security_check_sharepoint_rw_now_violates`.
@@ -9112,7 +9583,8 @@ services:
             user = container_user()
         );
         let paths = test_expected_paths();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
         let sp_violations: Vec<_> = violations
             .iter()
             .filter(|v| v.rule.is_sharepoint())
@@ -9126,6 +9598,7 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_with_oauth_bearer_mount_passes() {
+        let data_dir = tempfile::tempdir().unwrap();
         // After ADR-060, SharePoint additionally mounts its per-service oauth
         // bearer at `/secrets/oauth-auth-token-sharepoint:ro`. Verify the
         // SharepointNoExtraVolumes allowlist accepts it.
@@ -9150,7 +9623,8 @@ services:
             user = container_user()
         );
         let paths = test_expected_paths();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
         let sp_violations: Vec<_> = violations
             .iter()
             .filter(|v| v.rule.is_sharepoint())
@@ -9164,6 +9638,7 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_oauth_bearer_must_be_ro() {
+        let data_dir = tempfile::tempdir().unwrap();
         // ADR-060 / extra_allowed_ro_targets logic: oauth bearer mount must be :ro.
         // A `:rw` mount on that path should fail SharepointNoExtraVolumes.
         let yaml = format!(
@@ -9187,7 +9662,8 @@ services:
             user = container_user()
         );
         let paths = test_expected_paths();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
         assert!(
             violations
                 .iter()
@@ -9198,6 +9674,7 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_unrecognised_secret_mount_rejected() {
+        let data_dir = tempfile::tempdir().unwrap();
         // A `/secrets/` mount with a path that is NOT in extra_allowed_ro_targets
         // (e.g. an attempt to mount another service's bearer) must be rejected.
         let yaml = format!(
@@ -9221,7 +9698,8 @@ services:
             user = container_user()
         );
         let paths = test_expected_paths();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
         assert!(
             violations
                 .iter()
@@ -9232,6 +9710,7 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_rw_now_violates() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Verifies that the legacy :rw mount (ADR-009) is rejected after the
         // ADR-060 migration: SharePoint no longer needs to write to /tokens.
         let yaml = format!(
@@ -9254,7 +9733,8 @@ services:
             user = container_user()
         );
         let paths = test_expected_paths();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
         // ADR-060/PR3 removed `SharepointTokenMountMode`; the universal
         // `PluginTokenMountMode` rule (re-used for built-in workers) is now
         // what catches a SharePoint `:rw` regression.
@@ -9269,6 +9749,7 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_missing_workspace_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -9288,7 +9769,8 @@ services:
             user = container_user()
         );
         let paths = test_expected_paths();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
         assert!(
             violations
                 .iter()
@@ -9299,6 +9781,7 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_workspace_path_mismatch() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -9319,7 +9802,8 @@ services:
             user = container_user()
         );
         let paths = test_expected_paths();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
         assert!(
             violations
                 .iter()
@@ -9330,6 +9814,7 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_workspace_mount_mode_ro() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -9350,7 +9835,8 @@ services:
             user = container_user()
         );
         let paths = test_expected_paths();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
         assert!(
             violations
                 .iter()
@@ -10411,6 +10897,7 @@ networks:
 
     #[test]
     fn test_security_check_plugin_token_ro_when_manifest_rw() {
+        let data_dir = tempfile::tempdir().unwrap();
         use crate::plugin::{PluginManifest, TokenMount};
         let yaml = format!(
             r#"
@@ -10456,7 +10943,13 @@ services:
             host_bridge: None,
             instructions: None,
         };
-        let violations = SecurityCheck::run(&yaml, "test", &[manifest], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -10471,6 +10964,7 @@ services:
 
     #[test]
     fn test_security_check_sharepoint_no_extra_volumes() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
@@ -10489,7 +10983,13 @@ services:
 "#,
             user = container_user()
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -11222,12 +11722,14 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_propagates_tz_to_all_services() {
+        let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let yaml = render_compose(
+        let yaml = render_compose_isolated(
+            data_dir.path(),
             "test-project",
             "/home/user/projects/test",
             &config,
@@ -11310,6 +11812,7 @@ services:
 
     #[test]
     fn test_security_check_oauth_token_allowed() {
+        let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
 services:
@@ -11326,7 +11829,13 @@ services:
       - CLAUDE_VERSION=1.0.3
       - CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-aaaaaaaaaaaaaaaaaaaa
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             !violations
                 .iter()
@@ -11338,6 +11847,7 @@ services:
 
     #[test]
     fn test_security_check_other_token_still_blocked() {
+        let data_dir = tempfile::tempdir().unwrap();
         // Defence-in-depth: allowlist must NOT widen to arbitrary *_TOKEN.
         // MCP_OS_AUTH_TOKEN must remain forbidden in claude container.
         let yaml = r#"
@@ -11356,7 +11866,13 @@ services:
       - CLAUDE_VERSION=1.0.3
       - MCP_OS_AUTH_TOKEN=secret-uuid
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
         assert!(
             violations
                 .iter()
@@ -11824,6 +12340,7 @@ services:
 
     #[test]
     fn apply_llm_config_local_provider_renders_with_dummy_when_no_key() {
+        let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             provider: Some("local".to_string()),
             model: Some("my-model".to_string()),
@@ -11832,7 +12349,8 @@ services:
             has_api_key: false,
             has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
 
         // Dummy token when has_api_key=false.
@@ -11887,6 +12405,7 @@ services:
 
     #[test]
     fn apply_llm_config_local_uses_default_base_url_when_none() {
+        let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             provider: Some("local".to_string()),
             model: Some("foo".to_string()),
@@ -11895,7 +12414,8 @@ services:
             has_api_key: false,
             has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         let expected = format!("ANTHROPIC_BASE_URL={}", default_base_url("local").unwrap());
         assert!(
@@ -12045,12 +12565,9 @@ services:
     /// abandoned token could silently leak into a future container render.
     #[test]
     fn apply_llm_config_ignores_orphaned_token_when_flag_is_false() {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
-
+        let data_dir = tempfile::tempdir().unwrap();
         let project = format!("crash-recovery-{}", std::process::id());
-        let dir = ensure_token_dir(&project, "local-llm")
+        let dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
             .expect("ensure_token_dir must succeed in test env");
         let api_key_path = dir.join("api_key");
         // Simulate the orphan: a token written by an interrupted save that
@@ -12067,7 +12584,8 @@ services:
             has_api_key: false,
             has_custom_headers: false,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, &project).unwrap();
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
         let env = get_claude_env(&rendered);
 
         // Critical: dummy, not the orphaned secret.
@@ -12105,15 +12623,9 @@ services:
     ///    regressions that might re-introduce block-literal serialisation).
     #[test]
     fn apply_llm_config_multiline_custom_headers_survives_yaml_roundtrip() {
-        use std::sync::Mutex;
-        // Serialize across test threads — apply_llm_config reads from the
-        // real `tokens_path` which is global state. Each invocation uses a
-        // unique project name so per-project files do not collide.
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
-
+        let data_dir = tempfile::tempdir().unwrap();
         let project = format!("custom-headers-roundtrip-{}", std::process::id());
-        let dir = ensure_token_dir(&project, "local-llm")
+        let dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
             .expect("ensure_token_dir must succeed in test env");
         let headers_path = dir.join("custom_headers");
         let multiline = "X-Foo: bar\nX-Tenant-ID: acme\nOcp-Apim-Subscription-Key: secret-123";
@@ -12128,7 +12640,8 @@ services:
             has_api_key: false,
             has_custom_headers: true,
         };
-        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm, &project).unwrap();
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
 
         // Step 1: the env entry is present as a string.
         let env = get_claude_env(&rendered);
@@ -12318,14 +12831,15 @@ networks:
   speedwave_net:
     driver: bridge
 "#;
-        let err = super::save_compose(&project, yaml).unwrap_err();
+        let data_dir = tempfile::tempdir().unwrap();
+        let err = super::save_compose_in(data_dir.path(), &project, yaml).unwrap_err();
         assert!(
             err.to_string().contains("in-memory YAML failed validation"),
             "expected in-memory diagnostic: {err}"
         );
 
         // Side-effect check: file should NOT have been written.
-        let path = super::compose_output_path(&project).unwrap();
+        let path = super::compose_output_path_in(data_dir.path(), &project).unwrap();
         assert!(
             !path.exists(),
             "compose.yml must not exist after pre-write bail"
@@ -12356,8 +12870,9 @@ networks:
   speedwave_net:
     driver: bridge
 "#;
+        let data_dir = tempfile::tempdir().unwrap();
         super::FORCE_DISK_GARBAGE.with(|c| *c.borrow_mut() = Some(corrupt_yaml.to_string()));
-        let err = super::save_compose(&project, valid_yaml).unwrap_err();
+        let err = super::save_compose_in(data_dir.path(), &project, valid_yaml).unwrap_err();
         assert!(
             err.to_string().contains("disk content failed validation"),
             "expected disk-corruption diagnostic, got: {err}"
@@ -12384,8 +12899,9 @@ networks:
   speedwave_net:
     driver: bridge
 "#;
+        let data_dir = tempfile::tempdir().unwrap();
         super::FORCE_DISK_GARBAGE.with(|c| *c.borrow_mut() = Some(valid_yaml.to_string()));
-        super::save_compose(&project, valid_yaml).unwrap();
+        super::save_compose_in(data_dir.path(), &project, valid_yaml).unwrap();
     }
 
     // ── HostAddressing resolver tests ───────────────────────────────────────

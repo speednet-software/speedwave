@@ -2586,7 +2586,10 @@ mod tests {
             "image tag: {yaml}"
         );
         assert!(
-            yaml.contains("speedwave_myproject_mcp_presale"),
+            yaml.contains(&format!(
+                "{}_myproject_mcp_presale",
+                crate::consts::compose_prefix()
+            )),
             "container_name: {yaml}"
         );
         assert!(yaml.contains("read_only: true"), "read_only: {yaml}");
@@ -3338,11 +3341,10 @@ mod tests {
     #[test]
     fn test_peek_plugin_manifest_does_not_install() {
         // Verifies peek does not write into the plugins base directory.
-        // Runs against an isolated tempdir-as-plugins-dir snapshot: even
-        // though peek itself uses the real plugins_base_dir() internally,
-        // it should not touch it (no write paths). We check by counting
-        // entries in a freshly-created tempdir given as a probe — peek
-        // should not write anywhere outside its own scratch tmp.
+        // peek_plugin_manifest only extracts into std::env::temp_dir(), so it
+        // should never touch a plugins dir. We check by counting entries in a
+        // freshly-created tempdir given as a probe — peek should not write
+        // anywhere outside its own scratch tmp.
         let tmp = tempfile::tempdir().unwrap();
         let zip = tmp.path().join("plugin.zip");
         build_test_plugin_zip(&zip, "side-effect-test", true);
@@ -5205,7 +5207,9 @@ mod tests {
 
     #[test]
     fn test_token_dir_returns_correct_path() {
-        let result = token_dir("myproject", "presale").unwrap();
+        // Isolated: build under a tempdir home instead of consts::data_dir().
+        let tmp = tempfile::tempdir().unwrap();
+        let result = token_dir_with_base(tmp.path(), "myproject", "presale");
         let expected_suffix = std::path::Path::new(".speedwave/tokens/myproject/presale");
         assert!(
             result.ends_with(expected_suffix),
@@ -5617,7 +5621,11 @@ mod tests {
 
     #[test]
     fn test_plugin_state_dir_returns_plugin_state_path_for_slug() {
-        let dir = plugin_state_dir("my-plugin");
+        // Isolated: exercise the path logic via the _for variant on a tempdir
+        // so we never resolve consts::data_dir() / the real ~/.speedwave.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let dir = plugin_state_dir_for(&plugins_dir, "my-plugin");
         assert!(
             dir.to_string_lossy().contains("plugin-state"),
             "expected 'plugin-state' in path, got {}",
