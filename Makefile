@@ -43,10 +43,11 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 # Hard floor: dev/test must never run against the production data dir, even if a
 # user exported SPEEDWAVE_DATA_DIR=~/.speedwave (the `?=` default above only
 # applies when it is unset). A data dir whose basename is exactly `.speedwave` is
-# production. Portable: pure shell `case`, no installed tool.
+# production — matched both with a path separator (`*/.speedwave`) and bare
+# (`.speedwave`). Portable: pure shell `case`, no installed tool.
 guard-not-prod-data-dir:
 	@case "$(SPEEDWAVE_DATA_DIR)" in \
-	  */.speedwave) \
+	  */.speedwave | .speedwave) \
 	    echo "❌ Refusing: SPEEDWAVE_DATA_DIR=$(SPEEDWAVE_DATA_DIR) is the production data dir." >&2; \
 	    echo "   Use ~/.speedwave-dev (the default) or another non-production dir." >&2; \
 	    exit 1;; \

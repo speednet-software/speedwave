@@ -21,6 +21,11 @@ run_guard() {
     [ "$status" -ne 0 ]
 }
 
+@test "guard refuses a bare .speedwave (no path separator)" {
+    run run_guard ".speedwave"
+    [ "$status" -ne 0 ]
+}
+
 @test "guard allows the dev data dir (~/.speedwave-dev)" {
     run run_guard "$HOME/.speedwave-dev"
     [ "$status" -eq 0 ]
