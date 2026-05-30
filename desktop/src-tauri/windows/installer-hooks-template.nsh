@@ -44,7 +44,12 @@ Var SpeedwaveDataDirOverride
   sw_data_dir_ok:
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", t "$1")i'
 
-  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\sweep.ps1"`
+  ; Run via the wscript hidden-window shim so PowerShell does not flash a black
+  ; console during install (nsExec hides via SW_HIDE only, which conhost paints
+  ; before honoring — see windows/run-hidden.vbs). The shim returns the child
+  ; exit code, so Pop $0 is unchanged.
+  !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
+  nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\sweep.ps1$\""`
   Pop $0
   ${If} $0 != 0
     DetailPrint "Speedwave PRE-INSTALL: sweep exited $0 — install may fail with 'file in use'."
@@ -62,7 +67,9 @@ Var SpeedwaveDataDirOverride
 ; See CLAUDE.md SSOT row for windows/firewall.ps1.
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
-  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\firewall.ps1" -Mode install`
+  !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
+  ; Hidden-window shim (see PRE-INSTALL): no console flash, exit code preserved.
+  nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\firewall.ps1$\" -Mode install"`
   Pop $0
   ${If} $0 != 0
     DetailPrint "Speedwave POST-INSTALL: firewall rule install exited $0 (non-fatal)."
@@ -104,9 +111,11 @@ Var SpeedwaveDataDirOverride
   RMDir /r "$LOCALAPPDATA\Speedwave\nodejs"
   RMDir "$LOCALAPPDATA\Speedwave"
 
-  ; Always remove Hyper-V firewall rule — it is app config, not user data.
+  ; Always remove the firewall rules — they are app config, not user data.
   !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
-  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\firewall.ps1" -Mode uninstall`
+  !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
+  ; Hidden-window shim (see PRE-INSTALL): no console flash, exit code preserved.
+  nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\firewall.ps1$\" -Mode uninstall"`
   Pop $0
   ${If} $0 != 0
     DetailPrint "Speedwave POST-UNINSTALL: firewall rule remove exited $0 (non-fatal)."

@@ -26,6 +26,13 @@ services:
       - CLAUDE_VERSION=${CLAUDE_VERSION}
       - MCP_HUB_PORT=${PORT_HUB}
       - CLAUDE_CODE_IDE_HOST_OVERRIDE=${IDE_HOST_OVERRIDE}
+      # Connect to the Speedwave IDE Bridge on start so the user does not have to
+      # run /ide and pick "Speedwave" by hand. The bridge lock file is always
+      # mounted at ~/.claude/ide; this var forces the attempt even though the
+      # container TTY is not a recognised IDE integrated terminal (the documented
+      # "auto-detection fails" case). Value is the string `true` (not 1) per the
+      # Claude Code env-vars reference.
+      - CLAUDE_CODE_AUTO_CONNECT_IDE=true
       # `auto` = use the model's own default effort (high on Opus 4.8). A valid
       # value per Claude Code env-vars docs (low|medium|high|xhigh|max|auto).
       - CLAUDE_CODE_EFFORT_LEVEL=auto

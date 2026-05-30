@@ -26,6 +26,18 @@ We need a login surface reachable from both the CLI (`speedwave login`) and the 
 
 `entrypoint.sh` pre-creates `~/.claude.json` with `{ "hasCompletedOnboarding": true, "installMethod": "native" }` if absent. Without this, Claude Code treats every fresh container as a brand-new install and re-prompts for login even when `.credentials.json` is in place[^2].
 
+### Windows: the `metadata` automount requirement
+
+On Windows the `CLAUDE_HOME` bind-mount resolves to a path under `C:\` (`~/.speedwave/claude-home/<project>`), exposed inside the WSL2 distro via the drvfs/9p automount of `/mnt/c`. By default that mount is `uid=0;gid=0` and **rejects `chmod`** (`Operation not permitted`). Claude Code writes `.credentials.json` and then `chmod 0600`s it; on a non-`metadata` mount that chmod fails and the login does not persist — the TUI may report "Login successful" yet the next session shows "Not logged in". The container itself is fine (verified: uid 1000, `HOME=/home/speedwave`); only the chmod-on-9p step fails.
+
+Fix — two parts, because the mount ownership cannot be set by the automount option alone:
+
+1. **`metadata` automount** — `setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange)` writes `[automount]\noptions = "metadata,uid=1000,gid=1000,umask=022"` (uid/gid derived from the `consts::CONTAINER_USER_UNPRIVILEGED` SSOT via `container_uid_gid()`). `metadata` makes drvfs honor Linux mode bits so `chmod 0600` works. The `uid=`/`gid=` part is **best-effort, not load-bearing**: the imported distro has no `[user]` default → WSL prepends the default-user uid (root → 0) ahead of our option, and the prepended uid wins, so the mount stays uid 0. The `TerminateOnChange` argument gates the post-write `wsl --terminate`: `Yes` right after `wsl --import` (no container yet — safe), `No` on the startup migration for existing distros (containers may be running; a terminate there kills them mid-start — instead the config applies on the next natural restart). **Accepted trade-off:** on a pre-existing distro created before this fix, the `No` path writes `metadata` to `wsl.conf` but does not apply it until the next WSL restart, so a `/login` run in that window still cannot `chmod 0600` and credentials do not persist — a one-time inconvenience on the migration boot, preferred over killing running containers. Fresh imports (`Yes`) are unaffected.
+
+2. **Per-project `chown` after compose up (load-bearing)** — `setup_wizard::ensure_claude_home_owner(project)` runs `chown -R <uid>:<gid>` (same SSOT) on the project's `claude-home` tree. With `metadata` on, drvfs honors per-file ownership for access, so a 1000-owned tree is writable by the uid-1000 container regardless of the mount's default uid. **Ordering is critical:** it must run **after** `compose_up_recreate`, because `compose up` auto-creates the `/home/speedwave/.claude` bind mount-point (for the read-only ide-bridge mount) as **root** — a chown done before compose is silently undone. The container's first entrypoint still exits(1) on `mkdir .claude/skills` EACCES; `ensure_exec_healthy` then detects the stopped container and recreates it, and the recreated entrypoint runs against the now-1000-owned tree and succeeds. Verified end-to-end on the live distro.
+
+This is distro-internal config — distinct from the host `%USERPROFILE%\.wslconfig` managed by `ensure_wslconfig_vpn_compat` (ADR-067). macOS (Lima VirtioFS) is unaffected; it honors chmod and uid natively.
+
 `speedwave logout [--project <name>]` deletes both `.credentials.json` and `.claude.json` from the project's `CLAUDE_HOME` mount.
 
 ### Surface

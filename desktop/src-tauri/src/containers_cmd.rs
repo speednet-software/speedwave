@@ -686,6 +686,16 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         })
         .map_err(|e| e.to_string())?;
 
+        // Windows: `compose up` re-creates the root-owned /home/speedwave/.claude
+        // mount-point, so the uid-1000 entrypoint EACCESes; chown the claude-home
+        // tree after compose, same as start_containers (ADR-052). Fail-open.
+        #[cfg(target_os = "windows")]
+        if let Err(e) = crate::setup_wizard::ensure_claude_home_owner(&project) {
+            log::warn!(
+                "recreate_project_containers: ensure_claude_home_owner failed (non-fatal): {e}"
+            );
+        }
+
         log::info!("recreate_project_containers: done for project={project}");
         Ok(())
     })

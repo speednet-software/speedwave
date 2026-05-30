@@ -87,12 +87,43 @@ Detection failure on Windows (`wsl.exe` missing, distro not registered, parser c
 
 `set_host_addressing_computer_for_test` mutates a global slot. Tests that inject `FailingComputer` (e.g. `host_addressing_surfaces_computer_error`) are keyed `#[serial_test::serial(host_addressing)]` so they cannot interleave with `render_compose` tests that consume the production computer.
 
+## Two firewall layers, and the runtime fallback (perUser-install elevation gap)
+
+Windows has **two independent firewall engines**, and Speedwave needs a rule in **each** under WSL2 mirrored networking:[^2]
+
+1. **Hyper-V firewall** (`New-NetFirewallHyperVRule`, scoped to the WSL `VMCreatorId`) governs traffic crossing the WSL VM boundary — it makes the host-bound worker reachable from containers inside the VM. Necessary, but it does **not** govern host processes.
+2. **Host Windows Defender Firewall (WDF / MpsSvc)** governs a host process's own `listen()` on a host interface. The bundled `node.exe` workers and `speedwave-desktop.exe` bind the WSL vEthernet adapter IP (172.x.x.1) — which WDF classifies as a real (Public-profile) interface — so WDF raises the per-binary "allow an app to access the network" consent prompt. The **only** way to suppress it is a host WDF application allow rule (`New-NetFirewallRule -Program <exe>`), created before first listen.[^3]
+
+The original design created only the Hyper-V rule, so the WDF prompt for `node.exe` still fired (confirmed live: prompt appeared while the Hyper-V rule existed). `firewall.ps1` now creates **both**: the Hyper-V rule (VM-boundary reachability) **and** per-program WDF allow rules for the resolved host-listener paths (prompt suppression). It also removes stale WDF Block rules first, since an explicit Block beats an Allow.
+
+Both require administrator privileges to create. Tauri v2 defaults the NSIS installer to **perUser** (`installMode` unset), which runs **without elevation**.[^4] So `NSIS_HOOK_POSTINSTALL` invokes `firewall.ps1 -Mode install` un-elevated, the privileged cmdlets fail, and the script's fail-open `exit 0` swallows it — leaving no rules and surfacing the WDF prompt on first use. The MSI path is unaffected (WiX CustomAction runs as LocalSystem via `Impersonate="no"`).
+
+**Program paths are resolved at runtime** (`firewall::host_listener_programs` from `current_exe()` + the bundled `nodejs/node.exe`), not hardcoded — they differ between perUser and per-machine installs, and WDF application rules require exact paths (no wildcards). They are passed to `firewall.ps1` as a single `;`-separated `-Programs` string (PowerShell `-File` cannot bind a multi-element array).
+
+**Decision: defense-in-depth across three call sites, one shared `firewall.ps1`** (mirroring the `sweep.ps1` 3-place pattern):
+
+1. **NSIS install** — `-Mode install`, never self-elevates (relies on whatever elevation the installer has). Fail-open.
+2. **MSI install** — `-Mode install` as LocalSystem (admin); creates the rule directly. Unchanged.
+3. **Desktop runtime** — `desktop/src-tauri/src/firewall.rs::ensure_firewall_rule`, invoked as the first statement of every host-listener starter (`ensure_ide_bridge_running` / `ensure_mcp_os_running` / `ensure_host_exec_running` / `ensure_oauth_running`) and guarded by a process-wide `Once`, so the rule is ensured **before any WSL-adapter-IP bind** regardless of fresh-install vs restart. This is the load-bearing guarantee, since perUser installs cannot create the rule at install time.
+
+**Why the starters, not the install-time block or the bind chokepoint:** on a fresh install `setup_started` is `false`, so the post-setup startup block never runs during the wizard — but the wizard's `start_containers` already starts listeners. The bind chokepoint (`bind_with_retry`) covers only the IDE/plugin bridges; `mcp-os`/`host_exec`/`oauth` are Node children that `.listen()` on `MCP_LISTEN_HOST` directly. The four `ensure_*` starters are the only common point upstream of every bind.
+
+**Exit-code contract.** `ensure`: `0` present/created, `3` missing+needs-admin, `2` caught failure. `install-elevated` (internal, invoked by the Rust self-elevation): `0`/`2`. `install`/`uninstall`: always `0` (fail-open). The Rust caller does a non-admin existence check first (no UAC), and only on `3` self-elevates once via UAC.
+
+**Re-prompt policy.** No decline state is persisted. Rule _presence_ is the only source of truth (re-checked each session via `-Mode ensure`), and the process-wide `Once` caps the prompt at one per app launch. So an accidental "No" on the UAC dialog is not a permanent lock-out — the next time the user opens Speedwave they get one more chance, and the rule self-heals if it was deleted externally. The trade-off: a user permanently without admin sees one UAC each time they start the app (bounded to one per session by `Once`); this was chosen over a persisted "declined" flag because a misclick must not silently suppress the rule forever. Non-interactive/headless sessions skip elevation entirely (no `-Verb RunAs` hang under silent install / SCCM — gated on `SESSIONNAME`). Users without admin: fail-open — the app works, WDF prompts remain, no worse than before.
+
 ## SSOT alignment
 
-Recorded in CLAUDE.md under the `HOST_GATEWAY_ALIAS`, `host_addressing`, and `MCP_LISTEN_HOST` SSOT-alignment rows.
+Recorded in CLAUDE.md under the `HOST_GATEWAY_ALIAS`, `host_addressing`, `MCP_LISTEN_HOST`, and `firewall.ps1` SSOT-alignment rows.
 
 The `windows/sweep.ps1` + WiX CustomAction pair (added alongside this work — see [ADR-048 §"MSI parity (resolved)"](ADR-048-windows-uninstall-cleanup.md#msi-parity-resolved)) ensures stale CLI processes do not block binary overwrite on either installer format.
 
 ---
 
 [^1]: WSL2 mirrored-mode loopback bug — `microsoft/WSL#11312` <https://github.com/microsoft/WSL/issues/11312>. Tracked across `#11600`, `#12399`, `#14063`. No fix shipped as of Windows 11 24H2.
+
+[^2]: Hyper-V firewall (`New-NetFirewallHyperVRule`, VMCreatorId-scoped) filters "inbound and outbound traffic to/from containers hosted by Windows, including WSL" — a separate engine from the host Windows Defender Firewall — Microsoft Learn, Hyper-V Firewall <https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall>. Managing rules in either engine requires an elevated (administrator) session — NetSecurity cmdlet reference <https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallhypervrule>.
+
+[^3]: The host WDF "allow an app" consent dialog fires when a program first issues a listen call and "there's no active application or administrator-defined allow rule(s)"; "explicitly defined allow rules take precedence over the default block setting," and staging the rule "before the user first launches the application helps ensure a seamless experience." Application rules are scoped by full program path (wildcards unsupported) — Microsoft Learn, Windows Firewall Rules <https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/rules> and `New-NetFirewallRule` <https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule>.
+
+[^4]: Tauri v2 Windows installer — NSIS install mode defaults to `currentUser` (perUser), which installs to `%LOCALAPPDATA%` and does **not** require administrator privileges <https://v2.tauri.app/distribute/windows-installer/#install-modes>.
