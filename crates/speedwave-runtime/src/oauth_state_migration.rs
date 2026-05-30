@@ -7,13 +7,18 @@ use std::path::Path;
 
 use crate::consts;
 
-/// Top-level keys lifted into `providerData`. SSOT for what this module moves.
-/// These are the only `FieldStorage::OAuthStateProviderData` identity keys
-/// today (Microsoft); the nesting rule is provider-agnostic.
-const IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
+/// Top-level keys lifted into `providerData` — the SSOT for the IdP identity
+/// keys this module (and the Desktop credential-save path) nest. These are the
+/// only `FieldStorage::OAuthStateProviderData` identity keys today (Microsoft);
+/// the nesting rule is provider-agnostic. Pinned to the descriptor SSOT by
+/// `identity_keys_match_oauth_state_provider_data_descriptors`.
+pub const IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
 
-/// Run migration once at startup. Best-effort: per-file failures are logged and
-/// do not abort the rest. Returns the number of files rewritten this run.
+/// Run migration once at startup. Best-effort: each healed file and every
+/// per-file failure is logged from inside the module (path only, never content).
+/// Returns the count of files rewritten — callers must NOT log this return value:
+/// CodeQL traces it back through the oauth.json reads and flags
+/// rust/cleartext-logging (false positive on an integer count).
 pub fn run_oauth_state_migration_at_startup() -> usize {
     run_with_data_dir(consts::data_dir())
 }
@@ -147,7 +152,8 @@ fn needs_migration(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
 }
 
 /// Move top-level identity strings under a fresh `providerData` object and drop
-/// the top-level copies. Returns `true` if at least one key was moved.
+/// the top-level copies. Returns `true` if at least one key was moved. Does not
+/// touch an existing `providerData` — callers gate on [`needs_migration`].
 fn nest_identity(obj: &mut serde_json::Map<String, serde_json::Value>) -> bool {
     let mut provider_data = serde_json::Map::new();
     for &key in IDENTITY_KEYS {
@@ -163,6 +169,53 @@ fn nest_identity(obj: &mut serde_json::Map<String, serde_json::Value>) -> bool {
         serde_json::Value::Object(provider_data),
     );
     true
+}
+
+/// snake_case descriptor key → camelCase property name used in `oauth.json`.
+/// SSOT for the mapping; the Desktop oauth-state read/write paths delegate here.
+/// An unknown key with an underscore signals a missing arm (debug-assert in dev,
+/// warn in release) rather than silently producing a snake_case JSON key.
+pub fn oauth_json_key_for(key: &str) -> &str {
+    match key {
+        "client_id" => "clientId",
+        "tenant_id" => "tenantId",
+        "refresh_token" => "refreshToken",
+        // Never interpolate `other` — it may carry caller-supplied values
+        // (CodeQL cleartext-logging false positive otherwise).
+        other => {
+            debug_assert!(
+                !other.contains('_'),
+                "oauth_json_key_for: unknown snake_case key — add an arm",
+            );
+            #[cfg(not(debug_assertions))]
+            if other.contains('_') {
+                log::warn!("oauth_json_key_for: unknown snake_case key — add an arm");
+            }
+            other
+        }
+    }
+}
+
+/// Guarantee `providerData` is a plain object, healing the legacy ADR-060 layout
+/// in place. If it is already an object, no-op. Otherwise replace it with a fresh
+/// object, lifting any top-level [`IDENTITY_KEYS`] strings into it and dropping
+/// the top-level copies (so a re-save heals the file instead of orphaning them).
+/// Shared SSOT for both the startup migration and the Desktop credential-save
+/// path (`integrations_cmd::merge_oauth_state_json`).
+pub fn ensure_provider_data_object(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    if obj.get("providerData").is_some_and(|v| v.is_object()) {
+        return;
+    }
+    let mut provider_data = serde_json::Map::new();
+    for &key in IDENTITY_KEYS {
+        if let Some(serde_json::Value::String(s)) = obj.remove(key) {
+            provider_data.insert(key.to_string(), serde_json::Value::String(s));
+        }
+    }
+    obj.insert(
+        "providerData".to_string(),
+        serde_json::Value::Object(provider_data),
+    );
 }
 
 #[cfg(test)]
@@ -190,37 +243,18 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
-    /// snake_case → camelCase (test-local; mirrors the desktop
-    /// `snake_to_oauth_json_key` mapping for the providerData identity keys).
-    fn snake_to_camel(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        let mut upper = false;
-        for c in s.chars() {
-            if c == '_' {
-                upper = true;
-            } else if upper {
-                out.extend(c.to_uppercase());
-                upper = false;
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    }
-
     /// Drift guard: `IDENTITY_KEYS` must equal the camelCase JSON keys of every
     /// `OAuthStateProviderData`-tagged descriptor field across all services — the
-    /// true SSOT (`consts::TOGGLEABLE_MCP_SERVICES`). The same set is independently
-    /// pinned desktop-side by `OAUTH_IDENTITY_KEYS` (integrations_cmd.rs); if a new
-    /// providerData field is added to a descriptor, this fails until both lists and
-    /// the desktop one are updated together.
+    /// true SSOT (`consts::TOGGLEABLE_MCP_SERVICES`) — mapped through the same
+    /// `oauth_json_key_for` the production code uses. If a new providerData field
+    /// is added to a descriptor, this fails until `IDENTITY_KEYS` is updated.
     #[test]
     fn identity_keys_match_oauth_state_provider_data_descriptors() {
         let mut expected: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
             .iter()
             .flat_map(|svc| svc.auth_fields.iter())
             .filter(|f| f.storage == consts::FieldStorage::OAuthStateProviderData)
-            .map(|f| snake_to_camel(f.key))
+            .map(|f| oauth_json_key_for(f.key).to_string())
             .collect();
         expected.sort();
         expected.dedup();

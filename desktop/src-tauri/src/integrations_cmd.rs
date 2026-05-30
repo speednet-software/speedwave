@@ -23,8 +23,13 @@ fn detect_oauth_action_required_in(
     project: &str,
     service: &str,
 ) -> Option<String> {
-    if service != "sharepoint" {
-        return None;
+    // Gate on the descriptor flag (SSOT) rather than a hardcoded service id, so a
+    // future OAuth-refresh integration surfaces the banner without a code change.
+    // The scope-coverage check below is still Microsoft-shaped; revisit when a
+    // second provider lands (today only SharePoint sets `uses_oauth_refresh`).
+    match speedwave_runtime::consts::find_mcp_service(service) {
+        Some(d) if d.uses_oauth_refresh => {}
+        _ => return None,
     }
     let oauth_path = plugin::oauth_state_file_in(data_dir, project, service);
     let raw = match std::fs::read_to_string(&oauth_path) {
@@ -441,28 +446,9 @@ fn is_service_configured_inner(data_dir: &std::path::Path, project: &str, servic
 }
 
 /// snake_case descriptor key → camelCase property name used in oauth.json.
+/// Delegates to the runtime SSOT so the mapping lives in one place.
 fn snake_to_oauth_json_key(key: &str) -> &str {
-    match key {
-        "client_id" => "clientId",
-        "tenant_id" => "tenantId",
-        "refresh_token" => "refreshToken",
-        // Drift catch: any new snake_case provider key must get an arm.
-        // Never interpolate `other` — it carries caller-supplied values
-        // (CodeQL cleartext-logging false positive otherwise).
-        other => {
-            debug_assert!(
-                !other.contains('_'),
-                "snake_to_oauth_json_key: unknown snake_case key — add an arm",
-            );
-            #[cfg(not(debug_assertions))]
-            if other.contains('_') {
-                log::warn!(
-                    "snake_to_oauth_json_key: unknown snake_case key — add an arm to this function"
-                );
-            }
-            other
-        }
-    }
+    speedwave_runtime::oauth_state_migration::oauth_json_key_for(key)
 }
 
 fn get_oauth_field<'a>(
@@ -1049,7 +1035,7 @@ fn merge_oauth_state_json(
     let obj = state
         .as_object_mut()
         .ok_or_else(|| "oauth state must be a JSON object".to_string())?;
-    ensure_provider_data_object(obj);
+    speedwave_runtime::oauth_state_migration::ensure_provider_data_object(obj);
     for (key, (storage, value)) in fields {
         let prop = snake_to_oauth_json_key(key).to_string();
         match storage {
@@ -1093,30 +1079,6 @@ fn read_existing_oauth_state(
 
 fn fresh_oauth_skeleton(provider: &str) -> serde_json::Value {
     serde_json::json!({ "provider": provider, "providerData": {} })
-}
-
-/// IdP identity keys that belong under `providerData` (ADR-060). Top-level
-/// copies on a legacy/partial file are lifted here, mirroring
-/// `speedwave_runtime::oauth_state_migration`.
-const OAUTH_IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
-
-/// Guarantee `providerData` is a plain object. When creating it, lift any
-/// top-level identity strings (legacy ADR-060 layout) into it and drop the
-/// top-level copies so a re-save heals the file instead of orphaning them.
-fn ensure_provider_data_object(obj: &mut serde_json::Map<String, serde_json::Value>) {
-    if obj.get("providerData").is_some_and(|v| v.is_object()) {
-        return;
-    }
-    let mut provider_data = serde_json::Map::new();
-    for &key in OAUTH_IDENTITY_KEYS {
-        if let Some(serde_json::Value::String(s)) = obj.remove(key) {
-            provider_data.insert(key.to_string(), serde_json::Value::String(s));
-        }
-    }
-    obj.insert(
-        "providerData".to_string(),
-        serde_json::Value::Object(provider_data),
-    );
 }
 
 fn provider_id_for_service(service: &str) -> Option<&'static str> {
@@ -1410,15 +1372,14 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// Drift guard: `OAUTH_IDENTITY_KEYS` must equal the camelCase JSON keys of
-    /// every `OAuthStateProviderData`-tagged descriptor field (the SSOT in
-    /// `consts.rs`), derived via the production `snake_to_oauth_json_key` mapping.
-    /// The runtime crate independently pins the same set via `IDENTITY_KEYS`
-    /// (`oauth_state_migration.rs`); both must move together when a providerData
-    /// field is added.
+    /// Drift guard: the camelCase JSON keys the Desktop save-path derives from the
+    /// `OAuthStateProviderData` descriptors (via `snake_to_oauth_json_key`, which
+    /// delegates to the runtime SSOT) must equal the runtime `IDENTITY_KEYS` the
+    /// migration nests under `providerData`. Catches a descriptor/mapping change
+    /// that would desync the two write paths.
     #[test]
-    fn oauth_identity_keys_match_provider_data_descriptors() {
-        let mut expected: Vec<&str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
+    fn provider_data_descriptor_keys_match_runtime_identity_keys() {
+        let mut got: Vec<&str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
             .iter()
             .flat_map(|svc| svc.auth_fields.iter())
             .filter(|f| {
@@ -1426,16 +1387,16 @@ mod tests {
             })
             .map(|f| snake_to_oauth_json_key(f.key))
             .collect();
-        expected.sort_unstable();
-        expected.dedup();
-
-        let mut got: Vec<&str> = OAUTH_IDENTITY_KEYS.to_vec();
         got.sort_unstable();
+        got.dedup();
+
+        let mut expected: Vec<&str> =
+            speedwave_runtime::oauth_state_migration::IDENTITY_KEYS.to_vec();
+        expected.sort_unstable();
 
         assert_eq!(
             got, expected,
-            "OAUTH_IDENTITY_KEYS drifted from the OAuthStateProviderData descriptors — \
-             update it here AND IDENTITY_KEYS in speedwave-runtime oauth_state_migration.rs"
+            "Desktop providerData descriptor keys drifted from runtime IDENTITY_KEYS"
         );
     }
 

@@ -271,12 +271,24 @@ teardown() {
 
     "$SCRIPT" &
     local pid=$!
-    sleep 1
-    # Still blocked: our lock dir is intact and the script has not built anything.
-    kill -0 "$pid"                                  # script still running (waiting)
+    # While WE hold the lock, the script must never start its body no matter how
+    # long we wait — so observe across several polls. A longer wall-clock only
+    # strengthens the "stayed blocked" assertion; it cannot make this flaky on a
+    # slow host (unlike a single fixed sleep that could fire before the body).
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        [ ! -d "$DEST/build-context" ] || {
+            echo "script started its body while the lock was held"
+            return 1
+        }
+        kill -0 "$pid" 2>/dev/null || {
+            echo "script exited instead of waiting for the lock"
+            return 1
+        }
+        sleep 0.2
+    done
     [ -f "$DEST/.bundle.lock/pid" ]                 # our lock untouched
     [ "$(cat "$DEST/.bundle.lock/pid")" = "$$" ]    # not reclaimed/overwritten
-    [ ! -d "$DEST/build-context" ]                  # body has not started
 
     rm -rf "$DEST/.bundle.lock"                      # release — script can proceed
     wait "$pid"; local rc=$?
