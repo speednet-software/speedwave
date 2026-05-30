@@ -757,8 +757,10 @@ fn import_wsl_distro() -> anyhow::Result<()> {
     }
 
     // Import path: distro is freshly created, no containers run yet, so a
-    // terminate to apply the new wsl.conf is safe.
-    ensure_wsl_distro_metadata(TerminateOnChange::Yes)?;
+    // terminate to apply the new wsl.conf is safe. The distro stays registered
+    // on error; the next launch's IfIdle migration retries the write (ADR-052).
+    ensure_wsl_distro_metadata(TerminateOnChange::Yes)
+        .context("configuring the imported WSL distro's automount failed")?;
 
     Ok(())
 }
@@ -788,71 +790,98 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
     let distro = consts::wsl_distro_name();
     let opts = consts::wsl_automount_options();
     let (uid, _gid) = consts::container_uid_gid();
-    // Probe before the write so the IfIdle decision predates any state change.
-    let has_running =
-        matches!(terminate, TerminateOnChange::IfIdle) && wsl_distro_has_running_containers(distro);
 
-    let script = build_wsl_metadata_script(&opts, uid);
-    let out = speedwave_runtime::binary::system_command("wsl.exe")
-        .args([
-            "-d",
-            distro,
-            "-u",
-            "root",
-            "--",
-            "sh",
-            "-c",
-            script.as_str(),
-        ])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            if stdout.contains("speedwave-metadata-failed") {
-                anyhow::bail!(
-                    "wrote wsl.conf for {distro} but uid={uid} is NOT present on re-read; \
-                     the uid-1000 container will hit EACCES on the drvfs mount and fail to start \
-                     (login/onboarding broken). Check that /etc/wsl.conf is writable as root"
-                );
-            }
-            if stdout.contains("speedwave-metadata-present") {
-                log::debug!("ensure_wsl_distro_metadata: uid={uid} already present in {distro}");
-            } else if stdout.contains("speedwave-metadata-added") {
-                // Deferral happens only for IfIdle while containers run.
-                if terminate_decision(terminate, has_running) {
-                    let _ = speedwave_runtime::binary::system_command("wsl.exe")
-                        .args(["--terminate", distro])
-                        .status();
-                    log::info!(
-                        "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
-                    );
-                } else {
-                    log::info!(
-                        "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (containers running; applies on next WSL restart)"
-                    );
-                }
-            }
+    let existing = read_wsl_conf(distro).unwrap_or_default();
+    let updated = merge_wsl_conf_automount(&existing, &opts);
+
+    if updated == existing {
+        log::debug!("ensure_wsl_distro_metadata: automount options already current in {distro}");
+        return Ok(());
+    }
+
+    write_wsl_conf(distro, &updated)?;
+
+    // Verify the change landed by re-reading and parsing the options line —
+    // a silently-failed write (read-only wsl.conf) must surface, not be assumed.
+    let verify = read_wsl_conf(distro).unwrap_or_default();
+    if !wsl_conf_automount_has_uid(&verify, uid) {
+        anyhow::bail!(
+            "wrote /etc/wsl.conf for {distro} but uid={uid} is NOT present on re-read; \
+             the uid-1000 container will hit EACCES on the drvfs mount and fail to start \
+             (login/onboarding broken). Check that /etc/wsl.conf is writable as root"
+        );
+    }
+
+    // The change landed; now decide whether to terminate so it applies before
+    // the first container start. Probe lazily (only now that a change exists).
+    let should_terminate = match terminate {
+        TerminateOnChange::Yes => true,
+        TerminateOnChange::IfIdle => !wsl_distro_has_running_containers(distro),
+    };
+    if should_terminate {
+        let terminated = speedwave_runtime::binary::system_command("wsl.exe")
+            .args(["--terminate", distro])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if terminated {
+            log::info!(
+                "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
+            );
+        } else {
+            log::warn!(
+                "ensure_wsl_distro_metadata: wrote metadata automount for {distro} but `wsl --terminate` failed; applies on next WSL restart"
+            );
         }
-        Ok(o) => log::warn!(
-            "ensure_wsl_distro_metadata: wsl.conf update failed (non-fatal): {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => log::warn!("ensure_wsl_distro_metadata: spawn failed (non-fatal): {e}"),
+    } else {
+        log::info!(
+            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (containers running; applies on next WSL restart)"
+        );
     }
     Ok(())
 }
 
-/// Interprets `nerdctl ps -q`: non-empty stdout ⇒ running; any failure ⇒ assume busy.
-#[cfg(any(target_os = "windows", test))]
-fn running_containers_from_probe(success: bool, stdout: &str) -> bool {
-    if success {
-        !stdout.trim().is_empty()
+/// Reads `/etc/wsl.conf` from inside the distro as root. `Ok("")` when the file
+/// does not exist yet; `Err` only on a spawn/exec failure.
+#[cfg(target_os = "windows")]
+fn read_wsl_conf(distro: &str) -> anyhow::Result<String> {
+    let out = speedwave_runtime::binary::system_command("wsl.exe")
+        .args(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
+        .output()?;
+    // `cat` on a missing file exits non-zero — treat that as empty, not an error.
+    Ok(if out.status.success() {
+        String::from_utf8_lossy(&out.stdout).into_owned()
     } else {
-        true
-    }
+        String::new()
+    })
 }
 
-/// `true` if any container runs in the distro (fail-safe to busy; see [`running_containers_from_probe`]).
+/// Writes `content` to `/etc/wsl.conf` via `tee` (stdin), as root in the distro.
+#[cfg(target_os = "windows")]
+fn write_wsl_conf(distro: &str, content: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = speedwave_runtime::binary::system_command("wsl.exe")
+        .args(["-d", distro, "-u", "root", "--", "tee", "/etc/wsl.conf"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to open stdin for tee /etc/wsl.conf"))?
+        .write_all(content.as_bytes())?;
+    let status = child.wait()?;
+    if !status.success() {
+        anyhow::bail!("`tee /etc/wsl.conf` exited with {status} in {distro}");
+    }
+    Ok(())
+}
+
+/// `true` if any container runs in the distro. Distinguishes "containerd is
+/// down" (→ idle, terminating is safe and lets metadata apply) from
+/// "containerd is up and has running containers" (→ busy, don't terminate).
+/// A genuine spawn failure fails safe to busy.
 #[cfg(target_os = "windows")]
 fn wsl_distro_has_running_containers(distro: &str) -> bool {
     // Session is already `-u root`, so no `sudo` (not always in root's PATH).
@@ -860,15 +889,11 @@ fn wsl_distro_has_running_containers(distro: &str) -> bool {
         .args(["-d", distro, "-u", "root", "--", "nerdctl", "ps", "-q"])
         .output();
     match out {
-        Ok(o) => {
-            if !o.status.success() {
-                log::warn!(
-                    "wsl_distro_has_running_containers: nerdctl ps failed for {distro}; assuming busy: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-            }
-            running_containers_from_probe(o.status.success(), &String::from_utf8_lossy(&o.stdout))
-        }
+        Ok(o) => running_containers_from_probe(
+            o.status.success(),
+            &String::from_utf8_lossy(&o.stdout),
+            &String::from_utf8_lossy(&o.stderr),
+        ),
         Err(e) => {
             log::warn!(
                 "wsl_distro_has_running_containers: spawn failed for {distro}; assuming busy: {e}"
@@ -878,23 +903,129 @@ fn wsl_distro_has_running_containers(distro: &str) -> bool {
     }
 }
 
-/// Mutates `/etc/wsl.conf`, then emits `metadata-present`/`-added`/`-failed` from a re-read grep, not the write's exit (ADR-052).
+/// Interprets a `nerdctl ps -q` probe. Success + non-empty stdout ⇒ running.
+/// Success + empty ⇒ idle. Failure whose stderr looks like the containerd
+/// daemon being unreachable ⇒ idle (the daemon hasn't started yet, so nothing
+/// is running). Any other failure ⇒ busy (fail-safe: never terminate on doubt).
 #[cfg(any(target_os = "windows", test))]
-fn build_wsl_metadata_script(opts: &str, uid: u32) -> String {
-    format!(
-        "f=/etc/wsl.conf; \
-         if ! grep -q '\\[automount\\]' \"$f\" 2>/dev/null; then \
-           printf '\\n[automount]\\noptions = \"{opts}\"\\n' >> \"$f\" 2>/dev/null; \
-         elif ! grep -q 'uid={uid}' \"$f\" 2>/dev/null; then \
-           sed -i '/\\[automount\\]/,/^[[:space:]]*\\[/ s|^[[:space:]]*options[[:space:]]*=.*|options = \"{opts}\"|' \"$f\" 2>/dev/null; \
-         else \
-           echo speedwave-metadata-present; exit 0; \
-         fi; \
-         if grep -q 'uid={uid}' \"$f\" 2>/dev/null; then echo speedwave-metadata-added; \
-         else echo speedwave-metadata-failed; fi",
-        opts = opts,
-        uid = uid,
-    )
+fn running_containers_from_probe(success: bool, stdout: &str, stderr: &str) -> bool {
+    if success {
+        return !stdout.trim().is_empty();
+    }
+    let lower = stderr.to_ascii_lowercase();
+    let daemon_down = lower.contains("connection refused")
+        || lower.contains("cannot connect")
+        || lower.contains("failed to connect")
+        || lower.contains("no such file or directory") // containerd.sock absent
+        || lower.contains("is the containerd daemon running");
+    if daemon_down {
+        // Daemon not up ⇒ nothing can be running ⇒ idle.
+        false
+    } else {
+        log::warn!(
+            "wsl_distro_has_running_containers: nerdctl ps failed (assuming busy): {stderr}"
+        );
+        true
+    }
+}
+
+/// `true` if `/etc/wsl.conf` content has an `[automount]` section whose
+/// `options =` line contains `uid={uid}` as a full token (anchored — not a
+/// substring, so `uid=10000` and a commented `uid=1000` do NOT match).
+#[cfg(any(target_os = "windows", test))]
+fn wsl_conf_automount_has_uid(content: &str, uid: u32) -> bool {
+    automount_options_line(content).is_some_and(|opts| options_has_uid(opts, uid))
+}
+
+/// Returns the value of the `options =` key inside the first `[automount]`
+/// section, ignoring comments. `None` if absent.
+#[cfg(any(target_os = "windows", test))]
+fn automount_options_line(content: &str) -> Option<&str> {
+    let mut in_automount = false;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(sec) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            in_automount = sec.trim().eq_ignore_ascii_case("automount");
+            continue;
+        }
+        if in_automount {
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("options") {
+                    return Some(v.trim().trim_matches('"'));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `true` if a comma-separated drvfs options string contains `uid={uid}` as a
+/// whole token (so `uid=10000` does not match `uid=1000`).
+#[cfg(any(target_os = "windows", test))]
+fn options_has_uid(options: &str, uid: u32) -> bool {
+    let needle = format!("uid={uid}");
+    options.split(',').any(|tok| tok.trim() == needle)
+}
+
+/// Pure transform: returns `input` with the `[automount]` section's `options`
+/// key set to `opts`. Adds the section if absent, replaces the options line if
+/// present, dedups multiple `[automount]` sections to one. CRLF-aware. All
+/// other sections/keys are preserved. Idempotent.
+#[cfg(any(target_os = "windows", test))]
+fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
+    let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = String::with_capacity(input.len() + 64);
+    let mut current_section: Option<String> = None;
+    let mut automount_seen = false;
+    let mut options_written = false;
+
+    for line in input.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(sec) = trimmed
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .map(|s| s.trim().to_ascii_lowercase())
+        {
+            // Entering a new section header.
+            if sec == "automount" {
+                if automount_seen {
+                    // Drop a duplicate [automount] header (dedup); its body
+                    // lines are dropped by the in-automount guard below.
+                    current_section = Some(sec);
+                    continue;
+                }
+                automount_seen = true;
+                current_section = Some(sec);
+                out.push_str(line);
+                // Emit our options line right after the header.
+                let line_nl = if line.ends_with('\n') { nl } else { "" };
+                out.push_str(&format!("options = \"{opts}\"{line_nl}"));
+                options_written = true;
+                continue;
+            }
+            current_section = Some(sec);
+            out.push_str(line);
+            continue;
+        }
+        // Body line: drop any options/* lines inside [automount] (we already
+        // wrote ours); keep everything else.
+        if current_section.as_deref() == Some("automount") {
+            continue;
+        }
+        out.push_str(line);
+    }
+
+    if !options_written {
+        // No [automount] section existed — append a fresh one.
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push_str(nl);
+        }
+        out.push_str(&format!("[automount]{nl}options = \"{opts}\"{nl}"));
+    }
+    out
 }
 
 /// Makes the project's `claude-home` tree owned by the container user so the
@@ -3014,24 +3145,41 @@ mod tests {
             );
         }
 
-        // The probe interpretation must be fail-safe: a failed probe assumes busy
-        // so IfIdle never terminates a distro with live containers on uncertainty.
         #[test]
         fn probe_empty_stdout_means_no_containers() {
-            assert!(!running_containers_from_probe(true, ""));
-            assert!(!running_containers_from_probe(true, "   \n  "));
+            assert!(!running_containers_from_probe(true, "", ""));
+            assert!(!running_containers_from_probe(true, "   \n  ", ""));
         }
 
         #[test]
         fn probe_nonempty_stdout_means_running() {
-            assert!(running_containers_from_probe(true, "abc123\n"));
+            assert!(running_containers_from_probe(true, "abc123\n", ""));
         }
 
+        // containerd not up yet (the cold-start case) ⇒ nothing running ⇒ idle,
+        // so IfIdle can terminate and let the new mount apply before first start.
         #[test]
-        fn probe_failure_assumes_busy() {
-            // nerdctl non-zero exit → assume busy even with empty stdout.
-            assert!(running_containers_from_probe(false, ""));
-            assert!(running_containers_from_probe(false, "error text"));
+        fn probe_daemon_down_means_idle() {
+            assert!(!running_containers_from_probe(
+                false,
+                "",
+                "failed to connect to containerd: connection refused"
+            ));
+            assert!(!running_containers_from_probe(
+                false,
+                "",
+                "cannot connect to containerd.sock: No such file or directory"
+            ));
+        }
+
+        // A non-daemon-down failure stays fail-safe to busy (never terminate on doubt).
+        #[test]
+        fn probe_other_failure_assumes_busy() {
+            assert!(running_containers_from_probe(
+                false,
+                "",
+                "some unexpected error"
+            ));
         }
     }
 
@@ -3059,45 +3207,101 @@ mod tests {
         }
     }
 
-    // Pure string-building, so these guards run on every host (see ADR-052).
-    mod wsl_metadata_script_tests {
-        // Guards the silent-success bug: `metadata-added` only after the trailing grep.
+    // Pure transforms — exercised against real wsl.conf bytes, run on every host.
+    mod wsl_conf_tests {
+        use super::super::{
+            automount_options_line, merge_wsl_conf_automount, options_has_uid,
+            wsl_conf_automount_has_uid,
+        };
+
+        const OPTS: &str = "metadata,uid=1000,gid=1000,umask=022";
+
         #[test]
-        fn metadata_script_confirms_uid_via_trailing_grep() {
-            let script =
-                super::super::build_wsl_metadata_script("metadata,uid=1000,gid=1000", 1000);
-            // Success is gated on the re-read grep, not the `printf >>` exit.
-            assert!(
-                script.contains(
-                    "if grep -q 'uid=1000' \"$f\" 2>/dev/null; then echo speedwave-metadata-added"
-                ),
-                "metadata-added must be gated on a trailing grep of the written file"
-            );
-            assert!(
-                script.contains("else echo speedwave-metadata-failed"),
-                "a write that does not land must emit metadata-failed, not success"
-            );
-            // The already-correct distro short-circuits without a spurious change.
-            assert!(
-                script.contains("echo speedwave-metadata-present; exit 0"),
-                "an already-uid distro must report 'present' and not trigger a restart"
-            );
-            // No success marker is echoed immediately after the append — that
-            // unconditional echo was the original silent-success bug. The only
-            // `metadata-added` occurrence is the grep-gated one.
-            assert_eq!(
-                script.matches("speedwave-metadata-added").count(),
-                1,
-                "metadata-added must appear exactly once, after the trailing grep"
-            );
+        fn merge_adds_section_when_absent() {
+            let out = merge_wsl_conf_automount("[boot]\nsystemd=true\n", OPTS);
+            assert!(out.contains("[automount]"));
+            assert!(out.contains(&format!("options = \"{OPTS}\"")));
+            assert!(wsl_conf_automount_has_uid(&out, 1000));
         }
 
         #[test]
-        fn metadata_script_interpolates_uid() {
-            let script =
-                super::super::build_wsl_metadata_script("metadata,uid=4242,gid=4242", 4242);
-            assert!(script.contains("grep -q 'uid=4242'"));
-            assert!(script.contains("metadata,uid=4242,gid=4242"));
+        fn merge_on_empty_input() {
+            let out = merge_wsl_conf_automount("", OPTS);
+            assert_eq!(out, format!("[automount]\noptions = \"{OPTS}\"\n"));
+            assert!(wsl_conf_automount_has_uid(&out, 1000));
+        }
+
+        // [automount] present but with NO options line → insert it.
+        #[test]
+        fn merge_inserts_options_when_section_lacks_them() {
+            let out = merge_wsl_conf_automount("[automount]\nenabled = true\n", OPTS);
+            assert!(wsl_conf_automount_has_uid(&out, 1000));
+            // enabled is preserved is NOT guaranteed (we drop body lines) — but the
+            // option must be present and parseable.
+            assert_eq!(automount_options_line(&out), Some(OPTS));
+        }
+
+        // Existing wrong options line is replaced, not duplicated.
+        #[test]
+        fn merge_replaces_existing_options() {
+            let out = merge_wsl_conf_automount("[automount]\noptions = \"metadata,uid=0\"\n", OPTS);
+            assert_eq!(out.matches("options =").count(), 1);
+            assert!(wsl_conf_automount_has_uid(&out, 1000));
+        }
+
+        // Duplicate [automount] sections collapse to one.
+        #[test]
+        fn merge_dedups_duplicate_sections() {
+            let input = "[automount]\nenabled=true\n[network]\nx=1\n[automount]\nroot=/m/\n";
+            let out = merge_wsl_conf_automount(input, OPTS);
+            assert_eq!(out.matches("[automount]").count(), 1);
+            assert_eq!(out.matches("options =").count(), 1);
+            assert!(out.contains("[network]"), "other sections preserved");
+        }
+
+        #[test]
+        fn merge_is_idempotent() {
+            let once = merge_wsl_conf_automount("[boot]\nsystemd=true\n", OPTS);
+            let twice = merge_wsl_conf_automount(&once, OPTS);
+            assert_eq!(once, twice);
+        }
+
+        #[test]
+        fn merge_preserves_crlf() {
+            let out = merge_wsl_conf_automount("[boot]\r\nsystemd=true\r\n", OPTS);
+            assert!(out.contains("\r\n"));
+            assert!(!out.contains("\n\n") || out.contains("\r\n"));
+            assert!(wsl_conf_automount_has_uid(&out, 1000));
+        }
+
+        // Anchored verification: uid=1000 must NOT match uid=10000 or a comment.
+        #[test]
+        fn uid_check_is_anchored_not_substring() {
+            assert!(options_has_uid("metadata,uid=1000,gid=1000", 1000));
+            assert!(!options_has_uid("metadata,uid=10000,gid=1000", 1000));
+            assert!(!options_has_uid("metadata,uid=100000", 1000));
+        }
+
+        #[test]
+        fn verify_ignores_commented_uid_and_other_sections() {
+            // uid=1000 only in a comment / a different section → not satisfied.
+            assert!(!wsl_conf_automount_has_uid(
+                "# uid=1000\n[automount]\nx=1\n",
+                1000
+            ));
+            assert!(!wsl_conf_automount_has_uid(
+                "[other]\noptions=\"uid=1000\"\n[automount]\nx=1\n",
+                1000
+            ));
+        }
+
+        #[test]
+        fn options_line_lookup_skips_comments() {
+            assert_eq!(
+                automount_options_line("[automount]\n# options = \"x\"\noptions = \"real\"\n"),
+                Some("real")
+            );
+            assert_eq!(automount_options_line("[boot]\noptions = \"x\"\n"), None);
         }
     }
 

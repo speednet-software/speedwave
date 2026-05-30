@@ -1791,8 +1791,8 @@ fn main() {
                 }
 
                 // Startup/post-update: apply automount=metadata for existing
-                // distros. `IfIdle` terminates only when no container runs, so
-                // the mount applies before the first start (see ADR-052).
+                // distros via `IfIdle` (terminates only when idle). Err is
+                // non-fatal here — never block app launch (see ADR-052).
                 #[cfg(target_os = "windows")]
                 {
                     use setup_wizard::TerminateOnChange;
