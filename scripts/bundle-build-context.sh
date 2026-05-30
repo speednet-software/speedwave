@@ -21,6 +21,32 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # BUNDLE_DEST so concurrent `make test` and `make dev` do not race on the same
 # files (see _tests/desktop/bundle-build-context.bats).
 DEST="${BUNDLE_DEST:-$REPO_ROOT/desktop/src-tauri}"
+mkdir -p "$DEST"
+
+# Serialize concurrent runs on the same DEST. The body does `rm -rf` + non-atomic
+# copies; a parallel image build (e.g. `make dev` while `make test` bundles) can
+# read a half-written tree and bake a 0-byte mcp-shared/package.json into a worker
+# image (ERR_INVALID_PACKAGE_CONFIG, exit 1). `mkdir` is an atomic create-or-fail
+# on macOS/Windows/Linux with no external tool (unlike flock) — the second runner
+# spins until the first releases. The lock stores its holder PID so a run killed
+# with SIGKILL (untrappable) cannot deadlock future bundles: a lock whose PID is
+# gone is reclaimed. The trap clears our own lock on any exit incl. signals.
+LOCK_DIR="$DEST/.bundle.lock"
+while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+  holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  # Reclaim only when we can prove the holder is gone. A blank PID means the
+  # owner created the dir but has not written its PID yet — treat as alive and
+  # wait, so we never delete a lock another run is mid-acquiring.
+  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+    rm -rf "$LOCK_DIR"  # holder process is dead — reclaim the stale lock
+    continue
+  fi
+  sleep 0.3
+done
+# Arm the release trap BEFORE writing the PID: if the `echo` fails (e.g. disk
+# full), `set -e` exits and the trap still removes the lock — no deadlock.
+trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+echo "$$" >"$LOCK_DIR/pid"
 
 # Clean destination to prevent stale files from previous runs
 rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/host_exec" "$DEST/oauth"

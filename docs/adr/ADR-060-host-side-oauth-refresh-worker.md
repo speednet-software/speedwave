@@ -100,9 +100,23 @@ The dispatcher emits the following `error:<code>` values into `audit.log`. Opera
 | `malformed`        | Response was not valid JSON or required fields missing | Indicates either a network mid-stream truncation or an upstream incident. Transient retry-by-rate-limit is appropriate.                                                                                         |
 | `unlink_failed`    | `forget` couldn't delete state / access-token file     | EPERM / EBUSY when removing `oauth/<project>/<service>.json` or the worker-mounted access-token file. The tool now returns an error to the caller instead of falsely reporting `forgotten`.                     |
 
+## Addendum: `providerData` self-heal migration
+
+Files written before the OAuthProvider refactor (or by a credential-form save whose device-code flow never completed) can carry `clientId` / `tenantId` at the **top level** of `oauth/<project>/<service>.json` instead of under `providerData`. Three independent consumers then break together: the worker's strict `assertOAuthState` throws `malformed_state`; `is_service_configured` reads the identity as empty and reports the card "Not Configured"; and because the re-authorise banner was gated on `configured`, the only recovery affordances were hidden or disabled — the user was stuck.
+
+Resolution (two parts, both shape-only — **secrets are never fabricated, moved between services, or synthesized**; a refresh token that is absent stays absent):
+
+- **Startup migration** (`crates/speedwave-runtime/src/oauth_state_migration.rs`, run from CLI and Desktop right after `legacy_token_cleanup`). Best-effort, idempotent, per-file: if `providerData` is not already a plain object and a top-level identity string exists, it is nested under `providerData` and the top-level copy removed; every other key is preserved verbatim; the file is rewritten 0o600. Unparseable / non-object / no-recoverable-identity files are left untouched. The in-process repair path (`merge_oauth_state_json` → `ensure_provider_data_object`) performs the same lift so a credential re-save heals rather than orphans.
+- **Banner ungating.** `oauth_action_required` is now computed regardless of `configured`, so a file too damaged to migrate (e.g. no refresh token) still surfaces the "Re-authorise SharePoint" banner. A fresh, never-configured service has no file and shows no banner.
+- **`offline_access` coverage.** The desktop coverage check (`detect_scope_mismatch_or_stale`) excludes `offline_access` from the required set: it is an OIDC control scope that Microsoft never echoes in the token-response `scope` field[^offline-access], so it never appears in `grantedScopes`. Requiring it produced a false-positive banner for fully-working integrations. This mirrors the worker's own check in `mcp-servers/oauth/src/providers/microsoft.ts`; the request-scope SSOT (`consts::SHAREPOINT_OAUTH_SCOPES`) still includes `offline_access` because it must be **requested** to obtain a refresh token.
+
+This **refines** the "user must re-authorize manually / no silent data migration" stance above: that stance governs _secrets_ (the v1 worker-mounted `refresh_token` / `client_id` / `tenant_id` files are still deleted, never migrated). The self-heal touches only the structural placement of the non-secret IdP identity in the host-side state file, converging it onto the schema in §"Implementation notes".
+
 ## References
 
 [^create-list]: Microsoft Graph — Create a new list in a SharePoint site requires `Sites.Manage.All` (delegated): <https://learn.microsoft.com/en-us/graph/api/list-create?view=graph-rest-1.0&tabs=http#permissions>
+
+[^offline-access]: Microsoft Identity platform — `offline_access` is an OpenID Connect scope used to request a refresh token; the token-response `scope` field lists only the scopes the **access token** is valid for, so `offline_access` is not returned there. Refresh-token presence (not the `scope` list) signals offline access was granted: <https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc> and <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow#refresh-the-access-token>
 
 [^device-code]: Microsoft Identity platform — Device authorization grant is for public clients with no secret: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>
 

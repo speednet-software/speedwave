@@ -738,12 +738,17 @@ fn main() -> anyhow::Result<()> {
 
     // Sanitise any v1 SharePoint secrets still sitting in the worker-mounted
     // token dir (refresh_token / client_id / tenant_id). Idempotent — no-op
-    // when no project has the legacy layout. Users with v1 state see the
-    // "Re-authorize SharePoint" banner instead of getting a silent data
-    // migration (decision: post-OAuthProvider refactor, no backward compat).
+    // when no project has the legacy layout. Secrets are never migrated.
     let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
     if cleaned > 0 {
         log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
+    }
+
+    // Self-heal legacy/partial oauth.json whose clientId/tenantId sit top-level
+    // instead of under providerData (ADR-060 addendum). Shape-only, idempotent.
+    let healed = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
+    if healed > 0 {
+        log::info!("oauth_state_migration: {healed} file(s) healed");
     }
 
     // Spawn host_exec BEFORE render_compose — hub needs port/auth-token files (ADR-054).

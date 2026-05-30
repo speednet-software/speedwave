@@ -243,6 +243,67 @@ teardown() {
     [ "$src_perms" = "$dst_perms" ]
 }
 
+@test "bundle script releases the lock on success" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -d "$DEST/.bundle.lock" ]
+}
+
+@test "bundle script reclaims a stale lock whose holder PID is dead" {
+    # Simulate a run killed with SIGKILL (untrappable): a leftover lock dir
+    # pointing at a PID that no longer exists must not deadlock the next run.
+    mkdir -p "$DEST/.bundle.lock"
+    # PID 2147483647 (INT_MAX) is not a live process on any supported platform.
+    echo "2147483647" > "$DEST/.bundle.lock/pid"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$DEST/build-context/containers" ]
+    [ ! -d "$DEST/.bundle.lock" ]
+}
+
+@test "lock held by a live holder blocks a second run until released" {
+    # Directly proves mutual exclusion (not just final-state). Hold the lock with
+    # OUR (live) PID, launch the script, assert it does NOT proceed while held,
+    # then release and assert it completes. Without the mutex it would race in
+    # immediately.
+    mkdir -p "$DEST/.bundle.lock"
+    echo "$$" > "$DEST/.bundle.lock/pid"   # $$ is bats — a live process
+
+    "$SCRIPT" &
+    local pid=$!
+    sleep 1
+    # Still blocked: our lock dir is intact and the script has not built anything.
+    kill -0 "$pid"                                  # script still running (waiting)
+    [ -f "$DEST/.bundle.lock/pid" ]                 # our lock untouched
+    [ "$(cat "$DEST/.bundle.lock/pid")" = "$$" ]    # not reclaimed/overwritten
+    [ ! -d "$DEST/build-context" ]                  # body has not started
+
+    rm -rf "$DEST/.bundle.lock"                      # release — script can proceed
+    wait "$pid"; local rc=$?
+    [ "$rc" -eq 0 ]
+    [ -d "$DEST/build-context/containers" ]
+    [ ! -d "$DEST/.bundle.lock" ]                    # script released its own lock
+}
+
+@test "concurrent runs on the same DEST both finish with a valid package.json" {
+    # The incident: `make dev` building an image while `make test` re-bundles the
+    # SAME DEST captured a 0-byte mcp-shared/package.json. Serialization itself is
+    # proven by the mutual-exclusion test above; this asserts the end state is
+    # never corrupt under real concurrency.
+    "$SCRIPT" &
+    local p1=$!
+    "$SCRIPT" &
+    local p2=$!
+    wait "$p1"; local r1=$?
+    wait "$p2"; local r2=$?
+    [ "$r1" -eq 0 ]
+    [ "$r2" -eq 0 ]
+    [ ! -d "$DEST/.bundle.lock" ]
+    local pkg="$DEST/build-context/mcp-servers/shared/package.json"
+    [ -s "$pkg" ]
+    node -e "JSON.parse(require('fs').readFileSync('$pkg','utf8'))"
+}
+
 @test "bundle script --ci works without pre-built dist directories" {
     REPO_ROOT="$BATS_TEST_DIRNAME/../.."
     # Simulate a clean checkout by temporarily renaming dist directories

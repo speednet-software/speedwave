@@ -140,6 +140,9 @@ export async function refreshMicrosoftToken(
   // it back in the `scope` field of the token response. Treat its presence in
   // `req.scopes` as satisfied iff the response carries a refresh_token on the
   // initial exchange, or — for refresh calls — implicitly (we got here at all).
+  // The Desktop banner check applies the same skip in
+  // `desktop/src-tauri/src/integrations_cmd.rs` (`OFFLINE_ACCESS_SCOPE`) — keep
+  // both in sync.
   const missing = req.scopes.filter((s) => {
     if (s.toLowerCase() === 'offline_access') return false;
     return !grantedScopes.some((g) => g.toLowerCase() === s.toLowerCase());
