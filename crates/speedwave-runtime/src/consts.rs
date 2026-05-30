@@ -169,15 +169,13 @@ pub const CONTAINER_USER_UNPRIVILEGED: &str = "1000:1000";
 /// from drifting (see ADR-052: the Windows claude-home mount must be owned by
 /// this uid or the uid-1000 entrypoint hits EACCES and the container exits).
 pub fn container_uid_gid() -> (u32, u32) {
-    let (uid, gid) = CONTAINER_USER_UNPRIVILEGED
+    // The const is pinned to "1000:1000" by a unit test, so this parse never
+    // fails in practice; fall back to (1000, 1000) rather than panic on a
+    // runtime path (no expect/unwrap in production per the project rules).
+    CONTAINER_USER_UNPRIVILEGED
         .split_once(':')
-        .expect("CONTAINER_USER_UNPRIVILEGED must be UID:GID");
-    (
-        uid.parse()
-            .expect("CONTAINER_USER_UNPRIVILEGED uid must be numeric"),
-        gid.parse()
-            .expect("CONTAINER_USER_UNPRIVILEGED gid must be numeric"),
-    )
+        .and_then(|(uid, gid)| Some((uid.parse().ok()?, gid.parse().ok()?)))
+        .unwrap_or((1000, 1000))
 }
 
 /// drvfs `[automount]` options for the Speedwave WSL distro, derived from
