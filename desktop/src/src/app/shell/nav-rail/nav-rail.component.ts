@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { IconComponent, type IconName } from '../../shared/icon.component';
+import { LogoComponent } from '../../shared/logo.component';
 
 /** One entry in the left navigation rail. */
 export interface NavRailEntry {
@@ -27,7 +28,7 @@ export interface NavRailEntry {
  */
 @Component({
   selector: 'app-nav-rail',
-  imports: [RouterLink, IconComponent],
+  imports: [RouterLink, IconComponent, LogoComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     role: 'navigation',
@@ -35,19 +36,10 @@ export interface NavRailEntry {
     class: 'flex w-14 flex-col items-center border-r border-[var(--line)] bg-[var(--bg-1)]',
   },
   template: `
-    <!-- Logo band aligned with chat header (44px). Mask + bg-current adapt the
-         color per mode (white in dark, ink in light); the SVG fill is irrelevant
-         to the mask alpha and must stay static — currentColor breaks in WebView. -->
+    <!-- Logo band aligned with chat header (44px). Inline SVG adapts per theme
+         via currentColor (white in dark, ink in light). -->
     <div class="flex h-11 w-14 items-center justify-center border-b border-[var(--line)]">
-      <span
-        role="img"
-        aria-label="Speedwave"
-        class="block h-7 w-7 bg-current text-[var(--ink)] dark:text-white"
-        style="
-          -webkit-mask: url('assets/speedwave-mark-white.svg') center / contain no-repeat;
-          mask: url('assets/speedwave-mark-white.svg') center / contain no-repeat;
-        "
-      ></span>
+      <app-logo class="h-7 w-7" />
     </div>
 
     <nav class="mt-4 flex flex-col gap-1" data-testid="nav-rail">

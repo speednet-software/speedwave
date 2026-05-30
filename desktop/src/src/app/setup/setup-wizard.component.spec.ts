@@ -51,15 +51,18 @@ describe('SetupWizardComponent', () => {
     expect(component.phase()).toBe('welcome');
   });
 
-  // Logo must adapt per theme (mask + dark:text-white), not a static white image
-  // that vanishes on the light-mode white background.
-  it('renders the Speedwave logo as a theme-adaptive masked mark', () => {
-    const logo = fixture.nativeElement.querySelector('[role="img"][aria-label="Speedwave"]');
+  // Logo must be an inline SVG (currentColor-driven, adapts per theme), not a
+  // CSS-mask span (breaks in the Tauri WebView build) nor a static image (the
+  // white PNG vanished on the light-mode white background).
+  it('renders the Speedwave logo as an inline theme-adaptive SVG mark', () => {
+    const logo = fixture.nativeElement.querySelector(
+      'app-logo[role="img"][aria-label="Speedwave"]'
+    );
     expect(logo).not.toBeNull();
-    expect(logo.tagName.toLowerCase()).toBe('span');
-    expect(logo.getAttribute('style')).toContain('speedwave-mark-white.svg');
-    expect(logo.className).toContain('dark:text-white');
+    expect(logo.querySelector('svg path[fill="currentColor"]')).not.toBeNull();
+    expect(logo.getAttribute('style') ?? '').not.toContain('mask');
     expect(fixture.nativeElement.querySelector('img[src*="speedwave-mark-white"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[style*="speedwave-mark-white.svg"]')).toBeNull();
   });
 
   it('should transition to progress phase on startSetup', async () => {
