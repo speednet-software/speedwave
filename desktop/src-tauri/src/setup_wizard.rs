@@ -814,12 +814,11 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
     }
 
     // The change landed; now decide whether to terminate so it applies before
-    // the first container start. Probe lazily (only now that a change exists).
-    let should_terminate = match terminate {
-        TerminateOnChange::Yes => true,
-        TerminateOnChange::IfIdle => !wsl_distro_has_running_containers(distro),
-    };
-    if should_terminate {
+    // the first container start. Probe lazily — only IfIdle needs it, only now
+    // that a real change exists.
+    let has_running =
+        matches!(terminate, TerminateOnChange::IfIdle) && wsl_distro_has_running_containers(distro);
+    if terminate_decision(terminate, has_running) {
         let terminated = speedwave_runtime::binary::system_command("wsl.exe")
             .args(["--terminate", distro])
             .status()
