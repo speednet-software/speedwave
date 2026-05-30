@@ -225,6 +225,12 @@ pub fn render_compose(
     // Filter services based on integrations config
     yaml = apply_integrations_filter(&yaml, integrations, &network_name)?;
 
+    // Final hardening: re-quote any `environment:` value carrying a YAML flow
+    // indicator (e.g. the `[1m]` 1M-context suffix) that libyaml emits
+    // unquoted but nerdctl's Go YAML parser rejects. Must run last — after
+    // every env-injection pass has contributed its entries.
+    yaml = harden_env_scalar_quoting(&yaml)?;
+
     Ok(yaml)
 }
 
@@ -403,6 +409,86 @@ fn validate_compose_network_refs(yaml: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// YAML flow indicators that are legal inside a *block-context* plain scalar
+/// per the YAML 1.2 spec, so libyaml (serde_yaml_ng's emitter) leaves them
+/// unquoted — but nerdctl's Go YAML parser (gopkg.in/yaml.v3 via compose-go)
+/// rejects them, failing the whole file with `could not find expected ":"`
+/// several lines later. Any env value containing one of these MUST be emitted
+/// as an explicitly quoted scalar. `[`/`]` cover the documented `[1m]`
+/// 1M-context suffix (anthropics/claude-code#34083 workaround); the rest make
+/// the rule general so any future value (`{`, `}`, `,`) is safe too.
+const YAML_PLAIN_UNSAFE_CHARS: &[char] = &['[', ']', '{', '}', ','];
+
+/// True when `entry` (a `KEY=VALUE` env line) would round-trip through every
+/// conformant YAML parser as a plain scalar. When false the caller must emit a
+/// quoted scalar — see [`harden_env_scalar_quoting`].
+fn env_entry_needs_quoting(entry: &str) -> bool {
+    entry.contains(YAML_PLAIN_UNSAFE_CHARS)
+}
+
+/// Final SSOT pass over rendered compose YAML: re-quotes every `environment:`
+/// sequence entry whose value contains a YAML flow indicator that libyaml
+/// emits unquoted but nerdctl's stricter Go parser rejects.
+///
+/// Scoped to `environment:` blocks (tracked by indentation) so it never
+/// touches images, volumes, or networks. The replacement scalar is produced
+/// with `serde_json::to_string`, whose escaping is a valid YAML 1.2
+/// double-quoted scalar (YAML is a JSON superset) — no hand-rolled escaping.
+/// Idempotent: already-quoted entries (those that don't re-parse as a bare
+/// `KEY=VALUE` plain scalar) are left untouched.
+fn harden_env_scalar_quoting(yaml: &str) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(yaml.len());
+    // Indentation (column) of the active `environment:` key, if inside one.
+    let mut env_indent: Option<usize> = None;
+    for line in yaml.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let indent = body.len() - body.trim_start().len();
+        let trimmed = body.trim_start();
+
+        // Leaving the active environment block. Compose renders sequence
+        // items at the SAME column as the `environment:` key (`- ITEM`
+        // aligned under `environment:`), so same-indent `- ` lines stay in
+        // the block; any non-sequence line, or a line indented less than the
+        // key, closes it.
+        if let Some(env_col) = env_indent {
+            let is_seq_item = trimmed.starts_with("- ") || trimmed == "-";
+            if !body.trim().is_empty() && (indent < env_col || !is_seq_item) {
+                env_indent = None;
+            }
+        }
+
+        if env_indent.is_none() && trimmed == "environment:" {
+            env_indent = Some(indent);
+            out.push_str(line);
+            continue;
+        }
+
+        if env_indent.is_some() {
+            if let Some(rest) = trimmed.strip_prefix("- ") {
+                let value = rest.trim();
+                // Only touch bare (unquoted) `KEY=VALUE` plain scalars that
+                // carry an unsafe char; quoted/escaped entries are skipped.
+                let is_bare_plain = !value.starts_with('"')
+                    && !value.starts_with('\'')
+                    && !value.starts_with('|')
+                    && !value.starts_with('>');
+                if is_bare_plain && env_entry_needs_quoting(value) {
+                    let prefix = &body[..body.len() - rest.len()];
+                    out.push_str(prefix);
+                    out.push_str(&serde_json::to_string(value)?);
+                    if line.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    continue;
+                }
+            }
+        }
+
+        out.push_str(line);
+    }
+    Ok(out)
 }
 
 fn inject_claude_env(
@@ -3415,6 +3501,88 @@ mod tests {
         let _ = std::fs::remove_dir(&tokens_dir);
     }
 
+    /// Regression for the unquoted `[1m]` 1M-context suffix that nerdctl's Go
+    /// YAML parser rejected with `could not find expected ":"`. The default
+    /// Anthropic provider injects `ANTHROPIC_DEFAULT_OPUS_MODEL=<id>[1m]`; the
+    /// rendered file must (a) re-parse and (b) carry the bracketed entry as a
+    /// quoted scalar so a strict parser accepts it. The pre-existing
+    /// substring/`from_str` tests missed this because serde_yaml_ng's libyaml
+    /// emitter leaves the bracket unquoted and re-reads it without complaint.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_compose_quotes_bracketed_model_env_and_round_trips() {
+        let project = format!("render-1m-suffix-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        // Default Anthropic provider (no explicit model) — exercises
+        // anthropic_default_models_env(), which emits the `[1m]` suffix.
+        let resolved = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("anthropic".to_string()),
+                model: None,
+                base_url: None,
+                context_tokens: None,
+                has_api_key: false,
+                has_custom_headers: false,
+            },
+        };
+
+        let yaml = render_compose(
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        // (a) Round-trips through the parser.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
+            .unwrap_or_else(|e| panic!("rendered compose YAML must re-parse: {e}"));
+        let env = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .expect("claude.environment must be a sequence");
+        let opus = env
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL="))
+            .expect("ANTHROPIC_DEFAULT_OPUS_MODEL must be present");
+        assert!(
+            opus.ends_with("[1m]"),
+            "1M-context suffix must survive intact, got: {opus:?}"
+        );
+
+        // (b) Across EVERY service, each `environment:` entry that carries a
+        // YAML flow indicator must be a quoted scalar in the RAW serialized
+        // form — the property the Go parser needs and the old tests never
+        // checked. Scope to env values (via the parsed doc) so non-env lines
+        // that legitimately contain flow indicators (e.g. the tmpfs mount
+        // `/tmp:noexec,nosuid,size=512m`) are not mistaken for env entries.
+        let services = doc["services"].as_mapping().expect("services mapping");
+        for (_, svc) in services {
+            let Some(env) = svc.get("environment").and_then(|e| e.as_sequence()) else {
+                continue;
+            };
+            for v in env {
+                let Some(entry) = v.as_str() else { continue };
+                if !env_entry_needs_quoting(entry) {
+                    continue;
+                }
+                let quoted = format!("- {}", serde_json::to_string(entry).unwrap());
+                assert!(
+                    yaml.contains(&quoted),
+                    "env entry {entry:?} carries a flow indicator but is not a quoted \
+                     scalar in the rendered YAML; expected a line containing {quoted:?}"
+                );
+            }
+        }
+    }
+
     /// `Authorization` in a stale `custom_headers` token must not be allowed
     /// to smuggle a header that collides with `ANTHROPIC_AUTH_TOKEN` Bearer.
     /// Mirrors the defensive reject in `build_llm_probe_client_with_auth`.
@@ -3509,6 +3677,85 @@ mod tests {
             .expect("header entry present");
         assert!(header_entry.contains("X-Tenant-ID: foo"));
         assert!(header_entry.contains("X-Subscription-ID: bar"));
+    }
+
+    #[test]
+    fn env_entry_needs_quoting_flags_flow_indicators() {
+        // Happy path: plain values stay plain.
+        assert!(!env_entry_needs_quoting("ANTHROPIC_MODEL=claude-opus-4-8"));
+        assert!(!env_entry_needs_quoting("PORT=4000"));
+        assert!(!env_entry_needs_quoting("TZ=Europe/Warsaw"));
+        // A single `: ` mid-scalar is plain-safe (the Go parser accepts it);
+        // no flow indicator means no quoting.
+        assert!(!env_entry_needs_quoting(
+            "ANTHROPIC_CUSTOM_HEADERS=X-Tenant-ID: foo"
+        ));
+        // …but the multi-header flattened form joins with `, ` — the comma is
+        // a flow indicator, so it must now be quoted too (defends the same
+        // nerdctl-compose breakage the multiline headers fix addressed).
+        assert!(env_entry_needs_quoting(
+            "ANTHROPIC_CUSTOM_HEADERS=X-Tenant-ID: foo, X-Subscription-ID: bar"
+        ));
+        // The reported bug: the `[1m]` 1M-context suffix.
+        assert!(env_entry_needs_quoting(
+            "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8[1m]"
+        ));
+        // General: every flow indicator triggers quoting.
+        for c in ['[', ']', '{', '}', ','] {
+            assert!(
+                env_entry_needs_quoting(&format!("K=a{c}b")),
+                "char {c:?} must require quoting"
+            );
+        }
+    }
+
+    #[test]
+    fn harden_env_scalar_quoting_quotes_bracketed_model_id() {
+        let yaml = "services:\n  claude:\n    environment:\n    \
+                    - ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8[1m]\n    \
+                    - ANTHROPIC_MODEL=claude-opus-4-8\nnetworks: {}\n";
+        let hardened = harden_env_scalar_quoting(yaml).unwrap();
+        // The bracketed entry is now an explicit double-quoted scalar.
+        assert!(
+            hardened.contains("- \"ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8[1m]\""),
+            "bracketed entry must be double-quoted, got:\n{hardened}"
+        );
+        // The plain entry is untouched (no needless quoting).
+        assert!(
+            hardened.contains("- ANTHROPIC_MODEL=claude-opus-4-8\n"),
+            "plain entry must stay plain, got:\n{hardened}"
+        );
+        // Round-trips, and the value survives intact.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&hardened).unwrap();
+        let env = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .unwrap();
+        assert!(env
+            .iter()
+            .any(|v| v.as_str() == Some("ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8[1m]")));
+    }
+
+    #[test]
+    fn harden_env_scalar_quoting_is_idempotent_and_scoped() {
+        // Already-quoted entries and non-environment flow indicators (the
+        // `networks: {}` mapping, an image with no brackets) are untouched;
+        // running twice is a no-op.
+        let yaml = "services:\n  claude:\n    image: registry/x:1\n    environment:\n    \
+                    - \"ALREADY=quoted[1m]\"\n    - PLAIN=ok\n    volumes:\n    \
+                    - /a:/b\nnetworks:\n  net: {}\n";
+        let once = harden_env_scalar_quoting(yaml).unwrap();
+        let twice = harden_env_scalar_quoting(&once).unwrap();
+        assert_eq!(once, twice, "must be idempotent");
+        // Volume mounts contain `:` but no flow indicator — untouched.
+        assert!(once.contains("- /a:/b\n"));
+        // The flow-mapping `net: {}` outside environment is untouched.
+        assert!(once.contains("net: {}"));
+        // Already-quoted bracket entry not re-wrapped.
+        assert!(once.contains("- \"ALREADY=quoted[1m]\""));
+        assert!(
+            !once.contains("\\\""),
+            "no double-escaping of existing quotes"
+        );
     }
 
     fn default_flags() -> Vec<String> {
