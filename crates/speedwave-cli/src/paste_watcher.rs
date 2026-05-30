@@ -147,6 +147,7 @@ fn set_owner_only(_path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
