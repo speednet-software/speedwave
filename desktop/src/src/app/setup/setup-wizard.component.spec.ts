@@ -51,6 +51,17 @@ describe('SetupWizardComponent', () => {
     expect(component.phase()).toBe('welcome');
   });
 
+  // Logo must adapt per theme (mask + dark:text-white), not a static white image
+  // that vanishes on the light-mode white background.
+  it('renders the Speedwave logo as a theme-adaptive masked mark', () => {
+    const logo = fixture.nativeElement.querySelector('[role="img"][aria-label="Speedwave"]');
+    expect(logo).not.toBeNull();
+    expect(logo.tagName.toLowerCase()).toBe('span');
+    expect(logo.getAttribute('style')).toContain('speedwave-mark-white.svg');
+    expect(logo.className).toContain('dark:text-white');
+    expect(fixture.nativeElement.querySelector('img[src*="speedwave-mark-white"]')).toBeNull();
+  });
+
   it('should transition to progress phase on startSetup', async () => {
     const promise = component.startSetup();
     expect(component.phase()).toBe('progress');

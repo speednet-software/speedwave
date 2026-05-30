@@ -41,13 +41,17 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
       <div class="flex flex-1 overflow-y-auto">
         <div class="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-6 py-10">
           <div class="mb-6 flex items-center gap-3">
-            <img
-              src="assets/speedwave-mark-white@2x.png"
-              alt="Speedwave"
-              class="h-9 w-9"
-              width="36"
-              height="36"
-            />
+            <!-- Mask + bg-current so the mark adapts per theme (white on dark,
+                 ink on light); a static white PNG vanished on the light bg. -->
+            <span
+              role="img"
+              aria-label="Speedwave"
+              class="block h-9 w-9 bg-current text-[var(--ink)] dark:text-white"
+              style="
+                -webkit-mask: url('assets/speedwave-mark-white.svg') center / contain no-repeat;
+                mask: url('assets/speedwave-mark-white.svg') center / contain no-repeat;
+              "
+            ></span>
             <div>
               <div
                 class="view-title view-title-display text-[var(--ink)]"
