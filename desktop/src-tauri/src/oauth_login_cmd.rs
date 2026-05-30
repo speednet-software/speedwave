@@ -248,15 +248,17 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
         "powershell.exe"
     };
 
-    if crate::path_util::which_in_path("wt.exe").is_some() {
-        // wt.exe returns immediately after opening the tab; a non-zero status
-        // means it could not launch, so fall through to the direct spawn.
-        let argv = build_wt_terminal_argv(ps, cmd);
-        match std::process::Command::new("wt.exe").args(argv).status() {
-            Ok(s) if s.success() => return Ok(()),
-            Ok(s) => log::warn!("wt.exe exited {s}; falling back to direct PowerShell"),
-            Err(e) => log::warn!("wt.exe spawn failed ({e}); falling back to direct PowerShell"),
-        }
+    // Try wt.exe directly — do NOT pre-check with `which_in_path`/`is_file`:
+    // wt.exe ships as a Windows App Execution Alias (a zero-byte reparse point
+    // under WindowsApps), and `Path::is_file()` returns false for it even when
+    // it launches fine. CreateProcess DOES resolve the alias, so spawning by
+    // name is the reliable detection. A spawn error (not installed) or non-zero
+    // status falls through to the direct PowerShell spawn.
+    let argv = build_wt_terminal_argv(ps, cmd);
+    match std::process::Command::new("wt.exe").args(argv).status() {
+        Ok(s) if s.success() => return Ok(()),
+        Ok(s) => log::warn!("wt.exe exited {s}; falling back to direct PowerShell"),
+        Err(e) => log::warn!("wt.exe not available ({e}); falling back to direct PowerShell"),
     }
 
     // Direct PowerShell spawn (its own console window) — pumps input from start.

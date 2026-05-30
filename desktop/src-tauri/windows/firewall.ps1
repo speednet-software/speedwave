@@ -49,11 +49,19 @@ function Test-RuleExists {
   if (-not (Get-NetFirewallHyperVRule -DisplayName $RuleName -ErrorAction SilentlyContinue)) {
     return $false
   }
+  # With no program list there are no WDF allow rules to find — report missing so
+  # the caller does not claim "rules present" off the Hyper-V rule alone.
+  if ($ProgramList.Count -eq 0) {
+    return $false
+  }
   foreach ($prog in $ProgramList) {
+    # Match only OUR rules (DisplayName prefix) — a foreign vendor's Allow rule
+    # for the same Program must not satisfy our idempotency check and leave us
+    # relying on a rule we do not own.
     $rule = Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |
       Where-Object { $_.Program -eq $prog } |
       Get-NetFirewallRule -ErrorAction SilentlyContinue |
-      Where-Object { $_.Action -eq 'Allow' -and $_.Direction -eq 'Inbound' }
+      Where-Object { $_.Action -eq 'Allow' -and $_.Direction -eq 'Inbound' -and $_.DisplayName -like "$WdfRulePrefix*" }
     if (-not $rule) { return $false }
   }
   return $true

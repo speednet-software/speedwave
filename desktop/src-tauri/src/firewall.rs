@@ -101,7 +101,17 @@ mod windows_impl {
                 let node = dir
                     .join(speedwave_runtime::consts::NODEJS_SUBDIR)
                     .join("node.exe");
-                progs.push(node.to_string_lossy().into_owned());
+                // Only authorize node.exe if it actually exists — a rule for an
+                // absent binary gives false "firewall configured" confidence and
+                // never matches the real worker.
+                if node.is_file() {
+                    progs.push(node.to_string_lossy().into_owned());
+                } else {
+                    log::warn!(
+                        "firewall: bundled node.exe not found at {} — skipping its allow rule",
+                        node.display()
+                    );
+                }
             }
         }
         progs

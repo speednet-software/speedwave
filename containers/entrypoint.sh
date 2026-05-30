@@ -220,13 +220,19 @@ cat > "${HOME}/.claude/mcp-config.json" << EOF
 EOF
 
 # Pre-create .claude.json to skip the onboarding flow — but ONLY when the user
-# is already logged in (credentials present). Skipping onboarding also suppresses
-# Claude Code's automatic login prompt on a fresh `claude` start, so doing it
-# unconditionally forced the user to type `/login` by hand. When credentials are
-# absent we leave .claude.json uncreated so `claude` opens the OAuth flow itself.
-# When present, we still pre-create it so a logged-in user is not re-onboarded
-# every session (the original bug — see https://github.com/tfvchow/field-notes-public/issues/10).
-if [ -f "${HOME}/.claude/.credentials.json" ] && [ ! -f "${HOME}/.claude.json" ]; then
+# is already logged in (credentials present AND non-empty/JSON-shaped). Skipping
+# onboarding also suppresses Claude Code's automatic login prompt on a fresh
+# `claude` start, so doing it unconditionally forced the user to type `/login` by
+# hand. When credentials are absent — or a truncated/corrupt file — we leave
+# .claude.json uncreated so `claude` opens the OAuth flow itself. When present
+# and well-formed, we pre-create it so a logged-in user is not re-onboarded every
+# session (the original bug — see https://github.com/tfvchow/field-notes-public/issues/10).
+creds_valid() {
+    local f="${HOME}/.claude/.credentials.json"
+    # Non-empty and ends with `}` (a complete JSON object, not a truncated write).
+    [ -s "$f" ] && [ "$(tr -d '[:space:]' < "$f" | tail -c 1)" = "}" ]
+}
+if creds_valid && [ ! -f "${HOME}/.claude.json" ]; then
     cat > "${HOME}/.claude.json" << 'EOF'
 {
   "hasCompletedOnboarding": true,

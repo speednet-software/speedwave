@@ -175,11 +175,19 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `  if (-not (Get-NetFirewallHyperVRule -DisplayName $$RuleName -ErrorAction SilentlyContinue)) {$\r$\n`
   FileWrite $0 `    return $$false$\r$\n`
   FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `  # With no program list there are no WDF allow rules to find — report missing so$\r$\n`
+  FileWrite $0 `  # the caller does not claim $\"rules present$\" off the Hyper-V rule alone.$\r$\n`
+  FileWrite $0 `  if ($$ProgramList.Count -eq 0) {$\r$\n`
+  FileWrite $0 `    return $$false$\r$\n`
+  FileWrite $0 `  }$\r$\n`
   FileWrite $0 `  foreach ($$prog in $$ProgramList) {$\r$\n`
+  FileWrite $0 `    # Match only OUR rules (DisplayName prefix) — a foreign vendor's Allow rule$\r$\n`
+  FileWrite $0 `    # for the same Program must not satisfy our idempotency check and leave us$\r$\n`
+  FileWrite $0 `    # relying on a rule we do not own.$\r$\n`
   FileWrite $0 `    $$rule = Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |$\r$\n`
   FileWrite $0 `      Where-Object { $$_.Program -eq $$prog } |$\r$\n`
   FileWrite $0 `      Get-NetFirewallRule -ErrorAction SilentlyContinue |$\r$\n`
-  FileWrite $0 `      Where-Object { $$_.Action -eq 'Allow' -and $$_.Direction -eq 'Inbound' }$\r$\n`
+  FileWrite $0 `      Where-Object { $$_.Action -eq 'Allow' -and $$_.Direction -eq 'Inbound' -and $$_.DisplayName -like $\"$$WdfRulePrefix*$\" }$\r$\n`
   FileWrite $0 `    if (-not $$rule) { return $$false }$\r$\n`
   FileWrite $0 `  }$\r$\n`
   FileWrite $0 `  return $$true$\r$\n`

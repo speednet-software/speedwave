@@ -685,7 +685,9 @@ clean-lima:
 NODE_VERSION := $(shell cat .node-version 2>/dev/null || echo 24.14.0)
 
 download-nodejs:
-	@if [ -s desktop/src-tauri/nodejs/bin/node ] || [ -s desktop/src-tauri/nodejs/node.exe ]; then \
+	@NODE_BIN=desktop/src-tauri/nodejs/bin/node; \
+	case "$$(uname -s)" in MINGW*|MSYS*|CYGWIN*) NODE_BIN=desktop/src-tauri/nodejs/node.exe ;; esac; \
+	if [ -s "$$NODE_BIN" ] && "$$NODE_BIN" --version >/dev/null 2>&1; then \
 		echo "  ✅ Node.js already present — skipping download"; \
 		exit 0; \
 	fi; \
