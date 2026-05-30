@@ -782,9 +782,7 @@ fn terminate_decision(terminate: TerminateOnChange, has_running: bool) -> bool {
     }
 }
 
-/// Sets `/etc/wsl.conf` automount to [`consts::wsl_automount_options`] (`metadata`
-/// + uid/gid; ADR-052). `Yes` at import, `IfIdle` at startup; `Err` if the write
-/// didn't land (mount stays uid=0 → login breaks).
+/// Sets `/etc/wsl.conf` automount (`Yes` at import, `IfIdle` at startup; `Err` if the write didn't land — ADR-052).
 #[cfg(target_os = "windows")]
 pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Result<()> {
     let distro = consts::wsl_distro_name();
@@ -880,8 +878,7 @@ fn wsl_distro_has_running_containers(distro: &str) -> bool {
     }
 }
 
-/// Mutates `/etc/wsl.conf`, then re-reads it: emits `metadata-present`/`-added`/
-/// `-failed` from the trailing grep, never from the write's own exit (see ADR-052).
+/// Mutates `/etc/wsl.conf`, then emits `metadata-present`/`-added`/`-failed` from a re-read grep, not the write's exit (ADR-052).
 #[cfg(any(target_os = "windows", test))]
 fn build_wsl_metadata_script(opts: &str, uid: u32) -> String {
     format!(
@@ -2978,15 +2975,11 @@ mod tests {
         }
     }
 
-    // Cross-platform: the enum and the terminate policy are pure (no Windows
-    // I/O), so their guards run on every host.
+    // Pure policy, no Windows I/O — runs on every host.
     mod terminate_on_change_tests {
         use super::super::{running_containers_from_probe, terminate_decision, TerminateOnChange};
 
-        // Regression guard for the E2E "cannot exec in a stopped state"
-        // failure: the import path may terminate (no containers yet), the
-        // startup-migration path uses IfIdle (terminate only when no containers
-        // run, so the metadata mount applies before the first start).
+        // Guards the "cannot exec in a stopped state" regression: Yes vs IfIdle stay distinct.
         #[test]
         fn variants_are_distinct() {
             assert_ne!(TerminateOnChange::IfIdle, TerminateOnChange::Yes);
@@ -3073,8 +3066,7 @@ mod tests {
         fn metadata_script_confirms_uid_via_trailing_grep() {
             let script =
                 super::super::build_wsl_metadata_script("metadata,uid=1000,gid=1000", 1000);
-            // Success is gated on re-reading the file for the uid, NOT on the
-            // exit of `printf >>`.
+            // Success is gated on the re-read grep, not the `printf >>` exit.
             assert!(
                 script.contains(
                     "if grep -q 'uid=1000' \"$f\" 2>/dev/null; then echo speedwave-metadata-added"
