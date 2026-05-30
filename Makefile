@@ -40,7 +40,20 @@ export SPEEDWAVE_DATA_DIR
 
 LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
-.PHONY: all build test check clean dev install-deps setup-dev install-hooks \
+# Hard floor: dev/test must never run against the production data dir, even if a
+# user exported SPEEDWAVE_DATA_DIR=~/.speedwave (the `?=` default above only
+# applies when it is unset). A data dir whose basename is exactly `.speedwave` is
+# production — matched both with a path separator (`*/.speedwave`) and bare
+# (`.speedwave`). Portable: pure shell `case`, no installed tool.
+guard-not-prod-data-dir:
+	@case "$(SPEEDWAVE_DATA_DIR)" in \
+	  */.speedwave | .speedwave) \
+	    echo "❌ Refusing: SPEEDWAVE_DATA_DIR=$(SPEEDWAVE_DATA_DIR) is the production data dir." >&2; \
+	    echo "   Use ~/.speedwave-dev (the default) or another non-production dir." >&2; \
+	    exit 1;; \
+	esac
+
+.PHONY: all build test check clean dev install-deps setup-dev install-hooks guard-not-prod-data-dir \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
@@ -174,7 +187,7 @@ all: build
 build: build-runtime build-cli build-os-cli build-mcp build-angular
 	@echo "\n✅ All builds complete"
 
-test: test-rust test-angular test-mcp test-entrypoint test-desktop-config test-desktop-build test-desktop test-ci
+test: guard-not-prod-data-dir test-rust test-angular test-mcp test-entrypoint test-desktop-config test-desktop-build test-desktop test-ci
 	@echo "\n✅ All tests passed"
 
 check: check-clippy check-desktop-clippy check-fmt check-mcp check-mcp-lint check-angular-lint
@@ -445,6 +458,7 @@ test-desktop-build: build-angular build-mcp
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	bats _tests/desktop/desktop-build.bats
 	bats _tests/desktop/bundle-build-context.bats
+	bats _tests/desktop/guard-prod-data-dir.bats
 	bats _tests/desktop/verify-bundled-assets.bats
 	bats _tests/desktop/sign-bundled-binaries.bats
 	bats _tests/desktop/release-workflow-signing.bats
@@ -793,7 +807,7 @@ endif
 # invokes the actual builds explicitly.
 
 ifeq ($(OS),Windows_NT)
-dev: download-nodejs download-sherpa-onnx download-wsl-resources generate-installer-nsh
+dev: guard-not-prod-data-dir download-nodejs download-sherpa-onnx download-wsl-resources generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@sh -c 'export SHERPA_ONNX_LIB_DIR=$$(cat $(SHERPA_LIB_CACHE)); echo "Building with SHERPA_ONNX_LIB_DIR=$$SHERPA_ONNX_LIB_DIR"; "$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp'
 	@echo "Preparing build context..."
@@ -803,7 +817,7 @@ dev: download-nodejs download-sherpa-onnx download-wsl-resources generate-instal
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh $(SHERPA_LIB_CACHE)
 else
-dev: build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
+dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@echo "Preparing build context..."

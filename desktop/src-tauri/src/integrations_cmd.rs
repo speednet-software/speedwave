@@ -13,10 +13,25 @@ use speedwave_runtime::plugin;
 
 /// SharePoint banner trigger. ScopeMismatch and Stale collapse to one UI code.
 fn detect_oauth_action_required(project: &str, service: &str) -> Option<String> {
-    if service != "sharepoint" {
-        return None;
+    detect_oauth_action_required_in(speedwave_runtime::consts::data_dir(), project, service)
+}
+
+/// Parameterised by `data_dir` so unit tests avoid the `consts::data_dir()`
+/// `OnceLock` cache. Production callers go through `detect_oauth_action_required`.
+fn detect_oauth_action_required_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+) -> Option<String> {
+    // Gate on the descriptor flag (SSOT) rather than a hardcoded service id, so a
+    // future OAuth-refresh integration surfaces the banner without a code change.
+    // The scope-coverage check below is still Microsoft-shaped; revisit when a
+    // second provider lands (today only SharePoint sets `uses_oauth_refresh`).
+    match speedwave_runtime::consts::find_mcp_service(service) {
+        Some(d) if d.uses_oauth_refresh => {}
+        _ => return None,
     }
-    let oauth_path = plugin::oauth_state_file(project, service);
+    let oauth_path = plugin::oauth_state_file_in(data_dir, project, service);
     let raw = match std::fs::read_to_string(&oauth_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -72,12 +87,25 @@ fn detect_scope_mismatch_or_stale(oauth_json_raw: &str, required: &[String]) -> 
         .iter()
         .filter_map(|s| s.as_str().map(|s| s.to_lowercase()))
         .collect();
-    if required.iter().all(|r| granted.contains(r)) {
+    // `offline_access` is an OIDC control scope: Microsoft never echoes it in the
+    // token-response `scope` field, so it never lands in grantedScopes. Same rule
+    // as `mcp-servers/oauth/src/providers/microsoft.ts` `refreshMicrosoftToken`
+    // (the `s.toLowerCase() === 'offline_access'` skip) — keep both in sync;
+    // refreshToken is the real proof offline access was granted.
+    let covers = required
+        .iter()
+        .filter(|r| r.as_str() != OFFLINE_ACCESS_SCOPE)
+        .all(|r| granted.contains(r));
+    if covers {
         ReauthorizeReason::Ok
     } else {
         ReauthorizeReason::ScopeMismatch
     }
 }
+
+/// OIDC control scope (lowercase) excluded from the response-scope coverage
+/// check — Microsoft does not return it in the token-response `scope` field.
+const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
 
 fn sharepoint_required_scopes() -> Vec<String> {
     speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES
@@ -307,11 +335,11 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             (values, None)
         };
 
-        let oauth_action_required = if configured {
-            detect_oauth_action_required(&project, svc)
-        } else {
-            None
-        };
+        // Computed regardless of `configured`: a stale/malformed providerData
+        // makes the service read as unconfigured, yet the user must still be
+        // led to re-authorise. `detect_oauth_action_required` returns None for a
+        // fresh (absent) file, so a never-configured service shows no banner.
+        let oauth_action_required = detect_oauth_action_required(&project, svc);
 
         // Optional-only services (e.g. context7): badge from descriptor only when
         // no key is set — once configured, drop the badge to mirror configured state.
@@ -418,28 +446,9 @@ fn is_service_configured_inner(data_dir: &std::path::Path, project: &str, servic
 }
 
 /// snake_case descriptor key → camelCase property name used in oauth.json.
+/// Delegates to the runtime SSOT so the mapping lives in one place.
 fn snake_to_oauth_json_key(key: &str) -> &str {
-    match key {
-        "client_id" => "clientId",
-        "tenant_id" => "tenantId",
-        "refresh_token" => "refreshToken",
-        // Drift catch: any new snake_case provider key must get an arm.
-        // Never interpolate `other` — it carries caller-supplied values
-        // (CodeQL cleartext-logging false positive otherwise).
-        other => {
-            debug_assert!(
-                !other.contains('_'),
-                "snake_to_oauth_json_key: unknown snake_case key — add an arm",
-            );
-            #[cfg(not(debug_assertions))]
-            if other.contains('_') {
-                log::warn!(
-                    "snake_to_oauth_json_key: unknown snake_case key — add an arm to this function"
-                );
-            }
-            other
-        }
-    }
+    speedwave_runtime::oauth_state_migration::oauth_json_key_for(key)
 }
 
 fn get_oauth_field<'a>(
@@ -1026,7 +1035,7 @@ fn merge_oauth_state_json(
     let obj = state
         .as_object_mut()
         .ok_or_else(|| "oauth state must be a JSON object".to_string())?;
-    ensure_provider_data_object(obj);
+    speedwave_runtime::oauth_state_migration::ensure_provider_data_object(obj);
     for (key, (storage, value)) in fields {
         let prop = snake_to_oauth_json_key(key).to_string();
         match storage {
@@ -1070,12 +1079,6 @@ fn read_existing_oauth_state(
 
 fn fresh_oauth_skeleton(provider: &str) -> serde_json::Value {
     serde_json::json!({ "provider": provider, "providerData": {} })
-}
-
-fn ensure_provider_data_object(obj: &mut serde_json::Map<String, serde_json::Value>) {
-    if !obj.get("providerData").is_some_and(|v| v.is_object()) {
-        obj.insert("providerData".to_string(), serde_json::json!({}));
-    }
 }
 
 fn provider_id_for_service(service: &str) -> Option<&'static str> {
@@ -1369,6 +1372,34 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// Drift guard: the camelCase JSON keys the Desktop save-path derives from the
+    /// `OAuthStateProviderData` descriptors (via `snake_to_oauth_json_key`, which
+    /// delegates to the runtime SSOT) must equal the runtime `IDENTITY_KEYS` the
+    /// migration nests under `providerData`. Catches a descriptor/mapping change
+    /// that would desync the two write paths.
+    #[test]
+    fn provider_data_descriptor_keys_match_runtime_identity_keys() {
+        let mut got: Vec<&str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
+            .iter()
+            .flat_map(|svc| svc.auth_fields.iter())
+            .filter(|f| {
+                f.storage == speedwave_runtime::consts::FieldStorage::OAuthStateProviderData
+            })
+            .map(|f| snake_to_oauth_json_key(f.key))
+            .collect();
+        got.sort_unstable();
+        got.dedup();
+
+        let mut expected: Vec<&str> =
+            speedwave_runtime::oauth_state_migration::IDENTITY_KEYS.to_vec();
+        expected.sort_unstable();
+
+        assert_eq!(
+            got, expected,
+            "Desktop providerData descriptor keys drifted from runtime IDENTITY_KEYS"
+        );
+    }
+
     // -- IntegrationsConfig::set_service tests --
 
     #[test]
@@ -1478,6 +1509,69 @@ mod tests {
         );
     }
 
+    // Microsoft echoes the fully-qualified resource scopes (e.g.
+    // `https://graph.microsoft.com/sites.manage.all`) in grantedScopes, never
+    // `offline_access`. These mirror the live `documents` / `speedwave` files.
+    const GRAPH_RESOURCE_SCOPES: &[&str] = &[
+        "https://graph.microsoft.com/sites.manage.all",
+        "https://graph.microsoft.com/files.readwrite.all",
+        "https://graph.microsoft.com/user.read",
+    ];
+
+    #[test]
+    fn detect_scope_mismatch_ok_when_all_resource_scopes_granted_but_offline_access_absent() {
+        // The `documents` live case: every resource scope present, only
+        // `offline_access` "missing" — Microsoft never echoes it. Must be Ok.
+        let raw = well_formed_state(GRAPH_RESOURCE_SCOPES);
+        let required = sharepoint_required_scopes(); // includes offline_access
+        assert!(required.iter().any(|r| r == OFFLINE_ACCESS_SCOPE));
+        assert_eq!(
+            detect_scope_mismatch_or_stale(&raw, &required),
+            ReauthorizeReason::Ok
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_still_trips_when_a_real_resource_scope_is_missing() {
+        // Excluding offline_access must NOT mask a genuinely missing resource
+        // scope (here: sites.manage.all absent).
+        let raw = well_formed_state(&[
+            "https://graph.microsoft.com/files.readwrite.all",
+            "https://graph.microsoft.com/user.read",
+        ]);
+        let required = sharepoint_required_scopes();
+        assert_eq!(
+            detect_scope_mismatch_or_stale(&raw, &required),
+            ReauthorizeReason::ScopeMismatch
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_ok_when_offline_access_also_present() {
+        // A freshly re-authed file that happens to carry offline_access in
+        // grantedScopes must still be Ok (the `speedwave` live case).
+        let mut granted: Vec<&str> = GRAPH_RESOURCE_SCOPES.to_vec();
+        granted.push("offline_access");
+        let raw = well_formed_state(&granted);
+        let required = sharepoint_required_scopes();
+        assert_eq!(
+            detect_scope_mismatch_or_stale(&raw, &required),
+            ReauthorizeReason::Ok
+        );
+    }
+
+    #[test]
+    fn detect_scope_mismatch_stale_guard_unaffected_by_offline_access_filter() {
+        // The Stale guards (missing providerData / grantedScopes) take priority
+        // over the coverage check — filtering offline_access must not change that.
+        let raw = r#"{"provider":"microsoft","providerData":{"clientId":"c"}}"#;
+        let required = sharepoint_required_scopes();
+        assert_eq!(
+            detect_scope_mismatch_or_stale(raw, &required),
+            ReauthorizeReason::Stale
+        );
+    }
+
     #[test]
     fn detect_scope_mismatch_returns_stale_on_malformed_json() {
         let required = vec!["sites.manage.all".to_string()];
@@ -1548,6 +1642,54 @@ mod tests {
         assert!(detect_oauth_action_required("any-project", "slack").is_none());
         assert!(detect_oauth_action_required("any-project", "redmine").is_none());
         assert!(detect_oauth_action_required("any-project", "gitlab").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_none_when_file_absent() {
+        // Fresh, never-configured SharePoint: no file → no banner.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "sharepoint").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_some_when_present_but_stale() {
+        // Present file with malformed providerData (the bug state): the service
+        // reads as unconfigured, but the banner MUST still fire so the user can
+        // re-authorise. Stale collapses to "scope_mismatch".
+        let tmp = tempfile::tempdir().unwrap();
+        let path = speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "p", "sharepoint");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"provider":"microsoft","clientId":"cid","tenantId":"tid"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "sharepoint"),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_oauth_action_required_none_when_well_formed_and_scopes_cover() {
+        // A fully valid file covering required scopes → no banner.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "p", "sharepoint");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let granted: Vec<String> = sharepoint_required_scopes();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "microsoft",
+                "providerData": { "clientId": "cid", "tenantId": "tid" },
+                "grantedScopes": granted,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "sharepoint").is_none());
     }
 
     #[test]
@@ -2802,6 +2944,50 @@ mod tests {
         assert_eq!(json["providerData"]["clientId"], "cid");
         // Pre-existing top-level fields preserved.
         assert_eq!(json["refreshToken"], "old");
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn merge_oauth_state_json_lifts_legacy_top_level_identity() {
+        // Legacy file with clientId/tenantId at top level (pre-providerData).
+        // A re-save must lift them under providerData AND remove the top-level
+        // copies — not leave them orphaned next to an empty providerData.
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let path = speedwave_runtime::plugin::oauth_state_file("p", "sharepoint");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "microsoft",
+                "clientId": "legacy-cid",
+                "tenantId": "legacy-tid",
+                "refreshToken": "rt"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Re-save only tenant_id; client_id must survive via the lift.
+        let fields: std::collections::HashMap<_, _> =
+            [merge_field("tenant_id", "new-tid")].into_iter().collect();
+        merge_oauth_state_json("p", "sharepoint", &fields).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["providerData"]["clientId"], "legacy-cid");
+        assert_eq!(json["providerData"]["tenantId"], "new-tid");
+        // Top-level identity removed — no orphans.
+        assert!(json.get("clientId").is_none());
+        assert!(json.get("tenantId").is_none());
+        assert_eq!(json["refreshToken"], "rt");
 
         match prev {
             Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),

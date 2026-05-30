@@ -1706,13 +1706,19 @@ fn main() {
             if setup_started {
                 // Sanitise any v1 SharePoint secrets still in the worker-mounted
                 // token dir (refresh_token / client_id / tenant_id). Best-effort,
-                // idempotent. Users with v1 state see the "Re-authorize SharePoint"
-                // banner — see legacy_token_cleanup module docs.
+                // idempotent. Secrets are never migrated — see module docs.
                 let cleaned =
                     speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
                 if cleaned > 0 {
                     log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
                 }
+
+                // Self-heal legacy/partial oauth.json whose clientId/tenantId sit
+                // top-level instead of under providerData (ADR-060 addendum).
+                // Shape-only, idempotent — never moves secrets. It logs its own
+                // summary; do not re-log the return value (CodeQL taints it).
+                let _ =
+                    speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
                 // Start IDE Bridge
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
