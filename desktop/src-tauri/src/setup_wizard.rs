@@ -800,34 +800,33 @@ pub enum TerminateOnChange {
 pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Result<()> {
     let distro = consts::wsl_distro_name();
     // Run as root inside the distro; `/etc/wsl.conf` is distro-internal (not the
-    // host .wslconfig). Two branches: add the block if `[automount]` is absent,
-    // else upgrade an options line that lacks our uid in place. Both emit the
-    // change marker so the caller's terminate/restart logic fires.
+    // host .wslconfig). Add the `[automount]` block if absent, else upgrade an
+    // options line that lacks our uid. Success is confirmed by re-reading the
+    // file (see script comment), so the caller's terminate/restart only fires
+    // when the uid actually landed.
     let opts = consts::wsl_automount_options();
     let (uid, _gid) = consts::container_uid_gid();
-    let script = format!(
-        "f=/etc/wsl.conf; \
-         if ! grep -q '\\[automount\\]' \"$f\" 2>/dev/null; then \
-           printf '\\n[automount]\\noptions = \"{opts}\"\\n' >> \"$f\"; \
-           echo speedwave-metadata-added; \
-         elif ! grep -q 'uid={uid}' \"$f\" 2>/dev/null; then \
-           sed -i '/\\[automount\\]/,/^[[:space:]]*\\[/ s|^[[:space:]]*options[[:space:]]*=.*|options = \"{opts}\"|' \"$f\"; \
-           if grep -q 'uid={uid}' \"$f\" 2>/dev/null; then echo speedwave-metadata-added; \
-           else echo speedwave-metadata-noop; fi; \
-         fi",
-        opts = opts,
-        uid = uid,
-    );
-    let script = script.as_str();
+    let script = build_wsl_metadata_script(&opts, uid);
     let out = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", distro, "-u", "root", "--", "sh", "-c", script])
+        .args([
+            "-d",
+            distro,
+            "-u",
+            "root",
+            "--",
+            "sh",
+            "-c",
+            script.as_str(),
+        ])
         .output();
     match out {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            if stdout.contains("speedwave-metadata-noop") {
-                log::warn!(
-                    "ensure_wsl_distro_metadata: wsl.conf options line could not be upgraded for {distro} (malformed [automount]?); uid not applied"
+            if stdout.contains("speedwave-metadata-failed") {
+                log::error!(
+                    "ensure_wsl_distro_metadata: wrote wsl.conf for {distro} but uid={uid} is NOT present on re-read; \
+                     the uid-1000 container will hit EACCES on the drvfs mount and fail to start (login/onboarding broken). \
+                     Check that /etc/wsl.conf is writable as root in this distro"
                 );
             }
             let changed = stdout.contains("speedwave-metadata-added");
@@ -859,6 +858,36 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
         Err(e) => log::warn!("ensure_wsl_distro_metadata: spawn failed (non-fatal): {e}"),
     }
     Ok(())
+}
+
+/// Builds the `sh -c` script that adds/upgrades the `[automount]` block in
+/// `/etc/wsl.conf`, then RE-READS the file and emits a marker reflecting the
+/// real on-disk state:
+/// - `speedwave-metadata-present` — uid already there, nothing changed
+/// - `speedwave-metadata-added` — mutation confirmed by the trailing grep
+/// - `speedwave-metadata-failed` — mutation did NOT land (e.g. read-only file)
+///
+/// The trailing grep is load-bearing: the previous version `echo`'d success
+/// unconditionally right after `printf >> "$f"`, so a silently-failed append
+/// reported success and the caller `--terminate`d "to apply" a change that
+/// never reached the file — leaving the drvfs mount uid=0 and the uid-1000
+/// container at EACCES (login/onboarding broken).
+#[cfg(any(target_os = "windows", test))]
+fn build_wsl_metadata_script(opts: &str, uid: u32) -> String {
+    format!(
+        "f=/etc/wsl.conf; \
+         if ! grep -q '\\[automount\\]' \"$f\" 2>/dev/null; then \
+           printf '\\n[automount]\\noptions = \"{opts}\"\\n' >> \"$f\" 2>/dev/null; \
+         elif ! grep -q 'uid={uid}' \"$f\" 2>/dev/null; then \
+           sed -i '/\\[automount\\]/,/^[[:space:]]*\\[/ s|^[[:space:]]*options[[:space:]]*=.*|options = \"{opts}\"|' \"$f\" 2>/dev/null; \
+         else \
+           echo speedwave-metadata-present; exit 0; \
+         fi; \
+         if grep -q 'uid={uid}' \"$f\" 2>/dev/null; then echo speedwave-metadata-added; \
+         else echo speedwave-metadata-failed; fi",
+        opts = opts,
+        uid = uid,
+    )
 }
 
 /// Makes the project's `claude-home` tree owned by the container user so the
@@ -2989,6 +3018,57 @@ mod tests {
                 opts.contains(&format!("gid={gid}")),
                 "automount gid must equal container gid {gid}"
             );
+        }
+    }
+
+    // Cross-platform: the metadata script is pure string-building, so its
+    // regression guards run on every host (not gated to Windows like the
+    // `consts::wsl_automount_options` checks above, which need a Windows-only
+    // const).
+    mod wsl_metadata_script_tests {
+        // Regression guard for the silent-success bug: the prod `Speedwave`
+        // distro logged "enabled metadata automount ... (terminated to apply)"
+        // 8× while /etc/wsl.conf stayed untouched (no [automount], mount uid=0)
+        // — so the container hit EACCES and login never worked. The script must
+        // re-read the file and only emit `metadata-added` when the uid is
+        // actually present; a failed write must surface as `metadata-failed`.
+        #[test]
+        fn metadata_script_confirms_uid_via_trailing_grep() {
+            let script =
+                super::super::build_wsl_metadata_script("metadata,uid=1000,gid=1000", 1000);
+            // Success is gated on re-reading the file for the uid, NOT on the
+            // exit of `printf >>`.
+            assert!(
+                script.contains(
+                    "if grep -q 'uid=1000' \"$f\" 2>/dev/null; then echo speedwave-metadata-added"
+                ),
+                "metadata-added must be gated on a trailing grep of the written file"
+            );
+            assert!(
+                script.contains("else echo speedwave-metadata-failed"),
+                "a write that does not land must emit metadata-failed, not success"
+            );
+            // The already-correct distro short-circuits without a spurious change.
+            assert!(
+                script.contains("echo speedwave-metadata-present; exit 0"),
+                "an already-uid distro must report 'present' and not trigger a restart"
+            );
+            // No success marker is echoed immediately after the append — that
+            // unconditional echo was the original silent-success bug. The only
+            // `metadata-added` occurrence is the grep-gated one.
+            assert_eq!(
+                script.matches("speedwave-metadata-added").count(),
+                1,
+                "metadata-added must appear exactly once, after the trailing grep"
+            );
+        }
+
+        #[test]
+        fn metadata_script_interpolates_uid() {
+            let script =
+                super::super::build_wsl_metadata_script("metadata,uid=4242,gid=4242", 4242);
+            assert!(script.contains("grep -q 'uid=4242'"));
+            assert!(script.contains("metadata,uid=4242,gid=4242"));
         }
     }
 
