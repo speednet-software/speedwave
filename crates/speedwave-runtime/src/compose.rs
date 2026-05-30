@@ -484,7 +484,8 @@ fn env_entry_needs_quoting(entry: &str) -> bool {
 /// with `serde_json::to_string`, whose escaping is a valid YAML 1.2
 /// double-quoted scalar (YAML is a JSON superset) — no hand-rolled escaping.
 /// Idempotent: already-quoted entries (those that don't re-parse as a bare
-/// `KEY=VALUE` plain scalar) are left untouched.
+/// `KEY=VALUE` plain scalar) are left untouched. Assumes the renderer emits no
+/// YAML comments inside `environment:` (a same-indent `#` line closes the block).
 fn harden_env_scalar_quoting(yaml: &str) -> anyhow::Result<String> {
     let mut out = String::with_capacity(yaml.len());
     // Indentation (column) of the active `environment:` key, if inside one.
@@ -3534,13 +3535,6 @@ mod tests {
     #[serial_test::serial(host_addressing)]
     fn render_compose_with_multiline_custom_headers_is_valid_yaml() {
         let data_dir = tempfile::tempdir().unwrap();
-        // Use the same locking pattern as the existing token-touching tests
-        // — they share a global `~/.speedwave/tokens` namespace and would
-        // otherwise race when run in parallel.
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let project = format!("render-multiline-headers-{}", std::process::id());
         let tokens_dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
             .expect("ensure_token_dir must succeed in test env");
@@ -3710,10 +3704,6 @@ mod tests {
     #[serial_test::serial(host_addressing)]
     fn render_compose_strips_authorization_from_custom_headers() {
         let data_dir = tempfile::tempdir().unwrap();
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let project = format!("authz-strip-{}", std::process::id());
         let tokens_dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
             .expect("ensure_token_dir must succeed in test env");
@@ -3877,6 +3867,36 @@ mod tests {
         assert!(
             !once.contains("\\\""),
             "no double-escaping of existing quotes"
+        );
+    }
+
+    #[test]
+    fn harden_env_scalar_quoting_reopens_block_for_second_service() {
+        // Two services, each with a bracketed env value separated by the first
+        // service's `networks`/`image` lines: the block must CLOSE after svc-a's
+        // env and RE-OPEN for svc-b's, so both bracketed values get quoted.
+        let yaml = "services:\n  a:\n    environment:\n    \
+                    - MODEL_A=x[1m]\n    image: reg/a:1\n  b:\n    environment:\n    \
+                    - MODEL_B=y[1m]\nnetworks: {}\n";
+        let hardened = harden_env_scalar_quoting(yaml).unwrap();
+        assert!(
+            hardened.contains("- \"MODEL_A=x[1m]\""),
+            "svc-a bracketed entry must be quoted, got:\n{hardened}"
+        );
+        assert!(
+            hardened.contains("- \"MODEL_B=y[1m]\""),
+            "svc-b bracketed entry must be quoted (block re-opened), got:\n{hardened}"
+        );
+        // The intervening non-env line is untouched (block closed before it).
+        assert!(hardened.contains("    image: reg/a:1\n"));
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&hardened).unwrap();
+        assert_eq!(
+            doc["services"]["a"]["environment"][0].as_str(),
+            Some("MODEL_A=x[1m]")
+        );
+        assert_eq!(
+            doc["services"]["b"]["environment"][0].as_str(),
+            Some("MODEL_B=y[1m]")
         );
     }
 
