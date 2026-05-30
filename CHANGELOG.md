@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.13.0](https://github.com/speednet-software/speedwave/compare/v0.12.1...v0.13.0) (2026-05-30)
+
+
+### Features
+
+* **desktop:** Opus 4.8, theme switch, plugin manifest UX, Windows & runtime fixes ([#747](https://github.com/speednet-software/speedwave/issues/747)) ([d13c59b](https://github.com/speednet-software/speedwave/commit/d13c59b914ed7d60681627757f4a39ca39ca7910))
+
 ## [0.12.1](https://github.com/speednet-software/speedwave/compare/v0.12.0...v0.12.1) (2026-05-27)
 
 
