@@ -221,20 +221,37 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_files_recursive(plugin_dir, &mut files)?;
 
-    // OsStr byte sort matches Python's as_posix() string sort in the sign script.
-    // Path::cmp is component-based: "X/..." < "X.ts", but byte-wise '.' (0x2E) < '/' (0x2F).
-    files.sort_by(|a, b| {
-        let ra = a.strip_prefix(plugin_dir).unwrap_or(a);
-        let rb = b.strip_prefix(plugin_dir).unwrap_or(b);
-        ra.as_os_str().cmp(rb.as_os_str())
-    });
+    // Build (posix_rel_path, file) pairs. The sign script hashes `as_posix()`
+    // paths (forward slashes), so the relative path MUST be normalized to '/'
+    // on every host — on Windows the native separator is '\', which would
+    // both reorder the sort and change the hashed bytes, breaking verification
+    // for any plugin with subdirectories (macOS already uses '/').
+    let mut entries: Vec<(String, &std::path::PathBuf)> = files
+        .iter()
+        .map(|file| {
+            let rel = file.strip_prefix(plugin_dir).unwrap_or(file);
+            // A non-UTF-8 component must abort, never be silently dropped: the
+            // sign script's as_posix() preserves the bytes, so dropping a
+            // component would diverge the digest AND let a non-UTF-8-named
+            // file vanish from the hash (collision / hidden-file vector).
+            let posix = rel
+                .components()
+                .map(|c| {
+                    c.as_os_str().to_str().ok_or_else(|| {
+                        anyhow::anyhow!("plugin path is not valid UTF-8: {}", rel.display())
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?
+                .join("/");
+            Ok((posix, file))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // Byte sort on the posix path matches Python's as_posix() string sort.
+    entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
 
     let mut hasher = Sha256::new();
-    for file in &files {
-        let rel = file
-            .strip_prefix(plugin_dir)
-            .unwrap_or(file)
-            .to_string_lossy();
+    for (rel, file) in &entries {
         // Hash: relative path (length-prefixed) + file contents (length-prefixed).
         // Length prefixes prevent ambiguity between ("ab","cd") and ("a","bcd").
         let rel_bytes = rel.as_bytes();
@@ -611,6 +628,75 @@ mod tests {
         assert_eq!(
             actual, expected,
             "file 'X.ts' must sort BEFORE 'X/<files>' (POSIX byte order, matching Python sign script)"
+        );
+    }
+
+    /// The hashed relative path must always use forward slashes, regardless
+    /// of host OS separator. The sign script hashes `as_posix()` paths, so a
+    /// nested file like `claude-resources/skills/foo.md` must contribute the
+    /// posix string to the digest — never the Windows `\`-separated form.
+    /// This is the regression test for the Windows-only "signature
+    /// verification failed" caused by `to_string_lossy()` emitting native
+    /// separators (macOS already produced '/').
+    #[test]
+    fn test_compute_digest_uses_posix_separators_for_nested_paths() {
+        use sha2::{Digest, Sha256};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("claude-resources").join("skills")).unwrap();
+        std::fs::write(
+            dir.join("claude-resources").join("skills").join("foo.md"),
+            b"body",
+        )
+        .unwrap();
+
+        let actual = compute_plugin_digest(dir).unwrap();
+
+        // Expected digest: the relative path hashed with '/' separators,
+        // exactly as the Python sign script's as_posix() would emit it.
+        let mut hasher = Sha256::new();
+        let rel = b"claude-resources/skills/foo.md" as &[u8];
+        let content = b"body" as &[u8];
+        hasher.update((rel.len() as u64).to_le_bytes());
+        hasher.update(rel);
+        hasher.update((content.len() as u64).to_le_bytes());
+        hasher.update(content);
+        let expected = hasher.finalize().to_vec();
+
+        assert_eq!(
+            actual, expected,
+            "nested-path digest must use posix '/' separators on every host"
+        );
+    }
+
+    /// A plugin file whose name is not valid UTF-8 must abort digest
+    /// computation, not be silently skipped. Silent skipping would diverge
+    /// the digest from the sign script's `as_posix()` (which preserves the
+    /// bytes via surrogateescape) and let a non-UTF-8-named file disappear
+    /// from the hash entirely — a collision / hidden-file vector.
+    #[cfg(unix)]
+    #[test]
+    fn test_compute_digest_rejects_non_utf8_filename() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("plugin.json"), r#"{"name":"ok"}"#).unwrap();
+        // 0xFF is never valid UTF-8 — a legal name on ext4 (the container FS),
+        // but APFS/HFS+ reject it at write time ("Illegal byte sequence").
+        // Where the FS won't even store such a name the bug is unreachable,
+        // so skip the assertion there; it still runs on Linux CI.
+        let bad = OsStr::from_bytes(b"bad\xff.md");
+        if std::fs::write(dir.join(bad), b"body").is_err() {
+            return;
+        }
+
+        let err = compute_plugin_digest(dir).expect_err("non-UTF-8 name must abort digest");
+        assert!(
+            err.to_string().contains("not valid UTF-8"),
+            "expected UTF-8 rejection, got: {err}"
         );
     }
 
