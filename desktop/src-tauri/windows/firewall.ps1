@@ -154,6 +154,9 @@ function Install-FirewallRule {
 # elevation (MSI runs as LocalSystem; perUser NSIS may lack admin and the
 # Desktop runtime 'ensure' fallback then creates the rules). Always exit 0.
 if ($Mode -eq 'install') {
+  # Note: the NSIS/WiX installer callers always pass -Programs. With an empty
+  # list Test-RuleExists fails closed, so this never short-circuits and falls
+  # through to Install-FirewallRule (which is harmless/idempotent).
   if (Test-RuleExists) {
     Write-Status "rules already present"
     exit 0

@@ -227,6 +227,12 @@ mod windows_impl {
     /// UAC consent dialog. Avoids hanging on `-Verb RunAs` in headless/SCCM
     /// contexts. `SESSIONNAME` is set for interactive (`Console`/`RDP-*`)
     /// sessions and absent for service/non-interactive launches.
+    ///
+    /// Known edge case: a Session-0 System-account launch (SCCM/Intune device
+    /// scope) can have `SESSIONNAME="Console"` with no interactive user, so this
+    /// returns `true` and a `RunAs` would block. The process-wide `Once` guard
+    /// caps the damage to one blocking call per launch; a CreateProcess timeout
+    /// would be the fuller fix if this ever proves a real deployment problem.
     fn is_interactive_session() -> bool {
         std::env::var_os("SESSIONNAME").is_some()
     }

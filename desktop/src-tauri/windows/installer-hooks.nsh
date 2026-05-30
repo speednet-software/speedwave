@@ -280,6 +280,9 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `# elevation (MSI runs as LocalSystem; perUser NSIS may lack admin and the$\r$\n`
   FileWrite $0 `# Desktop runtime 'ensure' fallback then creates the rules). Always exit 0.$\r$\n`
   FileWrite $0 `if ($$Mode -eq 'install') {$\r$\n`
+  FileWrite $0 `  # Note: the NSIS/WiX installer callers always pass -Programs. With an empty$\r$\n`
+  FileWrite $0 `  # list Test-RuleExists fails closed, so this never short-circuits and falls$\r$\n`
+  FileWrite $0 `  # through to Install-FirewallRule (which is harmless/idempotent).$\r$\n`
   FileWrite $0 `  if (Test-RuleExists) {$\r$\n`
   FileWrite $0 `    Write-Status $\"rules already present$\"$\r$\n`
   FileWrite $0 `    exit 0$\r$\n`
