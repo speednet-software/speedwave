@@ -1790,17 +1790,15 @@ fn main() {
                     log::warn!(".wslconfig VPN-compat migration failed: {e}");
                 }
 
-                // Existing distros (created before the metadata fix) need the
-                // automount=metadata option too, or claude /login cannot chmod
-                // its credentials on the 9p mount. Idempotent. NEVER terminate
-                // here: containers may already be running, and a `wsl
-                // --terminate` would kill them mid-start ("cannot exec in a
-                // stopped state"). The new wsl.conf applies on the next natural
-                // WSL restart.
+                // Startup/post-update: apply automount=metadata for existing
+                // distros via `IfIdle` (terminates only when idle). Err is
+                // non-fatal here — never block app launch (see ADR-052).
                 #[cfg(target_os = "windows")]
                 {
                     use setup_wizard::TerminateOnChange;
-                    if let Err(e) = setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::No) {
+                    if let Err(e) =
+                        setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::IfIdle)
+                    {
                         log::warn!("wsl.conf metadata migration failed: {e}");
                     }
                 }

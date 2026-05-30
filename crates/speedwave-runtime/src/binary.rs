@@ -12,6 +12,27 @@ const PATH_SEP: char = ';';
 #[cfg(not(windows))]
 const PATH_SEP: char = ':';
 
+/// Windows OS commands that are never bundled, so the "falling back to system
+/// PATH" debug log is noise for them (`wsl.exe` is called on every health poll).
+/// Windows-only on purpose: on macOS resolving one of these is a real misconfig
+/// worth logging, so suppression must not apply there.
+#[cfg(windows)]
+const ALWAYS_SYSTEM_COMMANDS: &[&str] = &["wsl.exe", "powershell.exe", "cmd.exe"];
+
+/// `true` if `cmd` is a never-bundled Windows OS command (case-insensitive).
+/// Matches on the file name, so an absolute path (e.g. the
+/// `C:\Windows\System32\wsl.exe` that `reset_vm` builds) is recognised too.
+#[cfg(windows)]
+fn is_always_system_command(cmd: &str) -> bool {
+    let name = std::path::Path::new(cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(cmd);
+    ALWAYS_SYSTEM_COMMANDS
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(name))
+}
+
 /// Resolves the path to a binary command.
 ///
 /// Lima (macOS), Node.js, and the native macOS CLI helpers (`reminders-cli`,
@@ -70,10 +91,16 @@ pub fn resolve_binary(cmd: &str) -> String {
             return top_level.to_string_lossy().to_string();
         }
 
-        log::debug!(
-            "bundled binary not found for '{}', falling back to system PATH",
-            cmd
-        );
+        #[cfg(windows)]
+        let should_log = !is_always_system_command(cmd);
+        #[cfg(not(windows))]
+        let should_log = true;
+        if should_log {
+            log::debug!(
+                "bundled binary not found for '{}', falling back to system PATH",
+                cmd
+            );
+        }
     }
     cmd.to_string()
 }
@@ -271,6 +298,35 @@ pub(crate) mod tests {
         env::remove_var(BUNDLE_RESOURCES_ENV);
     }
 
+    // Never-bundled OS commands are recognised (case-insensitive) so the
+    // fallback debug log is suppressed; everything else still logs. Windows-only.
+    #[cfg(windows)]
+    #[test]
+    fn always_system_commands_recognised() {
+        assert!(is_always_system_command("wsl.exe"));
+        assert!(is_always_system_command("WSL.EXE"));
+        assert!(is_always_system_command("powershell.exe"));
+        assert!(is_always_system_command("cmd.exe"));
+        // Absolute path (reset_vm builds C:\Windows\System32\wsl.exe).
+        assert!(is_always_system_command("C:\\Windows\\System32\\wsl.exe"));
+        assert!(is_always_system_command("C:\\Windows\\System32\\WSL.EXE"));
+        assert!(!is_always_system_command("limactl"));
+        assert!(!is_always_system_command("nerdctl"));
+        assert!(!is_always_system_command("node"));
+        assert!(!is_always_system_command("C:\\bundle\\limactl.exe"));
+    }
+
+    // Suppression must not change resolution — wsl.exe still resolves to the bare name.
+    #[cfg(windows)]
+    #[test]
+    fn resolve_binary_wsl_still_returns_bare_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
+        assert_eq!(resolve_binary("wsl.exe"), "wsl.exe");
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
     #[test]
     fn resolve_binary_top_level_native_cli_helper() {
         // Native CLIs (audio-capture-cli, reminders-cli, …) sit at the top of
@@ -374,11 +430,12 @@ pub(crate) mod tests {
         let home = lima_home();
         assert!(home.is_some());
         let path = home.unwrap();
-        let path_str = path.to_string_lossy();
+        // Compare path components (separator-agnostic): on Windows the path uses
+        // `\`, so a string `ends_with(".speedwave/lima")` would wrongly fail.
         assert!(
-            path_str.ends_with(".speedwave/lima"),
+            path.ends_with(std::path::Path::new(".speedwave").join("lima")),
             "expected path ending with .speedwave/lima, got: {}",
-            path_str
+            path.display()
         );
     }
 
@@ -396,11 +453,11 @@ pub(crate) mod tests {
             .expect("LIMA_HOME env should be set for limactl");
 
         let value = lima_home_env.1.expect("LIMA_HOME should have a value");
-        let value_str = value.to_string_lossy();
+        // Separator-agnostic (Windows uses `\`): compare path components.
         assert!(
-            value_str.ends_with(".speedwave/lima"),
+            std::path::Path::new(value).ends_with(std::path::Path::new(".speedwave").join("lima")),
             "LIMA_HOME should end with .speedwave/lima, got: {}",
-            value_str
+            value.to_string_lossy()
         );
     }
 
