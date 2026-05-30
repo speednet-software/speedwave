@@ -28,7 +28,7 @@ Whether you are adding a feature, fixing a bug, or refactoring something adjacen
 The full table lives in ADR-040. Two rules when modifying it:
 
 - **`ANTHROPIC_MODEL` is primary**, `ANTHROPIC_CUSTOM_MODEL_OPTION` is supplementary. Without `ANTHROPIC_MODEL` Claude Code falls back to the account-tier default and the UI lies about which model is running. Don't drop one and keep the other.
-- **`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL` is forbidden.** It silently remaps built-in aliases to the local model and leaves three misleading Anthropic names in `/model`. Choose explicit naming over silent remapping.
+- **`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL` is forbidden in the LOCAL-provider branch.** Pointing an alias at a local model silently remaps built-in aliases and leaves three misleading Anthropic names in `/model` — choose explicit naming over silent remapping. The Anthropic-provider branch is the deliberate exception: it pins each alias to _its own_ Anthropic model (Opus stays Opus) and appends the documented `[1m]` 1M-context suffix (anthropics/claude-code#34083 workaround in `defaults.rs::anthropic_default_models_env`). That neither remaps nor misleads, so it is allowed. Any env value carrying YAML flow indicators (`[ ] { } ,`, e.g. `[1m]`) is re-quoted by `compose::harden_env_scalar_quoting` so nerdctl's strict Go YAML parser accepts it — never hand-emit such a value unquoted.
 
 ## SSRF policy (host-side)
 

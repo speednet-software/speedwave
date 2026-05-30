@@ -20,6 +20,7 @@ import {
   CreateProjectModalComponent,
   type CreatedProject,
 } from '../shared/create-project-modal/create-project-modal.component';
+import { LogoComponent } from '../shared/logo.component';
 
 /** Maximum number of pipeline steps. */
 const TOTAL_STEPS = 6;
@@ -30,7 +31,7 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
 /** Guides the user through initial environment setup and project creation. */
 @Component({
   selector: 'app-setup-wizard',
-  imports: [CommonModule, ProgressStepsComponent, CreateProjectModalComponent],
+  imports: [CommonModule, ProgressStepsComponent, CreateProjectModalComponent, LogoComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -41,17 +42,8 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
       <div class="flex flex-1 overflow-y-auto">
         <div class="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-6 py-10">
           <div class="mb-6 flex items-center gap-3">
-            <!-- Mask + bg-current so the mark adapts per theme (white on dark,
-                 ink on light); a static white PNG vanished on the light bg. -->
-            <span
-              role="img"
-              aria-label="Speedwave"
-              class="block h-9 w-9 bg-current text-[var(--ink)] dark:text-white"
-              style="
-                -webkit-mask: url('assets/speedwave-mark-white.svg') center / contain no-repeat;
-                mask: url('assets/speedwave-mark-white.svg') center / contain no-repeat;
-              "
-            ></span>
+            <!-- Inline SVG mark adapts per theme via currentColor. -->
+            <app-logo class="h-9 w-9" />
             <div>
               <div
                 class="view-title view-title-display text-[var(--ink)]"

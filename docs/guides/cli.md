@@ -13,10 +13,11 @@ The CLI is re-linked on every Desktop startup, so Desktop updates automatically 
 
 ## Basic Usage
 
-The CLI uses the current working directory as project context:
+Bare `speedwave` runs the **active project** — the one selected in the Desktop project switcher (`active_project` in config). The working directory does not select the project; pass `--project <name>` to target a different one:
 
 ```bash
-cd ~/projects/acme && speedwave
+speedwave                      # run the active project (Desktop selector)
+speedwave --project acme       # run a specific project from any directory
 ```
 
 This renders compose for the current bundle, starts containers for the project, then launches an interactive Claude Code session inside the Claude container with all configured MCP integrations available.
@@ -24,12 +25,12 @@ This renders compose for the current bundle, starts containers for the project, 
 ## Subcommands
 
 ```
-speedwave                      # default: compose_up + exec claude in container
+speedwave [--project <name>]   # default: compose_up + exec claude for the active project
 speedwave init [name]          # register CWD as a project
 speedwave login [--project <name>]   # OAuth login: opens claude TUI for /login
 speedwave logout [--project <name>]  # delete Claude credentials for the project
 speedwave check                # run OS prereq + security checks, exit 0/1
-speedwave update               # rebuild current bundle images + recreate containers
+speedwave update [--project <name>]  # rebuild bundle images + recreate containers
 speedwave self-update          # download latest CLI from GitHub Releases
 speedwave plugin install <path.zip>  # install plugin from signed ZIP
 speedwave plugin list                # list installed plugins with status
@@ -39,20 +40,20 @@ speedwave plugin disable <slug> --project <name>  # disable plugin for a project
 speedwave --help | -h | help   # print usage and exit (no runtime required)
 ```
 
-- **`speedwave`** (no subcommand) — starts containers via `compose_up`, then exec's into the Claude container for an interactive session
+- **`speedwave [--project <name>]`** (no subcommand) — starts containers via `compose_up`, then exec's into the Claude container for an interactive session. Targets the active project (the Desktop selector) by default; `--project <name>` overrides it from any directory.
 - **`speedwave init [name]`** — registers the current working directory as a Speedwave project. If `name` is omitted, the directory name is used. The project is set as active. Project names must be lowercase (`a-z`, `0-9`, `_`, `.`, `-`), start with a letter or digit, and be at most 63 characters. Example:
   ```bash
   cd ~/projects/acme && speedwave init        # registers as "acme"
   cd ~/projects/acme && speedwave init my-app # registers as "my-app"
   ```
   If the directory is already registered, prints the existing project name and exits.
-- **`speedwave login [--project <name>]`** — runs `compose_up`, then exec's into the Claude container and starts an interactive `claude` session. Type `/login` at Claude's prompt to walk through the Anthropic OAuth flow (browser sign-in, paste-back code if the localhost callback can't reach the host). Claude Code stores credentials inside the container at `~/.claude/.credentials.json`, persisted on the host via the per-project `CLAUDE_HOME` bind-mount. If `--project <name>` is omitted, uses the project matched by CWD. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
-- **`speedwave logout [--project <name>]`** — deletes Claude Code's credential files (`.credentials.json`, `.claude.json`) from the project's `CLAUDE_HOME` mount. No runtime required. Idempotent — succeeds even when nothing is stored.
+- **`speedwave login [--project <name>]`** — runs `compose_up`, then exec's into the Claude container and starts an interactive `claude` session. Type `/login` at Claude's prompt to walk through the Anthropic OAuth flow (browser sign-in, paste-back code if the localhost callback can't reach the host). Claude Code stores credentials inside the container at `~/.claude/.credentials.json`, persisted on the host via the per-project `CLAUDE_HOME` bind-mount. If `--project <name>` is omitted, uses the active project. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
+- **`speedwave logout [--project <name>]`** — deletes Claude Code's credential files (`.credentials.json`, `.claude.json`) from the project's `CLAUDE_HOME` mount. No runtime required. Idempotent — succeeds even when nothing is stored. If `--project <name>` is omitted, targets the active project.
 - **`speedwave check`** — runs OS prerequisite checks (WSL2 on Windows; no host-level prerequisites on macOS) and compose security validation (cap_drop, token isolation, port binding, etc.), exits 0 on success or 1 on failure with detailed violation messages and remediation steps. Note: `check` is diagnostic-only — it reports permission violations but does NOT auto-fix them. All container start paths (`speedwave`, update, rollback) auto-fix file permissions before running SecurityCheck. `check` (and every other runtime command except `--help`, `self-update`, `init`, and the `plugin install`/`list`/`remove` recovery commands) first runs the **plugin signature audit**: if any plugin under `~/.speedwave/plugins/` no longer matches its signed contents, the command prints the affected plugins to stderr and exits `2` before doing anything else. Recover with `speedwave plugin remove <slug>` or by deleting the plugin directory.
-- **`speedwave update`** — rebuilds the built-in images for the current `bundle_id` and recreates containers with the current bundle manifest
+- **`speedwave update [--project <name>]`** — rebuilds the built-in images for the current `bundle_id` and recreates containers with the current bundle manifest. Targets the active project by default; `--project <name>` overrides it.
 - **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases, replaces the current binary, and automatically rebuilds container images if the version changed.
 
-  > **Note:** If the rebuild fails (e.g., when run from a non-project directory or without Desktop running), run `speedwave update` from your project directory. For multiple projects, run `speedwave update` from each project directory or restart the Desktop app.
+  > **Note:** If the rebuild fails (e.g., when run without Desktop running), start Desktop and run `speedwave update` again. `update` targets the active project; select a different project in the Desktop switcher to update it, or restart the Desktop app.
 
 - **`speedwave plugin install <path.zip>`** — verifies the Ed25519 signature, extracts the plugin to `~/.speedwave/plugins/<slug>/`, and registers it.
 
@@ -70,13 +71,15 @@ speedwave --help | -h | help   # print usage and exit (no runtime required)
 
 ## Project Resolution
 
-When running `speedwave` (no subcommand), the CLI resolves which project to use:
+`speedwave`, `login`, `logout`, and `update` resolve which project to use as follows:
 
-1. **Exact path match** — CWD matches a registered project directory
-2. **Subdirectory match** — CWD is inside a registered project directory (longest prefix wins for nested projects)
-3. **Fallback** — uses `active_project` from config (with a warning and hint to run `speedwave init`)
+1. **`--project <name>`** (or `--project=<name>`) — explicit override on `speedwave`/`login`/`logout`/`update`, wins from any directory. The name must be a registered project; an unknown name is rejected with an error.
+2. **Active project** — `active_project` from config, set by the Desktop project switcher (or by the last `speedwave init`)
+3. **First project** — used when no project is active
 
-All path comparisons use canonicalized paths (symlinks resolved, trailing slashes normalized).
+The working directory is **not** consulted (except by `speedwave init`, which registers the current directory as a new project). The Desktop selector is the single source of truth.
+
+Unknown subcommands and stray arguments are rejected, not silently ignored: `speedwave updatte` exits with `unknown command: 'updatte'`, and extra arguments after a subcommand (e.g. `speedwave check junk`) exit with a usage hint.
 
 ## Bundle Compatibility
 

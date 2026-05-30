@@ -584,7 +584,7 @@ mod tests {
             "should mention other distro, got: {err}"
         );
         assert!(
-            err.contains("Speedwave"),
+            err.contains(crate::consts::wsl_distro_name()),
             "should mention runtime distro, got: {err}"
         );
         assert!(
@@ -727,7 +727,10 @@ mod tests {
         let canonical = std::fs::canonicalize(&project_dir).unwrap();
         // Use a synthetic UNC-style string for the stored `dir` field — this
         // is what we'd persist on Windows for `\\wsl.localhost\Speedwave\projects\foo`.
-        let unc_canonical_str = r"\\wsl.localhost\Speedwave\projects\foo".to_string();
+        let unc_canonical_str = format!(
+            r"\\wsl.localhost\{}\projects\foo",
+            crate::consts::wsl_distro_name()
+        );
 
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
@@ -948,7 +951,10 @@ mod tests {
         let project_dir = tmp.path().join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
         let canonical = std::fs::canonicalize(&project_dir).unwrap();
-        let unc_str = r"\\wsl.localhost\Speedwave\projects\foo".to_string();
+        let unc_str = format!(
+            r"\\wsl.localhost\{}\projects\foo",
+            crate::consts::wsl_distro_name()
+        );
 
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();

@@ -124,17 +124,24 @@ mod tests {
 
     #[test]
     fn dirs_are_under_the_data_dir() {
-        let data = crate::consts::data_dir();
-        assert!(
-            transcripts_dir().starts_with(data),
-            "transcripts dir must be under data_dir"
+        // Structural invariant only — both dirs share one data-dir parent and
+        // end with their subdir. Asserted without naming the production
+        // `data_dir()` singleton, so it holds under any isolated tempdir.
+        let transcripts = transcripts_dir();
+        let models = models_dir();
+        assert!(transcripts.ends_with(crate::consts::TRANSCRIPTS_SUBDIR));
+        assert!(models.ends_with(crate::consts::MODELS_SUBDIR));
+        assert_eq!(
+            transcripts.parent(),
+            models.parent(),
+            "both dirs must live directly under the same data_dir"
         );
         assert!(
-            models_dir().starts_with(data),
-            "models dir must be under data_dir"
+            transcripts
+                .parent()
+                .is_some_and(|p| p.file_name().is_some()),
+            "data-dir parent must be non-empty"
         );
-        assert!(transcripts_dir().ends_with(crate::consts::TRANSCRIPTS_SUBDIR));
-        assert!(models_dir().ends_with(crate::consts::MODELS_SUBDIR));
     }
 
     #[test]

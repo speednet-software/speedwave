@@ -1304,7 +1304,7 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Running",
             );
@@ -1326,7 +1326,7 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Stopped",
             );
@@ -1349,14 +1349,15 @@ mod tests {
     #[test]
     fn test_ssh_config_path_contains_lima_vm() {
         let path = ssh_config_path().expect("ssh_config_path should succeed");
-        // Compare via Path components — path separators differ across host
-        // OSes (`/` on Unix, `\` on Windows) and a substring check would
-        // false-fail on Windows runners. The semantic claim is "the path
-        // ends with `.speedwave/lima/<vm>/ssh.config`", which Path::ends_with
-        // expresses portably.
+        // Compare via Path components — separators differ across host OSes
+        // (`/` vs `\`) and a substring check would false-fail on Windows.
+        // The semantic claim is the data-dir-relative tail `lima/<vm>/ssh.config`;
+        // asserting only that tail keeps the test tempdir-robust without naming
+        // the production `data_dir()` singleton.
         let vm = consts::lima_vm_name();
-        let expected_tail: std::path::PathBuf =
-            [".speedwave", "lima", vm, "ssh.config"].iter().collect();
+        let expected_tail = std::path::Path::new(consts::LIMA_SUBDIR)
+            .join(vm)
+            .join("ssh.config");
         assert!(
             path.ends_with(&expected_tail),
             "ssh_config_path should end with {:?}, got: {}",
@@ -1787,11 +1788,11 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Stopped",
             )
-            .with_response(&format!("limactl start {}", consts::LIMA_VM_NAME), "");
+            .with_response(&format!("limactl start {}", consts::lima_vm_name()), "");
         let rt = LimaRuntime::with_runner(Box::new(runner));
         assert!(
             !rt.is_available(),
@@ -1810,12 +1811,12 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Stopped",
             )
             .with_error(
-                &format!("limactl start {}", consts::LIMA_VM_NAME),
+                &format!("limactl start {}", consts::lima_vm_name()),
                 "timed out after 120s",
             );
         let rt = LimaRuntime::with_runner(Box::new(runner));
@@ -1935,7 +1936,7 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Running",
             )
@@ -1946,7 +1947,7 @@ mod tests {
         let runner = mock_runner_with_vm_running().with_response(
             &format!(
                 "limactl shell {} -- sudo nerdctl logs --tail 100 speedwave_acme_claude",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "line1\nline2\nline3",
         );
@@ -1996,7 +1997,7 @@ mod tests {
         let runner = mock_runner_with_vm_running().with_response(
             &format!(
                 "limactl shell {} -- sudo nerdctl compose -f {} -p acme logs --timestamps --tail 200",
-                consts::LIMA_VM_NAME,
+                consts::lima_vm_name(),
                 compose_file
             ),
             "hub | started\nclaude | ready",
@@ -2013,7 +2014,7 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Stopped",
             );
@@ -2132,7 +2133,7 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Stopped",
             );
@@ -2252,7 +2253,7 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Stopped",
             );
@@ -2293,7 +2294,7 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Stopped",
             );
@@ -2310,7 +2311,7 @@ mod tests {
         let runner = mock_runner_with_vm_running().with_error(
             &format!(
                 "limactl shell {} -- sudo nerdctl builder prune --all --force",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "buildkit prune failed",
         );
@@ -2346,7 +2347,7 @@ mod tests {
         let runner = mock_runner_with_vm_running().with_response(
             &format!(
                 "limactl shell {} -- sudo nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "",
         );
@@ -2360,7 +2361,7 @@ mod tests {
         let runner = mock_runner_with_vm_running().with_error(
             &format!(
                 "limactl shell {} -- sudo nerdctl rmi speedwave-claude:abc123",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "no such image",
         );
@@ -2378,7 +2379,7 @@ mod tests {
         let runner = mock_runner_with_vm_running().with_response(
             &format!(
                 "limactl shell {} -- sudo nerdctl rmi --force speedwave-mcp-example:1.0.0",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "",
         );
@@ -2396,7 +2397,7 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Stopped",
             );
@@ -2416,28 +2417,28 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl shell {} -- sudo systemctl restart containerd",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "",
             )
             .with_response(
                 &format!(
                     "limactl shell {} -- sudo systemctl restart buildkit",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "",
             )
             .with_response(
                 &format!(
                     "limactl shell {} -- sudo nerdctl info",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "containerd running",
             )
             .with_response(
                 &format!(
                     "limactl shell {} -- sudo buildctl debug workers",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "buildkit ready",
             );
@@ -2451,28 +2452,28 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl shell {} -- sudo systemctl restart containerd",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "",
             )
             .with_error(
                 &format!(
                     "limactl shell {} -- sudo systemctl restart buildkit",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "unit not found",
             )
             .with_response(
                 &format!(
                     "limactl shell {} -- sudo nerdctl info",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "containerd running",
             )
             .with_response(
                 &format!(
                     "limactl shell {} -- sudo buildctl debug workers",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "buildkit ready",
             );
@@ -2490,7 +2491,7 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Stopped",
             );
@@ -2508,14 +2509,14 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl shell {} -- sudo systemctl restart containerd",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "",
             )
             .with_error(
                 &format!(
                     "limactl shell {} -- sudo systemctl restart buildkit",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "some other error",
             );
@@ -2538,12 +2539,12 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Running",
             )
             .with_response(
-                &format!("limactl stop --force {}", consts::LIMA_VM_NAME),
+                &format!("limactl stop --force {}", consts::lima_vm_name()),
                 "",
             );
         let rt = LimaRuntime::with_runner(Box::new(runner));
@@ -2558,7 +2559,7 @@ mod tests {
         let runner = MockRunner::new().with_response(
             &format!(
                 "limactl list --format {{{{.Status}}}} {}",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "Stopped",
         );
@@ -2574,7 +2575,7 @@ mod tests {
         let runner = MockRunner::new().with_response(
             &format!(
                 "limactl list --format {{{{.Status}}}} {}",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "",
         );
@@ -2590,7 +2591,7 @@ mod tests {
         let runner = MockRunner::new().with_response(
             &format!(
                 "limactl list --format {{{{.Status}}}} {}",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "Stopping",
         );
@@ -2606,7 +2607,7 @@ mod tests {
         let runner = MockRunner::new().with_response(
             &format!(
                 "limactl list --format {{{{.Status}}}} {}",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "Creating",
         );
@@ -2623,12 +2624,12 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "Running",
             )
             .with_error(
-                &format!("limactl stop --force {}", consts::LIMA_VM_NAME),
+                &format!("limactl stop --force {}", consts::lima_vm_name()),
                 "limactl stop failed",
             );
         let rt = LimaRuntime::with_runner(Box::new(runner));
@@ -2650,12 +2651,12 @@ mod tests {
             .with_response(
                 &format!(
                     "limactl list --format {{{{.Status}}}} {}",
-                    consts::LIMA_VM_NAME
+                    consts::lima_vm_name()
                 ),
                 "  Running  \n",
             )
             .with_response(
-                &format!("limactl stop --force {}", consts::LIMA_VM_NAME),
+                &format!("limactl stop --force {}", consts::lima_vm_name()),
                 "",
             );
         let rt = LimaRuntime::with_runner(Box::new(runner));
@@ -2670,7 +2671,7 @@ mod tests {
         let runner = MockRunner::new().with_error(
             &format!(
                 "limactl list --format {{{{.Status}}}} {}",
-                consts::LIMA_VM_NAME
+                consts::lima_vm_name()
             ),
             "limactl not found",
         );
@@ -2759,7 +2760,7 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_stopping_then_stopped_starts_vm() {
-        let vm = consts::LIMA_VM_NAME;
+        let vm = consts::lima_vm_name();
         let runner = SequencedRunner::new()
             // ensure_ready_inner calls: --version, then list (Stopping), then list (Stopped)
             .with_fallback("limactl --version", "limactl version 1.0.0")
@@ -2777,7 +2778,7 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_stopping_then_running_returns_ok_without_start() {
-        let vm = consts::LIMA_VM_NAME;
+        let vm = consts::lima_vm_name();
         let runner = SequencedRunner::new()
             .with_fallback("limactl --version", "limactl version 1.0.0")
             .with_sequence(

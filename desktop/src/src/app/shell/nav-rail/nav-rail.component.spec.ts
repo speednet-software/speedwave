@@ -53,9 +53,15 @@ describe('NavRailComponent', () => {
     expect(buttons.length).toBe(3);
   });
 
-  it('renders the Speedwave logo with role="img" and an accessible name', () => {
-    const logo = fixture.nativeElement.querySelector('[role="img"][aria-label="Speedwave"]');
+  // Inline currentColor SVG — not a CSS-mask span (breaks under tauri://localhost) nor a static image.
+  it('renders the Speedwave logo as an inline theme-adaptive SVG mark', () => {
+    const logo = fixture.nativeElement.querySelector(
+      'app-logo[role="img"][aria-label="Speedwave"]'
+    );
     expect(logo).not.toBeNull();
+    expect(logo.querySelector('svg path[fill="currentColor"]')).not.toBeNull();
+    expect(logo.getAttribute('style') ?? '').not.toContain('mask');
+    expect(fixture.nativeElement.querySelector('img[src*="speedwave-mark-white"]')).toBeNull();
   });
 
   it('marks the active entry with .active and aria-current="page"', () => {

@@ -9,11 +9,13 @@ Speedwave ships two separate interfaces that share a single `speedwave-runtime` 
 **CLI** — for developers:
 
 ```bash
-cd ~/projects/acme-corp
-speedwave  # → Lima VM + containers + Claude Code in terminal
+speedwave  # → Lima VM + containers + Claude Code for the active project
 ```
 
-Project context = working directory. Zero configuration. Identical UX to today.
+Project context = the active project (the Desktop project switcher's
+`active_project`), or `--project <name>` to override. The working directory is
+not consulted for project selection. See [the CLI guide's Project Resolution
+section](../guides/cli.md#project-resolution) for the precedence rules.
 
 **Desktop (Speedwave.app)** — for everyone:
 

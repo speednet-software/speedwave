@@ -50,6 +50,11 @@ EOF
 
     # OS_AVAILABLE_SUBS is normally injected by compose.rs from TOGGLEABLE_OS_SERVICES.
     export OS_AVAILABLE_SUBS="reminders,calendar,mail,notes"
+
+    # Per-test health marker under TEST_HOME so parallel runs (bats --jobs)
+    # and concurrent worktrees never collide on a shared /tmp path.
+    # Cleaned up by teardown's rm -rf "$TEST_HOME".
+    export CLAUDE_READY_MARKER="$TEST_HOME/claude-ready"
 }
 
 teardown() {
@@ -119,7 +124,7 @@ EOF
 @test "creates /tmp/claude-ready health marker" {
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ -f /tmp/claude-ready ]
+    [ -f "$CLAUDE_READY_MARKER" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -905,7 +910,7 @@ EOF
         "$ENTRYPOINT" > "$patched"
     run bash "$patched" true
     [ "$status" -eq 0 ]
-    [ -f /tmp/claude-ready ]
+    [ -f "$CLAUDE_READY_MARKER" ]
     # Stderr should carry the warning so operators see the degraded mode.
     [[ "$output" == *"did not respond"* ]]
     rm -f "$patched"

@@ -167,6 +167,16 @@ pub fn images_exist(
             return false;
         }
     };
+    images_exist_with_manifest(rt, integrations, &manifest)
+}
+
+/// Core of [`images_exist`] taking an explicit manifest, so tests inject a build
+/// root and never read `SPEEDWAVE_RESOURCES_DIR` or the production marker.
+pub fn images_exist_with_manifest(
+    rt: &super::runtime::LockedRuntime,
+    integrations: &ResolvedIntegrationsConfig,
+    manifest: &crate::bundle::BundleManifest,
+) -> bool {
     enabled_images(integrations).iter().all(|img| {
         let tag = image_ref(img.name, &manifest.bundle_id);
         rt.image_exists(&tag).unwrap_or(false)
@@ -520,6 +530,19 @@ pub fn build_missing_images(
     images: &[&ImageDef],
     bundle_id: &str,
 ) -> anyhow::Result<u32> {
+    let root = resolve_build_root()?;
+    build_missing_images_in(runtime, images, bundle_id, &root)
+}
+
+/// Env-free core of [`build_missing_images`]: takes an explicit build root so
+/// tests never read `SPEEDWAVE_RESOURCES_DIR` or the production `~/.speedwave`
+/// marker.
+pub fn build_missing_images_in(
+    runtime: &crate::runtime::LockedRuntime,
+    images: &[&ImageDef],
+    bundle_id: &str,
+    root: &std::path::Path,
+) -> anyhow::Result<u32> {
     let missing: Vec<&ImageDef> = images
         .iter()
         .copied()
@@ -532,7 +555,7 @@ pub fn build_missing_images(
     if missing.is_empty() {
         return Ok(0);
     }
-    build_images_for_bundle(runtime, &missing, bundle_id)?;
+    build_images_for_bundle_in(runtime, &missing, bundle_id, root)?;
     Ok(missing.len() as u32)
 }
 
@@ -601,7 +624,19 @@ pub fn build_images_for_bundle(
     bundle_id: &str,
 ) -> anyhow::Result<u32> {
     let root = resolve_build_root()?;
-    let vm_root = runtime.prepare_build_context(&root)?;
+    build_images_for_bundle_in(runtime, images, bundle_id, &root)
+}
+
+/// Env-free core of [`build_images_for_bundle`]: takes an explicit build root so
+/// tests never read `SPEEDWAVE_RESOURCES_DIR` or the production `~/.speedwave`
+/// marker. The public no-arg shim resolves the root from env at the call site.
+pub fn build_images_for_bundle_in(
+    runtime: &crate::runtime::LockedRuntime,
+    images: &[&ImageDef],
+    bundle_id: &str,
+    root: &std::path::Path,
+) -> anyhow::Result<u32> {
+    let vm_root = runtime.prepare_build_context(root)?;
     let needs_cleanup = vm_root != root;
 
     let result = try_build_images(runtime, images, &vm_root, bundle_id).or_else(|first_err| {
@@ -955,11 +990,14 @@ mod tests {
     }
 
     /// Builds the full `IMAGES` set, mirroring the old `build_all_images_for_bundle`.
+    /// Takes an explicit build root so no test reads `SPEEDWAVE_RESOURCES_DIR` or
+    /// the production `~/.speedwave` marker.
     fn build_all_for_bundle(
         rt: &crate::runtime::LockedRuntime,
         bundle_id: &str,
+        root: &std::path::Path,
     ) -> anyhow::Result<u32> {
-        build_images_for_bundle(rt, &all_images(), bundle_id)
+        build_images_for_bundle_in(rt, &all_images(), bundle_id, root)
     }
 
     /// Runs the worker pool over the full `IMAGES` set (old `try_build_all`).
@@ -989,7 +1027,10 @@ mod tests {
 
     #[test]
     fn test_images_containerfiles_exist() {
-        let root = resolve_build_root().unwrap();
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        // None home → dev source tree, never the production ~/.speedwave marker.
+        let root = resolve_build_root_with_home(None).unwrap();
         for img in IMAGES {
             let path = root.join(img.containerfile);
             assert!(
@@ -1003,7 +1044,10 @@ mod tests {
 
     #[test]
     fn test_images_context_dirs_exist() {
-        let root = resolve_build_root().unwrap();
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        // None home → dev source tree, never the production ~/.speedwave marker.
+        let root = resolve_build_root_with_home(None).unwrap();
         for img in IMAGES {
             let path = root.join(img.context_dir);
             assert!(
@@ -1730,10 +1774,11 @@ mod tests {
             .with_prepare_build_context_root(translated.clone())
             .build();
 
-        // build_images_for_bundle resolves the real build root, then calls
-        // prepare_build_context; the mock returns the translated path.
+        // Explicit fake build root keeps the test off SPEEDWAVE_RESOURCES_DIR and
+        // the production marker; the mock returns the translated path regardless.
+        let (_tmp, root) = create_fake_build_root();
         let bundle_id = "test-bundle";
-        let result = build_all_for_bundle(&rt, bundle_id);
+        let result = build_all_for_bundle(&rt, bundle_id, &root);
         assert!(result.is_ok());
 
         assert!(
@@ -1915,8 +1960,8 @@ mod tests {
             github: true,
             ..ResolvedIntegrationsConfig::default()
         };
-        let (rt, handles) = lazy_build_mock(root, vec![]);
-        let n = build_images_for_bundle(&rt, &enabled_images(&cfg), "b1").unwrap();
+        let (rt, handles) = lazy_build_mock(root.clone(), vec![]);
+        let n = build_images_for_bundle_in(&rt, &enabled_images(&cfg), "b1", &root).unwrap();
         assert_eq!(n, 3);
         let mut built = handles.build_tags();
         built.sort();
@@ -1934,13 +1979,13 @@ mod tests {
     fn test_build_missing_images_skips_present() {
         let (_tmp, root) = create_fake_build_root();
         // claude + mcp-hub already present; mcp-playwright missing.
-        let (rt, handles) = lazy_build_mock(root, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+        let (rt, handles) = lazy_build_mock(root.clone(), vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
         let images: Vec<&ImageDef> = vec![
             image_for_service_key("playwright").unwrap(),
             IMAGES.iter().find(|i| i.name == IMAGE_CLAUDE).unwrap(),
             IMAGES.iter().find(|i| i.name == IMAGE_MCP_HUB).unwrap(),
         ];
-        let n = build_missing_images(&rt, &images, "b1").unwrap();
+        let n = build_missing_images_in(&rt, &images, "b1", &root).unwrap();
         assert_eq!(n, 1, "only the missing playwright image is built");
         assert_eq!(
             handles.build_tags(),
@@ -1951,12 +1996,12 @@ mod tests {
     #[test]
     fn test_build_missing_images_noop_when_all_present() {
         let (_tmp, root) = create_fake_build_root();
-        let (rt, handles) = lazy_build_mock(root, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+        let (rt, handles) = lazy_build_mock(root.clone(), vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
         let images: Vec<&ImageDef> = all_images()
             .into_iter()
             .filter(|i| i.name == IMAGE_CLAUDE || i.name == IMAGE_MCP_HUB)
             .collect();
-        let n = build_missing_images(&rt, &images, "b1").unwrap();
+        let n = build_missing_images_in(&rt, &images, "b1", &root).unwrap();
         assert_eq!(n, 0);
         assert!(handles.build_tags().is_empty());
     }
@@ -1973,9 +2018,9 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, handles) = retry_mock(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
 
         assert!(result.is_ok(), "retry should succeed, got: {:?}", result);
         assert_eq!(result.unwrap(), image_count);
@@ -2020,9 +2065,9 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, handles) = retry_mock(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
         assert!(result.is_ok(), "retry should succeed, got: {:?}", result);
         assert_eq!(result.unwrap(), image_count);
 
@@ -2051,9 +2096,9 @@ mod tests {
         }
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, _handles) = retry_mock(build_root, fail_on);
+        let (rt, _handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
         assert!(result.is_err(), "double disk-full must propagate");
 
         let msg = format!("{:#}", result.unwrap_err());
@@ -2101,9 +2146,9 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, handles) = retry_mock(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
 
         assert!(result.is_err(), "generic error should not be retried");
         assert!(
@@ -2184,9 +2229,9 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, handles) = retry_mock(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
 
         assert!(result.is_err(), "second failure should be returned");
         assert!(
@@ -2219,9 +2264,9 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, _handles) = retry_mock(build_root, fail_on);
+        let (rt, _handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
         assert!(result.is_err());
 
         let err = result.unwrap_err();
@@ -2275,9 +2320,9 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, _handles) = retry_mock(build_root, fail_on);
+        let (rt, _handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
         assert!(result.is_err());
 
         let err = result.unwrap_err();
@@ -2310,16 +2355,36 @@ mod tests {
             rt
         }
 
+        /// Synthetic manifest so `images_exist_with_manifest` never reads
+        /// `SPEEDWAVE_RESOURCES_DIR` or the production `~/.speedwave` marker. The
+        /// bundle_id is irrelevant — the mock matches on the image name substring.
+        fn fake_manifest() -> crate::bundle::BundleManifest {
+            crate::bundle::BundleManifest {
+                app_version: "0.0.0-test".to_string(),
+                bundle_id: "testbundle".to_string(),
+                build_context_hash: "deadbeef".to_string(),
+                claude_resources_hash: "cafebabe".to_string(),
+            }
+        }
+
         #[test]
         fn test_images_exist_returns_true_when_all_present() {
             let rt = image_check_mock(&[]);
-            assert!(images_exist(&rt, &all_enabled()));
+            assert!(images_exist_with_manifest(
+                &rt,
+                &all_enabled(),
+                &fake_manifest()
+            ));
         }
 
         #[test]
         fn test_images_exist_returns_false_when_any_missing() {
             let rt = image_check_mock(&["speedwave-claude"]);
-            assert!(!images_exist(&rt, &all_enabled()));
+            assert!(!images_exist_with_manifest(
+                &rt,
+                &all_enabled(),
+                &fake_manifest()
+            ));
         }
 
         #[test]
@@ -2330,7 +2395,7 @@ mod tests {
                 slack: true,
                 ..ResolvedIntegrationsConfig::default()
             };
-            assert!(images_exist(&rt, &cfg));
+            assert!(images_exist_with_manifest(&rt, &cfg, &fake_manifest()));
         }
 
         #[test]
@@ -2340,7 +2405,7 @@ mod tests {
                 slack: true,
                 ..ResolvedIntegrationsConfig::default()
             };
-            assert!(!images_exist(&rt, &cfg));
+            assert!(!images_exist_with_manifest(&rt, &cfg, &fake_manifest()));
         }
     }
 
@@ -2838,9 +2903,9 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, handles) = retry_mock(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
         assert_eq!(result.unwrap(), IMAGES.len() as u32);
 
         assert_eq!(
@@ -2871,9 +2936,9 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, handles) = retry_mock(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
         assert_eq!(
             result.unwrap(),
             IMAGES.len() as u32,
@@ -2905,9 +2970,9 @@ mod tests {
         }
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, handles) = retry_mock(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
         assert!(result.is_err(), "exhausting retries must surface the error");
         let msg = format!("{:#}", result.unwrap_err());
         assert!(
@@ -2940,9 +3005,9 @@ mod tests {
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let (rt, handles) = retry_mock(build_root, fail_on);
+        let (rt, handles) = retry_mock(build_root.clone(), fail_on);
 
-        let result = build_all_for_bundle(&rt, "test-bundle");
+        let result = build_all_for_bundle(&rt, "test-bundle", &build_root);
         assert_eq!(
             result.unwrap(),
             IMAGES.len() as u32,

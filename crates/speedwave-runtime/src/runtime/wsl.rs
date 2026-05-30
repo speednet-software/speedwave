@@ -900,8 +900,10 @@ mod tests {
 
     #[test]
     fn test_is_available_distro_exists() {
-        let runner =
-            MockRunner::new().with_response("wsl.exe --list --quiet", "Ubuntu\nSpeedwave\n");
+        let runner = MockRunner::new().with_response(
+            "wsl.exe --list --quiet",
+            &format!("Ubuntu\n{}\n", consts::wsl_distro_name()),
+        );
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.is_available());
     }
@@ -923,7 +925,7 @@ mod tests {
     #[test]
     fn test_is_available_handles_utf16le_output() {
         // Real wsl.exe outputs UTF-16LE: "Speedwave\r\n" with each char as 2 bytes
-        let text = "Ubuntu\r\nSpeedwave\r\n";
+        let text = format!("Ubuntu\r\n{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
@@ -935,7 +937,7 @@ mod tests {
 
     #[test]
     fn test_is_available_handles_utf16le_with_bom() {
-        let text = "Speedwave\r\n";
+        let text = format!("{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = vec![0xFF, 0xFE]; // BOM
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
@@ -947,7 +949,10 @@ mod tests {
 
     #[test]
     fn test_is_available_distro_with_trailing_null() {
-        let runner = MockRunner::new().with_response("wsl.exe --list --quiet", "Speedwave\0\n");
+        let runner = MockRunner::new().with_response(
+            "wsl.exe --list --quiet",
+            &format!("{}\0\n", consts::wsl_distro_name()),
+        );
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.is_available());
     }
@@ -956,7 +961,7 @@ mod tests {
     fn test_is_available_utf16le_non_ascii_distro_before_speedwave() {
         // Non-ASCII distro name before Speedwave — verifies that
         // UTF-16LE is detected even when the first bytes aren't ASCII
-        let text = "\u{5F00}\u{53D1}\r\nSpeedwave\r\n"; // "开发\r\nSpeedwave\r\n"
+        let text = format!("\u{5F00}\u{53D1}\r\n{}\r\n", consts::wsl_distro_name()); // "开发\r\n<distro>\r\n"
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
@@ -968,11 +973,15 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_distro_exists() {
+        let distro = consts::wsl_distro_name();
         let runner = MockRunner::new()
-            .with_response("wsl.exe --list --quiet", "Ubuntu\nSpeedwave\n")
-            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
+            .with_response("wsl.exe --list --quiet", &format!("Ubuntu\n{distro}\n"))
             .with_response(
-                "wsl.exe -d Speedwave -- buildctl debug workers",
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
+                "containerd running",
+            )
+            .with_response(
+                &format!("wsl.exe -d {distro} -- buildctl debug workers"),
                 "buildkit ready",
             );
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -1017,11 +1026,15 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_containerd_not_running() {
+        let distro = consts::wsl_distro_name();
         let runner = MockRunner::new()
-            .with_response("wsl.exe --list --quiet", "Speedwave\n")
-            .with_error("wsl.exe -d Speedwave -- nerdctl info", "connection refused")
+            .with_response("wsl.exe --list --quiet", &format!("{distro}\n"))
             .with_error(
-                "wsl.exe -d Speedwave -- systemctl start containerd",
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
+                "connection refused",
+            )
+            .with_error(
+                &format!("wsl.exe -d {distro} -- systemctl start containerd"),
                 "start failed",
             );
         let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
@@ -1044,15 +1057,19 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_buildkit_not_running() {
+        let distro = consts::wsl_distro_name();
         let runner = MockRunner::new()
-            .with_response("wsl.exe --list --quiet", "Speedwave\n")
-            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
+            .with_response("wsl.exe --list --quiet", &format!("{distro}\n"))
+            .with_response(
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
+                "containerd running",
+            )
             .with_error(
-                "wsl.exe -d Speedwave -- buildctl debug workers",
+                &format!("wsl.exe -d {distro} -- buildctl debug workers"),
                 "connection refused",
             )
             .with_error(
-                "wsl.exe -d Speedwave -- systemctl start buildkit",
+                &format!("wsl.exe -d {distro} -- systemctl start buildkit"),
                 "start failed",
             );
         let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
@@ -1077,7 +1094,10 @@ mod tests {
     #[test]
     fn test_container_logs() {
         let runner = MockRunner::new().with_response(
-            "wsl.exe -d Speedwave -- nerdctl logs --tail 100 my_container",
+            &format!(
+                "wsl.exe -d {} -- nerdctl logs --tail 100 my_container",
+                consts::wsl_distro_name()
+            ),
             "log output here",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -1095,7 +1115,8 @@ mod tests {
         let compose_file = wsl_compose_file_path("acme").unwrap();
         let runner = MockRunner::new().with_response(
             &format!(
-                "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme logs --timestamps --tail 200",
+                "wsl.exe -d {} -- nerdctl compose -f {} -p acme logs --timestamps --tail 200",
+                consts::wsl_distro_name(),
                 compose_file
             ),
             "hub | started\nclaude | ready",
@@ -1276,18 +1297,18 @@ mod tests {
         // calls) so the mock key matches on Windows runners where the
         // host home dir gets translated to `/mnt/c/...` before being
         // passed into wsl.exe.
+        let distro = consts::wsl_distro_name();
         let compose_file = wsl_compose_file_path("wsl-cleanup-test").unwrap();
         let expected_key = format!(
-            "wsl.exe -d Speedwave -- nerdctl compose -f {} -p wsl-cleanup-test down --remove-orphans",
-            compose_file
+            "wsl.exe -d {distro} -- nerdctl compose -f {compose_file} -p wsl-cleanup-test down --remove-orphans",
         );
         let runner = MockRunner::new()
             .with_response(&expected_key, "")
             .with_response(
-                "wsl.exe -d Speedwave -- nerdctl ps -a --filter label=com.docker.compose.project=wsl-cleanup-test -q",
+                &format!("wsl.exe -d {distro} -- nerdctl ps -a --filter label=com.docker.compose.project=wsl-cleanup-test -q"),
                 "stale-id",
             )
-            .with_response("wsl.exe -d Speedwave -- nerdctl rm -f stale-id", "");
+            .with_response(&format!("wsl.exe -d {distro} -- nerdctl rm -f stale-id"), "");
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.compose_down("wsl-cleanup-test").is_ok());
     }
@@ -1296,7 +1317,8 @@ mod tests {
     fn test_compose_up_recreate_includes_force_recreate() {
         let compose_file = wsl_compose_file_path("acme").unwrap();
         let expected_key = format!(
-            "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme up -d --force-recreate --remove-orphans",
+            "wsl.exe -d {} -- nerdctl compose -f {} -p acme up -d --force-recreate --remove-orphans",
+            consts::wsl_distro_name(),
             compose_file
         );
         let runner = MockRunner::new().with_response(&expected_key, "");
@@ -1308,14 +1330,15 @@ mod tests {
     fn test_compose_validate_runs_nerdctl_compose_config_quiet() {
         let compose_file = wsl_compose_file_path("acme").unwrap();
         let expected_key = format!(
-            "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme config --quiet",
+            "wsl.exe -d {} -- nerdctl compose -f {} -p acme config --quiet",
+            consts::wsl_distro_name(),
             compose_file
         );
         let runner = MockRunner::new().with_response(&expected_key, "");
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(
             rt.compose_validate("acme").is_ok(),
-            "compose_validate must emit `wsl.exe -d Speedwave -- nerdctl compose -f <file> -p acme config --quiet`"
+            "compose_validate must emit `wsl.exe -d <distro> -- nerdctl compose -f <file> -p acme config --quiet`"
         );
     }
 
@@ -1401,16 +1424,18 @@ mod tests {
 
     #[test]
     fn test_is_wsl_unc_path_modern_form() {
-        let info = is_wsl_unc_path(r"\\wsl.localhost\Speedwave\workspace\foo").unwrap();
-        assert_eq!(info.distro, "Speedwave");
+        let distro = consts::wsl_distro_name();
+        let info = is_wsl_unc_path(&format!(r"\\wsl.localhost\{distro}\workspace\foo")).unwrap();
+        assert_eq!(info.distro, distro);
         assert_eq!(info.rest, "workspace/foo");
         assert!(info.is_runtime_distro());
     }
 
     #[test]
     fn test_is_wsl_unc_path_legacy_form() {
-        let info = is_wsl_unc_path(r"\\wsl$\Speedwave\workspace").unwrap();
-        assert_eq!(info.distro, "Speedwave");
+        let distro = consts::wsl_distro_name();
+        let info = is_wsl_unc_path(&format!(r"\\wsl$\{distro}\workspace")).unwrap();
+        assert_eq!(info.distro, distro);
         assert_eq!(info.rest, "workspace");
         assert!(info.is_runtime_distro());
     }
@@ -1488,34 +1513,46 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_wsl_localhost_own_distro() {
-        let result =
-            windows_to_wsl_path(Path::new(r"\\wsl.localhost\Speedwave\workspace\foo")).unwrap();
+        let distro = consts::wsl_distro_name();
+        let result = windows_to_wsl_path(Path::new(&format!(
+            r"\\wsl.localhost\{distro}\workspace\foo"
+        )))
+        .unwrap();
         assert_eq!(result, PathBuf::from("/workspace/foo"));
     }
 
     #[test]
     fn test_windows_to_wsl_path_wsl_dollar_own_distro() {
-        let result = windows_to_wsl_path(Path::new(r"\\wsl$\Speedwave\workspace")).unwrap();
+        let distro = consts::wsl_distro_name();
+        let result =
+            windows_to_wsl_path(Path::new(&format!(r"\\wsl$\{distro}\workspace"))).unwrap();
         assert_eq!(result, PathBuf::from("/workspace"));
     }
 
     #[test]
     fn test_windows_to_wsl_path_canonicalized_wsl_unc() {
-        // \\?\UNC\wsl.localhost\Speedwave\foo (what canonicalize() may return on Windows)
+        // \\?\UNC\wsl.localhost\<distro>\foo (what canonicalize() may return on Windows)
+        let distro = consts::wsl_distro_name();
         let result =
-            windows_to_wsl_path(Path::new(r"\\?\UNC\wsl.localhost\Speedwave\foo")).unwrap();
+            windows_to_wsl_path(Path::new(&format!(r"\\?\UNC\wsl.localhost\{distro}\foo")))
+                .unwrap();
         assert_eq!(result, PathBuf::from("/foo"));
     }
 
     #[test]
     fn test_windows_to_wsl_path_canonicalized_wsl_dollar() {
-        let result = windows_to_wsl_path(Path::new(r"\\?\UNC\wsl$\Speedwave\foo")).unwrap();
+        let distro = consts::wsl_distro_name();
+        let result =
+            windows_to_wsl_path(Path::new(&format!(r"\\?\UNC\wsl$\{distro}\foo"))).unwrap();
         assert_eq!(result, PathBuf::from("/foo"));
     }
 
     #[test]
     fn test_windows_to_wsl_path_case_insensitive_distro() {
-        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\speedwave\foo")).unwrap();
+        // Lowercased distro name must still match the runtime distro.
+        let distro = consts::wsl_distro_name().to_lowercase();
+        let result =
+            windows_to_wsl_path(Path::new(&format!(r"\\wsl.localhost\{distro}\foo"))).unwrap();
         assert_eq!(result, PathBuf::from("/foo"));
     }
 
@@ -1523,7 +1560,9 @@ mod tests {
     fn test_windows_to_wsl_path_mixed_slashes_in_rest() {
         // After splitting on backslash for distro extraction, mixed slashes
         // within the rest must still normalize to forward slashes.
-        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\Speedwave\foo\bar")).unwrap();
+        let distro = consts::wsl_distro_name();
+        let result =
+            windows_to_wsl_path(Path::new(&format!(r"\\wsl.localhost\{distro}\foo\bar"))).unwrap();
         assert_eq!(result, PathBuf::from("/foo/bar"));
     }
 
@@ -1531,7 +1570,9 @@ mod tests {
     fn test_windows_to_wsl_path_wsl_localhost_bare_root_returns_slash() {
         // Pure path translator returns "/" for bare root distro paths.
         // Rejection of "/" as a project dir is enforced in project::add_project.
-        let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\Speedwave\")).unwrap();
+        let distro = consts::wsl_distro_name();
+        let result =
+            windows_to_wsl_path(Path::new(&format!(r"\\wsl.localhost\{distro}\"))).unwrap();
         assert_eq!(result, PathBuf::from("/"));
     }
 
@@ -1899,8 +1940,11 @@ mod tests {
 
     #[test]
     fn test_system_prune_calls_nerdctl_in_wsl() {
-        let runner = MockRunner::new()
-            .with_response("wsl.exe -d Speedwave -- nerdctl system prune --force", "");
+        let distro = consts::wsl_distro_name();
+        let runner = MockRunner::new().with_response(
+            &format!("wsl.exe -d {distro} -- nerdctl system prune --force"),
+            "",
+        );
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(
             rt.system_prune().is_ok(),
@@ -1911,7 +1955,10 @@ mod tests {
     #[test]
     fn test_system_prune_propagates_error() {
         let runner = MockRunner::new().with_error(
-            "wsl.exe -d Speedwave -- nerdctl system prune --force",
+            &format!(
+                "wsl.exe -d {} -- nerdctl system prune --force",
+                consts::wsl_distro_name()
+            ),
             "prune failed",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -1923,7 +1970,10 @@ mod tests {
     #[test]
     fn test_prune_buildkit_cache_calls_nerdctl_in_wsl() {
         let runner = MockRunner::new().with_response(
-            "wsl.exe -d Speedwave -- nerdctl builder prune --all --force",
+            &format!(
+                "wsl.exe -d {} -- nerdctl builder prune --all --force",
+                consts::wsl_distro_name()
+            ),
             "",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -1936,7 +1986,10 @@ mod tests {
     #[test]
     fn test_prune_buildkit_cache_propagates_error() {
         let runner = MockRunner::new().with_error(
-            "wsl.exe -d Speedwave -- nerdctl builder prune --all --force",
+            &format!(
+                "wsl.exe -d {} -- nerdctl builder prune --all --force",
+                consts::wsl_distro_name()
+            ),
             "prune failed",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -2003,7 +2056,8 @@ mod tests {
     fn test_build_image_passes_build_args() {
         let version = crate::defaults::CLAUDE_VERSION;
         let expected_key = format!(
-            "wsl.exe -d Speedwave -- nerdctl build -t my-image:latest -f /ctx/Containerfile --build-arg CLAUDE_VERSION={} /ctx",
+            "wsl.exe -d {} -- nerdctl build -t my-image:latest -f /ctx/Containerfile --build-arg CLAUDE_VERSION={} /ctx",
+            consts::wsl_distro_name(),
             version
         );
         let runner = MockRunner::new().with_response(&expected_key, "");
@@ -2054,16 +2108,20 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_handles_utf16le_output() {
-        let text = "Ubuntu\r\nSpeedwave\r\n";
+        let distro = consts::wsl_distro_name();
+        let text = format!("Ubuntu\r\n{distro}\r\n");
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
         }
         let runner = MockRunner::new()
             .with_raw_response("wsl.exe --list --quiet", bytes)
-            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
             .with_response(
-                "wsl.exe -d Speedwave -- buildctl debug workers",
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
+                "containerd running",
+            )
+            .with_response(
+                &format!("wsl.exe -d {distro} -- buildctl debug workers"),
                 "buildkit ready",
             );
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -2141,7 +2199,7 @@ mod tests {
 
     #[test]
     fn test_decode_wsl_output_utf16le_distro_name_matches_after_trim() {
-        let text = "Speedwave\r\n";
+        let text = format!("{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
@@ -2160,7 +2218,7 @@ mod tests {
 
     #[test]
     fn test_decode_wsl_output_utf16le_without_bom_distro_name_matches() {
-        let text = "Ubuntu\r\nSpeedwave\r\n";
+        let text = format!("Ubuntu\r\n{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
@@ -2271,18 +2329,16 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_recovers_buildkit_after_retries() {
+        let distro = consts::wsl_distro_name();
         // buildctl: fast-path fails, then 3 retry failures, then succeeds on 4th retry
         let runner = KeyedSequentialMockRunner::new()
-            .with_responses(
-                "wsl.exe --list --quiet",
-                vec![Ok("Speedwave\n".to_string())],
-            )
+            .with_responses("wsl.exe --list --quiet", vec![Ok(format!("{distro}\n"))])
             // containerd: fast-path OK
             .with_responses(
-                "wsl.exe -d Speedwave -- nerdctl info",
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
                 vec![Ok("containerd running".to_string())],
             )
-            .with_responses("wsl.exe -d Speedwave -- buildctl debug workers", {
+            .with_responses(&format!("wsl.exe -d {distro} -- buildctl debug workers"), {
                 let mut v: Vec<anyhow::Result<String>> = Vec::new();
                 // Fast-path check fails
                 v.push(Err(anyhow::anyhow!("connection refused")));
@@ -2297,7 +2353,7 @@ mod tests {
             // If the code used "buildkitd", this mock wouldn't match and the test
             // would panic with "unexpected command".
             .with_responses(
-                "wsl.exe -d Speedwave -- systemctl start buildkit",
+                &format!("wsl.exe -d {distro} -- systemctl start buildkit"),
                 vec![Ok(String::new())],
             );
 
@@ -2312,14 +2368,12 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_recovers_containerd_after_retries() {
+        let distro = consts::wsl_distro_name();
         let runner = KeyedSequentialMockRunner::new()
-            .with_responses(
-                "wsl.exe --list --quiet",
-                vec![Ok("Speedwave\n".to_string())],
-            )
+            .with_responses("wsl.exe --list --quiet", vec![Ok(format!("{distro}\n"))])
             // containerd: fast-path fails, start succeeds, 1st retry fails, 2nd retry OK
             .with_responses(
-                "wsl.exe -d Speedwave -- nerdctl info",
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
                 vec![
                     Err(anyhow::anyhow!("connection refused")),
                     Err(anyhow::anyhow!("connection refused")),
@@ -2327,12 +2381,12 @@ mod tests {
                 ],
             )
             .with_responses(
-                "wsl.exe -d Speedwave -- systemctl start containerd",
+                &format!("wsl.exe -d {distro} -- systemctl start containerd"),
                 vec![Ok(String::new())],
             )
             // buildkitd: fast-path OK
             .with_responses(
-                "wsl.exe -d Speedwave -- buildctl debug workers",
+                &format!("wsl.exe -d {distro} -- buildctl debug workers"),
                 vec![Ok("buildkit ready".to_string())],
             );
 
@@ -2347,6 +2401,7 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_fails_after_max_retries_with_diagnostics() {
+        let distro = consts::wsl_distro_name();
         let max = consts::WSL_SERVICE_CHECK_MAX_RETRIES;
 
         // buildctl fails on all attempts (fast-path + max retries)
@@ -2359,20 +2414,17 @@ mod tests {
         }
 
         let runner = KeyedSequentialMockRunner::new()
+            .with_responses("wsl.exe --list --quiet", vec![Ok(format!("{distro}\n"))])
             .with_responses(
-                "wsl.exe --list --quiet",
-                vec![Ok("Speedwave\n".to_string())],
-            )
-            .with_responses(
-                "wsl.exe -d Speedwave -- nerdctl info",
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
                 vec![Ok("containerd running".to_string())],
             )
             .with_responses(
-                "wsl.exe -d Speedwave -- buildctl debug workers",
+                &format!("wsl.exe -d {distro} -- buildctl debug workers"),
                 buildctl_responses,
             )
             .with_responses(
-                "wsl.exe -d Speedwave -- systemctl start buildkit",
+                &format!("wsl.exe -d {distro} -- systemctl start buildkit"),
                 vec![Err(anyhow::anyhow!("unit not found"))],
             );
 
@@ -2411,12 +2463,22 @@ mod tests {
 
     #[test]
     fn test_restart_container_engine_ok() {
+        let distro = consts::wsl_distro_name();
         let runner = MockRunner::new()
-            .with_response("wsl.exe -d Speedwave -- systemctl restart containerd", "")
-            .with_response("wsl.exe -d Speedwave -- systemctl restart buildkit", "")
-            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
             .with_response(
-                "wsl.exe -d Speedwave -- buildctl debug workers",
+                &format!("wsl.exe -d {distro} -- systemctl restart containerd"),
+                "",
+            )
+            .with_response(
+                &format!("wsl.exe -d {distro} -- systemctl restart buildkit"),
+                "",
+            )
+            .with_response(
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
+                "containerd running",
+            )
+            .with_response(
+                &format!("wsl.exe -d {distro} -- buildctl debug workers"),
                 "buildkit ready",
             );
         let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
@@ -2426,7 +2488,10 @@ mod tests {
     #[test]
     fn test_restart_container_engine_propagates_containerd_error() {
         let runner = MockRunner::new().with_error(
-            "wsl.exe -d Speedwave -- systemctl restart containerd",
+            &format!(
+                "wsl.exe -d {} -- systemctl restart containerd",
+                consts::wsl_distro_name()
+            ),
             "restart failed",
         );
         let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
@@ -2437,15 +2502,22 @@ mod tests {
 
     #[test]
     fn test_restart_container_engine_buildkit_unit_not_found_still_polls() {
+        let distro = consts::wsl_distro_name();
         let runner = MockRunner::new()
-            .with_response("wsl.exe -d Speedwave -- systemctl restart containerd", "")
+            .with_response(
+                &format!("wsl.exe -d {distro} -- systemctl restart containerd"),
+                "",
+            )
             .with_error(
-                "wsl.exe -d Speedwave -- systemctl restart buildkit",
+                &format!("wsl.exe -d {distro} -- systemctl restart buildkit"),
                 "Failed to restart buildkit.service: Unit not found.",
             )
-            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
             .with_response(
-                "wsl.exe -d Speedwave -- buildctl debug workers",
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
+                "containerd running",
+            )
+            .with_response(
+                &format!("wsl.exe -d {distro} -- buildctl debug workers"),
                 "buildkit ready",
             );
         let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
@@ -2457,10 +2529,14 @@ mod tests {
 
     #[test]
     fn test_restart_container_engine_propagates_buildkit_error() {
+        let distro = consts::wsl_distro_name();
         let runner = MockRunner::new()
-            .with_response("wsl.exe -d Speedwave -- systemctl restart containerd", "")
+            .with_response(
+                &format!("wsl.exe -d {distro} -- systemctl restart containerd"),
+                "",
+            )
             .with_error(
-                "wsl.exe -d Speedwave -- systemctl restart buildkit",
+                &format!("wsl.exe -d {distro} -- systemctl restart buildkit"),
                 "Failed to restart buildkit.service: some other error",
             );
         let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
@@ -2474,12 +2550,22 @@ mod tests {
 
     #[test]
     fn test_restart_container_engine_not_ready_after_retries() {
+        let distro = consts::wsl_distro_name();
         let runner = MockRunner::new()
-            .with_response("wsl.exe -d Speedwave -- systemctl restart containerd", "")
-            .with_response("wsl.exe -d Speedwave -- systemctl restart buildkit", "")
-            .with_error("wsl.exe -d Speedwave -- nerdctl info", "connection refused")
+            .with_response(
+                &format!("wsl.exe -d {distro} -- systemctl restart containerd"),
+                "",
+            )
+            .with_response(
+                &format!("wsl.exe -d {distro} -- systemctl restart buildkit"),
+                "",
+            )
             .with_error(
-                "wsl.exe -d Speedwave -- buildctl debug workers",
+                &format!("wsl.exe -d {distro} -- nerdctl info"),
+                "connection refused",
+            )
+            .with_error(
+                &format!("wsl.exe -d {distro} -- buildctl debug workers"),
                 "connection refused",
             );
         let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();

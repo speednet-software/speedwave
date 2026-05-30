@@ -1224,7 +1224,13 @@ pub fn build_claude_args(
 
 /// Build the container name for a project's Claude container.
 pub fn claude_container_name(project: &str) -> String {
-    format!("{}_{}_claude", consts::compose_prefix(), project)
+    claude_container_name_with_prefix(consts::compose_prefix(), project)
+}
+
+/// Parameterised by `prefix` so unit tests avoid the `consts::compose_prefix()`
+/// `OnceLock`, which resolves the process-global `data_dir()` basename.
+fn claude_container_name_with_prefix(prefix: &str, project: &str) -> String {
+    format!("{prefix}_{project}_claude")
 }
 
 /// Build the stream-json `control_request` payload for an interrupt.
@@ -3264,13 +3270,15 @@ mod tests {
 
     #[test]
     fn claude_container_name_uses_compose_prefix() {
-        let name = claude_container_name("myproject");
+        // Use the `_with_prefix` variant with the fixed `COMPOSE_PREFIX` literal
+        // so the test does not depend on the process-global `data_dir()` basename.
+        let name = claude_container_name_with_prefix(consts::COMPOSE_PREFIX, "myproject");
         assert_eq!(name, format!("{}_myproject_claude", consts::COMPOSE_PREFIX));
     }
 
     #[test]
     fn claude_container_name_format_is_prefix_project_claude() {
-        let name = claude_container_name("acme-corp");
+        let name = claude_container_name_with_prefix(consts::COMPOSE_PREFIX, "acme-corp");
         assert_eq!(name, "speedwave_acme-corp_claude");
     }
 

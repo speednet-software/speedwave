@@ -609,9 +609,15 @@ fn merge_wslconfig_vpn_keys(input: &str) -> String {
 /// Speedwave always imports into `~/.speedwave/wsl/Speedwave/`, so a legitimate
 /// distro will have `ext4.vhdx` at that path. If the file is missing the distro
 /// was registered from somewhere else — bail with a clear security error.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 fn verify_wsl_distro_origin() -> anyhow::Result<()> {
-    let expected_vhdx = expected_wsl_vhdx_path()?;
+    verify_wsl_distro_origin_in(consts::data_dir())
+}
+
+/// Data-dir-explicit variant of [`verify_wsl_distro_origin`].
+#[cfg(any(target_os = "windows", test))]
+fn verify_wsl_distro_origin_in(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let expected_vhdx = expected_wsl_vhdx_path_in(data_dir);
     if !expected_vhdx.exists() {
         anyhow::bail!(
             "Security error: a WSL2 distribution named '{}' already exists but was \
@@ -626,14 +632,14 @@ fn verify_wsl_distro_origin() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns the expected path to the WSL2 virtual disk for the Speedwave distro:
-/// `~/.speedwave/wsl/Speedwave/ext4.vhdx`.
+/// Data-dir-explicit variant returning the expected WSL2 virtual-disk path:
+/// `<data_dir>/wsl/<distro>/ext4.vhdx`.
 #[cfg(any(target_os = "windows", test))]
-fn expected_wsl_vhdx_path() -> anyhow::Result<PathBuf> {
-    Ok(consts::data_dir()
+fn expected_wsl_vhdx_path_in(data_dir: &std::path::Path) -> PathBuf {
+    data_dir
         .join("wsl")
         .join(consts::wsl_distro_name())
-        .join("ext4.vhdx"))
+        .join("ext4.vhdx")
 }
 
 /// Attempts to install WSL2 via elevated PowerShell. Always bails: either
@@ -1999,9 +2005,11 @@ fn ensure_local_bin_on_path_for_shell(
 /// - Unix: `~/.local/bin/speedwave`
 /// - Windows: `~/.speedwave/bin/speedwave.exe`
 ///
-/// Used only in tests to verify the path computation matches `link_cli_from`.
+/// Returns the install path of the CLI binary for an explicit `data_dir`.
+/// Only the Windows branch consults `data_dir`; on Unix the path derives from
+/// the home dir. Used only in tests to verify the path matches `link_cli_from`.
 #[cfg(test)]
-fn cli_install_path() -> Option<std::path::PathBuf> {
+fn cli_install_path_in(_data_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     #[cfg(unix)]
     let path = dirs::home_dir()?
         .join(".local")
@@ -2009,9 +2017,7 @@ fn cli_install_path() -> Option<std::path::PathBuf> {
         .join(consts::CLI_BINARY);
 
     #[cfg(target_os = "windows")]
-    let path = consts::data_dir()
-        .join(consts::CLI_BIN_SUBDIR)
-        .join("speedwave.exe");
+    let path = _data_dir.join(consts::CLI_BIN_SUBDIR).join("speedwave.exe");
 
     Some(path)
 }
@@ -3610,7 +3616,8 @@ mod tests {
 
     #[test]
     fn cli_install_path_returns_platform_specific_path() {
-        let path = cli_install_path().expect("should return a path");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let path = cli_install_path_in(data_dir.path()).expect("should return a path");
 
         #[cfg(unix)]
         assert!(
@@ -4018,7 +4025,9 @@ mod tests {
     fn decode_wsl_output_imported_from_runtime_works() {
         // Smoke test: verify the re-exported decode_wsl_output handles
         // UTF-16LE correctly. Full test coverage lives in speedwave-runtime.
-        let text = "Ubuntu\r\nSpeedwave\r\n";
+        // Build the input from `wsl_distro_name()` (derived from the data_dir
+        // basename) so the test is independent of the process-global data_dir.
+        let text = format!("Ubuntu\r\n{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
@@ -4035,32 +4044,18 @@ mod tests {
 
     // ── verify_wsl_distro_origin tests ───────────────────────────────────
     //
-    // All three tests below mutate the same path
-    // (`<data_dir>/wsl/Speedwave/ext4.vhdx`) — they create or check for the
-    // marker file. `#[serial]` prevents them from racing each other under
-    // `cargo test` parallel execution.
+    // Each test uses its own tempdir as the data_dir via the `_in` variant, so
+    // they neither touch the production data dir nor race each other.
 
     #[test]
-    #[serial]
     fn verify_wsl_distro_origin_passes_when_vhdx_exists() {
-        // Create the expected vhdx file under the real data_dir() (OnceLock-cached).
-        let vhdx_dir = consts::data_dir()
-            .join("wsl")
-            .join(consts::wsl_distro_name());
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let vhdx_dir = data_dir.path().join("wsl").join(consts::wsl_distro_name());
         std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
-        let vhdx_file = vhdx_dir.join("ext4.vhdx");
-        let existed_before = vhdx_file.exists();
-        if !existed_before {
-            std::fs::write(&vhdx_file, b"fake vhdx").expect("write marker");
-        }
+        std::fs::write(vhdx_dir.join("ext4.vhdx"), b"fake vhdx").expect("write marker");
 
-        let result = verify_wsl_distro_origin();
+        let result = verify_wsl_distro_origin_in(data_dir.path());
 
-        // Clean up only if we created the file
-        if !existed_before {
-            let _ = std::fs::remove_file(&vhdx_file);
-            let _ = std::fs::remove_dir(&vhdx_dir);
-        }
         assert!(
             result.is_ok(),
             "expected Ok when ext4.vhdx exists, got: {result:?}"
@@ -4068,20 +4063,10 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn verify_wsl_distro_origin_fails_when_vhdx_missing() {
-        // Verify that verify_wsl_distro_origin fails when the vhdx doesn't exist.
-        // Since data_dir() points to the real data dir, just ensure the vhdx
-        // file doesn't exist there (it shouldn't in dev/test environments).
-        let vhdx_path = consts::data_dir()
-            .join("wsl")
-            .join(consts::wsl_distro_name())
-            .join("ext4.vhdx");
-        if vhdx_path.exists() {
-            // Skip: can't test "missing" when file genuinely exists
-            return;
-        }
-        let result = verify_wsl_distro_origin();
+        // Empty tempdir — the vhdx file does not exist.
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let result = verify_wsl_distro_origin_in(data_dir.path());
         let err_msg = result
             .expect_err("expected Err when vhdx missing")
             .to_string();
@@ -4092,29 +4077,14 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn verify_wsl_distro_origin_rejects_empty_directory() {
         // Create the wsl distro directory without the ext4.vhdx file.
-        let vhdx_dir = consts::data_dir()
-            .join("wsl")
-            .join(consts::wsl_distro_name());
-        let dir_existed = vhdx_dir.exists();
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let vhdx_dir = data_dir.path().join("wsl").join(consts::wsl_distro_name());
         std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
 
-        // Remove the vhdx file if it exists to test the "empty dir" case
-        let vhdx_file = vhdx_dir.join("ext4.vhdx");
-        let file_existed = vhdx_file.exists();
-        if file_existed {
-            // Skip: can't test "empty dir" when file genuinely exists
-            return;
-        }
+        let result = verify_wsl_distro_origin_in(data_dir.path());
 
-        let result = verify_wsl_distro_origin();
-
-        // Clean up only if we created the directory
-        if !dir_existed {
-            let _ = std::fs::remove_dir(&vhdx_dir);
-        }
         let err_msg = result
             .expect_err("expected Err when vhdx missing in empty dir")
             .to_string();
@@ -4126,9 +4096,10 @@ mod tests {
 
     #[test]
     fn expected_wsl_vhdx_path_structure() {
-        let path = expected_wsl_vhdx_path().expect("should resolve path");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let path = expected_wsl_vhdx_path_in(data_dir.path());
         let path_str = path.to_string_lossy();
-        let data_dir_str = consts::data_dir().to_string_lossy().to_string();
+        let data_dir_str = data_dir.path().to_string_lossy().to_string();
         assert!(
             path_str.contains(&data_dir_str),
             "path should contain data dir ({data_dir_str}): {path_str}"
