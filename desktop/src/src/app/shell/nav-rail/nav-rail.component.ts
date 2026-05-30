@@ -35,8 +35,9 @@ export interface NavRailEntry {
     class: 'flex w-14 flex-col items-center border-r border-[var(--line)] bg-[var(--bg-1)]',
   },
   template: `
-    <!-- Logo band aligned with chat header (44px). Mask-image lets a single
-         asset adapt color per mode via currentColor (white in dark, ink in light). -->
+    <!-- Logo band aligned with chat header (44px). Mask + bg-current adapt the
+         color per mode (white in dark, ink in light); the SVG fill is irrelevant
+         to the mask alpha and must stay static — currentColor breaks in WebView. -->
     <div class="flex h-11 w-14 items-center justify-center border-b border-[var(--line)]">
       <span
         role="img"
