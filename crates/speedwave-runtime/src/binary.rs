@@ -12,6 +12,19 @@ const PATH_SEP: char = ';';
 #[cfg(not(windows))]
 const PATH_SEP: char = ':';
 
+/// Commands that are always provided by the OS and are never bundled, so the
+/// "falling back to system PATH" debug log is noise for them (e.g. `wsl.exe`
+/// is called on every health poll).
+const ALWAYS_SYSTEM_COMMANDS: &[&str] = &["wsl.exe", "powershell.exe", "cmd.exe"];
+
+/// `true` if `cmd` is a never-bundled OS command (case-insensitive), so the
+/// fallback-to-PATH debug log should be suppressed for it.
+fn is_always_system_command(cmd: &str) -> bool {
+    ALWAYS_SYSTEM_COMMANDS
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(cmd))
+}
+
 /// Resolves the path to a binary command.
 ///
 /// Lima (macOS), Node.js, and the native macOS CLI helpers (`reminders-cli`,
@@ -70,10 +83,12 @@ pub fn resolve_binary(cmd: &str) -> String {
             return top_level.to_string_lossy().to_string();
         }
 
-        log::debug!(
-            "bundled binary not found for '{}', falling back to system PATH",
-            cmd
-        );
+        if !is_always_system_command(cmd) {
+            log::debug!(
+                "bundled binary not found for '{}', falling back to system PATH",
+                cmd
+            );
+        }
     }
     cmd.to_string()
 }
@@ -268,6 +283,30 @@ pub(crate) mod tests {
 
         env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
         assert_eq!(resolve_binary("unknown-cmd"), "unknown-cmd");
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    // Never-bundled OS commands are recognised (case-insensitive) so the
+    // fallback debug log is suppressed; everything else still logs.
+    #[test]
+    fn always_system_commands_recognised() {
+        assert!(is_always_system_command("wsl.exe"));
+        assert!(is_always_system_command("WSL.EXE"));
+        assert!(is_always_system_command("powershell.exe"));
+        assert!(is_always_system_command("cmd.exe"));
+        assert!(!is_always_system_command("limactl"));
+        assert!(!is_always_system_command("nerdctl"));
+        assert!(!is_always_system_command("node"));
+    }
+
+    // The suppression must not change resolution behaviour — wsl.exe still
+    // resolves to the bare name (system PATH) as before.
+    #[test]
+    fn resolve_binary_wsl_still_returns_bare_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
+        assert_eq!(resolve_binary("wsl.exe"), "wsl.exe");
         env::remove_var(BUNDLE_RESOURCES_ENV);
     }
 
