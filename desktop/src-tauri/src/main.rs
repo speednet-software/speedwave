@@ -1790,16 +1790,9 @@ fn main() {
                     log::warn!(".wslconfig VPN-compat migration failed: {e}");
                 }
 
-                // Existing distros (created before the metadata fix) need the
-                // automount=metadata option too, or claude /login cannot chmod
-                // its credentials on the 9p mount. Idempotent. `IfIdle`: this
-                // runs at startup (incl. right after an update) before any
-                // container is started, so the distro is normally idle and we
-                // can terminate to apply the new mount options immediately —
-                // without it, the first container start after an update hits the
-                // still-uid=0 mount and login/onboarding breaks. If containers
-                // ARE running, IfIdle leaves them alone (applies on next
-                // restart).
+                // Startup/post-update: apply automount=metadata for existing
+                // distros. `IfIdle` terminates only when no container runs, so
+                // the mount applies before the first start (see ADR-052).
                 #[cfg(target_os = "windows")]
                 {
                     use setup_wizard::TerminateOnChange;

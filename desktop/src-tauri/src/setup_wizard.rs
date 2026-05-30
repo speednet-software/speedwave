@@ -769,16 +769,15 @@ fn import_wsl_distro() -> anyhow::Result<()> {
 #[cfg(any(target_os = "windows", test))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TerminateOnChange {
-    /// Safe only when no Speedwave containers run (e.g. right after import).
+    /// Import path only: no Speedwave containers run yet, so terminating is safe.
     Yes,
-    /// Leave the distro running; the new wsl.conf applies on its next restart.
+    /// Never terminate. Prefer `IfIdle` — `No` defers even when terminating
+    /// would be safe (it has no production caller; kept for explicit deferral).
     No,
-    /// Terminate ONLY if no Speedwave containers are currently running. The
-    /// startup/post-update path: a fresh process usually has no containers up
-    /// yet, so terminating lets the `metadata` mount option take effect before
-    /// the first container start (without it, the uid-1000 entrypoint hits
-    /// EACCES on the still-uid=0 drvfs mount and login/onboarding breaks). If
-    /// containers ARE running, behaves like `No` to avoid killing them.
+    /// Startup/post-update path: terminate only if no containers run, so the
+    /// `metadata` mount applies before the first container start (else uid-1000
+    /// hits EACCES on the uid=0 mount and login breaks). Falls back to `No` when
+    /// containers run.
     IfIdle,
 }
 
@@ -800,32 +799,21 @@ fn terminate_decision(terminate: TerminateOnChange, has_running: bool) -> bool {
 /// chmod (ADR-052) and `uid`/`gid` (from the [`consts::CONTAINER_USER_UNPRIVILEGED`]
 /// SSOT) requesting the mount be owned by the container user.
 ///
-/// NOTE: the `uid=`/`gid=` automount option is **not** load-bearing — WSL
-/// prepends the distro default user's uid (root → 0) ahead of it and that wins,
-/// so on imported distros (no `[user]` default) the mount stays uid 0. The
-/// actual fix for the uid-1000 entrypoint's EACCES is the per-project `chown`
-/// in [`ensure_claude_home_owner`]; this option still helps fresh imports and
-/// keeps `/login`'s chmod working.
-///
-/// Idempotent and self-upgrading: adds the `[automount]` block if absent, and
-/// rewrites a bare `options = "metadata"` line (written by an earlier build)
-/// to include the uid/gid — otherwise distros installed by that build stay
-/// broken.
-///
-/// `terminate` MUST be `No` on any path where containers may be running
-/// (startup migration for existing distros): a `--terminate` there kills the
-/// running containers mid-start ("cannot exec in a stopped state"). Pass `Yes`
-/// only at import time, before any container exists. Fail-open throughout.
+/// Idempotent: adds the `[automount]` block if absent, else upgrades an options
+/// line missing the uid (see [`ADR-052`]). Pass `Yes` at import, `IfIdle` on the
+/// startup/migration path; `No` only for explicit deferral. Returns `Err` when
+/// the write did not land (the mount stays uid=0 → login breaks).
 #[cfg(target_os = "windows")]
 pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Result<()> {
     let distro = consts::wsl_distro_name();
-    // Run as root inside the distro; `/etc/wsl.conf` is distro-internal (not the
-    // host .wslconfig). Add the `[automount]` block if absent, else upgrade an
-    // options line that lacks our uid. Success is confirmed by re-reading the
-    // file (see script comment), so the caller's terminate/restart only fires
-    // when the uid actually landed.
     let opts = consts::wsl_automount_options();
     let (uid, _gid) = consts::container_uid_gid();
+    // Probe BEFORE the write so the terminate decision is fixed before any state
+    // change — minimizes the probe→terminate window (a container could otherwise
+    // start in the gap). Only IfIdle cares about running containers.
+    let has_running =
+        matches!(terminate, TerminateOnChange::IfIdle) && wsl_distro_has_running_containers(distro);
+
     let script = build_wsl_metadata_script(&opts, uid);
     let out = speedwave_runtime::binary::system_command("wsl.exe")
         .args([
@@ -843,24 +831,25 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             if stdout.contains("speedwave-metadata-failed") {
-                log::error!(
-                    "ensure_wsl_distro_metadata: wrote wsl.conf for {distro} but uid={uid} is NOT present on re-read; \
-                     the uid-1000 container will hit EACCES on the drvfs mount and fail to start (login/onboarding broken). \
-                     Check that /etc/wsl.conf is writable as root in this distro"
+                anyhow::bail!(
+                    "wrote wsl.conf for {distro} but uid={uid} is NOT present on re-read; \
+                     the uid-1000 container will hit EACCES on the drvfs mount and fail to start \
+                     (login/onboarding broken). Check that /etc/wsl.conf is writable as root"
                 );
             }
-            let changed = stdout.contains("speedwave-metadata-added");
-            if changed {
-                // `IfIdle` needs to know whether containers are running; only
-                // probe in that case (the probe spawns wsl.exe).
-                let has_running = matches!(terminate, TerminateOnChange::IfIdle)
-                    && wsl_distro_has_running_containers(distro);
+            if stdout.contains("speedwave-metadata-present") {
+                log::debug!("ensure_wsl_distro_metadata: uid={uid} already present in {distro}");
+            } else if stdout.contains("speedwave-metadata-added") {
                 if terminate_decision(terminate, has_running) {
                     let _ = speedwave_runtime::binary::system_command("wsl.exe")
                         .args(["--terminate", distro])
                         .status();
                     log::info!(
                         "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
+                    );
+                } else if has_running {
+                    log::info!(
+                        "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (containers running; applies on next WSL restart)"
                     );
                 } else {
                     log::info!(
@@ -878,29 +867,36 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
     Ok(())
 }
 
-/// `true` if any container is currently running inside the Speedwave distro
-/// (any compose project). Used to decide whether `wsl --terminate` is safe:
-/// terminating a distro with live containers kills them mid-run. Best-effort —
-/// on any probe failure returns `true` (assume busy) so we never terminate on
-/// uncertainty.
+/// Interprets a `nerdctl ps -q` probe: non-empty stdout on success ⇒ running.
+/// Fail-safe: any probe failure (`success == false`) assumes busy (`true`) so we
+/// never `--terminate` a distro with live containers on uncertainty.
+#[cfg(any(target_os = "windows", test))]
+fn running_containers_from_probe(success: bool, stdout: &str) -> bool {
+    if success {
+        !stdout.trim().is_empty()
+    } else {
+        true
+    }
+}
+
+/// `true` if any container is currently running in the Speedwave distro (probes
+/// `nerdctl ps -q`; fail-safe to busy — see [`running_containers_from_probe`]).
 #[cfg(target_os = "windows")]
 fn wsl_distro_has_running_containers(distro: &str) -> bool {
-    // `nerdctl ps -q` lists only RUNNING containers (no `-a`). Non-empty stdout
-    // ⇒ something is up. Run via the distro's root shell, mirroring how the
-    // runtime reaches nerdctl.
     let out = speedwave_runtime::binary::system_command("wsl.exe")
         .args([
             "-d", distro, "-u", "root", "--", "sudo", "nerdctl", "ps", "-q",
         ])
         .output();
     match out {
-        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
         Ok(o) => {
-            log::warn!(
-                "wsl_distro_has_running_containers: nerdctl ps failed for {distro}; assuming busy: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            );
-            true
+            if !o.status.success() {
+                log::warn!(
+                    "wsl_distro_has_running_containers: nerdctl ps failed for {distro}; assuming busy: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+            }
+            running_containers_from_probe(o.status.success(), &String::from_utf8_lossy(&o.stdout))
         }
         Err(e) => {
             log::warn!(
@@ -911,18 +907,8 @@ fn wsl_distro_has_running_containers(distro: &str) -> bool {
     }
 }
 
-/// Builds the `sh -c` script that adds/upgrades the `[automount]` block in
-/// `/etc/wsl.conf`, then RE-READS the file and emits a marker reflecting the
-/// real on-disk state:
-/// - `speedwave-metadata-present` — uid already there, nothing changed
-/// - `speedwave-metadata-added` — mutation confirmed by the trailing grep
-/// - `speedwave-metadata-failed` — mutation did NOT land (e.g. read-only file)
-///
-/// The trailing grep is load-bearing: the previous version `echo`'d success
-/// unconditionally right after `printf >> "$f"`, so a silently-failed append
-/// reported success and the caller `--terminate`d "to apply" a change that
-/// never reached the file — leaving the drvfs mount uid=0 and the uid-1000
-/// container at EACCES (login/onboarding broken).
+/// Mutates `/etc/wsl.conf`, then re-reads it: emits `metadata-present`/`-added`/
+/// `-failed` from the trailing grep, never from the write's own exit (see ADR-052).
 #[cfg(any(target_os = "windows", test))]
 fn build_wsl_metadata_script(opts: &str, uid: u32) -> String {
     format!(
@@ -3022,7 +3008,7 @@ mod tests {
     // Cross-platform: the enum and the terminate policy are pure (no Windows
     // I/O), so their guards run on every host.
     mod terminate_on_change_tests {
-        use super::super::{terminate_decision, TerminateOnChange};
+        use super::super::{running_containers_from_probe, terminate_decision, TerminateOnChange};
 
         // Regression guard for the E2E "cannot exec in a stopped state"
         // failure: the import path may terminate (no containers yet), the
@@ -3072,6 +3058,26 @@ mod tests {
                 "must NOT terminate while containers run (would kill them)"
             );
         }
+
+        // The probe interpretation must be fail-safe: a failed probe assumes busy
+        // so IfIdle never terminates a distro with live containers on uncertainty.
+        #[test]
+        fn probe_empty_stdout_means_no_containers() {
+            assert!(!running_containers_from_probe(true, ""));
+            assert!(!running_containers_from_probe(true, "   \n  "));
+        }
+
+        #[test]
+        fn probe_nonempty_stdout_means_running() {
+            assert!(running_containers_from_probe(true, "abc123\n"));
+        }
+
+        #[test]
+        fn probe_failure_assumes_busy() {
+            // nerdctl non-zero exit → assume busy even with empty stdout.
+            assert!(running_containers_from_probe(false, ""));
+            assert!(running_containers_from_probe(false, "error text"));
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -3103,17 +3109,9 @@ mod tests {
         }
     }
 
-    // Cross-platform: the metadata script is pure string-building, so its
-    // regression guards run on every host (not gated to Windows like the
-    // `consts::wsl_automount_options` checks above, which need a Windows-only
-    // const).
+    // Pure string-building, so these guards run on every host (see ADR-052).
     mod wsl_metadata_script_tests {
-        // Regression guard for the silent-success bug: the prod `Speedwave`
-        // distro logged "enabled metadata automount ... (terminated to apply)"
-        // 8× while /etc/wsl.conf stayed untouched (no [automount], mount uid=0)
-        // — so the container hit EACCES and login never worked. The script must
-        // re-read the file and only emit `metadata-added` when the uid is
-        // actually present; a failed write must surface as `metadata-failed`.
+        // Guards the silent-success bug: `metadata-added` only after the trailing grep.
         #[test]
         fn metadata_script_confirms_uid_via_trailing_grep() {
             let script =
