@@ -12,13 +12,15 @@ const PATH_SEP: char = ';';
 #[cfg(not(windows))]
 const PATH_SEP: char = ':';
 
-/// Commands that are always provided by the OS and are never bundled, so the
-/// "falling back to system PATH" debug log is noise for them (e.g. `wsl.exe`
-/// is called on every health poll).
+/// Windows OS commands that are never bundled, so the "falling back to system
+/// PATH" debug log is noise for them (`wsl.exe` is called on every health poll).
+/// Windows-only on purpose: on macOS resolving one of these is a real misconfig
+/// worth logging, so suppression must not apply there.
+#[cfg(windows)]
 const ALWAYS_SYSTEM_COMMANDS: &[&str] = &["wsl.exe", "powershell.exe", "cmd.exe"];
 
-/// `true` if `cmd` is a never-bundled OS command (case-insensitive), so the
-/// fallback-to-PATH debug log should be suppressed for it.
+/// `true` if `cmd` is a never-bundled Windows OS command (case-insensitive).
+#[cfg(windows)]
 fn is_always_system_command(cmd: &str) -> bool {
     ALWAYS_SYSTEM_COMMANDS
         .iter()
@@ -83,7 +85,11 @@ pub fn resolve_binary(cmd: &str) -> String {
             return top_level.to_string_lossy().to_string();
         }
 
-        if !is_always_system_command(cmd) {
+        #[cfg(windows)]
+        let should_log = !is_always_system_command(cmd);
+        #[cfg(not(windows))]
+        let should_log = true;
+        if should_log {
             log::debug!(
                 "bundled binary not found for '{}', falling back to system PATH",
                 cmd
@@ -287,7 +293,8 @@ pub(crate) mod tests {
     }
 
     // Never-bundled OS commands are recognised (case-insensitive) so the
-    // fallback debug log is suppressed; everything else still logs.
+    // fallback debug log is suppressed; everything else still logs. Windows-only.
+    #[cfg(windows)]
     #[test]
     fn always_system_commands_recognised() {
         assert!(is_always_system_command("wsl.exe"));
@@ -299,8 +306,8 @@ pub(crate) mod tests {
         assert!(!is_always_system_command("node"));
     }
 
-    // The suppression must not change resolution behaviour — wsl.exe still
-    // resolves to the bare name (system PATH) as before.
+    // Suppression must not change resolution — wsl.exe still resolves to the bare name.
+    #[cfg(windows)]
     #[test]
     fn resolve_binary_wsl_still_returns_bare_name() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -413,11 +420,12 @@ pub(crate) mod tests {
         let home = lima_home();
         assert!(home.is_some());
         let path = home.unwrap();
-        let path_str = path.to_string_lossy();
+        // Compare path components (separator-agnostic): on Windows the path uses
+        // `\`, so a string `ends_with(".speedwave/lima")` would wrongly fail.
         assert!(
-            path_str.ends_with(".speedwave/lima"),
+            path.ends_with(std::path::Path::new(".speedwave").join("lima")),
             "expected path ending with .speedwave/lima, got: {}",
-            path_str
+            path.display()
         );
     }
 
@@ -435,11 +443,11 @@ pub(crate) mod tests {
             .expect("LIMA_HOME env should be set for limactl");
 
         let value = lima_home_env.1.expect("LIMA_HOME should have a value");
-        let value_str = value.to_string_lossy();
+        // Separator-agnostic (Windows uses `\`): compare path components.
         assert!(
-            value_str.ends_with(".speedwave/lima"),
+            std::path::Path::new(value).ends_with(std::path::Path::new(".speedwave").join("lima")),
             "LIMA_HOME should end with .speedwave/lima, got: {}",
-            value_str
+            value.to_string_lossy()
         );
     }
 
