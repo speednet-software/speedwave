@@ -53,8 +53,7 @@ describe('NavRailComponent', () => {
     expect(buttons.length).toBe(3);
   });
 
-  // Inline SVG mark (currentColor) — not a CSS-mask span that breaks in the
-  // Tauri WebView build, nor a static image.
+  // Inline currentColor SVG — not a CSS-mask span (breaks under tauri://localhost) nor a static image.
   it('renders the Speedwave logo as an inline theme-adaptive SVG mark', () => {
     const logo = fixture.nativeElement.querySelector(
       'app-logo[role="img"][aria-label="Speedwave"]'

@@ -1,15 +1,9 @@
 import { ChangeDetectionStrategy, Component } from '@angular/core';
 
-/**
- * Speedwave brand mark as inline SVG.
- *
- * Inline (not <img>/CSS-mask) so `fill="currentColor"` follows the host's text
- * color and adapts per theme. CSS `mask: url(...)` broke in the Tauri WebView
- * build because the relative asset URL did not resolve under `tauri://localhost`.
- * Color comes from the host element's `color` — set `text-*` on the usage site.
- */
+/** Inline SVG mark with fill="currentColor" — CSS mask: url() breaks under tauri://localhost. */
 @Component({
   selector: 'app-logo',
+  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     role: 'img',

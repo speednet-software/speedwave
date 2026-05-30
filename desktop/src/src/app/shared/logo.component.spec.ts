@@ -17,8 +17,7 @@ describe('LogoComponent', () => {
     expect(host.getAttribute('aria-label')).toBe('Speedwave');
   });
 
-  // Inline SVG with currentColor is what makes the mark adapt per theme and
-  // survive the Tauri WebView build (no relative-URL mask, no static image).
+  // Inline currentColor SVG — CSS mask breaks under tauri://localhost.
   it('renders an inline SVG whose path uses currentColor', () => {
     const host = fixture.nativeElement as HTMLElement;
     const path = host.querySelector('svg path');

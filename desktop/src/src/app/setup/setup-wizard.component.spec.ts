@@ -51,9 +51,7 @@ describe('SetupWizardComponent', () => {
     expect(component.phase()).toBe('welcome');
   });
 
-  // Logo must be an inline SVG (currentColor-driven, adapts per theme), not a
-  // CSS-mask span (breaks in the Tauri WebView build) nor a static image (the
-  // white PNG vanished on the light-mode white background).
+  // Inline currentColor SVG — not a CSS-mask span (breaks under tauri://localhost) nor a static image.
   it('renders the Speedwave logo as an inline theme-adaptive SVG mark', () => {
     const logo = fixture.nativeElement.querySelector(
       'app-logo[role="img"][aria-label="Speedwave"]'
