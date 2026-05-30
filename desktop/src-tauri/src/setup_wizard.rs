@@ -766,13 +766,33 @@ fn import_wsl_distro() -> anyhow::Result<()> {
 /// Whether `ensure_wsl_distro_metadata` may `wsl --terminate` the distro after
 /// it edits `/etc/wsl.conf`. Terminating applies the new config immediately but
 /// kills every process in the distro — fatal if containers are running.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TerminateOnChange {
     /// Safe only when no Speedwave containers run (e.g. right after import).
     Yes,
     /// Leave the distro running; the new wsl.conf applies on its next restart.
     No,
+    /// Terminate ONLY if no Speedwave containers are currently running. The
+    /// startup/post-update path: a fresh process usually has no containers up
+    /// yet, so terminating lets the `metadata` mount option take effect before
+    /// the first container start (without it, the uid-1000 entrypoint hits
+    /// EACCES on the still-uid=0 drvfs mount and login/onboarding breaks). If
+    /// containers ARE running, behaves like `No` to avoid killing them.
+    IfIdle,
+}
+
+/// Pure decision: should the distro be `wsl --terminate`d to apply a wsl.conf
+/// change? `has_running` is only meaningful for `IfIdle` (whether any Speedwave
+/// container is currently up). Extracted from the I/O so the policy is testable
+/// without Windows.
+#[cfg(any(target_os = "windows", test))]
+fn terminate_decision(terminate: TerminateOnChange, has_running: bool) -> bool {
+    match terminate {
+        TerminateOnChange::Yes => true,
+        TerminateOnChange::No => false,
+        TerminateOnChange::IfIdle => !has_running,
+    }
 }
 
 /// Ensures the Speedwave distro's `/etc/wsl.conf` sets the drvfs automount
@@ -831,23 +851,21 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
             }
             let changed = stdout.contains("speedwave-metadata-added");
             if changed {
-                match terminate {
-                    TerminateOnChange::Yes => {
-                        // Safe at import time: no Speedwave containers run yet.
-                        let _ = speedwave_runtime::binary::system_command("wsl.exe")
-                            .args(["--terminate", distro])
-                            .status();
-                        log::info!(
-                            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
-                        );
-                    }
-                    TerminateOnChange::No => {
-                        // Containers may be running; do NOT terminate. The new
-                        // wsl.conf applies on the distro's next natural restart.
-                        log::info!(
-                            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (applies on next WSL restart)"
-                        );
-                    }
+                // `IfIdle` needs to know whether containers are running; only
+                // probe in that case (the probe spawns wsl.exe).
+                let has_running = matches!(terminate, TerminateOnChange::IfIdle)
+                    && wsl_distro_has_running_containers(distro);
+                if terminate_decision(terminate, has_running) {
+                    let _ = speedwave_runtime::binary::system_command("wsl.exe")
+                        .args(["--terminate", distro])
+                        .status();
+                    log::info!(
+                        "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
+                    );
+                } else {
+                    log::info!(
+                        "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (applies on next WSL restart)"
+                    );
                 }
             }
         }
@@ -858,6 +876,39 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
         Err(e) => log::warn!("ensure_wsl_distro_metadata: spawn failed (non-fatal): {e}"),
     }
     Ok(())
+}
+
+/// `true` if any container is currently running inside the Speedwave distro
+/// (any compose project). Used to decide whether `wsl --terminate` is safe:
+/// terminating a distro with live containers kills them mid-run. Best-effort —
+/// on any probe failure returns `true` (assume busy) so we never terminate on
+/// uncertainty.
+#[cfg(target_os = "windows")]
+fn wsl_distro_has_running_containers(distro: &str) -> bool {
+    // `nerdctl ps -q` lists only RUNNING containers (no `-a`). Non-empty stdout
+    // ⇒ something is up. Run via the distro's root shell, mirroring how the
+    // runtime reaches nerdctl.
+    let out = speedwave_runtime::binary::system_command("wsl.exe")
+        .args([
+            "-d", distro, "-u", "root", "--", "sudo", "nerdctl", "ps", "-q",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        Ok(o) => {
+            log::warn!(
+                "wsl_distro_has_running_containers: nerdctl ps failed for {distro}; assuming busy: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "wsl_distro_has_running_containers: spawn failed for {distro}; assuming busy: {e}"
+            );
+            true
+        }
+    }
 }
 
 /// Builds the `sh -c` script that adds/upgrades the `[automount]` block in
@@ -2968,18 +3019,21 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    // Cross-platform: the enum and the terminate policy are pure (no Windows
+    // I/O), so their guards run on every host.
     mod terminate_on_change_tests {
-        use super::super::TerminateOnChange;
+        use super::super::{terminate_decision, TerminateOnChange};
 
         // Regression guard for the E2E "cannot exec in a stopped state"
         // failure: the import path may terminate (no containers yet), the
-        // startup-migration path must not (containers may be running).
+        // startup-migration path uses IfIdle (terminate only when no containers
+        // run, so the metadata mount applies before the first start).
         #[test]
         fn variants_are_distinct() {
             assert_ne!(TerminateOnChange::Yes, TerminateOnChange::No);
-            assert_eq!(TerminateOnChange::Yes, TerminateOnChange::Yes);
-            assert_eq!(TerminateOnChange::No, TerminateOnChange::No);
+            assert_ne!(TerminateOnChange::IfIdle, TerminateOnChange::No);
+            assert_ne!(TerminateOnChange::IfIdle, TerminateOnChange::Yes);
+            assert_eq!(TerminateOnChange::IfIdle, TerminateOnChange::IfIdle);
         }
 
         #[test]
@@ -2989,6 +3043,34 @@ mod tests {
             assert_eq!(y, copied);
             assert_eq!(format!("{:?}", TerminateOnChange::No), "No");
             assert_eq!(format!("{:?}", TerminateOnChange::Yes), "Yes");
+            assert_eq!(format!("{:?}", TerminateOnChange::IfIdle), "IfIdle");
+        }
+
+        // The terminate policy: Yes always, No never, IfIdle only when the
+        // distro has no running containers (so the metadata mount applies before
+        // the first start without killing live containers).
+        #[test]
+        fn yes_always_terminates() {
+            assert!(terminate_decision(TerminateOnChange::Yes, false));
+            assert!(terminate_decision(TerminateOnChange::Yes, true));
+        }
+
+        #[test]
+        fn no_never_terminates() {
+            assert!(!terminate_decision(TerminateOnChange::No, false));
+            assert!(!terminate_decision(TerminateOnChange::No, true));
+        }
+
+        #[test]
+        fn ifidle_terminates_only_when_no_containers_run() {
+            assert!(
+                terminate_decision(TerminateOnChange::IfIdle, false),
+                "idle distro must terminate so metadata applies before first start"
+            );
+            assert!(
+                !terminate_decision(TerminateOnChange::IfIdle, true),
+                "must NOT terminate while containers run (would kill them)"
+            );
         }
     }
 

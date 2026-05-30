@@ -1792,15 +1792,20 @@ fn main() {
 
                 // Existing distros (created before the metadata fix) need the
                 // automount=metadata option too, or claude /login cannot chmod
-                // its credentials on the 9p mount. Idempotent. NEVER terminate
-                // here: containers may already be running, and a `wsl
-                // --terminate` would kill them mid-start ("cannot exec in a
-                // stopped state"). The new wsl.conf applies on the next natural
-                // WSL restart.
+                // its credentials on the 9p mount. Idempotent. `IfIdle`: this
+                // runs at startup (incl. right after an update) before any
+                // container is started, so the distro is normally idle and we
+                // can terminate to apply the new mount options immediately —
+                // without it, the first container start after an update hits the
+                // still-uid=0 mount and login/onboarding breaks. If containers
+                // ARE running, IfIdle leaves them alone (applies on next
+                // restart).
                 #[cfg(target_os = "windows")]
                 {
                     use setup_wizard::TerminateOnChange;
-                    if let Err(e) = setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::No) {
+                    if let Err(e) =
+                        setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::IfIdle)
+                    {
                         log::warn!("wsl.conf metadata migration failed: {e}");
                     }
                 }
