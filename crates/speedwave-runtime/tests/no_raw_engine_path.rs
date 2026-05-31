@@ -60,6 +60,12 @@ const WSLPATH_PATTERNS: &[&str] = &["\"wslpath\""];
 /// downstream crate (desktop/cli) may call it — they go through the SSOT.
 const PRIMITIVE_PATTERNS: &[&str] = &["windows_to_wsl_path"];
 
+// Heuristic: scan backward for a test marker, stopping at the first column-0
+// `}` (a top-level item close). Limitation: a column-0 `}` between the
+// violation and its enclosing `mod tests` (e.g. a nested `impl` close at column
+// 0 inside the module) could end the scan early and mis-classify a test-module
+// line as production — a possible false negative. Acceptable: the worst case is
+// the detector flagging real test code, which a `// SSOT-allow:` clears.
 fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
     for i in (0..idx).rev() {
         let l = lines[i].trim_start();
@@ -70,7 +76,7 @@ fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
         {
             return true;
         }
-        if l == "}" && lines[i].starts_with('}') {
+        if lines[i] == "}" {
             return false;
         }
     }

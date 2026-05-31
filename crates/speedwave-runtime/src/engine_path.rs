@@ -36,6 +36,10 @@ pub fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
 /// (the `presaleContainerfile` plugin-build bug). Trailing slashes on `vm_root`
 /// collapse so the result has exactly one separator.
 pub fn vm_path_join(vm_root: &str, child: &str) -> String {
+    debug_assert!(
+        !child.starts_with('/'),
+        "vm_path_join child must be relative, got: {child}"
+    );
     format!("{}/{}", vm_root.trim_end_matches('/'), child)
 }
 
