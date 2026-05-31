@@ -14,6 +14,7 @@ pub(crate) mod wsl;
 
 pub use locked::LockedRuntime;
 pub use wsl::decode_wsl_output;
+pub use wsl::vm_path_join;
 #[cfg(any(target_os = "windows", test))]
 pub use wsl::windows_to_wsl_path;
 

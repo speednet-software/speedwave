@@ -759,11 +759,12 @@ fn try_build_images(
                 for &idx in *chunk {
                     let img = images[idx];
                     let tag = image_ref(img.name, bundle_id);
-                    // String-concat with "/" rather than PathBuf::join: vm_root may be
-                    // a WSL/Linux path on Windows where PathBuf::join treats /-prefixed
-                    // paths as absolute roots.
-                    let abs_context = format!("{}/{}", root_str, img.context_dir);
-                    let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
+                    // vm_path_join, not PathBuf::join: vm_root may be a WSL/Linux
+                    // path on Windows where PathBuf::join mangles /-rooted strings.
+                    let abs_context =
+                        crate::runtime::vm_path_join(root_str, img.context_dir);
+                    let abs_containerfile =
+                        crate::runtime::vm_path_join(root_str, img.containerfile);
                     log::info!(
                         "build_images: [{}/{}] building {} (context={}, file={})",
                         idx + 1,
