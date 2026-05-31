@@ -145,6 +145,13 @@ fn line_matches(rule: &Rule, line: &str) -> bool {
 
 #[test]
 fn engine_paths_go_through_ssot() {
+    // Self-verify the hard-coded index: if a rule is inserted before it, the
+    // primitive-rule exemption would silently apply to the wrong rule.
+    assert_eq!(
+        RULES[PRIMITIVE_RULE_IDX].patterns, PRIMITIVE_PATTERNS,
+        "PRIMITIVE_RULE_IDX no longer points at the PRIMITIVE_PATTERNS rule — update it"
+    );
+
     let root = manifest_root();
     let mut files = Vec::new();
     walk_rs(&root.join("crates/speedwave-runtime/src"), &mut files);
