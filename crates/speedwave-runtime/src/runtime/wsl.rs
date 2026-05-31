@@ -325,8 +325,10 @@ pub fn looks_like_wsl_unc_prefix(s: &str) -> bool {
 ///
 /// Returns an error for true network UNC paths (`\\server\share`) which cannot
 /// be mapped to WSL mount points.
+// Internal primitive of `engine_path::to_engine_path` — the one public SSOT.
+// Kept `pub(crate)` so no downstream crate hand-rolls host→WSL translation.
 #[cfg(any(target_os = "windows", test))]
-pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
     let s = path.to_string_lossy();
     let bytes = s.as_bytes();
 
@@ -390,17 +392,6 @@ pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
 
     // Already a Unix path or relative — pass through
     Ok(path.to_path_buf())
-}
-
-/// Joins a VM-side (Linux/WSL) directory and a child with a forward slash.
-///
-/// `vm_root` is a path bound for inside the VM/container (`/mnt/c/...` on
-/// Windows). `PathBuf::join` must NOT be used: on Windows it inserts a
-/// backslash and mishandles the `/`-rooted string, mangling `<root>/<child>`
-/// into garbage (the `presaleContainerfile` plugin-build bug). Trailing slashes
-/// on `vm_root` are collapsed so the result has exactly one separator.
-pub fn vm_path_join(vm_root: &str, child: &str) -> String {
-    format!("{}/{}", vm_root.trim_end_matches('/'), child)
 }
 
 /// Returns the compose file path translated to a WSL mount path.
@@ -908,27 +899,6 @@ impl WslRuntime {
 mod tests {
     use super::*;
     use crate::runtime::test_support::MockRunner;
-
-    #[test]
-    fn vm_path_join_inserts_single_separator() {
-        // The case the plugin build hit: a WSL root + "Containerfile" must yield
-        // exactly one "/", never the dropped-separator "presaleContainerfile".
-        assert_eq!(
-            vm_path_join("/mnt/c/Users/u/.speedwave/plugins/presale", "Containerfile"),
-            "/mnt/c/Users/u/.speedwave/plugins/presale/Containerfile"
-        );
-    }
-
-    #[test]
-    fn vm_path_join_collapses_trailing_slashes_and_keeps_forward_slash() {
-        // Trailing slashes on the root collapse to one separator; the separator
-        // is always "/" regardless of host OS (no backslash even on Windows).
-        assert_eq!(vm_path_join("/mnt/c/x/", "Containerfile"), "/mnt/c/x/Containerfile");
-        assert_eq!(vm_path_join("/mnt/c/x///", "y"), "/mnt/c/x/y");
-        let joined = vm_path_join("/mnt/c/some/dir", "sub/Containerfile");
-        assert!(!joined.contains('\\'), "must never use backslash, got: {joined}");
-        assert_eq!(joined, "/mnt/c/some/dir/sub/Containerfile");
-    }
 
     #[test]
     fn test_is_available_distro_exists() {

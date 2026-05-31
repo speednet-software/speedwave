@@ -761,10 +761,9 @@ fn try_build_images(
                     let tag = image_ref(img.name, bundle_id);
                     // vm_path_join, not PathBuf::join: vm_root may be a WSL/Linux
                     // path on Windows where PathBuf::join mangles /-rooted strings.
-                    let abs_context =
-                        crate::runtime::vm_path_join(root_str, img.context_dir);
+                    let abs_context = crate::engine_path::vm_path_join(root_str, img.context_dir);
                     let abs_containerfile =
-                        crate::runtime::vm_path_join(root_str, img.containerfile);
+                        crate::engine_path::vm_path_join(root_str, img.containerfile);
                     log::info!(
                         "build_images: [{}/{}] building {} (context={}, file={})",
                         idx + 1,

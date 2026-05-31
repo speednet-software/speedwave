@@ -1046,8 +1046,7 @@ pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
     let distro = consts::wsl_distro_name();
     let (uid, gid) = consts::container_uid_gid();
     let host_path = speedwave_runtime::claude_home::claude_home_dir(consts::data_dir(), project);
-    let wsl_path = speedwave_runtime::runtime::windows_to_wsl_path(&host_path)?;
-    let wsl_path = wsl_path.to_string_lossy().to_string();
+    let wsl_path = speedwave_runtime::engine_path::to_engine_path(&host_path)?;
     let uidgid = format!("{uid}:{gid}");
     // Pass the path as its OWN argv token to each tool (mkdir/chown/chmod) — no
     // `sh -c` wrapper, no shell variable. `wsl.exe` re-parses a `sh -c "<script>"`
@@ -1116,23 +1115,15 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
 
     if let Some(bundled) = find_bundled_resource("wsl/nerdctl-full.tar.gz") {
         if verify_sha256_ps(&bundled, expected_sha256) {
-            let win_path = bundled.to_string_lossy().to_string();
-            let wslpath_output = speedwave_runtime::binary::system_command("wsl.exe")
-                .args([
-                    "-d",
-                    consts::wsl_distro_name(),
-                    "--",
-                    "wslpath",
-                    "-u",
-                    &win_path,
-                ])
-                .output()?;
-            if wslpath_output.status.success() {
-                bundled_wsl_path = Some(
-                    String::from_utf8_lossy(&wslpath_output.stdout)
-                        .trim()
-                        .to_string(),
-                );
+            // Translate the bundled tarball's host path to its WSL path via the
+            // SSOT (engine_path::to_engine_path) — one path-translation mechanism,
+            // not a second `wslpath` round-trip. On translation failure fall
+            // through to the curl download branch rather than abort the install.
+            match speedwave_runtime::engine_path::to_engine_path(&bundled) {
+                Ok(wsl) => bundled_wsl_path = Some(wsl),
+                Err(e) => log::warn!(
+                    "could not translate bundled nerdctl path to WSL ({e}); will download instead"
+                ),
             }
         }
     }

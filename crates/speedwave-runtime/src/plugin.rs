@@ -2016,7 +2016,7 @@ fn build_single_plugin_image(
     // vm_root is a VM-side path (on Windows a WSL `/mnt/c/...` path); join with
     // `vm_path_join`, never `PathBuf::join` which mangles it on Windows.
     let root_str = vm_root.to_string_lossy();
-    let containerfile = crate::runtime::vm_path_join(&root_str, "Containerfile");
+    let containerfile = crate::engine_path::vm_path_join(&root_str, "Containerfile");
 
     log::info!(
         "Building plugin image {} from {}",
@@ -2090,8 +2090,8 @@ pub fn generate_plugin_service(
         TokenMount::ReadWrite { .. } => "rw",
     };
 
-    let tokens_path = crate::compose::to_engine_path(&tokens_dir.join(sid))?;
-    let workspace_path = crate::compose::to_engine_path(Path::new(project_dir))?;
+    let tokens_path = crate::engine_path::to_engine_path(&tokens_dir.join(sid))?;
+    let workspace_path = crate::engine_path::to_engine_path(Path::new(project_dir))?;
     let mem_limit = manifest.mem_limit.as_deref().unwrap_or("128m");
     let cpu_limit = manifest.cpu_limit.as_deref().unwrap_or("2.0");
     let user = container_user();
