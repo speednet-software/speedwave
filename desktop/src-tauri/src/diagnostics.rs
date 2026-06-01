@@ -155,16 +155,11 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
         let rt = speedwave_runtime::runtime::detect_runtime();
         let container_logs = rt.compose_logs(&project, 5000).ok();
 
-        let compose_path = Some(
-            speedwave_runtime::consts::data_dir()
-                .join("projects")
-                .join(&project)
-                .join("compose.yml"),
-        );
+        // SSOT path — a hand-rolled projects/<project>/ path bundled nothing.
+        let compose_path = speedwave_runtime::compose::compose_output_path(&project).ok();
 
         let mcp_os_log = {
-            let p = speedwave_runtime::consts::data_dir()
-                .join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
+            let p = speedwave_runtime::consts::mcp_os_log_path();
             if p.exists() {
                 Some(p)
             } else {
@@ -212,6 +207,27 @@ mod tests {
     fn export_diagnostics_rejects_invalid_project_name() {
         let result = super::super::check_project("../escape");
         assert!(result.is_err(), "path traversal should be rejected");
+    }
+
+    /// Regression: the compose path must resolve via the `compose_output_path`
+    /// SSOT, never the hand-rolled `projects/<project>/` path that silently
+    /// bundled nothing.
+    #[test]
+    fn export_diagnostics_resolves_compose_via_ssot() {
+        let src = include_str!("diagnostics.rs");
+        let cmd = src
+            .split("async fn export_diagnostics(")
+            .nth(1)
+            .and_then(|s| s.split("\n}").next())
+            .expect("export_diagnostics body");
+        assert!(
+            cmd.contains("compose::compose_output_path("),
+            "compose path must come from the compose_output_path SSOT"
+        );
+        assert!(
+            !cmd.contains(".join(\"projects\")"),
+            "must not re-introduce the non-existent projects/<project>/compose.yml path"
+        );
     }
 
     #[test]

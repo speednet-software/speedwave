@@ -92,6 +92,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+# Durable writes: safe fsync wrappers (macOS F_FULLFSYNC); `unsafe`-free.
+rustix = { version = "1", features = ["fs"] }
+
 [features]
 # Host-side meeting transcription: WAV I/O + the model downloader + the Whisper
 # transcriber + the sherpa-onnx diarizer (+ cpal on Windows for WASAPI loopback).

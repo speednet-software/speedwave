@@ -140,8 +140,7 @@ pub(crate) async fn get_compose_logs(project: String, tail: Option<u32>) -> Resu
 #[tauri::command]
 pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let log_path =
-            speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
+        let log_path = speedwave_runtime::consts::mcp_os_log_path();
         let tail = tail.unwrap_or(200).min(10_000) as usize;
         read_tail_sanitized(&log_path, tail)
     })
@@ -388,9 +387,8 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
             None => String::new(),
         };
 
-        // mcp-os — same path resolution `get_mcp_os_logs` uses
-        let mcp_os_path =
-            speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
+        // mcp-os — same path resolution `get_mcp_os_logs` uses (SSOT).
+        let mcp_os_path = speedwave_runtime::consts::mcp_os_log_path();
         let mcp_os = read_tail_sanitized(&mcp_os_path, tail_us).unwrap_or_default();
 
         // host-exec — per-project worker log (`get_host_exec_logs`'s path)
