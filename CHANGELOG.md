@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.13.3](https://github.com/speednet-software/speedwave/compare/v0.13.2...v0.13.3) (2026-06-01)
+
+
+### Bug Fixes
+
+* **runtime:** consolidate host→engine path handling behind one SSOT (fixes Windows plugin build) ([#760](https://github.com/speednet-software/speedwave/issues/760)) ([#761](https://github.com/speednet-software/speedwave/issues/761)) ([0947982](https://github.com/speednet-software/speedwave/commit/0947982eeeae51365c9e296554c758a38aabe523))
+
 ## [0.13.2](https://github.com/speednet-software/speedwave/compare/v0.13.1...v0.13.2) (2026-05-30)
 
 
