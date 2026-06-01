@@ -387,7 +387,7 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
             None => String::new(),
         };
 
-        // mcp-os — same path resolution `get_mcp_os_logs` uses (SSOT).
+        // mcp-os — same path resolution `get_mcp_os_logs` uses.
         let mcp_os_path = speedwave_runtime::consts::mcp_os_log_path();
         let mcp_os = read_tail_sanitized(&mcp_os_path, tail_us).unwrap_or_default();
 
