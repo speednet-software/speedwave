@@ -41,17 +41,19 @@ load setup
 @test "speedwave check produces a structured verdict" {
     # `speedwave check` renders compose in-memory from the resolved project
     # config (no compose file is required on disk) and must terminate with
-    # one of three structured verdicts:
+    # one of four structured verdicts:
     #   - "speedwave check OK"           — all security + OS checks passed
     #   - "speedwave check FAILED"       — at least one security violation
     #   - "runtime is not running"       — Desktop isn't up, CLI short-circuits
+    #   - "No project configured"        — run from a dir with no project set up
     # Any other outcome (panic, bare Rust error, silent exit) indicates a
     # regression in the check pipeline.
     cd "$TEST_TEMP_DIR"
     run "$SPEEDWAVE_BIN" check 2>&1 || true
     [[ "$output" == *"speedwave check OK"* ]] \
         || [[ "$output" == *"speedwave check FAILED"* ]] \
-        || [[ "$output" == *"runtime is not running"* ]]
+        || [[ "$output" == *"runtime is not running"* ]] \
+        || [[ "$output" == *"No project configured"* ]]
     # Must not crash with a panic — those are real regressions, not expected
     # failure modes.
     [[ "$output" != *"panicked"* ]]
