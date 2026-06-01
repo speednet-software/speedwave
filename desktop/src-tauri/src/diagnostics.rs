@@ -70,23 +70,33 @@ pub(crate) fn build_diagnostics_zip(
         }
     }
 
+    // Entry names come from the SSOT registry (keyed by source), so a stray
+    // hand-rolled entry can't appear — every name traces to DIAGNOSTIC_SOURCES.
+    let zip_entry = |key: &str| -> &'static str {
+        speedwave_runtime::diagnostic_sources::DIAGNOSTIC_SOURCES
+            .iter()
+            .find(|s| s.key == key)
+            .map(|s| s.zip_entry)
+            .unwrap_or_default()
+    };
+
     if let Some(ref logs) = input.container_logs {
-        write_sanitized_entry(&mut zip, options, "containers/compose.log", logs)?;
+        write_sanitized_entry(&mut zip, options, zip_entry("compose"), logs)?;
     }
 
-    // Single-file sources: (path, zip_entry). Existence-gated.
+    // Single-file sources keyed to the registry. Existence-gated.
     let single_files = [
-        (&input.serial_log, "lima/serial.log"),
-        (&input.mcp_os_log, "mcp-os/mcp-os.log"),
-        (&input.host_exec_log, "host-exec/log"),
-        (&input.claude_session_log, "claude/claude-session.log"),
-        (&input.compose_path, "containers/compose.yml"),
+        (&input.serial_log, "lima"),
+        (&input.mcp_os_log, "mcp-os"),
+        (&input.host_exec_log, "host-exec"),
+        (&input.claude_session_log, "claude"),
+        (&input.compose_path, "compose-yml"),
     ];
-    for (maybe_path, entry) in single_files {
+    for (maybe_path, key) in single_files {
         if let Some(path) = maybe_path {
             if path.exists() {
                 if let Ok(content) = std::fs::read_to_string(path) {
-                    write_sanitized_entry(&mut zip, options, entry, &content)?;
+                    write_sanitized_entry(&mut zip, options, zip_entry(key), &content)?;
                 }
             }
         }
@@ -609,6 +619,46 @@ mod tests {
                     "secret '{s}' leaked into ZIP entry '{name}': {content}"
                 );
             }
+        }
+    }
+
+    /// Parity: every ZIP entry must trace to a registry `zip_entry`. A stray
+    /// hand-rolled `zip.start_file(...)` outside the registry would fail here.
+    #[test]
+    fn every_zip_entry_traces_to_source() {
+        use speedwave_runtime::diagnostic_sources::DIAGNOSTIC_SOURCES;
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-trace.zip");
+        let log_dir = tmp.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(log_dir.join("app.log"), "x").unwrap();
+        let mk = |name: &str| {
+            let p = tmp.path().join(name);
+            std::fs::write(&p, "x").unwrap();
+            p
+        };
+        let input = DiagnosticsInput {
+            log_dir: Some(log_dir),
+            serial_log: Some(mk("serial.log")),
+            container_logs: Some("x".into()),
+            mcp_os_log: Some(mk("mcp.log")),
+            host_exec_log: Some(mk("he.log")),
+            compose_path: Some(mk("compose.yml")),
+            claude_session_log: Some(mk("claude.log")),
+        };
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        let registry_entries: Vec<&str> = DIAGNOSTIC_SOURCES.iter().map(|s| s.zip_entry).collect();
+        for name in zip_entry_names(&zip_path) {
+            // system-info.txt is the documented non-source trailing write;
+            // `logs/<file>` are the desktop dir's N dynamic entries (zip_entry "logs/").
+            let traced = name == "system-info.txt"
+                || name.starts_with("logs/")
+                || registry_entries.contains(&name.as_str());
+            assert!(
+                traced,
+                "ZIP entry '{name}' does not trace to any DIAGNOSTIC_SOURCES.zip_entry"
+            );
         }
     }
 }

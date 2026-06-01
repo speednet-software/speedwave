@@ -483,6 +483,51 @@ mod tests {
         MsgStoreRegistry::new()
     }
 
+    /// P0-1 channel guard: the patch mirror (which feeds `chat_patch::*` via
+    /// subscribe_cmd, with no sanitize of its own) must carry redacted content.
+    /// Mirrors production: sanitize_chunk runs BEFORE handle_chunk.
+    #[test]
+    fn patch_channel_redacts_secrets() {
+        let r = registry();
+        let mut e = PatchEmitter::new();
+        let secret = "MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000";
+        let chunk = crate::chat::sanitize_chunk(StreamChunk::Text {
+            content: format!("here it is {secret}"),
+        });
+        e.handle_chunk(&chunk, &r);
+        let dump = format!("{:?}", e.pending);
+        assert!(
+            !dump.contains("550e8400"),
+            "secret leaked into patch-mirror payload: {dump}"
+        );
+    }
+
+    /// Tool input (partial_json) must reach the patch mirror byte-identical —
+    /// sanitize_chunk must not corrupt incremental JSON.
+    #[test]
+    fn patch_channel_preserves_tool_input_json() {
+        let r = registry();
+        let mut e = PatchEmitter::new();
+        e.handle_chunk(
+            &StreamChunk::ToolStart {
+                tool_id: "t1".into(),
+                tool_name: "Bash".into(),
+            },
+            &r,
+        );
+        let raw = r#"{"command":"echo"#;
+        let chunk = crate::chat::sanitize_chunk(StreamChunk::ToolInputDelta {
+            tool_id: "t1".into(),
+            partial_json: raw.into(),
+        });
+        e.handle_chunk(&chunk, &r);
+        let dump = format!("{:?}", e.pending);
+        assert!(
+            dump.contains(r#"{\"command\":\"echo"#) || dump.contains(raw),
+            "partial_json must pass through intact: {dump}"
+        );
+    }
+
     #[test]
     fn text_chunk_creates_assistant_entry_and_appends() {
         let r = registry();

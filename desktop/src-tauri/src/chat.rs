@@ -103,7 +103,7 @@ pub enum StreamChunk {
 /// single emit point so neither channel can leak. Structural fields (tool ids,
 /// model, session ids) and `partial_json` (incremental JSON — sanitizing could
 /// corrupt it) are left untouched.
-fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
+pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
     use speedwave_runtime::log_sanitizer::sanitize;
     match chunk {
         StreamChunk::Text { content } => StreamChunk::Text {

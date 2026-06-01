@@ -872,30 +872,36 @@ mod tests {
 
     #[test]
     fn logs_view_covers_all_displayable_registry_sources() {
-        // Parity: every displayable+available registry source must have a /logs
-        // representation. compose/desktop are non-File kinds (handled inline);
-        // the rest are File sources whose keys must be merged here.
-        use speedwave_runtime::diagnostic_sources::{SourceKind, DIAGNOSTIC_SOURCES};
-        let merged_keys = [
-            "compose",
-            "desktop",
-            "mcp-os",
-            "host-exec",
-            "claude",
-            "lima",
-        ];
+        // Parity, checked against the ACTUAL merge output (not a proxy array):
+        // give every source a unique marker, run the real merge, and assert each
+        // displayable+available registry source's marker survives prefixed by its
+        // key. A registry source not wired into LogSources/merge fails here.
+        use speedwave_runtime::diagnostic_sources::DIAGNOSTIC_SOURCES;
+        let merged = merge_log_sources(
+            LogSources {
+                compose: "MARKER_compose\n".to_string(),
+                desktop: "MARKER_desktop\n".to_string(),
+                mcp_os: "MARKER_mcp_os\n".to_string(),
+                host_exec: "MARKER_host_exec\n".to_string(),
+                claude: "MARKER_claude\n".to_string(),
+                lima: "MARKER_lima\n".to_string(),
+            },
+            "proj",
+        );
         for s in DIAGNOSTIC_SOURCES {
             if s.displayable && s.platforms.available_here() {
+                let token = format!("{} | MARKER_{}", s.key, s.key.replace('-', "_"));
                 assert!(
-                    merged_keys.contains(&s.key),
-                    "displayable registry source '{}' is missing from the /logs merge — \
-                     ZIP would carry more than /logs, violating parity",
+                    merged.contains(&token),
+                    "displayable registry source '{}' not present in /logs merge \
+                     (expected '{token}') — ZIP would carry more than /logs, \
+                     violating parity. Merged:\n{merged}",
                     s.key
                 );
             }
         }
-        // And nothing non-displayable (compose-yml) sneaks into /logs.
-        assert!(!merged_keys.contains(&"compose-yml"));
+        // compose-yml (non-displayable) must never appear in /logs.
+        assert!(!merged.contains("compose-yml |"), "merged: {merged}");
     }
 
     #[test]
