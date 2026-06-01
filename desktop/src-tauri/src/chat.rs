@@ -98,6 +98,61 @@ pub enum StreamChunk {
     QueueDrained { session_id: String, text: String },
 }
 
+/// Redacts secrets in a chunk's free-text fields before it fans out to the UI
+/// (both `chat_stream` and the `chat_patch::*` patch mirror). Called once at the
+/// single emit point so neither channel can leak. Structural fields (tool ids,
+/// model, session ids) and `partial_json` (incremental JSON — sanitizing could
+/// corrupt it) are left untouched.
+fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
+    use speedwave_runtime::log_sanitizer::sanitize;
+    match chunk {
+        StreamChunk::Text { content } => StreamChunk::Text {
+            content: sanitize(&content),
+        },
+        StreamChunk::Thinking { content } => StreamChunk::Thinking {
+            content: sanitize(&content),
+        },
+        StreamChunk::ToolResult {
+            tool_id,
+            content,
+            is_error,
+        } => StreamChunk::ToolResult {
+            tool_id,
+            content: sanitize(&content),
+            is_error,
+        },
+        StreamChunk::Error { content } => StreamChunk::Error {
+            content: sanitize(&content),
+        },
+        StreamChunk::Result {
+            result_text: Some(text),
+            session_id,
+            total_cost,
+            usage,
+            context_window_size,
+            assistant_uuid,
+            turn_usage,
+            turn_cost,
+            model,
+        } => StreamChunk::Result {
+            result_text: Some(sanitize(&text)),
+            session_id,
+            total_cost,
+            usage,
+            context_window_size,
+            assistant_uuid,
+            turn_usage,
+            turn_cost,
+            model,
+        },
+        StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
+            session_id,
+            text: sanitize(&text),
+        },
+        other => other,
+    }
+}
+
 /// Token usage information from the result message.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UsageInfo {
@@ -1645,6 +1700,9 @@ impl ChatSession {
                 }
                 let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
                 for chunk in chunks {
+                    // Redact secrets once, before BOTH egress channels (patch
+                    // mirror in handle_chunk + chat_stream emit). See sanitize_chunk.
+                    let chunk = sanitize_chunk(chunk);
                     patch_emitter.handle_chunk(&chunk, &registry);
                     if let Err(e) = app_handle.emit("chat_stream", chunk) {
                         log::warn!("failed to emit chat_stream event: {e}");
@@ -2059,6 +2117,73 @@ fn drain_queued_message(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // -- sanitize_chunk: secrets must not reach the UI on any chunk channel --
+
+    #[test]
+    fn sanitize_chunk_redacts_text_and_thinking() {
+        let secret = "MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000";
+        for chunk in [
+            StreamChunk::Text {
+                content: secret.into(),
+            },
+            StreamChunk::Thinking {
+                content: secret.into(),
+            },
+            StreamChunk::Error {
+                content: secret.into(),
+            },
+        ] {
+            let out = format!("{:?}", sanitize_chunk(chunk));
+            assert!(!out.contains("550e8400"), "secret leaked: {out}");
+        }
+    }
+
+    #[test]
+    fn sanitize_chunk_redacts_tool_result() {
+        let chunk = StreamChunk::ToolResult {
+            tool_id: "t1".into(),
+            content: "key sk-ant-abcdefabcdefabcdefabcdef".into(),
+            is_error: false,
+        };
+        let out = format!("{:?}", sanitize_chunk(chunk));
+        assert!(!out.contains("abcdefabcdefabcdefabcdef"), "leaked: {out}");
+    }
+
+    #[test]
+    fn sanitize_chunk_redacts_result_text() {
+        // result_text is dropped from the patch mirror, reaches UI only via
+        // chat_stream — so the single sanitize point must cover it.
+        let chunk = StreamChunk::Result {
+            session_id: "s".into(),
+            total_cost: None,
+            usage: None,
+            result_text: Some("token=sk-ant-secretsecretsecretsecret done".into()),
+            context_window_size: None,
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
+        };
+        let out = format!("{:?}", sanitize_chunk(chunk));
+        assert!(!out.contains("secretsecretsecretsecret"), "leaked: {out}");
+    }
+
+    #[test]
+    fn sanitize_chunk_leaves_tool_input_delta_untouched() {
+        // partial_json is incremental JSON — sanitizing could corrupt structure.
+        let raw = r#"{"path":"/x","token":"abc"#;
+        let chunk = StreamChunk::ToolInputDelta {
+            tool_id: "t1".into(),
+            partial_json: raw.into(),
+        };
+        match sanitize_chunk(chunk) {
+            StreamChunk::ToolInputDelta { partial_json, .. } => {
+                assert_eq!(partial_json, raw, "partial_json must be byte-identical");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
 
     // -- interrupt protocol tests (behavioural via free helpers) --
 

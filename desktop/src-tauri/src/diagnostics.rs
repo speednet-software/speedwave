@@ -11,6 +11,8 @@ pub(crate) struct DiagnosticsInput {
     pub container_logs: Option<String>,
     /// Path to the mcp-os dedicated log file.
     pub mcp_os_log: Option<std::path::PathBuf>,
+    /// Path to the per-project host-exec worker log.
+    pub host_exec_log: Option<std::path::PathBuf>,
     /// Path to the project's `compose.yml`.
     pub compose_path: Option<std::path::PathBuf>,
     /// Path to the Claude session log file.
@@ -21,6 +23,21 @@ pub(crate) struct DiagnosticsInput {
 ///
 /// All textual content is passed through `log_sanitizer::sanitize()` before
 /// being written to the archive. System info is appended without sanitization.
+/// Writes one ZIP entry, ALWAYS sanitized. The single textual-write path —
+/// every secret-bearing entry goes through here, so none can skip redaction.
+fn write_sanitized_entry(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    options: zip::write::SimpleFileOptions,
+    name: &str,
+    raw: &str,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let sanitized = speedwave_runtime::log_sanitizer::sanitize(raw);
+    zip.start_file(name, options)?;
+    zip.write_all(sanitized.as_bytes())?;
+    Ok(())
+}
+
 pub(crate) fn build_diagnostics_zip(
     zip_path: &std::path::Path,
     input: &DiagnosticsInput,
@@ -32,7 +49,7 @@ pub(crate) fn build_diagnostics_zip(
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    // 1. App logs
+    // App logs: one /logs source ("desktop") → N `logs/<file>` entries.
     if let Some(ref log_dir) = input.log_dir {
         if let Ok(entries) = std::fs::read_dir(log_dir) {
             let mut log_paths: Vec<_> = entries
@@ -43,71 +60,39 @@ pub(crate) fn build_diagnostics_zip(
             log_paths.sort();
             for path in &log_paths {
                 if let Ok(content) = std::fs::read_to_string(path) {
-                    let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
                     let name = format!(
                         "logs/{}",
                         path.file_name().unwrap_or_default().to_string_lossy()
                     );
-                    zip.start_file(&name, options)?;
-                    zip.write_all(sanitized.as_bytes())?;
+                    write_sanitized_entry(&mut zip, options, &name, &content)?;
                 }
             }
         }
     }
 
-    // 2. Lima VM serial log
-    if let Some(ref serial_log) = input.serial_log {
-        if serial_log.exists() {
-            if let Ok(content) = std::fs::read_to_string(serial_log) {
-                let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
-                zip.start_file("lima/serial.log", options)?;
-                zip.write_all(sanitized.as_bytes())?;
-            }
-        }
-    }
-
-    // 3. Container logs
     if let Some(ref logs) = input.container_logs {
-        let sanitized = speedwave_runtime::log_sanitizer::sanitize(logs);
-        zip.start_file("containers/compose.log", options)?;
-        zip.write_all(sanitized.as_bytes())?;
+        write_sanitized_entry(&mut zip, options, "containers/compose.log", logs)?;
     }
 
-    // 4. mcp-os log
-    if let Some(ref path) = input.mcp_os_log {
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
-                let entry_name = format!("mcp-os/{}", speedwave_runtime::consts::MCP_OS_LOG_FILE);
-                zip.start_file(&entry_name, options)?;
-                zip.write_all(sanitized.as_bytes())?;
+    // Single-file sources: (path, zip_entry). Existence-gated.
+    let single_files = [
+        (&input.serial_log, "lima/serial.log"),
+        (&input.mcp_os_log, "mcp-os/mcp-os.log"),
+        (&input.host_exec_log, "host-exec/log"),
+        (&input.claude_session_log, "claude/claude-session.log"),
+        (&input.compose_path, "containers/compose.yml"),
+    ];
+    for (maybe_path, entry) in single_files {
+        if let Some(path) = maybe_path {
+            if path.exists() {
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    write_sanitized_entry(&mut zip, options, entry, &content)?;
+                }
             }
         }
     }
 
-    // 5. Claude session log
-    if let Some(ref path) = input.claude_session_log {
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
-                zip.start_file("claude/claude-session.log", options)?;
-                zip.write_all(sanitized.as_bytes())?;
-            }
-        }
-    }
-
-    // 6. compose.yml
-    if let Some(ref compose_path) = input.compose_path {
-        if compose_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(compose_path) {
-                let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
-                zip.start_file("containers/compose.yml", options)?;
-                zip.write_all(sanitized.as_bytes())?;
-            }
-        }
-    }
-
-    // 7. System info (no sanitization needed)
+    // System info: compile-time constants, no secrets — the one raw entry.
     let sys_info = format!(
         "os: {}\narch: {}\nversion: {}\n",
         std::env::consts::OS,
@@ -141,48 +126,31 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
 
         let log_dir = crate::logging_cmd::desktop_log_dir();
 
-        let serial_log = if cfg!(target_os = "macos") {
-            Some(
-                speedwave_runtime::consts::data_dir()
-                    .join(speedwave_runtime::consts::LIMA_SUBDIR)
-                    .join(speedwave_runtime::consts::lima_vm_name())
-                    .join("serial.log"),
-            )
-        } else {
-            None
-        };
-
         let rt = speedwave_runtime::runtime::detect_runtime();
         let container_logs = rt.compose_logs(&project, 5000).ok();
 
-        // SSOT path — a hand-rolled projects/<project>/ path bundled nothing.
-        let compose_path = speedwave_runtime::compose::compose_output_path(&project).ok();
-
-        let mcp_os_log = {
-            let p = speedwave_runtime::consts::mcp_os_log_path();
-            if p.exists() {
-                Some(p)
-            } else {
-                None
-            }
-        };
-
-        let claude_session_log = {
-            let p = speedwave_runtime::consts::claude_session_log_path(&project);
-            if p.exists() {
-                Some(p)
-            } else {
-                None
-            }
+        // File-source paths resolved from the SSOT registry (platform-gated), so
+        // /logs and the ZIP can't drift and host-exec is no longer dropped.
+        use speedwave_runtime::diagnostic_sources::{SourceKind, DIAGNOSTIC_SOURCES};
+        let data_dir = speedwave_runtime::consts::data_dir();
+        let resolve = |key: &str| -> Option<std::path::PathBuf> {
+            DIAGNOSTIC_SOURCES
+                .iter()
+                .find(|s| s.key == key && s.platforms.available_here())
+                .and_then(|s| match s.kind {
+                    SourceKind::File(f) => f(data_dir, &project),
+                    _ => None,
+                })
         };
 
         let input = DiagnosticsInput {
             log_dir,
-            serial_log,
+            serial_log: resolve("lima"),
             container_logs,
-            mcp_os_log,
-            compose_path,
-            claude_session_log,
+            mcp_os_log: resolve("mcp-os"),
+            host_exec_log: resolve("host-exec"),
+            compose_path: resolve("compose-yml"),
+            claude_session_log: resolve("claude"),
         };
 
         build_diagnostics_zip(&zip_path, &input)?;
@@ -209,11 +177,10 @@ mod tests {
         assert!(result.is_err(), "path traversal should be rejected");
     }
 
-    /// Regression: the compose path must resolve via the `compose_output_path`
-    /// SSOT, never the hand-rolled `projects/<project>/` path that silently
-    /// bundled nothing.
+    /// Regression: paths must come from the DIAGNOSTIC_SOURCES registry, never
+    /// a hand-rolled `projects/<project>/` path that silently bundled nothing.
     #[test]
-    fn export_diagnostics_resolves_compose_via_ssot() {
+    fn export_diagnostics_resolves_paths_via_registry() {
         let src = include_str!("diagnostics.rs");
         let cmd = src
             .split("async fn export_diagnostics(")
@@ -221,8 +188,8 @@ mod tests {
             .and_then(|s| s.split("\n}").next())
             .expect("export_diagnostics body");
         assert!(
-            cmd.contains("compose::compose_output_path("),
-            "compose path must come from the compose_output_path SSOT"
+            cmd.contains("DIAGNOSTIC_SOURCES"),
+            "paths must be resolved from the registry SSOT"
         );
         assert!(
             !cmd.contains(".join(\"projects\")"),
@@ -282,6 +249,7 @@ mod tests {
             serial_log: None,
             container_logs: Some("container output here".into()),
             mcp_os_log: None,
+            host_exec_log: None,
             compose_path: Some(compose_path),
             claude_session_log: None,
         };
@@ -343,6 +311,7 @@ mod tests {
                 "JWT: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123\n".into(),
             ),
             mcp_os_log: None,
+            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -387,6 +356,7 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: None,
+            host_exec_log: None,
             compose_path: Some(compose_path),
             claude_session_log: None,
         };
@@ -427,6 +397,7 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: None,
+            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -457,6 +428,7 @@ mod tests {
             serial_log: Some(serial_log),
             container_logs: None,
             mcp_os_log: None,
+            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -484,6 +456,7 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: None,
+            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -511,6 +484,7 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: Some(mcp_os_log),
+            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -544,6 +518,7 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: None,
+            host_exec_log: None,
             compose_path: None,
             claude_session_log: Some(session_log),
         };
@@ -559,5 +534,81 @@ mod tests {
         let content = read_zip_entry(&zip_path, "claude/claude-session.log").unwrap();
         assert!(content.contains("SESSION: started"), "content: {content}");
         assert!(content.contains("TOOL: start"), "content: {content}");
+    }
+
+    #[test]
+    fn diagnostics_zip_includes_host_exec_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-hostexec.zip");
+        let host_exec = tmp.path().join("host-exec-log");
+        std::fs::write(&host_exec, "host_exec ran npm test").unwrap();
+
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: None,
+            host_exec_log: Some(host_exec),
+            compose_path: None,
+            claude_session_log: None,
+        };
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        let names = zip_entry_names(&zip_path);
+        assert!(
+            names.contains(&"host-exec/log".to_string()),
+            "ZIP must contain host-exec log (was missing before the registry fix): {names:?}"
+        );
+    }
+
+    /// Matrix guard: a secret planted in EVERY textual source must be redacted
+    /// in EVERY ZIP entry — not just the few cases the per-source tests check.
+    #[test]
+    fn diagnostics_zip_all_sources_redact_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-matrix.zip");
+
+        let log_dir = tmp.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("app.log"),
+            "desktop sk-ant-deadbeefdeadbeefdeadbeef",
+        )
+        .unwrap();
+        let mk = |name: &str, body: &str| {
+            let p = tmp.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        let secrets = [
+            "sk-ant-deadbeefdeadbeefdeadbeef",
+            "xoxb-1111-2222-secretslacktoken",
+            "MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000",
+            "password=hunter2hunter2",
+            "Bearer ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ];
+        let input = DiagnosticsInput {
+            log_dir: Some(log_dir),
+            serial_log: Some(mk("serial.log", secrets[1])),
+            container_logs: Some(secrets[2].into()),
+            mcp_os_log: Some(mk("mcp.log", secrets[3])),
+            host_exec_log: Some(mk("he.log", secrets[4])),
+            compose_path: Some(mk("compose.yml", secrets[0])),
+            claude_session_log: Some(mk("claude.log", secrets[1])),
+        };
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        for name in zip_entry_names(&zip_path) {
+            if name == "system-info.txt" {
+                continue;
+            }
+            let content = read_zip_entry(&zip_path, &name).unwrap_or_default();
+            for s in &secrets {
+                assert!(
+                    !content.contains(s),
+                    "secret '{s}' leaked into ZIP entry '{name}': {content}"
+                );
+            }
+        }
     }
 }
