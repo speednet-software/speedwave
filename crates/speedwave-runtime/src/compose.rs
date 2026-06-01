@@ -1,33 +1,12 @@
 use crate::config::{LlmConfig, ResolvedClaudeConfig, ResolvedIntegrationsConfig};
 use crate::consts;
 use crate::defaults;
+// Host→engine path conversion is the SSOT in `crate::engine_path`.
+use crate::engine_path::{str_to_engine_path, to_engine_path};
 use crate::plugin::{self, PluginManifest};
 use crate::{build, bundle};
 use std::path::{Path, PathBuf};
 use strum::EnumProperty;
-
-/// Converts a host path to the path seen by the container engine.
-///
-/// On Windows, nerdctl runs inside WSL2 so host paths must be translated
-/// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS, Lima mounts the
-/// host home directory at the same path inside the VM, so paths are
-/// returned unchanged.
-pub(crate) fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
-    #[cfg(target_os = "windows")]
-    {
-        let wsl = crate::runtime::wsl::windows_to_wsl_path(path)?;
-        Ok(wsl.to_string_lossy().to_string())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(path.to_string_lossy().to_string())
-    }
-}
-
-/// Like `to_engine_path` but takes a string (convenience for `project_dir`).
-fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
-    to_engine_path(std::path::Path::new(path))
-}
 
 /// Returns the tokens directory for a project under an explicit data dir.
 fn resolve_tokens_dir_in(data_dir: &Path, project_name: &str) -> PathBuf {
@@ -9863,32 +9842,6 @@ services:
                 .any(|v| v.rule == SecurityRule::SharepointWorkspaceMountMode),
             "SharePoint workspace with :ro should trigger SHAREPOINT_WORKSPACE_MOUNT_MODE"
         );
-    }
-
-    #[test]
-    fn to_engine_path_returns_path_unchanged_on_non_windows() {
-        let path = std::path::Path::new("/home/user/projects/acme");
-        let result = to_engine_path(path).unwrap();
-        assert_eq!(result, "/home/user/projects/acme");
-    }
-
-    #[test]
-    fn str_to_engine_path_returns_path_unchanged_on_non_windows() {
-        let result = str_to_engine_path("/home/user/projects/acme").unwrap();
-        assert_eq!(result, "/home/user/projects/acme");
-    }
-
-    #[test]
-    fn to_engine_path_handles_path_with_spaces() {
-        let path = std::path::Path::new("/home/user/my projects/acme corp");
-        let result = to_engine_path(path).unwrap();
-        assert_eq!(result, "/home/user/my projects/acme corp");
-    }
-
-    #[test]
-    fn str_to_engine_path_handles_absolute_path() {
-        let result = str_to_engine_path("/usr/local/share/speedwave").unwrap();
-        assert_eq!(result, "/usr/local/share/speedwave");
     }
 
     #[test]

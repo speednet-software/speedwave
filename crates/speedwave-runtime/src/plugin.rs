@@ -2013,19 +2013,17 @@ fn build_single_plugin_image(
     })?;
     let tag = plugin_image_tag(manifest);
     let vm_root = runtime.prepare_build_context(plugin_dir)?;
-    let containerfile = vm_root.join("Containerfile");
+    // vm_root is a VM-side path (on Windows a WSL `/mnt/c/...` path); join with
+    // `vm_path_join`, never `PathBuf::join` which mangles it on Windows.
+    let root_str = vm_root.to_string_lossy();
+    let containerfile = crate::engine_path::vm_path_join(&root_str, "Containerfile");
 
     log::info!(
         "Building plugin image {} from {}",
         tag,
         plugin_dir.display()
     );
-    runtime.build_image(
-        &tag,
-        &vm_root.to_string_lossy(),
-        &containerfile.to_string_lossy(),
-        &[],
-    )?;
+    runtime.build_image(&tag, root_str.trim_end_matches('/'), &containerfile, &[])?;
 
     // Remove the pending marker on success — both the new state-dir
     // location and the legacy in-tree marker, so a plugin installed by an older release
@@ -2092,8 +2090,8 @@ pub fn generate_plugin_service(
         TokenMount::ReadWrite { .. } => "rw",
     };
 
-    let tokens_path = crate::compose::to_engine_path(&tokens_dir.join(sid))?;
-    let workspace_path = crate::compose::to_engine_path(Path::new(project_dir))?;
+    let tokens_path = crate::engine_path::to_engine_path(&tokens_dir.join(sid))?;
+    let workspace_path = crate::engine_path::to_engine_path(Path::new(project_dir))?;
     let mem_limit = manifest.mem_limit.as_deref().unwrap_or("128m");
     let cpu_limit = manifest.cpu_limit.as_deref().unwrap_or("2.0");
     let user = container_user();
@@ -6451,6 +6449,41 @@ mod tests {
             "should build the missing image"
         );
         assert!(handle.was_built("speedwave-mcp-presale:1.4.6"));
+    }
+
+    #[test]
+    fn test_build_single_plugin_image_containerfile_path_has_separator() {
+        // Regression: on Windows `prepare_build_context` returns a WSL path
+        // (`/mnt/c/...`); building the Containerfile path with `PathBuf::join`
+        // mangled it into `.../presaleContainerfile` (no separator). The
+        // containerfile arg passed to `build_image` must always be
+        // `<vm_root>/Containerfile`, separator intact, on every host OS.
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+
+        // Simulate the Windows case: prepare_build_context yields a WSL path.
+        let wsl_root = std::path::PathBuf::from("/mnt/c/Users/u/.speedwave/plugins/presale");
+        let (rt, handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_prepare_build_context_root(wsl_root.clone())
+            .build();
+        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+
+        let calls = handle.build_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "should build the image");
+        let cf = &calls[0].containerfile;
+        assert_eq!(
+            cf, "/mnt/c/Users/u/.speedwave/plugins/presale/Containerfile",
+            "containerfile must be <vm_root>/Containerfile with separator, got: {cf}"
+        );
+        assert!(
+            !cf.contains("presaleContainerfile"),
+            "separator must not be dropped (Windows PathBuf::join bug), got: {cf}"
+        );
+        assert_eq!(
+            calls[0].context_dir, "/mnt/c/Users/u/.speedwave/plugins/presale",
+            "context dir must be the WSL vm_root verbatim"
+        );
     }
 
     #[test]

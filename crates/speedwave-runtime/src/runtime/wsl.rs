@@ -325,8 +325,10 @@ pub fn looks_like_wsl_unc_prefix(s: &str) -> bool {
 ///
 /// Returns an error for true network UNC paths (`\\server\share`) which cannot
 /// be mapped to WSL mount points.
+// Internal primitive of `engine_path::to_engine_path` — the one public SSOT.
+// Kept `pub(crate)` so no downstream crate hand-rolls host→WSL translation.
 #[cfg(any(target_os = "windows", test))]
-pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
     let s = path.to_string_lossy();
     let bytes = s.as_bytes();
 
