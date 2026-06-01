@@ -14,15 +14,39 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 /// Flushes a file's data to stable media. On macOS plain `fsync` returns before
-/// APFS hits the platter, so `F_FULLFSYNC` is required; other Unix uses `fsync`;
-/// Windows is a no-op (`MoveFileExW` rename is durable on NTFS).
+/// APFS hits the platter, so `F_FULLFSYNC` is preferred; if the filesystem
+/// doesn't support it (network mounts: SMB/NFS return ENOTSUP) it falls back to
+/// plain `fsync`, then to a best-effort no-op — degrading to pre-fsync durability
+/// rather than failing the write. Other Unix uses `fsync`; Windows is a no-op.
 #[cfg(unix)]
 fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
-    let r = rustix::fs::fcntl_fullfsync(file);
+    {
+        use rustix::io::Errno;
+        // Errnos meaning "this fs/device can't do this sync flavour" → fall back.
+        // ENOTSUP/EOPNOTSUPP: network mounts (SMB/NFS). ENODEV: char devices.
+        let unsupported = |e: &Errno| {
+            matches!(
+                *e,
+                Errno::NOTSUP | Errno::OPNOTSUPP | Errno::INVAL | Errno::NODEV
+            )
+        };
+        match rustix::fs::fcntl_fullfsync(file) {
+            Ok(()) => Ok(()),
+            // F_FULLFSYNC not supported here — fall back to plain fsync.
+            Err(e) if unsupported(&e) => match rustix::fs::fsync(file) {
+                Ok(()) => Ok(()),
+                // Neither supported (some network FS): best-effort, don't fail.
+                Err(e2) if unsupported(&e2) => Ok(()),
+                Err(e2) => Err(std::io::Error::from(e2)),
+            },
+            Err(e) => Err(std::io::Error::from(e)),
+        }
+    }
     #[cfg(not(target_os = "macos"))]
-    let r = rustix::fs::fsync(file);
-    r.map_err(std::io::Error::from)
+    {
+        rustix::fs::fsync(file).map_err(std::io::Error::from)
+    }
 }
 
 #[cfg(not(unix))]
@@ -672,18 +696,20 @@ mod tests {
         fsync_file_durable(&file).expect("fsync of an open writable file must succeed");
     }
 
-    /// Error path: `F_FULLFSYNC` on a non-syncable fd must surface, not swallow.
+    /// Network-mount regression guard: a target that supports neither
+    /// `F_FULLFSYNC` nor plain `fsync` (ENOTSUP) must degrade to best-effort
+    /// `Ok`, NOT fail the write — else workers can't start on SMB/NFS homes.
     #[cfg(target_os = "macos")]
     #[test]
-    fn fsync_file_durable_surfaces_error_on_nonsyncable_fd() {
-        // /dev/null does not support F_FULLFSYNC — fcntl returns ENOTSUP/EINVAL.
+    fn fsync_file_durable_best_effort_on_unsupported_fd() {
+        // /dev/null supports neither fsync flavour — fcntl returns ENOTSUP/EINVAL.
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open("/dev/null")
             .unwrap();
         assert!(
-            fsync_file_durable(&file).is_err(),
-            "F_FULLFSYNC on /dev/null must surface an error, not be swallowed"
+            fsync_file_durable(&file).is_ok(),
+            "unsupported-fsync target must degrade to best-effort, not hard-fail"
         );
     }
 

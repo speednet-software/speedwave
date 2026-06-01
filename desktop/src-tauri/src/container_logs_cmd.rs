@@ -393,16 +393,9 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
 
         // File-source paths resolved from the SSOT registry (platform-gated), so
         // /logs and the ZIP draw from the same list. Empty when unavailable.
-        use speedwave_runtime::diagnostic_sources::{SourceKind, DIAGNOSTIC_SOURCES};
         let data_dir = speedwave_runtime::consts::data_dir();
         let read_source = |key: &str| -> String {
-            DIAGNOSTIC_SOURCES
-                .iter()
-                .find(|s| s.key == key && s.platforms.available_here())
-                .and_then(|s| match s.kind {
-                    SourceKind::File(f) => f(data_dir, &project),
-                    _ => None,
-                })
+            speedwave_runtime::diagnostic_sources::resolve_file_path(key, data_dir, &project)
                 .map(|p| read_tail_sanitized(&p, tail_us).unwrap_or_default())
                 .unwrap_or_default()
         };

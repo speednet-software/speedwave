@@ -141,16 +141,9 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
 
         // File-source paths resolved from the SSOT registry (platform-gated), so
         // /logs and the ZIP can't drift and host-exec is no longer dropped.
-        use speedwave_runtime::diagnostic_sources::{SourceKind, DIAGNOSTIC_SOURCES};
         let data_dir = speedwave_runtime::consts::data_dir();
-        let resolve = |key: &str| -> Option<std::path::PathBuf> {
-            DIAGNOSTIC_SOURCES
-                .iter()
-                .find(|s| s.key == key && s.platforms.available_here())
-                .and_then(|s| match s.kind {
-                    SourceKind::File(f) => f(data_dir, &project),
-                    _ => None,
-                })
+        let resolve = |key: &str| {
+            speedwave_runtime::diagnostic_sources::resolve_file_path(key, data_dir, &project)
         };
 
         let input = DiagnosticsInput {
@@ -198,8 +191,8 @@ mod tests {
             .and_then(|s| s.split("\n}").next())
             .expect("export_diagnostics body");
         assert!(
-            cmd.contains("DIAGNOSTIC_SOURCES"),
-            "paths must be resolved from the registry SSOT"
+            cmd.contains("resolve_file_path"),
+            "paths must be resolved from the registry SSOT (resolve_file_path)"
         );
         assert!(
             !cmd.contains(".join(\"projects\")"),

@@ -63,12 +63,7 @@ fn host_exec_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
 }
 
 fn claude_session_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
-    Some(
-        data_dir
-            .join("logs")
-            .join(project)
-            .join(consts::CLAUDE_SESSION_LOG_FILE),
-    )
+    Some(consts::claude_session_log_path_under(data_dir, project))
 }
 
 fn lima_serial_path(data_dir: &Path, _project: &str) -> Option<PathBuf> {
@@ -141,6 +136,20 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
 /// added here too, or `nondisplayable_sources_match_zip_only_allowlist` fails.
 pub const ZIP_ONLY_KEYS: &[&str] = &["compose-yml"];
 
+/// Resolves a `SourceKind::File` source's path by key, gated to the current
+/// platform. Shared by both consumers (/logs + ZIP) so neither hand-rolls the
+/// find + platform-gate + File-extraction chain. Returns `None` for unknown
+/// keys, unavailable platforms, or non-File kinds.
+pub fn resolve_file_path(key: &str, data_dir: &Path, project: &str) -> Option<PathBuf> {
+    DIAGNOSTIC_SOURCES
+        .iter()
+        .find(|s| s.key == key && s.platforms.available_here())
+        .and_then(|s| match s.kind {
+            SourceKind::File(f) => f(data_dir, project),
+            _ => None,
+        })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -197,5 +206,21 @@ mod tests {
             .map(|s| s.key)
             .collect();
         assert_eq!(mac_only, vec!["lima"]);
+    }
+
+    /// `zip_entry` literals embed const-owned filenames (the slice needs
+    /// `&'static str`, so they can't be `format!`-ed). Guard against drift if a
+    /// const filename changes.
+    #[test]
+    fn zip_entries_match_owning_consts() {
+        let entry = |key: &str| {
+            DIAGNOSTIC_SOURCES
+                .iter()
+                .find(|s| s.key == key)
+                .map(|s| s.zip_entry)
+                .unwrap_or_default()
+        };
+        assert!(entry("mcp-os").ends_with(consts::MCP_OS_LOG_FILE));
+        assert!(entry("claude").ends_with(consts::CLAUDE_SESSION_LOG_FILE));
     }
 }

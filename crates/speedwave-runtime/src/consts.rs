@@ -968,12 +968,21 @@ pub fn claude_session_log_path_in(home: &std::path::Path, project: &str) -> std:
         .join(CLAUDE_SESSION_LOG_FILE)
 }
 
-/// Build the per-project Claude session log path.
-pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
-    data_dir()
+/// SSOT for the Claude session log path under an explicit data dir — used by the
+/// diagnostic-source registry. `claude_session_log_path` is the `data_dir()` shim.
+pub fn claude_session_log_path_under(
+    data_dir: &std::path::Path,
+    project: &str,
+) -> std::path::PathBuf {
+    data_dir
         .join("logs")
         .join(project)
         .join(CLAUDE_SESSION_LOG_FILE)
+}
+
+/// Build the per-project Claude session log path.
+pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
+    claude_session_log_path_under(data_dir(), project)
 }
 
 /// SSOT for the mcp-os drain log path — never re-join `data_dir()` by hand.
