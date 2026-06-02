@@ -86,7 +86,7 @@ First, the machine-readable `audit.json` (shape below):
       "url": "https://example.com/",
       "findings": [
         { "id": "foundations.doctype", "category": "Foundations", "status": "required", "verdict": "pass", "evidence": "<!doctype html>" },
-        { "id": "accessibility.image-alt", "category": "Accessibility", "status": "required", "verdict": "fail", "evidence": "<img src=hero.jpg> has no alt" },
+        { "id": "accessibility.image-alt-text", "category": "Accessibility", "status": "required", "verdict": "fail", "evidence": "<img src=hero.jpg> has no alt" },
         { "id": "accessibility.colour-contrast", "category": "Accessibility", "status": "required", "verdict": "skipped", "reason": "playwright-disabled" }
       ]
     }
