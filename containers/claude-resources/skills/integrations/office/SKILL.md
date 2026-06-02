@@ -48,7 +48,7 @@ The `spec.elements[]` array is a JSON tree — not free-form Markdown:
 { "type": "heading", "level": 1, "text": "Title" }                       // level 1..6
 { "type": "paragraph", "text": "Body…", "bold": false, "italic": false }
 { "type": "table", "header": ["A","B"], "rows": [["1","2"],["3","4"]] }
-{ "type": "image", "path": "/workspace/.speedwave-office/chart.png" }
+{ "type": "image", "path": "/workspace/.speedwave/office/chart.png" }
 { "type": "pagebreak" }
 ```
 
@@ -114,7 +114,7 @@ Charts in `.docx` are images, not native chart objects (python-docx limitation).
 
 ## Pitfalls
 
-- **`/workspace` confinement** — inputs and outputs must be under `/workspace`. Default output dir is `/workspace/.speedwave-office/`; use `outName` to pin the filename.
+- **`/workspace` confinement** — inputs and outputs must be under `/workspace`. Default output dir is `/workspace/.speedwave/office/`; use `outName` to pin the filename.
 - **Overwrite gate** — existing files are not replaced by default. Pass `overwrite: true` only when the user explicitly asks to replace.
 - **Limits** — 50 MB input cap; 2 000-page PDF cap.
 - **No macros / active content** — scripts, VBA, and embedded OLE objects are stripped.

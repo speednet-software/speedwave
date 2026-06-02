@@ -151,7 +151,7 @@ const OUTPUT_PROPS = {
   outName: {
     type: 'string',
     description:
-      'Output file name (written under /workspace/.speedwave-office/) or an explicit path under /workspace.',
+      'Output file name (written under /workspace/.speedwave/office/) or an explicit path under /workspace.',
   },
   overwrite: {
     type: 'boolean',
@@ -271,7 +271,7 @@ const fileResultSchema = {
 const markdownToPdfTool: Tool = {
   name: 'markdownToPdf',
   description:
-    'Render Markdown (a .md path under /workspace, or inline `markdown` ≤200KB) to a PDF written under /workspace/.speedwave-office/. ' +
+    'Render Markdown (a .md path under /workspace, or inline `markdown` ≤200KB) to a PDF written under /workspace/.speedwave/office/. ' +
     'Uses pandoc → HTML → WeasyPrint with print CSS (page size, margins, page breaks, monospace code). ' +
     'For an EXISTING .docx/.pptx/.xlsx use `officeToPdf` — this tool does not read Office formats. For HTML input use `htmlToPdf`. ' +
     'To embed a chart, first call `renderChart` to produce a PNG/SVG under /workspace, then reference it as `![](path)` in the markdown.',

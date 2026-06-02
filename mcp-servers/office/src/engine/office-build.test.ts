@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const { resolveInputFile, resolveOutputPath, runPythonScript } = vi.hoisted(() => ({
   resolveInputFile: vi.fn(async (p: string) => `/workspace/${p}`),
   resolveOutputPath: vi.fn(
-    async (_n: string | undefined, base: string) => `/workspace/.speedwave-office/${base}`
+    async (_n: string | undefined, base: string) => `/workspace/.speedwave/office/${base}`
   ),
   runPythonScript: vi.fn(async () => ({ ok: true })),
 }));

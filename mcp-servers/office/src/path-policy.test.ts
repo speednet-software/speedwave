@@ -43,7 +43,7 @@ vi.mock('./config.js', async () => {
   const dir = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'office-ws-'));
   return {
     WORKSPACE_ROOT: dir,
-    OUTPUT_DIR: realPath.join(dir, '.speedwave-office'),
+    OUTPUT_DIR: realPath.join(dir, '.speedwave', 'office'),
     MAX_INPUT_BYTES: 1024 * 1024,
   };
 });

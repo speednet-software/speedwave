@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 /** Build a fake FileResult-shaped object for the given format. */
 function fr(format: string) {
   return {
-    path: `/workspace/.speedwave-office/x.${format}`,
+    path: `/workspace/.speedwave/office/x.${format}`,
     bytes: 10,
     format,
     preview: '',
@@ -22,7 +22,7 @@ function fr(format: string) {
 const eng = vi.hoisted(() => {
   const make = (impl: () => unknown) => vi.fn(async () => impl());
   const file = (format: string) => () => ({
-    path: `/workspace/.speedwave-office/x.${format}`,
+    path: `/workspace/.speedwave/office/x.${format}`,
     bytes: 10,
     format,
     preview: '',
