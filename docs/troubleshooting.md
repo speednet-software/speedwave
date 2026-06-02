@@ -23,7 +23,7 @@ Click each affected toggle once. macOS shows a fresh consent dialog. Click
 _Allow_. The integration is now bound to the new identifier and the banner does
 not reappear.
 
-This is a one-time migration. See ADR-039 for the rationale.
+This is a one-time migration. See ADR-049 for the rationale.
 
 ---
 
@@ -89,7 +89,7 @@ verified by signing.
    tccutil reset Calendar pl.speedwave.desktop.calendar
    tccutil reset Reminders pl.speedwave.desktop.reminders
    ```
-2. Reinstall Speedwave from a fresh download at [speedwave.pl](https://speedwave.pl).
+2. Reinstall Speedwave from a fresh download at [GitHub Releases](https://github.com/speednet-software/speedwave/releases).
 3. Click the toggle again — the system consent dialog should appear.
 
 ---
@@ -153,14 +153,14 @@ manually:
 ```bash
 # Each line should print "Contents of (__TEXT,__info_plist) section" + hex
 for svc in calendar reminders mail notes; do
-  bin="native/macos/$svc/.build/apple/Products/Release/$svc-cli"
+  bin="native/macos/$svc/.build/arm64-apple-macosx/release/$svc-cli"
   echo "=== $svc ==="
   otool -s __TEXT __info_plist "$bin" | head -3
 done
 
 # Each binary's CFBundleIdentifier must be pl.speedwave.desktop.<svc>
 for svc in calendar reminders mail notes; do
-  bin="native/macos/$svc/.build/apple/Products/Release/$svc-cli"
+  bin="native/macos/$svc/.build/arm64-apple-macosx/release/$svc-cli"
   thin=$(mktemp)
   lipo -thin arm64 "$bin" -output "$thin"
   segedit "$thin" -extract __TEXT __info_plist /tmp/sw-${svc}-plist.plist
@@ -169,6 +169,6 @@ for svc in calendar reminders mail notes; do
 done
 ```
 
-See also: `docs/contributing/release-signing.md` for the full Path A / Path B /
-Path C verification procedures, and `docs/adr/ADR-039-tcc-sub-identifiers-and-applevents-gate.md`
+See also: `docs/contributing/release-signing.md` for the full macOS signing,
+local verification, and local notarization procedures, and `docs/adr/ADR-049-tcc-sub-identifiers-and-applevents-gate.md`
 for the architectural rationale.

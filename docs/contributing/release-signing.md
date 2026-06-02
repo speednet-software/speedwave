@@ -218,7 +218,7 @@ Binaries that don't need signing (no change required):
 
 ## Windows signing
 
-Tracked in issue #376. Windows will use Azure Trusted Signing (HSM-backed cloud signing) — no local `.pfx` file. See [Azure Trusted Signing overview](https://learn.microsoft.com/en-us/azure/trusted-signing/overview) for the architecture.
+Windows signing is planned but not yet implemented. Windows will use Azure Artifact Signing (formerly Trusted Signing — HSM-backed cloud signing) — no local `.pfx` file. See [Azure Artifact Signing overview](https://learn.microsoft.com/en-us/azure/artifact-signing/overview) for the architecture.
 
 Current status: the `beforeBundleCommand` hook runs on Windows, but `scripts/sign-bundled-binaries.sh` exits 0 immediately on non-Darwin platforms. The Windows branch will either live in the same script (conditional on `uname` / `$OS`) or in a sibling `sign-bundled-binaries.ps1` — decision deferred to the Windows implementation PR.
 
@@ -327,11 +327,11 @@ If a future PR adds a fifth CLI (e.g. `contacts-cli`):
 2. Add `linkerSettings.unsafeFlags` with `-sectcreate ... Resources/Info.plist`
    to `native/macos/contacts/Package.swift`.
 3. Update `SharedCLI/Utilities.swift::PermissionEntity`,
-   `subBundleIdentifier(for:)`, and `tccServiceName(for:)`.
+   `subBundleIdentifier(for:)`, and `tccServiceName(for:)` — only if this is a user-facing toggleable service (calendar, reminders, mail, notes, etc.). Infrastructure services like `audio-capture-cli` do not appear in `PermissionEntity`.
 4. Update `scripts/sign-bundled-binaries.sh::SIGN_TARGETS` and the
    `get_expected_identifier` mapping.
 5. Update `desktop/src-tauri/tauri.macos.conf.json::bundle.resources`.
-6. Update `crates/speedwave-runtime/src/consts.rs::TOGGLEABLE_OS_SERVICES`.
+6. If the new CLI is a user-facing toggleable service, update `crates/speedwave-runtime/src/consts.rs::TOGGLEABLE_OS_SERVICES` to add its config key and display name. Infrastructure CLIs like `audio-capture-cli` do not belong in this list.
 7. The bats test `_tests/desktop/native-cli-info-plist.bats` automatically
    picks up the new service via the `SERVICES` array — bump it there too.
 
@@ -362,4 +362,4 @@ Stapling was skipped. Re-run `xcrun stapler staple <path>.app`. Without stapling
 
 [^1]: [Apple Developer — "About notarization for macOS apps" — typical processing time](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution)
 
-[^legacy-flag]: [OpenSSL 3.0 migration guide — `-legacy` flag required for PKCS#12 files that older tools must read (RC2 + SHA1 MAC vs the new AES-256-CBC + PBKDF2 default)](https://wiki.openssl.org/index.php/OpenSSL_3.0#PKCS12_Changes)
+[^legacy-flag]: [OpenSSL 3.0 migration guide — `-legacy` flag required for PKCS#12 files that older tools must read (RC2 + SHA1 MAC vs the new AES-256-CBC + PBKDF2 default)](https://docs.openssl.org/3.0/man7/migration_guide/)

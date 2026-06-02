@@ -30,7 +30,7 @@ If you cannot verify a change is safe — ask the user.
 
 Plugin containers inherit Speedwave's hardening (`cap_drop: ALL`, `no-new-privileges`, `read_only`, resource limits — see `.claude/rules/security.md`). When extending compose injection in `apply_plugins()` / `generate_plugin_service()`:
 
-- Token mounts stay `:ro` unless the plugin's manifest opts in via `token_mount: rw` and there is an ADR justifying it (precedent: SharePoint OAuth refresh, ADR-009).
+- Token mounts are always `:ro` for plugins — no exceptions. `:rw` is reserved for built-in services only (and enforced by code; see `validate_manifest()` in `plugin.rs`). The historical precedent was SharePoint OAuth refresh, but that was moved to the host-side `oauth` worker per ADR-060.
 - Workspace mount is `/workspace:rw` — that is the only writable cross-boundary surface. Do not introduce a second one.
 - The hub→worker channel is `WORKER_<SLUG_UPPER>_URL` — uppercase, underscore-separated. Discovery and naming both depend on this; do not introduce a parallel mechanism.
 

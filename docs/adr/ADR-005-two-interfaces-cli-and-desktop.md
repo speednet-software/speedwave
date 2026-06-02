@@ -1,84 +1,43 @@
 # ADR-005: Two Interfaces — CLI and Desktop
 
+> **Status:** Accepted
+> **Context:** Speedwave needs to serve both terminal-first developers and chat-first users without duplicating any container-orchestration logic.
+
 ## Decision
 
-Speedwave ships two separate interfaces that share a single `speedwave-runtime` library.
+Speedwave ships two separate front-ends — a terminal CLI (`speedwave`) and a Desktop chat app (`Speedwave.app`) — that both depend on the single `speedwave-runtime` library crate. All Lima/WSL2/nerdctl orchestration lives in the runtime; neither front-end reimplements it.
 
-## Rationale
+## Why
 
-**CLI** — for developers:
+- One SSOT for orchestration: the runtime crate is pure Rust with no Tauri coupling, so both clients link it as a Cargo dependency and share identical behaviour (see CLAUDE.md "Key Architecture").
+- CLI suits developers who want to launch containers and Claude Code from a terminal for the active project; Desktop gives everyone a chat UI, a setup wizard, a project switcher, and native OS integrations.
+- The CLI is a thin client: it requires a Desktop install that has completed setup (VM creation, image building, token configuration). It does not bundle Lima/WSL2/nerdctl. See ADR-021 for the zero-install rationale.
+- The CLI binary is bundled inside the Desktop app and copied to the user's PATH on each startup, guaranteeing CLI/Desktop version alignment. See ADR-016 for cross-platform PATH handling.
 
-```bash
-speedwave  # → Lima VM + containers + Claude Code for the active project
-```
+## How project context is resolved
 
-Project context = the active project (the Desktop project switcher's
-`active_project`), or `--project <name>` to override. The working directory is
-not consulted for project selection. See [the CLI guide's Project Resolution
-section](../guides/cli.md#project-resolution) for the precedence rules.
+The CLI bare-run form (and `update`/`login`/`logout`) targets the active project recorded in `~/.speedwave/config.json` (the Desktop project switcher's `active_project`), overridable with `--project <name>`. The working directory is not consulted. The precedence rules live in the CLI guide's [Project Resolution](../guides/cli.md#project-resolution) section.
 
-**Desktop (Speedwave.app)** — for everyone:
+## CLI scope and subcommands
 
-- Chat UI (like vibe-kanban[^16]) via `claude -p --output-format=stream-json`[^17]
-- Setup wizard for tokens and project configuration
-- Project switcher (list of projects in `~/.speedwave/config.json`)
-- Native OS integrations (Reminders, Calendar, Mail, Notes)
+The CLI handles argument parsing, project resolution, self-update via GitHub Releases, the plugin sub-surface, and the security pre-flight check — everything else is delegated to the runtime. The subcommand surface (see `CliAction` / `parse_action` in `crates/speedwave-cli/src/main.rs`) is: bare run (start containers + interactive Claude), `check`, `init`, `login`, `logout`, `update`, `self-update`, and the `plugin` group (`install`, `list`, `remove`, `enable`, `disable`). The file is sizeable — production and test code are each on the order of several hundred lines, so do not rely on a fixed line count here.
 
-## SSOT — Zero Duplication
+## Where it lives in code
 
-```
-crates/
-├── speedwave-runtime/  ← SSOT: all Lima/nerdctl/WSL2 logic
-└── speedwave-cli/      ← CLI client
-desktop/
-└── src-tauri/          ← Tauri app (Rust backend)
-```
+- CLI client and subcommand parser — `crates/speedwave-cli/src/main.rs` (`CliAction`, `parse_action`)
+- Orchestration SSOT — `crates/speedwave-runtime/`
+- Desktop Tauri backend — `desktop/src-tauri/`
+- Public runtime façade `LockedRuntime` and the `detect_runtime()` entry point — `crates/speedwave-runtime/src/runtime/locked.rs` and `crates/speedwave-runtime/src/runtime/mod.rs`
 
-Both clients import `speedwave-runtime` as a Cargo dependency. No logic is duplicated.
+## ContainerRuntime trait (crate-internal)
 
-## CLI = Thin Client (Bundled in Desktop)
+All container operations go through the `ContainerRuntime` trait in `crates/speedwave-runtime/src/runtime/mod.rs`. The trait is `pub(crate)`, not public: no code outside `speedwave-runtime` may name or implement it. The public handle is `LockedRuntime`, which enforces the per-project compose transaction lock (see ADR-066). The trait has roughly two dozen methods — including `compose_up`, `compose_down`, `compose_ps`, `compose_validate`, `compose_up_recreate`, `container_exec`, `container_exec_piped` (which returns `anyhow::Result<Command>` so the impl can check preconditions such as the Lima VM running before building the command), `is_available`, `is_installed`, `ensure_ready`, `build_image`, `prepare_build_context`, `image_exists`, `container_logs`, `compose_logs`, the prune family (`system_prune`, `remove_images`, `prune_buildkit_cache`, `prune_unused_images`), `restart_container_engine`, `stop_vm`, `reset_vm`, and `vm_exec`. The two production implementations are `LimaRuntime` (macOS) and `WslRuntime` (Windows); Linux as a host platform was dropped (ADR-059).
 
-The CLI (`speedwave`) is a thin client that **requires a running Desktop application with completed setup**. The CLI does not bundle runtime dependencies (Lima, nerdctl, WSL2) — it connects to the already-provisioned environment managed by the Desktop app. The Desktop's Setup Wizard handles all first-time provisioning (VM creation, image building, token configuration). See ADR-021 for the full rationale.
+## Rejected alternatives
 
-The CLI binary is bundled inside the Desktop app and copied to the user's PATH on every startup. This guarantees version alignment between CLI and Desktop — a Desktop update automatically distributes the matching CLI version. See ADR-016 for cross-platform PATH details.
-
-## CLI Scope
-
-The CLI binary (`speedwave`) is a lightweight client — all container orchestration logic lives in `speedwave-runtime`. The CLI itself handles argument parsing, project resolution, self-update via GitHub Releases, plugin installation, and the security pre-flight check. Core logic is ~340 lines of Rust (plus ~200 lines of tests).
-
-Subcommands:
-
-| Command                               | Description                           |
-| ------------------------------------- | ------------------------------------- |
-| `speedwave`                           | Start containers + interactive Claude |
-| `speedwave check`                     | Validate security invariants          |
-| `speedwave update`                    | Rebuild images + recreate containers  |
-| `speedwave self-update`               | Download latest CLI from GitHub       |
-| `speedwave plugin install <path.zip>` | Install a plugin package              |
-
-## ContainerRuntime Trait
-
-All container operations go through a single trait (no Tauri coupling — runtime crate is pure Rust):
-
-```rust
-pub trait ContainerRuntime: Send + Sync {
-    fn compose_up(&self, project: &str) -> anyhow::Result<()>;
-    fn compose_down(&self, project: &str) -> anyhow::Result<()>;
-    fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>>;
-    fn container_exec(&self, container: &str, cmd: &[&str]) -> Command;
-    fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> Command;
-    fn is_available(&self) -> bool;
-    fn ensure_ready(&self) -> anyhow::Result<()>;
-    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str, build_args: &[(&str, &str)]) -> anyhow::Result<()>;
-    fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String>;
-    fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
-    fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
-}
-// Implementations: LimaRuntime, WslRuntime (see ADR-059 — Linux dropped)
-```
+- A single combined binary doing both CLI and chat: rejected because the Desktop app needs Tauri/GUI dependencies the terminal client should stay free of, and the split keeps the runtime crate Tauri-agnostic.
+- Letting either front-end reimplement orchestration: rejected as a DRY violation — the runtime crate is the single source of truth.
 
 ---
 
-[^16]: [vibe-kanban - Claude Code GUI integration](https://github.com/BloopAI/vibe-kanban)
-
-[^17]: [Claude Code CLI reference - --output-format](https://code.claude.com/docs/en/cli-reference)
+The Desktop chat UI follows the same approach as the vibe-kanban Claude Code GUI integration (`https://github.com/BloopAI/vibe-kanban`), driving Claude Code via `claude -p --output-format=stream-json` (see the Claude Code CLI reference at `https://code.claude.com/docs/en/cli-reference`).

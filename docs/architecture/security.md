@@ -52,7 +52,7 @@ Anthropic OAuth credentials are managed entirely by Claude Code inside the `CLAU
 
 The `claude` image bakes `/usr/local/bin/{pbcopy,xclip,xsel,wl-copy,clip.exe}` as five symlinks to one shell script (`osc52-copy.sh`) that base64-encodes stdin and writes an [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Operating-System-Commands) sequence to `/dev/tty`. Compatible host terminals interpret it as a clipboard write request — incompatible terminals ignore it.
 
-The wrapper is **write-only by design**: it never reads the host clipboard (OSC 52 query/paste would require a terminal-side response handshake and would leak host clipboard contents into the container). It touches only its own stdin and `/dev/tty`, runs as the unprivileged container user, and adds no new mounts. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
+The wrapper **never issues an OSC 52 query/paste**: an OSC 52 read would require a terminal-side response handshake and would leak host clipboard contents into the container, so that path is deliberately absent. It does serve one host-originated value: when invoked with `-o`/`--out`/`--paste` (e.g. `xclip -t image/png -o`), it reads the image the user pasted in the Desktop UI from `/workspace/.speedwave/pastes/clip.png` (`SPEEDWAVE_CLIP_FILE`) — that file is written by `desktop/src-tauri/src/paste_cmd.rs::save_pasted_image` from the user's clipboard (see [ADR-065](../adr/ADR-065-image-attachments-structured-input.md)). The write path base64-encodes stdin to `/dev/tty`; the read path reads only that one workspace-mounted file. It runs as the unprivileged container user and adds no new mounts. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
 
 ## Log Sanitization
 
@@ -82,7 +82,7 @@ Speedwave's threat model includes a non-privileged process running as the same u
 
 - Every read of a plugin tree (compose render, image build, claude-resources mount, UI listing) goes through `signing::verify_plugin_signature_cached` — the cache is keyed by canonical path AND content digest, so any byte change to any file forces a fresh Ed25519 check.
 - Mutable per-plugin state lives at `~/.speedwave/plugin-state/<slug>/`, not under `plugins/<slug>/`, so writing the `image_pending` marker does not invalidate the digest.
-- `plugin::compute_plugin_digest` rejects symlinks. Without this, an attacker dropping `claude-resources/skills/foo.md → /etc/passwd` could fold arbitrary host content into the digest of an otherwise-innocent tree.
+- `signing::compute_plugin_digest` rejects symlinks. Without this, an attacker dropping `claude-resources/skills/foo.md → /etc/passwd` could fold arbitrary host content into the digest of an otherwise-innocent tree.
 - Install is atomic: lock + staging dir on the same filesystem + `rename` swap + cleanup, so a concurrent install or a crash mid-replace cannot leave a half-A/half-B Frankenstein.
 - Startup runs `plugin::audit_all` — the Desktop blocks with a recovery dialog (Tauri 2 `tauri-plugin-dialog`) on any failure; the CLI exits 2. Recovery commands (`plugin remove`, `plugin install`, `plugin list`, `init`) skip the audit so users can always reach the recovery path.
 
@@ -206,12 +206,12 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 
 ### Network Security Rules
 
-| Rule                          | Scope                     | What it checks                                                                                   |
-| ----------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------ |
-| `PORTS_LOCALHOST`             | All containers with ports | All exposed ports bind to `127.0.0.1`, not `0.0.0.0`                                             |
-| `NO_SOCKET_CLAUDE`            | claude                    | No `docker.sock` or `nerdctl.sock` volume mounts                                                 |
-| `NO_EXTERNAL_LLM_KEYS_CLAUDE` | claude                    | No `OPENAI_*`, `GEMINI_*`, `DEEPSEEK_*`, `OPENROUTER_*` env vars (these belong in the LLM proxy) |
-| `NO_PORTS_WORKERS`            | Built-in MCP workers      | Built-in services must not expose ports at all — inter-container communication uses Docker DNS   |
+| Rule                          | Scope                     | What it checks                                                                                                                                                        |
+| ----------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORTS_LOCALHOST`             | All containers with ports | All exposed ports bind to `127.0.0.1`, not `0.0.0.0`                                                                                                                  |
+| `NO_SOCKET_CLAUDE`            | claude                    | No `docker.sock` or `nerdctl.sock` volume mounts                                                                                                                      |
+| `NO_EXTERNAL_LLM_KEYS_CLAUDE` | claude                    | No external-LLM-provider env vars — blocks 9 prefixes: `OPENAI_`, `AZURE_OPENAI_`, `GEMINI_`, `DEEPSEEK_`, `OPENROUTER_`, `COHERE_`, `MISTRAL_`, `TOGETHER_`, `GROQ_` |
+| `NO_PORTS_WORKERS`            | Built-in MCP workers      | Built-in services must not expose ports at all — inter-container communication uses Docker DNS                                                                        |
 
 **Host-gateway alias distribution.** `host.docker.internal` is statically present in `extra_hosts` for `claude` and `mcp-playwright` (see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)), and dynamically injected for `mcp-hub` and OAuth-consumer services by `ensure_host_gateway_extra_host()`. Other built-in workers (slack, github, gitlab, atlassian, redmine, context7, office) have no host-side dependency and therefore no `extra_hosts` entry. The underlying IP routing to the VM gateway exists for every container regardless — the alias only adds DNS convenience.
 
@@ -394,7 +394,7 @@ The Desktop app includes a Tauri command `discover_llm_models` that probes a loc
 
 ## Host-Side Audio Capture (Meeting Transcription)
 
-Meeting transcription runs **on the Desktop host** — the Claude container has no audio access (a v1 invariant), so this is a separate threat surface, like the LLM-discovery and Redmine commands. The full design and rationale is [ADR-056](adr/ADR-056-host-side-audio-transcription.md); the security-relevant points:
+Meeting transcription runs **on the Desktop host** — the Claude container has no audio access (a v1 invariant), so this is a separate threat surface, like the LLM-discovery and Redmine commands. The full design and rationale is [ADR-056](../adr/ADR-056-host-side-audio-transcription.md); the security-relevant points:
 
 - **Opt-in, off by default, no repo override.** The feature is gated behind a top-level user-config flag (`~/.speedwave/config.json`). Repository `.speedwave.json` **cannot** enable it (privacy invariant — a repo must not be able to turn on the user's microphone). With the flag off, no capture code runs.
 - **Capture surface.** When enabled, the app can record the host's system-audio loopback (what the user hears — the other call participants) and the microphone, mixed into one stream (the "Whole meeting" default). Each platform uses its OS primitive: macOS CoreAudio process taps via the bundled `audio-capture-cli` (14.4+), and Windows WASAPI loopback via `cpal`. The bundled macOS CLI is a signed Mach-O (`pl.speedwave.desktop.audio-capture`, embedded `Info.plist`) — see _Binary Authenticity_ below.

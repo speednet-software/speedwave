@@ -3,7 +3,7 @@
  * Best-output-wins engine chain: SheetJS for spreadsheet formats (native TS, reads
  * `.xls`/`.xlsb` that markitdown does not), `markitdown` as the primary for
  * `.docx`/`.pptx`/`.pdf`, then `pdftotext`/`pandoc`/the `python-docx` script as
- * fallback (see ADR-055 §"Deliberate duplication with presale").
+ * fallback (see ADR-055 §"Deliberate duplication with example-plugin").
  * @module mcp-office/engine/extract
  */
 

@@ -13,7 +13,7 @@ graph TD
         CLI[speedwave CLI]
     end
 
-    subgraph "Lima VM / WSL2 / Native"
+    subgraph "Lima VM / WSL2"
         CLAUDE[Claude container]
         HUB[MCP Hub container]
         WORKERS[MCP service containers]

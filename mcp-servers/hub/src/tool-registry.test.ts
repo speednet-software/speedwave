@@ -329,11 +329,11 @@ describe('tool-registry', () => {
     it('should include plugin services after initializeRegistry', async () => {
       _resetRegistryForTesting();
       resetServiceCaches();
-      process.env.ENABLED_SERVICES = 'slack,presale';
+      process.env.ENABLED_SERVICES = 'slack,example-plugin';
 
       await initializeRegistry();
 
-      expect([...SERVICE_NAMES]).toContain('presale');
+      expect([...SERVICE_NAMES]).toContain('example-plugin');
       expect([...SERVICE_NAMES]).toContain('slack');
     });
 

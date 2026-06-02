@@ -9,7 +9,7 @@ description: >
   no reports, no recommendations.
   Do not use for: auditing the pages, generating a sitemap from templates, or anything beyond
   producing the URL list.
-argument-hint: "<url> [max_pages] [max_depth] [include_subdomains] [output_path]"
+argument-hint: '<url> [max_pages] [max_depth] [include_subdomains] [output_path]'
 allowed-tools: WebFetch mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code Write
 ---
 
@@ -41,7 +41,7 @@ Use the Playwright integration through the MCP Hub. It renders JS, so it catches
 **Reaching a host dev server.** Inside the Playwright container, `localhost` is the container, not the host. To reach a server the user runs on their machine, navigate to `http://host.docker.internal:<port>` — Speedwave injects that alias into the Playwright container for exactly this (ADR-062), so no per-platform gateway IP is needed. Seed the crawl with the `host.docker.internal` URL and keep the same-host check against `host.docker.internal` (not `localhost`), or every discovered link is treated as off-site and the crawl stops at one page.
 
 1. Probe availability: `search_tools { query: "browser", detail_level: "full_schema" }`.
-   - **If it returns nothing**, the Playwright integration is disabled. Do NOT fail silently: return whatever Strategy 1 produced, and if that was also empty, tell the user plainly: *"No sitemap.xml found and the Playwright integration is disabled — enable it for this project to crawl the site, or point me at a site that publishes a sitemap."* Stop.
+   - **If it returns nothing**, the Playwright integration is disabled. Do NOT fail silently: return whatever Strategy 1 produced, and if that was also empty, tell the user plainly: _"No sitemap.xml found and the Playwright integration is disabled — enable it for this project to crawl the site, or point me at a site that publishes a sitemap."_ Stop.
 2. Run a bounded breadth-first crawl. Use the exact method names from the schema. The crawl logic:
    - Maintain a queue of `{ url, depth }`, a `visited` set, and an `enqueued` set, seeded with the start URL at depth 0.
    - For each dequeued URL: `browserNavigate`, read the rendered DOM, collect same-host `<a href>` links, record `{ url, finalUrl, status, title, depth }`.
@@ -56,7 +56,7 @@ The `execute_code` runner is restricted. Follow these or the crawl thrashes:
 
 - **Drive the browser via `playwright.browserRunCode({ code: "async (page) => { … }" })`.** Pass the page-driver function as a string; `await` the call.
 - **Forbidden text patterns** are rejected before execution — even inside strings. Never write `eval(`, `$$eval(`, or `globalThis`. Use `page.evaluate(fn)` for DOM work and `page.$$(...)` (not `$$eval`).
-- **The Node runner has no `URL`, no `document`, no DOM globals** — only the browser context does. Resolve/normalize/filter links *inside* `page.evaluate((host) => { /* new URL(a.href) works here */ }, host)` and return plain strings. Plain `Set`/`Array`/`JSON` work fine in the runner.
+- **The Node runner has no `URL`, no `document`, no DOM globals** — only the browser context does. Resolve/normalize/filter links _inside_ `page.evaluate((host) => { /* new URL(a.href) works here */ }, host)` and return plain strings. Plain `Set`/`Array`/`JSON` work fine in the runner.
 - **State does NOT persist between `execute_code` calls** (fresh process each time) and **one call has a ~90s budget**. A crawl larger than one budget must persist its own state. Use the page's **`localStorage`** (per-origin, survives navigation and calls): read state at the start of each call, process a batch, write state back, return a small progress summary (`{ visitedCount, queueLen, done }`). Repeat the same `execute_code` until `done`, then read the records out of `localStorage` in a final call.
 - **Use `waitUntil: "domcontentloaded"`, not `networkidle`** — `networkidle` adds seconds per page and is unnecessary for link extraction.
 - **No `/workspace` in the Playwright container** — return data as the call's value; write the file from the Claude container (see Output).
@@ -74,8 +74,22 @@ Assemble the final JSON **in the Claude container** (from Strategy 1's parsed lo
     "truncated": false
   },
   "urls": [
-    { "url": "https://example.com/", "status": 200, "source": "sitemap", "depth": 0, "lastmod": "2026-05-01", "title": null },
-    { "url": "https://example.com/about", "status": 200, "source": "crawl", "depth": 1, "lastmod": null, "title": "About" }
+    {
+      "url": "https://example.com/",
+      "status": 200,
+      "source": "sitemap",
+      "depth": 0,
+      "lastmod": "2026-05-01",
+      "title": null
+    },
+    {
+      "url": "https://example.com/about",
+      "status": 200,
+      "source": "crawl",
+      "depth": 1,
+      "lastmod": null,
+      "title": "About"
+    }
   ]
 }
 ```

@@ -843,14 +843,17 @@ pub fn ensure_exec_healthy(
     })
 }
 
-/// Maximum number of `compose_validate` attempts (initial try + retries).
-/// Sleeps occur between attempts: 100 ms before attempt 1, 200 ms before
-/// attempt 2. Total worst-case extra latency: 300 ms.
-const COMPOSE_VALIDATE_MAX_ATTEMPTS: u32 = 3;
+/// Max `compose_validate` attempts. Backoff 100/200/400/800/1600 ms between
+/// them — ~3.1 s total window for the guest to see the host write through
+/// virtiofs. 300 ms (the old 3-attempt window) was too short under load.
+const COMPOSE_VALIDATE_MAX_ATTEMPTS: u32 = 6;
 
-/// Retries `compose_validate` with exponential backoff (100 ms before retry 1,
-/// 200 ms before retry 2) on errors matching `is_propagation_error` — typical
-/// of virtiofs/9p mount lag. Total `COMPOSE_VALIDATE_MAX_ATTEMPTS` attempts.
+/// Backoff cap so a higher attempt count cannot explode the delay.
+const COMPOSE_VALIDATE_MAX_DELAY_MS: u64 = 1600;
+
+/// Retries `compose_validate` (guest-side `nerdctl compose config`) with capped
+/// exponential backoff on `is_propagation_error` — virtiofs/9p mount lag where
+/// the VM still sees the pre-write compose.yml after the host already wrote it.
 pub fn compose_validate_with_retry(runtime: &LockedRuntime, project: &str) -> anyhow::Result<()> {
     let mut delay_ms: u64 = 100;
     for attempt in 0..COMPOSE_VALIDATE_MAX_ATTEMPTS {
@@ -867,7 +870,7 @@ pub fn compose_validate_with_retry(runtime: &LockedRuntime, project: &str) -> an
                     delay_ms
                 );
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                delay_ms *= 2;
+                delay_ms = (delay_ms * 2).min(COMPOSE_VALIDATE_MAX_DELAY_MS);
             }
         }
     }
@@ -2146,14 +2149,40 @@ services:
 
     #[test]
     fn compose_validate_with_retry_bails_after_max_retries() {
-        let (rt, handles) = MockRuntimeBuilder::new()
-            .push_validate_result(Err("undefined network a".to_string()))
-            .push_validate_result(Err("undefined network b".to_string()))
-            .push_validate_result(Err("undefined network c".to_string()))
-            .build();
+        let mut b = MockRuntimeBuilder::new();
+        for i in 0..COMPOSE_VALIDATE_MAX_ATTEMPTS {
+            b = b.push_validate_result(Err(format!("undefined network n{i}")));
+        }
+        let (rt, handles) = b.build();
         let err = compose_validate_with_retry(&rt, "proj").unwrap_err();
-        assert!(err.to_string().contains("undefined network c"));
-        assert_eq!(handles.validate_calls.lock().unwrap().len(), 3);
+        assert!(err
+            .to_string()
+            .contains(&format!("n{}", COMPOSE_VALIDATE_MAX_ATTEMPTS - 1)));
+        assert_eq!(
+            handles.validate_calls.lock().unwrap().len() as u32,
+            COMPOSE_VALIDATE_MAX_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn compose_validate_retry_window_is_long_enough_for_virtiofs_lag() {
+        // Regression: 3 attempts / 300 ms total was too short — the guest saw a
+        // stale compose.yml past the window. Pin the wider window + capped delay.
+        assert!(
+            COMPOSE_VALIDATE_MAX_ATTEMPTS >= 6,
+            "retry window shrank below the virtiofs-lag fix"
+        );
+        let mut delay_ms: u64 = 100;
+        let mut total: u64 = 0;
+        for _ in 0..COMPOSE_VALIDATE_MAX_ATTEMPTS {
+            total += delay_ms;
+            delay_ms = (delay_ms * 2).min(COMPOSE_VALIDATE_MAX_DELAY_MS);
+        }
+        assert!(total >= 3000, "total backoff window {total} ms < 3 s");
+        assert_eq!(
+            delay_ms, COMPOSE_VALIDATE_MAX_DELAY_MS,
+            "delay must hit cap"
+        );
     }
 
     #[test]

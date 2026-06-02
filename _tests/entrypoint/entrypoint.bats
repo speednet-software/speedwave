@@ -418,23 +418,24 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# ~/.claude.json onboarding pre-seed — conditional on credentials (ADR-052)
-#
-# Onboarding is skipped (pre-seeded .claude.json) ONLY when the user is already
-# logged in. With credentials absent we leave .claude.json uncreated so `claude`
-# opens the OAuth login flow itself instead of the user having to type /login.
+# ~/.claude.json pre-seed: always pre-accepts the /workspace trust dialog;
+# onboarding only when logged in (ADR-052). Trust is keyed by working_dir and
+# is separate from --dangerously-skip-permissions, so it must be set even with
+# no credentials, while onboarding stays incomplete so `claude` shows OAuth.
 # ---------------------------------------------------------------------------
 
-@test "does NOT create ~/.claude.json when credentials are absent (so auto-login shows)" {
+@test "pre-accepts /workspace trust but skips onboarding when credentials are absent" {
     [ ! -e "${TEST_HOME}/.claude.json" ]
     [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # No credentials → onboarding NOT skipped → claude shows the login prompt.
-    [ ! -e "${TEST_HOME}/.claude.json" ]
+    [ -f "${TEST_HOME}/.claude.json" ]
+    grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
+    # No credentials → onboarding NOT completed → claude still shows the login prompt.
+    ! grep -q '"hasCompletedOnboarding"' "${TEST_HOME}/.claude.json"
 }
 
-@test "creates ~/.claude.json with hasCompletedOnboarding when credentials exist" {
+@test "creates ~/.claude.json with onboarding AND trust when credentials exist" {
     # Simulate a logged-in user: credentials present, no .claude.json yet.
     printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
     [ ! -e "${TEST_HOME}/.claude.json" ]
@@ -442,6 +443,18 @@ EOF
     [ "$status" -eq 0 ]
     [ -f "${TEST_HOME}/.claude.json" ]
     grep -q '"hasCompletedOnboarding": true' "${TEST_HOME}/.claude.json"
+    grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
+}
+
+@test "pre-seeded ~/.claude.json is valid JSON in both credential states" {
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    python3 -c "import json,sys; json.load(open('${TEST_HOME}/.claude.json'))"
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
+    rm -f "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    python3 -c "import json,sys; json.load(open('${TEST_HOME}/.claude.json'))"
 }
 
 @test "does not overwrite an existing ~/.claude.json (even with credentials)" {
@@ -483,19 +496,42 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# settings.json: symlink from resources
+# settings.json: WRITABLE copy (NOT a symlink) — Claude Code writes it via
+# /effort and /model; the resources mount is read-only so a symlink → EROFS.
 # ---------------------------------------------------------------------------
 
-@test "symlinks settings.json from resources" {
+@test "seeds settings.json as a writable copy, not a symlink" {
     echo '{"statusLine":{"type":"command","command":"~/.claude/statusline.sh"}}' > "${SPEEDWAVE_RESOURCES}/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    [ -L "${TEST_HOME}/.claude/settings.json" ]
-    [ "$(readlink "${TEST_HOME}/.claude/settings.json")" = "${SPEEDWAVE_RESOURCES}/settings.json" ]
+    [ -f "${TEST_HOME}/.claude/settings.json" ]
+    [ ! -L "${TEST_HOME}/.claude/settings.json" ]
+    [ -w "${TEST_HOME}/.claude/settings.json" ]
     grep -q "statusLine" "${TEST_HOME}/.claude/settings.json"
 }
 
-@test "skips settings.json symlink when not in resources" {
+@test "replaces a stale settings.json symlink with a writable copy" {
+    # Older builds linked settings.json into the read-only resources mount.
+    echo '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    ln -s "${SPEEDWAVE_RESOURCES}/settings.json" "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    [ ! -L "${TEST_HOME}/.claude/settings.json" ]
+    [ -f "${TEST_HOME}/.claude/settings.json" ]
+}
+
+@test "preserves a user's modified settings.json across restarts" {
+    echo '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # Simulate /effort low writing the user's choice into the copy.
+    echo '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    grep -q '"effortLevel":"low"' "${TEST_HOME}/.claude/settings.json"
+}
+
+@test "skips settings.json when not in resources" {
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/settings.json" ]
@@ -726,16 +762,16 @@ EOF
     # Setup plugin resources
     local plugins_dir
     plugins_dir="$(mktemp -d)"
-    mkdir -p "${plugins_dir}/presale/skills"
-    mkdir -p "${plugins_dir}/presale/commands"
-    echo "# Plugin Skill" > "${plugins_dir}/presale/skills/presale-skill.md"
-    echo "# Plugin Command" > "${plugins_dir}/presale/commands/presale-cmd.md"
+    mkdir -p "${plugins_dir}/example-plugin/skills"
+    mkdir -p "${plugins_dir}/example-plugin/commands"
+    echo "# Plugin Skill" > "${plugins_dir}/example-plugin/skills/example-plugin-skill.md"
+    echo "# Plugin Command" > "${plugins_dir}/example-plugin/commands/example-plugin-cmd.md"
 
     local patched
     patched="$(mktemp)"
     sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
 
-    SPEEDWAVE_PLUGINS="presale" run bash "$patched" true
+    SPEEDWAVE_PLUGINS="example-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
     # Resource dirs must be real directories (not symlinks to RO mount)
@@ -746,15 +782,15 @@ EOF
 
     # Both core and plugin entries accessible
     [ -L "${TEST_HOME}/.claude/skills/core-skill.md" ]
-    [ -L "${TEST_HOME}/.claude/skills/presale-skill.md" ]
+    [ -L "${TEST_HOME}/.claude/skills/example-plugin-skill.md" ]
     [ -L "${TEST_HOME}/.claude/commands/core-command.md" ]
-    [ -L "${TEST_HOME}/.claude/commands/presale-cmd.md" ]
+    [ -L "${TEST_HOME}/.claude/commands/example-plugin-cmd.md" ]
 
     # Content is correct
     grep -q "Core Skill" "${TEST_HOME}/.claude/skills/core-skill.md"
-    grep -q "Plugin Skill" "${TEST_HOME}/.claude/skills/presale-skill.md"
+    grep -q "Plugin Skill" "${TEST_HOME}/.claude/skills/example-plugin-skill.md"
     grep -q "Core Command" "${TEST_HOME}/.claude/commands/core-command.md"
-    grep -q "Plugin Command" "${TEST_HOME}/.claude/commands/presale-cmd.md"
+    grep -q "Plugin Command" "${TEST_HOME}/.claude/commands/example-plugin-cmd.md"
 
     rm -rf "$plugins_dir" "$patched"
 }

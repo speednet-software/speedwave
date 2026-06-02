@@ -4,7 +4,7 @@ paths:
   - 'crates/speedwave-runtime/src/config.rs'
   - 'desktop/src-tauri/src/llm_cmd.rs'
   - 'desktop/src-tauri/src/containers_cmd.rs'
-  - 'desktop/src-tauri/src/url_validation.rs'
+  - 'desktop/src-tauri/src/http_util.rs'
   - 'desktop/src/src/app/settings/llm-provider/**'
   - 'docs/adr/ADR-040-remove-litellm-direct-provider-injection.md'
   - 'docs/adr/ADR-041-local-llm-model-discovery.md'
@@ -32,17 +32,17 @@ The full table lives in ADR-040. Two rules when modifying it:
 
 ## SSRF policy (host-side)
 
-The discovery probe (`discover_llm_models`) and the save path (`update_llm_config`) **share one validator** — `validate_llm_base_url` in `desktop/src-tauri/src/url_validation.rs`, parameterised by `PrivatePolicy`. Two callsites, one policy. When you add a third callsite (e.g. a future "test connection" button):
+The discovery probe (`discover_llm_models`) and the save path (`update_llm_config`) **share one validator** — `validate_llm_base_url` in `desktop/src-tauri/src/llm_cmd.rs`, parameterised by `PrivatePolicy`. Two callsites, one policy. When you add a third callsite (e.g. a future "test connection" button):
 
 - Reuse `validate_llm_base_url`. Do not write a second URL validator.
 - If your callsite needs a different loopback policy than the existing two, extend `PrivatePolicy` (already used by Redmine — Rule of Three is satisfied), don't fork the function.
-- Block list is **fixed**: link-local (incl. cloud metadata 169.254.169.254 and IPv6 `fe80::/10`), TEST-NET, IPv6 documentation/discard prefixes, multicast, unspecified, embedded credentials, query/fragment, non-`http(s)` schemes. IPv6-mapped IPv4 bypasses are checked. Adding to or removing from this list requires an ADR delta.
+- Block list is **fixed**: loopback (per `PrivatePolicy`), RFC 1918 private (10/8, 172.16/12, 192.168/16), CGNAT shared space (100.64.0.0/10), link-local (incl. cloud metadata 169.254.169.254 and IPv6 `fe80::/10`), IPv6 ULA (`fc00::/7`) and deprecated site-local (`fec0::/10`), TEST-NET (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24), RFC 2544 benchmarking (198.18.0.0/15), IPv6 documentation (`2001:db8::/32`)/discard (`100::/64`) prefixes, unspecified, `localhost`/`*.localhost`, embedded credentials, query/fragment, non-`http(s)` schemes. IPv6-mapped IPv4 bypasses are checked. **Multicast (IPv4 224.0.0.0/4, IPv6 `ff00::/8`) is NOT currently blocked** — `is_private_or_reserved` does not call `is_multicast()`, so a multicast literal passes `validate_url`. Adding multicast (or anything else) to — or removing from — this list requires an ADR delta.
 
 The HTTP probe itself runs through reqwest with: `redirect::Policy::none()`, 5-second timeout, 5 MiB body cap (`http_util::read_body_limited`), `Content-Type` allow-list. These four are a unit — if you add a new probe, copy the configuration constants by **reusing the existing reqwest client builder**, not by re-typing the values.
 
 ## Container-host alias rewrite
 
-`host.docker.internal` resolves **inside the container** (injected via Compose `extra_hosts` per-service) but not from the Desktop host process — Speedwave does not bundle Docker Desktop. Host-side code that probes a base URL must call `speedwave_runtime::compose::rewrite_container_alias_to_loopback`. The single SSOT is `consts::HOST_GATEWAY_ALIAS`. Do not reintroduce per-platform aliases (`host.lima.internal`, `host.speedwave.internal`, `host.containers.internal`) — one canonical hostname; per-platform divergence is in the gateway IP only, resolved at runtime by `compose::host_addressing` (macOS: static `LIMA_VZ_HOST_IP`; Windows: detected from `wsl.exe -d <distro> -- sh -c 'ip -4 route show default'`, see ADR-067).
+`host.docker.internal` resolves **inside the container** (injected via Compose `extra_hosts` per-service) but not from the Desktop host process — Speedwave does not bundle Docker Desktop. Host-side code that probes a base URL must call `http_util::rewrite_container_alias_to_loopback`. The single SSOT is `consts::HOST_GATEWAY_ALIAS`. Do not reintroduce per-platform aliases (`host.lima.internal`, `host.speedwave.internal`, `host.containers.internal`) — one canonical hostname; per-platform divergence is in the gateway IP only, resolved at runtime by `compose::host_addressing` (macOS: static `LIMA_VZ_HOST_IP`; Windows: detected from `wsl.exe -d <distro> -- sh -c 'ip -4 route show default'`, see ADR-067).
 
 ## Authentication bypass
 

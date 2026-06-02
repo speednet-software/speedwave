@@ -52,7 +52,7 @@ There is no official Atlassian Node SDK, and the popular community libraries (`j
 
 Same outcome again (ADR-055). Four upstream Office/PDF MCP servers were evaluated — `microsoft/markitdown-mcp`, `GongRzhe/Office-Word-MCP-Server`, `dvejsada/mcp-ms-office-documents`, `jenstangen1/pptx-xlsx-mcp` — and the gate fails on condition (1) "mature and covers the need": `markitdown-mcp` is read-only (no create/edit/PDF-generation/conversion/charts), `pptx-xlsx-mcp` uses `pywin32`/COM (Windows-only, useless in a Linux container), and the rest are single-maintainer community projects. There is no single upstream covering the full read/write/create/convert/charts scope, so `office` gets an own thin worker (TypeScript glue over `markitdown`/`pandoc`/LibreOffice/`weasyprint`/`pypdf`/`python-docx`/`openpyxl`/`python-pptx`/`matplotlib`/SheetJS) — not reinventing those tools, just the tool definitions and glue.
 
-→ **Office documents gets an own thin worker, `mcp-servers/office/`, a TypeScript MCP server plus Python support-scripts (the `presale` hybrid pattern); see ADR-055.**
+→ **Office documents gets an own thin worker, `mcp-servers/office/`, a TypeScript MCP server plus Python support-scripts (a hybrid TypeScript-plus-Python pattern); see ADR-055.**
 
 ### Retroactive explanation of existing workers
 

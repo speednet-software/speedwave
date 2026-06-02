@@ -105,7 +105,7 @@ Speedwave preprocesses with [pica](https://github.com/nodeca/pica) before send:
 - **PNG** stays PNG (transparency preserved).
 - **JPEG / WebP** resamples to JPEG q=0.92 (text OCR remains comfortable).
 - **GIF** passes through (Anthropic processes only the first frame; the file on disk keeps the animation).
-- Tiny PNGs below the model's native long edge (2576 px for Opus 4.7, 1568 px for Sonnet/Haiku) and below 2 MB skip pica entirely.
+- Tiny PNGs below the model's native long edge (2576 px for Opus, 1568 px for Sonnet/Haiku) and below 2 MB skip pica entirely.
 
 There is no client-side gate on the active model — every provider gets a chance to accept the attachment. If the active model can't handle images (text-only Anthropic snapshot, local model loaded without vision, BYOK provider that ignores image blocks), the chat shows the provider's API error as a regular error block. See [ADR-065](../adr/ADR-065-image-attachments-structured-input.md) for the rationale (no client-side capability matrix to keep stale).
 
@@ -127,11 +127,23 @@ The project pill in the top-right of every view opens the project switcher dropd
 
 ## System Tray
 
+Speedwave runs a system tray icon on both platforms (ADR-058). macOS renders a black template glyph that the system inverts for the active appearance; Windows uses a white glyph for the notification area's typically-dark background.
+
+**Left-click** the icon toggles the main window's visibility (show if hidden, hide if visible). Rapid clicks within 500 ms are debounced to avoid a double-toggle.
+
+**Right-click** opens the context menu. Its items are built from the current state:
+
+- **Open Speedwave** — brings the main window to the foreground.
+- **Check for Updates** — runs the updater on demand.
+- **Install Update v{version}** — appears only when the updater has found a newer version.
+- **Beta features** — a checkbox that toggles beta features in the user config. Hidden until setup completes, so the switch can't race the wizard's data-dir creation.
+- **Quit** — exits the app.
+
 ## Logs & system health
 
 The `/logs` route hosts a single page that combines container logs, host-side service logs, and a compact system-health status bar. It replaced the previous Settings → Diagnostics block and the standalone System Health view.
 
-**Status bar.** A horizontal strip at the top reports overall, VM, containers, IDE Bridge, and `mcp-os` health. Each cell expands on click to show the underlying details (container list with health, detected IDE list, etc.). The bar is computed from the `get_system_health` Tauri command and refreshes every 5 s.
+**Status bar.** A horizontal strip at the top reports overall, VM, containers, IDE Bridge, and `mcp-os` health. Each cell expands on click to show the underlying details (container list with health, detected IDE list, etc.). The bar is computed from the `get_health` Tauri command and refreshes every 5 s.
 
 **IDE Bridge connect link.** The IDE Bridge cell renders `connect →` when the daemon is running but no IDE is selected (`selected_ide` is `null`). The link deep-jumps to `/integrations#ide-bridge` (anchor scrolling is enabled in the Angular router for this) so the user can pick a target IDE without scrolling.
 

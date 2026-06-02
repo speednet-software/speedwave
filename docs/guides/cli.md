@@ -35,8 +35,8 @@ speedwave self-update          # download latest CLI from GitHub Releases
 speedwave plugin install <path.zip>  # install plugin from signed ZIP
 speedwave plugin list                # list installed plugins with status
 speedwave plugin remove <slug>       # uninstall a plugin
-speedwave plugin enable <slug> --project <name>   # enable plugin for a project
-speedwave plugin disable <slug> --project <name>  # disable plugin for a project
+speedwave plugin enable <service_id> --project <name>   # enable plugin for a project
+speedwave plugin disable <service_id> --project <name>  # disable plugin for a project
 speedwave --help | -h | help   # print usage and exit (no runtime required)
 ```
 
@@ -59,14 +59,14 @@ speedwave --help | -h | help   # print usage and exit (no runtime required)
 
   Two outcomes are possible:
   - **Installed:** the plugin is on disk and (for MCP plugins) the container image was built. Stdout: `"Plugin '<name>' (<slug>) installed successfully"`.
-  - **Installed with deferred build:** the plugin is on disk but the container image build failed (network outage, broken Containerfile). Stderr: `"Plugin '<name>' (<slug>) installed; image build failed and will retry on next launch"`. A marker file at `~/.speedwave/plugin-state/<slug>/image_pending` (a sibling of `~/.speedwave/plugins/`, **outside** the signed plugin tree) remains and the build is retried automatically on the next Speedwave start (`ensure_all_plugin_images`).
+  - **Installed with deferred build:** the plugin is on disk but the container image build failed (network outage, broken Containerfile). Stderr: `"Plugin '<name>' (<slug>) installed; image build failed and will retry on next launch"`. A marker file at `~/.speedwave/plugin-state/<slug>/image_pending` (a sibling of `~/.speedwave/plugins/`, **outside** the signed plugin tree) remains and the build is retried automatically on the next Speedwave start (`ensure_plugin_images`).
 
   **Both cases exit 0** so existing `speedwave plugin install foo.zip && echo OK` scripts continue to work. To detect a deferred build, read stderr or check for `~/.speedwave/plugin-state/<slug>/image_pending`. See [ADR-047](../adr/ADR-047-plugin-install-progress-events.md) for the rationale.
 
 - **`speedwave plugin list`** — lists all installed plugins, showing name, version, and a `[verified]` / `[UNVERIFIED: <reason>]` marker per plugin. This command does **not** run the startup audit (so it stays usable when an audit is failing) — it reports the per-plugin verification status instead.
 - **`speedwave plugin remove <slug>`** — removes the plugin directory from `~/.speedwave/plugins/<slug>/` (and its `~/.speedwave/plugin-state/<slug>/` sibling). Works even when the plugin fails signature verification — this is the recovery command for a tampered plugin. Note: credential files at `~/.speedwave/tokens/<project>/<slug>/` and config entries are **not** cleaned by the CLI — use the Desktop UI for full cleanup, or remove token directories manually
-- **`speedwave plugin enable <slug> --project <name>`** — enables a plugin for a specific project in user config
-- **`speedwave plugin disable <slug> --project <name>`** — disables a plugin for a specific project in user config
+- **`speedwave plugin enable <service_id> --project <name>`** — enables a plugin for a specific project in user config
+- **`speedwave plugin disable <service_id> --project <name>`** — disables a plugin for a specific project in user config
 - **`speedwave --help` / `-h` / `help`** — prints the subcommand list and exits 0. Unlike every other subcommand, `--help` does NOT require Speedwave Desktop to be running — useful for discovering commands during a broken setup or before the runtime is installed.
 
 ## Project Resolution

@@ -19,11 +19,7 @@ A bind-mount of `/etc/localtime` was considered (the Docker convention). Rejecte
 
 ### Detection
 
-A new module `crates/speedwave-runtime/src/tz.rs` exposes:
-
-```rust
-pub fn detect_host_timezone() -> String
-```
+`crates/speedwave-runtime/src/tz.rs::detect_host_timezone()` returns the host IANA zone as a `String` (never errors):
 
 - **Unix (macOS):** read `/etc/localtime` as a symlink; extract the path suffix after the last `zoneinfo/` segment (e.g. `/var/db/timezone/zoneinfo/...`). Fall back to `$TZ` if the symlink is missing or doesn't point into `zoneinfo/`. The fallback validates `$TZ` against an IANA-shape regex to reject glibc-isms like `:Europe/Warsaw` and path-traversal strings.[^1][^2]
 - **Windows:** invoke `powershell -NoProfile -NonInteractive -Command "(Get-TimeZone).Id"` (5 s deadline) and map the Windows zone ID to IANA via an inline `WINDOWS_TO_IANA` table sourced from CLDR `windowsZones.xml` (territory `001`).[^3][^4]

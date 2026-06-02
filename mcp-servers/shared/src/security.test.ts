@@ -353,7 +353,7 @@ describe('security', () => {
 
     it('accepts plugin worker URLs', () => {
       // Plugins also use PORT_WORKER; URLs differ only by DNS service name.
-      expect(validateWorkerUrl('http://mcp-presale:3000')).toBe(true);
+      expect(validateWorkerUrl('http://mcp-example-plugin:3000')).toBe(true);
       expect(validateWorkerUrl('http://mcp-my-addon:3000')).toBe(true);
     });
 

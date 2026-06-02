@@ -1,61 +1,57 @@
 # ADR-004: WSL2 + nerdctl on Windows
 
+> **Status:** Accepted
+> **Context:** Speedwave needs container isolation on Windows without requiring Docker Desktop.
+
 ## Decision
 
-On Windows, Speedwave uses WSL2 (Hyper-V) with nerdctl inside the Linux distribution.
+On Windows, Speedwave runs containers via nerdctl inside a dedicated WSL2 (Hyper-V) Linux distribution named `Speedwave`, managed from the Rust runtime by shelling out to `wsl.exe`. Linux as a host platform was dropped (ADR-059); the two supported hosts are macOS (Lima) and Windows (WSL2).
 
-## Rationale
+## Why
 
-WSL2[^5] is built into Windows 10/11 and uses Hyper-V — the same hypervisor Docker Desktop for Windows uses. Tauri (Rust) can manage WSL2 via `wsl.exe`:
-
-```rust
-Command::new("wsl.exe")
-    .args(["-d", "Speedwave", "--", "nerdctl", "compose", "up", "-d"])
-    .output()
-```
-
-The public WSL API (`wslapi.h`)[^12] allows distribution registration and process execution. For mcp-os:
-
-- `windows-rs` (Microsoft-maintained)[^13] for WinRT API access
-- `mapi-rs` (Microsoft-maintained)[^14] for Outlook mail and calendar
-
-IDE lock file on Windows: `%USERPROFILE%\.claude\ide\<port>.lock`[^15]
+- WSL2 ships with Windows 10/11 and uses Hyper-V — the same hypervisor Docker Desktop relies on — so no extra hypervisor install is needed.
+- The Rust runtime can drive WSL2 entirely through `wsl.exe -d <distro> -- ...`, keeping the orchestration layer thin (KISS).
+- A dedicated, Speedwave-owned distribution isolates the container environment from any user-configured WSL distros (Ubuntu, Debian, etc.) and lets Speedwave verify the distro's origin before trusting it.
+- `windows-rs` (Microsoft-maintained) provides WinRT access; `mapi-rs` provides Outlook mail and calendar bindings for the host-side native helpers.
 
 ## Auto-Installation
 
-The Setup Wizard detects whether WSL2 is available and provisions it automatically (see ADR-021):
+The Setup Wizard provisions WSL2 automatically (see ADR-021):
 
-1. **Detection**: Run `wsl --status` to check if WSL2 is installed and operational
-2. **Installation**: If WSL2 is missing, run `wsl --install --no-distribution` with UAC elevation[^16]. The `--no-distribution` flag installs only the WSL2 kernel without a default Linux distribution — Speedwave provides its own.
-3. **Reboot**: Prompt the user to reboot (required for WSL2 kernel installation on first setup)
-4. **Distribution import**: After reboot, run `wsl --import Speedwave <install-dir> <rootfs.tar.gz>` to create an isolated named distribution[^17]
+1. Detection — prerequisite checks decide whether WSL2 is installed and operational.
+2. Installation — if WSL2 is missing, the wizard runs `wsl --install --no-distribution` via elevated PowerShell (UAC). The `--no-distribution` flag installs only the WSL2 kernel; Speedwave imports its own distro.
+3. Reboot — the user is prompted to restart (required after first-time kernel install).
+4. Distribution import — the bundled Ubuntu rootfs (SHA256-verified) is imported with `wsl --import` into a dedicated named distribution.
 
-This ensures the user never needs to manually enable Windows features or install WSL2 from the command line.
+Implemented in `desktop/src-tauri/src/setup_wizard.rs` (`attempt_wsl_install`, `import_wsl_distro`).
 
-## Distribution Import
+## Where it lives in code
 
-Speedwave creates a dedicated WSL2 distribution named `Speedwave` using `wsl --import`. This isolates Speedwave's Linux environment from any user-configured WSL distributions (e.g., Ubuntu, Debian). The distribution is stored in `%USERPROFILE%\.speedwave\wsl\Speedwave\`.
+- WSL container runtime (the `WslRuntime` impl behind the `LockedRuntime` façade, ADR-066) — `crates/speedwave-runtime/src/runtime/wsl.rs`
+- WSL2 install + rootfs import + distro-origin verification — `desktop/src-tauri/src/setup_wizard.rs`
+- Distro name SSOT, derived from the data-dir basename (`~/.speedwave` → `Speedwave`, `~/.speedwave-dev` → `Speedwave-dev`) — `crates/speedwave-runtime/src/consts.rs` (`wsl_distro_name`, `derive_wsl_distro_name_from`)
+- WSL2 disk image lives at `<data_dir>/wsl/<distro>/ext4.vhdx` — `setup_wizard.rs` (`expected_wsl_vhdx_path_in`)
+- IDE Bridge lock files are written by Speedwave on the host at `<data_dir>/ide-bridge/<port>.lock` (e.g. `~/.speedwave/ide-bridge/<port>.lock`), then mounted into the `claude` container as `/home/speedwave/.claude/ide/` — `desktop/src-tauri/src/bridges/host_bridge.rs` (`HostBridge::new_with_options`) and `crates/speedwave-runtime/src/compose.rs`. Note: `%USERPROFILE%\.claude\ide\<port>.lock` is the upstream Claude Code path inside the container, not where Speedwave persists the host-side lock.
 
 ## System Requirements
 
-- Windows 10 version 21H2 (Build 19044) or later[^18]
-- Hyper-V capable hardware (virtualization enabled in BIOS/UEFI)
-- Administrator privileges for initial WSL2 installation (UAC prompt)
+- Windows 10 version 21H2 (Build 19044) or later
+- Hyper-V-capable hardware (virtualization enabled in BIOS/UEFI)
+- Administrator privileges for the initial WSL2 install (one UAC prompt)
+
+## Rejected alternatives
+
+- Docker Desktop on Windows — extra licensing and install burden for end users; Speedwave aims to ship a single installable app with no Docker dependency.
+- Reusing a user's existing WSL distro — would couple Speedwave's container environment to arbitrary user configuration and break the origin-verification security check; a dedicated imported distro keeps isolation clean.
 
 ---
 
-[^5]: [WSL2 architecture - Microsoft Docs](https://learn.microsoft.com/en-us/windows/wsl/compare-versions)
+[WSL2 architecture — Microsoft Docs](https://learn.microsoft.com/en-us/windows/wsl/compare-versions)
 
-[^12]: [WslRegisterDistribution - wslapi.h - Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/api/wslapi/nf-wslapi-wslregisterdistribution)
+[Install WSL — Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/install)
 
-[^13]: [microsoft/windows-rs - Rust for Windows](https://github.com/microsoft/windows-rs)
+[Import a Linux distribution — wsl --import](https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro)
 
-[^14]: [microsoft/mapi-rs - Rust bindings for Outlook MAPI](https://github.com/microsoft/mapi-rs)
+[microsoft/windows-rs — Rust for Windows](https://github.com/microsoft/windows-rs)
 
-[^15]: [Claude Code Issue #16434 - Windows IDE lockfile path](https://github.com/anthropics/claude-code/issues/16434)
-
-[^16]: [Install WSL - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/install)
-
-[^17]: [Import a Linux distribution - wsl --import](https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro)
-
-[^18]: [WSL2 requirements - Windows 10 version 21H2](https://learn.microsoft.com/en-us/windows/wsl/install-manual#step-2---check-requirements-for-running-wsl-2)
+[microsoft/mapi-rs — Rust bindings for Outlook MAPI](https://github.com/microsoft/mapi-rs)

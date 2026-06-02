@@ -5,11 +5,11 @@ import { PluginStatusEntry } from '../../models/plugin';
 
 function makeMcpPlugin(): PluginStatusEntry {
   return {
-    slug: 'presale',
-    name: 'Presale CRM',
-    service_id: 'presale',
+    slug: 'example-plugin',
+    name: 'Example Plugin CRM',
+    service_id: 'example-plugin',
     version: '1.2.0',
-    description: 'CRM integration for presale',
+    description: 'CRM integration for example-plugin',
     enabled: true,
     configured: true,
     auth_fields: [
@@ -82,7 +82,9 @@ describe('PluginCardComponent', () => {
   it('should render plugin name, version, and description', () => {
     fixture.detectChanges();
     const el = fixture.nativeElement;
-    expect(el.querySelector('[data-testid="service-name"]').textContent).toContain('Presale CRM');
+    expect(el.querySelector('[data-testid="service-name"]').textContent).toContain(
+      'Example Plugin CRM'
+    );
     expect(el.querySelector('[data-testid="version-badge"]').textContent).toContain('v1.2.0');
     expect(el.querySelector('[data-testid="card-description"]').textContent).toContain(
       'CRM integration'
@@ -136,7 +138,7 @@ describe('PluginCardComponent', () => {
     const toggleSpy = vi.spyOn(component.togglePlugin, 'emit');
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     checkbox.dispatchEvent(new Event('change'));
-    expect(expandSpy).toHaveBeenCalledWith('presale');
+    expect(expandSpy).toHaveBeenCalledWith('example-plugin');
     expect(toggleSpy).not.toHaveBeenCalled();
   });
 
@@ -171,17 +173,19 @@ describe('PluginCardComponent', () => {
   it('should emit openPlugin when Open button is clicked', () => {
     fixture.detectChanges();
     const spy = vi.spyOn(component.openPlugin, 'emit');
-    const openBtn = fixture.nativeElement.querySelector('[data-testid="plugin-open-presale"]');
+    const openBtn = fixture.nativeElement.querySelector(
+      '[data-testid="plugin-open-example-plugin"]'
+    );
     expect(openBtn).not.toBeNull();
     openBtn.click();
-    expect(spy).toHaveBeenCalledWith('presale');
+    expect(spy).toHaveBeenCalledWith('example-plugin');
   });
 
   it('should emit toggleExpand when header button is clicked', () => {
     fixture.detectChanges();
     const spy = vi.spyOn(component.toggleExpand, 'emit');
     fixture.nativeElement.querySelector('[data-testid="card-header-btn"]').click();
-    expect(spy).toHaveBeenCalledWith('presale');
+    expect(spy).toHaveBeenCalledWith('example-plugin');
   });
 
   it('should emit togglePlugin on checkbox change', () => {
@@ -254,7 +258,7 @@ describe('PluginCardComponent', () => {
       fixture.detectChanges();
       const spy = vi.spyOn(component.removePlugin, 'emit');
       const removeBtn = fixture.nativeElement.querySelector(
-        '[data-testid="plugin-remove-presale"]'
+        '[data-testid="plugin-remove-example-plugin"]'
       );
       removeBtn.click();
       fixture.detectChanges();
@@ -270,7 +274,7 @@ describe('PluginCardComponent', () => {
       fixture.detectChanges();
       const spy = vi.spyOn(component.removePlugin, 'emit');
       const confirmBtn = fixture.nativeElement.querySelector(
-        '[data-testid="plugin-remove-confirm-presale"]'
+        '[data-testid="plugin-remove-confirm-example-plugin"]'
       );
       confirmBtn.click();
       expect(spy).toHaveBeenCalledWith(component.plugin());
@@ -283,7 +287,7 @@ describe('PluginCardComponent', () => {
       fixture.detectChanges();
       const spy = vi.spyOn(component.removePlugin, 'emit');
       const cancelBtn = fixture.nativeElement.querySelector(
-        '[data-testid="plugin-remove-cancel-presale"]'
+        '[data-testid="plugin-remove-cancel-example-plugin"]'
       );
       cancelBtn.click();
       fixture.detectChanges();
@@ -328,7 +332,7 @@ describe('PluginCardComponent', () => {
       const spy = vi.spyOn(component.toggleExpand, 'emit');
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
       hint.click();
-      expect(spy).toHaveBeenCalledWith('presale');
+      expect(spy).toHaveBeenCalledWith('example-plugin');
     });
 
     it('emits toggleExpand on Enter key', () => {
@@ -338,7 +342,7 @@ describe('PluginCardComponent', () => {
       const spy = vi.spyOn(component.toggleExpand, 'emit');
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
       hint.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-      expect(spy).toHaveBeenCalledWith('presale');
+      expect(spy).toHaveBeenCalledWith('example-plugin');
     });
 
     it('emits toggleExpand on Space key and prevents default', () => {
@@ -349,7 +353,7 @@ describe('PluginCardComponent', () => {
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
       const event = new KeyboardEvent('keydown', { key: ' ', cancelable: true });
       hint.dispatchEvent(event);
-      expect(spy).toHaveBeenCalledWith('presale');
+      expect(spy).toHaveBeenCalledWith('example-plugin');
       expect(event.defaultPrevented).toBe(true);
     });
   });
@@ -359,7 +363,7 @@ describe('PluginCardComponent', () => {
     fixture.detectChanges();
     const spy = vi.spyOn(component.deleteCredentials, 'emit');
     const removeBtn = fixture.nativeElement.querySelector(
-      '[data-testid="plugin-delete-creds-presale"]'
+      '[data-testid="plugin-delete-creds-example-plugin"]'
     );
     removeBtn.click();
     expect(spy).toHaveBeenCalledWith(component.plugin());
@@ -367,7 +371,7 @@ describe('PluginCardComponent', () => {
 
   it('should set correct data-testid attribute', () => {
     fixture.detectChanges();
-    const card = fixture.nativeElement.querySelector('[data-testid="plugin-card-presale"]');
+    const card = fixture.nativeElement.querySelector('[data-testid="plugin-card-example-plugin"]');
     expect(card).not.toBeNull();
   });
 });

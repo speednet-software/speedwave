@@ -50,16 +50,19 @@ steps and flickering. Guard every async callback with a monotonic token bumped o
 ```js
 var gen = 0;
 function clearAll() {
-  gen++;                                  // invalidates all in-flight callbacks
-  timers.forEach(clearTimeout); timers = [];
-  frames.forEach(cancelAnimationFrame); frames = [];
+  gen++; // invalidates all in-flight callbacks
+  timers.forEach(clearTimeout);
+  timers = [];
+  frames.forEach(cancelAnimationFrame);
+  frames = [];
 }
 // after() removes its id once fired, so the array tracks only PENDING timers (no unbounded growth)
 function after(ms, fn) {
   var g = gen;
   var t = setTimeout(function () {
-    var i = timers.indexOf(t); if (i !== -1) timers.splice(i, 1);
-    if (running && g === gen) fn();       // stale run → no-op
+    var i = timers.indexOf(t);
+    if (i !== -1) timers.splice(i, 1);
+    if (running && g === gen) fn(); // stale run → no-op
   }, ms);
   timers.push(t);
   return t;
@@ -77,8 +80,8 @@ timeline while another is live or while off-screen:
 
 ```js
 function resume(idx) {
-  if (reduce || !visible || hovering) return;   // every guard, one place
-  stop();                                        // stop() bumps gen via clearAll()
+  if (reduce || !visible || hovering) return; // every guard, one place
+  stop(); // stop() bumps gen via clearAll()
   running = true;
   playFrom(idx == null ? Math.max(current, 0) : idx);
 }
@@ -92,18 +95,24 @@ function resume(idx) {
 
 ### 3. Slide index vs carousel step (decouple them)
 
-If one slide is shown *inside* another step (e.g. a "create project" modal that appears mid-way
+If one slide is shown _inside_ another step (e.g. a "create project" modal that appears mid-way
 through the "setup" pipeline and then returns), it must NOT be a carousel step with its own dot.
 Separate the two concepts: each carousel step carries the `data-step` of the slide it activates.
 
 ```js
 var STEP_META = [
-  { slide: 0, pill: 'first-run setup', rail: '' },   // setup (create-project shown from inside it)
-  { slide: 2, pill: 'provider',        rail: 'settings' },
+  { slide: 0, pill: 'first-run setup', rail: '' }, // setup (create-project shown from inside it)
+  { slide: 2, pill: 'provider', rail: 'settings' },
   // …                                                 // slide 1 (create-project) has NO dot
 ];
-function showSlide(n) { steps.forEach(s => s.classList.toggle('sw-active', +s.dataset.step === n)); }
-function showStep(i) { current = i; var m = STEP_META[i]; showSlide(m.slide); /* dots, rail, pill */ }
+function showSlide(n) {
+  steps.forEach((s) => s.classList.toggle('sw-active', +s.dataset.step === n));
+}
+function showStep(i) {
+  current = i;
+  var m = STEP_META[i];
+  showSlide(m.slide); /* dots, rail, pill */
+}
 ```
 
 ### 4. The loop
@@ -112,8 +121,11 @@ function showStep(i) { current = i; var m = STEP_META[i]; showSlide(m.slide); /*
 function playFrom(idx) {
   if (!running) return;
   showStep(idx);
-  SEQUENCE[idx].run(function () {                 // each step's run(done) animates, then calls done
-    after(SEQUENCE[idx].hold, function () { playFrom((idx + 1) % SEQUENCE.length); });
+  SEQUENCE[idx].run(function () {
+    // each step's run(done) animates, then calls done
+    after(SEQUENCE[idx].hold, function () {
+      playFrom((idx + 1) % SEQUENCE.length);
+    });
   });
 }
 ```
@@ -126,9 +138,17 @@ or the carousel freezes on that step. Reset its own DOM state at the top of `run
 
 ```js
 window.__swShowcase = {
-  goto: function (i) { stop(); running = true; playFrom(i); },
-  pause: function () { stop(); },
-  step: function () { return current; },
+  goto: function (i) {
+    stop();
+    running = true;
+    playFrom(i);
+  },
+  pause: function () {
+    stop();
+  },
+  step: function () {
+    return current;
+  },
 };
 ```
 
@@ -139,7 +159,7 @@ Indispensable for QA screenshots — drive the carousel deterministically instea
 
 - **Lists that "scroll" (chat, logs, file trees):** don't use native scroll. Drive `scrollTop`
   via rAF with a gentle sine ease in a sequence of "thumb-flicks" `[distancePx, durationMs,
-  pauseMs]`. Hide the scrollbar (`scrollbar-width:none` + `::-webkit-scrollbar{display:none}`)
+pauseMs]`. Hide the scrollbar (`scrollbar-width:none` + `::-webkit-scrollbar{display:none}`)
   and mask the edges so rows fade in/out.
 - **Toggles / enable flows:** flip the visual toggle FIRST (slide the knob), THEN transition the
   status `configure → starting → running`. Toggling and status flipping simultaneously reads as

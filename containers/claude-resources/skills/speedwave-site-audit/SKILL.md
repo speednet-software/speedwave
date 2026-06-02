@@ -9,7 +9,7 @@ description: >
   from the sitemap (pairs with speedwave-sitemap). Always runs a final verifier pass.
   Do not use for: producing a sitemap (use speedwave-sitemap), or fixing the issues — this
   skill only reports.
-argument-hint: "<url> [--scope page|sitemap] [--categories C1,C2] [--output_path P]"
+argument-hint: '<url> [--scope page|sitemap] [--categories C1,C2] [--output_path P]'
 allowed-tools: WebFetch mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code Write Agent
 ---
 
@@ -85,9 +85,27 @@ First, the machine-readable `audit.json` (shape below):
     {
       "url": "https://example.com/",
       "findings": [
-        { "id": "foundations.doctype", "category": "Foundations", "status": "required", "verdict": "pass", "evidence": "<!doctype html>" },
-        { "id": "accessibility.image-alt-text", "category": "Accessibility", "status": "required", "verdict": "fail", "evidence": "<img src=hero.jpg> has no alt" },
-        { "id": "accessibility.colour-contrast", "category": "Accessibility", "status": "required", "verdict": "skipped", "reason": "playwright-disabled" }
+        {
+          "id": "foundations.doctype",
+          "category": "Foundations",
+          "status": "required",
+          "verdict": "pass",
+          "evidence": "<!doctype html>"
+        },
+        {
+          "id": "accessibility.image-alt-text",
+          "category": "Accessibility",
+          "status": "required",
+          "verdict": "fail",
+          "evidence": "<img src=hero.jpg> has no alt"
+        },
+        {
+          "id": "accessibility.colour-contrast",
+          "category": "Accessibility",
+          "status": "required",
+          "verdict": "skipped",
+          "reason": "playwright-disabled"
+        }
       ]
     }
   ],
@@ -104,23 +122,26 @@ The report has, per page, one Markdown table — every in-scope rule as a row, g
 
 **Scope:** sitemap (12 pages) · **Categories:** Accessibility, Security · **Playwright:** available · **Verified:** yes
 
-## https://example.com/   ✅ 28 · ❌ 3 · ⏭️ 1
+## https://example.com/ ✅ 28 · ❌ 3 · ⏭️ 1
 
 ### Accessibility
-| Rule | Status | Result | Evidence |
-| --- | --- | --- | --- |
-| Image alt text | required | ❌ FAIL | `<img src=hero.jpg>` has no alt |
+
+| Rule                             | Status   | Result  | Evidence                         |
+| -------------------------------- | -------- | ------- | -------------------------------- |
+| Image alt text                   | required | ❌ FAIL | `<img src=hero.jpg>` has no alt  |
 | Visible keyboard focus indicator | required | ✅ PASS | every control shows a focus ring |
-| Colour contrast | required | ⏭️ SKIP | playwright-disabled |
-| OIDC discovery doc | optional | ➖ N/A | site has no login |
+| Colour contrast                  | required | ⏭️ SKIP | playwright-disabled              |
+| OIDC discovery doc               | optional | ➖ N/A  | site has no login                |
 
 ### Security
-| Rule | Status | Result | Evidence |
-| --- | --- | --- | --- |
+
+| Rule                | Status   | Result  | Evidence                                                                  |
+| ------------------- | -------- | ------- | ------------------------------------------------------------------------- |
 | HSTS header present | required | ✅ PASS | `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload` |
 ```
 
 Rules for the table:
+
 - One row per in-scope rule, even passes — the user wants the full checklist ticked off, not just failures.
 - `Result` glyphs: ✅ PASS, ❌ FAIL, ⏭️ SKIP, ➖ N/A. `Status` is the rule's required/recommended/optional/avoid.
 - `Evidence` quotes the captured proof (`evidence_hint`); for SKIP put the reason, for N/A put why it doesn't apply.

@@ -153,14 +153,24 @@ for resource_type in skills commands agents hooks; do
     fi
 done
 
-# Symlink individual resource files from read-only mount.
-# These auto-update when Speedwave ships new versions — no stale copies.
+# Symlink read-only resource files (auto-update on new Speedwave versions).
 # Teams override via project-level .claude/ (ADR-022 scope precedence).
-for resource_file in statusline.sh settings.json CLAUDE.md; do
+for resource_file in statusline.sh CLAUDE.md; do
     if [ -f "${SPEEDWAVE_RESOURCES}/${resource_file}" ]; then
         ln -sf "${SPEEDWAVE_RESOURCES}/${resource_file}" "${HOME}/.claude/${resource_file}"
     fi
 done
+
+# settings.json must be a WRITABLE copy, not a symlink: Claude Code writes it
+# (`/effort`, `/model` persist the choice) and the resources mount is read-only
+# (EROFS otherwise). Replace a stale symlink (older builds linked it), then seed
+# only when absent so a user's persisted choice survives across restarts.
+if [ -L "${HOME}/.claude/settings.json" ]; then
+    rm -f "${HOME}/.claude/settings.json"
+fi
+if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ] && [ ! -e "${HOME}/.claude/settings.json" ]; then
+    cp "${SPEEDWAVE_RESOURCES}/settings.json" "${HOME}/.claude/settings.json"
+fi
 
 # output-styles: symlink individual file (not directory) to preserve user's custom styles
 if [ -f "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" ]; then
@@ -219,24 +229,30 @@ cat > "${HOME}/.claude/mcp-config.json" << EOF
 }
 EOF
 
-# Pre-create .claude.json to skip the onboarding flow — but ONLY when the user
-# is already logged in (credentials present AND non-empty/JSON-shaped). Skipping
-# onboarding also suppresses Claude Code's automatic login prompt on a fresh
-# `claude` start, so doing it unconditionally forced the user to type `/login` by
-# hand. When credentials are absent — or a truncated/corrupt file — we leave
-# .claude.json uncreated so `claude` opens the OAuth flow itself. When present
-# and well-formed, we pre-create it so a logged-in user is not re-onboarded every
-# session (the original bug — see https://github.com/tfvchow/field-notes-public/issues/10).
+# Pre-seed .claude.json: always pre-accept the /workspace trust dialog (keyed by
+# working_dir, separate from --dangerously-skip-permissions); set onboarding only
+# when logged in, else leave it incomplete so `claude` shows the OAuth flow.
 creds_valid() {
     local f="${HOME}/.claude/.credentials.json"
     # Non-empty and ends with `}` (a complete JSON object, not a truncated write).
     [ -s "$f" ] && [ "$(tr -d '[:space:]' < "$f" | tail -c 1)" = "}" ]
 }
-if creds_valid && [ ! -f "${HOME}/.claude.json" ]; then
-    cat > "${HOME}/.claude.json" << 'EOF'
+if [ ! -f "${HOME}/.claude.json" ]; then
+    if creds_valid; then
+        onboarding='"hasCompletedOnboarding": true,
+  "installMethod": "native",'
+    else
+        onboarding=''
+    fi
+    cat > "${HOME}/.claude.json" << EOF
 {
-  "hasCompletedOnboarding": true,
-  "installMethod": "native"
+  ${onboarding}
+  "projects": {
+    "/workspace": {
+      "hasTrustDialogAccepted": true,
+      "hasCompletedProjectOnboarding": true
+    }
+  }
 }
 EOF
 fi

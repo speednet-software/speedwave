@@ -881,9 +881,9 @@ mod tests {
     #[test]
     fn plugin_status_entry_serializes_instructions_when_present() {
         let entry = PluginStatusEntry {
-            slug: "figma".into(),
-            name: "Figma".into(),
-            service_id: Some("figma".into()),
+            slug: "example-plugin".into(),
+            name: "Example Plugin".into(),
+            service_id: Some("example-plugin".into()),
             version: "0.1.4".into(),
             description: "short".into(),
             instructions: Some("# Setup\n1. Import the bridge plugin".into()),
@@ -935,9 +935,9 @@ mod tests {
             }
         });
         let entry = PluginStatusEntry {
-            slug: "presale".into(),
-            name: "Presale CRM".into(),
-            service_id: Some("presale".into()),
+            slug: "example-plugin".into(),
+            name: "Example Plugin CRM".into(),
+            service_id: Some("example-plugin".into()),
             version: "1.2.0".into(),
             description: "CRM integration".into(),
             instructions: None,
@@ -980,7 +980,7 @@ mod tests {
             "required": ["currency"]
         });
         let payload = serde_json::json!({ "currency": "EUR" });
-        super::validate_settings_against_schema("presale", &schema, &payload)
+        super::validate_settings_against_schema("example-plugin", &schema, &payload)
             .expect("a conforming payload must pass");
     }
 
@@ -995,19 +995,19 @@ mod tests {
         });
         // Value outside the enum.
         let bad_enum = serde_json::json!({ "currency": "BTC" });
-        let err = super::validate_settings_against_schema("presale", &schema, &bad_enum)
+        let err = super::validate_settings_against_schema("example-plugin", &schema, &bad_enum)
             .expect_err("off-enum value must be rejected");
         assert!(err.contains("do not match its schema"), "got: {err}");
 
         // Wrong type.
         let bad_type = serde_json::json!({ "currency": 42 });
-        let err = super::validate_settings_against_schema("presale", &schema, &bad_type)
+        let err = super::validate_settings_against_schema("example-plugin", &schema, &bad_type)
             .expect_err("wrong-type value must be rejected");
         assert!(err.contains("do not match its schema"), "got: {err}");
 
         // Missing required field.
         let missing = serde_json::json!({});
-        let err = super::validate_settings_against_schema("presale", &schema, &missing)
+        let err = super::validate_settings_against_schema("example-plugin", &schema, &missing)
             .expect_err("missing required field must be rejected");
         assert!(err.contains("do not match its schema"), "got: {err}");
     }
@@ -1019,8 +1019,9 @@ mod tests {
         // should fail to compile it; we surface that as a clean error.
         let bogus_schema = serde_json::json!({ "type": 12345 });
         let payload = serde_json::json!({ "anything": true });
-        let err = super::validate_settings_against_schema("presale", &bogus_schema, &payload)
-            .expect_err("malformed schema must be rejected, not panic");
+        let err =
+            super::validate_settings_against_schema("example-plugin", &bogus_schema, &payload)
+                .expect_err("malformed schema must be rejected, not panic");
         assert!(err.contains("invalid settings_schema"), "got: {err}");
     }
 
@@ -1179,15 +1180,15 @@ mod tests {
     #[test]
     fn field_has_stored_value_true_for_non_empty_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("figma_pat");
-        std::fs::write(&path, "figd_abc").unwrap();
+        let path = dir.path().join("example_pat");
+        std::fs::write(&path, "tok_abc").unwrap();
         assert!(field_has_stored_value(&path));
     }
 
     #[test]
     fn field_has_stored_value_false_for_empty_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("figma_pat");
+        let path = dir.path().join("example_pat");
         std::fs::write(&path, "").unwrap();
         assert!(
             !field_has_stored_value(&path),
@@ -1504,7 +1505,7 @@ mod tests {
                     claude: None,
                     integrations: Some(config::IntegrationsConfig {
                         plugins: Some(HashMap::from([(
-                            "presale".into(),
+                            "example-plugin".into(),
                             config::IntegrationConfig {
                                 enabled: Some(true),
                             },
@@ -1520,7 +1521,7 @@ mod tests {
                     integrations: Some(config::IntegrationsConfig {
                         plugins: Some(HashMap::from([
                             (
-                                "presale".into(),
+                                "example-plugin".into(),
                                 config::IntegrationConfig {
                                     enabled: Some(true),
                                 },
@@ -1543,7 +1544,7 @@ mod tests {
             ui: None,
         };
 
-        let service_id = "presale";
+        let service_id = "example-plugin";
         for project in &mut cfg.projects {
             if let Some(integrations) = project.integrations.as_mut() {
                 if let Some(plugins) = integrations.plugins.as_mut() {
@@ -1559,7 +1560,7 @@ mod tests {
             .plugins
             .as_ref()
             .unwrap();
-        assert!(!plugins_a.contains_key("presale"));
+        assert!(!plugins_a.contains_key("example-plugin"));
 
         let plugins_b = cfg.projects[1]
             .integrations
@@ -1568,7 +1569,7 @@ mod tests {
             .plugins
             .as_ref()
             .unwrap();
-        assert!(!plugins_b.contains_key("presale"));
+        assert!(!plugins_b.contains_key("example-plugin"));
         assert!(plugins_b.contains_key("other"));
     }
 
@@ -1577,15 +1578,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
 
         // Create token dirs for two projects
-        let dir_a = tmp.path().join("tokens/proj-a/presale");
-        let dir_b = tmp.path().join("tokens/proj-b/presale");
+        let dir_a = tmp.path().join("tokens/proj-a/example-plugin");
+        let dir_b = tmp.path().join("tokens/proj-b/example-plugin");
         std::fs::create_dir_all(&dir_a).unwrap();
         std::fs::create_dir_all(&dir_b).unwrap();
         std::fs::write(dir_a.join("access_token"), "secret-a").unwrap();
         std::fs::write(dir_b.join("access_token"), "secret-b").unwrap();
 
         let auth_fields = vec!["access_token".to_string()];
-        let service_id = "presale";
+        let service_id = "example-plugin";
         let project_names = vec!["proj-a", "proj-b"];
 
         for project_name in &project_names {
@@ -1615,13 +1616,13 @@ mod tests {
     fn remove_plugin_fallback_removes_whole_dir_when_no_auth_fields() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let dir = tmp.path().join("tokens/proj-a/presale");
+        let dir = tmp.path().join("tokens/proj-a/example-plugin");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("unknown_file"), "data").unwrap();
         std::fs::write(dir.join("another_file"), "data2").unwrap();
 
         let auth_fields: Vec<String> = vec![];
-        let svc_dir = tmp.path().join("tokens/proj-a/presale");
+        let svc_dir = tmp.path().join("tokens/proj-a/example-plugin");
 
         if svc_dir.exists() {
             if auth_fields.is_empty() {
@@ -1636,7 +1637,7 @@ mod tests {
     fn remove_plugin_removes_empty_token_dir() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let dir = tmp.path().join("tokens/proj-a/presale");
+        let dir = tmp.path().join("tokens/proj-a/example-plugin");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("api_key"), "secret").unwrap();
         std::fs::write(dir.join("host_url"), "https://example.com").unwrap();
@@ -1791,10 +1792,10 @@ mod tests {
 
     #[test]
     fn auto_enable_uses_service_id_when_present() {
-        let service_id: Option<String> = Some("presale".to_string());
-        let slug = "presale";
+        let service_id: Option<String> = Some("example-plugin".to_string());
+        let slug = "example-plugin";
         let plugin_key = service_id.as_deref().unwrap_or(slug);
-        assert_eq!(plugin_key, "presale");
+        assert_eq!(plugin_key, "example-plugin");
     }
 
     #[test]
@@ -1856,22 +1857,22 @@ mod tests {
         // full command needs a verified on-disk plugin, so this isolates the
         // wiring the same way save_plugin_credentials_rejects_* does.
         let field = plugin::AuthFieldDef {
-            key: "figma_pat".to_string(),
-            label: "Figma Token".to_string(),
+            key: "example_pat".to_string(),
+            label: "Example Token".to_string(),
             field_type: "password".to_string(),
-            placeholder: "figd_...".to_string(),
+            placeholder: "tok_...".to_string(),
             is_secret: true,
             required: false,
             description: None,
             validation: Some(plugin::AuthFieldValidation {
-                pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
-                message: Some("Personal Access Tokens start with figd_".to_string()),
+                pattern: "^tok_[A-Za-z0-9_-]+$".to_string(),
+                message: Some("Personal Access Tokens start with tok_".to_string()),
             }),
         };
         let manifest = plugin::PluginManifest {
-            name: "Figma".to_string(),
-            service_id: Some("figma".to_string()),
-            slug: "figma".to_string(),
+            name: "Example Plugin".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(),
             version: "0.1.2".to_string(),
             description: "test".to_string(),
             port: None,
@@ -1897,14 +1898,14 @@ mod tests {
         };
 
         // Good value passes.
-        assert!(lookup("figma_pat", "figd_abc-123_XYZ").is_ok());
+        assert!(lookup("example_pat", "tok_abc-123_XYZ").is_ok());
         // Wrong prefix is rejected, surfacing the author's message.
         assert_eq!(
-            lookup("figma_pat", "ghp_wrong").unwrap_err(),
-            "Personal Access Tokens start with figd_"
+            lookup("example_pat", "ghp_wrong").unwrap_err(),
+            "Personal Access Tokens start with tok_"
         );
         // Empty value (leave-as-is) is never rejected by the pattern.
-        assert!(lookup("figma_pat", "").is_ok());
+        assert!(lookup("example_pat", "").is_ok());
     }
 
     #[test]

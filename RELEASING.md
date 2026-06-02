@@ -55,7 +55,7 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
 2. When ready to release, merge `dev` → `main` via PR
 3. On push to `main`, release-please analyzes new commits since the last release
 4. If there are releasable changes, release-please opens (or updates) a **release PR** on `main`
-5. The release PR updates `CHANGELOG.md`, bumps version in all 16 files, and shows a summary of changes
+5. The release PR updates `CHANGELOG.md`, bumps version in all configured version files, and shows a summary of changes
 6. **Merge the release PR** — this triggers release-please to create a draft GitHub Release + tag
 7. The draft release triggers `desktop-release.yml` to build all platforms
 8. After all builds succeed, `publish-release` flips the release from draft → published
@@ -111,7 +111,7 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
   │        │                                                                      │
   │        ▼                                                                      │
   │  [job: publish-release]                                                       │
-  │    verify-release-assets.sh: 20 assets, 6 .sig companions, latest.json       │
+  │    verify-release-assets.sh: 18 assets, 6 .sig companions, latest.json       │
   │    draft ─► live ─► verify-release-assets.sh (post-publish safety net)       │
   │                                                                               │
   └──────────────────────────┬────────────────────────────────────────────────────┘
@@ -138,9 +138,9 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
         │      ├─ desktop (desktop clippy, angular eslint, angular tests)
         │      └─ audit (cargo-audit, npm audit)
         │
-        └──► desktop-build.yml  (push/PR to main only, when desktop/** crates/** Cargo.toml Cargo.lock change)
-               ├─ PR to main:   macOS only
-               └─ push to main: macOS + Windows (unsigned)
+        └──► desktop-build.yml  (push/PR to main or dev, when desktop/** crates/** Cargo.toml Cargo.lock change)
+               ├─ PR:   macOS only
+               └─ push: macOS + Windows (unsigned)
 ```
 
 ## How to Create a Release
@@ -391,7 +391,7 @@ gh workflow run desktop-release.yml --ref main -f version=0.3.0
 
 **Note:** `workflow_dispatch` now checks whether the tag exists. If `v0.3.0` tag exists, the build checks out that tag (builds from tagged code with correct version). If no tag exists, falls back to branch HEAD (for testing only — version in artifacts will match whatever the branch has).
 
-Or use `desktop-build.yml` which runs automatically on PRs to `main` (macOS only) and on push to `main` (macOS + Windows). These builds are unsigned.
+Or use `desktop-build.yml` which runs automatically on PRs to `main` or `dev` (macOS only) and on push to `main` or `dev` (macOS + Windows). These builds are unsigned.
 
 ## Files Involved
 

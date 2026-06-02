@@ -1,50 +1,30 @@
 # ADR-002: Lima as VM Manager on macOS
 
+> **Status:** Accepted
+> **Context:** macOS needs a kernel-level isolation VM (containerd runs inside it) without requiring Docker Desktop. Windows uses WSL2 instead (ADR-059 dropped Linux as a host platform).
+
 ## Decision
 
-Lima manages the VM on macOS using Apple Virtualization Framework (`vmType: vz`).
+On macOS, Lima manages the containerd VM using Apple Virtualization Framework (`vmType: vz`), with Rosetta enabled for x86 emulation on Apple Silicon. The VM is provisioned by the Desktop setup wizard from an auto-generated Lima YAML config. Windows has its own runtime (`WslRuntime`); both sit behind the `LockedRuntime` façade (ADR-066).
 
-## Rationale
+## Why
 
-Lima[^8] is an open-source VM manager built specifically as a Docker Desktop alternative on macOS. It uses Apple VZ (the same hypervisor Docker Desktop has used since version 4.15+[^9]), which provides:
+- Lima is purpose-built as a Docker Desktop alternative on macOS and is open source ([lima-vm/lima](https://github.com/lima-vm/lima)).
+- Apple VZ gives full native-ARM performance on Apple Silicon and is the same hypervisor Docker Desktop adopted in [version 4.15](https://docs.docker.com/desktop/release-notes/#4150).
+- Bundling Lima means a single installable app — no separate `brew install lima` step.
+- An isolated `LIMA_HOME` keeps Speedwave's VM completely independent from any user-installed Lima.
 
-- Full performance on Apple Silicon (native ARM)
-- Automatic port forwarding (`guestPortRange: [3000, 3010]`)
-- Direct mount of `~/.speedwave` into the VM
-- CLI management via `limactl`
+## Where it lives in code
 
-Implemented in current codebase:
+- VM config (`vmType: vz`, Rosetta, vzNAT network, virtiofs mounts, boot-time netplan provision script) — `lima_config()` in `desktop/src-tauri/src/setup_wizard.rs`. The `vmType` is written directly into the YAML string; there is no `cfg!(target_os = ...)` branch selecting it.
+- Home mount — the config mounts the entire host home directory (`location: "~"`, `writable: true`), not a narrower `~/.speedwave` subtree.
+- Networking — `networks: - vzNAT: true`; the VM inherits the host routing table (and VPN tunnels). There is no Lima port-forwarding / `guestPortRange` configuration. Container-to-host reach uses the static vzNAT host IP `consts::LIMA_VZ_HOST_IP` (`192.168.5.2`).
+- Isolated `LIMA_HOME` (`~/.speedwave/lima`) — `binary::lima_home()` in `crates/speedwave-runtime/src/binary.rs`, set as an env var on every `limactl` invocation by `binary::command()`.
+- VM instance name — `consts::lima_vm_name()` in `crates/speedwave-runtime/src/consts.rs`, derived from the data-dir basename (production `~/.speedwave` → `speedwave`).
+- `limactl` binary resolution — `binary::resolve_binary()` in `crates/speedwave-runtime/src/binary.rs`: looks under `SPEEDWAVE_RESOURCES_DIR` (set in production from `current_exe()` by `desktop/src-tauri/src/main.rs`) for `lima/bin/limactl`, then falls back to system PATH for local development.
+- Bundling — `limactl` and `lima/share/` are listed as bundle resources in `desktop/src-tauri/tauri.macos.conf.json`; see ADR-021 for the zero-install bundling strategy.
 
-```rust
-let vm_type = if cfg!(target_os = "macos") { "vz" } else { "qemu" };
-```
+## Rejected alternatives
 
-## Distribution
-
-Lima is bundled inside the application at `.app/Contents/Resources/lima/` (see ADR-021). The user does not need to install Lima separately — there is no `brew install lima` step.
-
-Release artifacts include the Lima binary for the target architecture (arm64 for Apple Silicon, amd64 for Intel). SHA256 checksums are verified during the build process.
-
-## Isolation
-
-Speedwave uses a dedicated Lima home directory to prevent conflicts with any user-installed Lima instance:
-
-```
-LIMA_HOME=~/.speedwave/lima
-```
-
-This means Speedwave's VM (`speedwave`) is invisible to a user's own `limactl list`, and vice versa. The two installations are completely independent.
-
-## Binary Resolution
-
-The runtime resolves the `limactl` binary path using the following order:
-
-1. `SPEEDWAVE_RESOURCES_DIR` environment variable — used in development and testing to point to a custom Lima build
-2. `.app/Contents/Resources/lima/bin/limactl` — production path, resolved relative to the running executable via `std::env::current_exe()`
-3. System PATH fallback — development mode only, allows using a Homebrew-installed Lima during local development
-
----
-
-[^8]: [Lima GitHub repository](https://github.com/lima-vm/lima)
-
-[^9]: [Docker Desktop 4.15 - Apple Virtualization Framework](https://docs.docker.com/desktop/release-notes/#4150)
+- Docker Desktop — heavyweight install, licensing constraints, and not bundleable into a single app.
+- QEMU as the macOS hypervisor — slower than Apple VZ on Apple Silicon; VZ is the native, hardware-accelerated path.

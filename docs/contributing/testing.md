@@ -34,13 +34,14 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 
 ### Coverage Thresholds
 
-| Area                                               | Lines | Functions | Branches | Statements |
-| -------------------------------------------------- | ----- | --------- | -------- | ---------- |
-| Rust (`speedwave-runtime`, `speedwave-cli`)        | 70%   | —         | —        | —          |
-| MCP Hub                                            | 50%   | 50%       | 40%      | 50%        |
-| MCP Shared, Slack, OS, GitLab, Redmine, SharePoint | 60%   | 60%       | 50%      | 60%        |
-| MCP GitHub, Atlassian, Office                      | 100%  | 100%      | 90%      | 100%       |
-| Angular Desktop                                    | 40%   | 40%       | 30%      | 40%        |
+| Area                                                      | Lines | Functions | Branches | Statements |
+| --------------------------------------------------------- | ----- | --------- | -------- | ---------- |
+| Rust (`speedwave-runtime`, `speedwave-cli`)               | 70%   | —         | —        | —          |
+| MCP Hub                                                   | 100%  | 100%      | 90%      | 100%       |
+| MCP Shared                                                | 99%   | 96%       | 95%      | 99%        |
+| MCP Slack, OS, GitLab, Redmine, GitHub, Atlassian, Office | 100%  | 100%      | 90%      | 100%       |
+| MCP SharePoint                                            | 98%   | 98%       | 90%      | 98%        |
+| Angular Desktop                                           | —     | —         | —        | —          |
 
 Thresholds are enforced locally via vitest `coverage.thresholds` in each workspace's `vitest.config.ts` (SSOT for all threshold values — MCP and Angular alike) and in CI via `make coverage-mcp` / `make coverage-angular` / `vitest run --coverage`.
 
@@ -48,13 +49,15 @@ Thresholds are enforced locally via vitest `coverage.thresholds` in each workspa
 
 ## CI Pipeline
 
-The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and every PR to `main`/`dev`. It has five jobs:
+The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and every PR to `main`/`dev`. It has seven jobs:
 
 1. **lint** — Rust clippy + format, Prettier, MCP type-check (tsc), MCP ESLint
 2. **test** — Rust tests, MCP tests with coverage enforcement, Office Python script tests (`test-mcp-office-py`), entrypoint tests (bats)
 3. **desktop** — Desktop clippy, Angular ESLint, Angular tests with coverage enforcement, updater config + version-consistency bats (`test-desktop-config`), release-gate bats with `gh` shim (`test-release-gate`), desktop bats (`test-desktop-build`), Tauri build check
 4. **audit** — npm audit + cargo audit for all workspaces
 5. **swift** (PRs only) — Builds native macOS CLI binaries as universal binaries (`scripts/build-native-macos.sh`) and runs Swift tests on `macos-latest`. Catches xcbuild/`@main` attribute issues that `swift build` (llbuild) tolerates locally
+6. **runtime-windows** — Runs `cargo test -p speedwave-runtime` for the platform-specific `runtime::lima`, `runtime::wsl`, `build`, and `host_mcp_process::job_object` (Windows kill-on-close, ADR-048) modules on `windows-latest`, then verifies `.gitattributes` keeps `containers/*.sh` LF-clean after a `core.autocrlf=true` checkout
+7. **desktop-windows-check** — Runs `cargo check --all-targets` for `speedwave-desktop` on `windows-latest` with stubbed bundle resources (`scripts/create-desktop-stubs.sh`), catching Windows-only compile errors without paying for a full Tauri bundle
 
 ## Test Patterns
 
@@ -64,7 +67,7 @@ Each bats file in `_tests/desktop/` starts with a header comment describing the 
 
 ### MCP Hub Tool Tests
 
-Pattern: `mcp-servers/hub/src/tools/gitlab/delete_tag.test.ts`
+Pattern: `mcp-servers/gitlab/src/tools/release.test.ts`
 
 - Import `metadata` + `execute` from the handler
 - **Metadata tests**: name, service, description, keywords, inputSchema (type, properties, required), outputSchema, example, inputExamples, annotations
@@ -174,7 +177,7 @@ See [ADR-024](../adr/ADR-024-e2e-testing-strategy.md) for full architectural rat
 
 ## Updater Pipeline Coverage
 
-Three BATS files guard the release pipeline against silent failures (Issue #26). `updater-config.bats` statically validates `tauri.conf.json` fields (`createUpdaterArtifacts`, `endpoints`, `pubkey`, and bundle targets) using intentionally broken fixtures in `_tests/desktop/fixtures/`. `version-consistency.bats` reads `release-please-config.json` dynamically and asserts every version-bearing file matches `.release-please-manifest.json`, catching version drift before a release ships. `verify-release-assets.bats` tests `scripts/verify-release-assets.sh` end-to-end by shimming `gh` — the script checks that all 20 expected assets (including 6 `.sig` companions and `latest.json`) are present and valid. Additional cases (16-25) validate that the script rejects missing or malformed `VERSION`, `REPO`, `TAG_NAME`, and `RID` inputs with structured `::error::` annotations. The split between `test-desktop-config` (in `make test`) and `test-release-gate` (CI-only) keeps the `gh` shim surface away from everyday development builds.
+Three BATS files guard the release pipeline against silent failures (Issue #26). `updater-config.bats` statically validates `tauri.conf.json` fields (`createUpdaterArtifacts`, `endpoints`, `pubkey`, and bundle targets) using intentionally broken fixtures in `_tests/desktop/fixtures/`. `version-consistency.bats` reads `release-please-config.json` dynamically and asserts every version-bearing file matches `.release-please-manifest.json`, catching version drift before a release ships. `verify-release-assets.bats` tests `scripts/verify-release-assets.sh` end-to-end by shimming `gh` — the script checks that all 18 expected assets (including 6 `.sig` companions and `latest.json`) are present and valid. Additional cases (16-25) validate that the script rejects missing or malformed `VERSION`, `REPO`, `TAG_NAME`, and `RID` inputs with structured `::error::` annotations. The split between `test-desktop-config` (in `make test`) and `test-release-gate` (CI-only) keeps the `gh` shim surface away from everyday development builds.
 
 ## Host Exec — manual smoke (live Claude)
 

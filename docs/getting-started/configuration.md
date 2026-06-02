@@ -33,6 +33,7 @@ The user-level config file stores project definitions, the active project, and I
         "atlassian": { "enabled": false },
         "office": { "enabled": false },
         "playwright": { "enabled": false },
+        "context7": { "enabled": false },
         "os": {
           "reminders": { "enabled": true },
           "calendar": { "enabled": true },
@@ -67,7 +68,7 @@ Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). W
 A `.speedwave.json` file in the project repository root provides repo-level defaults. These are overridden by the user-level config:
 
 - `claude.env` — environment variables passed to Claude Code inside the container
-- `claude.llm` — LLM provider (`anthropic`, `ollama`, `lmstudio`, `llamacpp`), model name, optional base URL, and optional `context_tokens`. See [ADR-040](../adr/ADR-040-remove-litellm-direct-provider-injection.md) for provider details and [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for model auto-discovery. **`provider` / `base_url` are not merged from the repo file** — only the user config may set them.
+- `claude.llm` — LLM provider (`anthropic`, `local`, or legacy `ollama` / `lmstudio` / `llamacpp`), model name, optional base URL, and optional `context_tokens`. See [ADR-040](../adr/ADR-040-remove-litellm-direct-provider-injection.md) for provider details and [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for model auto-discovery. **`provider` / `base_url` are not merged from the repo file** — only the user config may set them.
 - `integrations` — enable/disable individual integrations per project. **`integrations.hostExec` is the exception: it is ignored in the repo file** — a Host Exec command whitelist is user-config-only (see [`integrations.hostExec`](#integrationshostexec--host-exec-whitelist) below and [ADR-054](../adr/ADR-054-host-exec-worker.md)).
 
 ### `claude.llm.context_tokens`
@@ -76,11 +77,11 @@ Optional. When set, this is the persisted context window (in tokens) the chat fo
 
 ### Model auto-discovery (local providers)
 
-When the selected provider is local (`ollama`, `lmstudio`, `llamacpp`) and a `base_url` is configured (or the provider default is reachable), the Settings → LLM Provider panel probes the server for the list of available models and surfaces both the ids and per-model context windows where the server advertises them:
+When the selected provider is local (`local`, or legacy `ollama` / `lmstudio` / `llamacpp`) and a `base_url` is configured (or the provider default is reachable), the Settings → LLM Provider panel probes the server for the list of available models and surfaces both the ids and per-model context windows where the server advertises them:
 
-- **Ollama** — `GET /api/tags` for the id list, then a parallel fan-out of `POST /api/show` per model to read `model_info.<arch>.context_length`. Models without a recognised arch key fall back to the first numeric `*.context_length` field.
-- **LM Studio** — `GET /api/v0/models` (the extended listing) which carries `max_context_length` per entry. The OpenAI-compat `/v1/models` fallback was removed; users on builds that pre-date the extended API will see an empty list.
-- **llama.cpp** — `GET /v1/models` reads `meta.n_ctx_train` per entry (the runtime `--ctx-size` flag may constrain it lower; we report the trained value as the best-available approximation).
+- **Local providers (`local`, plus legacy `ollama` / `lmstudio` / `llamacpp`)** — a single unified `discover_local` path: one `GET /v1/models` request returns the id list, and the per-model context window is read **inline** from each entry's metadata, trying `meta.n_ctx_train` (llama.cpp / vLLM / Unsloth shape) first, then falling back to `max_context_length` (LM Studio 0.4.1+ shape). The legacy provider names route through this same path for two release cycles; the obsolete Ollama `GET /api/tags` listing is no longer used.
+- **Ollama context fallback** — for entries that expose no inline context window, a single `POST /api/show` **sanity** call is made on the first such entry: a `200` response means the server implements `/api/show`, so the remaining missing entries are fanned out (bounded concurrency) to read their context windows; a `404`/error means the server does not implement it and the remaining entries stay `undefined`. This bounds the worst-case call count for unknown servers instead of issuing one request per model unconditionally.
+- **Anthropic Messages probe** — alongside the model list, a `POST /v1/messages` 1-token sanity probe runs to detect whether the local server speaks the Anthropic Messages endpoint.
 - **Anthropic** — not probed; the catalog comes from the backend SSOT (`speedwave_runtime::defaults::ANTHROPIC_MODELS`, surfaced via the `list_anthropic_models` Tauri command).
 - The probe returns `Vec<DiscoveredModel>` (`{ id, context_tokens? }`); a missing context window stays `undefined` and the chat fallback chain takes over rather than guessing.
 - If the server is offline or returns an unexpected response, the UI gracefully falls back to a free-text input so you can pre-configure the app before starting your server.

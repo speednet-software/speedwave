@@ -1,189 +1,53 @@
 # ADR-037: Code Signing and Bundled Binary Signing
 
 > **Status:** Accepted
-
----
-
-## Context
-
-Speedwave is distributed as a single installable desktop application on macOS and Windows. Without code signing:
-
-- **macOS Gatekeeper** blocks the app from launching — users see "Speedwave cannot be opened because the developer cannot be verified"[^1]
-- **Windows SmartScreen** warns "Windows protected your PC — Unknown publisher", forcing a "More info → Run anyway" click-through[^2]
-- Auto-update is unsafe — binaries cannot be cryptographically attributed to Speednet, enabling supply-chain tampering
-
-`tauri-bundler` (invoked by `tauri-action`) signs the **main application executable** and the outer `.app` bundle but does not recursively sign executable resources inside `Contents/Resources/`[^10]. The macOS bundle's `tauri.macos.conf.json → bundle.resources` lists additional Mach-O executables that Tauri copies into `Contents/Resources/` verbatim:
-
-- `cli/speedwave` — main Rust CLI that calls into `speedwave-runtime`
-- `calendar-cli`, `mail-cli`, `notes-cli`, `reminders-cli` — Swift-built native helpers for macOS personal information management (see [ADR-010](ADR-010-mcp-os-as-host-process-per-platform.md))
-- `lima/bin/limactl` — bundled Lima VM manager (see [ADR-002](ADR-002-lima-as-vm-manager-on-macos.md), [ADR-021](ADR-021-bundled-dependencies-and-zero-install-strategy.md))
-- `nodejs/bin/node` — bundled Node.js runtime used by mcp-os
-
-Apple Notary Service enforces a strict rule: **every Mach-O executable inside a bundle submitted for notarization must itself be signed with a Developer ID Application certificate, use Hardened Runtime, and carry a secure timestamp.**[^3] If any nested binary is unsigned, notarization returns `status: Invalid` with specific error codes[^4], and Gatekeeper continues to block the app even though the outer bundle is signed.
-
-The first notarization attempt (2026-04-14) failed with:
-
-```
-The binary is not signed with a valid Developer ID certificate.
-The signature does not include a secure timestamp.
-The executable does not have the hardened runtime enabled.
-```
-
-— affecting all seven Mach-O resources listed above.
+> **Context:** macOS notarization rejects a bundle if any nested Mach-O is unsigned, but Tauri signs only the main executable — so every binary Speedwave ships inside `Contents/Resources/` must be signed individually before bundling.
 
 ## Decision
 
-**Sign every Mach-O binary bundled into `Speedwave.app` individually before Tauri wraps the bundle.** The tauri-action-provided signing of the main executable is not sufficient; bundled tools require their own signatures.
+Sign every Mach-O binary bundled into `Speedwave.app` individually, before Tauri wraps the bundle, via a `beforeBundleCommand` hook that runs `scripts/sign-bundled-binaries.sh`. Each binary gets a Developer ID Application signature with Hardened Runtime (`--options runtime`) and a secure timestamp (`--timestamp`); binaries that use restricted platform APIs additionally get a per-binary entitlements plist. The script is a no-op when `APPLE_SIGNING_IDENTITY` is unset, so dev builds need no Apple credentials. Notarization and stapling remain handled by `tauri-action` when the Apple credentials are present.
 
-### Implementation
+## Why
 
-Three coordinated changes:
+- Apple Notary Service requires every Mach-O in a submitted bundle to be signed with Developer ID, use Hardened Runtime, and carry a secure timestamp. `tauri-bundler` signs only `Contents/MacOS/<main>` and the outer `.app`; nested resources are copied in unsigned, so notarization fails until they are signed too.
+- Lima, Node.js, and other upstream binaries cannot be signed at their own build time — we do not control their build, so signing must happen at bundle time after download.
+- Even our own Rust/Swift binaries are ad-hoc signed by the compiler on Apple Silicon; `--force` replaces those with the Developer ID signature.
+- A single explicit target list (no recursive globbing) gives a known inventory of exactly what ships signed in `Contents/Resources/`.
 
-**1. `scripts/sign-bundled-binaries.sh` (new)** — signs each Mach-O resource listed in `tauri.macos.conf.json → bundle.resources` with an explicit target list (no recursive globbing). The base `codesign` invocation is:
+## Where it lives in code
 
-```bash
-codesign --force \
-  --options runtime \
-  --timestamp \
-  --sign "$APPLE_SIGNING_IDENTITY" \
-  "$binary"
-```
+- **Signing script (SSOT)** — `scripts/sign-bundled-binaries.sh`. Holds the `SIGN_TARGETS` array (each entry is `<source-path>:<entitlements-path>`, entitlements optional). It signs, then verifies the signature and, for the native CLIs, cross-checks the embedded `CFBundleIdentifier`. Exits 0 on non-Darwin and when `APPLE_SIGNING_IDENTITY` is unset.
+- **Bundle resource list** — `desktop/src-tauri/tauri.macos.conf.json` (`bundle.resources`). `SIGN_TARGETS` must stay aligned with this list — they are an SSOT-alignment pair (see root `CLAUDE.md`); adding a Mach-O resource here without adding it to `SIGN_TARGETS` ships an unsigned binary.
+- **Build hook** — `desktop/src-tauri/tauri.conf.json` (`build.beforeBundleCommand`): runs `bash scripts/sign-bundled-binaries.sh` with `cwd` set to `../..`. Because the config file lives in `desktop/src-tauri/`, that relative `cwd` resolves to the repo root, where the script path is valid. The hook fires after `cargo build`/`swift build` but before Tauri seals the `.app`, which is the only point where the binaries are present but not yet covered by the outer signature.
+- **Entitlements plists** — `desktop/src-tauri/entitlements/`. One minimal plist per capability.
 
-The three flags encode three non-negotiable notarization requirements:
+### Entitlements inventory
 
-| Flag                | Purpose                                                                                                                                                               | Required by        |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| `--options runtime` | Enables Hardened Runtime — disables DYLD injection, JIT without entitlement, and dynamic library loading from unsigned paths                                          | Notary Service[^5] |
-| `--timestamp`       | RFC 3161 timestamp from Apple's timestamp server — proves the binary was signed while the certificate was valid                                                       | Notary Service[^6] |
-| `--force`           | Overwrites pre-existing signatures (upstream vendor signatures on `limactl` and `node`, ad-hoc signatures Apple Silicon `cargo build` writes into Rust binaries[^14]) | Build determinism  |
+Hardened Runtime disables several capabilities by default; binaries that use restricted APIs opt back in via an entitlements plist. The current targets:
 
-The script is a no-op when `APPLE_SIGNING_IDENTITY` is not set, so dev builds on developer machines work without Apple credentials.
+| Binary              | Entitlements plist     | Key(s)                                                                                      | Reason                                                                                   |
+| ------------------- | ---------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `cli/speedwave`     | none                   | —                                                                                           | AOT Rust, no restricted APIs                                                             |
+| `nodejs/bin/node`   | `node.plist`           | `com.apple.security.cs.allow-jit`, `com.apple.security.cs.allow-unsigned-executable-memory` | V8 JIT engine                                                                            |
+| `lima/bin/limactl`  | `virtualization.plist` | `com.apple.security.virtualization`                                                         | Apple Virtualization.framework (`vmType: vz`)                                            |
+| `calendar-cli`      | `calendars.plist`      | `com.apple.security.personal-information.calendars`                                         | EventKit Calendar access (see [ADR-010](ADR-010-mcp-os-as-host-process-per-platform.md)) |
+| `reminders-cli`     | `reminders.plist`      | `com.apple.security.personal-information.reminders`                                         | EventKit Reminders access                                                                |
+| `mail-cli`          | `apple-events.plist`   | `com.apple.security.automation.apple-events`                                                | Apple Events to Mail/Outlook via osascript                                               |
+| `notes-cli`         | `apple-events.plist`   | `com.apple.security.automation.apple-events`                                                | Apple Events to Notes via osascript                                                      |
+| `audio-capture-cli` | `audio-capture.plist`  | `com.apple.security.device.audio-input`                                                     | Host-side audio capture (see [ADR-056](ADR-056-host-side-audio-transcription.md))        |
 
-**1a. Per-binary entitlements.** Several bundled binaries require `codesign --entitlements` to opt back into platform capabilities that Hardened Runtime disables. Each capability is backed by a minimal plist under `desktop/src-tauri/entitlements/` declaring exactly the keys that binary needs — see the [Entitlements inventory](#entitlements-inventory) below for the full table. Symptomatic failure modes vary by capability: Node.js crashes at startup with `Fatal process out of memory: Failed to reserve virtual memory for CodeRange`[^15]; `limactl` fails with `VZErrorDomain Code=2 "doesn't have the com.apple.security.virtualization entitlement"`; Apple Events calls fail with error -1743; EventKit access is denied before any consent prompt appears.
+Entitlements grant capability at codesign time; TCC still needs a matching `NS*UsageDescription` key in `Info.plist` before macOS shows the consent prompt. The two surfaces are parallel but distinct — missing either silently breaks the feature. The required usage-description keys track the restricted APIs actually used (EventKit calendar/reminders legacy + full-access keys per Apple TN3153, Apple Events, microphone, and a FileProvider key so virtiofs reads from `~/Library/CloudStorage/` are not blocked).
 
-**2. `tauri.conf.json` — `beforeBundleCommand` hook** — Tauri v2 runs a pre-bundle script after `cargo build` but before `tauri bundle` wraps binaries into `.app`[^7]. This is the correct integration point because all dependencies are already copied into `desktop/src-tauri/{cli,lima,nodejs,*-cli}` but not yet sealed into the bundle.
+Adding a future bundled binary that needs a restricted API = add its entitlements plist under `desktop/src-tauri/entitlements/` and reference it from `SIGN_TARGETS` (and any required `Info.plist` usage key) in the same commit.
 
-```json
-{
-  "build": {
-    "beforeBundleCommand": "bash -c 'cd \"$(git rev-parse --show-toplevel)\" && scripts/sign-bundled-binaries.sh'"
-  }
-}
-```
+## Rejected alternatives
 
-Using `git rev-parse --show-toplevel` resolves the repo root deterministically regardless of where Tauri executes the hook from — Tauri's cwd for `beforeBundleCommand` is not a documented stable contract[^8].
+- **Fork `tauri-action` for recursive bundled-binary signing.** Maintaining a fork of a large TypeScript action is ongoing work; `beforeBundleCommand` is the official extension point for exactly this.
+- **Post-bundle signing (sign binaries inside the finished `.app`).** Re-signing nested binaries after the outer `.app` is sealed invalidates the outer signature, and re-signing the bundle afterward is brittle.
+- **Skip notarization, ship Gatekeeper-bypass instructions.** Right-click → Open is acceptable for internal betas, not for external users, and it forgoes Apple's malware scanning.
 
-Notarization and stapling are already handled by `tauri-action` when `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` are set — no workflow changes required. Apple returns `Accepted` once every Mach-O in the bundle passes the three requirements above, and stapling embeds the resulting ticket into the `.app` so Gatekeeper validates offline[^9].
+## Notes
 
-### Rationale
-
-#### Why not sign binaries individually in their respective build scripts?
-
-Three reasons:
-
-1. **Single source of truth.** Lima, Node.js, and nerdctl come from upstream vendors — we cannot modify their build. Signing must happen at bundle-time, after download.
-2. **Re-signs after `cargo build` / `swift build`.** Even our own binaries get ad-hoc signed locally by the compiler; those signatures must be replaced with Developer ID signatures + Hardened Runtime.
-3. **Consistency with dev builds.** When `APPLE_SIGNING_IDENTITY` is unset (dev builds), no signing runs — the same code path works locally without Apple setup.
-
-#### Why not rely on `tauri-action`'s built-in signing exclusively?
-
-tauri-action's macOS signing logic was designed assuming the Tauri app has no bundled external binaries. It signs `Contents/MacOS/<main>` and the `.app` bundle root, but does not recursively sign `Contents/Resources/**/*` Mach-O files[^10]. This is a known limitation — PRs to extend it upstream have stalled. Implementing it ourselves via `beforeBundleCommand` is more maintainable than carrying a fork.
-
-#### Entitlements inventory
-
-Hardened Runtime disables several platform capabilities by default[^11]. Bundled binaries that use restricted APIs must carry entitlements plists to opt back in. Each personal-information category — calendars, reminders, addressbook (contacts), photos-library, etc. — is a separate Resource Access entitlement under `com.apple.security.personal-information.*`; binaries that access multiple categories must declare each one independently, and each requires its own corresponding `NS*UsageDescription` key in `Info.plist`. The complete inventory:
-
-| Binary             | Entitlements plist     | Keys                                                | Reason                                                                       |
-| ------------------ | ---------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `nodejs/bin/node`  | `node.plist`           | `allow-jit`, `allow-unsigned-executable-memory`     | V8 JIT engine                                                                |
-| `lima/bin/limactl` | `virtualization.plist` | `com.apple.security.virtualization`                 | Apple Virtualization Framework[^16]                                          |
-| `mail-cli`         | `apple-events.plist`   | `com.apple.security.automation.apple-events`        | Sends Apple Events to Mail.app/Outlook via osascript                         |
-| `notes-cli`        | `apple-events.plist`   | `com.apple.security.automation.apple-events`        | Sends Apple Events to Notes.app via osascript                                |
-| `cli/speedwave`    | none                   | —                                                   | AOT Rust, no restricted APIs                                                 |
-| `calendar-cli`     | `calendars.plist`      | `com.apple.security.personal-information.calendars` | EventKit Calendar read-write access (Hardened Runtime Resource Access)[^17]  |
-| `reminders-cli`    | `reminders.plist`      | `com.apple.security.personal-information.reminders` | EventKit Reminders read-write access (Hardened Runtime Resource Access)[^17] |
-
-If a future bundled binary requires JIT (e.g. a Python runtime with PyPy), virtualization APIs, Apple Events automation, or access to personal information (calendars, contacts, photos), add its entitlements plist under `desktop/src-tauri/entitlements/` and reference it from the `SIGN_TARGETS` table in the script.
-
-**1b. Info.plist TCC usage descriptions.** Entitlements grant _capability_ at codesign time; TCC (Transparency, Consent, and Control) still requires a user-facing `NS*UsageDescription` key in `Info.plist` before macOS will display the consent prompt for protected resources. The two surfaces are parallel but distinct — missing either one silently breaks the feature. The required keys track the restricted APIs actually used by bundled binaries:
-
-- `NSRemindersUsageDescription`, `NSCalendarsUsageDescription` — EventKit legacy keys, macOS 13 fallback, required by `reminders-cli` and `calendar-cli`
-- `NSRemindersFullAccessUsageDescription` — pairs with `requestFullAccessToReminders` (macOS 14+), required by `reminders-cli`; per Apple TN3153[^18]
-- `NSCalendarsFullAccessUsageDescription` — pairs with `requestFullAccessToEvents` (macOS 14+), required by `calendar-cli`; per Apple TN3153[^18]
-- `NSContactsUsageDescription` — reserved for future Contacts access
-- `NSAppleEventsUsageDescription` — osascript → Apple Events, required by `mail-cli` and `notes-cli`
-- `NSFileProviderDomainUsageDescription` — FileProvider domains (OneDrive, iCloud Drive, Dropbox, Google Drive), required when the user's workspace directory lives under `~/Library/CloudStorage/`. Lima's virtiofs mount inherits the host app's TCC attribution, so without this key macOS silently blocks reads from CloudStorage paths inside the VM (see anthropics/claude-code#26981 for the same pattern in Claude Code)
-
-[^17]: Apple's Hardened Runtime documentation defines `com.apple.security.personal-information.calendars` and `com.apple.security.personal-information.reminders` as separate Resource Access entitlements; both are required by binaries that call the corresponding EventKit APIs. On macOS 14+, the corresponding Info.plist keys split similarly — `NSCalendarsFullAccessUsageDescription` pairs with `requestFullAccessToEvents`, and `NSRemindersFullAccessUsageDescription` pairs with `requestFullAccessToReminders`, per Apple TN3153. See https://developer.apple.com/documentation/security/hardened_runtime and https://developer.apple.com/documentation/technotes/tn3153-adopting-api-changes-for-eventkit-in-ios-macos-and-watchos.
-
-[^18]: [Apple TN3153 — "Adopting new APIs for EventKit in iOS, macOS, and watchOS"](https://developer.apple.com/documentation/technotes/tn3153-adopting-api-changes-for-eventkit-in-ios-macos-and-watchos) — documents `requestFullAccessToEvents` and `requestFullAccessToReminders` (macOS 14+) and the corresponding `NSCalendarsFullAccessUsageDescription` / `NSRemindersFullAccessUsageDescription` usage description keys.
-
-[^16]: Lima uses Apple's Virtualization.framework (`vmType: vz`) for VM management. The upstream Lima project carries a similar entitlements file at [`vz.entitlements`](https://github.com/lima-vm/lima/blob/master/vz.entitlements).
-
-## Consequences
-
-### Positive
-
-- macOS users can launch Speedwave without Gatekeeper warnings on first run
-- Auto-update integrity — Tauri's Ed25519 updater signature chain combines with OS-level Developer ID signature chain for defense in depth
-- CI builds are reproducibly signed — no manual codesign step per release
-- Dev builds on developer machines remain unsigned (no Apple credentials required locally)
-- Explicit inventory of every signed binary: we know exactly what ships in `Contents/Resources/`
-
-### Negative
-
-- **Release-time Apple API dependency.** If Apple Notary Service is down (rare, ~99.9% SLA[^12]), releases cannot be notarized. Workaround: release as unsigned, with a known UX degradation.
-- **Cost floor.** Apple Developer Program ($99/yr) is required for any signed macOS distribution.
-- **Per-architecture signing.** Universal binaries would require signing per architecture slice; current builds are per-arch (aarch64 + x86_64) so this is transparent.
-- **Certificate renewal risk.** Developer ID Application certificates expire after 5 years. A calendar reminder is required; expired cert = no new releases until reissued.
-
-### Neutral
-
-- **macOS only.** The script exits 0 on non-Darwin platforms. `beforeBundleCommand` runs on every platform, but the script itself has no Windows branch today.
-- **Windows signing (Azure Trusted Signing)** is tracked separately in issue #376 and has a distinct architecture (HSM-backed cloud signing, no local `.pfx`[^13]). When implemented, it will add a Windows branch to this script or a sibling script — the hook itself already runs on Windows.
-
-## Alternatives Considered
-
-### 1. Fork tauri-action to support recursive bundled-binary signing
-
-Rejected. Maintaining a fork of a ~3000-line TypeScript action is ongoing work. The `beforeBundleCommand` hook is an official Tauri extension point designed for exactly this kind of pre-bundle customization — using it keeps us on the supported upstream path.
-
-### 2. Post-bundle signing — sign binaries inside the final `.app`
-
-Rejected. `codesign` of nested binaries after the outer `.app` is sealed invalidates the outer signature (the bundle's code signature covers all contained files). Re-signing the outer bundle after nested edits works but is brittle — easy to leave a stale intermediate signature behind.
-
-### 3. Skip notarization, rely on Gatekeeper bypass instructions
-
-Rejected. Requiring users to right-click → Open → Open Anyway for first launch is acceptable for internal betas but not for a platform sold to external users. It also bypasses Apple's malware scanning — a value-add Speednet gets for the $99/yr Developer Program fee.
-
----
-
-[^1]: [Apple Developer — "Protecting users against malware" — Gatekeeper enforcement of Developer ID](https://developer.apple.com/documentation/security/updating-mac-software)
-
-[^2]: [Microsoft Learn — "Microsoft Defender SmartScreen overview" — unsigned binaries trigger the Unknown Publisher prompt](https://learn.microsoft.com/en-us/windows/security/operating-system-security/virus-and-threat-protection/microsoft-defender-smartscreen/)
-
-[^3]: [Apple Developer — "Resolving common notarization issues" — all executables must be signed with Developer ID and timestamped](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution/resolving_common_notarization_issues)
-
-[^4]: [Apple Developer — notarization error codes for unsigned binaries, missing timestamps, disabled hardened runtime](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution/resolving_common_notarization_issues#3087721)
-
-[^5]: [Apple Developer — "Enabling Hardened Runtime" — required for notarized apps distributed outside the App Store](https://developer.apple.com/documentation/security/hardened_runtime)
-
-[^6]: [Apple Developer — "Include a secure timestamp" — `codesign --timestamp` uses Apple's RFC 3161 Time Stamp Authority](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution/customizing_the_notarization_workflow)
-
-[^7]: [Tauri v2 docs — `beforeBundleCommand` runs after cargo build and before platform-specific bundling (DMG, NSIS, deb)](https://v2.tauri.app/reference/config/#beforebundlecommand)
-
-[^8]: [Tauri v2 docs — build hooks accept shell commands; cwd is not specified as part of the stable API contract](https://v2.tauri.app/reference/config/#buildconfig)
-
-[^9]: [Apple Developer — "Stapling a ticket to your app" — required so Gatekeeper validates offline](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution/customizing_the_notarization_workflow)
-
-[^10]: [tauri-bundler source — `sign_app` signs the main binary and outer bundle; resources under `Contents/Resources/` are copied in unsigned](https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle/macos/sign.rs)
-
-[^11]: [Apple Developer — "Hardened Runtime entitlements" — list of entitlements that opt back into disabled capabilities](https://developer.apple.com/documentation/security/hardened_runtime#3098734)
-
-[^12]: [Apple System Status — Developer services uptime record](https://developer.apple.com/system-status/)
-
-[^13]: [Microsoft Learn — "Azure Trusted Signing: HSM-backed cloud signing for Windows apps" (formerly in /trusted-signing/, redirects now handled by MS Learn)](https://learn.microsoft.com/en-us/azure/trusted-signing/overview)
-
-[^14]: [Apple Developer — `kSecCodeSignatureAdhoc` flag — binaries on Apple Silicon are ad-hoc signed at link time (`Signature=adhoc, flags=0x20002(adhoc,linker-signed)`); `codesign --force` replaces the ad-hoc signature with a Developer ID signature](https://developer.apple.com/documentation/security/seccodesignatureflags/kseccodesignatureadhoc)
-
-[^15]: [Apple Developer — `com.apple.security.cs.allow-jit` entitlement — required for processes that generate executable code at runtime (e.g. V8, JavaScriptCore)](https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_security_cs_allow-jit)
+- macOS only — the script has no Windows branch today. Windows signing (Azure Trusted Signing) is tracked separately and would add a Windows branch to this or a sibling script.
+- Per-architecture signing: builds are per-arch (aarch64 + x86_64), so universal-binary slice signing is not needed.
+- Developer ID Application certificates expire after 5 years; an expired cert blocks new releases until reissued.

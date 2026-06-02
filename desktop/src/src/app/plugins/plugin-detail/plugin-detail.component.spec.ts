@@ -23,11 +23,11 @@ const MOCK_SCHEMA: JsonSchema = {
 const MOCK_PLUGINS = {
   plugins: [
     {
-      slug: 'presale',
-      name: 'Presale CRM',
-      service_id: 'presale',
+      slug: 'example-plugin',
+      name: 'Example Plugin CRM',
+      service_id: 'example-plugin',
       version: '1.2.0',
-      description: 'CRM integration for presale',
+      description: 'CRM integration for example-plugin',
       enabled: true,
       configured: true,
       auth_fields: [],
@@ -144,7 +144,7 @@ async function initAndDetect(
 describe('PluginDetailComponent', () => {
   let mockTauri: MockTauriService;
 
-  function setup(slug = 'presale') {
+  function setup(slug = 'example-plugin') {
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = defaultInvokeHandler;
     mockRouter.navigate = vi.fn();
@@ -199,8 +199,8 @@ describe('PluginDetailComponent', () => {
     await initAndDetect(component, fixture);
 
     expect(component.plugin).not.toBeNull();
-    expect(component.plugin!.slug).toBe('presale');
-    expect(component.plugin!.name).toBe('Presale CRM');
+    expect(component.plugin!.slug).toBe('example-plugin');
+    expect(component.plugin!.name).toBe('Example Plugin CRM');
     expect(component.settings).toEqual(MOCK_SETTINGS);
   });
 
@@ -262,7 +262,7 @@ describe('PluginDetailComponent', () => {
 
     expect(invokeSpy).toHaveBeenCalledWith('plugin_save_settings', {
       project: 'test-project',
-      slug: 'presale',
+      slug: 'example-plugin',
       settings: { currency: 'USD' },
     });
     expect(component.success).toBe('Settings saved');
@@ -297,7 +297,7 @@ describe('PluginDetailComponent', () => {
 
     const desc = fixture.nativeElement.querySelector('[data-testid="plugin-description"]');
     expect(desc).not.toBeNull();
-    expect(desc.textContent).toContain('CRM integration for presale');
+    expect(desc.textContent).toContain('CRM integration for example-plugin');
   });
 
   it('renders manifest instructions as Markdown on the dashboard', async () => {
@@ -711,7 +711,7 @@ describe('PluginDetailComponent', () => {
       component.confirmingRemove = true;
       await component.onConfirmUninstall();
 
-      expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'presale' });
+      expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'example-plugin' });
     });
 
     it('on success, signals restart and navigates back to /plugins', async () => {
@@ -806,32 +806,32 @@ describe('PluginDetailComponent', () => {
   describe('credentials section in Settings tab', () => {
     /**
      * Mock plugin entry with two auth_fields — one required PAT, one
-     * optional OAuth token. Mirrors the figma plugin manifest shape.
+     * optional OAuth token. Mirrors a host-bridged plugin manifest shape.
      */
     const PLUGIN_WITH_AUTH = {
       plugins: [
         {
-          slug: 'figma',
-          name: 'Figma DS Bridge',
-          service_id: 'figma',
+          slug: 'example-plugin',
+          name: 'Example Plugin Bridge',
+          service_id: 'example-plugin',
           version: '0.1.1',
-          description: 'Figma integration',
+          description: 'Example Plugin integration',
           enabled: false,
           configured: false,
           auth_fields: [
             {
-              key: 'figma_pat',
-              label: 'Figma Personal Access Token',
+              key: 'example_pat',
+              label: 'Example Plugin Personal Access Token',
               field_type: 'password',
-              placeholder: 'figd_...',
+              placeholder: 'tok_...',
               is_secret: true,
               required: true,
             },
             {
-              key: 'figma_mcp_oauth',
-              label: 'Figma Remote MCP OAuth Token',
+              key: 'example_oauth',
+              label: 'Example Plugin OAuth Token',
               field_type: 'password',
-              placeholder: 'fmcp_...',
+              placeholder: 'oauth_...',
               is_secret: true,
               required: false,
             },
@@ -847,7 +847,7 @@ describe('PluginDetailComponent', () => {
       ],
     };
 
-    function setupWithAuth(slug = 'figma') {
+    function setupWithAuth(slug = 'example-plugin') {
       const mockTauri = new MockTauriService();
       mockTauri.invokeHandler = (cmd: string) => {
         switch (cmd) {
@@ -954,13 +954,13 @@ describe('PluginDetailComponent', () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
       await component.onSaveCredentials({
-        credentials: { figma_pat: 'figd_REAL_TOKEN' },
+        credentials: { example_pat: 'tok_REAL_TOKEN' },
       });
 
       expect(invokeSpy).toHaveBeenCalledWith('save_plugin_credentials', {
         project: 'test-project',
-        slug: 'figma',
-        credentials: { figma_pat: 'figd_REAL_TOKEN' },
+        slug: 'example-plugin',
+        credentials: { example_pat: 'tok_REAL_TOKEN' },
       });
       expect(component.success).toContain('1 field');
     });
@@ -970,7 +970,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
 
       await component.onSaveCredentials({
-        credentials: { figma_pat: 'a', figma_mcp_oauth: 'b' },
+        credentials: { example_pat: 'a', example_oauth: 'b' },
       });
 
       expect(component.success).toContain('2 fields');
@@ -988,7 +988,7 @@ describe('PluginDetailComponent', () => {
         return Promise.resolve(undefined);
       };
 
-      await component.onSaveCredentials({ credentials: { figma_pat: 'x' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'x' } });
 
       expect(component.error).toContain('signature verification failed');
       expect(component.success).toBe('');
@@ -998,7 +998,7 @@ describe('PluginDetailComponent', () => {
       const { component, fixture, mockTauri } = setupWithAuth();
       // Intentionally do NOT init — plugin stays null
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await component.onSaveCredentials({ credentials: { figma_pat: 'x' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'x' } });
       expect(invokeSpy).not.toHaveBeenCalled();
       expect(component.error).toContain('No active project');
       expect(fixture).toBeDefined();
@@ -1010,7 +1010,7 @@ describe('PluginDetailComponent', () => {
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
 
-      await component.onSaveCredentials({ credentials: { figma_pat: 'figd_X' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'tok_X' } });
 
       expect(projectState.needsRestart).toBe(true);
     });
@@ -1032,7 +1032,7 @@ describe('PluginDetailComponent', () => {
         return Promise.resolve(undefined);
       };
 
-      await component.onSaveCredentials({ credentials: { figma_pat: 'figd_X' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'tok_X' } });
 
       expect(component.plugin?.configured).toBe(true);
     });
@@ -1048,7 +1048,7 @@ describe('PluginDetailComponent', () => {
         return Promise.resolve(undefined);
       };
 
-      await component.onSaveCredentials({ credentials: { figma_pat: 'figd_X' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'tok_X' } });
 
       expect(component.success).toContain('Credentials saved');
       expect(component.error).toBe('');
@@ -1087,7 +1087,7 @@ describe('PluginDetailComponent', () => {
 
       expect(invokeSpy).toHaveBeenCalledWith('delete_plugin_credentials', {
         project: 'test-project',
-        slug: 'figma',
+        slug: 'example-plugin',
       });
       expect(component.success).toContain('cleared');
     });
@@ -1146,20 +1146,20 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
-      await component.onClearField('figma_pat');
+      await component.onClearField('example_pat');
 
       expect(invokeSpy).toHaveBeenCalledWith('delete_plugin_credential_field', {
         project: 'test-project',
-        slug: 'figma',
-        key: 'figma_pat',
+        slug: 'example-plugin',
+        key: 'example_pat',
       });
-      expect(component.success).toContain('figma_pat');
+      expect(component.success).toContain('example_pat');
     });
 
     it('onClearField sets an error (not silent return) when plugin is null', async () => {
       const { component, fixture, mockTauri } = setupWithAuth();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await component.onClearField('figma_pat');
+      await component.onClearField('example_pat');
       expect(invokeSpy).not.toHaveBeenCalled();
       expect(component.error).toContain('No active project');
       expect(fixture).toBeDefined();
@@ -1167,7 +1167,7 @@ describe('PluginDetailComponent', () => {
 
     it('passes configured_fields to the credentials form so the "set" badge renders', async () => {
       const withConfigured = JSON.parse(JSON.stringify(PLUGIN_WITH_AUTH));
-      withConfigured.plugins[0].configured_fields = ['figma_pat'];
+      withConfigured.plugins[0].configured_fields = ['example_pat'];
       const mockTauri = new MockTauriService();
       mockTauri.invokeHandler = (cmd: string) => {
         switch (cmd) {
@@ -1190,7 +1190,7 @@ describe('PluginDetailComponent', () => {
         imports: [PluginDetailComponent],
         providers: [
           { provide: TauriService, useValue: mockTauri },
-          { provide: ActivatedRoute, useValue: createRouteStub('figma') },
+          { provide: ActivatedRoute, useValue: createRouteStub('example-plugin') },
           { provide: Router, useValue: mockRouter },
         ],
       });
@@ -1236,7 +1236,7 @@ describe('PluginDetailComponent', () => {
         imports: [PluginDetailComponent],
         providers: [
           { provide: TauriService, useValue: mockTauri },
-          { provide: ActivatedRoute, useValue: createRouteStub('figma') },
+          { provide: ActivatedRoute, useValue: createRouteStub('example-plugin') },
           { provide: Router, useValue: mockRouter },
         ],
       });
