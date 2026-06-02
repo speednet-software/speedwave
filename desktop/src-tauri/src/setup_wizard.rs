@@ -153,7 +153,8 @@ pub fn install_runtime() -> anyhow::Result<()> {
 /// Desired Lima VM memory as a Lima-compatible string (e.g. `"16GiB"`).
 ///
 /// Uses adaptive scaling from [`speedwave_runtime::resources`]:
-/// VM = host_ram / 2, clamped 4–32 GiB (never more than 50% of host RAM).
+/// VM = host_ram / 2, clamped 8–32 GiB (≤50% of host RAM at/above the 16 GiB
+/// minimum supported host; the 8 GiB floor makes the always-on set fit).
 ///
 /// Older installs with lower values are auto-migrated by
 /// [`ensure_lima_vm_config`].
@@ -165,9 +166,15 @@ fn desired_lima_vm_memory() -> String {
     format!("{gib}GiB")
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn desired_lima_vm_cpus() -> u32 {
+    speedwave_runtime::resources::desired_vm_cpus(speedwave_runtime::resources::host_logical_cpus())
+}
+
 /// Default Lima VM configuration for Speedwave.
 /// Uses Apple Virtualization Framework (vz) with containerd + nerdctl.
-/// Memory is adaptive based on host RAM — see [`desired_lima_vm_memory`].
+/// Memory and CPU are adaptive based on host RAM/cores — see
+/// [`desired_lima_vm_memory`] and [`desired_lima_vm_cpus`].
 #[cfg(any(target_os = "macos", test))]
 fn lima_config() -> String {
     format!(
@@ -183,7 +190,7 @@ images:
     arch: "x86_64"
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
     arch: "aarch64"
-cpus: 4
+cpus: {}
 memory: "{}"
 disk: "50GiB"
 mountType: virtiofs
@@ -235,6 +242,7 @@ provision:
       chmod 600 /etc/netplan/99-speedwave-prefer-vznat.yaml
       netplan apply
 "#,
+        desired_lima_vm_cpus(),
         desired_lima_vm_memory()
     )
 }
@@ -1466,28 +1474,23 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
 // Lima VM config migration — upgrade memory from older installs
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if the Lima config memory differs from the desired value.
-///
-/// Compares the `memory: "XGiB"` line against the desired value from
-/// [`desired_lima_vm_memory`]. Returns `false` if current memory equals desired
-/// (no-op) or if the value is unparseable (safety). Supports both upgrades and
-/// downgrades so that a reduced VM formula is applied on next startup.
+/// Returns `true` if the Lima config needs regenerating: the VPN netplan
+/// drop-in is missing, or `memory`/`cpus` drifted from the SSOT formulas.
+/// Unparseable values are treated as no-drift (don't touch a hand-mangled file).
 #[cfg(any(target_os = "macos", test))]
 fn lima_vm_config_needs_update(config_content: &str) -> bool {
-    let desired_str = desired_lima_vm_memory();
-    let desired = match desired_str
-        .strip_suffix("GiB")
-        .and_then(|s| s.parse::<u32>().ok())
-    {
-        Some(v) => v,
-        None => return false,
-    };
-    lima_vm_config_needs_update_with(config_content, desired)
+    use speedwave_runtime::resources;
+    let desired_gib = resources::desired_vm_memory_gib(resources::host_total_memory_gib());
+    lima_vm_config_needs_update_with(config_content, desired_gib, desired_lima_vm_cpus())
 }
 
-/// Testable variant: compares config content against an explicit desired GiB.
+/// Testable variant: compares config content against explicit desired memory + cpus.
 #[cfg(any(target_os = "macos", test))]
-fn lima_vm_config_needs_update_with(config_content: &str, desired_gib: u32) -> bool {
+fn lima_vm_config_needs_update_with(
+    config_content: &str,
+    desired_gib: u32,
+    desired_cpus: u32,
+) -> bool {
     // Trigger migration when the VPN-aware netplan drop-in is absent —
     // existing pre-update installs (including ones with the old `ip route del`
     // provision) need the new netplan-based fix injected on next boot.
@@ -1495,31 +1498,37 @@ fn lima_vm_config_needs_update_with(config_content: &str, desired_gib: u32) -> b
     if !config_content.contains("99-speedwave-prefer-vznat.yaml") {
         return true;
     }
-    for line in config_content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("memory:") {
-            let value = rest.trim().trim_matches('"');
-            return match value
-                .strip_suffix("GiB")
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                Some(current) => current != desired_gib,
-                None => false, // unparseable — don't touch
-            };
+    // Whether a `prefix` line exists at all (regardless of parseability).
+    let line_present = |prefix: &str| config_content.lines().any(|l| l.trim().starts_with(prefix));
+    // Parse a `memory: "8GiB"` or `cpus: 4` value to u32. `cpus` has no GiB
+    // suffix, so strip it optionally; present-but-unparseable → None (don't
+    // touch a hand-mangled value).
+    let line_val = |prefix: &str| -> Option<u32> {
+        config_content.lines().find_map(|line| {
+            line.trim().strip_prefix(prefix).and_then(|rest| {
+                let v = rest.trim().trim_matches('"').trim();
+                v.strip_suffix("GiB").unwrap_or(v).parse::<u32>().ok()
+            })
+        })
+    };
+    // Regenerate if EITHER memory or cpus is absent (the SSOT line was never
+    // written — e.g. a pre-adaptive-cpus config) or drifted from the formula.
+    // Present-but-unparseable → "no drift" (don't clobber a hand-mangled value).
+    let needs_update = |prefix: &str, desired: u32| -> bool {
+        if !line_present(prefix) {
+            return true; // line absent — regenerate to write the SSOT value
         }
-    }
-    false // no memory line found
+        line_val(prefix).is_some_and(|current| current != desired)
+    };
+    needs_update("memory:", desired_gib) || needs_update("cpus:", desired_cpus)
 }
 
-/// Migrates the Lima VM memory allocation on existing installs.
-///
-/// Reads the source template at `{data_dir()}/lima.yaml` and, if the memory
-/// value differs from [`desired_lima_vm_memory`], updates both the source template and the
-/// Lima instance config. Stops and restarts the VM if it was running.
-///
-/// No-op when:
-/// - Source template doesn't exist (fresh install — `init_vm_macos` creates it)
-/// - Memory already equals the desired value
+/// Migrates the Lima VM config on existing installs when it drifts from the
+/// SSOT (memory, cpus, or the VPN netplan drop-in — see
+/// [`lima_vm_config_needs_update`]). Fully regenerates `lima.yaml` from
+/// [`lima_config`] (a generated file — user edits are not preserved, per
+/// ADR-068), rewrites source + instance config, and restarts the VM if running.
+/// No-op on a fresh install (template absent) or when nothing drifted.
 #[cfg(target_os = "macos")]
 pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     use speedwave_runtime::binary;
@@ -1536,23 +1545,11 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let desired_mem = desired_lima_vm_memory();
-
-    // Extract current memory for informative logging.
-    let current_mem: Option<String> = content.lines().find_map(|line| {
-        let trimmed = line.trim();
-        trimmed
-            .strip_prefix("memory:")
-            .map(|rest| rest.trim().trim_matches('"').to_string())
-    });
-
-    if let Some(ref current) = current_mem {
-        log::info!(
-            "Lima VM config migration: {current} → {desired_mem} (formula: host_ram/2, clamped 4–32 GiB)"
-        );
-    } else {
-        log::info!("Lima VM config migration: updating memory to {desired_mem}");
-    }
+    log::info!(
+        "Lima VM config migration: regenerating from SSOT (memory {}, cpus {}; host_ram/2 + host_cores/2)",
+        desired_lima_vm_memory(),
+        desired_lima_vm_cpus()
+    );
 
     // Check if VM exists
     let list_output = limactl_command()
@@ -1587,63 +1584,26 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         }
     }
 
-    // Migration rewrite: in-place line-by-line — replaces the memory line
-    // and appends the SSOT provision block. Preserves user customisations
-    // (cpus, mounts, original indentation). Full regeneration from
-    // `lima_config()` would clobber any user-added fields, so we limit
-    // mutations to the two fields we control.
-    let rewrite_config = |text: &str| -> String {
-        let mut new_text: String = text
-            .lines()
-            .map(|line| {
-                if line.trim().starts_with("memory:") {
-                    let indent = &line[..line.len() - line.trim_start().len()];
-                    format!("{indent}memory: \"{desired_mem}\"")
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        // Preserve trailing newline if original had one
-        if text.ends_with('\n') && !new_text.ends_with('\n') {
-            new_text.push('\n');
-        }
-        // Append the provision block if missing — the SSOT `lima_config()`
-        // always emits it, but pre-update files don't have it. We append
-        // verbatim from the SSOT so a future change to the script reaches
-        // existing installs.
-        if !new_text.contains("99-speedwave-prefer-vznat.yaml") {
-            // Extract just the `provision:` section from the SSOT template.
-            // Replaces any prior provision block (including the old
-            // `ip route del` variant) by truncating from `provision:` onward.
-            let ssot = lima_config();
-            if let Some(existing) = new_text.find("\nprovision:") {
-                new_text.truncate(existing + 1);
-            } else if let Some(existing) = new_text.find("provision:") {
-                new_text.truncate(existing);
-            }
-            if let Some(idx) = ssot.find("provision:") {
-                if !new_text.ends_with('\n') {
-                    new_text.push('\n');
-                }
-                new_text.push_str(&ssot[idx..]);
-            }
-        }
-        new_text
-    };
+    // Full regeneration from the SSOT `lima_config()` — both `cpus` and
+    // `memory` (and the provision block) always reflect the current formula.
+    // `lima.yaml` is a generated file (like compose.yml); user edits are not
+    // preserved by design.
+    let regenerated = lima_config();
+    if content.trim() != regenerated.trim() {
+        log::warn!(
+            "Lima VM config at {} is regenerated from the SSOT template — any manual edits are discarded",
+            source_template.display()
+        );
+    }
+    std::fs::write(&source_template, &regenerated)?;
 
-    // Update source template (reuse `content` already read above)
-    std::fs::write(&source_template, rewrite_config(&content))?;
-
-    // Update instance config (may not exist if VM was never created)
+    // Update instance config too (may not exist if VM was never created).
     let instance_config = data_dir
         .join(consts::LIMA_SUBDIR)
         .join(consts::lima_vm_name())
         .join("lima.yaml");
     if instance_config.exists() {
-        let instance_content = std::fs::read_to_string(&instance_config)?;
-        std::fs::write(&instance_config, rewrite_config(&instance_content))?;
+        std::fs::write(&instance_config, &regenerated)?;
     }
 
     // Restart VM if it existed
@@ -4369,7 +4329,7 @@ networks:
     #[test]
     fn lima_vm_config_detects_old_8gib() {
         let config = "vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 12));
+        assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
     /// Test helper — appends the VPN-aware provision sentinel so fixtures
@@ -4385,7 +4345,7 @@ networks:
     fn lima_vm_config_current_no_update() {
         let config =
             with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n");
-        assert!(!lima_vm_config_needs_update_with(&config, 12));
+        assert!(!lima_vm_config_needs_update_with(&config, 12, 4));
     }
 
     #[test]
@@ -4393,13 +4353,13 @@ networks:
         // After the VM formula was reduced, existing VMs with more RAM than
         // desired must be migrated down to reclaim host memory.
         let config = "vmType: vz\ncpus: 4\nmemory: \"16GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 12));
+        assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
     #[test]
     fn lima_vm_config_lower_memory_triggers_update() {
         let config = "vmType: vz\ncpus: 4\nmemory: \"4GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 12));
+        assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
     /// Generated lima.yaml must include a provision script that demotes lima0
@@ -4460,14 +4420,14 @@ networks:
     fn lima_vm_config_unparseable_memory_no_update() {
         let config =
             with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"plenty\"\ndisk: \"30GiB\"\n");
-        assert!(!lima_vm_config_needs_update_with(&config, 12));
+        assert!(!lima_vm_config_needs_update_with(&config, 12, 4));
     }
 
     #[test]
     fn lima_vm_config_adaptive_upgrade_needed() {
         // 32 GiB host → desired 16 GiB → old 12 GiB config needs upgrade
         let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 16));
+        assert!(lima_vm_config_needs_update_with(config, 16, 4));
     }
 
     #[test]
@@ -4475,15 +4435,40 @@ networks:
         // 16 GiB host: old formula gave 12 GiB VM, new formula gives 8 GiB.
         // The migration must trigger to reclaim 4 GiB for the host.
         let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 8));
+        assert!(lima_vm_config_needs_update_with(config, 8, 4));
     }
 
     #[test]
     fn lima_vm_config_no_op_when_current_equals_desired() {
-        // Already at the desired value — migration must not trigger (idempotent).
+        // Already at the desired value (mem AND cpus) — must not trigger (idempotent).
         let config =
             with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
-        assert!(!lima_vm_config_needs_update_with(&config, 8));
+        assert!(!lima_vm_config_needs_update_with(&config, 8, 4));
+    }
+
+    #[test]
+    fn lima_vm_config_cpus_drift_triggers_update() {
+        // Memory matches but cpus drifted (bigger host → desired 8) → migrate
+        // so existing users pick up the adaptive vCPU count on upgrade.
+        let config =
+            with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
+        assert!(lima_vm_config_needs_update_with(&config, 8, 8));
+    }
+
+    #[test]
+    fn lima_vm_config_missing_cpus_triggers_update() {
+        // Pre-adaptive-cpus config: no `cpus:` line at all. Absent ≠ "no drift"
+        // — regenerate to write the SSOT vCPU count (matched memory must not mask it).
+        let config = with_provision_sentinel("vmType: vz\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
+        assert!(lima_vm_config_needs_update_with(&config, 8, 4));
+    }
+
+    #[test]
+    fn lima_vm_config_missing_memory_triggers_update() {
+        // Symmetric: no `memory:` line — regenerate to write the SSOT value
+        // even though cpus already matches.
+        let config = with_provision_sentinel("vmType: vz\ncpus: 4\ndisk: \"30GiB\"\n");
+        assert!(lima_vm_config_needs_update_with(&config, 8, 4));
     }
 
     /// Regression guard for the VPN routing fix — installs pre-dating the
@@ -4492,7 +4477,7 @@ networks:
     fn lima_vm_config_without_provision_script_triggers_migration() {
         let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
         assert!(
-            lima_vm_config_needs_update_with(config, 12),
+            lima_vm_config_needs_update_with(config, 12, 4),
             "configs missing the VPN-aware provision script must be migrated"
         );
     }
@@ -4642,6 +4627,20 @@ networks:
             "lima_config() must use desired_lima_vm_memory() ({desired}), \
              but the memory line doesn't match. Config:\n{config}"
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn lima_config_function_has_correct_cpus() {
+        let config = lima_config();
+        let desired = desired_lima_vm_cpus();
+        assert!(
+            config.contains(&format!("cpus: {desired}")),
+            "lima_config() must use desired_lima_vm_cpus() ({desired}), \
+             but the cpus line doesn't match. Config:\n{config}"
+        );
+        // Adaptive floor: never below the historical 4-vCPU baseline.
+        assert!(desired >= 4, "vCPU floor regressed below 4");
     }
 
     /// Structural test: `ensure_lima_vm_config()` must be called in `main.rs`

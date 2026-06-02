@@ -1205,8 +1205,9 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
 }
 
 // (`is_service_enabled` lives on `ResolvedIntegrationsConfig` in
-// `speedwave-runtime::config` — used here and in the CLI's
-// `maybe_spawn_oauth_worker` so the match arms stay in one place.)
+// `speedwave-runtime::config` so the match arms stay in one place. The CLI no
+// longer spawns oauth/host_exec workers — Desktop is the sole supervisor; see
+// the dual-supervisor exit-137 note in `speedwave-cli::main`.)
 
 /// Spawn the per-project `oauth` worker on demand. No-op if no project
 /// integration with `uses_oauth_refresh = true` is enabled, or if the worker

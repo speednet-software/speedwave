@@ -16,7 +16,7 @@ services:
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY}"
     tmpfs:
-      - /tmp:noexec,nosuid,size=512m
+      - /tmp:noexec,nosuid,size=${CLAUDE_TMPFS}
     volumes:
       - ${CLAUDE_HOME}:/home/speedwave:rw
       - ${PROJECT_DIR}:/workspace
@@ -43,7 +43,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.0'
+          cpus: '${CLAUDE_CPUS}'
           memory: ${CLAUDE_MEMORY}
 
   mcp-hub:
@@ -57,7 +57,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_HUB_TMPFS}
     environment:
       - PORT=${PORT_HUB}
       - WORKER_SLACK_URL=http://mcp-slack:${PORT_WORKER}
@@ -76,8 +76,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 512m
+          cpus: '${MCP_HUB_CPUS}'
+          memory: ${MCP_HUB_MEM}
 
   mcp-slack:
     image: ${IMAGE_MCP_SLACK}
@@ -90,7 +90,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_SLACK_TMPFS}
     volumes:
       - ${TOKENS_DIR}/slack:/tokens:ro
     environment:
@@ -100,8 +100,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_SLACK_CPUS}'
+          memory: ${MCP_SLACK_MEM}
 
   mcp-sharepoint:
     image: ${IMAGE_MCP_SHAREPOINT}
@@ -114,7 +114,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_SHAREPOINT_TMPFS}
     volumes:
       # :ro per ADR-060 — OAuth token refresh moved to the host-side `oauth`
       # worker. The SharePoint container only reads access_token / site_id /
@@ -129,8 +129,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_SHAREPOINT_CPUS}'
+          memory: ${MCP_SHAREPOINT_MEM}
 
   mcp-redmine:
     image: ${IMAGE_MCP_REDMINE}
@@ -143,7 +143,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_REDMINE_TMPFS}
     volumes:
       - ${TOKENS_DIR}/redmine:/tokens:ro
     environment:
@@ -153,8 +153,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_REDMINE_CPUS}'
+          memory: ${MCP_REDMINE_MEM}
 
   mcp-gitlab:
     image: ${IMAGE_MCP_GITLAB}
@@ -167,7 +167,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_GITLAB_TMPFS}
     volumes:
       - ${TOKENS_DIR}/gitlab:/tokens:ro
     environment:
@@ -177,8 +177,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_GITLAB_CPUS}'
+          memory: ${MCP_GITLAB_MEM}
 
   mcp-github:
     image: ${IMAGE_MCP_GITHUB}
@@ -191,7 +191,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_GITHUB_TMPFS}
     volumes:
       - ${TOKENS_DIR}/github:/tokens:ro
     environment:
@@ -201,12 +201,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          # 256m (not the 128m other API workers use): Octokit composed with the
-          # throttling + retry plugins has a heavier resident footprint than
-          # @gitbeaker, and `octokit.paginate` buffers full result sets in memory
-          # — a `listIssues({state:'all'})` on a busy repo OOM-kills a 128m cap.
-          memory: 256m
+          cpus: '${MCP_GITHUB_CPUS}'
+          # Memory cap (and the 256m-vs-128m rationale) is the SSOT — see the
+          # github descriptor in crates/speedwave-runtime/src/consts.rs.
+          memory: ${MCP_GITHUB_MEM}
 
   mcp-atlassian:
     image: ${IMAGE_MCP_ATLASSIAN}
@@ -219,7 +217,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_ATLASSIAN_TMPFS}
     volumes:
       - ${TOKENS_DIR}/atlassian:/tokens:ro
     environment:
@@ -229,8 +227,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_ATLASSIAN_CPUS}'
+          memory: ${MCP_ATLASSIAN_MEM}
 
   # Office documents worker — a pure file processor: no service credentials, no /tokens mount,
   # and NO network egress (attached only to the internal ${NETWORK_NAME}_office network — see ADR-055).
@@ -248,7 +246,7 @@ services:
     # /tmp holds the LibreOffice per-call profile, matplotlib config, and conversion scratch space.
     # LibreOffice headless on a non-trivial .pptx can use a few hundred MB of temp space + RAM.
     tmpfs:
-      - /tmp:noexec,nosuid,size=512m
+      - /tmp:noexec,nosuid,size=${MCP_OFFICE_TMPFS}
     volumes:
       # No /tokens mount — this worker has no credentials. /workspace is its only window onto the host.
       - ${PROJECT_DIR}:/workspace:rw
@@ -266,8 +264,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 1g
+          cpus: '${MCP_OFFICE_CPUS}'
+          memory: ${MCP_OFFICE_MEM}
 
   mcp-playwright:
     image: ${IMAGE_MCP_PLAYWRIGHT}
@@ -292,10 +290,10 @@ services:
     # tmpfs lives in RAM — keep it lean. Heavy screenshots return inline
     # as base64, not via /tmp.
     tmpfs:
-      - /tmp:noexec,nosuid,size=1g
+      - /tmp:noexec,nosuid,size=${MCP_PLAYWRIGHT_TMPFS}
     # Chromium IPC shared-memory requirement; the 64 MiB default causes ENOMEM
     # at page load time.
-    shm_size: 2g
+    shm_size: ${MCP_PLAYWRIGHT_SHM}
     # No /tokens mount — Playwright accesses only public URLs and has no credentials.
     # No /workspace mount in v1 — outputs return as base64 to shrink attack surface.
     environment:
@@ -309,8 +307,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.0'
-          memory: 2048m
+          cpus: '${MCP_PLAYWRIGHT_CPUS}'
+          memory: ${MCP_PLAYWRIGHT_MEM}
 
   mcp-context7:
     image: ${IMAGE_MCP_CONTEXT7}
@@ -323,7 +321,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_CONTEXT7_TMPFS}
     volumes:
       # Optional /tokens/api_key — anonymous mode (per-IP rate limit) if absent.
       # See docs/architecture/security.md for the third-party data-flow note.
@@ -335,8 +333,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_CONTEXT7_CPUS}'
+          memory: ${MCP_CONTEXT7_MEM}
 
 networks:
   ${NETWORK_NAME}:

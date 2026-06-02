@@ -883,6 +883,9 @@ fn is_propagation_error(e: &anyhow::Error) -> bool {
     let s = e.to_string().to_lowercase();
     s.contains(crate::compose::UNDEFINED_NETWORK_ERROR_FRAGMENT)
         || s.contains(crate::compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT)
+        || crate::compose::COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS
+            .iter()
+            .any(|frag| s.contains(frag))
 }
 
 /// Force-remove any containers still registered in the nerdctl name-store for
@@ -2200,11 +2203,52 @@ services:
     }
 
     #[test]
+    fn is_propagation_error_matches_schema_validation() {
+        // A truncated virtiofs read of the networks section (last in the file)
+        // surfaces as a compose-go schema error, not "undefined network".
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "validating compose.yml: networks.x_network.driver must be a string"
+        )));
+        // YAML parse symptom of a mid-line cut.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "yaml: line 12: could not find expected ':'"
+        )));
+        // libyaml emits the "did not find expected" variant when the cut lands
+        // at a different token position — the third schema/parse fragment.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "yaml: line 8: did not find expected key"
+        )));
+    }
+
+    #[test]
     fn is_propagation_error_rejects_unrelated() {
         assert!(!is_propagation_error(&anyhow::anyhow!(
             "connection refused"
         )));
         assert!(!is_propagation_error(&anyhow::anyhow!("EOF")));
+        // A bare "must be a string" from some other field must NOT be treated as
+        // retryable propagation lag — the fragment is scoped to the network
+        // driver torn-write.
+        assert!(!is_propagation_error(&anyhow::anyhow!(
+            "validating compose.yml: services.claude.image must be a string"
+        )));
+    }
+
+    #[test]
+    fn is_propagation_error_yaml_scanner_phrases_are_intentionally_retried() {
+        // `could not find expected` / `did not find expected` are libyaml
+        // SCANNER messages (malformed YAML structure), the exact symptom of a
+        // torn virtiofs page. compose-go SCHEMA errors are phrased differently
+        // ("... must be X"), so these fragments do not catch a plugin field-type
+        // bug. Worst case for a genuinely malformed manifest is a bounded retry
+        // delay before the real error surfaces — never a swallowed error. This
+        // test documents that the broad match here is deliberate.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "yaml: line 5: could not find expected ':'"
+        )));
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "yaml: line 9: did not find expected node content"
+        )));
     }
 
     #[test]

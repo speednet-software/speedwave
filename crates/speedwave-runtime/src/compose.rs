@@ -181,10 +181,10 @@ pub fn render_compose_in(
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
-    // Adaptive Claude container memory based on host resources.
-    // SSOT: resources::effective_claude_memory_gib() handles platform detection.
-    let claude_mem = crate::resources::effective_claude_memory_gib();
-    yaml = yaml.replace("${CLAUDE_MEMORY}", &format!("{}g", claude_mem));
+    // Container resource limits (mem/cpu/tmpfs/shm). SSOT: resources.rs table +
+    // McpServiceDescriptor.resources. Renderer substitutes the placeholders the
+    // template carries instead of YAML literals; drift test enforces parity.
+    yaml = apply_container_resources(&yaml);
 
     // Inject Claude environment variables from resolved config
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
@@ -255,6 +255,53 @@ pub fn render_compose_in(
     yaml = harden_env_scalar_quoting(&yaml)?;
 
     Ok(yaml)
+}
+
+/// Canonical memory/tmpfs/shm rendering — MiB as `Nm` (e.g. `512m`).
+fn format_mib(mib: u32) -> String {
+    format!("{mib}m")
+}
+
+/// Canonical CPU rendering — one decimal (e.g. `2.0`).
+fn format_cpus(cpus: f32) -> String {
+    format!("{cpus:.1}")
+}
+
+/// Substitutes every `${…_MEM|_CPUS|_TMPFS|_SHM}` placeholder in the compose
+/// template from the resource SSOT (resources.rs table +
+/// `McpServiceDescriptor.resources`). Memory/tmpfs/shm are always emitted in
+/// MiB (`Nm`) for one canonical format; CPU as one-decimal (`2.0`). The
+/// resource-drift test asserts the template carries exactly these placeholders.
+fn apply_container_resources(yaml: &str) -> String {
+    use crate::resources::{ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES};
+
+    // Substitute the ${PREFIX_*} placeholders for one container into `out`.
+    fn apply(out: &mut String, prefix: &str, r: &ContainerResources) {
+        *out = out.replace(&format!("${{{prefix}_MEM}}"), &format_mib(r.mem_mib));
+        *out = out.replace(&format!("${{{prefix}_CPUS}}"), &format_cpus(r.cpus));
+        *out = out.replace(&format!("${{{prefix}_TMPFS}}"), &format_mib(r.tmpfs_mib));
+        if let Some(shm) = r.shm_mib {
+            *out = out.replace(&format!("${{{prefix}_SHM}}"), &format_mib(shm));
+        }
+    }
+
+    let mut out = yaml.to_string();
+
+    // Only Claude's mem placeholder is special-cased: it uses the legacy
+    // ${CLAUDE_MEMORY} name, not the uniform ${CLAUDE_MEM} that `apply` emits.
+    // CPUS and TMPFS already match the ${CLAUDE_*} shape, so `apply` handles
+    // them (and its ${CLAUDE_MEM} replace no-ops — that placeholder is absent).
+    out = out.replace("${CLAUDE_MEMORY}", &format_mib(CLAUDE_RESOURCES.mem_mib));
+    apply(&mut out, "CLAUDE", &CLAUDE_RESOURCES);
+    apply(&mut out, "MCP_HUB", &HUB_RESOURCES);
+
+    for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+        // compose_name "mcp-slack" → placeholder prefix "MCP_SLACK".
+        let prefix = svc.compose_name.to_ascii_uppercase().replace('-', "_");
+        apply(&mut out, &prefix, &svc.resources);
+    }
+
+    out
 }
 
 /// Creates the secrets directory for a project with restrictive permissions (chmod 700).
@@ -373,6 +420,20 @@ pub(crate) const UNDEFINED_NETWORK_ERROR_FRAGMENT: &str = "undefined network";
 /// when a compose.yml references an undefined network — recognised by
 /// `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose project";
+
+/// SSOT for compose schema/parse error fragments that appear when the VM-side
+/// engine reads a stale or torn virtiofs/9p page — e.g. the networks section
+/// (last in the file) truncated mid-`driver:` yields a null driver ("must be a
+/// string"), or a mid-line cut yields a YAML parse error. Recognised by
+/// `runtime::is_propagation_error` for retry-on-propagation-lag.
+pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
+    // Scoped to the network-driver torn-write symptom, not the bare
+    // "must be a string" — that phrase alone over-matches unrelated schema
+    // errors that are not retryable propagation lag.
+    "driver must be a string",
+    "could not find expected",
+    "did not find expected",
+];
 
 /// Asserts every `services.<svc>.networks: [name]` reference resolves to a
 /// declared top-level `networks.<name>` entry. Catches render bugs and torn
@@ -1571,10 +1632,19 @@ fn apply_oauth_config_with_paths(
     lock_path: &std::path::Path,
     bearer_map_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let port = match read_lock_port(lock_path, crate::host_mcp_process::lock::LockService::Oauth) {
-        Some(p) => p,
-        None => return Ok(yaml.to_string()),
+    // A Desktop hard-kill (kill -9 / crash) orphans the VM but never runs the
+    // graceful `cleanup_files()` path, so `lock.json` survives pointing at a
+    // dead worker. Injecting that stale port would make every container-side
+    // OAuth refresh hit connection-refused — worse than the "not configured"
+    // state. Gate on PID liveness: a dead/absent worker is treated as absent.
+    let lock = match crate::host_mcp_process::lock::read(
+        lock_path,
+        crate::host_mcp_process::lock::LockService::Oauth,
+    ) {
+        Some(l) if crate::host_mcp_process::probe::is_pid_alive(l.pid) => l,
+        _ => return Ok(yaml.to_string()),
     };
+    let port = lock.port;
     let bearer_map = match read_oauth_bearer_map(bearer_map_path) {
         Some(m) => m,
         None => return Ok(yaml.to_string()),
@@ -4385,15 +4455,11 @@ services:
         assert!(yaml.contains(&format!("{prefix}_test-project_claude")));
         assert!(yaml.contains(&format!("{prefix}_test-project_mcp_hub")));
         assert!(yaml.contains("/workspace"));
-        // ${CLAUDE_MEMORY} must be substituted with a concrete value (e.g. "8g")
+        // Resource placeholders must all be substituted; the concrete values are
+        // asserted against the SSOT by `resources_render_from_ssot`.
         assert!(
-            !yaml.contains("${CLAUDE_MEMORY}"),
-            "CLAUDE_MEMORY placeholder must be substituted"
-        );
-        assert!(
-            yaml.lines()
-                .any(|l| l.trim().starts_with("memory:") && l.contains('g')),
-            "rendered YAML must contain a concrete memory limit (e.g. memory: 8g)"
+            !yaml.contains("${CLAUDE_MEMORY}") && !yaml.contains("${MCP_"),
+            "resource placeholders must be substituted"
         );
         // Verify it's valid YAML
         let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -4531,11 +4597,8 @@ services:
                 .unwrap_or(false),
             "mcp-playwright must set read_only: true"
         );
-        assert_eq!(
-            pw.get("shm_size").and_then(|v| v.as_str()),
-            Some("2g"),
-            "mcp-playwright must set shm_size: 2g for Chromium IPC"
-        );
+        // shm_size comes from the SSOT (McpServiceDescriptor.resources.shm_mib),
+        // guarded by `resources_render_from_ssot` — not duplicated here.
         let cap_drop = pw
             .get("cap_drop")
             .and_then(|v| v.as_sequence())
@@ -4758,10 +4821,10 @@ services:
         );
     }
 
-    /// mcp-github must render with the standard worker hardening AND its non-standard
-    /// 256m memory cap (Octokit + `octokit.paginate` need more headroom than the 128m
-    /// other API workers use — see the comment in compose.template.yml). Also verifies
-    /// the read-only, project-scoped `/tokens` mount and `PORT=PORT_WORKER`.
+    /// mcp-github must render with the standard worker hardening, the read-only
+    /// project-scoped `/tokens` mount, and `PORT=PORT_WORKER`. Its memory cap
+    /// comes from the SSOT (McpServiceDescriptor.resources) and is guarded by
+    /// `resources_render_from_ssot`, not duplicated here.
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_github_service_present() {
@@ -4810,17 +4873,6 @@ services:
         assert!(sec_opt
             .iter()
             .any(|s| s.as_str() == Some("no-new-privileges:true")));
-
-        // Non-standard, load-bearing memory cap.
-        assert_eq!(
-            gh.get("deploy")
-                .and_then(|d| d.get("resources"))
-                .and_then(|r| r.get("limits"))
-                .and_then(|l| l.get("memory"))
-                .and_then(|m| m.as_str()),
-            Some("256m"),
-            "mcp-github must keep its 256m memory limit (Octokit footprint)"
-        );
 
         // Token mount: only its own service dir, read-only, under the project's tokens path.
         let volumes = gh
@@ -6302,6 +6354,117 @@ services:
         COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", &host_gateway_ip().expect("test"))
     }
 
+    // --- Resource SSOT works (ADR-068) -----------------------------------------
+    // One test proving the centralization holds: the renderer fills every
+    // container's mem/cpu/tmpfs/shm from the SSOT (resources.rs table +
+    // McpServiceDescriptor.resources), and no resource placeholder is left
+    // behind. If the renderer stops reading the SSOT, a service's value drifts,
+    // or a placeholder is misnamed, this fails.
+
+    /// Reads a service's mem/cpu/tmpfs/shm out of the rendered doc and asserts
+    /// they equal its SSOT entry. Iterating callers stay literal-free.
+    fn assert_resources_from_ssot(
+        doc: &serde_yaml_ng::Value,
+        service: &str,
+        ssot: &crate::resources::ContainerResources,
+    ) {
+        let svc = &doc["services"][service];
+        let parse = |s: &str| crate::plugin::parse_mem_limit_to_mib(s).expect("mem parse");
+        let mem = svc["deploy"]["resources"]["limits"]["memory"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{service}: missing memory"));
+        let cpus: f32 = svc["deploy"]["resources"]["limits"]["cpus"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{service}: missing cpus"))
+            .parse()
+            .expect("cpus parse");
+        let tmpfs = svc["tmpfs"][0]
+            .as_str()
+            .and_then(|e| e.rsplit("size=").next())
+            .unwrap_or_else(|| panic!("{service}: missing tmpfs size"));
+        let shm = svc["shm_size"].as_str().map(parse);
+
+        assert_eq!(parse(mem), ssot.mem_mib as u64, "{service}: memory");
+        assert!((cpus - ssot.cpus).abs() < f32::EPSILON, "{service}: cpus");
+        assert_eq!(parse(tmpfs), ssot.tmpfs_mib as u64, "{service}: tmpfs");
+        assert_eq!(shm, ssot.shm_mib.map(|m| m as u64), "{service}: shm");
+    }
+
+    #[test]
+    fn resources_render_from_ssot() {
+        let yaml =
+            apply_container_resources(COMPOSE_TEMPLATE).replace("${HOST_GATEWAY}", "127.0.0.1");
+        let doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&yaml).expect("rendered template must be valid YAML");
+
+        // Every container's resources come from the SSOT.
+        assert_resources_from_ssot(&doc, "claude", &crate::resources::CLAUDE_RESOURCES);
+        assert_resources_from_ssot(&doc, "mcp-hub", &crate::resources::HUB_RESOURCES);
+        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+            assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
+        }
+        // No RESOURCE placeholder left unsubstituted. Only the families this
+        // function owns — other ${…} (IMAGE_*, NETWORK_NAME, …) are filled by
+        // later render stages and are intentionally still present here.
+        for marker in ["_MEM}", "_CPUS}", "_TMPFS}", "_SHM}", "${CLAUDE_MEMORY}"] {
+            assert!(
+                !yaml.contains(marker),
+                "unsubstituted resource placeholder containing {marker}"
+            );
+        }
+
+        // The RAW template must carry a placeholder for each worker's mem/cpu —
+        // catches a regression where a literal equal to the SSOT value is
+        // hardcoded back in (which the rendered-value check above would miss).
+        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+            let prefix = svc.compose_name.to_ascii_uppercase().replace('-', "_");
+            assert!(
+                COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_MEM}}")),
+                "{}: template must carry ${{{prefix}_MEM}}, not a literal",
+                svc.compose_name
+            );
+            assert!(
+                COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_CPUS}}")),
+                "{}: template must carry ${{{prefix}_CPUS}}, not a literal",
+                svc.compose_name
+            );
+            // tmpfs is the axis most prone to a silent re-hardcode (SSOT value
+            // often equals the literal, e.g. size=64m), so it needs the same
+            // raw-template presence guard as _MEM/_CPUS — the rendered-value
+            // check alone would not catch a literal that coincidentally matches.
+            assert!(
+                COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_TMPFS}}")),
+                "{}: template must carry ${{{prefix}_TMPFS}}, not a literal",
+                svc.compose_name
+            );
+            // A `_SHM` placeholder must exist in the template IFF the descriptor
+            // sets shm_mib. A descriptor with Some(shm) but no placeholder would
+            // silently never apply (apply() no-ops); a placeholder with None
+            // would survive as a leftover marker. Assert both directions.
+            assert_eq!(
+                COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_SHM}}")),
+                svc.resources.shm_mib.is_some(),
+                "{}: template ${{{prefix}_SHM}} placeholder must match descriptor shm_mib",
+                svc.compose_name
+            );
+        }
+    }
+
+    #[test]
+    fn format_mib_renders_mebibyte_suffix() {
+        assert_eq!(format_mib(0), "0m");
+        assert_eq!(format_mib(64), "64m");
+        assert_eq!(format_mib(6144), "6144m");
+    }
+
+    #[test]
+    fn format_cpus_renders_one_decimal() {
+        assert_eq!(format_cpus(0.5), "0.5");
+        assert_eq!(format_cpus(2.0), "2.0");
+        // Whole and >1 values still carry exactly one decimal place.
+        assert_eq!(format_cpus(4.0), "4.0");
+    }
+
     /// Write a fixture lock.json + standalone token mount file, for the
     /// given service. Returns `(token_mount_path, lock_path)` — both are
     /// inputs to `apply_*_config_with_path*`.
@@ -6377,14 +6540,9 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn apply_oauth_config_adds_host_gateway_to_each_consumer() {
-        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        lock::write(
-            &lock_path,
-            &LockFile::new(LockService::Oauth, 12345, 4090, "supervisor".into()),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 4090);
         let bearer_map_path = tmp.path().join("bearer-map.json");
         std::fs::write(
             &bearer_map_path,
@@ -7285,6 +7443,22 @@ services:
       - /test/project:/workspace:rw
 "#;
 
+    /// Write an oauth `lock.json` whose PID is THIS test process — guaranteed
+    /// alive, so the injection path's liveness gate passes. Tests that want a
+    /// dead worker pass a bogus PID directly.
+    fn write_live_oauth_lock(lock_path: &std::path::Path, port: u16) {
+        crate::host_mcp_process::lock::write(
+            lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                std::process::id(),
+                port,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_oauth_config_skipped_when_port_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -7305,16 +7479,7 @@ services:
     fn test_oauth_config_skipped_when_bearer_map_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49300,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49300);
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
@@ -7332,16 +7497,7 @@ services:
     fn test_oauth_config_skipped_when_bearer_map_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49300,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49300);
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, "{}").unwrap();
         let result = apply_oauth_config_with_paths(
@@ -7361,16 +7517,7 @@ services:
     fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49301,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49301);
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp-uuid": "sharepoint"}"#).unwrap();
 
@@ -7439,16 +7586,7 @@ services:
     fn test_oauth_config_writes_per_service_bearer_file() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49301,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49301);
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-x": "sharepoint"}"#).unwrap();
 
@@ -7489,16 +7627,7 @@ services:
     fn test_oauth_config_does_not_inject_into_slack_or_redmine() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49301,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49301);
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
 
@@ -7543,6 +7672,53 @@ services:
                 "{non_oauth_service}: oauth bearer must NOT be mounted, vols={vols:?}"
             );
         }
+    }
+
+    /// Regression guard: after a Desktop hard-kill the graceful cleanup never
+    /// runs, so `lock.json` survives pointing at a dead PID. The injection path
+    /// must treat that as absent (no `WORKER_OAUTH_URL`) instead of wiring up a
+    /// dead port that fails every container-side refresh with connection-refused.
+    #[test]
+    fn test_oauth_config_skipped_when_worker_pid_is_dead() {
+        // Reap a real child so its PID is deterministically dead (not merely
+        // "probably unused") — avoids the 999999-might-exist flakiness.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("cmd")
+                    .args(["/C", "exit"])
+                    .spawn()
+            })
+            .expect("spawn a trivially-exiting child");
+        let dead_pid = child.id();
+        child.wait().expect("reap child");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                dead_pid,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
+
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &lock_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE_WITH_SHAREPOINT,
+            "stale lock with a dead PID must be treated as absent — no injection"
+        );
     }
 
     /// Helper: read environment sequence for a given compose service name.

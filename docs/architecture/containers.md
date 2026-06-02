@@ -30,51 +30,56 @@ speedwave_<project>_network
 
 ## Resource Limits
 
-Container memory limits are defined in `containers/compose.template.yml`. The Claude container memory is **adaptive** based on host RAM; other services use fixed limits:
+Container limits are the resource SSOT in Rust (not the compose template, which
+carries only placeholders the renderer fills — see ADR-068):
 
-- **Claude container:** adaptive (`${CLAUDE_MEMORY}` — see scaling below)
-- **MCP Hub:** 512 MiB (fixed)
-- **MCP workers:** 128 MiB each (fixed), except:
-  - `mcp-github` — 256 MiB (Octokit composed with the throttling + retry plugins, plus `octokit.paginate` buffering full result sets, OOM-kills a 128 MiB cap on a busy repo)
-  - `mcp-office` — 1 GiB (`cpus: 1.0`); LibreOffice headless on a non-trivial document needs the headroom. Attached only to an `internal: true` compose network (no egress) — see ADR-055
-  - `mcp-playwright` — 2048 MiB (`cpus: 2.0`) due to Chromium requirements
+- **Claude container:** fixed **6 GiB** cap on every platform/host size. Claude Code needs 4 GB+ officially and its process is light (heavy compute is server-side), so a fixed cap is generous and immune to drift when workers are added. (`resources.rs::CLAUDE_MEMORY_GIB`)
+- **MCP Hub:** 512 MiB, `cpus: 1.0` (on the path of every request, does real CPU work)
+- **MCP workers:** 128 MiB / `cpus: 0.5` each (`resources::STANDARD_WORKER_RESOURCES`), except:
+  - `mcp-github` — 256 MiB (Octokit + throttling/retry plugins + `octokit.paginate` buffering full result sets OOM-kills a 128 MiB cap on a busy repo)
+  - `mcp-office` — 1 GiB / `cpus: 1.0`; LibreOffice headless needs the headroom. Internal-only network (no egress) — see ADR-055
+  - `mcp-playwright` — 2048 MiB / `cpus: 2.0` + 2 GiB shm (Chromium IPC)
 
-**Minimum requirement:** 8 GiB RAM. Speedwave warns at startup if the host has less than 8 GiB.
+Container limits are **ceilings, not reservations** — the limit sum may exceed
+the VM (overcommit is fine) as long as live usage does not. Only the always-on
+set (Claude + hub) is asserted to fit the smallest supported VM.
 
-All resource formulas live in `crates/speedwave-runtime/src/resources.rs` (SSOT).
+**Minimum requirement:** 16 GiB RAM (`resources::MIN_SUPPORTED_HOST_GIB`). At 16 GiB the VM is sized to 8 GiB, which fits the always-on set (Claude's 6 GiB cap + hub) without overcommit; a smaller host would size the VM below Claude's cap and risk an OOM. Speedwave warns at startup if the host has less than 16 GiB.
 
-### Adaptive scaling (macOS — Lima VM)
+The SSOT spans two files (ADR-068 §3): always-on limits + VM sizing in
+`crates/speedwave-runtime/src/resources.rs`; per-worker limits on
+`consts::McpServiceDescriptor.resources`; the plugin default/cap envelope in
+`consts.rs`. A drift test (`compose::tests::resources_render_from_ssot`) enforces
+template ↔ SSOT parity.
 
-The Lima VM and Claude container memory scale based on host RAM. The VM never takes more than 50% of host RAM (capped at 32 GiB):
+### Adaptive VM sizing (macOS — Lima VM)
 
-| Host RAM | Lima VM      | Claude container |
-| -------- | ------------ | ---------------- |
-| 8 GiB    | 4 GiB        | 4 g (floor)      |
-| 16 GiB   | 8 GiB        | 4 g              |
-| 24 GiB   | 12 GiB       | 8 g              |
-| 32 GiB   | 16 GiB       | 12 g             |
-| 64 GiB   | 32 GiB (cap) | 28 g (cap)       |
+Only the **VM** is host-adaptive; the Claude container cap is fixed (above). The
+VM never takes more than 50% of host RAM/cores:
 
-Formulas: VM = `(host_ram / 2).clamp(4, 32)`, Claude = `(vm_mem - 4).clamp(4, 28)`.
+| Host RAM / cores | Lima VM RAM   | Lima VM vCPUs |
+| ---------------- | ------------- | ------------- |
+| 16 GiB / 8       | 8 GiB (floor) | 4 (floor)     |
+| 32 GiB / 16      | 16 GiB        | 8 (cap)       |
+| 64 GiB / 24      | 32 GiB (cap)  | 8 (cap)       |
+
+Formulas: VM RAM = `(host_ram / 2).clamp(8, 32)`, VM vCPUs = `(host_cores / 2).clamp(4, 8)`. The 8 GiB RAM floor matches the 16 GiB minimum host (a sub-minimum host still floors at an 8 GiB VM so the always-on set fits).
 
 ### Windows (WSL2)
 
-Claude container memory scales directly from host RAM with 6 GiB reserved for
-the OS and user applications. WSL2 shares host RAM dynamically rather than
-reserving a hard partition like Lima, so the formula bypasses the VM-memory
-step. Falls back to 10 g when RAM detection fails (`host_total_memory_gib()`
-returns 16 on failure → 16 − 6 = 10).
-
-| Host RAM | Claude container |
-| -------- | ---------------- |
-| 8 GiB    | 4 g (floor)      |
-| 16 GiB   | 10 g             |
-| 32 GiB   | 26 g             |
-| 64 GiB   | 28 g (cap)       |
+WSL2 sizing is **deliberately unmanaged** (ADR-068 §4): WSL2 schedules CPU
+dynamically and defaults the VM to half host RAM, and `.wslconfig` is a global,
+user-owned file shared with Docker Desktop. Speedwave does not set
+`memory`/`processors` there. The Claude container's fixed 6 GiB cap applies on
+Windows too.
 
 ### Migration
 
-On upgrade from older versions, `ensure_lima_vm_config()` automatically migrates the VM memory on startup. The migration stops the VM, edits both the source template and instance config, and restarts — no VM recreation needed. The migration applies both upgrades and downgrades so that a reduced VM formula takes effect immediately (triggers when `current != desired`).
+On upgrade, `ensure_lima_vm_config()` regenerates `lima.yaml` from the SSOT
+template (macOS only) when the VM memory, vCPU count, or VPN netplan drop-in
+drifts from the current formulas. `lima.yaml` is treated as a generated file —
+user hand-edits are not preserved (ADR-068). The migration stops the VM, rewrites
+both source and instance config, and restarts — no VM recreation.
 
 Existing projects receive the new Claude container memory limit on next container start (when `render_compose()` generates a fresh compose.yml), not immediately on upgrade.
 
@@ -220,7 +225,7 @@ When the Desktop app exits, Speedwave stops the underlying VM (where applicable)
 
 ### macOS (Lima VM)
 
-The Lima VM reserves 4–32 GiB of RAM for the lifetime of the process (`desired_vm_memory_gib` = `(host_ram / 2).clamp(4, 32)`, per the adaptive table above) — QEMU/VZ does not support memory ballooning, so this RAM is not returned to the system while the VM is running. On app exit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm_name>` with a 30s timeout.
+The Lima VM reserves 8–32 GiB of RAM for the lifetime of the process (`desired_vm_memory_gib` = `(host_ram / 2).clamp(8, 32)`, per the adaptive table above) — QEMU/VZ does not support memory ballooning, so this RAM is not returned to the system while the VM is running. On app exit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm_name>` with a 30s timeout.
 
 - **Next startup:** `ensure_ready()` detects the stopped VM and runs `limactl start` automatically. Startup is ~10–20s slower due to VM cold boot.
 - **If the process is force-killed during `limactl stop`:** The VM may be left in a `"Stopping"` state. `ensure_ready_inner()` on next launch polls until the VM finishes stopping, then starts it — no user intervention required.

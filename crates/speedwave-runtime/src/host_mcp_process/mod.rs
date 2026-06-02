@@ -31,7 +31,7 @@ pub use lock::{
     migrate_legacy_with_target, read as read_lock, write as write_lock, LockFile, LockService,
 };
 pub use probe::{is_pid_alive, probe_tcp};
-pub use process::{HostMcpProcess, LivenessProbe, SpawnContext, WorkerSpec};
+pub use process::{HostMcpProcess, LivenessProbe, SpawnContext, WorkerSpec, KILL_STALE_LOG_MARKER};
 pub use stale::{is_node_process, kill_process};
 
 /// Timeout shared by every drain reader when waiting for the worker's

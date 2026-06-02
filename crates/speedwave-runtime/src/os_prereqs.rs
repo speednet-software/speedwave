@@ -139,11 +139,12 @@ fn check_low_memory() -> Vec<String> {
 }
 
 fn check_low_memory_with(host_ram_gib: u32) -> Vec<String> {
-    if host_ram_gib < 8 {
+    if host_ram_gib < crate::resources::MIN_SUPPORTED_HOST_GIB {
         vec![format!(
-            "Low memory detected: {} GiB RAM. Speedwave requires at least 8 GiB. \
+            "Low memory detected: {} GiB RAM. Speedwave requires at least {} GiB. \
              Performance may be severely degraded.",
-            host_ram_gib
+            host_ram_gib,
+            crate::resources::MIN_SUPPORTED_HOST_GIB
         )]
     } else {
         Vec::new()
@@ -392,16 +393,16 @@ mod tests {
 
     #[test]
     fn test_check_os_warnings_returns_empty_on_macos_with_sufficient_ram() {
-        // On macOS dev machines with ≥8 GiB RAM, check_os_warnings() returns
-        // empty (no nested-virt check, no low-memory warning).
+        // On macOS dev machines at/above the minimum host, check_os_warnings()
+        // returns empty (no nested-virt check, no low-memory warning).
         #[cfg(not(target_os = "windows"))]
         {
             let host_ram = crate::resources::host_total_memory_gib();
-            if host_ram >= 8 {
+            if host_ram >= crate::resources::MIN_SUPPORTED_HOST_GIB {
                 let warnings = check_os_warnings();
                 assert!(
                     warnings.is_empty(),
-                    "check_os_warnings() should return empty on non-Windows with ≥8 GiB RAM, \
+                    "check_os_warnings() should return empty on non-Windows at/above the minimum host, \
                      got: {:?}",
                     warnings
                 );
@@ -414,45 +415,47 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn low_memory_warning_below_8() {
-        let w = check_low_memory_with(4);
+    fn low_memory_warning_below_minimum() {
+        let w = check_low_memory_with(8);
         assert_eq!(w.len(), 1);
         assert!(
-            w[0].contains("4 GiB"),
+            w[0].contains("8 GiB"),
             "warning must mention host RAM: {}",
             w[0]
         );
         assert!(
-            w[0].contains("8 GiB"),
-            "warning must mention threshold: {}",
+            w[0].contains("16 GiB"),
+            "warning must mention the 16 GiB threshold: {}",
             w[0]
         );
     }
 
     #[test]
-    fn low_memory_no_warning_at_8() {
-        assert!(check_low_memory_with(8).is_empty());
+    fn low_memory_no_warning_at_minimum() {
+        // MIN_SUPPORTED_HOST_GIB (16) is the boundary — at/above it, no warning.
+        assert!(check_low_memory_with(crate::resources::MIN_SUPPORTED_HOST_GIB).is_empty());
     }
 
     #[test]
-    fn low_memory_no_warning_above_8() {
-        assert!(check_low_memory_with(16).is_empty());
+    fn low_memory_no_warning_above_minimum() {
+        assert!(check_low_memory_with(32).is_empty());
+    }
+
+    #[test]
+    fn low_memory_warning_just_below_minimum() {
+        // 15 GiB — one below the boundary — must still warn.
+        let w = check_low_memory_with(crate::resources::MIN_SUPPORTED_HOST_GIB - 1);
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].contains("15 GiB"),
+            "warning must mention host RAM: {}",
+            w[0]
+        );
     }
 
     #[test]
     fn low_memory_warning_at_zero() {
         let w = check_low_memory_with(0);
         assert_eq!(w.len(), 1);
-    }
-
-    #[test]
-    fn low_memory_warning_at_7() {
-        let w = check_low_memory_with(7);
-        assert_eq!(w.len(), 1);
-        assert!(
-            w[0].contains("7 GiB"),
-            "warning must mention host RAM: {}",
-            w[0]
-        );
     }
 }
