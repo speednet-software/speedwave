@@ -34,7 +34,7 @@ import { PluginBridgeService } from '../../services/plugin-bridge.service';
         </p>
       } @else {
         <p class="mb-2 text-[12px] leading-relaxed text-[var(--ink-dim)]">
-          Paste these into your companion app (e.g. the Figma Desktop plugin). The worker container
+          Paste these into your companion app (e.g. a design-tool desktop app). The worker container
           uses an internal address; this URL is for external clients on the same host.
         </p>
 

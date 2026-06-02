@@ -399,7 +399,7 @@ describe('tool-discovery', () => {
     });
 
     it('accepts all worker tools from any service', async () => {
-      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+      process.env.WORKER_EXAMPLE_PLUGIN_URL = 'http://mcp-example-plugin:4010';
 
       const mockTools: Tool[] = [
         {
@@ -423,26 +423,26 @@ describe('tool-discovery', () => {
 
       vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
 
-      const result = await discoverAndMergeService('presale');
+      const result = await discoverAndMergeService('example-plugin');
 
       expect(Object.keys(result)).toHaveLength(2);
       expect(result['searchCustomers']).toBeDefined();
-      expect(result['searchCustomers'].service).toBe('presale');
+      expect(result['searchCustomers'].service).toBe('example-plugin');
       expect(result['createOrder']).toBeDefined();
-      expect(result['createOrder'].service).toBe('presale');
+      expect(result['createOrder'].service).toBe('example-plugin');
     });
 
     it('returns empty result when worker has no tools', async () => {
-      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+      process.env.WORKER_EXAMPLE_PLUGIN_URL = 'http://mcp-example-plugin:4010';
 
       vi.stubGlobal('fetch', createMcpMockFetch([]));
 
-      const result = await discoverAndMergeService('presale');
+      const result = await discoverAndMergeService('example-plugin');
       expect(Object.keys(result)).toHaveLength(0);
     });
 
     it('accepts tools without annotations', async () => {
-      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+      process.env.WORKER_EXAMPLE_PLUGIN_URL = 'http://mcp-example-plugin:4010';
 
       const mockTools: Tool[] = [
         {
@@ -454,9 +454,9 @@ describe('tool-discovery', () => {
 
       vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
 
-      const result = await discoverAndMergeService('presale');
+      const result = await discoverAndMergeService('example-plugin');
       expect(result['getStatus']).toBeDefined();
-      expect(result['getStatus'].service).toBe('presale');
+      expect(result['getStatus'].service).toBe('example-plugin');
     });
 
     it('reads _meta fields from worker tools', async () => {

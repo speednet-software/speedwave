@@ -6,7 +6,7 @@
 
 - Claude container: no tokens, no container socket, container user UID 1000:1000 (containerd runs inside a VM on both supported platforms — Lima on macOS, WSL2 on Windows; see ADR-059)
 - OWASP container hardening: `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
-- Token isolation: each MCP worker mounts **only its own** service credentials at `/tokens` read-only — a compromised worker exposes only that service. Exception: SharePoint uses `:rw` for OAuth token refresh (see ADR-009)
+- Token isolation: each MCP worker mounts **only its own** service credentials at `/tokens` read-only — a compromised worker exposes only that service. Every built-in worker mounts `/tokens:ro` with no exception (SharePoint's former `:rw` token mount was retired when OAuth refresh moved to the host-side `oauth` worker — see ADR-060)
 - Hub has zero tokens — compromise of the hub exposes nothing
 - Lima VM / WSL2: kernel-level isolation layer on top of container isolation
 - Resource limits per container (CPU + memory caps)
@@ -31,5 +31,5 @@
 The `claude` container's network surface is governed by the v1 invariants above. Code running on the **host** (Tauri commands like `discover_llm_models`, Redmine proxy, update checker) is a separate threat surface:
 
 - All outbound HTTP from Tauri commands goes through `reqwest` clients configured per ADR-041 (no redirects, bounded timeout, capped body, `Content-Type` allow-list where the response is parsed).
-- DNS rebinding is an accepted residual risk for user-originated URLs (see ADR-041 §"Negative"). Do not introduce a codepath that lets an attacker inject URLs into config without explicit user action — that would invalidate the accepted-risk decision.
+- DNS rebinding is an accepted residual risk for user-originated URLs (see ADR-041 §"Residual risks (accepted)"). Do not introduce a codepath that lets an attacker inject URLs into config without explicit user action — that would invalidate the accepted-risk decision.
 - TLS uses `rustls-tls` with bundled CA roots. Do not switch to system roots without an ADR.

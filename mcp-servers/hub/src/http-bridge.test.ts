@@ -732,10 +732,10 @@ describe('http-bridge', () => {
         string,
         Record<string, Record<string, unknown>>
       >;
-      mutableRegistry['presale'] = {
+      mutableRegistry['example-plugin'] = {
         searchCustomers: {
           name: 'searchCustomers',
-          service: 'presale',
+          service: 'example-plugin',
           description: 'Search CRM customers',
           inputSchema: { type: 'object', properties: {} },
           keywords: ['crm'],
@@ -744,16 +744,16 @@ describe('http-bridge', () => {
         },
       };
 
-      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+      process.env.WORKER_EXAMPLE_PLUGIN_URL = 'http://mcp-example-plugin:4010';
 
-      const bridge = buildServiceBridge('presale', callWorker);
+      const bridge = buildServiceBridge('example-plugin', callWorker);
 
       expect(bridge).toHaveProperty('searchCustomers');
       expect(typeof bridge.searchCustomers).toBe('function');
 
       // Cleanup
-      delete mutableRegistry['presale'];
-      delete process.env.WORKER_PRESALE_URL;
+      delete mutableRegistry['example-plugin'];
+      delete process.env.WORKER_EXAMPLE_PLUGIN_URL;
     });
 
     it('should create bridge for plugin service from ENABLED_SERVICES via initializeAllBridges', async () => {

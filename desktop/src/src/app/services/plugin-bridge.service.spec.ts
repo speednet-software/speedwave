@@ -5,7 +5,7 @@ import { TauriService } from './tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import type { PluginBridgeStatus } from '../models/plugin';
 
-const SLUG = 'figma';
+const SLUG = 'example-plugin';
 
 type RunningSnapshot = Extract<PluginBridgeStatus, { running: true }>;
 
@@ -16,7 +16,7 @@ function snapshot(overrides: Partial<RunningSnapshot> = {}): PluginBridgeStatus 
     port: 60123,
     paired: false,
     partner_connected: false,
-    display_name: 'Figma Bridge',
+    display_name: 'Example Plugin Bridge',
     ...overrides,
   };
 }

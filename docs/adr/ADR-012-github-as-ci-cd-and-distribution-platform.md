@@ -1,53 +1,55 @@
 # ADR-012: GitHub as CI/CD and Distribution Platform
 
+> **Status:** Accepted
+> **Context:** Open-source project needs CI/CD, binary hosting, and an auto-update channel without standing up dedicated infrastructure.
+
 ## Decision
 
-Speedwave uses GitHub Actions for CI/CD and GitHub Releases for binary distribution and auto-updates.
+Speedwave uses GitHub Actions for CI/CD and GitHub Releases for binary distribution and auto-updates. The Tauri updater consumes a `latest.json` manifest published as a release asset.
 
-## Rationale
+## Why
 
-The project is open-source. GitHub provides:
-
-- Free CI/CD minutes for public repositories (GitHub Actions)[^57]
-- Free binary hosting via GitHub Releases (no bandwidth limits for open-source)[^58]
-- Built-in release management with tags and changelogs
-- Native integration with the open-source community (Issues, Discussions, PRs)
-
-GitHub Releases as an update server eliminates the need for dedicated update infrastructure (no server to maintain, no CDN costs). The Tauri updater protocol is designed specifically for GitHub Releases[^53] — `latest.json` is generated during the release workflow and uploaded as a release artifact.
+- Free CI/CD minutes and free binary hosting for public repositories — no server to run, no CDN to pay for.
+- GitHub Releases doubles as the update server: the Tauri updater protocol is built around it (`latest.json` is generated during the release workflow and uploaded as a release artifact).
+- Native integration with the open-source workflow (Issues, Discussions, PRs, tags, changelogs).
+- Release versioning is automated by release-please; the desktop release workflow uploads platform artifacts to the release it manages.
 
 ## Release Artifacts
 
-GitHub Releases hosts the following platform-specific artifacts (see ADR-021):
+Only macOS and Windows are built — Linux was dropped as a host platform (see [ADR-059](ADR-059-drop-linux-support.md)). The Tauri bundle targets are `nsis`, `msi`, `app`, and `dmg`; there is no `.deb` target and no Linux entry in the release build matrix.
 
-| Platform | Artifact                    | Contents                                                       |
-| -------- | --------------------------- | -------------------------------------------------------------- |
-| macOS    | `Speedwave-x.y.z.dmg`       | `.app` bundle with Lima binaries in `Contents/Resources/lima/` |
-| Linux    | `speedwave_x.y.z_amd64.deb` | .deb package with nerdctl-full bundled (see ADR-025)           |
-| Windows  | `Speedwave-x.y.z-setup.exe` | NSIS installer with WSL2 rootfs and auto-install logic         |
+| Platform            | Artifact                                  | Contents                                                          |
+| ------------------- | ----------------------------------------- | ----------------------------------------------------------------- |
+| macOS Apple Silicon | `Speedwave_<ver>_macOS_Apple_Silicon.dmg` | `.app` bundle with Lima binaries under `Contents/Resources/lima/` |
+| macOS Intel         | `Speedwave_<ver>_macOS_Intel.dmg`         | same `.app` layout, x86_64 build                                  |
+| Windows (NSIS)      | `Speedwave_<ver>_x64-setup.exe`           | NSIS installer with WSL2 setup logic                              |
+| Windows (MSI)       | `Speedwave_<ver>_x64_en-US.msi`           | MSI installer (same payload, MSI packaging)                       |
+
+The two macOS DMGs are produced from one matrix per arch (`aarch64-apple-darwin`, `x86_64-apple-darwin`) with arch labels applied via the release workflow's `assetNamePattern`. The Windows job produces both the NSIS and MSI installers under Tauri's default naming. See [ADR-021](ADR-021-bundled-dependencies-and-zero-install-strategy.md) for what gets bundled into each artifact.
 
 ## SHA256 Verification in CI
 
-The CI pipeline verifies all downloaded dependencies using SHA256 checksums:
+Bundled dependencies are verified by SHA256 before they go into a release artifact. For Lima (macOS), the build fetches the upstream `SHA256SUMS` from the Lima GitHub release, verifies the downloaded tarball against it, and fails the build immediately on mismatch — preventing a compromised download from injecting code into the app.
 
-1. Lima binaries are downloaded from Lima GitHub Releases[^59]
-2. The `SHA256SUMS` file is fetched and the checksum of the downloaded tarball is verified
-3. If the checksum does not match, the build fails immediately
-4. Verified binaries are bundled into the release artifact
+## Where it lives in code
 
-This prevents supply-chain attacks where a compromised download could inject malicious code into the application.
+- Bundle targets (`nsis`, `msi`, `app`, `dmg`) — `desktop/src-tauri/tauri.conf.json`
+- Release build matrix + per-arch asset naming — `.github/workflows/desktop-release.yml`
+- macOS Lima bundling into `Contents/Resources/lima/` — `desktop/src-tauri/tauri.macos.conf.json`
+- Lima SHA256 download verification — `.github/actions/download-lima/action.yml` and the `download-lima` target in `Makefile`
+- Automated version bumps / release PRs — `.github/workflows/release-please.yml`, `release-please-config.json`
 
-## Rejected Alternatives
+## Rejected alternatives
 
-- **Self-hosted update server** — operational overhead, cost, single point of failure
-- **Sparkle (macOS only)** — not cross-platform
-- **Custom update mechanism** — reinventing the wheel; Tauri's updater is battle-tested
+- **Self-hosted update server** — operational overhead, cost, single point of failure.
+- **Sparkle (macOS only)** — not cross-platform.
+- **Custom update mechanism** — reinventing the wheel; Tauri's updater is battle-tested.
 
 ---
 
-[^53]: [Tauri Updater Plugin](https://v2.tauri.app/plugin/updater/)
+## References
 
-[^57]: [GitHub Actions - Billing for public repos](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions)
-
-[^58]: [GitHub Releases - About releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
-
-[^59]: [Lima GitHub Releases](https://github.com/lima-vm/lima/releases)
+- [Tauri Updater Plugin](https://v2.tauri.app/plugin/updater/)
+- [GitHub Actions — billing for public repos](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions)
+- [GitHub Releases — about releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
+- [Lima GitHub Releases](https://github.com/lima-vm/lima/releases)

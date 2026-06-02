@@ -2,6 +2,7 @@
   "effortLevel": "high",
   "outputStyle": "Speedwave",
   "showThinkingSummaries": true,
+  "skipDangerousModePermissionPrompt": true,
   "statusLine": {
     "type": "command",
     "command": "~/.claude/statusline.sh"

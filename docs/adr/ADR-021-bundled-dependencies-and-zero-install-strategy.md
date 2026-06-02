@@ -1,154 +1,37 @@
 # ADR-021: Bundled Dependencies and Zero-Install Strategy
 
 > **Status:** Accepted
-> **Context:** Fulfilling the "zero dependencies" promise from ADR-000
-
----
-
-## Context
-
-The "zero dependencies beyond Speedwave" principle (ADR-000) was not fully realized in the initial implementation. On macOS, users were required to run `brew install lima` before using Speedwave. On Windows, the `init_vm()` function was an empty stub with no WSL2 provisioning logic.
-
-This violated the core product principle: the user downloads one file and everything works.
+> **Context:** Fulfilling the "zero dependencies beyond Speedwave" promise from ADR-000 — the user downloads one file and everything works, with no `brew install` or manual WSL2 setup.
 
 ## Decision
 
-Each platform uses the most idiomatic approach to ensure runtime dependencies are available without manual user intervention:
+Each supported platform makes its container runtime available without manual user intervention. macOS bundles Lima inside the `.app`; Windows auto-provisions an isolated WSL2 distribution via the Setup Wizard (with an offline fallback shipped in the installer). Both platforms bundle a pinned Node.js `node` binary for the host-side MCP workers. The CLI is a thin client bundled inside the Desktop app and copied onto the user's PATH at startup. (Linux as a host platform was dropped — see ADR-059.)
 
-### macOS: Bundle Lima in the Application
+## Why
 
-Lima is bundled inside the application at `.app/Contents/Resources/lima/`. The `LIMA_HOME` environment variable is set to `~/.speedwave/lima` to isolate Speedwave's VM from any user-installed Lima instance.
+- macOS GUI apps launched from Finder/Spotlight do not inherit the shell PATH, so a Homebrew-installed `limactl` would be invisible. Bundling Lima inside the `.app` and isolating its VM under `~/.speedwave/lima` (via `LIMA_HOME`) avoids PATH hacks and conflicts with any user-installed Lima.
+- Auto-provisioning WSL2 with a named, isolated distribution keeps Speedwave out of the way of any WSL distros the user already runs.
+- Offline / air-gapped installs work: the Windows installer bundles the nerdctl-full tarball and the Ubuntu rootfs, and the Setup Wizard prefers bundled files before any network download.
+- A clean macOS install has no `node` in PATH, which would break the host-side MCP workers; bundling the pinned `node` binary keeps the zero-dependency promise.
+- Bundling the CLI inside Desktop and re-linking it on every startup guarantees the CLI and Desktop versions stay aligned — a Desktop update distributes the matching CLI automatically.
 
-```
-Speedwave.app/
-└── Contents/
-    └── Resources/
-        └── lima/
-            ├── bin/
-            │   ├── limactl
-            │   └── lima
-            └── share/
-                └── lima/
-```
+## Where it lives in code
 
-Binary resolution order:
+- Bundled-asset manifest (Lima, Node.js, CLI, native helpers, per platform) — `crates/speedwave-runtime/src/bundle.rs` (`MACOS_BUNDLED_ASSETS`, `WINDOWS_BUNDLED_ASSETS`, `COMMON_BUNDLED_ASSETS`).
+- Binary resolution order (env override, then `resources-dir` marker, then the bundle layout, then PATH fallback for dev) — `crates/speedwave-runtime/src/binary.rs` (`resolve_binary`). The bundled-resources env var and marker constants are `BUNDLE_RESOURCES_ENV` (`SPEEDWAVE_RESOURCES_DIR`) and `RESOURCES_MARKER` in `crates/speedwave-runtime/src/consts.rs`.
+- Node.js subdir name (SSOT) — `crates/speedwave-runtime/src/consts.rs` (`NODEJS_SUBDIR` = `nodejs`). Under that directory the macOS layout is `nodejs/bin/node` and the Windows layout is `nodejs/node.exe` — siblings, not nested; `resolve_binary` checks `<resources>/nodejs/bin/<cmd>` on Unix and `<resources>/nodejs/<cmd>.exe` on Windows.
+- Host-side MCP worker spawn (the consumer that needs `node` on the host) — `crates/speedwave-runtime/src/host_mcp_process/process.rs`.
+- Windows WSL2 provisioning + offline-tarball detection — `desktop/src-tauri/src/setup_wizard.rs`.
+- CLI linking into the user's PATH (`~/.local/bin/` on macOS, `~/.speedwave/bin/` on Windows) — `desktop/src-tauri/src/setup_wizard.rs` (`link_cli`, `link_cli_from`). The CLI is bundled as `cli/speedwave` (macOS) / `cli/speedwave.exe` (Windows) per `desktop/src-tauri/tauri.macos.conf.json` and `desktop/src-tauri/tauri.windows.conf.json`. See ADR-016 for the cross-platform PATH details.
+- Pinned versions (SSOT) — `.lima-version` and `.node-version` at the repo root, consumed by the Makefile and CI; downloads are SHA256-verified at build time.
 
-1. `SPEEDWAVE_RESOURCES_DIR` environment variable (if set — used in development)
-2. `~/.speedwave/resources-dir` marker file (written by the Desktop app, read by the CLI to discover bundled resources when `SPEEDWAVE_RESOURCES_DIR` is not set)
-3. `.app/Contents/Resources/lima/bin/` (production, resolved via `std::env::current_exe()`)
-4. System PATH fallback (development mode only)
+## Rejected alternatives
 
-### Windows: Auto-install WSL2 via Setup Wizard
+- **CLI as a standalone tool with its own bundled Lima** — would duplicate setup logic, complicate self-update (two bundles), and break the "CLI = thin client" principle from ADR-005.
+- **Auto-download Lima on first launch** — requires post-install internet, fails in restricted/corporate networks, and risks a silently broken first run.
+- **CLI with its own `speedwave setup` command** — would duplicate the Desktop Setup Wizard. Per YAGNI, the CLI delegates all setup to Desktop.
+- **Podman as a package dependency / Flatpak packaging** — both were tied to the dropped Linux host path (ADR-059). Podman added a second runtime to maintain alongside nerdctl; Flatpak's sandbox conflicts with rootless container management (containerd needs direct cgroup/namespace/storage access). Retained here only as historical rationale.
 
-The Setup Wizard detects whether WSL2 is available and, if missing, installs it:
+## License compliance
 
-1. Check: `wsl --status` to detect WSL2 availability
-2. Install: `wsl --install --no-distribution` with UAC elevation[^4]
-3. Reboot: prompt user to reboot (required for WSL2 kernel installation)
-4. Import: `wsl --import Speedwave <install-dir> <rootfs.tar.gz>` creates an isolated named distribution[^5]
-
-Minimum requirement: Windows 10 version 21H2 (Build 19044) or later[^6].
-
-For offline installation, the Windows installer (NSIS) bundles both the nerdctl-full tarball and the Ubuntu rootfs inside the `.exe`. The Setup Wizard checks for bundled files before attempting network downloads, enabling fully offline setup on air-gapped machines.
-
-### CLI = Thin Client (Bundled in Desktop)
-
-The CLI (`speedwave`) is a thin client that requires a running Desktop application with completed setup. The CLI does not bundle runtime dependencies (Lima, nerdctl, WSL2) — it connects to the already-provisioned environment managed by the Desktop app.
-
-The CLI binary itself is bundled inside the Desktop app at build time:
-
-- macOS: `.app/Contents/Resources/cli/speedwave`
-- Windows: `<exe_dir>/resources/cli/speedwave.exe`
-
-On every Desktop startup (and during initial setup), `setup_wizard::link_cli()` copies the bundled CLI to the user's PATH (`~/.local/bin/` on Unix, `~/.speedwave/bin/` on Windows). This ensures version alignment between CLI and Desktop — a Desktop update automatically distributes the matching CLI version. See ADR-016 for PATH details.
-
-### All Platforms: Bundle Node.js for mcp-os
-
-The mcp-os TypeScript worker (`mcp-servers/os/dist/index.js`) runs on the host via `node`. On a clean macOS install, Node.js is not available in PATH, causing `mcp_os_process.rs` to fail with "No such file or directory". To maintain the zero-dependency promise, the Node.js runtime binary is bundled inside the app.
-
-Only the `node` binary is bundled — npm and other tools are not needed at runtime. The version is pinned in `.node-version` at the repository root (SSOT, same pattern as `.lima-version`).
-
-```
-Resources/
-└── nodejs/
-    └── bin/
-        └── node          # macOS
-    └── node.exe          # Windows
-```
-
-Binary resolution in `resolve_binary()` checks `<resources>/nodejs/bin/<cmd>` (Unix) or `<resources>/nodejs/<cmd>.exe` (Windows) after Lima and nerdctl-full paths. If the bundled binary is not found, it falls back to system PATH — enabling development without downloading Node.js into the resource directory.
-
-SHA256 integrity is verified at download time against the official `SHASUMS256.txt` published alongside each Node.js release[^13]. Node.js is licensed under the MIT License[^14], which permits bundling and redistribution. The LICENSE file is included in `THIRD-PARTY-LICENSES/nodejs-LICENSE`.
-
-## Rationale
-
-### Why bundle Lima on macOS?
-
-GUI applications on macOS do not inherit the user's shell PATH[^7]. A `.app` launched from Finder or Spotlight has a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which does not include Homebrew's `/opt/homebrew/bin`. Requiring `brew install lima` would mean the Desktop app cannot find `limactl` without PATH hacks.
-
-Bundling is the established pattern for macOS GUI apps. Rancher Desktop (CNCF sandbox project) bundles Lima in the same way[^8]. The isolation via `LIMA_HOME=~/.speedwave/lima` prevents any conflict with a user-installed Lima instance.
-
-### Why auto-install WSL2 on Windows?
-
-WSL2 is a built-in Windows feature that can be enabled programmatically[^4]. The `wsl --install` command is the Microsoft-recommended way to set up WSL2. Using `wsl --import` to create a named distribution (`Speedwave`) isolates Speedwave from any user-configured WSL distributions.
-
-## Rejected Alternatives
-
-### 1. CLI as standalone tool with bundled Lima
-
-Rejected. This would duplicate setup logic between CLI and Desktop, complicate self-update (two separate bundles to update), and violate the "CLI = thin client" principle from ADR-005.
-
-### 2. Auto-download Lima on first Desktop launch
-
-Rejected. This requires an internet connection after installation, which is a worse user experience than bundling. Users in corporate environments may have restricted internet access. The download could also fail silently, leading to a broken first-run experience.
-
-### 3. Podman as package dependency (.deb only)
-
-Previously used (see ADR-003 history). Rejected because it added external dependency management burden. Also requires maintaining a separate container runtime alongside nerdctl used on macOS/Windows.
-
-### 4. Flatpak instead of .deb
-
-Rejected. Flatpak's sandbox model conflicts with rootless container management[^10]. containerd/nerdctl needs direct access to cgroups, namespaces, and the container storage directory — all of which are restricted by Flatpak's Bubblewrap sandbox.
-
-### 5. CLI with own `speedwave setup` command
-
-Rejected. This would duplicate the Setup Wizard logic that already exists in the Desktop app. Per YAGNI, the CLI delegates all setup to the Desktop. Adding a separate setup path increases maintenance burden and creates a second code path to test.
-
-## License Compliance
-
-Lima is licensed under Apache License 2.0[^11], which permits bundling and redistribution. The following files are included in the release artifacts under `THIRD-PARTY-LICENSES/`:
-
-- `LICENSE` (Apache 2.0 full text)
-- `NOTICE` (Lima copyright notice)
-
-## Supply-Chain Security
-
-Lima binaries are downloaded during the build process (CI) with SHA256 verification:
-
-1. Download Lima release tarball from GitHub Releases[^12]
-2. Verify SHA256 checksum against the published `SHA256SUMS` file
-3. Bundle verified binaries into the `.app` or installer
-
-The Makefile and CI pipeline enforce checksum verification — builds fail if checksums do not match. The Lima version is pinned in `.lima-version` at the repository root (SSOT for both Makefile and CI).
-
----
-
-[^4]: [Install WSL - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/install)
-
-[^5]: [Import a Linux distribution - wsl --import](https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro)
-
-[^6]: [WSL2 requirements - Windows 10 version 21H2](https://learn.microsoft.com/en-us/windows/wsl/install-manual#step-2---check-requirements-for-running-wsl-2)
-
-[^7]: [Apple Developer - About the PATH environment in macOS apps](https://developer.apple.com/library/archive/qa/qa1067/_index.html)
-
-[^8]: [Rancher Desktop - Lima integration (CNCF sandbox)](https://github.com/rancher-sandbox/rancher-desktop/tree/main/src/go/wsl-helper)
-
-[^10]: [Flatpak sandbox permissions](https://docs.flatpak.org/en/latest/sandbox-permissions.html)
-
-[^11]: [Lima LICENSE - Apache 2.0](https://github.com/lima-vm/lima/blob/master/LICENSE)
-
-[^12]: [Lima GitHub Releases](https://github.com/lima-vm/lima/releases)
-
-[^13]: [Node.js SHASUMS256.txt for releases](https://nodejs.org/dist/)
-
-[^14]: [Node.js LICENSE — MIT](https://github.com/nodejs/node/blob/main/LICENSE)
+Lima (Apache 2.0) and Node.js (MIT) both permit bundling and redistribution; their license texts ship under `THIRD-PARTY-LICENSES/` in the release artifacts.

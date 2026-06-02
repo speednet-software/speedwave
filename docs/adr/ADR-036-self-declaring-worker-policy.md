@@ -1,74 +1,39 @@
 # ADR-036: Self-Declaring Worker Policy via `_meta`
 
-## Status
-
-Accepted
-
-## Context
-
-The MCP hub maintains a hardcoded `TOOL_POLICIES` map in `hub-tool-policy.ts` with 103 entries across 5 built-in services[^1]. Each entry defines hub-specific operational metadata for a tool:
-
-- `deferLoading` — whether the tool is shown upfront to Claude or deferred behind `search_tools`
-- `timeoutClass` — standard or long execution timeout
-- `timeoutMs` — custom timeout override in milliseconds
-- `osCategory` — OS sub-integration routing (reminders, calendar, mail, notes)
-
-This map must be manually updated whenever a worker adds, removes, or renames a tool — violating DRY and SSOT principles. Workers already declare rich tool metadata (name, description, inputSchema, annotations, keywords) but not policy fields. The hub also maintains a `BUILT_IN_SERVICES` list that creates an artificial distinction between built-in and plugin services, with different discovery paths for each[^2].
+> **Status:** Accepted
+> **Context:** The MCP hub used to hold a hardcoded per-tool policy map and a built-in/plugin service split, both of which had to be hand-edited whenever a worker changed its tools.
 
 ## Decision
 
-Workers declare policy metadata on each tool via the MCP specification's `_meta` field[^3]. The hub reads `_meta` from worker tool definitions during discovery and applies sensible defaults when absent. The `TOOL_POLICIES` map, `BUILT_IN_SERVICES` list, and skeleton fallback mechanism are removed entirely.
+Each worker declares its own hub-side policy on every tool through the MCP `_meta` field, and the hub reads it during discovery, applying sensible defaults when `_meta` is absent. The old hardcoded policy map, the built-in-vs-plugin service distinction, and the skeleton-fallback mechanism are gone — workers are the single source of truth for both tool contract and tool policy.
 
-### Policy fields in `_meta`
+## Why
 
-Workers declare a `SpeedwaveMeta` structure in each tool's `_meta` field:
+- The previous design duplicated, in the hub, knowledge that workers already owned. Any tool added, renamed, or removed in a worker forced a manual hub edit, violating DRY/SSOT.
+- Built-in and plugin services were discovered along different code paths for no real benefit; a single discovery path is simpler and treats external/third-party MCP servers the same as first-party workers.
+- A worker that is unavailable cannot serve tool calls anyway, so building skeleton tool entries from a hardcoded map added complexity without changing observable behavior.
 
-```typescript
-interface SpeedwaveMeta {
-  deferLoading?: boolean; // default: true
-  timeoutClass?: 'standard' | 'long'; // default: 'standard'
-  timeoutMs?: number; // default: undefined (uses global WORKER_REQUEST_MS)
-  osCategory?: 'reminders' | 'calendar' | 'mail' | 'notes'; // default: undefined
-}
-```
+## Policy fields and defaults
 
-### Default values when `_meta` is absent
+Per tool, `_meta` may carry: `deferLoading` (default `true` — the tool is discoverable via `search_tools` but not shown to Claude upfront), `timeoutClass` (`standard` or `long`; standard timeout applies when absent), `timeoutMs` (custom override; falls back to the global worker request timeout when absent), and `osCategory` (`reminders` / `calendar` / `mail` / `notes`, only meaningful for the `os` service). The `deferLoading: true` default keeps token usage low when many tools are registered; a worker opts a tool into upfront visibility with `_meta: { deferLoading: false }`.
 
-| Field          | Default      | Rationale                                                                                         |
-| -------------- | ------------ | ------------------------------------------------------------------------------------------------- |
-| `deferLoading` | `true`       | With 100+ tools, showing all by default wastes tokens. Workers must opt in to upfront visibility. |
-| `timeoutClass` | `'standard'` | Most tools complete within the standard timeout.                                                  |
-| `timeoutMs`    | `undefined`  | Uses the global `WORKER_REQUEST_MS` constant.                                                     |
-| `osCategory`   | `undefined`  | Only relevant for the OS service.                                                                 |
+## Where it lives in code
 
-### Unified service handling
+- `_meta` merge + defaulting — `mcp-servers/hub/src/tool-discovery.ts` (`mergeToolWithMeta`): reads `_meta`, validates each field, applies the defaults above, and warns when a tool ships no `_meta`.
+- Policy fields on the merged tool shape — `mcp-servers/hub/src/hub-types.ts` (`deferLoading`, `timeoutClass`, `timeoutMs`, `osCategory` on `ToolMetadata`).
+- Single discovery path / no built-in split — `mcp-servers/hub/src/service-list.ts` now only enumerates enabled services from `ENABLED_SERVICES`; there is no built-in-service list or plugin check.
+- Empty-registry-instead-of-skeleton + 5-minute background refresh — `mcp-servers/hub/src/tool-registry.ts`: an unavailable worker leaves an empty registry entry that the periodic refresh populates once the worker comes up.
+- `deferLoading` filtering during discovery — `mcp-servers/hub/src/search-tools.ts`.
+- Plugin-author guidance — `docs/guides/integrations.md` ("Tool Policy via `_meta`").
 
-The hub treats all services identically — no `BUILT_IN_SERVICES` list, no `isPluginService()` check. Discovery follows a single path: fetch `tools/list` from worker, read `_meta`, apply defaults, register tools.
+## Impact on the plugin contract
 
-### Skeleton fallback removed
-
-When a worker is unavailable at startup, the hub registers an empty tool set for that service (instead of building skeleton entries from the hardcoded policy map). Background refresh (every 5 minutes) populates tools when the worker becomes available. This is acceptable because a worker that is unavailable cannot serve tool calls regardless of registry state.
-
-## Impact on Plugin Contract
-
-Analyzed against the contract table in CLAUDE.md[^4]:
-
-- **`_meta` is optional** — existing plugins without `_meta` continue working. All tools default to `deferLoading: true` (deferred behind `search_tools`).
-- **No breaking changes** — the `speedwave-plugins` repository (presale plugin) does not reference `BUILT_IN_SERVICES`, `isPluginService`, or `hub-tool-policy`. Its use of `_meta` is limited to JSON-RPC session tracking, which is a different concern from tool-level metadata.
-- **Behavioral change for plugins**: plugins without `_meta` previously had `deferLoading: false` (all tools shown upfront). After this change, they default to `deferLoading: true`. Plugins that want upfront visibility must add `_meta: { deferLoading: false }` to their tool definitions.
+- `_meta` is optional. Plugins shipping no `_meta` keep working; all their tools default to `deferLoading: true`.
+- Behavioral change: before this ADR, plugins without policy data effectively showed tools upfront; now they default to deferred. A plugin wanting immediate visibility sets `_meta: { deferLoading: false }` on the relevant tools.
+- No plugin references the removed hub internals, so this is not a breaking change to the contract surface in CLAUDE.md.
 
 ## Consequences
 
-- Workers become the single source of truth for all tool metadata (contract + policy)
-- Adding a new tool requires zero hub-side changes
-- External MCP servers work without any hub configuration — sensible defaults apply
-- The hub has zero hardcoded knowledge about specific tools or services
-- Plugin developers must be aware of `_meta.deferLoading` default behavior (documented in `docs/guides/integrations.md`)
-
-[^1]: `mcp-servers/hub/src/hub-tool-policy.ts` — TOOL_POLICIES map with 103 entries
-
-[^2]: `mcp-servers/hub/src/service-list.ts` — BUILT_IN_SERVICES and isPluginService()
-
-[^3]: [MCP Specification — Tool definition, \_meta field](https://modelcontextprotocol.io/specification/2025-11-25/server/tools/)
-
-[^4]: CLAUDE.md — "Contract between Speedwave and plugins" table
+- Adding or changing a worker tool needs zero hub-side edits.
+- External MCP servers work against the hub with no per-tool configuration — defaults apply.
+- The hub holds no hardcoded knowledge of any specific tool or service.

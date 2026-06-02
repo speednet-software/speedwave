@@ -5391,15 +5391,22 @@ services:
     fn test_inject_worker_env() {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
 
-        inject_worker_env(&mut doc, "WORKER_PRESALE_URL", "http://mcp-presale:4006");
+        inject_worker_env(
+            &mut doc,
+            "WORKER_EXAMPLE_PLUGIN_URL",
+            "http://mcp-example-plugin:4006",
+        );
 
         let hub = doc.get("services").unwrap().get("mcp-hub").unwrap();
         let env_seq = hub.get("environment").unwrap().as_sequence().unwrap();
-        let has_presale = env_seq.iter().any(|v| {
+        let has_example_plugin = env_seq.iter().any(|v| {
             v.as_str()
-                .is_some_and(|s| s == "WORKER_PRESALE_URL=http://mcp-presale:4006")
+                .is_some_and(|s| s == "WORKER_EXAMPLE_PLUGIN_URL=http://mcp-example-plugin:4006")
         });
-        assert!(has_presale, "WORKER_PRESALE_URL should be in mcp-hub env");
+        assert!(
+            has_example_plugin,
+            "WORKER_EXAMPLE_PLUGIN_URL should be in mcp-hub env"
+        );
     }
 
     /// Second call with the same key must REPLACE, not duplicate. Both claude and
@@ -5555,14 +5562,14 @@ services:
 
         add_claude_volume(
             &mut doc,
-            "/home/user/.speedwave/addons/presale/claude-resources:/speedwave/addons/presale:ro",
+            "/home/user/.speedwave/addons/example-plugin/claude-resources:/speedwave/addons/example-plugin:ro",
         );
 
         let claude = doc.get("services").unwrap().get("claude").unwrap();
         let vols = claude.get("volumes").unwrap().as_sequence().unwrap();
         let has_addon_vol = vols.iter().any(|v| {
             v.as_str()
-                .is_some_and(|s| s.contains("/speedwave/addons/presale:ro"))
+                .is_some_and(|s| s.contains("/speedwave/addons/example-plugin:ro"))
         });
         assert!(has_addon_vol, "Addon volume should be in claude volumes");
     }
@@ -5571,13 +5578,17 @@ services:
     fn test_add_claude_env_var() {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
 
-        add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", "presale,custom-skills");
+        add_claude_env_var(
+            &mut doc,
+            "SPEEDWAVE_PLUGINS",
+            "example-plugin,custom-skills",
+        );
 
         let claude = doc.get("services").unwrap().get("claude").unwrap();
         let env_seq = claude.get("environment").unwrap().as_sequence().unwrap();
         let has_plugins_var = env_seq.iter().any(|v| {
             v.as_str()
-                .is_some_and(|s| s == "SPEEDWAVE_PLUGINS=presale,custom-skills")
+                .is_some_and(|s| s == "SPEEDWAVE_PLUGINS=example-plugin,custom-skills")
         });
         assert!(has_plugins_var, "SPEEDWAVE_PLUGINS should be in claude env");
     }
@@ -8302,8 +8313,8 @@ services:
         let yaml = r#"
 version: "3"
 services:
-  mcp-presale:
-    image: speedwave-mcp-presale:latest
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:latest
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -8511,14 +8522,14 @@ services:
             host_exec: true,
             ..ResolvedIntegrationsConfig::default()
         };
-        cfg.plugins.insert("presale".to_string(), true);
+        cfg.plugins.insert("example-plugin".to_string(), true);
         cfg.plugins.insert("disabled-one".to_string(), false);
         let ids = enabled_hub_service_ids(&cfg);
         assert!(ids.contains(&"slack".to_string()));
         assert!(ids.contains(&"gitlab".to_string()));
         assert!(ids.contains(&"os".to_string()));
         assert!(ids.contains(&"host_exec".to_string()));
-        assert!(ids.contains(&"presale".to_string()));
+        assert!(ids.contains(&"example-plugin".to_string()));
         assert!(!ids.contains(&"redmine".to_string()));
         assert!(!ids.contains(&"disabled-one".to_string()));
         assert!(!ids.contains(&"claude".to_string()));
@@ -8928,8 +8939,8 @@ services:
             r#"
 version: "3"
 services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
     user: "{user}"
     privileged: true
     cap_drop:
@@ -8951,7 +8962,8 @@ services:
         assert!(
             violations
                 .iter()
-                .any(|v| v.rule == SecurityRule::PluginNoPrivileged && v.container == "mcp-presale"),
+                .any(|v| v.rule == SecurityRule::PluginNoPrivileged
+                    && v.container == "mcp-example-plugin"),
             "Plugin with privileged: true should trigger PLUGIN_NO_PRIVILEGED"
         );
     }
@@ -8963,8 +8975,8 @@ services:
             r#"
 version: "3"
 services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
     user: "{user}"
     network_mode: host
     cap_drop:
@@ -8984,18 +8996,19 @@ services:
             data_dir.path(),
         );
         assert!(
-            violations.iter().any(
-                |v| v.rule == SecurityRule::PluginNoHostNetwork && v.container == "mcp-presale"
-            ),
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginNoHostNetwork
+                    && v.container == "mcp-example-plugin"),
             "Plugin with network_mode: host should trigger PLUGIN_NO_HOST_NETWORK"
         );
     }
 
-    fn test_presale_manifest(token_mount: plugin::TokenMount) -> PluginManifest {
+    fn test_example_plugin_manifest(token_mount: plugin::TokenMount) -> PluginManifest {
         PluginManifest {
-            name: "Presale".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(),
+            name: "Example Plugin".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
             port: Some(4010),
@@ -9025,8 +9038,8 @@ services:
             r#"
 version: "3"
 services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
     user: "{user}"
     cap_drop:
       - ALL
@@ -9035,7 +9048,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/presale:/tokens:{token_mode}
+      - /test/.speedwave/tokens/test/example-plugin:/tokens:{token_mode}
       - /test/project:/workspace:rw
     labels:
       speedwave.plugin-service: "true"
@@ -9052,15 +9065,15 @@ services:
             r#"
 version: "3"
 services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
     user: "{user}"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     volumes:
-      - /test/.speedwave/tokens/test/presale:/tokens:ro
+      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
       - /test/project:/workspace:rw
       - /etc/passwd:/etc/passwd:ro
     labels:
@@ -9068,7 +9081,7 @@ services:
 "#,
             user = container_user()
         );
-        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let manifests = vec![test_example_plugin_manifest(plugin::TokenMount::ReadOnly)];
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -9080,7 +9093,7 @@ services:
             violations
                 .iter()
                 .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes
-                    && v.container == "mcp-presale"),
+                    && v.container == "mcp-example-plugin"),
             "Plugin with extra volumes should trigger PLUGIN_NO_EXTRA_VOLUMES"
         );
     }
@@ -9089,7 +9102,7 @@ services:
     fn test_security_check_plugin_no_extra_volumes_clean() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = valid_plugin_yaml("ro");
-        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let manifests = vec![test_example_plugin_manifest(plugin::TokenMount::ReadOnly)];
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -9109,7 +9122,7 @@ services:
     fn test_security_check_plugin_token_mount_mode_ro_violation() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = valid_plugin_yaml("rw");
-        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let manifests = vec![test_example_plugin_manifest(plugin::TokenMount::ReadOnly)];
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -9121,7 +9134,7 @@ services:
             violations
                 .iter()
                 .any(|v| v.rule == SecurityRule::PluginTokenMountMode
-                    && v.container == "mcp-presale"),
+                    && v.container == "mcp-example-plugin"),
             "ReadOnly manifest + :rw mount should trigger PLUGIN_TOKEN_MOUNT_MODE"
         );
     }
@@ -9130,9 +9143,11 @@ services:
     fn test_security_check_plugin_token_mount_mode_rw_pass() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = valid_plugin_yaml("rw");
-        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadWrite {
-            justification: "OAuth token refresh".to_string(),
-        })];
+        let manifests = vec![test_example_plugin_manifest(
+            plugin::TokenMount::ReadWrite {
+                justification: "OAuth token refresh".to_string(),
+            },
+        )];
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -9155,8 +9170,8 @@ services:
             r#"
 version: "3"
 services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
     user: "{user}"
     cap_drop:
       - ALL
@@ -9165,14 +9180,14 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/presale:/tokens:ro
+      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
       - /etc:/workspace:rw
     labels:
       speedwave.plugin-service: "true"
 "#,
             user = container_user()
         );
-        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let manifests = vec![test_example_plugin_manifest(plugin::TokenMount::ReadOnly)];
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -9195,8 +9210,8 @@ services:
             r#"
 version: "3"
 services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
     user: "{user}"
     cap_drop:
       - ALL
@@ -9205,14 +9220,14 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/presale:/tokens:ro
+      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
       - /test/project:/workspace:ro
     labels:
       speedwave.plugin-service: "true"
 "#,
             user = container_user()
         );
-        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let manifests = vec![test_example_plugin_manifest(plugin::TokenMount::ReadOnly)];
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -9235,8 +9250,8 @@ services:
             r#"
 version: "3"
 services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
     user: "{user}"
     cap_drop:
       - ALL
@@ -9252,7 +9267,7 @@ services:
 "#,
             user = container_user()
         );
-        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let manifests = vec![test_example_plugin_manifest(plugin::TokenMount::ReadOnly)];
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -9275,8 +9290,8 @@ services:
             r#"
 version: "3"
 services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
     user: "{user}"
     cap_drop:
       - ALL
@@ -9286,14 +9301,14 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - type: bind
-        source: /test/.speedwave/tokens/test/presale
+        source: /test/.speedwave/tokens/test/example-plugin
         target: /tokens
     labels:
       speedwave.plugin-service: "true"
 "#,
             user = container_user()
         );
-        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let manifests = vec![test_example_plugin_manifest(plugin::TokenMount::ReadOnly)];
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -9336,9 +9351,9 @@ services:
         // Test that generate_plugin_service creates a valid service and it can be
         // inserted into compose YAML, simulating what apply_plugins does.
         let manifest = PluginManifest {
-            name: "Presale".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(),
+            name: "Example Plugin".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
             port: Some(4010),
@@ -9370,7 +9385,7 @@ services:
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
         if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
             services.insert(
-                serde_yaml_ng::Value::String("mcp-presale".to_string()),
+                serde_yaml_ng::Value::String("mcp-example-plugin".to_string()),
                 service_value,
             );
         }
@@ -9378,8 +9393,8 @@ services:
         // Verify the service appears
         let services = doc.get("services").unwrap().as_mapping().unwrap();
         assert!(
-            services.contains_key(&serde_yaml_ng::Value::String("mcp-presale".into())),
-            "Enabled plugin service mcp-presale should appear in compose"
+            services.contains_key(&serde_yaml_ng::Value::String("mcp-example-plugin".into())),
+            "Enabled plugin service mcp-example-plugin should appear in compose"
         );
     }
 
@@ -9430,32 +9445,32 @@ services:
         // Simulate by not inserting into compose.
         let integrations = ResolvedIntegrationsConfig::default(); // plugins map is empty
         assert!(
-            !integrations.is_plugin_enabled("presale"),
-            "presale should not be enabled by default"
+            !integrations.is_plugin_enabled("example-plugin"),
+            "example-plugin should not be enabled by default"
         );
 
         // Verify the compose YAML does not contain the plugin service
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
         assert!(
-            !services.contains_key(&serde_yaml_ng::Value::String("mcp-presale".into())),
+            !services.contains_key(&serde_yaml_ng::Value::String("mcp-example-plugin".into())),
             "Disabled plugin service should NOT appear in compose"
         );
     }
 
     #[test]
     fn test_apply_plugins_worker_url_injected() {
-        // Simulate apply_plugins injecting WORKER_PRESALE_URL into mcp-hub
+        // Simulate apply_plugins injecting WORKER_EXAMPLE_PLUGIN_URL into mcp-hub
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-        let worker_env = plugin::derive_worker_env("presale");
-        let url = format!("http://mcp-presale:4010");
+        let worker_env = plugin::derive_worker_env("example-plugin");
+        let url = format!("http://mcp-example-plugin:4010");
         inject_worker_env(&mut doc, &worker_env, &url);
 
         let env = get_hub_env_seq(&doc);
         assert!(
             env.iter()
-                .any(|s| s == "WORKER_PRESALE_URL=http://mcp-presale:4010"),
-            "WORKER_PRESALE_URL should be injected into mcp-hub. Got: {:?}",
+                .any(|s| s == "WORKER_EXAMPLE_PLUGIN_URL=http://mcp-example-plugin:4010"),
+            "WORKER_EXAMPLE_PLUGIN_URL should be injected into mcp-hub. Got: {:?}",
             env
         );
     }
@@ -9464,14 +9479,14 @@ services:
     fn test_apply_plugins_speedwave_plugins_env() {
         // Simulate apply_plugins setting SPEEDWAVE_PLUGINS in claude container
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-        let slugs = vec!["presale".to_string(), "analytics".to_string()];
+        let slugs = vec!["example-plugin".to_string(), "analytics".to_string()];
         add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", &slugs.join(","));
 
         let claude = doc.get("services").unwrap().get("claude").unwrap();
         let env_seq = claude.get("environment").unwrap().as_sequence().unwrap();
         let has_plugins = env_seq.iter().any(|v| {
             v.as_str()
-                .is_some_and(|s| s == "SPEEDWAVE_PLUGINS=presale,analytics")
+                .is_some_and(|s| s == "SPEEDWAVE_PLUGINS=example-plugin,analytics")
         });
         assert!(
             has_plugins,
@@ -9483,9 +9498,9 @@ services:
     fn test_apply_plugins_token_mount_path() {
         // Verify the token mount path format generated by generate_plugin_service
         let manifest = PluginManifest {
-            name: "Presale".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(),
+            name: "Example Plugin".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
             port: Some(4010),
@@ -9516,7 +9531,7 @@ services:
         let yaml = serde_yaml_ng::to_string(&service_value).unwrap();
         // Token mount should be tokens_dir/service_id:/tokens:ro
         assert!(
-            yaml.contains("/home/user/.speedwave/tokens/myproject/presale:/tokens:ro"),
+            yaml.contains("/home/user/.speedwave/tokens/myproject/example-plugin:/tokens:ro"),
             "Token mount should be <tokens_dir>/<service_id>:/tokens:<mode>. Got:\n{}",
             yaml
         );
@@ -10783,9 +10798,9 @@ networks:
         let tmp = tempfile::tempdir().unwrap();
 
         let plugins = vec![plugin::PluginManifest {
-            name: "Presale".to_string(),
-            slug: "presale".to_string(),
-            service_id: Some("presale".to_string()),
+            name: "Example Plugin".to_string(),
+            slug: "example-plugin".to_string(),
+            service_id: Some("example-plugin".to_string()),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
             port: Some(4010),
@@ -10807,14 +10822,16 @@ networks:
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(VALID_COMPOSE_ALL_WORKERS).unwrap();
         let plugin_svc: serde_yaml_ng::Value = serde_yaml_ng::from_str(
-            "image: speedwave-mcp-presale:1.0.0\nenvironment:\n  - PORT=4010\nnetworks:\n  - speedwave_test_network\n",
+            "image: speedwave-mcp-example-plugin:1.0.0\nenvironment:\n  - PORT=4010\nnetworks:\n  - speedwave_test_network\n",
         )
         .unwrap();
-        doc["services"]["mcp-presale"] = plugin_svc;
+        doc["services"]["mcp-example-plugin"] = plugin_svc;
         let compose_with_plugin = serde_yaml_ng::to_string(&doc).unwrap();
 
         let mut integrations = all_enabled_integrations();
-        integrations.plugins.insert("presale".to_string(), true);
+        integrations
+            .plugins
+            .insert("example-plugin".to_string(), true);
 
         let secrets_dir = tmp.path().join("secrets");
         std::fs::create_dir_all(&secrets_dir).unwrap();
@@ -10828,26 +10845,27 @@ networks:
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
 
-        // Plugin worker should have MCP_PRESALE_AUTH_TOKEN env var
-        let env = get_service_env_seq(&doc, "mcp-presale");
+        // Plugin worker should have MCP_EXAMPLE_PLUGIN_AUTH_TOKEN env var
+        let env = get_service_env_seq(&doc, "mcp-example-plugin");
         assert!(
-            env.iter().any(|e| e.starts_with("MCP_PRESALE_AUTH_TOKEN=")),
-            "plugin worker should have MCP_PRESALE_AUTH_TOKEN, env={:?}",
+            env.iter()
+                .any(|e| e.starts_with("MCP_EXAMPLE_PLUGIN_AUTH_TOKEN=")),
+            "plugin worker should have MCP_EXAMPLE_PLUGIN_AUTH_TOKEN, env={:?}",
             env
         );
 
-        // Hub should have /secrets/presale-auth-token:ro mount
+        // Hub should have /secrets/example-plugin-auth-token:ro mount
         let volumes = get_hub_volumes(&doc);
         assert!(
             volumes
                 .iter()
-                .any(|v| v.contains("/secrets/presale-auth-token:ro")),
+                .any(|v| v.contains("/secrets/example-plugin-auth-token:ro")),
             "hub should mount plugin auth token, volumes={:?}",
             volumes
         );
 
         // Token file should exist on disk
-        assert!(secrets_dir.join("presale-auth-token").exists());
+        assert!(secrets_dir.join("example-plugin-auth-token").exists());
     }
 
     #[test]
@@ -12178,44 +12196,44 @@ services:
     #[test]
     fn test_render_compose_default_bridges_omits_host_bridge_env() {
         let yaml = render_with_host_bridge_plugin(
-            "figma",
-            "FIGMA_BRIDGE_URL",
-            "FIGMA_BRIDGE_TOKEN",
+            "example-plugin",
+            "EXAMPLE_PLUGIN_BRIDGE_URL",
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN",
             &super::HostBridgesInfo::default(),
         )
         .unwrap();
         assert!(
-            !yaml.contains("FIGMA_BRIDGE_URL"),
+            !yaml.contains("EXAMPLE_PLUGIN_BRIDGE_URL"),
             "host-bridge env must NOT be injected when bridges is empty, got:\n{yaml}"
         );
-        assert!(!yaml.contains("FIGMA_BRIDGE_TOKEN"));
+        assert!(!yaml.contains("EXAMPLE_PLUGIN_BRIDGE_TOKEN"));
     }
 
     #[test]
     fn test_render_compose_with_host_bridge_registration_injects_url_and_token() {
         let bridges = super::HostBridgesInfo {
             bridges: vec![super::HostBridgeRegistration {
-                plugin_slug: "figma".to_string(),
+                plugin_slug: "example-plugin".to_string(),
                 port: 54321,
                 auth_token: "test-token-abc".to_string(),
-                url_env: "FIGMA_BRIDGE_URL".to_string(),
-                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+                url_env: "EXAMPLE_PLUGIN_BRIDGE_URL".to_string(),
+                token_env: "EXAMPLE_PLUGIN_BRIDGE_TOKEN".to_string(),
             }],
         };
         let yaml = render_with_host_bridge_plugin(
-            "figma",
-            "FIGMA_BRIDGE_URL",
-            "FIGMA_BRIDGE_TOKEN",
+            "example-plugin",
+            "EXAMPLE_PLUGIN_BRIDGE_URL",
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN",
             &bridges,
         )
         .unwrap();
         assert!(
-            yaml.contains("FIGMA_BRIDGE_URL"),
-            "FIGMA_BRIDGE_URL must be injected, got:\n{yaml}"
+            yaml.contains("EXAMPLE_PLUGIN_BRIDGE_URL"),
+            "EXAMPLE_PLUGIN_BRIDGE_URL must be injected, got:\n{yaml}"
         );
         assert!(
-            yaml.contains("FIGMA_BRIDGE_TOKEN"),
-            "FIGMA_BRIDGE_TOKEN must be injected, got:\n{yaml}"
+            yaml.contains("EXAMPLE_PLUGIN_BRIDGE_TOKEN"),
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN must be injected, got:\n{yaml}"
         );
         assert!(
             yaml.contains("54321"),
@@ -12356,17 +12374,17 @@ services:
     fn test_render_compose_host_bridge_url_uses_host_docker_internal() {
         let bridges = super::HostBridgesInfo {
             bridges: vec![super::HostBridgeRegistration {
-                plugin_slug: "figma".to_string(),
+                plugin_slug: "example-plugin".to_string(),
                 port: 54321,
                 auth_token: "tok".to_string(),
-                url_env: "FIGMA_BRIDGE_URL".to_string(),
-                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+                url_env: "EXAMPLE_PLUGIN_BRIDGE_URL".to_string(),
+                token_env: "EXAMPLE_PLUGIN_BRIDGE_TOKEN".to_string(),
             }],
         };
         let yaml = render_with_host_bridge_plugin(
-            "figma",
-            "FIGMA_BRIDGE_URL",
-            "FIGMA_BRIDGE_TOKEN",
+            "example-plugin",
+            "EXAMPLE_PLUGIN_BRIDGE_URL",
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN",
             &bridges,
         )
         .unwrap();
@@ -12401,29 +12419,31 @@ services:
     fn test_render_compose_host_bridge_adds_extra_hosts_for_plugin_service() {
         let bridges = super::HostBridgesInfo {
             bridges: vec![super::HostBridgeRegistration {
-                plugin_slug: "figma".to_string(),
+                plugin_slug: "example-plugin".to_string(),
                 port: 54321,
                 auth_token: "tok".to_string(),
-                url_env: "FIGMA_BRIDGE_URL".to_string(),
-                token_env: "FIGMA_BRIDGE_TOKEN".to_string(),
+                url_env: "EXAMPLE_PLUGIN_BRIDGE_URL".to_string(),
+                token_env: "EXAMPLE_PLUGIN_BRIDGE_TOKEN".to_string(),
             }],
         };
         let yaml = render_with_host_bridge_plugin(
-            "figma",
-            "FIGMA_BRIDGE_URL",
-            "FIGMA_BRIDGE_TOKEN",
+            "example-plugin",
+            "EXAMPLE_PLUGIN_BRIDGE_URL",
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN",
             &bridges,
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let services = doc.get("services").and_then(|v| v.as_mapping()).unwrap();
-        let mcp_figma = services
-            .get(serde_yaml_ng::Value::String("mcp-figma".to_string()))
+        let mcp_example_plugin = services
+            .get(serde_yaml_ng::Value::String(
+                "mcp-example-plugin".to_string(),
+            ))
             .and_then(|v| v.as_mapping())
-            .expect("mcp-figma service must be present");
-        let extra_hosts = mcp_figma
+            .expect("mcp-example-plugin service must be present");
+        let extra_hosts = mcp_example_plugin
             .get(serde_yaml_ng::Value::String("extra_hosts".to_string()))
-            .expect("mcp-figma needs extra_hosts for host.docker.internal");
+            .expect("mcp-example-plugin needs extra_hosts for host.docker.internal");
         let entries: Vec<String> = extra_hosts
             .as_sequence()
             .unwrap()
@@ -12476,16 +12496,16 @@ services:
     #[test]
     fn test_apply_plugins_from_verified_skips_bridge_when_no_registration_matches() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("figma");
+        let plugin_dir = tmp.path().join("example-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         let vp = fixture_verified_plugin_full(
-            "figma",
-            Some("figma"),
+            "example-plugin",
+            Some("example-plugin"),
             &plugin_dir,
             None,
             Some(fixture_host_bridge_manifest(
-                "FIGMA_BRIDGE_URL",
-                "FIGMA_BRIDGE_TOKEN",
+                "EXAMPLE_PLUGIN_BRIDGE_URL",
+                "EXAMPLE_PLUGIN_BRIDGE_TOKEN",
             )),
         );
         let bridges = super::HostBridgesInfo {
@@ -12497,7 +12517,7 @@ services:
                 token_env: "OTHER_TOKEN".to_string(),
             }],
         };
-        let cfg = fixture_integrations_with_enabled("figma");
+        let cfg = fixture_integrations_with_enabled("example-plugin");
         let yaml = super::apply_plugins_from_verified(
             fixture_compose_yaml(),
             &super::ApplyPluginsCtx {
@@ -12512,8 +12532,8 @@ services:
         )
         .unwrap();
         assert!(
-            !yaml.contains("FIGMA_BRIDGE_URL"),
-            "figma plugin declares host_bridge but no registration matches its slug, got:\n{yaml}"
+            !yaml.contains("EXAMPLE_PLUGIN_BRIDGE_URL"),
+            "example-plugin declares host_bridge but no registration matches its slug, got:\n{yaml}"
         );
     }
 

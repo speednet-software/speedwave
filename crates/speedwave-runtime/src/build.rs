@@ -1650,7 +1650,7 @@ mod tests {
     #[test]
     fn test_enabled_images_ignores_plugins() {
         let mut cfg = ResolvedIntegrationsConfig::default();
-        cfg.plugins.insert("presale".to_string(), true);
+        cfg.plugins.insert("example-plugin".to_string(), true);
         let names: Vec<&str> = enabled_images(&cfg).iter().map(|i| i.name).collect();
         assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
     }

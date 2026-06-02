@@ -14,9 +14,9 @@ const openMock = vi.mocked(open);
 const MOCK_PLUGINS = {
   plugins: [
     {
-      slug: 'presale',
-      name: 'Presale CRM',
-      service_id: 'presale',
+      slug: 'example-plugin',
+      name: 'Example Plugin CRM',
+      service_id: 'example-plugin',
       version: '1.2.0',
       description: 'CRM integration',
       enabled: true,
@@ -146,18 +146,18 @@ describe('PluginsComponent', () => {
 
   describe('toggleExpand()', () => {
     it('expands a plugin', () => {
-      component.toggleExpand('presale');
-      expect(component.expandedPlugin).toBe('presale');
+      component.toggleExpand('example-plugin');
+      expect(component.expandedPlugin).toBe('example-plugin');
     });
 
     it('collapses an already expanded plugin', () => {
-      component.expandedPlugin = 'presale';
-      component.toggleExpand('presale');
+      component.expandedPlugin = 'example-plugin';
+      component.toggleExpand('example-plugin');
       expect(component.expandedPlugin).toBeNull();
     });
 
     it('switches to a different plugin', () => {
-      component.expandedPlugin = 'presale';
+      component.expandedPlugin = 'example-plugin';
       component.toggleExpand('my-commands');
       expect(component.expandedPlugin).toBe('my-commands');
     });
@@ -179,7 +179,7 @@ describe('PluginsComponent', () => {
       await component.handleTogglePlugin({ plugin: component.plugins[0], event });
       expect(invokeSpy).toHaveBeenCalledWith('set_plugin_enabled', {
         project: 'test-project',
-        serviceId: 'presale',
+        serviceId: 'example-plugin',
         enabled: true,
       });
     });
@@ -221,7 +221,7 @@ describe('PluginsComponent', () => {
       });
       expect(invokeSpy).toHaveBeenCalledWith('save_plugin_credentials', {
         project: 'test-project',
-        slug: 'presale',
+        slug: 'example-plugin',
         credentials: { api_key: 'secret-123' },
       });
       expect(projectState.needsRestart).toBe(true);
@@ -256,7 +256,7 @@ describe('PluginsComponent', () => {
       });
       expect(invokeSpy).toHaveBeenCalledWith('set_plugin_enabled', {
         project: 'test-project',
-        serviceId: 'presale',
+        serviceId: 'example-plugin',
         enabled: true,
       });
     });
@@ -332,7 +332,7 @@ describe('PluginsComponent', () => {
       await component.handleDeleteCredentials(component.plugins[0]);
       expect(invokeSpy).toHaveBeenCalledWith('delete_plugin_credentials', {
         project: 'test-project',
-        slug: 'presale',
+        slug: 'example-plugin',
       });
       expect(projectState.needsRestart).toBe(true);
     });
@@ -353,8 +353,8 @@ describe('PluginsComponent', () => {
       await component.ngOnInit();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.handleRemovePlugin(component.plugins[0]);
-      expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'presale' });
-      expect(component.success).toContain('Presale CRM');
+      expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'example-plugin' });
+      expect(component.success).toContain('Example Plugin CRM');
       expect(projectState.needsRestart).toBe(true);
     });
 
@@ -659,8 +659,8 @@ describe('PluginsComponent', () => {
     it('navigates to plugin detail route', () => {
       const router = TestBed.inject(Router);
       const spy = vi.spyOn(router, 'navigate');
-      component.navigateToPlugin('presale');
-      expect(spy).toHaveBeenCalledWith(['/plugins', 'presale']);
+      component.navigateToPlugin('example-plugin');
+      expect(spy).toHaveBeenCalledWith(['/plugins', 'example-plugin']);
     });
   });
 
@@ -709,15 +709,17 @@ describe('PluginsComponent', () => {
       const rows = fixture.nativeElement.querySelectorAll('tbody tr');
       expect(rows.length).toBe(component.plugins.length);
 
-      const presaleRow = fixture.nativeElement.querySelector('[data-testid="plugins-row-presale"]');
-      expect(presaleRow).not.toBeNull();
-      const type = presaleRow.querySelector('[data-testid="plugins-row-type"]');
+      const examplePluginRow = fixture.nativeElement.querySelector(
+        '[data-testid="plugins-row-example-plugin"]'
+      );
+      expect(examplePluginRow).not.toBeNull();
+      const type = examplePluginRow.querySelector('[data-testid="plugins-row-type"]');
       expect(type).not.toBeNull();
       expect(type.textContent.trim()).toBe('mcp');
-      const ver = presaleRow.querySelector('[data-testid="plugins-row-ver"]');
+      const ver = examplePluginRow.querySelector('[data-testid="plugins-row-ver"]');
       expect(ver).not.toBeNull();
       expect(ver.textContent.trim()).toContain('v1.2.0');
-      const signed = presaleRow.querySelector('[data-testid="plugins-row-signed"]');
+      const signed = examplePluginRow.querySelector('[data-testid="plugins-row-signed"]');
       expect(signed).not.toBeNull();
       expect(signed.textContent).toContain('ed25519');
     });
@@ -738,9 +740,9 @@ describe('PluginsComponent', () => {
       fixture.detectChanges();
       const router = TestBed.inject(Router);
       const spy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
-      const row = fixture.nativeElement.querySelector('[data-testid="plugins-row-presale"]');
+      const row = fixture.nativeElement.querySelector('[data-testid="plugins-row-example-plugin"]');
       row.click();
-      expect(spy).toHaveBeenCalledWith(['/plugins', 'presale']);
+      expect(spy).toHaveBeenCalledWith(['/plugins', 'example-plugin']);
     });
 
     it('row toggle flips enabled state and stops propagation (no navigation)', async () => {

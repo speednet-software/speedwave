@@ -26,15 +26,15 @@ describe('service-list', () => {
     });
 
     it('includes plugin services from ENABLED_SERVICES', () => {
-      process.env.ENABLED_SERVICES = 'slack,gitlab,presale';
+      process.env.ENABLED_SERVICES = 'slack,gitlab,example-plugin';
       const names = getAllServiceNames();
-      expect(names).toEqual(['slack', 'gitlab', 'presale']);
+      expect(names).toEqual(['slack', 'gitlab', 'example-plugin']);
     });
 
     it('includes multiple plugin services', () => {
-      process.env.ENABLED_SERVICES = 'slack,presale,crm,analytics';
+      process.env.ENABLED_SERVICES = 'slack,example-plugin,crm,analytics';
       const names = getAllServiceNames();
-      expect(names).toContain('presale');
+      expect(names).toContain('example-plugin');
       expect(names).toContain('crm');
       expect(names).toContain('analytics');
       expect(names).toContain('slack');
@@ -47,9 +47,9 @@ describe('service-list', () => {
     });
 
     it('handles whitespace in ENABLED_SERVICES', () => {
-      process.env.ENABLED_SERVICES = ' slack , presale , gitlab ';
+      process.env.ENABLED_SERVICES = ' slack , example-plugin , gitlab ';
       const names = getAllServiceNames();
-      expect(names).toEqual(['slack', 'presale', 'gitlab']);
+      expect(names).toEqual(['slack', 'example-plugin', 'gitlab']);
     });
 
     it('filters out empty entries from trailing commas', () => {

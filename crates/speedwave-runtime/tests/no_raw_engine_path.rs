@@ -34,7 +34,7 @@ fn manifest_root() -> PathBuf {
 }
 
 /// `.join(` invoked on a binding whose name signals it already holds an
-/// engine-side path — the exact shape of the `presaleContainerfile` bug. Use
+/// engine-side path — the exact shape of the `examplePluginContainerfile` bug. Use
 /// `vm_path_join` instead. (A chained `prepare_build_context(...).join(...)` is
 /// caught by the `CHAINED_JOIN` rule below, not here.)
 const JOIN_ON_ENGINE_PATTERNS: &[&str] = &[

@@ -100,17 +100,17 @@ Builds are scoped to what the user actually runs:
 
 ### Image pruning on update
 
-When the bundle ID changes (app version bump or build-context change), disk space is reclaimed in two steps **before** building the new image set:
+When the bundle ID changes (app version bump or build-context change), disk space is reclaimed in two steps **after** the new image set has been built (atomicity: the previous bundle's images stay on disk until the new build succeeds, so a partial failure leaves a known-good set to fall back to):
 
 1. The previous bundle's tagged images (one per `build.rs::IMAGES` entry) are removed via `nerdctl rmi`, reclaiming several GiB.
 2. BuildKit build cache is pruned via `nerdctl builder prune --all --force`, reclaiming an additional ~5–15 GiB of transient layers from `--mount=type=cache` steps.
 
-This two-step cleanup ensures the Lima VM diffdisk (50 GiB cap) has sufficient space for the new build.
+This two-step cleanup frees the Lima VM diffdisk (50 GiB cap) once the new build has succeeded, removing the now-superseded previous bundle.
 
 Both update paths perform this pruning:
 
-- **Desktop** (`reconcile_bundle_update_inner` in `desktop/src-tauri/src/reconcile.rs`) — prunes before calling `build_enabled_images` for the active project's enabled set
-- **CLI** (`update_containers` in `crates/speedwave-runtime/src/update.rs`) — prunes before calling `build_images_for_bundle` for the current project's enabled set
+- **Desktop** (`reconcile_bundle_update_inner` in `desktop/src-tauri/src/reconcile.rs`) — calls `build::build_images_for_bundle` for the active project's enabled set first, restores projects, then prunes (`should_prune_bundle` → `prune_old_bundle_images`) after `ProjectsRestored`
+- **CLI** (`update_containers` in `crates/speedwave-runtime/src/update.rs`) — builds via `build::build_images_for_bundle` for the current project's enabled set first, then prunes via `maybe_prune_previous_bundle`
 
 The guard condition is: `applied_bundle_id` exists **and** differs from the new bundle ID. Fresh installs (no `applied_bundle_id`) and rebuilds without a version change produce no prune call.
 
@@ -122,7 +122,7 @@ The mcp-os process runs on the host (not in a container) and binds to a dynamic 
 
 `reconcile_compose_port` runs in a background thread to fix this:
 
-1. Reads the current mcp-os port from `~/.speedwave/mcp-os.port`
+1. Reads the current mcp-os port from the unified lock file `~/.speedwave/mcp-os.lock.json` (`consts::MCP_OS_LOCK_FILE`) via `host_mcp_process::lock::read`
 2. Reads the active compose file and checks `WORKER_OS_URL` for a matching port
 3. If the port is stale, regenerates the compose YAML via `render_compose()`, runs the security check, and saves the new compose file
 4. Calls `compose_up_recreate` to recreate containers with the updated `WORKER_OS_URL`
@@ -173,7 +173,7 @@ Per-project granularity: different projects never block each other; the same pro
 
 After every `save_compose`, transactions call `compose_validate_with_retry(rt, project)` which runs `nerdctl compose -f <file> -p <project> config --quiet` inside the VM/distro. This catches virtiofs/9p propagation lag — the host atomic-write succeeded but the engine still sees stale or torn YAML.
 
-Retries on errors matching `is_propagation_error` (substrings `"undefined network"` and `"invalid compose project"`, both lowercased). Backoff: 100 ms before retry 1, 200 ms before retry 2. Max 3 attempts. Non-propagation errors propagate immediately.
+Retries on errors matching `is_propagation_error` (substrings `"undefined network"` and `"invalid compose project"`, both lowercased). Capped exponential backoff: 100/200/400/800/1600 ms between attempts, doubling each retry up to `COMPOSE_VALIDATE_MAX_DELAY_MS` = 1600 ms. Max `COMPOSE_VALIDATE_MAX_ATTEMPTS` = 6 attempts. Non-propagation errors propagate immediately.
 
 The error-fragment strings are SSOT'd as `compose::UNDEFINED_NETWORK_ERROR_FRAGMENT` and `compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT`, shared between the host-side `validate_compose_network_refs` (which emits the fragment) and `runtime::is_propagation_error` (which recognises it).
 
@@ -208,7 +208,7 @@ After a containerd reinstall, VM recreation, or other event that wipes container
 4. If recovery fails, the user sees an actionable message ("Please restart Speedwave")
 5. `start_containers()` additionally verifies exec health before marking `containers_started = true` in setup state
 
-The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/runtime/mod.rs`), called from four sites: CLI (`main.rs`), Desktop chat (`chat.rs`), auth check (`setup_wizard.rs`), and container start (`setup_wizard.rs`).
+The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/runtime/mod.rs`), called from three sites: CLI (`main.rs`), auth check (`check_claude_auth` in `setup_wizard.rs`), and container start (`start_containers` in `setup_wizard.rs`). The Desktop chat path (`chat.rs`) does **not** call it directly — `ChatSession::start` requires the caller to have already verified health (e.g. via `check_claude_auth`) and skips the check to avoid double health-checks.
 
 ### Missing images (reconcile-time detection)
 
@@ -220,7 +220,7 @@ When the Desktop app exits, Speedwave stops the underlying VM (where applicable)
 
 ### macOS (Lima VM)
 
-The Lima VM reserves ~9–32 GiB of RAM for the lifetime of the process — QEMU/VZ does not support memory ballooning, so this RAM is not returned to the system while the VM is running. On app exit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm_name>` with a 30s timeout.
+The Lima VM reserves 4–32 GiB of RAM for the lifetime of the process (`desired_vm_memory_gib` = `(host_ram / 2).clamp(4, 32)`, per the adaptive table above) — QEMU/VZ does not support memory ballooning, so this RAM is not returned to the system while the VM is running. On app exit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm_name>` with a 30s timeout.
 
 - **Next startup:** `ensure_ready()` detects the stopped VM and runs `limactl start` automatically. Startup is ~10–20s slower due to VM cold boot.
 - **If the process is force-killed during `limactl stop`:** The VM may be left in a `"Stopping"` state. `ensure_ready_inner()` on next launch polls until the VM finishes stopping, then starts it — no user intervention required.

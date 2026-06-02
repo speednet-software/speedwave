@@ -1,54 +1,49 @@
 # ADR-016: Cross-Platform CLI PATH
 
+> **Status:** Accepted
+> **Context:** The `speedwave` CLI binary must end up on the user's PATH on both supported platforms without ever asking for admin/sudo/UAC.
+
 ## Decision
 
-The `speedwave` CLI binary is placed on the user's PATH using **user-scope mechanisms only** — zero privilege escalation on any platform. The setup wizard (`setup_wizard::link_cli()`) handles all platforms.
+The CLI binary is placed on PATH using **user-scope mechanisms only** — no privilege escalation on macOS or Windows. The setup wizard owns this for all platforms via `setup_wizard::link_cli`, which copies the bundled binary into a user-owned directory and updates the user's shell config (Unix) or per-user registry PATH (Windows).
 
-## Rationale
+## Why
 
-Requiring admin/sudo to install a single-user CLI tool violates the principle of least privilege.[^1] Speedwave uses user-scope paths on all platforms:
+- Requiring admin/sudo to install a single-user CLI tool violates least privilege[^1]; user-scope paths avoid it entirely.
+- Copying (rather than symlinking) keeps the CLI working even if the Desktop app bundle is moved or renamed.
+- The Desktop re-links the CLI on every startup, so the binary stays in sync after an app update with no separate CLI-update step.
 
-| Platform | Location                 | Mechanism                                                                                                                              | Privileges           |
-| -------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| macOS    | `~/.local/bin/speedwave` | Copied from app bundle resources; shell config file updated based on detected shell (see Shell Detection below)                        | User scope — no sudo |
-| Windows  | `~/.speedwave/bin/`      | Copied from app bundle resources; directory added to `HKCU\Environment\Path` via PowerShell[^4]; `WM_SETTINGCHANGE` broadcast[^5] [^6] | User scope — no UAC  |
+## How it works
 
-## macOS Details
+- **macOS** — the binary is copied to `~/.local/bin/speedwave` (the XDG standard location for user executables[^2], not on the default macOS PATH built by `/usr/libexec/path_helper`). `detect_shell` reads `$SHELL`, and an `export PATH="$HOME/.local/bin:$PATH"` line is appended to the right shell config file. The append is idempotent — files already containing `.local/bin` are skipped.
+- **Windows** — the binary is copied to `~/.speedwave/bin/speedwave.exe`, that directory is added to `HKCU\Environment\Path` via PowerShell's `[Environment]::SetEnvironmentVariable('Path', …, 'User')` (per-user registry, no UAC)[^4], and a `WM_SETTINGCHANGE`[^5] broadcast (via `SendMessageTimeoutW` with `HWND_BROADCAST`[^6]) tells running shells to pick up the new PATH without a restart.
 
-`~/.local/bin/` is the XDG standard location for user-installed binaries.[^2] macOS uses the `#[cfg(unix)]` code path in `setup_wizard::link_cli()`:
+### Shell config file selection (Unix)
 
-1. Copy: the CLI binary bundled in app resources is copied to `~/.local/bin/speedwave` (with executable permission set)
-2. Shell detection: `detect_shell()` reads `$SHELL` to determine the user's default shell, then writes `export PATH="$HOME/.local/bin:$PATH"` to the correct config file for that shell (see table below). If the target file doesn't exist, it is created.
+`detect_shell` maps `$SHELL` to a `UserShell` enum (`Zsh`, `Bash`, `Unknown`), and `shell_config_targets` picks the file:
 
-This copy-based approach (replacing the previous symlink) ensures that the CLI remains functional even if the Desktop app bundle is moved or renamed. The Desktop re-links the CLI on every startup, so the binary is automatically kept in sync after updates.
+| Shell variant              | Target file(s)                                                                                        | Rationale                                                                        |
+| -------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `Zsh`                      | `.zshrc`                                                                                              | Sourced for both login and interactive zsh sessions.                             |
+| `Bash`                     | first existing of `.bash_profile` > `.bash_login` > `.profile`; creates `.bash_profile` if none exist | macOS terminals open login shells; bash reads the first existing file and stops. |
+| `Unknown` (e.g. fish, ksh) | `.profile`                                                                                            | POSIX-portable fallback for any unrecognized `$SHELL`.                           |
 
-### Shell Detection
+When `$SHELL` is _empty_ (common when the Desktop app launches from Dock/Finder under launchd, which may not propagate `$SHELL`), detection falls back to `Zsh` on macOS — zsh has been the macOS default since Catalina[^3].
 
-`detect_shell()` maps the `$SHELL` environment variable to a `UserShell` enum and selects the correct config file(s) per platform:
+**`$SHELL` limitation:** `$SHELL` reflects the login shell from `/etc/passwd`, not necessarily the interactively-used shell. This is the convention shared by Homebrew, rustup, and nvm; a user whose login shell is bash but who launches fish in their terminal profile won't get fish config updated — a known, ecosystem-wide trade-off.
 
-| Shell   | Target file(s)                                        | Rationale                                                                                              |
-| ------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| zsh     | `.zshrc`                                              | Sourced for both login and interactive zsh sessions                                                    |
-| bash    | First of `.bash_profile` > `.bash_login` > `.profile` | macOS terminals open login shells; bash reads the first existing file and stops                        |
-| unknown | `.zshrc`                                              | `$SHELL` may be unset in launchd context (Dock/Finder launch); zsh is the macOS default since Catalina |
+## Where it lives in code
 
-**`$SHELL` limitation:** `$SHELL` reflects the user's login shell (set in `/etc/passwd`), not necessarily the shell they use interactively. This is the standard convention used by all major tools (Homebrew, rustup, nvm) and covers the vast majority of users. A user whose login shell is bash but who launches fish in their terminal profile won't get fish config updated — this is a known trade-off shared with the wider ecosystem.
+- Link entry point + re-link-on-startup — `desktop/src-tauri/src/setup_wizard.rs::link_cli` (filesystem work in `link_cli_from`).
+- Shell detection / parsing — `setup_wizard.rs::detect_shell` and `parse_shell_env`.
+- Shell config file selection — `setup_wizard.rs::shell_config_targets`; idempotent PATH append in `ensure_local_bin_on_path` / `ensure_local_bin_on_path_for_shell`.
+- Windows CLI subdir (`bin`) — `crates/speedwave-runtime/src/consts.rs::CLI_BIN_SUBDIR` (SSOT; see CLAUDE.md alignment with `sweep.ps1` and the pinned-CLI launch path).
+- Cleanup — `setup_wizard.rs::factory_reset` removes the Unix CLI binary at `~/.local/bin/speedwave`; on Windows the CLI lives inside the data dir (`~/.speedwave/bin/`) and is removed by the data-dir wipe. The shell `export` line is intentionally left in place to avoid destructively editing user dotfiles.
 
-**macOS PATH:** `~/.local/bin` is not in the default macOS PATH (which is constructed by `/usr/libexec/path_helper` from `/etc/paths`[^3]). The shell config file modification in step 2 is therefore required.
+## Rejected alternatives
 
-**Why not `/usr/local/bin/`:** Although `/usr/local/` is exempt from SIP[^7], writing to it requires `sudo`. Using `~/.local/bin/` avoids privilege escalation entirely and keeps the binary in the user's home directory — aligned with XDG conventions, and isolated per-user.
-
-## Windows Details
-
-`setup_wizard::link_cli()` copies the bundled CLI binary to `~/.speedwave/bin/speedwave.exe` and adds this directory to `HKCU\Environment\Path` via PowerShell's `[Environment]::SetEnvironmentVariable('Path', ..., 'User')`[^4] — user-level registry, no UAC required. After modifying the registry, `SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment")` broadcasts the change so running shells pick up the new PATH immediately without restart.[^5] [^6]
-
-## Re-link on Startup
-
-The Desktop app calls `link_cli()` on every startup (after verifying that setup is complete). This ensures the CLI binary is updated whenever the Desktop app is updated — no separate CLI update step required.
-
-## Cleanup
-
-`setup_wizard::factory_reset()` removes the CLI binary on Unix (`~/.local/bin/speedwave`) but does not remove the shell profile line — this is intentional to avoid modifying user dotfiles destructively.
+- **`/usr/local/bin/` on macOS** — although `/usr/local/` is exempt from System Integrity Protection[^7], writing to it requires `sudo`. Using `~/.local/bin/` avoids privilege escalation entirely and keeps the binary per-user under the home directory, aligned with XDG conventions.
+- **Symlink instead of copy** — a symlink into the app bundle breaks if the bundle is moved or renamed; the copy-based approach survives that and is refreshed on every Desktop startup.
 
 ---
 

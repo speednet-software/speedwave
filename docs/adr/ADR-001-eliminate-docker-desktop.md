@@ -1,35 +1,28 @@
 # ADR-001: Eliminate Docker Desktop
 
+> **Status:** Accepted
+> **Context:** Speedwave needs container isolation on macOS and Windows without shipping Docker Desktop.
+
 ## Decision
 
-Speedwave does not require Docker Desktop. Native hypervisors are used per platform.
+Speedwave does not require Docker Desktop. Each supported platform uses a native hypervisor that hosts a Linux VM running containerd + nerdctl: Lima (on Apple's Virtualization Framework) on macOS, WSL2 (on Hyper-V) on Windows.
 
-## Rationale
+## Why
 
-Docker Desktop requires a commercial license for companies with more than 250 employees or over $10M in revenue.[^1] It is also heavyweight — it runs a full LinuxKit VM on macOS under the hood.[^2]
+- Docker Desktop needs a paid commercial license for larger companies (over 250 employees or over $10M revenue), per the [Docker Subscription Service Agreement](https://www.docker.com/legal/docker-subscription-service-agreement/).
+- It is heavyweight on macOS, running a full LinuxKit VM (see [Docker Desktop for Mac architecture](https://docs.docker.com/desktop/mac/apple-silicon/)).
+- The native alternatives are free, faster to start, and better integrated with the OS.
+- macOS: [Lima](https://lima-vm.io/) is open-source and runs on Apple's Virtualization Framework (the native macOS hypervisor) via Lima's vzNAT networking.
+- Windows: WSL2 is built into Windows 10/11 and runs on the native Hyper-V layer (see the [WSL version comparison](https://learn.microsoft.com/en-us/windows/wsl/compare-versions)).
 
-Native alternatives are free, faster, and better integrated with the OS:
+## Where it lives in code
 
-| Platform | Solution                              | Rationale                                                                                       |
-| -------- | ------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| macOS    | Lima + Apple Virtualization Framework | Lima is open-source; Apple VZ is the native macOS hypervisor also used by UTM and Parallels[^3] |
-| Windows  | WSL2 + Hyper-V                        | Built into Windows 10/11 Pro, free, uses native Hyper-V[^5]                                     |
+- macOS runtime (Lima, vzNAT host gateway, Lima 0.11.0+ requirement) — `crates/speedwave-runtime/src/runtime/lima.rs`
+- Windows runtime (WSL2 distro management, containerd/buildkit inside the distro) — `crates/speedwave-runtime/src/runtime/wsl.rs`
+- Lima vzNAT static host IP (192.168.5.2) — `crates/speedwave-runtime/src/consts.rs` (`LIMA_VZ_HOST_IP`)
+- Public runtime façade selecting the per-platform implementation — `crates/speedwave-runtime/src/runtime/locked.rs` (see [ADR-066](ADR-066-locked-runtime-per-project-compose-lock.md))
 
-## Rejected Alternatives
+## Rejected alternatives
 
-- **Rancher Desktop** — requires KVM on Linux, extra dependency for the Linux path that was dropped in [ADR-059](ADR-059-drop-linux-support.md)[^6]
-- **Podman Desktop on macOS** — uses QEMU instead of Apple VZ, slower[^7]
-
----
-
-[^1]: [Docker Desktop Subscription Service Agreement](https://www.docker.com/legal/docker-subscription-service-agreement/)
-
-[^2]: [Docker Desktop for Mac architecture](https://docs.docker.com/desktop/mac/apple-silicon/)
-
-[^3]: [Lima - Linux virtual machines on macOS](https://lima-vm.io/)
-
-[^5]: [WSL2 architecture - Microsoft Docs](https://learn.microsoft.com/en-us/windows/wsl/compare-versions)
-
-[^6]: [Rancher Desktop Installation - KVM requirement](https://docs.rancherdesktop.io/getting-started/installation/)
-
-[^7]: [Lima vmType: vz vs qemu](https://lima-vm.io/docs/config/vmtype/)
+- **Rancher Desktop** — required KVM on Linux, an extra dependency for the Linux host path that was later dropped entirely (see [ADR-059](ADR-059-drop-linux-support.md)).
+- **Podman Desktop on macOS** — used QEMU instead of Apple's Virtualization Framework, which is slower (see [Lima vmType: vz vs qemu](https://lima-vm.io/docs/config/vmtype/)).

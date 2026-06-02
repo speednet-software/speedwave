@@ -1456,7 +1456,7 @@ mod tests {
     #[test]
     fn validate_bridge_name_ok() {
         assert!(validate_bridge_name("ide"));
-        assert!(validate_bridge_name("figma"));
+        assert!(validate_bridge_name("example-plugin"));
         assert!(validate_bridge_name("a"));
         assert!(validate_bridge_name("a-b-c"));
         assert!(validate_bridge_name("a1b2"));
@@ -1510,8 +1510,8 @@ mod tests {
 
     #[test]
     fn config_builder_pairing_valid() {
-        let cfg = pairing_config("figma");
-        assert_eq!(cfg.name, "figma");
+        let cfg = pairing_config("example-plugin");
+        assert_eq!(cfg.name, "example-plugin");
         assert!(matches!(cfg.mode, ConnectionMode::Pairing(_)));
         assert!(cfg.auth.is_none());
     }
@@ -1528,7 +1528,7 @@ mod tests {
 
     #[test]
     fn config_builder_pairing_empty_roles_rejected() {
-        let err = HostBridgeConfig::builder("figma")
+        let err = HostBridgeConfig::builder("example-plugin")
             .pairing(PairingConfig {
                 roles: HashMap::new(),
                 on_role_collision: RoleCollisionPolicy::EvictOlder,
@@ -1722,7 +1722,7 @@ mod tests {
     #[test]
     fn origin_reject_if_present_blocks_browser() {
         let req = req_with_origin(
-            Some("https://figma.com"),
+            Some("https://example.com"),
             None,
             Some(("x-test-auth", "tok")),
         );
@@ -1738,7 +1738,7 @@ mod tests {
 
     #[test]
     fn origin_accept_if_query_param_allows_browser_with_token() {
-        let req = req_with_origin(Some("https://figma.com"), Some("token=tok"), None);
+        let req = req_with_origin(Some("https://example.com"), Some("token=tok"), None);
         let auth = AuthState::new("tok".to_string());
         let matched = validate_request_auth_single(&req, &auth, &AuthScheme::QueryParam("token"))
             .expect("auth must match via query param");
@@ -1753,7 +1753,7 @@ mod tests {
     fn origin_accept_if_query_param_blocks_browser_with_header_auth() {
         // Header auth + Origin = forged combo (workers never set Origin).
         let req = req_with_origin(
-            Some("https://figma.com"),
+            Some("https://example.com"),
             None,
             Some(("x-test-worker-auth", "tok")),
         );
@@ -1843,7 +1843,7 @@ mod tests {
 
     #[test]
     fn start_endpoint_in_pairing_config_bails() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let mut bridge = HostBridge::new(cfg).unwrap();
         let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
         let err = bridge.start_endpoint(handler);
@@ -2123,7 +2123,7 @@ mod tests {
 
     #[test]
     fn pairing_two_different_roles_get_paired_and_relay() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |evt| {
@@ -2145,7 +2145,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (mut plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
 
@@ -2187,7 +2187,7 @@ mod tests {
 
     #[test]
     fn pairing_relay_forwards_binary_frames() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2201,7 +2201,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (mut plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
 
@@ -2220,7 +2220,7 @@ mod tests {
 
     #[test]
     fn pairing_pair_busy_returns_http_409() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |evt| {
@@ -2240,7 +2240,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (_plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
             // Wait for pairing to set `active`.
@@ -2277,7 +2277,7 @@ mod tests {
 
     #[test]
     fn pairing_disconnect_one_side_closes_other() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2291,7 +2291,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (mut plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
 
@@ -2514,7 +2514,7 @@ mod tests {
 
     #[test]
     fn pairing_role_match_header_worker() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |e| {
@@ -2549,7 +2549,7 @@ mod tests {
 
     #[test]
     fn pairing_role_match_query_plugin() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |e| {
@@ -2565,7 +2565,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (_ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2582,7 +2582,7 @@ mod tests {
 
     #[test]
     fn pairing_relay_text_frames() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2600,7 +2600,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2616,7 +2616,7 @@ mod tests {
 
     #[test]
     fn pairing_relay_close_frames() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2634,7 +2634,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2656,7 +2656,7 @@ mod tests {
 
     #[test]
     fn pairing_event_callback_order_slot_slot_paired_closed() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |e| {
@@ -2680,7 +2680,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2716,7 +2716,7 @@ mod tests {
             ("worker", AuthScheme::Header("x-test-worker-auth")),
             ("plugin", AuthScheme::QueryParam("token")),
         ]);
-        let cfg = HostBridgeConfig::builder("figma")
+        let cfg = HostBridgeConfig::builder("example-plugin")
             .pairing(PairingConfig {
                 roles,
                 on_role_collision: RoleCollisionPolicy::Reject,
@@ -2785,7 +2785,7 @@ mod tests {
 
     #[test]
     fn pairing_evict_older_replaces_pending() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |e| {
@@ -2835,7 +2835,7 @@ mod tests {
 
     #[test]
     fn pairing_third_connection_returns_http_409_not_close_1008() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2853,7 +2853,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2882,7 +2882,7 @@ mod tests {
     fn pairing_pair_id_generation_prevents_stale_active_clear() {
         // A relay task that finishes after a *new* pair was activated must
         // NOT clear `active`. We exercise this by walking the state manually.
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2901,7 +2901,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2924,7 +2924,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2957,7 +2957,7 @@ mod tests {
             ("worker", AuthScheme::Header("x-test-worker-auth")),
             ("plugin", AuthScheme::QueryParam("token")),
         ]);
-        let cfg = HostBridgeConfig::builder("figma")
+        let cfg = HostBridgeConfig::builder("example-plugin")
             .pairing(PairingConfig {
                 roles,
                 on_role_collision: RoleCollisionPolicy::EvictOlder,
@@ -2985,7 +2985,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -3018,7 +3018,7 @@ mod tests {
             ("worker", AuthScheme::Header("x-test-worker-auth")),
             ("plugin", AuthScheme::QueryParam("token")),
         ]);
-        let cfg = HostBridgeConfig::builder("figma")
+        let cfg = HostBridgeConfig::builder("example-plugin")
             .pairing(PairingConfig {
                 roles,
                 on_role_collision: RoleCollisionPolicy::EvictOlder,

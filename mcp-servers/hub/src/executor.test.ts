@@ -545,7 +545,7 @@ describe('executor', () => {
 
     beforeEach(() => {
       resetServiceCaches();
-      process.env.ENABLED_SERVICES = 'slack,presale';
+      process.env.ENABLED_SERVICES = 'slack,example-plugin';
     });
 
     afterEach(() => {
@@ -564,10 +564,10 @@ describe('executor', () => {
         string,
         Record<string, Record<string, unknown>>
       >;
-      mutableRegistry['presale'] = {
+      mutableRegistry['example-plugin'] = {
         searchCustomers: {
           name: 'searchCustomers',
-          service: 'presale',
+          service: 'example-plugin',
           description: 'Search CRM customers',
           inputSchema: { type: 'object', properties: {} },
           keywords: [],
@@ -578,19 +578,19 @@ describe('executor', () => {
 
       // Set up mock bridges
       const mockBridges = createMockBridges();
-      mockBridges['presale'] = null;
+      mockBridges['example-plugin'] = null;
       mockBridges['os'] = null;
       _setBridgesForTesting(mockBridges);
 
       // Code that accesses the sandbox to check what's available
-      const code = `typeof presale`;
+      const code = `typeof examplePlugin`;
       const result = await executeCode({ code, timeoutMs: 5000 });
-      // presale is in sandbox but has no bridge, so it's undefined
+      // example-plugin is in sandbox but has no bridge, so it's undefined
       expect(result.success).toBe(true);
       expect(result.data).toBe('undefined');
 
       // Cleanup
-      delete mutableRegistry['presale'];
+      delete mutableRegistry['example-plugin'];
       _setBridgesForTesting(null);
     });
   });

@@ -1,9 +1,8 @@
 # Speedwave MCP Playwright Worker — see ADR-039 in docs/adr/
 #
 # Shared browser automation service — wraps Microsoft's official @playwright/mcp
-# package in a Speedwave-hardened container. Consumed by the `figma`,
-# `accessibility-audit`, `visual-regression`, and `site-analyzer` plugins (and
-# directly from Claude).
+# package in a Speedwave-hardened container. Consumed by browser-automation
+# plugins and directly from Claude.
 #
 # Security profile:
 # - No /tokens mount (Playwright has no credentials).

@@ -8,7 +8,7 @@ Speedwave is a **thin orchestration layer**, not a reimplementation of Lima, ner
 
 - If you're writing more than ~100 lines for something that already exists as a CLI tool — stop and reconsider
 - Avoid clever abstractions; prefer obvious code that a new contributor understands in 5 minutes
-- `speedwave` binary: starts containers, launches Claude, plus `check`/`update`/`self-update`/`addon install` subcommands — nothing more
+- `speedwave` binary: starts containers, launches Claude, plus `check`/`init`/`login`/`logout`/`update`/`self-update`/`plugin install` subcommands — nothing more
 
 ## YAGNI — You Aren't Gonna Need It
 
@@ -31,10 +31,10 @@ CLAUDE.md lists every SSOT and SSOT-alignment pair — read it for the full surf
 ## SOLID (applied to this codebase)
 
 - **Single Responsibility** — `ContainerRuntime` only manages containers; `ide_bridge.rs` only handles IDE events; `setup_wizard.rs` only runs setup. Do not mix concerns.
-- **Open/Closed** — Adding a new platform = new `impl ContainerRuntime` alongside `LimaRuntime` / `WslRuntime`, zero changes to existing code
-- **Liskov Substitution** — `LimaRuntime` (macOS) and `WslRuntime` (Windows) are interchangeable; callers use `Box<dyn ContainerRuntime>` exclusively
+- **Open/Closed** — Adding a new platform = new `impl ContainerRuntime` alongside `LimaRuntime` / `WslRuntime`, zero changes to external callers
+- **Liskov Substitution** — `LimaRuntime` (macOS) and `WslRuntime` (Windows) are interchangeable; the public `LockedRuntime` façade wraps `Box<dyn ContainerRuntime>` and callers never see the trait directly
 - **Interface Segregation** — `ContainerRuntime` trait has only the methods callers actually need
-- **Dependency Inversion** — high-level modules (`speedwave-cli`, `desktop`) depend on the `ContainerRuntime` trait, not on Lima/WSL2 directly
+- **Dependency Inversion** — high-level modules (`speedwave-cli`, `desktop`) depend on the public `LockedRuntime` interface, not on Lima/WSL2 directly. The internal `ContainerRuntime` trait remains `pub(crate)` and is never exposed outside the runtime crate
 
 ## Rule of Three
 

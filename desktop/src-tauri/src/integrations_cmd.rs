@@ -803,7 +803,7 @@ pub struct OsIntegrationValidation {
 
 /// Reconcile enabled OS integrations with live macOS TCC state — auto-disable
 /// any whose permission no longer holds. No-op on non-macOS. Migration path
-/// for the embedded-Info.plist identifier change is in ADR-053.
+/// for the embedded-Info.plist identifier change is in ADR-049.
 #[tauri::command]
 pub fn validate_os_integrations_on_startup(
     project: String,

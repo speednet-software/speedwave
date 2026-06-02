@@ -12,10 +12,10 @@ paths:
 
 ## Test pattern
 
-Follow `mcp-servers/hub/src/tools/gitlab/delete_tag.test.ts` as reference:
+Follow `mcp-servers/gitlab/src/tools/branch-tools.test.ts` (or `mcp-servers/redmine/src/tools/metadata.test.ts`) as reference:
 
-- Import `metadata` + `execute` from the handler
-- **Metadata tests**: name, category, service, description, keywords, inputSchema (type, properties, required), outputSchema, example, inputExamples, deferLoading
+- Import the worker's tool factory (e.g. `createBranchTools` from `./branch-tools.js`, or `createToolDefinitions` from `./index.js`) plus the types/helpers from `@speedwave/mcp-shared` (`Tool`, `notConfiguredMessage`). Call the factory and resolve each tool's `handler` via `tools.find((t) => t.tool.name === '<name>')?.handler`
+- **Metadata tests**: name, description, annotations (readOnlyHint, destructiveHint), keywords, example, inputSchema (type, properties, required), and `_meta.deferLoading`
 - **Execute success cases**: mock the service client method with `vi.fn()`, verify return value and mock calls
 - **Parameter validation**: missing, empty, null, undefined, falsy values
 - **Error handling**: Error objects, non-Error with message/description, plain strings, undefined

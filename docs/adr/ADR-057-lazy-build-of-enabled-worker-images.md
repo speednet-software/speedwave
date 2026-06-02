@@ -12,7 +12,7 @@ The heavy images amplify the cost:
 
 - `speedwave-mcp-playwright` is the biggest built-in image because it ships Chromium and its system dependencies.[^1]
 - the upcoming `speedwave-mcp-office` adds Debian + LibreOffice + a Python venv (markitdown / weasyprint / pdfminer / onnxruntime / pandas / …) on top.
-- plugin `presale` and similar ML plugins multiple GB (docling, embeddings)
+- large ML plugins can reach multiple GB once their model and Python dependencies are bundled
 
 Effects on the user:
 

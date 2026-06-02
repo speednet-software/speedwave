@@ -2049,25 +2049,25 @@ mod tests {
         let mut cfg = IntegrationsConfig::default();
         assert!(cfg.plugins.is_none());
 
-        cfg.set_plugin_enabled("presale", true);
+        cfg.set_plugin_enabled("example-plugin", true);
         let plugins = cfg.plugins.as_ref().unwrap();
-        assert_eq!(plugins.get("presale").unwrap().enabled, Some(true));
+        assert_eq!(plugins.get("example-plugin").unwrap().enabled, Some(true));
 
-        cfg.set_plugin_enabled("presale", false);
+        cfg.set_plugin_enabled("example-plugin", false);
         let plugins = cfg.plugins.as_ref().unwrap();
-        assert_eq!(plugins.get("presale").unwrap().enabled, Some(false));
+        assert_eq!(plugins.get("example-plugin").unwrap().enabled, Some(false));
     }
 
     #[test]
     fn test_is_plugin_enabled() {
         let resolved = ResolvedIntegrationsConfig {
             plugins: HashMap::from([
-                ("presale".to_string(), true),
+                ("example-plugin".to_string(), true),
                 ("analytics".to_string(), false),
             ]),
             ..Default::default()
         };
-        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(resolved.is_plugin_enabled("example-plugin"));
         assert!(!resolved.is_plugin_enabled("analytics"));
         assert!(!resolved.is_plugin_enabled("unknown"));
     }
@@ -2076,7 +2076,7 @@ mod tests {
     fn test_enabled_plugin_service_ids() {
         let resolved = ResolvedIntegrationsConfig {
             plugins: HashMap::from([
-                ("presale".to_string(), true),
+                ("example-plugin".to_string(), true),
                 ("analytics".to_string(), false),
                 ("reporting".to_string(), true),
             ]),
@@ -2084,7 +2084,7 @@ mod tests {
         };
         let mut enabled = resolved.enabled_plugin_service_ids();
         enabled.sort();
-        assert_eq!(enabled, vec!["presale", "reporting"]);
+        assert_eq!(enabled, vec!["example-plugin", "reporting"]);
     }
 
     #[test]
@@ -2110,7 +2110,7 @@ mod tests {
                     host_exec: None,
                     os: None,
                     plugins: Some(HashMap::from([(
-                        "presale".to_string(),
+                        "example-plugin".to_string(),
                         IntegrationConfig {
                             enabled: Some(true),
                         },
@@ -2125,9 +2125,12 @@ mod tests {
         };
 
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
-        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(resolved.is_plugin_enabled("example-plugin"));
         assert!(!resolved.is_plugin_enabled("unknown"));
-        assert_eq!(resolved.enabled_plugin_service_ids(), vec!["presale"]);
+        assert_eq!(
+            resolved.enabled_plugin_service_ids(),
+            vec!["example-plugin"]
+        );
     }
 
     // -- SpeedwaveUserConfig::find_project / require_project tests --

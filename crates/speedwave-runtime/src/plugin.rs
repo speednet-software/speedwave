@@ -634,12 +634,12 @@ fn get_plugin_token_status_with_base(
     get_plugin_token_status_in(&home.join(consts::DATA_DIR), project, manifest)
 }
 
-/// Derives WORKER_{SID}_URL from a service_id. E.g. "presale" → "WORKER_PRESALE_URL"
+/// Derives WORKER_{SID}_URL from a service_id. E.g. "example-plugin" → "WORKER_EXAMPLE_PLUGIN_URL"
 pub fn derive_worker_env(service_id: &str) -> String {
     format!("WORKER_{}_URL", service_id.to_uppercase().replace('-', "_"))
 }
 
-/// Derives compose service name from service_id. E.g. "presale" → "mcp-presale"
+/// Derives compose service name from service_id. E.g. "example-plugin" → "mcp-example-plugin"
 pub fn derive_compose_name(service_id: &str) -> String {
     format!("mcp-{}", service_id)
 }
@@ -2054,7 +2054,7 @@ fn build_single_plugin_image(
     Ok(())
 }
 
-/// Returns the image tag for a plugin. E.g. "speedwave-mcp-presale:1.2.0"
+/// Returns the image tag for a plugin. E.g. "speedwave-mcp-example-plugin:1.2.0"
 fn plugin_image_tag(manifest: &PluginManifest) -> String {
     let tag = manifest.image_tag.as_deref().unwrap_or(&manifest.version);
     format!("speedwave-mcp-{}:{}", manifest.slug, tag)
@@ -2290,11 +2290,11 @@ mod tests {
     #[test]
     fn test_manifest_serde_roundtrip() {
         let manifest = PluginManifest {
-            name: "Presale CRM".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(),
+            name: "Example Plugin CRM".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(),
             version: "1.2.0".to_string(),
-            description: "Presale CRM integration".to_string(),
+            description: "Example Plugin CRM integration".to_string(),
             port: None,
             image_tag: None,
             resources: vec!["skills".to_string(), "commands".to_string()],
@@ -2320,9 +2320,9 @@ mod tests {
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: PluginManifest = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.name, "Presale CRM");
-        assert_eq!(parsed.service_id.as_deref(), Some("presale"));
-        assert_eq!(parsed.slug, "presale");
+        assert_eq!(parsed.name, "Example Plugin CRM");
+        assert_eq!(parsed.service_id.as_deref(), Some("example-plugin"));
+        assert_eq!(parsed.slug, "example-plugin");
         assert_eq!(parsed.version, "1.2.0");
         assert_eq!(parsed.port, None);
         assert_eq!(parsed.resources.len(), 2);
@@ -2354,10 +2354,10 @@ mod tests {
     #[test]
     fn test_manifest_with_requires_integrations() {
         let json = r#"{
-            "name": "Presale Plugin",
-            "slug": "presale",
+            "name": "Example Plugin Plugin",
+            "slug": "example-plugin",
             "version": "1.0.0",
-            "description": "Presale CRM",
+            "description": "Example Plugin CRM",
             "requires_integrations": ["sharepoint"]
         }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
@@ -2386,7 +2386,7 @@ mod tests {
 
     #[test]
     fn test_slug_validation_valid() {
-        assert!(validate_slug("presale").is_ok());
+        assert!(validate_slug("example-plugin").is_ok());
         assert!(validate_slug("my-plugin").is_ok());
         assert!(validate_slug("a").is_ok());
         assert!(validate_slug("plugin123").is_ok());
@@ -2532,25 +2532,28 @@ mod tests {
 
     #[test]
     fn test_derive_worker_env() {
-        assert_eq!(derive_worker_env("presale"), "WORKER_PRESALE_URL");
+        assert_eq!(
+            derive_worker_env("example-plugin"),
+            "WORKER_EXAMPLE_PLUGIN_URL"
+        );
         assert_eq!(derive_worker_env("my-plugin"), "WORKER_MY_PLUGIN_URL");
         assert_eq!(derive_worker_env("crm"), "WORKER_CRM_URL");
     }
 
     #[test]
     fn test_derive_compose_name() {
-        assert_eq!(derive_compose_name("presale"), "mcp-presale");
+        assert_eq!(derive_compose_name("example-plugin"), "mcp-example-plugin");
         assert_eq!(derive_compose_name("my-plugin"), "mcp-my-plugin");
     }
 
     #[test]
     fn test_generate_plugin_service_output() {
         let manifest = PluginManifest {
-            name: "Presale CRM".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(),
+            name: "Example Plugin CRM".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(),
             version: "1.2.0".to_string(),
-            description: "Presale CRM".to_string(),
+            description: "Example Plugin CRM".to_string(),
             port: None,
             image_tag: None,
             resources: vec![],
@@ -2580,12 +2583,12 @@ mod tests {
 
         // Verify key properties
         assert!(
-            yaml.contains("speedwave-mcp-presale:1.2.0"),
+            yaml.contains("speedwave-mcp-example-plugin:1.2.0"),
             "image tag: {yaml}"
         );
         assert!(
             yaml.contains(&format!(
-                "{}_myproject_mcp_presale",
+                "{}_myproject_mcp_example_plugin",
                 crate::consts::compose_prefix()
             )),
             "container_name: {yaml}"
@@ -2699,13 +2702,13 @@ mod tests {
     #[test]
     fn test_list_installed_plugins_from_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("presale");
+        let plugin_dir = tmp.path().join("example-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
 
         let manifest = r#"{
-            "name": "Presale",
-            "slug": "presale",
-            "service_id": "presale",
+            "name": "Example Plugin",
+            "slug": "example-plugin",
+            "service_id": "example-plugin",
             "version": "1.0.0",
             "description": "test",
             "port": 4010
@@ -2714,7 +2717,7 @@ mod tests {
 
         let plugins = list_installed_from_dir(tmp.path()).unwrap();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].slug, "presale");
+        assert_eq!(plugins[0].slug, "example-plugin");
     }
 
     #[test]
@@ -2836,7 +2839,7 @@ mod tests {
     #[test]
     fn test_find_plugin_dir_nested() {
         let tmp = tempfile::tempdir().unwrap();
-        let nested = tmp.path().join("presale-1.0.0");
+        let nested = tmp.path().join("example-plugin-1.0.0");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("plugin.json"), "{}").unwrap();
         let result = find_plugin_dir(tmp.path()).unwrap();
@@ -2883,13 +2886,13 @@ mod tests {
         tokens.insert("api_key".to_string(), "sk-secret-123".to_string());
         tokens.insert("refresh_token".to_string(), "rt-abc".to_string());
 
-        configure_plugin_tokens_with_base(home, "myproject", "presale", &tokens).unwrap();
+        configure_plugin_tokens_with_base(home, "myproject", "example-plugin", &tokens).unwrap();
 
         let token_dir = home
             .join(consts::DATA_DIR)
             .join("tokens")
             .join("myproject")
-            .join("presale");
+            .join("example-plugin");
 
         assert_eq!(
             std::fs::read_to_string(token_dir.join("api_key")).unwrap(),
@@ -4130,17 +4133,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
 
-        // Create an "existing" plugin with service_id "presale"
-        let existing_dir = plugins_dir.join("presale");
+        // Create an "existing" plugin with service_id "example-plugin"
+        let existing_dir = plugins_dir.join("example-plugin");
         std::fs::create_dir_all(&existing_dir).unwrap();
         std::fs::write(
             existing_dir.join("plugin.json"),
             r#"{
-                "name": "Presale Original",
-                "slug": "presale",
-                "service_id": "presale",
+                "name": "Example Plugin Original",
+                "slug": "example-plugin",
+                "service_id": "example-plugin",
                 "version": "1.0.0",
-                "description": "Original presale plugin",
+                "description": "Original example-plugin plugin",
                 "port": 4010
             }"#,
         )
@@ -4162,9 +4165,9 @@ mod tests {
 
         // New plugin with the same service_id but different slug
         let new_manifest = PluginManifest {
-            name: "Presale Clone".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(), // slug == service_id (required by validation)
+            name: "Example Plugin Clone".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(), // slug == service_id (required by validation)
             version: "2.0.0".to_string(),
             description: "A clone".to_string(),
             port: None,
@@ -4200,9 +4203,9 @@ mod tests {
 
         // Now test with a DIFFERENT slug but same service_id
         let conflict_manifest = PluginManifest {
-            name: "Presale Fork".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale-fork".to_string(),
+            name: "Example Plugin Fork".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin-fork".to_string(),
             version: "1.0.0".to_string(),
             description: "A fork".to_string(),
             port: None,
@@ -4847,10 +4850,10 @@ mod tests {
     #[test]
     fn auth_field_description_defaults_to_none_when_omitted() {
         let json = r#"{
-            "key": "figma_pat",
+            "key": "example_pat",
             "label": "Token",
             "field_type": "password",
-            "placeholder": "figd_...",
+            "placeholder": "tok_...",
             "is_secret": true
         }"#;
         let field: AuthFieldDef = serde_json::from_str(json).unwrap();
@@ -4862,17 +4865,17 @@ mod tests {
     #[test]
     fn auth_field_description_parses_when_present() {
         let json = r#"{
-            "key": "figma_pat",
+            "key": "example_pat",
             "label": "Token",
             "field_type": "password",
-            "placeholder": "figd_...",
+            "placeholder": "tok_...",
             "is_secret": true,
-            "description": "Generate at figma.com → Settings → Security."
+            "description": "Generate at example.com → Settings → Security."
         }"#;
         let field: AuthFieldDef = serde_json::from_str(json).unwrap();
         assert_eq!(
             field.description.as_deref(),
-            Some("Generate at figma.com → Settings → Security.")
+            Some("Generate at example.com → Settings → Security.")
         );
     }
 
@@ -4881,7 +4884,7 @@ mod tests {
         // An explicit empty string must round-trip as Some(""), not be
         // coerced to None — the author chose to render nothing deliberately.
         let json = r#"{
-            "key": "figma_pat",
+            "key": "example_pat",
             "label": "Token",
             "field_type": "password",
             "placeholder": "",
@@ -4933,7 +4936,7 @@ mod tests {
     fn field_with_validation(validation: Option<AuthFieldValidation>) -> AuthFieldDef {
         AuthFieldDef {
             key: "token".to_string(),
-            label: "Figma Token".to_string(),
+            label: "Example Plugin Token".to_string(),
             field_type: "password".to_string(),
             placeholder: "".to_string(),
             is_secret: true,
@@ -4958,12 +4961,12 @@ mod tests {
         let json = r#"{
             "key": "token", "label": "T", "field_type": "password",
             "placeholder": "", "is_secret": true,
-            "validation": { "pattern": "^figd_[A-Za-z0-9_-]+$", "message": "Must start with figd_" }
+            "validation": { "pattern": "^tok_[A-Za-z0-9_-]+$", "message": "Must start with tok_" }
         }"#;
         let field: AuthFieldDef = serde_json::from_str(json).unwrap();
         let v = field.validation.expect("validation should parse");
-        assert_eq!(v.pattern, "^figd_[A-Za-z0-9_-]+$");
-        assert_eq!(v.message.as_deref(), Some("Must start with figd_"));
+        assert_eq!(v.pattern, "^tok_[A-Za-z0-9_-]+$");
+        assert_eq!(v.message.as_deref(), Some("Must start with tok_"));
     }
 
     #[test]
@@ -4980,7 +4983,7 @@ mod tests {
     #[test]
     fn validate_manifest_accepts_valid_pattern() {
         let m = manifest_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
+            pattern: "^tok_[A-Za-z0-9_-]+$".to_string(),
             message: Some("bad".to_string()),
         }));
         let tmp = tempfile::tempdir().unwrap();
@@ -5014,7 +5017,7 @@ mod tests {
     fn validate_manifest_rejects_uncompilable_pattern() {
         // Unbalanced group — invalid in the Rust regex crate.
         let m = manifest_with_validation(Some(AuthFieldValidation {
-            pattern: "^(figd_".to_string(),
+            pattern: "^(tok_".to_string(),
             message: None,
         }));
         let tmp = tempfile::tempdir().unwrap();
@@ -5033,7 +5036,7 @@ mod tests {
         // Empty == "leave stored value untouched"; required-ness is enforced
         // elsewhere, so the pattern must not fire on an empty submission.
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_.+$".to_string(),
+            pattern: "^tok_.+$".to_string(),
             message: None,
         }));
         assert!(validate_credential_value(&field, "").is_ok());
@@ -5042,31 +5045,31 @@ mod tests {
     #[test]
     fn validate_credential_value_accepts_matching() {
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
+            pattern: "^tok_[A-Za-z0-9_-]+$".to_string(),
             message: Some("nope".to_string()),
         }));
-        assert!(validate_credential_value(&field, "figd_abc-123_XYZ").is_ok());
+        assert!(validate_credential_value(&field, "tok_abc-123_XYZ").is_ok());
     }
 
     #[test]
     fn validate_credential_value_rejects_mismatch_with_author_message() {
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
-            message: Some("Token must start with figd_".to_string()),
+            pattern: "^tok_[A-Za-z0-9_-]+$".to_string(),
+            message: Some("Token must start with tok_".to_string()),
         }));
         let err = validate_credential_value(&field, "ghp_wrongprefix").unwrap_err();
-        assert_eq!(err, "Token must start with figd_");
+        assert_eq!(err, "Token must start with tok_");
     }
 
     #[test]
     fn validate_credential_value_rejects_mismatch_with_generic_fallback() {
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_.+$".to_string(),
+            pattern: "^tok_.+$".to_string(),
             message: None,
         }));
         let err = validate_credential_value(&field, "bad").unwrap_err();
         // Falls back to a message naming the field's label, not its key.
-        assert!(err.contains("Figma Token"), "got: {err}");
+        assert!(err.contains("Example Plugin Token"), "got: {err}");
     }
 
     #[test]
@@ -5074,12 +5077,12 @@ mod tests {
         // A value that only *contains* a match (but has extra chars) must be
         // rejected — anchoring mirrors the HTML pattern's full-match rule.
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "figd_[a-z]+".to_string(), // intentionally un-anchored by author
+            pattern: "tok_[a-z]+".to_string(), // intentionally un-anchored by author
             message: Some("bad".to_string()),
         }));
-        assert!(validate_credential_value(&field, "figd_abc").is_ok());
+        assert!(validate_credential_value(&field, "tok_abc").is_ok());
         assert!(
-            validate_credential_value(&field, "prefix_figd_abc_suffix").is_err(),
+            validate_credential_value(&field, "prefix_tok_abc_suffix").is_err(),
             "partial match must be rejected by the anchoring wrapper"
         );
     }
@@ -5195,10 +5198,10 @@ mod tests {
         assert!(compile_anchored_pattern("(")
             .unwrap_err()
             .contains("invalid"));
-        let re = compile_anchored_pattern("figd_[a-z]+").unwrap();
-        assert!(re.is_match("figd_abc"));
+        let re = compile_anchored_pattern("tok_[a-z]+").unwrap();
+        assert!(re.is_match("tok_abc"));
         assert!(
-            !re.is_match("x figd_abc"),
+            !re.is_match("x tok_abc"),
             "compile_anchored_pattern must wrap in ^(?:…)$ for full-match"
         );
     }
@@ -5207,8 +5210,8 @@ mod tests {
     fn test_token_dir_returns_correct_path() {
         // Isolated: build under a tempdir home instead of consts::data_dir().
         let tmp = tempfile::tempdir().unwrap();
-        let result = token_dir_with_base(tmp.path(), "myproject", "presale");
-        let expected_suffix = std::path::Path::new(".speedwave/tokens/myproject/presale");
+        let result = token_dir_with_base(tmp.path(), "myproject", "example-plugin");
+        let expected_suffix = std::path::Path::new(".speedwave/tokens/myproject/example-plugin");
         assert!(
             result.ends_with(expected_suffix),
             "token_dir should return ~/.speedwave/tokens/<project>/<service_id>, got: {}",
@@ -6438,50 +6441,50 @@ mod tests {
     fn test_ensure_plugin_images_rebuilds_missing_enabled() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
         let (rt, handle) = tracking_runtime(&[]); // no existing images
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(
             handle.build_call_count(),
             1,
             "should build the missing image"
         );
-        assert!(handle.was_built("speedwave-mcp-presale:1.4.6"));
+        assert!(handle.was_built("speedwave-mcp-example-plugin:1.4.6"));
     }
 
     #[test]
     fn test_build_single_plugin_image_containerfile_path_has_separator() {
         // Regression: on Windows `prepare_build_context` returns a WSL path
         // (`/mnt/c/...`); building the Containerfile path with `PathBuf::join`
-        // mangled it into `.../presaleContainerfile` (no separator). The
+        // mangled it into `.../examplePluginContainerfile` (no separator). The
         // containerfile arg passed to `build_image` must always be
         // `<vm_root>/Containerfile`, separator intact, on every host OS.
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
         // Simulate the Windows case: prepare_build_context yields a WSL path.
-        let wsl_root = std::path::PathBuf::from("/mnt/c/Users/u/.speedwave/plugins/presale");
+        let wsl_root = std::path::PathBuf::from("/mnt/c/Users/u/.speedwave/plugins/example-plugin");
         let (rt, handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_prepare_build_context_root(wsl_root.clone())
             .build();
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         let calls = handle.build_calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "should build the image");
         let cf = &calls[0].containerfile;
         assert_eq!(
-            cf, "/mnt/c/Users/u/.speedwave/plugins/presale/Containerfile",
+            cf, "/mnt/c/Users/u/.speedwave/plugins/example-plugin/Containerfile",
             "containerfile must be <vm_root>/Containerfile with separator, got: {cf}"
         );
         assert!(
-            !cf.contains("presaleContainerfile"),
+            !cf.contains("examplePluginContainerfile"),
             "separator must not be dropped (Windows PathBuf::join bug), got: {cf}"
         );
         assert_eq!(
-            calls[0].context_dir, "/mnt/c/Users/u/.speedwave/plugins/presale",
+            calls[0].context_dir, "/mnt/c/Users/u/.speedwave/plugins/example-plugin",
             "context dir must be the WSL vm_root verbatim"
         );
     }
@@ -6490,10 +6493,10 @@ mod tests {
     fn test_ensure_plugin_images_skips_existing() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
-        let (rt, handle) = tracking_runtime(&["speedwave-mcp-presale:1.4.6"]); // image exists
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        let (rt, handle) = tracking_runtime(&["speedwave-mcp-example-plugin:1.4.6"]); // image exists
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(
             handle.build_call_count(),
@@ -6506,10 +6509,10 @@ mod tests {
     fn test_ensure_plugin_images_skips_disabled_plugin() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
         let (rt, handle) = tracking_runtime(&[]); // no existing images
-                                                  // enabled_service_ids is empty — presale is disabled for this project
+                                                  // enabled_service_ids is empty — example-plugin is disabled for this project
         ensure_plugin_images_from_dir(&rt, &[], tmp.path()).unwrap();
 
         assert_eq!(
@@ -6560,12 +6563,12 @@ mod tests {
     fn test_ensure_plugin_images_also_builds_pending_for_enabled() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
         // Add .image_pending marker
-        std::fs::write(tmp.path().join("presale").join(".image_pending"), "").unwrap();
+        std::fs::write(tmp.path().join("example-plugin").join(".image_pending"), "").unwrap();
 
         let (rt, handle) = tracking_runtime(&[]); // image missing
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         // Built exactly once: the pending pass builds it, then the second pass sees it via
         // image_exists() and skips. (TrackingRuntime.build_image now inserts into existing_images.)
@@ -6655,13 +6658,13 @@ mod tests {
         // (which succeeds with the default builder), so the whole pass returns Ok.
 
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
 
         let (rt, _handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_image_exists_error("runtime unavailable")
             .build();
         // image_exists returns Err → treated as missing → build attempted → succeeds
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
     }
 
     // --- Edge cases ---
@@ -6673,7 +6676,7 @@ mod tests {
         std::fs::create_dir_all(&plugins_dir).unwrap();
 
         let (rt, handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["presale"], &plugins_dir).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir).unwrap();
         assert_eq!(handle.build_call_count(), 0);
     }
 
@@ -6683,7 +6686,7 @@ mod tests {
         let nonexistent = tmp.path().join("does-not-exist");
 
         let (rt, handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["presale"], &nonexistent).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &nonexistent).unwrap();
         assert_eq!(handle.build_call_count(), 0);
     }
 
@@ -6714,14 +6717,14 @@ mod tests {
     fn test_ensure_plugin_images_custom_image_tag() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("presale");
+        let plugin_dir = tmp.path().join("example-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.json"),
             r#"{
-                "name": "presale",
-                "slug": "presale",
-                "service_id": "presale",
+                "name": "example-plugin",
+                "slug": "example-plugin",
+                "service_id": "example-plugin",
                 "version": "1.0.0",
                 "image_tag": "custom-tag",
                 "description": "test",
@@ -6732,11 +6735,11 @@ mod tests {
         std::fs::write(plugin_dir.join("Containerfile"), "FROM scratch").unwrap();
 
         let (rt, handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(handle.build_call_count(), 1);
         assert!(
-            handle.was_built("speedwave-mcp-presale:custom-tag"),
+            handle.was_built("speedwave-mcp-example-plugin:custom-tag"),
             "should use custom image_tag, got calls: {:?}",
             handle.build_tags()
         );
@@ -6748,13 +6751,13 @@ mod tests {
     fn test_ensure_plugin_images_pending_marker_cleared_after_build() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
-        let pending = tmp.path().join("presale").join(".image_pending");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
+        let pending = tmp.path().join("example-plugin").join(".image_pending");
         std::fs::write(&pending, "").unwrap();
         assert!(pending.exists(), "marker should exist before build");
 
         let (rt, _handle) = tracking_runtime(&[]); // image missing
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert!(
             !pending.exists(),
@@ -6766,16 +6769,16 @@ mod tests {
     fn test_ensure_plugin_images_image_exists_after_rebuild() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
 
         // First call: image missing → builds it
         let (rt, handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
         assert_eq!(handle.build_call_count(), 1, "first call should build");
 
         // Second call: image now exists (simulate by creating a runtime that knows about it)
-        let (rt2, handle2) = tracking_runtime(&["speedwave-mcp-presale:1.0.0"]);
-        ensure_plugin_images_from_dir(&rt2, &["presale"], tmp.path()).unwrap();
+        let (rt2, handle2) = tracking_runtime(&["speedwave-mcp-example-plugin:1.0.0"]);
+        ensure_plugin_images_from_dir(&rt2, &["example-plugin"], tmp.path()).unwrap();
         assert_eq!(
             handle2.build_call_count(),
             0,

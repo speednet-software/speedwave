@@ -211,10 +211,10 @@ SharePoint integration combines two Microsoft Graph surfaces: a SharePoint docum
 
 **Scopes.** SharePoint requests `Sites.Manage.All Files.ReadWrite.All User.Read offline_access`. `Sites.Manage.All` is the broadest of the three site scopes Microsoft offers (covers `Sites.ReadWrite.All` and `Sites.Read.All`); it is required for `createList` (PR5) and is requested up-front so a single consent dialog covers all SharePoint operations. `Sites.Manage.All` typically requires tenant admin consent in Azure AD; users in tenants without admin consent will be prompted to request it during the device-code flow.
 
-**Tool surface.** 26 tools total:
+**Tool surface.** 28 tools total:
 
 - Files (5): `listFileIds`, `getFileFull`, `downloadFile`, `uploadFile`, `getCurrentUser`.
-- Pages (8, PR4): `listPages`, `getPage`, `createPage`, `updatePage`, `addWebPart`, `updateWebPart`, `removeWebPart`, `publishPage`.
+- Pages (10, PR4): `listPages`, `getPage`, `createPage`, `updatePage`, `addWebPart`, `updateWebPart`, `removeWebPart`, `publishPage`, `generateTableOfContents`, `addImageWebPart`.
 - Lists / items / columns / deletion (13, PR5): `listLists`, `getList`, `createList`, `updateList`, `deleteList`, `addListColumn`, `removeListColumn`, `listItems`, `getItem`, `createItem`, `updateItem`, `deleteItem`, `deletePage`.
 
 **Site policy by omission.** None of the page / list / item / column tools accept a `site_id` parameter. The worker uses the `site_id` it reads from `/tokens/site_id` at startup, so the model has no way to target another site — security by design, not by validation. A regression test (`PAGE_TOOL_SCHEMAS` / `LIST_TOOL_SCHEMAS`) asserts no schema introduces a `site_id` field.
@@ -249,7 +249,7 @@ In both paths the oauth worker reads `refreshToken` from `oauth.json`, calls Mic
 
 The Office integration is a built-in MCP worker for **Word, Excel, PowerPoint, and PDF** files. It is a pure file processor: it has **no credentials** (no `/tokens` mount), **no network egress** (attached only to an `internal: true` compose network — see [ADR-055](../adr/ADR-055-built-in-office-document-worker.md)), and its only window onto the host is the project workspace mounted read-write. Generated files are written under `/workspace/.speedwave-office/`.
 
-It is a thin TypeScript worker on `@speedwave/mcp-shared` plus Python support-scripts invoked via `spawn` — the `presale` plugin's hybrid pattern — gluing mature tools: `markitdown` and SheetJS for extraction, `pandoc` for Markdown↔document conversion, `weasyprint` for HTML/Markdown→PDF, LibreOffice headless for Office→PDF and Office↔Office conversion, `python-docx`/`openpyxl`/`python-pptx` for creating and editing Office files (including native Excel/PowerPoint charts), `pypdf` for PDF manipulation, and `matplotlib` for standalone chart images. Per [ADR-053](../adr/ADR-053-worker-implementation-own-vs-wrap-official-mcp.md) this is an own thin worker rather than wrapping an upstream MCP server: `microsoft/markitdown-mcp` covers read only (not create/edit/PDF/charts), and the other community servers are single-maintainer or Windows-only COM-based.
+It is a thin TypeScript worker on `@speedwave/mcp-shared` plus Python support-scripts invoked via `spawn`, gluing mature tools: `markitdown` and SheetJS for extraction, `pandoc` for Markdown↔document conversion, `weasyprint` for HTML/Markdown→PDF, LibreOffice headless for Office→PDF and Office↔Office conversion, `python-docx`/`openpyxl`/`python-pptx` for creating and editing Office files (including native Excel/PowerPoint charts), `pypdf` for PDF manipulation, and `matplotlib` for standalone chart images. Per [ADR-053](../adr/ADR-053-worker-implementation-own-vs-wrap-official-mcp.md) this is an own thin worker rather than wrapping an upstream MCP server: `microsoft/markitdown-mcp` covers read only (not create/edit/PDF/charts), and the other community servers are single-maintainer or Windows-only COM-based.
 
 #### When to use Office vs reading files directly
 
@@ -373,7 +373,7 @@ MCP service containers (both built-in SharePoint and plugins) mount the project 
 
 This allows MCP workers and Claude to share files through identical paths — `/workspace/...` is valid for both. No path translation needed and no separate context directory is required.
 
-The path validator blocks access to sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. These entries are enforced by a denylist in `path-validator.ts`, ensuring that MCP workers cannot read or write protected files even though the full project directory is mounted.
+The SharePoint worker's path validator blocks access to sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. These entries are enforced by a denylist in the SharePoint worker's `mcp-servers/sharepoint/src/path-validator.ts`, ensuring that worker cannot read or write protected files even though the full project directory is mounted. This denylist is SharePoint-worker-specific — it is not a shared validator automatically applied to other built-in workers or plugins.
 
 ## Adding New Integrations
 
@@ -494,7 +494,7 @@ worker picks up the change.
 
 ### Bridge plugins — dev UX
 
-Plugins that pair a containerized worker with an external host application (e.g. a Figma Desktop plugin, an editor extension) declare a `host_bridge` block in `plugin.json` — see [ADR-063](../adr/ADR-063-host-bridge-generic.md). Speedwave Desktop spawns a loopback WebSocket relay per such plugin and injects the bridge URL + auth token into the worker's container.
+Plugins that pair a containerized worker with an external host application (e.g. a design-tool desktop app, an editor extension) declare a `host_bridge` block in `plugin.json` — see [ADR-063](../adr/ADR-063-host-bridge-generic.md). Speedwave Desktop spawns a loopback WebSocket relay per such plugin and injects the bridge URL + auth token into the worker's container.
 
 Two optional manifest fields make the user-facing flow smoother:
 

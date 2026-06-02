@@ -1,61 +1,53 @@
 # ADR-010: mcp-os as Host Process Per Platform
 
+> **Status:** Accepted
+> **Context:** Native OS integrations (Calendar, Mail, Reminders, Notes, Outlook) need host-only APIs that an isolated container cannot reach.
+
 ## Decision
 
-mcp-os runs as a **host process** (inside the Speedwave Desktop app), not in a container. It implements native OS integrations separately per platform.
+mcp-os runs as a **host process** spawned by the Speedwave Desktop app, not in a container. It exposes native OS integrations over local HTTP and is implemented per platform: macOS via Swift CLIs (AppleScript / EventKit), Windows via a Rust binary (`windows-rs` WinRT + `mapi-rs` for Outlook). Claude never talks to mcp-os directly — the MCP Hub proxies requests.
 
-| Platform | Technology                           | Status            |
-| -------- | ------------------------------------ | ----------------- |
-| macOS    | AppleScript / EventKit via Swift CLI | Implemented       |
-| Windows  | WinRT + mapi-rs (Outlook)            | To be implemented |
+| Platform | Technology                            | Status            |
+| -------- | ------------------------------------- | ----------------- |
+| macOS    | AppleScript / EventKit via Swift CLIs | Implemented       |
+| Windows  | WinRT + mapi-rs (Outlook)             | To be implemented |
 
-Port 4007 in dev (not 3007, to avoid v1 collision). Before public release, changed to 3007 along with other constants.
+## Why
 
-## Rationale
+- WinRT/MAPI (Windows) and AppleScript/EventKit (macOS) are **host-only APIs** — inaccessible from inside an isolated container, so running mcp-os on the host is the only correct approach.
+- On macOS, AppleScript/EventKit is the only stable path to Reminders, Calendar, Mail, and Notes.
+- On Windows, `mapi-rs` provides Outlook access via MAPI COM and `windows-rs` provides WinRT bindings for the Calendar and Mail apps.
+- The "per-platform" in the title refers to this host-side process/native-API split (Lima VM on macOS vs WSL2 on Windows), not to any network alias.
 
-WinRT/MAPI (Windows) and AppleScript (macOS) are **host-only APIs** — they are inaccessible from inside an isolated container. Running mcp-os on the host is the only correct approach.
+## Network model
 
-On macOS, AppleScript/EventKit is the only stable path to Reminders, Calendar, Mail, and Notes.[^24]
-
-On Windows, `mapi-rs`[^14] (Microsoft-maintained, 21 releases) provides access to Outlook via MAPI COM. `windows-rs`[^13] provides WinRT bindings for Windows Calendar and Mail apps.
-
-## Network Model
-
-mcp-os is a **host process** — it binds to `127.0.0.1:4007` on the host. It never binds to `0.0.0.0` because it runs outside the container network and must not be exposed to the LAN.
-
-Containers cannot reach `127.0.0.1` on the host directly (that is the container's own loopback). All platforms use the canonical gateway alias `host.docker.internal`, injected into each consuming container's `/etc/hosts` via Compose `extra_hosts`[^32] (statically for `claude`, dynamically for `mcp-hub` and OAuth-consumers via `ensure_host_gateway_extra_host`). The alias maps to the per-platform gateway IP — Lima vzNAT (192.168.5.2) on macOS, WSL2 NAT (192.168.65.1) on Windows. The "per-platform" in the title refers to the host-side process model (Lima VM vs WSL2), not the network alias.
-
-`render_compose()` injects `WORKER_OS_URL=http://host.docker.internal:4007` into the mcp-hub container environment. Claude never talks to mcp-os directly — requests go through the hub.
-
-**Note:** containerized MCP servers (hub, slack, redmine, etc.) bind to `0.0.0.0` **inside their containers** — this is correct and necessary, because other containers on the same Docker bridge network need to reach them.[^29] Their ports are published to the host as `127.0.0.1:<port>` in `compose.template.yml`[^30], which prevents LAN exposure.[^31] The "never 0.0.0.0" rule applies only to mcp-os because it runs on the host network.
+- mcp-os binds a **dynamically allocated port**, not a fixed one. The manager spawns Node with `PORT=0`; Node lets the OS pick a free port, announces it as a `{"port":N}` JSON line on stdout, and the manager persists it in `mcp-os.lock.json`. There is no fixed mcp-os port constant in production code.
+- The bind address is platform-split. macOS binds `127.0.0.1`; Windows binds the WSL vEthernet adapter IP (WSL2 mirrored-mode loopback is broken, microsoft/WSL#11312). The worker's listen host comes from `compose::host_bind_address()`, never a hardcoded loopback literal.
+- Containers cannot reach the host's `127.0.0.1` directly, so both platforms use the canonical gateway alias `host.docker.internal`, injected into each consuming container's `/etc/hosts` via Compose `extra_hosts` (statically for `claude` and `mcp-playwright`, dynamically for `mcp-hub` and OAuth consumers via `ensure_host_gateway_extra_host`).
+- The alias resolves to the per-platform gateway IP — Lima vzNAT static `192.168.5.2` on macOS (`consts::LIMA_VZ_HOST_IP`); on Windows the gateway IP is detected at runtime by parsing `wsl.exe -d <distro> -- sh -c 'ip -4 route show default'` (no hardcoded Windows gateway literal exists).
+- `render_compose()` injects `WORKER_OS_URL=http://host.docker.internal:<port>` into the `mcp-hub` container, where `<port>` is the dynamic port read from `mcp-os.lock.json`.
+- Containerized MCP servers (hub, slack, redmine, etc.) bind `0.0.0.0` **inside their containers** — correct and necessary so peers on the same bridge network can reach them; their ports are published to the host as `127.0.0.1:<port>`. The "never 0.0.0.0" rule applies only to mcp-os because it runs on the host network.
 
 ## Security
 
-The network model follows OWASP Docker Security Cheat Sheet[^23] recommendations:
+- **Bearer token auth:** a per-session token (`MCP_OS_AUTH_TOKEN`) is injected at spawn; every mcp-os request must carry it, so other host processes cannot reach the endpoint.
+- **No LAN exposure:** mcp-os never binds `0.0.0.0`; it listens only on the host loopback (macOS) or the WSL adapter IP (Windows), neither of which is reachable from the LAN.
+- **Container isolation preserved:** containers reach mcp-os through gateway routing (`host.docker.internal`), not by sharing the host network namespace.
+- Follows OWASP Docker hardening for the containerized side: `cap_drop: ALL`, `no-new-privileges`, read-only root filesystem + `tmpfs /tmp:noexec,nosuid`, and per-container CPU/memory limits.
 
-- **Bearer token auth:** UUID v4 token generated per app session; every mcp-os request must include `Authorization: Bearer <token>`; protects against other processes on the same host accessing the endpoint
-- **Host loopback only:** mcp-os binds to `127.0.0.1`, not `0.0.0.0` — the port is not reachable from the LAN[^30]
-- **Container isolation preserved:** containers reach mcp-os through platform-specific gateway routing, not by sharing the host network namespace[^29]
-- **OWASP RULE #3 + #4:** all containers run with `cap_drop: ALL` and `no-new-privileges:true`[^23]
-- **OWASP RULE #7:** CPU and memory limits on every container to prevent DoS[^23]
-- **OWASP RULE #8:** read-only root filesystem + `tmpfs /tmp:noexec,nosuid` on all containers[^23]
+## Where it lives in code
 
----
+- Process manager (spawn `PORT=0`, lock-file persistence, liveness probe) — `crates/speedwave-runtime/src/mcp_os_process.rs` and the generic `crates/speedwave-runtime/src/host_mcp_process/process.rs` (`{"port":N}` stdout handshake).
+- mcp-os Node worker (reads `PORT`, announces the OS-assigned port on stdout) — `mcp-servers/os/src/index.ts`.
+- Hub URL injection / lock-port read — `crates/speedwave-runtime/src/compose.rs` (`apply_mcp_os_config_in`, `read_lock_port`, `worker_gateway_url`).
+- Host addressing SSOT (gateway IP + bind address, platform split) — `crates/speedwave-runtime/src/compose.rs` (`host_gateway_ip`, `host_bind_address`).
+- Gateway alias + Lima host IP constants — `crates/speedwave-runtime/src/consts.rs` (`HOST_GATEWAY_ALIAS`, `LIMA_VZ_HOST_IP`).
+- macOS native helpers — `native/macos/{calendar,mail,reminders,notes}/`; Windows placeholder — `native/windows/README.md`.
 
-[^13]: [microsoft/windows-rs - Rust for Windows](https://github.com/microsoft/windows-rs)
+## References
 
-[^14]: [microsoft/mapi-rs - Rust bindings for Outlook MAPI](https://github.com/microsoft/mapi-rs)
-
-[^23]: [OWASP Docker Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html)
-
-[^24]: [Apple EventKit - Calendar and Reminders](https://developer.apple.com/documentation/eventkit)
-
-[^28]: [Lima Network — user-mode networking (vzNAT, host.lima.internal)](https://lima-vm.io/docs/config/network/user/)
-
-[^29]: [Docker — Networking in Compose](https://docs.docker.com/compose/how-tos/networking/)
-
-[^30]: [Docker — Port publishing and mapping](https://docs.docker.com/engine/network/port-publishing/)
-
-[^31]: [Publishing Docker ports to 127.0.0.1 instead of 0.0.0.0](https://brokkr.net/2022/03/29/publishing-docker-ports-to-127-0-0-1-instead-of-0-0-0-0/)
-
-[^32]: [nerdctl command reference — --add-host / host-gateway](https://github.com/containerd/nerdctl/blob/main/docs/command-reference.md)
+- [microsoft/windows-rs — Rust for Windows](https://github.com/microsoft/windows-rs)
+- [microsoft/mapi-rs — Rust bindings for Outlook MAPI](https://github.com/microsoft/mapi-rs)
+- [Apple EventKit — Calendar and Reminders](https://developer.apple.com/documentation/eventkit)
+- [OWASP Docker Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html)
+- [ADR-062: playwright host-gateway access (static extra_hosts)](ADR-062-playwright-host-gateway-access.md)

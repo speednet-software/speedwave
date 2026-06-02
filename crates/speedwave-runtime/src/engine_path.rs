@@ -33,7 +33,7 @@ pub fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
 /// `vm_root` is a path bound for inside the VM/container (`/mnt/c/...` on
 /// Windows). `PathBuf::join` must NOT be used: on Windows it inserts a backslash
 /// and mishandles the `/`-rooted string, mangling `<root>/<child>` into garbage
-/// (the `presaleContainerfile` plugin-build bug). Trailing slashes on `vm_root`
+/// (the `examplePluginContainerfile` plugin-build bug). Trailing slashes on `vm_root`
 /// collapse so the result has exactly one separator.
 pub fn vm_path_join(vm_root: &str, child: &str) -> String {
     debug_assert!(
@@ -50,10 +50,13 @@ mod tests {
     #[test]
     fn vm_path_join_inserts_single_separator() {
         // The case the plugin build hit: a WSL root + "Containerfile" must yield
-        // exactly one "/", never the dropped-separator "presaleContainerfile".
+        // exactly one "/", never the dropped-separator "examplePluginContainerfile".
         assert_eq!(
-            vm_path_join("/mnt/c/Users/u/.speedwave/plugins/presale", "Containerfile"),
-            "/mnt/c/Users/u/.speedwave/plugins/presale/Containerfile"
+            vm_path_join(
+                "/mnt/c/Users/u/.speedwave/plugins/example-plugin",
+                "Containerfile"
+            ),
+            "/mnt/c/Users/u/.speedwave/plugins/example-plugin/Containerfile"
         );
     }
 
