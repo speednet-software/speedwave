@@ -216,6 +216,25 @@ EOF
     [ -z "$(ls -A "$HOME/.claude/skills")" ]
 }
 
+@test "links the bundled core web-authoring skills from the real resources tree" {
+    # Point at the real claude-resources tree (not a synthetic fixture) so this
+    # test verifies the actual top-level core skills ship as symlinks. These are
+    # unconditionally linked (no integration gating, no ENABLED_SERVICES).
+    real_resources="$BATS_TEST_DIRNAME/../../containers/claude-resources"
+    export SPEEDWAVE_RESOURCES="$real_resources"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -d "$HOME/.claude/skills" ]
+    [ ! -L "$HOME/.claude/skills" ]
+
+    for skill in speedwave-sitemap speedwave-site-audit speedwave-product-showcase; do
+        [ -L "$HOME/.claude/skills/$skill" ]
+        [ "$(readlink "$HOME/.claude/skills/$skill")" = "$real_resources/skills/$skill" ]
+        [ -f "$HOME/.claude/skills/$skill/SKILL.md" ]
+    done
+}
+
 # ---------------------------------------------------------------------------
 # DISABLE_AUTOUPDATER
 # ---------------------------------------------------------------------------

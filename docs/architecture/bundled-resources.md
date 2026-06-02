@@ -24,7 +24,7 @@ The **Editable in place?** column is about the user-scope copy in the container:
 
 ## Bundled Skills
 
-The `skills/` directory ships the `speedwave-code-review` orchestrator and its 13 specialized worker skills. Every production Speedwave install includes them in the Claude container's `~/.claude/skills/` directory, with no per-project setup required.
+The `skills/` directory ships the `speedwave-code-review` orchestrator and its 13 specialized worker skills, plus the standalone web-authoring skills `speedwave-sitemap`, `speedwave-site-audit`, and `speedwave-product-showcase`. Every production Speedwave install exposes them inside the Claude container, with no per-project setup required.
 
 | Skill                               | Purpose                                                                     |
 | ----------------------------------- | --------------------------------------------------------------------------- |
@@ -44,6 +44,14 @@ The `skills/` directory ships the `speedwave-code-review` orchestrator and its 1
 | `code-review-simplifier`            | Clarity, consistency, and simplification opportunities                      |
 
 These skills mirror the review workflow developers use on this repo via `.claude/skills/`. The two trees are maintained manually — when editing one copy, update the other (they are not auto-synced, and may drift, as the orchestrator currently does).
+
+| Skill                        | Purpose                                                                                                                                                                                                                                    |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `speedwave-sitemap`          | URL-inventory provider for other skills. Extracts an existing `sitemap.xml` (robots.txt + common paths, expanding indexes) or, failing that, crawls the site via Playwright. Returns JSON only — no analysis.                              |
+| `speedwave-site-audit`       | Audits a site against a bundled best-practice checklist (`rules.json`) spanning 10 categories. Pairs with `speedwave-sitemap` for whole-site scope; always runs a final verifier pass. Reports pass/fail/skip with evidence — never fixes. |
+| `speedwave-product-showcase` | Builds a self-contained, dependency-free animated "live product" demo (HTML + scoped CSS + one inline rAF script) recreating the real app UI for a landing page. Pins `model: opus` for UI fidelity.                                       |
+
+`speedwave-sitemap` is a data source, not an auditor: it answers "what are the pages of this site?" for any skill that needs a page list. `speedwave-site-audit` is the consumer that closes the loop — it asks the user for scope (one URL or the whole sitemap) and categories, evaluates each page against the rules, and writes a verified report to `/workspace/.speedwave/site-audit/`. Both skills gate browser-dependent work on the `playwright` integration: 13 of the audit rules need a live browser (contrast, focus, Core Web Vitals, …) and are marked `skipped` when Playwright is off; the other 115 run via `WebFetch` (including DNS checks over DNS-over-HTTPS). When Playwright is disabled, both skills degrade rather than guess.
 
 ## Filesystem Layout
 
