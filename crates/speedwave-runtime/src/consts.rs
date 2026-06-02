@@ -968,12 +968,26 @@ pub fn claude_session_log_path_in(home: &std::path::Path, project: &str) -> std:
         .join(CLAUDE_SESSION_LOG_FILE)
 }
 
-/// Build the per-project Claude session log path.
-pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
-    data_dir()
+/// SSOT for the Claude session log path under an explicit data dir — used by the
+/// diagnostic-source registry. `claude_session_log_path` is the `data_dir()` shim.
+pub fn claude_session_log_path_under(
+    data_dir: &std::path::Path,
+    project: &str,
+) -> std::path::PathBuf {
+    data_dir
         .join("logs")
         .join(project)
         .join(CLAUDE_SESSION_LOG_FILE)
+}
+
+/// Build the per-project Claude session log path.
+pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
+    claude_session_log_path_under(data_dir(), project)
+}
+
+/// SSOT for the mcp-os drain log path — never re-join `data_dir()` by hand.
+pub fn mcp_os_log_path() -> std::path::PathBuf {
+    data_dir().join(MCP_OS_LOG_FILE)
 }
 
 /// Built-in services defined in containers/compose.template.yml.
@@ -1920,6 +1934,20 @@ mod tests {
         assert_eq!(
             path,
             std::path::PathBuf::from("/home/user/.speedwave/logs/proj.v1/claude-session.log")
+        );
+    }
+
+    #[test]
+    fn mcp_os_log_path_ends_with_data_dir_and_log_file() {
+        let path = mcp_os_log_path();
+        assert!(
+            path.ends_with(MCP_OS_LOG_FILE),
+            "mcp_os_log_path must end with MCP_OS_LOG_FILE, got {path:?}"
+        );
+        assert_eq!(
+            path,
+            data_dir().join(MCP_OS_LOG_FILE),
+            "mcp_os_log_path is the SSOT for data_dir()/MCP_OS_LOG_FILE"
         );
     }
 

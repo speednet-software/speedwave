@@ -70,7 +70,7 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         // API keys in URL query parameters: ?key=<value> or &key=<value>
         // Also matches token=, secret=, password= in query strings
         (
-            r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token)=)[^&\s]+",
+            r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token|[a-z0-9_]*_token)=)[^&\s]+",
             "${1}***REDACTED***",
         ),
         // Redmine API key header: X-Redmine-API-Key: <value>
@@ -80,7 +80,7 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         // The trailing `"?` catches a lone closing quote that follows an unquoted value
         // (e.g. password=abc" where the opening quote was on a previous token).
         (
-            r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
+            r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
             "${1}***REDACTED***",
         ),
     ];
@@ -199,9 +199,9 @@ mod tests {
             r"sk-ant-[A-Za-z0-9_-]+",
             r"\bsk-[A-Za-z0-9_-]{16,}",
             r"(://[^:/@\s]+:)[^@\s]+(@)",
-            r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token)=)[^&\s]+",
+            r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token|[a-z0-9_]*_token)=)[^&\s]+",
             r"(?i)(X-Redmine-API-Key:\s*)\S+",
-            r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
+            r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
         ];
 
         assert_eq!(
@@ -377,6 +377,60 @@ mod tests {
             !output.contains("hidden_value_123"),
             "Secret value should not appear: {output}"
         );
+    }
+
+    #[test]
+    fn test_worker_auth_token_uuid_redaction() {
+        // Worker bearer tokens are bare UUIDs in MCP_<SVC>_AUTH_TOKEN env vars —
+        // no sk-/xox- prefix, so only the *_token assignment rule catches them.
+        let input = "MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("550e8400-e29b-41d4-a716-446655440000"),
+            "worker UUID auth token must be redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_auth_token_redaction() {
+        let input = "ANTHROPIC_AUTH_TOKEN=f1e2d3c4-0000-1111-2222-333344445555";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("f1e2d3c4-0000-1111-2222-333344445555"),
+            "ANTHROPIC_AUTH_TOKEN value must be redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_api_key_suffix_env_redaction() {
+        // *_API_KEY= is covered by the existing `api_key` substring keyword.
+        let input = "OPENROUTER_API_KEY=opaque-value-xyz";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("opaque-value-xyz"),
+            "*_API_KEY assignment value must be redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_bare_uuid_not_redacted() {
+        // A UUID NOT in a *_token= assignment (e.g. a request/container id) must
+        // survive — redacting bare UUIDs would erase debugging context.
+        let input = "request_id 550e8400-e29b-41d4-a716-446655440000 completed";
+        let output = sanitize(input);
+        assert_eq!(
+            output, input,
+            "bare UUID outside an assignment must not be redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_cache_key_not_redacted() {
+        // `_key` suffix is intentionally NOT in the rule: cache_key / sort_key
+        // are common non-secret identifiers. Only `_token` suffix is redacted.
+        let input = "cache_key=user_123";
+        let output = sanitize(input);
+        assert_eq!(output, input, "cache_key must not be redacted: {output}");
     }
 
     #[test]
@@ -919,15 +973,29 @@ mod tests {
     #[test]
     fn test_bare_sk_proj_key_redaction() {
         // OpenAI project-scoped key shape, also used by self-hosted servers.
+        // `_AUTH_TOKEN=` now also matches the assignment rule, which runs after
+        // the `sk-` rule and collapses the marker to the generic one — either
+        // way the key body is gone, which is the security property that matters.
         let input = "ANTHROPIC_AUTH_TOKEN=sk-proj-abc123def456ghi789xyz";
         let output = sanitize(input);
         assert!(
-            output.contains("***REDACTED_API_KEY***"),
+            output.contains("***REDACTED"),
             "bare sk-proj- key not redacted: {output}"
         );
         assert!(
             !output.contains("abc123def456ghi789xyz"),
             "key body should not appear: {output}"
+        );
+    }
+
+    #[test]
+    fn test_bare_sk_proj_key_redaction_no_assignment() {
+        // Without a *_token= assignment, the `sk-` rule keeps its specific marker.
+        let input = "got key sk-proj-abc123def456ghi789xyz from env";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED_API_KEY***"),
+            "bare sk-proj- key must keep its API_KEY marker: {output}"
         );
     }
 

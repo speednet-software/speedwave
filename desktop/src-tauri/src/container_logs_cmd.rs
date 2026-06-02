@@ -140,8 +140,7 @@ pub(crate) async fn get_compose_logs(project: String, tail: Option<u32>) -> Resu
 #[tauri::command]
 pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let log_path =
-            speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
+        let log_path = speedwave_runtime::consts::mcp_os_log_path();
         let tail = tail.unwrap_or(200).min(10_000) as usize;
         read_tail_sanitized(&log_path, tail)
     })
@@ -327,6 +326,9 @@ pub(crate) struct LogSources {
     pub mcp_os: String,
     pub host_exec: String,
     pub claude: String,
+    /// Lima VM serial log (macOS only; empty elsewhere). Parity with the ZIP —
+    /// it's a displayable log, so it must also appear in /logs.
+    pub lima: String,
 }
 
 /// Composes the per-source log buffers into a single newline-separated string,
@@ -340,11 +342,12 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let mcp_os = prefix_lines("mcp-os", &sources.mcp_os, None);
     let host_exec = prefix_lines("host-exec", &sources.host_exec, None);
     let claude = prefix_lines("claude", &sources.claude, None);
+    let lima = prefix_lines("lima", &sources.lima, None);
 
     // Apply the sanitizer once to the merged buffer (idempotent — sources are
     // already individually sanitized, this is a defence-in-depth pass).
     speedwave_runtime::log_sanitizer::sanitize(&format!(
-        "{compose}{desktop}{mcp_os}{host_exec}{claude}"
+        "{compose}{desktop}{mcp_os}{host_exec}{claude}{lima}"
     ))
 }
 
@@ -388,26 +391,23 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
             None => String::new(),
         };
 
-        // mcp-os — same path resolution `get_mcp_os_logs` uses
-        let mcp_os_path =
-            speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
-        let mcp_os = read_tail_sanitized(&mcp_os_path, tail_us).unwrap_or_default();
-
-        // host-exec — per-project worker log (`get_host_exec_logs`'s path)
-        let host_exec =
-            read_tail_sanitized(&host_exec_log_path(&project), tail_us).unwrap_or_default();
-
-        // claude session log — same path resolution `get_claude_session_logs` uses
-        let claude_path = speedwave_runtime::consts::claude_session_log_path(&project);
-        let claude = read_tail_sanitized(&claude_path, tail_us).unwrap_or_default();
+        // File-source paths resolved from the SSOT registry (platform-gated), so
+        // /logs and the ZIP draw from the same list. Empty when unavailable.
+        let data_dir = speedwave_runtime::consts::data_dir();
+        let read_source = |key: &str| -> String {
+            speedwave_runtime::diagnostic_sources::resolve_file_path(key, data_dir, &project)
+                .map(|p| read_tail_sanitized(&p, tail_us).unwrap_or_default())
+                .unwrap_or_default()
+        };
 
         Ok(merge_log_sources(
             LogSources {
                 compose,
                 desktop,
-                mcp_os,
-                host_exec,
-                claude,
+                mcp_os: read_source("mcp-os"),
+                host_exec: read_source("host-exec"),
+                claude: read_source("claude"),
+                lima: read_source("lima"),
             },
             &project,
         ))
@@ -825,6 +825,7 @@ mod tests {
                 mcp_os: String::new(),
                 host_exec: String::new(),
                 claude: String::new(),
+                lima: String::new(),
             },
             "testproj",
         );
@@ -844,6 +845,7 @@ mod tests {
                     r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#
                         .to_string(),
                 claude: "session started\n".to_string(),
+                lima: String::new(),
             },
             "testproj",
         );
@@ -862,6 +864,60 @@ mod tests {
     }
 
     #[test]
+    fn logs_view_covers_all_displayable_registry_sources() {
+        // Parity, checked against the ACTUAL merge output (not a proxy array):
+        // give every source a unique marker, run the real merge, and assert each
+        // displayable+available registry source's marker survives prefixed by its
+        // key. A registry source not wired into LogSources/merge fails here.
+        use speedwave_runtime::diagnostic_sources::DIAGNOSTIC_SOURCES;
+        let merged = merge_log_sources(
+            LogSources {
+                compose: "MARKER_compose\n".to_string(),
+                desktop: "MARKER_desktop\n".to_string(),
+                mcp_os: "MARKER_mcp_os\n".to_string(),
+                host_exec: "MARKER_host_exec\n".to_string(),
+                claude: "MARKER_claude\n".to_string(),
+                lima: "MARKER_lima\n".to_string(),
+            },
+            "proj",
+        );
+        for s in DIAGNOSTIC_SOURCES {
+            if s.displayable && s.platforms.available_here() {
+                let token = format!("{} | MARKER_{}", s.key, s.key.replace('-', "_"));
+                assert!(
+                    merged.contains(&token),
+                    "displayable registry source '{}' not present in /logs merge \
+                     (expected '{token}') — ZIP would carry more than /logs, \
+                     violating parity. Merged:\n{merged}",
+                    s.key
+                );
+            }
+        }
+        // compose-yml (non-displayable) must never appear in /logs.
+        assert!(!merged.contains("compose-yml |"), "merged: {merged}");
+    }
+
+    #[test]
+    fn merge_log_sources_sanitizes_host_exec_projectdir() {
+        let merged = merge_log_sources(
+            LogSources {
+                compose: String::new(),
+                desktop: String::new(),
+                mcp_os: String::new(),
+                host_exec: r#"{"cwd":"/Users/john-doe/Projects/mine","cmd":"npm test"}"#
+                    .to_string(),
+                claude: String::new(),
+                lima: String::new(),
+            },
+            "mine",
+        );
+        assert!(
+            !merged.contains("john-doe"),
+            "projectDir username must be redacted: {merged}"
+        );
+    }
+
+    #[test]
     fn merge_log_sources_sanitizes_secrets_across_sources() {
         let merged = merge_log_sources(
             LogSources {
@@ -872,6 +928,7 @@ mod tests {
                 mcp_os: String::new(),
                 host_exec: String::new(),
                 claude: String::new(),
+                lima: String::new(),
             },
             "testproj",
         );
@@ -892,6 +949,7 @@ mod tests {
                 mcp_os: String::new(),
                 host_exec: String::new(),
                 claude: String::new(),
+                lima: String::new(),
             },
             "testproj",
         );
@@ -909,6 +967,7 @@ mod tests {
                 mcp_os: "mcp_os_line\n".to_string(),
                 host_exec: "host_exec_line\n".to_string(),
                 claude: "claude_line\n".to_string(),
+                lima: String::new(),
             },
             "testproj",
         );

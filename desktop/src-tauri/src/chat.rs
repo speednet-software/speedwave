@@ -98,6 +98,90 @@ pub enum StreamChunk {
     QueueDrained { session_id: String, text: String },
 }
 
+/// Redacts secrets in a chunk's free-text fields. Every `chat_stream` emit must
+/// go through [`emit_sanitized_chunk`] (which calls this), so neither the
+/// `chat_stream` channel nor the `chat_patch::*` mirror can leak. Structural
+/// fields (tool ids, model, session ids) and `partial_json` (incremental JSON —
+/// sanitizing could corrupt it) are left untouched.
+pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
+    use speedwave_runtime::log_sanitizer::sanitize;
+    match chunk {
+        StreamChunk::Text { content } => StreamChunk::Text {
+            content: sanitize(&content),
+        },
+        StreamChunk::Thinking { content } => StreamChunk::Thinking {
+            content: sanitize(&content),
+        },
+        StreamChunk::ToolResult {
+            tool_id,
+            content,
+            is_error,
+        } => StreamChunk::ToolResult {
+            tool_id,
+            content: sanitize(&content),
+            is_error,
+        },
+        StreamChunk::Error { content } => StreamChunk::Error {
+            content: sanitize(&content),
+        },
+        StreamChunk::Result {
+            result_text: Some(text),
+            session_id,
+            total_cost,
+            usage,
+            context_window_size,
+            assistant_uuid,
+            turn_usage,
+            turn_cost,
+            model,
+        } => StreamChunk::Result {
+            result_text: Some(sanitize(&text)),
+            session_id,
+            total_cost,
+            usage,
+            context_window_size,
+            assistant_uuid,
+            turn_usage,
+            turn_cost,
+            model,
+        },
+        StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
+            session_id,
+            text: sanitize(&text),
+        },
+        StreamChunk::AskUserQuestion {
+            tool_id,
+            mut questions,
+            current_index,
+        } => {
+            // Model-authored free text — redact question/header/option strings.
+            for q in &mut questions {
+                q.question = sanitize(&q.question);
+                q.header = sanitize(&q.header);
+                for opt in &mut q.options {
+                    opt.label = sanitize(&opt.label);
+                    opt.value = sanitize(&opt.value);
+                }
+            }
+            StreamChunk::AskUserQuestion {
+                tool_id,
+                questions,
+                current_index,
+            }
+        }
+        other => other,
+    }
+}
+
+/// The ONE way to emit a `chat_stream` event: sanitizes the chunk first, so no
+/// emit site can leak a secret. Every `app_handle.emit("chat_stream", ...)` must
+/// route through here (enforced by `chat_stream_emits_go_through_helper` test).
+fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk) {
+    if let Err(e) = app_handle.emit("chat_stream", sanitize_chunk(chunk)) {
+        log::warn!("failed to emit chat_stream event: {e}");
+    }
+}
+
 /// Token usage information from the result message.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UsageInfo {
@@ -1530,8 +1614,8 @@ impl ChatSession {
                                 log::error!(
                                     "pending_requests mutex poisoned: {e}; dropping stream"
                                 );
-                                let _ = app_handle.emit(
-                                    "chat_stream",
+                                emit_sanitized_chunk(
+                                    &app_handle,
                                     StreamChunk::Error {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
@@ -1540,14 +1624,14 @@ impl ChatSession {
                                 break;
                             }
                         }
-                        let chunk = StreamChunk::AskUserQuestion {
-                            tool_id: ctrl.tool_use_id.clone(),
-                            questions,
-                            current_index: 0,
-                        };
-                        if let Err(e) = app_handle.emit("chat_stream", chunk) {
-                            log::warn!("failed to emit AskUserQuestion event: {e}");
-                        }
+                        emit_sanitized_chunk(
+                            &app_handle,
+                            StreamChunk::AskUserQuestion {
+                                tool_id: ctrl.tool_use_id.clone(),
+                                questions,
+                                current_index: 0,
+                            },
+                        );
                     } else {
                         // Auto-approve non-AskUserQuestion tools
                         let response = build_auto_approve_response(&ctrl);
@@ -1557,8 +1641,8 @@ impl ChatSession {
                                     log::error!(
                                         "auto-approve stdin write failed: {e}; dropping stream"
                                     );
-                                    let _ = app_handle.emit(
-                                        "chat_stream",
+                                    emit_sanitized_chunk(
+                                        &app_handle,
                                         StreamChunk::Error {
                                             content: format!(
                                                 "Failed to write auto-approve to stdin: {e}"
@@ -1571,8 +1655,8 @@ impl ChatSession {
                                     log::error!(
                                         "auto-approve stdin flush failed: {e}; dropping stream"
                                     );
-                                    let _ = app_handle.emit(
-                                        "chat_stream",
+                                    emit_sanitized_chunk(
+                                        &app_handle,
                                         StreamChunk::Error {
                                             content: format!(
                                                 "Failed to flush auto-approve to stdin: {e}"
@@ -1584,8 +1668,8 @@ impl ChatSession {
                             }
                             Err(e) => {
                                 log::error!("stdin mutex poisoned: {e}; dropping stream");
-                                let _ = app_handle.emit(
-                                    "chat_stream",
+                                emit_sanitized_chunk(
+                                    &app_handle,
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
                                     },
@@ -1645,10 +1729,12 @@ impl ChatSession {
                 }
                 let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
                 for chunk in chunks {
+                    // Sanitize before BOTH egress channels: the patch mirror
+                    // (handle_chunk reads the sanitized chunk) and the
+                    // chat_stream emit (via emit_sanitized_chunk).
+                    let chunk = sanitize_chunk(chunk);
                     patch_emitter.handle_chunk(&chunk, &registry);
-                    if let Err(e) = app_handle.emit("chat_stream", chunk) {
-                        log::warn!("failed to emit chat_stream event: {e}");
-                    }
+                    emit_sanitized_chunk(&app_handle, chunk);
                 }
                 // ADR-042/043 lifecycle patches are emitted automatically
                 // by `patch_emitter.handle_chunk` when it sees `Result` —
@@ -1677,9 +1763,10 @@ impl ChatSession {
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
                 };
+                let chunk = sanitize_chunk(chunk);
                 let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
                 patch_emitter.handle_chunk(&chunk, &registry);
-                let _ = app_handle.emit("chat_stream", chunk);
+                emit_sanitized_chunk(&app_handle, chunk);
             }
         });
         self.drain_handles.push(h);
@@ -2032,15 +2119,13 @@ fn drain_queued_message(
         }
     }
     let drained_text = drained.text.clone();
-    if let Err(e) = app_handle.emit(
-        "chat_stream",
+    emit_sanitized_chunk(
+        app_handle,
         StreamChunk::QueueDrained {
             session_id: session_id.to_string(),
             text: drained.text,
         },
-    ) {
-        log::warn!("failed to emit QueueDrained event: {e}");
-    }
+    );
     // ADR-042/045 mirror: clear the state-tree's pending_queue slot.
     use speedwave_runtime::stream::msg_store::LogMsg;
     use speedwave_runtime::stream::ConversationPatch;
@@ -2059,6 +2144,120 @@ fn drain_queued_message(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // -- sanitize_chunk: secrets must not reach the UI on any chunk channel --
+
+    /// Enforcement: the ONLY `emit("chat_stream", ...)` in production source is
+    /// inside emit_sanitized_chunk. A new raw emit elsewhere would leak.
+    #[test]
+    fn chat_stream_emits_go_through_helper() {
+        let src = include_str!("chat.rs");
+        // Strip the test module so test-only emits don't count.
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        // Count actual emit calls, ignoring doc/comment lines.
+        let raw_emits = prod
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && t.contains("emit(\"chat_stream\"")
+            })
+            .count();
+        assert_eq!(
+            raw_emits, 1,
+            "exactly one chat_stream emit allowed (inside emit_sanitized_chunk); \
+             found {raw_emits} — a new raw emit bypasses sanitization"
+        );
+    }
+
+    #[test]
+    fn sanitize_chunk_redacts_ask_user_question() {
+        use speedwave_runtime::stream::{AskUserOption, AskUserQuestionItem};
+        let chunk = StreamChunk::AskUserQuestion {
+            tool_id: "t1".into(),
+            questions: vec![AskUserQuestionItem {
+                question: "use sk-ant-abcdefabcdefabcdefabcdef?".into(),
+                header: "key sk-ant-abcdefabcdefabcdefabcdef".into(),
+                multi_select: false,
+                options: vec![AskUserOption {
+                    label: "Bearer ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    value: "MCP_X_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000".into(),
+                }],
+            }],
+            current_index: 0,
+        };
+        let out = format!("{:?}", sanitize_chunk(chunk));
+        assert!(
+            !out.contains("abcdefabcdefabcdefabcdef"),
+            "question/header leaked: {out}"
+        );
+        assert!(!out.contains("ghp_aaaaaaaa"), "option label leaked: {out}");
+        assert!(!out.contains("550e8400"), "option value leaked: {out}");
+    }
+
+    #[test]
+    fn sanitize_chunk_redacts_text_and_thinking() {
+        let secret = "MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000";
+        for chunk in [
+            StreamChunk::Text {
+                content: secret.into(),
+            },
+            StreamChunk::Thinking {
+                content: secret.into(),
+            },
+            StreamChunk::Error {
+                content: secret.into(),
+            },
+        ] {
+            let out = format!("{:?}", sanitize_chunk(chunk));
+            assert!(!out.contains("550e8400"), "secret leaked: {out}");
+        }
+    }
+
+    #[test]
+    fn sanitize_chunk_redacts_tool_result() {
+        let chunk = StreamChunk::ToolResult {
+            tool_id: "t1".into(),
+            content: "key sk-ant-abcdefabcdefabcdefabcdef".into(),
+            is_error: false,
+        };
+        let out = format!("{:?}", sanitize_chunk(chunk));
+        assert!(!out.contains("abcdefabcdefabcdefabcdef"), "leaked: {out}");
+    }
+
+    #[test]
+    fn sanitize_chunk_redacts_result_text() {
+        // result_text is dropped from the patch mirror, reaches UI only via
+        // chat_stream — so the single sanitize point must cover it.
+        let chunk = StreamChunk::Result {
+            session_id: "s".into(),
+            total_cost: None,
+            usage: None,
+            result_text: Some("token=sk-ant-secretsecretsecretsecret done".into()),
+            context_window_size: None,
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
+        };
+        let out = format!("{:?}", sanitize_chunk(chunk));
+        assert!(!out.contains("secretsecretsecretsecret"), "leaked: {out}");
+    }
+
+    #[test]
+    fn sanitize_chunk_leaves_tool_input_delta_untouched() {
+        // partial_json is incremental JSON — sanitizing could corrupt structure.
+        let raw = r#"{"path":"/x","token":"abc"#;
+        let chunk = StreamChunk::ToolInputDelta {
+            tool_id: "t1".into(),
+            partial_json: raw.into(),
+        };
+        match sanitize_chunk(chunk) {
+            StreamChunk::ToolInputDelta { partial_json, .. } => {
+                assert_eq!(partial_json, raw, "partial_json must be byte-identical");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
 
     // -- interrupt protocol tests (behavioural via free helpers) --
 

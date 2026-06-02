@@ -13,6 +13,66 @@ use std::path::Path;
 
 use tempfile::NamedTempFile;
 
+/// Flushes a file's data to stable media. On macOS plain `fsync` returns before
+/// APFS hits the platter, so `F_FULLFSYNC` is preferred; if the filesystem
+/// doesn't support it (network mounts: SMB/NFS return ENOTSUP) it falls back to
+/// plain `fsync`, then to a best-effort no-op — degrading to pre-fsync durability
+/// rather than failing the write. Other Unix uses `fsync`; Windows is a no-op.
+#[cfg(unix)]
+fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use rustix::io::Errno;
+        // `F_FULLFSYNC` unsupported on this fs/device → fall back. EINVAL here
+        // means "unknown fcntl command"; ENOTSUP/EOPNOTSUPP: network mounts
+        // (SMB/NFS); ENODEV: char devices.
+        let fcntl_unsupported = |e: &Errno| {
+            matches!(
+                *e,
+                Errno::NOTSUP | Errno::OPNOTSUPP | Errno::INVAL | Errno::NODEV
+            )
+        };
+        // Plain `fsync` fallback: only a filesystem capability gap is best-effort.
+        // EINVAL from `fsync` is a bad fd (programming error) — must propagate.
+        let fsync_unsupported =
+            |e: &Errno| matches!(*e, Errno::NOTSUP | Errno::OPNOTSUPP | Errno::NODEV);
+        match rustix::fs::fcntl_fullfsync(file) {
+            Ok(()) => Ok(()),
+            Err(e) if fcntl_unsupported(&e) => match rustix::fs::fsync(file) {
+                Ok(()) => Ok(()),
+                // Neither supported (some network FS): best-effort, don't fail.
+                Err(e2) if fsync_unsupported(&e2) => Ok(()),
+                Err(e2) => Err(std::io::Error::from(e2)),
+            },
+            Err(e) => Err(std::io::Error::from(e)),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        rustix::fs::fsync(file).map_err(std::io::Error::from)
+    }
+}
+
+#[cfg(not(unix))]
+fn fsync_file_durable(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Best-effort fsync of a directory so a contained rename is itself durable.
+/// Unix-only: opening a directory as a file and `fsync`-ing it commits the
+/// directory entry. Windows has no directory-fsync concept — no-op there.
+#[cfg(unix)]
+fn fsync_parent_dir(dir: &Path) {
+    if let Ok(handle) = std::fs::File::open(dir) {
+        // Best-effort: the data blocks are already durable (file fsync ran
+        // first), so a dir-fsync failure is non-fatal.
+        let _ = rustix::fs::fsync(&handle);
+    }
+}
+
+#[cfg(not(unix))]
+fn fsync_parent_dir(_dir: &Path) {}
+
 /// Write `content` to `path` with owner-only permissions.
 ///
 /// Both platforms now use the same write-then-atomic-rename pattern via
@@ -36,6 +96,17 @@ use tempfile::NamedTempFile;
 ///
 /// Existing directories at `path` are removed first (consistent with prior behavior).
 pub fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
+    // Direct callers: `path` is the final name, so commit its directory entry.
+    write_restricted_file_synced(path, content, true)
+}
+
+/// Core of [`write_restricted_file`]. `sync_parent_dir` = false skips the
+/// post-rename dir fsync when the caller renames `path` away next (atomic variant).
+fn write_restricted_file_synced(
+    path: &Path,
+    content: &str,
+    sync_parent_dir: bool,
+) -> anyhow::Result<()> {
     if path.is_dir() {
         log::warn!(
             "write_restricted_file: removing unexpected directory at {}",
@@ -112,10 +183,24 @@ pub fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
         );
     }
 
+    // fsync data before persist; `tempfile::persist` only renames, never fsyncs.
+    fsync_file_durable(tmp.as_file()).map_err(|e| {
+        anyhow::anyhow!(
+            "fsync tempfile before persist for {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+
     // Atomic rename. On error, `tmp` is dropped (cleanup on Unix; on Windows
     // the tempfile path may linger but never as `path`).
     tmp.persist(path)
         .map_err(|e| anyhow::anyhow!("failed to persist tempfile to {}: {}", path.display(), e))?;
+
+    // fsync parent dir so the rename is durable (skipped for the atomic variant).
+    if sync_parent_dir {
+        fsync_parent_dir(parent);
+    }
 
     Ok(())
 }
@@ -141,7 +226,8 @@ pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Resul
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".{}.tmp.{}.{}", file_name, std::process::id(), seq));
 
-    write_restricted_file(&tmp, content).inspect_err(|_| {
+    // `false`: the inner dir fsync is wasted — we rename `tmp` away next line.
+    write_restricted_file_synced(&tmp, content, false).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })?;
 
@@ -149,6 +235,9 @@ pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Resul
         let _ = std::fs::remove_file(&tmp);
         anyhow::bail!("rename {} -> {}: {}", tmp.display(), path.display(), e);
     }
+
+    // fsync parent dir once for the final name (data already fsynced by the inner write).
+    fsync_parent_dir(parent);
 
     Ok(())
 }
@@ -595,5 +684,89 @@ mod tests {
         ensure_owner_only_dir(&target).unwrap();
 
         assert!(target.is_dir());
+    }
+
+    // ── durability fsync ─────────────────────────────────────────────────
+
+    /// Happy path: fsync of a real, open file succeeds. On macOS this exercises
+    /// the `F_FULLFSYNC` branch; on other Unix the `fsync` branch.
+    #[cfg(unix)]
+    #[test]
+    fn fsync_file_durable_ok_on_open_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        let file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut (&file), b"data").unwrap();
+        fsync_file_durable(&file).expect("fsync of an open writable file must succeed");
+    }
+
+    /// Network-mount regression guard: a target that supports neither
+    /// `F_FULLFSYNC` nor plain `fsync` (ENOTSUP) must degrade to best-effort
+    /// `Ok`, NOT fail the write — else workers can't start on SMB/NFS homes.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fsync_file_durable_best_effort_on_unsupported_fd() {
+        // /dev/null supports neither fsync flavour — fcntl returns ENOTSUP/EINVAL.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        assert!(
+            fsync_file_durable(&file).is_ok(),
+            "unsupported-fsync target must degrade to best-effort, not hard-fail"
+        );
+    }
+
+    /// Regression: the fsync insertion must not change the observable happy-path
+    /// behavior — content and 0o600 perms are still correct after the write.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_content_and_mode_survive_fsync() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compose.yml");
+
+        write_restricted_file_atomic(&path, "networks:\n  net: {}\n").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "networks:\n  net: {}\n"
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0o600, got 0o{mode:o}");
+    }
+
+    /// `fsync_parent_dir` is best-effort: a non-existent directory must not
+    /// panic or propagate (the data blocks are already durable).
+    #[cfg(unix)]
+    #[test]
+    fn fsync_parent_dir_is_best_effort_on_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        // Must be a silent no-op — no panic, returns ().
+        fsync_parent_dir(&missing);
+    }
+
+    /// Source-ordering guard: the data fsync MUST precede `persist` in
+    /// `write_restricted_file_synced`, otherwise the rename can publish a torn
+    /// file. A future edit reordering these would reintroduce the torn-write bug.
+    #[test]
+    fn fsync_precedes_persist_in_source() {
+        let src = include_str!("fs_perms.rs");
+        let body = src
+            .split("fn write_restricted_file_synced(")
+            .nth(1)
+            .and_then(|s| s.split("\n}").next())
+            .expect("write_restricted_file_synced body");
+        let fsync_at = body
+            .find("fsync_file_durable(tmp.as_file())")
+            .expect("write_restricted_file_synced must fsync the tempfile");
+        let persist_at = body
+            .find("tmp.persist(path)")
+            .expect("write_restricted_file_synced must persist the tempfile");
+        assert!(
+            fsync_at < persist_at,
+            "fsync_file_durable must run BEFORE tmp.persist — reordering reintroduces the torn-write bug"
+        );
     }
 }
