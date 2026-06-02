@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url';
 /** Root of the mounted project workspace inside the container (compose mounts `${PROJECT_DIR}:/workspace:rw`). */
 export const WORKSPACE_ROOT = '/workspace';
 
-/** Default output directory for generated files — kept out of the repo root so an exploited parser cannot overwrite `.git`/config/scripts. */
-export const OUTPUT_DIR = path.join(WORKSPACE_ROOT, '.speedwave-office');
+/** Default output directory for generated files — kept under `/workspace/.speedwave/` so an exploited parser cannot overwrite `.git`/config/scripts. */
+export const OUTPUT_DIR = path.join(WORKSPACE_ROOT, '.speedwave', 'office');
 
 /** Path to the Python virtualenv created in the Dockerfile (`/opt/office-venv`). The `python3` binary used for support-scripts. */
 export const PYTHON_BIN = `${process.env.OFFICE_VENV ?? '/opt/office-venv'}/bin/python3`;

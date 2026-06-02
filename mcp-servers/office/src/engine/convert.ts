@@ -150,7 +150,7 @@ async function htmlFileToPdf(htmlAbs: string, baseUrl: string, destAbs: string):
 /**
  * Markdown (path or inline) → PDF via pandoc → HTML → WeasyPrint.
  * @param input - The Markdown source.
- * @param outName - Output filename/path (optional; defaults under `/workspace/.speedwave-office/`).
+ * @param outName - Output filename/path (optional; defaults under `/workspace/.speedwave/office/`).
  * @param opts - Page-rendering options.
  * @param overwrite - Permit overwriting an existing output (default false).
  * @returns The {@link FileResult} for the produced PDF.

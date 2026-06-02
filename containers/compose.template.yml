@@ -234,7 +234,7 @@ services:
 
   # Office documents worker — a pure file processor: no service credentials, no /tokens mount,
   # and NO network egress (attached only to the internal ${NETWORK_NAME}_office network — see ADR-055).
-  # Mounts the project workspace read-write; outputs land under /workspace/.speedwave-office/.
+  # Mounts the project workspace read-write; outputs land under /workspace/.speedwave/office/.
   mcp-office:
     image: ${IMAGE_MCP_OFFICE}
     pull_policy: never

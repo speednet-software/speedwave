@@ -9,7 +9,7 @@ A **pure file processor**: no service credentials, no `/tokens` mount, **no netw
 - `src/index.ts` — `createMCPServer` entry point (fails fast without `MCP_OFFICE_AUTH_TOKEN`).
 - `src/tools/index.ts` — the ~25 tool definitions and handlers.
 - `src/engine/` — `extract.ts` (→ Markdown), `convert.ts` (Markdown/HTML → PDF/DOCX/PPTX, Office → PDF, Office ↔ Office), `pdf-ops.ts` (merge/split/rotate/watermark/forms/metadata), `chart.ts` (chart spec → image), `office-build.ts` (DSL → DOCX/XLSX/PPTX).
-- `src/path-policy.ts` — `/workspace` confinement, symlink guard, atomic writes, `overwrite:false` default, default output dir `/workspace/.speedwave-office/`.
+- `src/path-policy.ts` — `/workspace` confinement, symlink guard, atomic writes, `overwrite:false` default, default output dir `/workspace/.speedwave/office/`.
 - `src/subprocess.ts` — hardened `spawn` (timeout/SIGKILL, bounded stdout/stderr) + `runPythonScript`.
 - `src/lo-queue.ts` — serializes all `soffice` invocations (LibreOffice headless is not reentrant).
 - `scripts/*.py` — Python support-scripts run in the venv at `/opt/office-venv`: `docx_build.py`, `xlsx_build.py`, `pptx_build.py`, `pdf_ops.py`, `render_chart.py`, `python_docx_extract.py`; helpers `markdown_utils.py`, `script_runner.py` (the stdout-JSON / exit-code convention); tests `test_helpers.py`, `test_scripts.py`.
