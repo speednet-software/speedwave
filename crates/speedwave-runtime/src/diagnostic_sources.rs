@@ -222,5 +222,8 @@ mod tests {
         };
         assert!(entry("mcp-os").ends_with(consts::MCP_OS_LOG_FILE));
         assert!(entry("claude").ends_with(consts::CLAUDE_SESSION_LOG_FILE));
+        assert!(entry("host-exec").ends_with(consts::HOST_EXEC_LOG_FILE));
+        // `lima`/`compose-yml` filenames are Lima's / compose's own conventions,
+        // not Speedwave consts, so there's nothing to drift against.
     }
 }

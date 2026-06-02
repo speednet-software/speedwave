@@ -23,21 +23,25 @@ fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use rustix::io::Errno;
-        // Errnos meaning "this fs/device can't do this sync flavour" → fall back.
-        // ENOTSUP/EOPNOTSUPP: network mounts (SMB/NFS). ENODEV: char devices.
-        let unsupported = |e: &Errno| {
+        // `F_FULLFSYNC` unsupported on this fs/device → fall back. EINVAL here
+        // means "unknown fcntl command"; ENOTSUP/EOPNOTSUPP: network mounts
+        // (SMB/NFS); ENODEV: char devices.
+        let fcntl_unsupported = |e: &Errno| {
             matches!(
                 *e,
                 Errno::NOTSUP | Errno::OPNOTSUPP | Errno::INVAL | Errno::NODEV
             )
         };
+        // Plain `fsync` fallback: only a filesystem capability gap is best-effort.
+        // EINVAL from `fsync` is a bad fd (programming error) — must propagate.
+        let fsync_unsupported =
+            |e: &Errno| matches!(*e, Errno::NOTSUP | Errno::OPNOTSUPP | Errno::NODEV);
         match rustix::fs::fcntl_fullfsync(file) {
             Ok(()) => Ok(()),
-            // F_FULLFSYNC not supported here — fall back to plain fsync.
-            Err(e) if unsupported(&e) => match rustix::fs::fsync(file) {
+            Err(e) if fcntl_unsupported(&e) => match rustix::fs::fsync(file) {
                 Ok(()) => Ok(()),
                 // Neither supported (some network FS): best-effort, don't fail.
-                Err(e2) if unsupported(&e2) => Ok(()),
+                Err(e2) if fsync_unsupported(&e2) => Ok(()),
                 Err(e2) => Err(std::io::Error::from(e2)),
             },
             Err(e) => Err(std::io::Error::from(e)),
