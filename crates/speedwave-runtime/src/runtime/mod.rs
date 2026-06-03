@@ -2218,6 +2218,15 @@ services:
         assert!(is_propagation_error(&anyhow::anyhow!(
             "yaml: line 8: did not find expected key"
         )));
+        // A torn `cpus:` value under deploy.resources.limits surfaces as the
+        // compose-go schema type error for that field (real-world: mcp-office).
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "validating compose.yml: services.mcp-office.deploy.resources.limits.cpus must be a number or string"
+        )));
+        // Same for a torn `memory:` limit value.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "validating compose.yml: services.mcp-office.deploy.resources.limits.memory must be a string"
+        )));
     }
 
     #[test]

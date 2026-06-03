@@ -427,10 +427,14 @@ pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose
 /// string"), or a mid-line cut yields a YAML parse error. Recognised by
 /// `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
-    // Scoped to the network-driver torn-write symptom, not the bare
-    // "must be a string" — that phrase alone over-matches unrelated schema
-    // errors that are not retryable propagation lag.
-    "driver must be a string",
+    // A torn/stale virtiofs page truncates a scalar, so compose-go's schema
+    // validator reports the field as the wrong type. Each fragment is scoped to
+    // a specific generated field (path + type), never the bare "must be a
+    // string" — our renderer always emits valid values, so any of these can
+    // only mean a truncated read, which a retry resolves. See ADR-068.
+    "driver must be a string",         // networks.<n>.driver torn
+    "cpus must be a number or string", // deploy.resources.limits.cpus torn
+    "memory must be a string",         // deploy.resources.limits.memory torn
     "could not find expected",
     "did not find expected",
 ];
