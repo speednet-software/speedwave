@@ -33,9 +33,6 @@ services:
       # "auto-detection fails" case). Value is the string `true` (not 1) per the
       # Claude Code env-vars reference.
       - CLAUDE_CODE_AUTO_CONNECT_IDE=true
-      # `auto` = use the model's own default effort (high on Opus 4.8). A valid
-      # value per Claude Code env-vars docs (low|medium|high|xhigh|max|auto).
-      - CLAUDE_CODE_EFFORT_LEVEL=auto
       - ANTHROPIC_LOG=debug
     working_dir: /workspace
     networks:
