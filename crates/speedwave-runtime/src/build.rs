@@ -690,11 +690,20 @@ pub fn build_images_for_bundle_in(
                  in Speedwave, or restart Speedwave to retry auto-prune). Check usage with \
                  `df -h` inside the VM.",
             )
+        } else if is_network_build_error(&err) {
+            err.context(
+                "Image build failed: the container VM could not reach a base-image registry \
+                 (docker.io / mcr.microsoft.com). This is usually a network or DNS problem — \
+                 a VPN with a low MTU, an offline host, or the VM's resolver not yet settled \
+                 right after boot. Check your connection and retry; if it persists, restart \
+                 Speedwave to reboot the VM.",
+            )
         } else if is_transient_build_error(&err) {
             err.context(
-                "Image build failed due to an I/O error. If running inside a virtual machine \
-                 (VMware, VirtualBox), try increasing VM memory to at least 8 GB and ensuring \
-                 nested virtualization is enabled in VM settings.",
+                "Image build failed with a transient I/O error inside the container VM. \
+                 Retry; if it persists, restart Speedwave. When running Speedwave inside \
+                 another VM (VMware, VirtualBox), give that VM at least 8 GB RAM and enable \
+                 nested virtualization.",
             )
         } else {
             err
@@ -939,10 +948,6 @@ const BASE_IMAGE_REGISTRY_HOSTS: &[&str] =
 fn is_transient_build_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
-        let dns_shaped = msg.contains("server misbehaving")
-            || msg.contains("failed to resolve source metadata")
-            || msg.contains("no such host")
-            || (msg.contains("dial tcp") && msg.contains("lookup"));
         if msg.contains("i/o timeout")
             || msg.contains("input/output error")
             || msg.contains("connection reset")
@@ -950,7 +955,7 @@ fn is_transient_build_error(err: &anyhow::Error) -> bool {
             || msg.contains("resource temporarily unavailable")
             // DNS hiccups (SERVFAIL / NXDOMAIN / dial-lookup) are transient only when
             // they name one of our base-image registries — see the doc above.
-            || (dns_shaped && mentions_base_image_registry(&msg))
+            || (is_dns_shaped(&msg) && mentions_base_image_registry(&msg))
         {
             return true;
         }
@@ -961,6 +966,33 @@ fn is_transient_build_error(err: &anyhow::Error) -> bool {
 /// `true` if `msg` (already lowercased) mentions one of [`BASE_IMAGE_REGISTRY_HOSTS`].
 fn mentions_base_image_registry(msg: &str) -> bool {
     BASE_IMAGE_REGISTRY_HOSTS.iter().any(|h| msg.contains(h))
+}
+
+/// `true` if `msg` (already lowercased) is a DNS-resolution failure (SERVFAIL /
+/// NXDOMAIN / dial-lookup). Caller scopes it to base-image registries.
+fn is_dns_shaped(msg: &str) -> bool {
+    msg.contains("server misbehaving")
+        || msg.contains("failed to resolve source metadata")
+        || msg.contains("no such host")
+        || (msg.contains("dial tcp") && msg.contains("lookup"))
+}
+
+/// `true` if a transient build error is network/DNS-shaped (vs. a local I/O stall).
+/// Lets the enrichment pick guidance that matches the actual cause instead of always
+/// blaming VM memory — the DNS-resolver race names a base-image registry.
+fn is_network_build_error(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        let msg = cause.to_string().to_ascii_lowercase();
+        // Both branches are scoped to a base-image registry: the network
+        // enrichment names docker.io / mcr.microsoft.com, so a reset during an
+        // apt layer (registry not involved) must NOT route here.
+        if (is_dns_shaped(&msg) || msg.contains("connection reset"))
+            && mentions_base_image_registry(&msg)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -2466,6 +2498,24 @@ mod tests {
     }
 
     #[test]
+    fn test_connection_reset_at_registry_is_network() {
+        // Reset while pulling a base image → network enrichment is accurate.
+        let err =
+            anyhow::anyhow!("failed to copy: connection reset by peer (registry-1.docker.io)");
+        assert!(is_network_build_error(&err));
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_connection_reset_off_registry_is_not_network() {
+        // Reset during an apt layer (no base-image registry) must NOT route to
+        // the network message that names docker.io / mcr.microsoft.com.
+        let err = anyhow::anyhow!("apt: connection reset by peer (deb.debian.org)");
+        assert!(!is_network_build_error(&err));
+        assert!(is_transient_build_error(&err), "still transient → retried");
+    }
+
+    #[test]
     fn test_is_transient_build_error_temporary_failure() {
         let err = anyhow::anyhow!("Temporary failure resolving deb.debian.org");
         assert!(is_transient_build_error(&err));
@@ -2627,58 +2677,63 @@ mod tests {
     // Error enrichment tests
     // -----------------------------------------------------------------------
 
+    /// A DNS-resolver-race failure naming a base-image registry is network-shaped,
+    /// so the enrichment must NOT blame VM memory.
     #[test]
-    fn test_build_error_enrichment_adds_vm_hint() {
+    fn test_dns_registry_error_is_network_not_io() {
+        let err = anyhow::anyhow!(
+            "failed to do request: Head \"https://registry-1.docker.io/v2/library/node/manifests/24-alpine\": \
+             dial tcp: lookup registry-1.docker.io on 127.0.0.53:53: server misbehaving"
+        );
+        assert!(
+            is_network_build_error(&err),
+            "DNS failure for a base-image registry must classify as network"
+        );
+        assert!(
+            is_transient_build_error(&err),
+            "and still be transient (so it is retried)"
+        );
+    }
+
+    /// A plain local I/O stall is transient but NOT network-shaped, so it keeps the
+    /// VM/RAM guidance.
+    #[test]
+    fn test_io_timeout_is_transient_but_not_network() {
         let err = anyhow::anyhow!("input/output error");
-        let enriched = if is_transient_build_error(&err) {
-            err.context(
-                "Image build failed due to an I/O error. If running inside a virtual machine \
-                 (VMware, VirtualBox), try increasing VM memory to at least 8 GB and ensuring \
-                 nested virtualization is enabled in VM settings.",
-            )
-        } else {
-            err
-        };
-        let msg = format!("{enriched:#}");
+        assert!(is_transient_build_error(&err));
         assert!(
-            msg.contains("virtual machine"),
-            "enriched error should contain VM guidance, got: {msg}"
+            !is_network_build_error(&err),
+            "a bare I/O error names no registry, so it is not network-shaped"
         );
     }
 
+    /// A DNS failure for a host that is NOT one of our base-image registries is
+    /// neither network-classified (could be a typo'd custom registry) nor retried.
     #[test]
-    fn test_build_error_enrichment_preserves_unrelated() {
-        let err = anyhow::anyhow!("permission denied");
-        let result = if is_transient_build_error(&err) {
-            err.context("VM hint")
-        } else {
-            err
-        };
-        let msg = format!("{result:#}");
-        assert!(
-            !msg.contains("virtual machine"),
-            "non-I/O error should not get VM hint, got: {msg}"
+    fn test_dns_for_unknown_host_is_not_network() {
+        let err = anyhow::anyhow!(
+            "dial tcp: lookup evil.example.com on 127.0.0.53:53: server misbehaving"
         );
+        assert!(!is_network_build_error(&err));
+        assert!(!is_transient_build_error(&err));
     }
 
+    /// Chain-wrapped network errors are still classified through the full cause chain.
     #[test]
-    fn test_build_error_enrichment_chain_wrapped() {
-        let inner = anyhow::anyhow!("i/o timeout");
+    fn test_network_error_chain_wrapped() {
+        let inner = anyhow::anyhow!(
+            "failed to resolve source metadata for docker.io/library/node:24-alpine"
+        );
         let outer = inner.context("nerdctl build failed");
-        let enriched = if is_transient_build_error(&outer) {
-            outer.context(
-                "Image build failed due to an I/O error. If running inside a virtual machine \
-                 (VMware, VirtualBox), try increasing VM memory to at least 8 GB and ensuring \
-                 nested virtualization is enabled in VM settings.",
-            )
-        } else {
-            outer
-        };
-        let msg = format!("{enriched:#}");
-        assert!(
-            msg.contains("virtual machine"),
-            "chain-wrapped I/O error should still get VM hint, got: {msg}"
-        );
+        assert!(is_network_build_error(&outer));
+    }
+
+    /// An unrelated error (permission denied) is neither network nor transient.
+    #[test]
+    fn test_unrelated_error_is_neither() {
+        let err = anyhow::anyhow!("permission denied");
+        assert!(!is_network_build_error(&err));
+        assert!(!is_transient_build_error(&err));
     }
 
     // ── prune_old_bundle_images tests ─────────────────────────────────────
