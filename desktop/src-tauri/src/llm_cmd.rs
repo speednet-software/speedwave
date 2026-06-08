@@ -43,16 +43,41 @@ pub struct DiscoveredModel {
     pub context_tokens: Option<u32>,
 }
 
+/// Compatibility status of the Anthropic Messages chat endpoint (`/v1/messages`).
+///
+/// A plain `bool` cannot represent "endpoint exists but rejects Claude Code's
+/// request shape". This enum makes the four states mutually exclusive and
+/// total, preventing illegal combinations.
+///
+/// The wire value (`serde(rename_all = "snake_case")`) is mirrored in the
+/// TypeScript frontend — see `desktop/src/src/app/models/llm.ts::MessagesEndpointStatus`.
+/// Adding a variant requires a matching update there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagesEndpointStatus {
+    /// `POST /v1/messages` exists and accepted the probe request shape.
+    Ok,
+    /// Endpoint absent — server returned 404 or 405.
+    Missing,
+    /// Endpoint exists but rejects the system turn Claude Code sends inside
+    /// `messages[]` as `{role:"system"}` (strict Anthropic schema enforcement,
+    /// e.g. unsloth llama-server). Claude Code sends the system turn in
+    /// `messages[]`, so chat will fail even though the endpoint "exists".
+    /// Speedwave cannot reshape the request (no proxy — ADR-040).
+    StrictSystemRole,
+    /// Could not determine: 5xx, transport error, or timeout during probe.
+    Unknown,
+}
+
 /// Result of a `provider="local"` discovery probe. Pairs the model list with
-/// a chat-endpoint sanity flag so the UI can warn when a server advertises
-/// models via `/v1/models` but does not implement the Anthropic Messages
-/// API (`/v1/messages`). `None` for the flag means "could not determine"
-/// (timeout, transport error) — UI treats it as unknown rather than failure.
+/// a chat-endpoint compatibility status so the UI can warn before the user
+/// starts a session. `None` for the status means "not probed at all"
+/// (anthropic provider or field omitted from the response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoverResult {
     pub models: Vec<DiscoveredModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub messages_endpoint_ok: Option<bool>,
+    pub messages_endpoint_status: Option<MessagesEndpointStatus>,
 }
 
 // ---------------------------------------------------------------------------
@@ -795,30 +820,107 @@ fn resolve_transient_credential(
     }
 }
 
-/// Probes `POST /v1/messages` with a 1-token request to detect whether the
-/// server implements the Anthropic Messages chat endpoint. See ADR-041.
-async fn probe_messages_endpoint(base: &url::Url, transport: &dyn ProbeTransport) -> Option<bool> {
+/// Returns `true` when `body` is a 4xx response that signals the server
+/// rejected the `{role:"system"}` element inside `messages[]` — the strict
+/// Anthropic-schema validation error emitted by llama-server / unsloth.
+///
+/// This distinguishes "system-role rejection" from other 4xx causes (e.g.
+/// unknown model `"ping"`). If the JSON cannot be parsed or does not carry
+/// the expected detail shape, we conservatively return `false` so the probe
+/// is classified as `Ok` rather than `StrictSystemRole` — better to let a
+/// session start and fail explicitly than to block it on a false positive.
+///
+/// Signature matched against the user-reported error:
+/// `{"detail":[{"type":"literal_error","loc":["body","messages",1,"role"],
+///   "msg":"Input should be 'user' or 'assistant'","input":"system"}]}`
+///
+/// Two independent checks — either is sufficient:
+/// 1. A `detail[]` entry whose `"loc"` array ends with `"role"` and whose
+///    `"input"` is `"system"`.
+/// 2. Any string value in the body contains `"'user' or 'assistant'"`.
+pub(crate) fn body_rejects_system_role(body: &[u8]) -> bool {
+    let Ok(val) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+
+    // Check 2: fast string scan first (cheaper than deep traversal).
+    let body_str = String::from_utf8_lossy(body);
+    if body_str.contains("'user' or 'assistant'") {
+        return true;
+    }
+
+    // Check 1: detail[].loc ends with "role" and input == "system".
+    if let Some(details) = val.get("detail").and_then(|d| d.as_array()) {
+        for entry in details {
+            let input_is_system = entry
+                .get("input")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "system")
+                .unwrap_or(false);
+            let loc_ends_with_role = entry
+                .get("loc")
+                .and_then(|l| l.as_array())
+                .and_then(|arr| arr.last())
+                .and_then(|last| last.as_str())
+                .map(|s| s == "role")
+                .unwrap_or(false);
+            if input_is_system && loc_ends_with_role {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Probes `POST /v1/messages` with a 1-token request that **faithfully
+/// replicates the request shape Claude Code sends** — a `{role:"system"}`
+/// entry inside `messages[]`. This detects the exact 422 a strict
+/// Anthropic-schema server returns before the user starts a session.
+///
+/// Status mapping:
+/// - `404`/`405` → `Missing` (endpoint absent).
+/// - `4xx` whose body matches the system-role rejection signature → `StrictSystemRole`.
+/// - Other `2xx`–`4xx` (incl. "unknown model `ping`" errors) → `Ok`.
+/// - `5xx` / transport error / timeout → `Unknown`.
+///
+/// See ADR-041 and the `MessagesEndpointStatus` doc for rationale.
+async fn probe_messages_endpoint(
+    base: &url::Url,
+    transport: &dyn ProbeTransport,
+) -> Option<MessagesEndpointStatus> {
     let url = format!("{}/v1/messages", base.as_str().trim_end_matches('/'));
+    // Send the faithful Claude Code shape: system turn inside messages[].
+    // This is the exact request that fails on strict-schema servers (llama-server,
+    // unsloth) and is accepted by fully-compatible ones (Ollama, LM Studio,
+    // recent llama.cpp with system-in-messages support).
     let body = serde_json::json!({
         "model": "ping",
         "max_tokens": 1,
-        "messages": [{ "role": "user", "content": "ping" }],
+        "messages": [
+            { "role": "system", "content": "ping" },
+            { "role": "user",   "content": "ping" }
+        ],
     });
-    let resp = transport.post(&url, &body).await;
-    match resp {
+    match transport.post(&url, &body).await {
         Ok(r) => {
             let status = r.status;
-            // 200/4xx (other than 404/405) → endpoint exists.
-            // 404/405 → endpoint missing.
-            // Anything else → unknown (5xx is also "unknown" because it
-            // could be a transient overload; the model probe was cheap).
             match status {
-                404 | 405 => Some(false),
-                s if (200..500).contains(&s) => Some(true),
-                _ => None,
+                404 | 405 => Some(MessagesEndpointStatus::Missing),
+                // 4xx with a body that identifies the system-role rejection →
+                // server exists but is incompatible with Claude Code's payload.
+                s if (400..500).contains(&s) && body_rejects_system_role(&r.body) => {
+                    Some(MessagesEndpointStatus::StrictSystemRole)
+                }
+                // Other 4xx (unknown model "ping", auth required, etc.) →
+                // endpoint exists, the system-role shape was not the problem.
+                s if (200..500).contains(&s) => Some(MessagesEndpointStatus::Ok),
+                // 5xx or unexpected → could not determine.
+                _ => Some(MessagesEndpointStatus::Unknown),
             }
         }
-        Err(_) => None,
+        // Transport error / timeout → could not determine.
+        Err(_) => Some(MessagesEndpointStatus::Unknown),
     }
 }
 
@@ -848,14 +950,14 @@ pub(crate) async fn do_discover_llm_models(
     // probe). Legacy provider names (`ollama`/`lmstudio`/`llamacpp`) are
     // accepted on read for two release cycles — the Settings UI auto-migrates
     // them to `local` on the next Save (ADR-040 §"Supported Providers").
-    let (raw_models, messages_endpoint_ok) = match provider {
+    let (raw_models, messages_endpoint_status) = match provider {
         "local" | "ollama" | "lmstudio" | "llamacpp" => {
-            let (models, sanity) = futures_util::future::join(
+            let (models, status) = futures_util::future::join(
                 discover_local(&validated, transport),
                 probe_messages_endpoint(&validated, transport),
             )
             .await;
-            (models?, sanity)
+            (models?, status)
         }
         _ => return Err("unsupported".to_string()),
     };
@@ -866,10 +968,10 @@ pub(crate) async fn do_discover_llm_models(
         .collect();
 
     log::info!(
-        "LLM model discovery: {} returned {} model(s) (messages_ok={:?})",
+        "LLM model discovery: {} returned {} model(s) (messages_endpoint_status={:?})",
         provider,
         models.len(),
-        messages_endpoint_ok
+        messages_endpoint_status
     );
 
     if models.is_empty() {
@@ -877,7 +979,7 @@ pub(crate) async fn do_discover_llm_models(
     }
     Ok(DiscoverResult {
         models,
-        messages_endpoint_ok,
+        messages_endpoint_status,
     })
 }
 
@@ -946,9 +1048,9 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
     };
     match &result {
         Ok(r) => log::info!(
-            "discover_llm_models: ok — {} model(s), messages_endpoint_ok={:?}",
+            "discover_llm_models: ok — {} model(s), messages_endpoint_status={:?}",
             r.models.len(),
-            r.messages_endpoint_ok
+            r.messages_endpoint_status
         ),
         Err(e) => log::warn!("discover_llm_models: err — {e}"),
     }
@@ -1832,7 +1934,10 @@ mod tests {
                 .unwrap();
         assert_eq!(result.models.len(), 1);
         assert_eq!(result.models[0].context_tokens, Some(8192));
-        assert_eq!(result.messages_endpoint_ok, Some(true));
+        assert_eq!(
+            result.messages_endpoint_status,
+            Some(MessagesEndpointStatus::Ok)
+        );
         models_mock.assert_async().await;
         messages_mock.assert_async().await;
         no_show_mock.assert_async().await;
@@ -1841,7 +1946,7 @@ mod tests {
     #[tokio::test]
     async fn integration_local_warns_when_messages_endpoint_missing() {
         // Server has `/v1/models` but returns 404 on `/v1/messages` — UI
-        // should get `messages_endpoint_ok: Some(false)` so it can warn.
+        // should get `messages_endpoint_status: Some(Missing)` so it can warn.
         // Inline `meta.n_ctx_train` → no `/api/show` fallback fires.
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
@@ -1871,7 +1976,10 @@ mod tests {
             do_discover_llm_models("local", &server.url(), &client, Duration::from_secs(2))
                 .await
                 .unwrap();
-        assert_eq!(result.messages_endpoint_ok, Some(false));
+        assert_eq!(
+            result.messages_endpoint_status,
+            Some(MessagesEndpointStatus::Missing)
+        );
         models_mock.assert_async().await;
         messages_mock.assert_async().await;
         no_show_mock.assert_async().await;
@@ -1918,7 +2026,10 @@ mod tests {
         for m in &result.models {
             assert_eq!(m.context_tokens, Some(8192));
         }
-        assert_eq!(result.messages_endpoint_ok, Some(true));
+        assert_eq!(
+            result.messages_endpoint_status,
+            Some(MessagesEndpointStatus::Ok)
+        );
         models_mock.assert_async().await;
         show_mock.assert_async().await;
         messages_mock.assert_async().await;
@@ -2046,5 +2157,177 @@ mod tests {
         // `Bearer` alone (no trailing token) is NOT a prefix — trims to the
         // literal word; caller's validation logic decides what to do with it.
         assert_eq!(strip_bearer_prefix("Bearer"), Some("Bearer".to_string()));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // body_rejects_system_role — pure unit tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn body_rejects_system_role_detects_llama_server_422() {
+        // Exact body from the user-reported error (unsloth llama-server).
+        let body = br#"{"detail":[{"type":"literal_error","loc":["body","messages",1,"role"],"msg":"Input should be 'user' or 'assistant'","input":"system","ctx":{"expected":"'user' or 'assistant'"}}]}"#;
+        assert!(
+            body_rejects_system_role(body),
+            "must detect llama-server's system-role 422 body"
+        );
+    }
+
+    #[test]
+    fn body_rejects_system_role_detects_user_or_assistant_in_msg() {
+        // A server that uses the msg substring but a different loc structure.
+        let body = br#"{"error":{"message":"Input should be 'user' or 'assistant'"}}"#;
+        assert!(
+            body_rejects_system_role(body),
+            "must detect 'user' or 'assistant' substring"
+        );
+    }
+
+    #[test]
+    fn body_rejects_system_role_ignores_unknown_model_422() {
+        // A 422 for an unknown model — must NOT be classified as StrictSystemRole.
+        let body =
+            br#"{"error":{"message":"model 'ping' not found","type":"invalid_request_error"}}"#;
+        assert!(
+            !body_rejects_system_role(body),
+            "unknown-model 422 must not be classified as system-role rejection"
+        );
+    }
+
+    #[test]
+    fn body_rejects_system_role_ignores_unrelated_loc() {
+        // detail[].loc ends with "model", not "role" — a different schema error.
+        let body = br#"{"detail":[{"type":"literal_error","loc":["body","model"],"msg":"Invalid value","input":"ping","ctx":{}}]}"#;
+        assert!(
+            !body_rejects_system_role(body),
+            "different loc field must not be classified as system-role rejection"
+        );
+    }
+
+    #[test]
+    fn body_rejects_system_role_handles_malformed_json() {
+        assert!(
+            !body_rejects_system_role(b"not json at all"),
+            "malformed JSON must return false (conservative)"
+        );
+        assert!(
+            !body_rejects_system_role(b""),
+            "empty body must return false"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // probe_messages_endpoint — integration with MessagesEndpointStatus
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn integration_local_strict_system_role_server() {
+        // Server lists models but rejects system-in-messages with the exact
+        // llama-server 422 body — probe must return StrictSystemRole.
+        let mut server = mockito::Server::new_async().await;
+        let models_mock = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"qwen3","meta":{"n_ctx_train":32768}}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let messages_mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(422)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"detail":[{"type":"literal_error","loc":["body","messages",1,"role"],"msg":"Input should be 'user' or 'assistant'","input":"system","ctx":{"expected":"'user' or 'assistant'"}}]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = build_llm_probe_client().unwrap();
+        let result =
+            do_discover_llm_models("local", &server.url(), &client, Duration::from_secs(2))
+                .await
+                .unwrap();
+        assert_eq!(
+            result.messages_endpoint_status,
+            Some(MessagesEndpointStatus::StrictSystemRole),
+            "llama-server strict-schema 422 must be detected as StrictSystemRole"
+        );
+        models_mock.assert_async().await;
+        messages_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn integration_local_unknown_model_ping_is_ok() {
+        // Server returns 422 for the unknown "ping" model, but the body
+        // does NOT contain the system-role signature — must be Ok, not
+        // StrictSystemRole, because a real model name would succeed.
+        let mut server = mockito::Server::new_async().await;
+        let models_mock = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"llama3","meta":{"n_ctx_train":8192}}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let messages_mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(422)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"error":{"message":"model 'ping' not found","type":"invalid_request_error"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = build_llm_probe_client().unwrap();
+        let result =
+            do_discover_llm_models("local", &server.url(), &client, Duration::from_secs(2))
+                .await
+                .unwrap();
+        assert_eq!(
+            result.messages_endpoint_status,
+            Some(MessagesEndpointStatus::Ok),
+            "unknown-model 422 must not be classified as StrictSystemRole"
+        );
+        models_mock.assert_async().await;
+        messages_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_returns_unknown_on_5xx() {
+        // A 5xx on /v1/messages must yield Unknown — server is up for
+        // models but the endpoint errored transiently.
+        let mut server = mockito::Server::new_async().await;
+        let models_mock = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"foo","meta":{"n_ctx_train":4096}}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let messages_mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(503)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = build_llm_probe_client().unwrap();
+        let result =
+            do_discover_llm_models("local", &server.url(), &client, Duration::from_secs(2))
+                .await
+                .unwrap();
+        assert_eq!(
+            result.messages_endpoint_status,
+            Some(MessagesEndpointStatus::Unknown),
+            "5xx on /v1/messages must yield Unknown"
+        );
+        models_mock.assert_async().await;
+        messages_mock.assert_async().await;
     }
 }

@@ -685,6 +685,8 @@ You can run Claude Code inside Speedwave against a local LLM server instead of A
 
 If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), select any local provider and override the **Base URL** field. The URL must use `http://` or `https://` and may include a single-segment path prefix such as `/anthropic` (LiteLLM) or `/v1` (AWS-style gateways). Multi-segment paths and query strings are rejected.
 
+> **Always use `host.docker.internal`, never `localhost` or `127.0.0.1`.** Claude Code runs inside a container — `localhost` there refers to the container itself, not your machine. The Speedwave-managed compose configuration maps `host.docker.internal` to the host gateway IP so the container can reach services on your machine. `0.0.0.0` is a bind address (valid for starting your server, invalid as a base URL destination — Speedwave rejects it).
+
 ### Servers requiring authentication
 
 When the local server requires a Bearer token (vLLM `--api-key`, LM Studio with "Require Authentication" enabled, llama.cpp `--api-key`, LiteLLM `LITELLM_MASTER_KEY`, corporate gateways):
@@ -705,9 +707,17 @@ LiteLLM exposes an Anthropic-compatible path at `/anthropic`. Configure it as:
 - **Base URL:** `http://host.docker.internal:4000/anthropic`
 - **api_key:** the value of `LITELLM_MASTER_KEY` set on the LiteLLM server
 
-### Servers without `/v1/messages`
+### Servers without `/v1/messages` or with strict schema enforcement
 
-Speedwave requires the server to implement Anthropic Messages on `POST /v1/messages`. Pure OpenAI Chat Completions servers (vLLM stock, TGI, Triton) **will not work for chat** — Settings shows a yellow banner after Discover when the sanity probe detects a missing `/v1/messages` endpoint. Resolve by running a translation proxy (LiteLLM with `/anthropic` route is the common choice) between Speedwave and the OpenAI-only server.
+Speedwave requires the server to implement Anthropic Messages on `POST /v1/messages`. The Settings discovery probe reports one of three states after clicking **Discover models**:
+
+| Warning shown                                                             | Meaning                                                                                                                                                                                                                                                                        | Resolution                                                                                      |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| _"server returned a model list but did not respond to POST /v1/messages"_ | Endpoint absent (404/405). Pure OpenAI Chat Completions server.                                                                                                                                                                                                                | Use LiteLLM with the `/anthropic` route as a translation proxy.                                 |
+| _"server rejects a system role inside messages[]"_                        | Endpoint exists but enforces strict Anthropic schema: the `system` prompt must be a top-level `system` field, not a `{role:"system"}` element in `messages[]`. Claude Code uses the latter form, so chat will fail. Speedwave cannot reshape the request (no proxy — ADR-040). | Switch to a compatible server version: Ollama 0.14+, LM Studio 0.4.1+, llama.cpp January 2026+. |
+| No warning                                                                | Endpoint exists and accepted the probe.                                                                                                                                                                                                                                        | None — proceed.                                                                                 |
+
+The probe sends the same `messages[]` shape Claude Code sends at chat time (including a `{role:"system"}` element) so the incompatibility is detected before you start a session rather than at the first message.
 
 ## See Also
 

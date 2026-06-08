@@ -172,3 +172,71 @@ done
 See also: `docs/contributing/release-signing.md` for the full macOS signing,
 local verification, and local notarization procedures, and `docs/adr/ADR-049-tcc-sub-identifiers-and-applevents-gate.md`
 for the architectural rationale.
+
+---
+
+## Local LLM: chat fails with HTTP 422 "Input should be 'user' or 'assistant'"
+
+**Symptom:** You configured a local provider (e.g. unsloth llama-server, a
+custom llama.cpp build) and Speedwave reports the server as found, but every
+chat attempt fails with an error like:
+
+```
+API Error: 422 {"detail":[{"type":"literal_error","loc":["body","messages",1,"role"],
+"msg":"Input should be 'user' or 'assistant'","input":"system"}]}
+```
+
+**Cause:** Claude Code sends the system prompt as a `{role:"system"}` element
+inside the `messages[]` array. Servers that enforce a strict Anthropic Messages
+schema (such as some llama-server / unsloth builds) reject this — their schema
+requires the system prompt in a separate top-level `system` field, not as a
+role inside `messages[]`. Speedwave has no proxy between Claude Code and the
+server (ADR-040) and cannot reshape the request.
+
+Starting with Speedwave v0.14, the Settings → LLM Provider discovery probe
+detects this incompatibility and shows a warning _before_ you start a session.
+If you see the warning, the server is not fully compatible with Claude Code's
+Anthropic Messages payload.
+
+**Resolution:** Switch to a server that accepts Claude Code's request shape:
+
+- **Ollama 0.14+** — supports `system` role inside `messages[]`.
+- **LM Studio 0.4.1+** — compatible with the Anthropic Messages schema Claude
+  Code uses.
+- **llama.cpp (January 2026 build or later)** — recent builds accept the full
+  Anthropic schema.
+- **LiteLLM** — route via the `/anthropic` prefix for full schema translation.
+
+---
+
+## Local LLM: cannot connect — use host.docker.internal, not localhost
+
+**Symptom:** You configured a local LLM server on your machine and entered
+`http://localhost:<port>` (or `http://127.0.0.1:<port>`) as the base URL.
+Discovery fails with "connection refused" or the chat session cannot reach the
+server.
+
+**Cause:** Claude Code runs inside a container (Lima VM on macOS, WSL2 on
+Windows). Inside the container, `localhost` and `127.0.0.1` resolve to the
+_container itself_, not your host machine. Only `host.docker.internal` is
+mapped to the host via the Compose `extra_hosts` entry that Speedwave injects
+at container start.
+
+**Why `0.0.0.0` is also wrong:** `0.0.0.0` is a bind address, not a
+destination address. It means "listen on all interfaces" when starting a
+server, but it is not a valid target for outbound connections. Speedwave's
+SSRF validator rejects it.
+
+**Resolution:**
+
+1. Set **Base URL** to `http://host.docker.internal:<port>` in Settings →
+   LLM Provider.
+2. Start your local server bound to all interfaces so the container can reach
+   it from the VM network. For llama-server / llama.cpp:
+   ```
+   llama-server -H 0.0.0.0 -p 8888 ...
+   ```
+   For Ollama the default bind already covers the VM network on macOS (Lima
+   VZ NAT) and Windows (WSL2 mirrored mode). On Windows you may need to set
+   `OLLAMA_HOST=0.0.0.0`.
+3. Save the configuration and click **discover models** to verify connectivity.

@@ -40,15 +40,29 @@ export interface DiscoveredModel {
 }
 
 /**
+ * Wire-format mirror of `llm_cmd::MessagesEndpointStatus` (Rust enum,
+ * `serde(rename_all = "snake_case")`). Adding a variant requires a matching
+ * update in the Rust source.
+ *
+ * - `ok` — endpoint exists and accepted the probe request shape.
+ * - `missing` — endpoint absent (404/405).
+ * - `strict_system_role` — endpoint exists but rejects the `{role:"system"}`
+ *   element Claude Code places inside `messages[]` (strict Anthropic-schema
+ *   server, e.g. unsloth llama-server). Chat will fail; Speedwave cannot
+ *   reshape the request (no proxy — ADR-040).
+ * - `unknown` — could not determine: 5xx, transport error, or timeout.
+ */
+export type MessagesEndpointStatus = 'ok' | 'missing' | 'strict_system_role' | 'unknown';
+
+/**
  * Result of a `provider="local"` discovery probe. Pairs the model list with
- * a chat-endpoint sanity flag — the UI shows a warning when the server has
- * `/v1/models` but does NOT implement `/v1/messages` (Anthropic Messages).
- * `messages_endpoint_ok === undefined` means "could not determine" (timeout
- * or transport error); treat as "unknown", not "failure".
+ * the Anthropic Messages endpoint compatibility status so the UI can warn
+ * before a session starts. `messages_endpoint_status === undefined` means
+ * "not probed at all" (anthropic provider or field absent from the response).
  */
 export interface DiscoverResult {
   models: DiscoveredModel[];
-  messages_endpoint_ok?: boolean;
+  messages_endpoint_status?: MessagesEndpointStatus;
 }
 
 /** Local-provider names treated as "Local" in the UI (`isLocalProvider`). */

@@ -1143,4 +1143,232 @@ describe('LlmProviderComponent', () => {
 
     expect(invokeCalled).toBe(true);
   });
+
+  // ── Usage hint (always visible, provider-aware) ──────────────────────
+
+  it('renders usage hint for anthropic provider', async () => {
+    component.provider = 'anthropic';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const hint = fixture.nativeElement.querySelector('[data-testid="settings-llm-usage-hint"]');
+    expect(hint).not.toBeNull();
+    expect(hint.textContent).toBeTruthy();
+  });
+
+  it('renders usage hint for local provider', async () => {
+    component.provider = 'local';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const hint = fixture.nativeElement.querySelector('[data-testid="settings-llm-usage-hint"]');
+    expect(hint).not.toBeNull();
+    expect(hint.textContent).toBeTruthy();
+  });
+
+  it('usageHint returns different text for anthropic vs local', () => {
+    component.provider = 'anthropic';
+    const anthropicHint = component.usageHint();
+    component.provider = 'local';
+    const localHint = component.usageHint();
+    expect(anthropicHint).not.toBe(localHint);
+    expect(anthropicHint.length).toBeGreaterThan(0);
+    expect(localHint.length).toBeGreaterThan(0);
+  });
+
+  // ── base_url host hint + container-local inline warning ──────────────
+
+  it('shows base_url host hint for local provider', async () => {
+    component.provider = 'local';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const hint = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-base-url-host-hint"]'
+    );
+    expect(hint).not.toBeNull();
+  });
+
+  it('hides base_url host hint for anthropic provider', async () => {
+    component.provider = 'anthropic';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const hint = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-base-url-host-hint"]'
+    );
+    expect(hint).toBeNull();
+  });
+
+  it('containerLocalHostWarning returns message for localhost', () => {
+    component.baseUrl = 'http://localhost:8888';
+    const warning = component.containerLocalHostWarning();
+    expect(warning).not.toBeNull();
+    expect(warning).toContain('localhost');
+    expect(warning).toContain('host.docker.internal');
+  });
+
+  it('containerLocalHostWarning returns message for 127.0.0.1', () => {
+    component.baseUrl = 'http://127.0.0.1:8888';
+    const warning = component.containerLocalHostWarning();
+    expect(warning).not.toBeNull();
+    expect(warning).toContain('127.0.0.1');
+    expect(warning).toContain('host.docker.internal');
+  });
+
+  it('containerLocalHostWarning returns message for 0.0.0.0', () => {
+    component.baseUrl = 'http://0.0.0.0:8888';
+    const warning = component.containerLocalHostWarning();
+    expect(warning).not.toBeNull();
+    expect(warning).toContain('0.0.0.0');
+  });
+
+  it('containerLocalHostWarning returns null for host.docker.internal', () => {
+    component.baseUrl = 'http://host.docker.internal:8888';
+    expect(component.containerLocalHostWarning()).toBeNull();
+  });
+
+  it('containerLocalHostWarning returns null for empty base_url', () => {
+    component.baseUrl = '';
+    expect(component.containerLocalHostWarning()).toBeNull();
+  });
+
+  it('shows container-local warning in template when base_url is localhost', async () => {
+    component.provider = 'local';
+    component.baseUrl = 'http://localhost:8888';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const warning = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-container-local-warning"]'
+    );
+    expect(warning).not.toBeNull();
+    expect(warning.textContent).toContain('host.docker.internal');
+  });
+
+  it('hides container-local warning when base_url is host.docker.internal', async () => {
+    component.provider = 'local';
+    component.baseUrl = 'http://host.docker.internal:8888';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const warning = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-container-local-warning"]'
+    );
+    expect(warning).toBeNull();
+  });
+
+  // ── messagesEndpointStatus — enum-based warnings ──────────────────────
+
+  it('shows strict_system_role warning when status is strict_system_role', async () => {
+    component.provider = 'local';
+    component.messagesEndpointStatus = 'strict_system_role';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const warning = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-strict-system-warning"]'
+    );
+    expect(warning).not.toBeNull();
+    expect(warning.textContent).toContain('/v1/messages');
+    // The missing-endpoint warning must NOT be shown simultaneously.
+    const missingWarning = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-messages-endpoint-warning"]'
+    );
+    expect(missingWarning).toBeNull();
+  });
+
+  it('shows missing-endpoint warning when status is missing', async () => {
+    component.provider = 'local';
+    component.messagesEndpointStatus = 'missing';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const warning = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-messages-endpoint-warning"]'
+    );
+    expect(warning).not.toBeNull();
+    // The strict-system warning must NOT be shown simultaneously.
+    const strictWarning = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-strict-system-warning"]'
+    );
+    expect(strictWarning).toBeNull();
+  });
+
+  it('shows no endpoint warning when status is ok', async () => {
+    component.provider = 'local';
+    component.messagesEndpointStatus = 'ok';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-strict-system-warning"]')
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-messages-endpoint-warning"]')
+    ).toBeNull();
+  });
+
+  it('maps discover_llm_models result to messagesEndpointStatus', async () => {
+    // When discovery returns strict_system_role, the component field is populated.
+    setupDiscoveryMock(mockTauri, {
+      provider: 'local',
+      defaultBaseUrl: 'http://host.docker.internal:8888',
+    });
+    // Override discover to return strict_system_role status.
+    const prevHandler = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'qwen3' }], messages_endpoint_status: 'strict_system_role' };
+      }
+      return prevHandler(cmd, args);
+    };
+
+    component.provider = 'local';
+    component.baseUrl = 'http://host.docker.internal:8888';
+    await component.discoverModels(true);
+
+    expect(component.messagesEndpointStatus).toBe('strict_system_role');
+  });
+
+  // ── connection-refused detection ──────────────────────────────────────
+
+  it('maps_connection_refused_to_refused_reason', async () => {
+    setupDiscoveryMock(mockTauri, {
+      provider: 'local',
+      discover: async () => {
+        throw new Error('LLM model discovery: request failed: Connection refused (os error 61)');
+      },
+    });
+    component.provider = 'local';
+    component.baseUrl = 'http://localhost:8888';
+    await component.discoverModels(false);
+
+    expect(component.discoveryState.kind).toBe('failed');
+    if (component.discoveryState.kind === 'failed') {
+      expect(component.discoveryState.reason).toBe('refused');
+    }
+    const msg = component.discoveryFailureMessage();
+    expect(msg).toContain('host.docker.internal');
+    expect(msg).toContain('connection refused');
+  });
+
+  it('refused_message_differs_from_offline_message', () => {
+    component.discoveryState = {
+      kind: 'failed',
+      url: 'http://localhost:8888',
+      reason: 'refused',
+    };
+    const refusedMsg = component.discoveryFailureMessage();
+
+    component.discoveryState = {
+      kind: 'failed',
+      url: 'http://localhost:8888',
+      reason: 'offline',
+    };
+    const offlineMsg = component.discoveryFailureMessage();
+
+    expect(refusedMsg).not.toBe(offlineMsg);
+    expect(refusedMsg).toContain('host.docker.internal');
+  });
 });

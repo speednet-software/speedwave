@@ -21,6 +21,7 @@ import {
   formatContextLabel,
   LEGACY_LOCAL_PROVIDERS,
   LlmConfigResponse,
+  MessagesEndpointStatus,
 } from '../../models/llm';
 
 /**
@@ -36,7 +37,7 @@ type DiscoveryState =
   | { kind: 'idle' }
   | { kind: 'in-flight'; url: string; id: number }
   | { kind: 'ready'; url: string; models: DiscoveredModel[] }
-  | { kind: 'failed'; url: string; reason: 'offline' | 'unsupported' | 'other' };
+  | { kind: 'failed'; url: string; reason: 'offline' | 'refused' | 'unsupported' | 'other' };
 
 /** Static catalog of provider cards rendered at the top of the section. */
 interface ProviderCard {
@@ -100,6 +101,14 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
         }
       </div>
 
+      <!-- Always-visible usage hint — shown for both anthropic and local -->
+      <p
+        class="mono mt-3 text-[11px] leading-relaxed text-[var(--ink-mute)]"
+        data-testid="settings-llm-usage-hint"
+      >
+        {{ usageHint() }}
+      </p>
+
       <!-- BASE_URL + DEFAULT_MODEL row -->
       <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
         <div>
@@ -119,6 +128,25 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
             class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
             data-testid="settings-llm-base-url"
           />
+          @if (provider !== 'anthropic') {
+            <p
+              class="mono mt-1 text-[10px] text-[var(--ink-mute)]"
+              data-testid="settings-llm-base-url-host-hint"
+            >
+              Use <code>host.docker.internal</code> (not <code>localhost</code>,
+              <code>127.0.0.1</code>, or <code>0.0.0.0</code>). Claude Code runs inside a container
+              — <code>localhost</code> there means the container itself, not your machine.
+              <code>0.0.0.0</code> is a bind address and is rejected.
+            </p>
+            @if (containerLocalHostWarning(); as warning) {
+              <p
+                class="mono mt-1 text-[11px] text-[var(--amber)]"
+                data-testid="settings-llm-container-local-warning"
+              >
+                ⚠ {{ warning }}
+              </p>
+            }
+          }
         </div>
         <div>
           <label
@@ -291,7 +319,20 @@ Ocp-Apim-Subscription-Key: bar'
           Sends a 1-token test request to verify chat endpoint compatibility.
         </p>
 
-        @if (messagesEndpointOk === false) {
+        @if (messagesEndpointStatus === 'strict_system_role') {
+          <div
+            class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
+            data-testid="settings-llm-strict-system-warning"
+          >
+            <strong>Warning:</strong> the server implements <code>POST /v1/messages</code> but
+            rejects Claude Code's request shape — it refuses a <code>system</code> role inside
+            <code>messages[]</code> (HTTP 422). Claude Code sends the system prompt inside
+            <code>messages[]</code>, so chat will fail with this server. Speedwave cannot reshape
+            the request (no proxy). Use a server that accepts Claude Code's Anthropic Messages
+            payload (Ollama 0.14+, LM Studio 0.4.1+, llama.cpp Jan 2026+).
+          </div>
+        }
+        @if (messagesEndpointStatus === 'missing') {
           <div
             class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
             data-testid="settings-llm-messages-endpoint-warning"
@@ -301,6 +342,11 @@ Ocp-Apim-Subscription-Key: bar'
             fail. Use a server with Anthropic Messages support (Ollama 0.14+, LM Studio 0.4.1+,
             llama.cpp Jan 2026+, or LiteLLM via <code>/anthropic</code>).
           </div>
+        }
+        @if (messagesEndpointStatus === 'unknown') {
+          <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]">
+            Could not verify chat-endpoint compatibility (server busy or unreachable during probe).
+          </p>
         }
       }
 
@@ -350,8 +396,8 @@ export class LlmProviderComponent implements OnInit {
   customHeadersTouched = false;
   hasCustomHeaders = false;
 
-  /** Result of the latest discovery probe — populated for `provider==="local"`. */
-  messagesEndpointOk: boolean | null = null;
+  /** Compatibility status of the Anthropic Messages endpoint from the last discovery probe. */
+  messagesEndpointStatus: MessagesEndpointStatus | null = null;
 
   /**
    * Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) detected in the
@@ -613,6 +659,8 @@ export class LlmProviderComponent implements OnInit {
     const url = this.discoveryState.url;
     const label = this.providerDisplayLabel();
     switch (this.discoveryState.reason) {
+      case 'refused':
+        return `Could not connect to ${url} (connection refused). Inside the container, localhost/127.0.0.1 cannot reach your host — use host.docker.internal. Also confirm the server is running and bound to an externally reachable interface (-H 0.0.0.0).`;
       case 'offline':
         return `${label} server not reachable at ${url}. Make sure it's running and the local server is enabled.`;
       case 'unsupported':
@@ -625,6 +673,52 @@ export class LlmProviderComponent implements OnInit {
   /** Returns the UI-friendly label for the current provider. */
   private providerDisplayLabel(): string {
     return this.provider === 'local' ? 'Local LLM server' : 'Provider';
+  }
+
+  /**
+   * Always-visible usage hint rendered regardless of the selected provider.
+   * Anthropic: explains the CLI-login flow. Local: explains how to point
+   * base_url at the host LLM server via host.docker.internal.
+   */
+  usageHint(): string {
+    if (this.provider === 'anthropic') {
+      return 'Claude Code authenticates via your CLI session. Run claude login (or set ANTHROPIC_API_KEY) on the host — Speedwave injects the auth token into the container.';
+    }
+    return 'No Anthropic login required. Point base_url at any Anthropic Messages-compatible server on your machine using host.docker.internal (not localhost).';
+  }
+
+  /**
+   * Returns an amber warning when the user typed a container-local hostname
+   * (localhost / 127.0.0.1 / 0.0.0.0) into base_url. These resolve to the
+   * container itself at runtime, not the host where the LLM server runs.
+   * Returns null when the base_url is safe or empty.
+   */
+  containerLocalHostWarning(): string | null {
+    const url = this.baseUrl.trim();
+    if (!url) return null;
+    let hostname: string;
+    try {
+      hostname = new URL(url).hostname.toLowerCase();
+    } catch {
+      // Malformed URL — fall back to substring heuristic.
+      const lower = url.toLowerCase();
+      if (lower.includes('localhost') || lower.includes('127.0.0.1') || lower.includes('0.0.0.0')) {
+        hostname = lower.includes('localhost')
+          ? 'localhost'
+          : lower.includes('127.0.0.1')
+            ? '127.0.0.1'
+            : '0.0.0.0';
+      } else {
+        return null;
+      }
+    }
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return `${hostname} resolves to the container itself, not your machine. Use host.docker.internal instead.`;
+    }
+    if (hostname === '0.0.0.0') {
+      return '0.0.0.0 is a bind address, not a destination — use host.docker.internal as base_url (and -H 0.0.0.0 on the server side to accept connections).';
+    }
+    return null;
   }
 
   /**
@@ -738,7 +832,7 @@ export class LlmProviderComponent implements OnInit {
       // so a resolved Ok always carries a non-empty array — the success path
       // never observes length === 0.
       this.discoveryState = { kind: 'ready', url: effectiveUrl, models: result.models };
-      this.messagesEndpointOk = result.messages_endpoint_ok ?? null;
+      this.messagesEndpointStatus = result.messages_endpoint_status ?? null;
       // Auto-select the first discovered model when the current value is
       // blank or not on the list — otherwise the <select> renders with no
       // active <option> and Save would persist an empty model name.
@@ -749,11 +843,18 @@ export class LlmProviderComponent implements OnInit {
     } catch (e: unknown) {
       if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
       const msg = e instanceof Error ? e.message : String(e);
-      let reason: 'offline' | 'unsupported' | 'other' = 'offline';
+      let reason: 'offline' | 'refused' | 'unsupported' | 'other' = 'offline';
       if (msg === 'unsupported') {
         reason = 'unsupported';
       } else if (msg === 'empty') {
         reason = 'other';
+      } else if (
+        msg.toLowerCase().includes('connection refused') ||
+        msg.toLowerCase().includes('error sending request') ||
+        msg.toLowerCase().includes('connect error')
+      ) {
+        // reqwest wraps connection-refused as "request failed: <detail>".
+        reason = 'refused';
       }
       this.discoveryState = { kind: 'failed', url: effectiveUrl, reason };
       // No errorOccurred.emit — discovery failure is silent degradation
