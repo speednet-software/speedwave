@@ -1,3 +1,5 @@
+use crate::resources::{ContainerResources, STANDARD_WORKER_RESOURCES};
+
 pub const APP_NAME: &str = "speedwave";
 pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
 pub const LIMA_SUBDIR: &str = "lima";
@@ -503,6 +505,10 @@ pub struct McpServiceDescriptor {
     /// mount at `/secrets/oauth-auth-token-<config_key>:ro` into this worker's container.
     /// SSOT — adding a new OAuth-using integration = flipping this bit on its descriptor.
     pub uses_oauth_refresh: bool,
+    /// Container resource limits (mem/cpu/tmpfs/shm) — the SSOT the compose
+    /// renderer reads instead of YAML literals. Drift between this and
+    /// `compose.template.yml` is caught by the resource-drift test. See ADR-068.
+    pub resources: ContainerResources,
 }
 
 /// Toggleable MCP services — Single Source of Truth for service metadata.
@@ -545,6 +551,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: None,
         egress_less: false,
         uses_oauth_refresh: false,
+        resources: STANDARD_WORKER_RESOURCES,
     },
     McpServiceDescriptor {
         config_key: "sharepoint",
@@ -654,6 +661,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: None,
         egress_less: false,
         uses_oauth_refresh: true,
+        resources: STANDARD_WORKER_RESOURCES,
     },
     McpServiceDescriptor {
         config_key: "redmine",
@@ -710,6 +718,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: None,
         egress_less: false,
         uses_oauth_refresh: false,
+        resources: STANDARD_WORKER_RESOURCES,
     },
     McpServiceDescriptor {
         config_key: "gitlab",
@@ -748,6 +757,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: None,
         egress_less: false,
         uses_oauth_refresh: false,
+        resources: STANDARD_WORKER_RESOURCES,
     },
     McpServiceDescriptor {
         config_key: "github",
@@ -778,6 +788,14 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: None,
         egress_less: false,
         uses_oauth_refresh: false,
+        // 256m (not 128m): Octokit + throttling/retry plugins + octokit.paginate
+        // buffer full result sets — a 128m cap OOM-kills listIssues on busy repos.
+        resources: ContainerResources {
+            mem_mib: 256,
+            cpus: 0.5,
+            tmpfs_mib: 64,
+            shm_mib: None,
+        },
     },
     McpServiceDescriptor {
         config_key: "atlassian",
@@ -858,6 +876,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: None,
         egress_less: false,
         uses_oauth_refresh: false,
+        resources: STANDARD_WORKER_RESOURCES,
     },
     McpServiceDescriptor {
         config_key: "office",
@@ -872,6 +891,13 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: Some("BETA"),
         egress_less: true,
         uses_oauth_refresh: false,
+        // 1g + 512m /tmp: LibreOffice headless on a non-trivial .pptx.
+        resources: ContainerResources {
+            mem_mib: 1024,
+            cpus: 1.0,
+            tmpfs_mib: 512,
+            shm_mib: None,
+        },
     },
     McpServiceDescriptor {
         config_key: "playwright",
@@ -886,6 +912,14 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: Some("BETA"),
         egress_less: false,
         uses_oauth_refresh: false,
+        // 2g + 1g /tmp + 2g shm: Chromium IPC needs shm above the 64m default
+        // (ENOMEM at page load otherwise); shm is separate from the mem cap.
+        resources: ContainerResources {
+            mem_mib: 2048,
+            cpus: 2.0,
+            tmpfs_mib: 1024,
+            shm_mib: Some(2048),
+        },
     },
     McpServiceDescriptor {
         config_key: "context7",
@@ -914,6 +948,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         badge: Some("Anonymous"),
         egress_less: false,
         uses_oauth_refresh: false,
+        resources: STANDARD_WORKER_RESOURCES,
     },
 ];
 
@@ -1090,6 +1125,13 @@ pub const PLUGIN_MEM_LIMIT_MAX_MIB: u64 = 16384;
 /// MCP worker we ship; raising it requires an explicit ADR.
 pub const PLUGIN_CPU_LIMIT_MAX: f32 = 4.0;
 
+/// Defaults when a plugin manifest omits the field. `MEM` is a floor; `CPU` is
+/// generous (half the 4.0 cap) — plugins are unpredictable third-party code.
+/// Capped by `plugin_defaults_within_caps`; SSOT for `generate_plugin_service`.
+pub const PLUGIN_DEFAULT_MEM: &str = "128m";
+pub const PLUGIN_DEFAULT_CPU: &str = "2.0";
+pub const PLUGIN_DEFAULT_TMPFS: &str = "512m";
+
 /// Upper bound (bytes) for two distinct JSON blobs in the plugin system,
 /// both of which end up inline in `user_config.json`: a plugin's
 /// `settings_schema` (validated at install / compose-render time) and a
@@ -1257,6 +1299,27 @@ pub fn strip_compose_container_prefix<'a>(name: &'a str, project: &str) -> &'a s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_defaults_within_caps() {
+        // The omitted-field defaults must themselves respect the caps the
+        // validator enforces for explicit values — otherwise a future edit like
+        // PLUGIN_DEFAULT_CPU = "8.0" would ship a default exceeding the 4.0 cap
+        // and nothing would fail. (TMPFS has no cap constant — not checked.)
+        let mem = crate::plugin::parse_mem_limit_to_mib(PLUGIN_DEFAULT_MEM)
+            .expect("PLUGIN_DEFAULT_MEM must parse");
+        assert!(
+            mem <= PLUGIN_MEM_LIMIT_MAX_MIB,
+            "PLUGIN_DEFAULT_MEM {mem} MiB exceeds cap {PLUGIN_MEM_LIMIT_MAX_MIB}"
+        );
+        let cpu: f32 = PLUGIN_DEFAULT_CPU
+            .parse()
+            .expect("PLUGIN_DEFAULT_CPU must parse");
+        assert!(
+            cpu <= PLUGIN_CPU_LIMIT_MAX,
+            "PLUGIN_DEFAULT_CPU {cpu} exceeds cap {PLUGIN_CPU_LIMIT_MAX}"
+        );
+    }
 
     #[test]
     fn test_reserved_env_keys_complete_and_uppercase() {

@@ -31,6 +31,8 @@ pub use lock::{
     migrate_legacy_with_target, read as read_lock, write as write_lock, LockFile, LockService,
 };
 pub use probe::{is_pid_alive, probe_tcp};
+#[cfg(test)]
+pub(crate) use process::KILL_STALE_LOG_MARKER;
 pub use process::{HostMcpProcess, LivenessProbe, SpawnContext, WorkerSpec};
 pub use stale::{is_node_process, kill_process};
 

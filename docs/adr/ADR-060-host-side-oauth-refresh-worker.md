@@ -28,7 +28,7 @@ Live compromise is **not** mitigated by isolation alone. An attacker with RCE in
 - `:ro`-everywhere mount enforcement (no SharePoint special case) — `crates/speedwave-runtime/src/compose.rs` (`validate_service_volume_mounts`)
 - SharePoint credential descriptor (`access_token`, `site_id` only) and OAuth state field allowlist — `crates/speedwave-runtime/src/consts.rs` (`credential_files`, `oauth_state_fields`)
 - OAuth request scopes SSOT — `crates/speedwave-runtime/src/consts.rs` (`SHAREPOINT_OAUTH_SCOPES`)
-- Spawn on project switch / compose-up when an OAuth service is enabled — `desktop/src-tauri/src/main.rs` (`ensure_oauth_running`), `crates/speedwave-cli/src/main.rs` (`maybe_spawn_oauth_worker`)
+- Spawn on project switch / compose-up when an OAuth service is enabled — `desktop/src-tauri/src/main.rs` (`ensure_oauth_running`). The Desktop app is the **sole** spawner; the CLI (a Desktop-dependent client) does not spawn the worker — it reads the Desktop-held lock/bearer-map from disk. A second CLI-side supervisor caused the dual-supervisor exit-137 cycle, removed per ADR-068 §"Not every exit 137 is OOM".
 - Device-code flow that seeds the state — `desktop/src-tauri/src/oauth_cmd.rs`
 - SharePoint token manager (now health-only, no token writes) — `mcp-servers/sharepoint/src/token-manager.ts`
 

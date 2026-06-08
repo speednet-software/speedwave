@@ -6,16 +6,18 @@ Platform-specific installation instructions for Speedwave.
 
 |      | Minimum     | Recommended |
 | ---- | ----------- | ----------- |
-| RAM  | 8 GiB       | 16 GiB      |
+| RAM  | 16 GiB      | 32 GiB      |
 | Disk | 10 GiB free | 20 GiB free |
 
-Speedwave warns at startup if the host has less than 8 GiB RAM.
+Speedwave warns at startup if the host has less than 16 GiB RAM. At 16 GiB the
+Lima VM is sized to 8 GiB (`host_ram / 2`), which fits the always-on containers
+(Claude's 6 GiB cap + the hub) without overcommit; a smaller host would size the
+VM below Claude's cap and risk an OOM (ADR-068).
 
-> **Upgrading from ≤ 0.6.0 on a 16 GiB host?** The new adaptive formula
-> (`host_ram / 2`) reduces the Lima VM from 12 GiB to 8 GiB, which lowers
-> Claude's working memory from 8 g to 4 g. This trade-off frees host RAM
-> for the browser and other apps. There is currently no persistent override
-> — the migration runs automatically on each launch.
+> **Upgrading on a 16 GiB host?** The Lima VM is sized at `host_ram / 2`
+> (8 GiB on a 16 GiB host), freeing host RAM for the browser and other apps.
+> The Claude container has a fixed 6 GiB cap independent of VM size (ADR-068).
+> The migration runs automatically on each launch; there is no persistent override.
 
 ## macOS
 

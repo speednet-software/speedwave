@@ -1063,7 +1063,7 @@ fn validate_bridge_env_name(field: &str, name: &str) -> anyhow::Result<()> {
 /// Accepts: bare bytes (`"512000"`), or `<number><unit>` where unit is one of
 /// `b/k/m/g` (case-insensitive). Returns an error on malformed input,
 /// negative or zero values, or arithmetic overflow.
-fn parse_mem_limit_to_mib(s: &str) -> anyhow::Result<u64> {
+pub(crate) fn parse_mem_limit_to_mib(s: &str) -> anyhow::Result<u64> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         anyhow::bail!("mem_limit must not be empty");
@@ -2092,8 +2092,14 @@ pub fn generate_plugin_service(
 
     let tokens_path = crate::engine_path::to_engine_path(&tokens_dir.join(sid))?;
     let workspace_path = crate::engine_path::to_engine_path(Path::new(project_dir))?;
-    let mem_limit = manifest.mem_limit.as_deref().unwrap_or("128m");
-    let cpu_limit = manifest.cpu_limit.as_deref().unwrap_or("2.0");
+    let mem_limit = manifest
+        .mem_limit
+        .as_deref()
+        .unwrap_or(consts::PLUGIN_DEFAULT_MEM);
+    let cpu_limit = manifest
+        .cpu_limit
+        .as_deref()
+        .unwrap_or(consts::PLUGIN_DEFAULT_CPU);
     let user = container_user();
 
     let mut env_lines = format!("  - PORT={port}");
@@ -2116,7 +2122,7 @@ cap_drop:
 security_opt:
   - no-new-privileges:true
 tmpfs:
-  - /tmp:noexec,nosuid,size=512m
+  - /tmp:noexec,nosuid,size={plugin_tmpfs}
 volumes:
   - {tokens_path}:/tokens:{token_mount_mode}
   - {workspace_path}:/workspace:rw
@@ -2142,6 +2148,7 @@ deploy:
         network_name = network_name,
         mem_limit = mem_limit,
         cpu_limit = cpu_limit,
+        plugin_tmpfs = consts::PLUGIN_DEFAULT_TMPFS,
     );
 
     let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml_str)?;
@@ -2600,7 +2607,10 @@ mod tests {
             yaml.contains("no-new-privileges:true"),
             "security_opt: {yaml}"
         );
-        assert!(yaml.contains("/tmp:noexec,nosuid"), "tmpfs: {yaml}");
+        assert!(
+            yaml.contains("/tmp:noexec,nosuid,size=512m"),
+            "default tmpfs from PLUGIN_DEFAULT_TMPFS: {yaml}"
+        );
         assert!(yaml.contains("/tokens:ro"), "token mount: {yaml}");
         assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
         // ADR-038: every worker — including plugins — uses PORT_WORKER (3000).
@@ -2610,8 +2620,16 @@ mod tests {
             "network: {yaml}"
         );
         assert!(yaml.contains("speedwave.plugin-service"), "label: {yaml}");
-        assert!(yaml.contains("memory: 128m"), "mem limit: {yaml}");
-        assert!(yaml.contains("cpus: '2.0'"), "default cpu limit: {yaml}");
+        // Reference the SSOT constants, not literals — a bump of either default
+        // must not silently leave this test asserting the old value.
+        assert!(
+            yaml.contains(&format!("memory: {}", consts::PLUGIN_DEFAULT_MEM)),
+            "mem limit: {yaml}"
+        );
+        assert!(
+            yaml.contains(&format!("cpus: '{}'", consts::PLUGIN_DEFAULT_CPU)),
+            "default cpu limit: {yaml}"
+        );
     }
 
     #[test]
