@@ -1059,6 +1059,30 @@ mod tests {
         );
     }
 
+    /// CLI must never spawn host workers — Desktop is sole supervisor (ADR-068);
+    /// re-adding a spawn call would silently reintroduce the exit-137 crash.
+    #[test]
+    fn cli_does_not_spawn_host_workers() {
+        let source = include_str!("main.rs");
+        // Needles assembled from fragments so this test can't match itself;
+        // type-prefix catches any spawn variant (spawn / spawn_in).
+        let forbidden = [
+            (concat!("maybe_", "spawn_oauth_worker"), "oauth"),
+            (concat!("maybe_", "spawn_host_exec_worker"), "host_exec"),
+            (concat!("OauthProcess::", "spawn"), "oauth"),
+            (concat!("HostExecProcess::", "spawn"), "host_exec"),
+            (concat!("McpOsProcess::", "spawn"), "mcp-os"),
+        ];
+        for (needle, worker) in forbidden {
+            assert!(
+                !source.contains(needle),
+                "CLI must not spawn the {worker} worker ({needle}) — Desktop is the \
+                 sole supervisor; two supervisors race kill_stale_node and crash \
+                 the Claude exec with exit 137 (ADR-068)"
+            );
+        }
+    }
+
     #[test]
     fn parse_action_check() {
         let args = vec!["speedwave".to_string(), "check".to_string()];

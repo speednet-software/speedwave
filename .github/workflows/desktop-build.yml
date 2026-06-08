@@ -182,8 +182,12 @@ jobs:
           # the missing key.
           IS_DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
+          # Split MATRIX_ARGS into an array so intentional multi-token values
+          # (e.g. `--target x`) still split, but no glob/metacharacter is
+          # interpreted by the shell (hardening — see PR #766 review).
+          read -ra ARGS <<< "$MATRIX_ARGS"
           if [ "$IS_DEPENDABOT" = "true" ]; then
-            npx --prefix ../src tauri build $MATRIX_ARGS --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            npx --prefix ../src tauri build "${ARGS[@]}" --config '{"bundle":{"createUpdaterArtifacts":false}}'
           else
-            npx --prefix ../src tauri build $MATRIX_ARGS
+            npx --prefix ../src tauri build "${ARGS[@]}"
           fi

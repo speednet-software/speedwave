@@ -1125,11 +1125,9 @@ pub const PLUGIN_MEM_LIMIT_MAX_MIB: u64 = 16384;
 /// MCP worker we ship; raising it requires an explicit ADR.
 pub const PLUGIN_CPU_LIMIT_MAX: f32 = 4.0;
 
-/// Defaults applied when a plugin manifest omits the field. Conservative —
-/// a plugin that needs more declares it. `MEM`/`CPU` stay within
-/// `PLUGIN_MEM_LIMIT_MAX_MIB`/`PLUGIN_CPU_LIMIT_MAX` (asserted by
-/// `plugin_defaults_within_caps`); `TMPFS` has no cap constant. SSOT for
-/// `generate_plugin_service`; do not inline these literals at the call site.
+/// Defaults when a plugin manifest omits the field. `MEM` is a floor; `CPU` is
+/// generous (half the 4.0 cap) — plugins are unpredictable third-party code.
+/// Capped by `plugin_defaults_within_caps`; SSOT for `generate_plugin_service`.
 pub const PLUGIN_DEFAULT_MEM: &str = "128m";
 pub const PLUGIN_DEFAULT_CPU: &str = "2.0";
 pub const PLUGIN_DEFAULT_TMPFS: &str = "512m";

@@ -2620,8 +2620,16 @@ mod tests {
             "network: {yaml}"
         );
         assert!(yaml.contains("speedwave.plugin-service"), "label: {yaml}");
-        assert!(yaml.contains("memory: 128m"), "mem limit: {yaml}");
-        assert!(yaml.contains("cpus: '2.0'"), "default cpu limit: {yaml}");
+        // Reference the SSOT constants, not literals — a bump of either default
+        // must not silently leave this test asserting the old value.
+        assert!(
+            yaml.contains(&format!("memory: {}", consts::PLUGIN_DEFAULT_MEM)),
+            "mem limit: {yaml}"
+        );
+        assert!(
+            yaml.contains(&format!("cpus: '{}'", consts::PLUGIN_DEFAULT_CPU)),
+            "default cpu limit: {yaml}"
+        );
     }
 
     #[test]

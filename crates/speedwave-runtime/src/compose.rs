@@ -1722,9 +1722,11 @@ fn apply_worker_config(
     env_var: &str,
     secret_name: &str,
 ) -> anyhow::Result<String> {
-    let port = match read_lock_port(lock_path, service) {
-        Some(p) => p,
-        None => return Ok(yaml.to_string()),
+    // PID-liveness gate (symmetric to apply_oauth_config_with_paths): a stale
+    // lock.json after a Desktop hard-kill would inject a dead WORKER_*_URL.
+    let port = match crate::host_mcp_process::lock::read(lock_path, service) {
+        Some(l) if crate::host_mcp_process::probe::is_pid_alive(l.pid) => l.port,
+        _ => return Ok(yaml.to_string()),
     };
     let token = match std::fs::read_to_string(token_mount_path) {
         Ok(s) => s.trim().to_string(),
@@ -1752,12 +1754,9 @@ fn apply_worker_config(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Read a worker's port from its `lock.json`. `None` when the file is
-/// absent or the JSON is unparseable / has the wrong `service` tag.
-///
-/// Each worker manager migrates pre-PR3 layout to `lock.json` before
-/// completing `spawn_*`, so by the time compose reads the port the
-/// JSON must exist; no legacy fallback is required here.
+/// Read a worker's port from its `lock.json`. Test-only since the production
+/// paths now read the full lock to also gate on PID liveness.
+#[cfg(test)]
 fn read_lock_port(
     lock_path: &std::path::Path,
     service: crate::host_mcp_process::lock::LockService,
@@ -6452,6 +6451,23 @@ services:
                 svc.compose_name
             );
         }
+
+        // Same raw-template guard for the always-on containers — a literal
+        // equal to the SSOT value passes the rendered check, only the
+        // placeholder proves the template still defers. (claude mem is legacy.)
+        for placeholder in [
+            "${CLAUDE_MEMORY}",
+            "${CLAUDE_CPUS}",
+            "${CLAUDE_TMPFS}",
+            "${MCP_HUB_MEM}",
+            "${MCP_HUB_CPUS}",
+            "${MCP_HUB_TMPFS}",
+        ] {
+            assert!(
+                COMPOSE_TEMPLATE.contains(placeholder),
+                "template must carry {placeholder}, not a literal"
+            );
+        }
     }
 
     #[test]
@@ -6480,7 +6496,8 @@ services:
         let token_path = tmp.join("auth-token");
         let lock_path = tmp.join(consts::PER_PROJECT_LOCK_FILE);
         std::fs::write(&token_path, "test-token").unwrap();
-        let lock = LockFile::new(service, 12345, 4007, "test-token".into());
+        // PID = this test process so apply_worker_config's liveness gate passes.
+        let lock = LockFile::new(service, std::process::id(), 4007, "test-token".into());
         lock::write(&lock_path, &lock).unwrap();
         (token_path, lock_path)
     }
@@ -6538,6 +6555,71 @@ services:
             count_canonical_entries(&entries),
             1,
             "mcp-hub must have exactly 1 host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    /// Like the live helper but reaps a real child for a deterministically-dead
+    /// PID, so apply_worker_config's liveness gate treats the lock as absent.
+    fn write_dead_lock_and_token_mount(
+        tmp: &std::path::Path,
+        service: crate::host_mcp_process::lock::LockService,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use crate::host_mcp_process::lock::{self, LockFile};
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("cmd")
+                    .args(["/C", "exit"])
+                    .spawn()
+            })
+            .expect("spawn a trivially-exiting child");
+        let dead_pid = child.id();
+        child.wait().expect("reap child");
+
+        let token_path = tmp.join("auth-token");
+        let lock_path = tmp.join(consts::PER_PROJECT_LOCK_FILE);
+        std::fs::write(&token_path, "test-token").unwrap();
+        lock::write(
+            &lock_path,
+            &LockFile::new(service, dead_pid, 4007, "test-token".into()),
+        )
+        .unwrap();
+        (token_path, lock_path)
+    }
+
+    /// A stale host_exec lock (dead PID, Desktop hard-kill) must not inject a
+    /// dead WORKER_HOST_EXEC_URL.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn apply_host_exec_config_skipped_when_worker_pid_is_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, lock_path) = write_dead_lock_and_token_mount(
+            tmp.path(),
+            crate::host_mcp_process::lock::LockService::HostExec,
+        );
+        let yaml = render_substituted_template();
+        let result = apply_host_exec_config_with_paths(&yaml, &token_path, &lock_path).unwrap();
+        assert_eq!(
+            result, yaml,
+            "stale host_exec lock with a dead PID must be treated as absent — no injection"
+        );
+    }
+
+    /// Same regression guard for the mcp-os entry point (also routes through
+    /// apply_worker_config).
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn apply_mcp_os_config_skipped_when_worker_pid_is_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, lock_path) = write_dead_lock_and_token_mount(
+            tmp.path(),
+            crate::host_mcp_process::lock::LockService::McpOs,
+        );
+        let yaml = render_substituted_template();
+        let result = apply_mcp_os_config_with_path(&yaml, &token_path, &lock_path).unwrap();
+        assert_eq!(
+            result, yaml,
+            "stale mcp-os lock with a dead PID must be treated as absent — no injection"
         );
     }
 
@@ -7095,7 +7177,7 @@ services:
             &lock_path,
             &LockFile::new(
                 LockService::McpOs,
-                12345,
+                std::process::id(),
                 54321,
                 "test-uuid-token-abc".into(),
             ),
@@ -7325,7 +7407,7 @@ services:
             &lock_path,
             &LockFile::new(
                 LockService::HostExec,
-                12345,
+                std::process::id(),
                 49215,
                 "host-exec-uuid-token".into(),
             ),

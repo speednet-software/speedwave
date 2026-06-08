@@ -32,10 +32,9 @@ pub const CLAUDE_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-/// MCP hub: on the path of every MCP request and does real CPU work (sandboxed
-/// code-exec, PII regex, result aggregation), so 1 full core — start-low, raise
-/// only if `nerdctl stats` shows it throttling under load (VM has 4 cores;
-/// claude+playwright already claim 4).
+/// MCP hub: on every MCP request's path, does real CPU work (sandboxed exec,
+/// PII regex, aggregation) → 1 full core. On a minimum-spec 4-vCPU VM,
+/// claude+playwright already claim all 4 (limits are ceilings — overcommit OK).
 pub const HUB_RESOURCES: ContainerResources = ContainerResources {
     mem_mib: 512,
     cpus: 1.0,
@@ -324,6 +323,15 @@ mod tests {
                 svc.config_key,
                 svc.resources.cpus
             );
+            // tmpfs is RAM-backed, so tmpfs > the worker's own mem limit is
+            // always a fat-finger (no dedicated cap constant exists).
+            assert!(
+                svc.resources.tmpfs_mib <= svc.resources.mem_mib,
+                "{}: tmpfs {} MiB exceeds the worker's own mem limit {} MiB",
+                svc.config_key,
+                svc.resources.tmpfs_mib,
+                svc.resources.mem_mib
+            );
         }
     }
 
@@ -335,7 +343,12 @@ mod tests {
         // bound across every Speedwave-owned resource (always-on + workers).
         let check = |r: &ContainerResources, who: &str| {
             assert!(r.mem_mib > 0, "{who}: mem_mib must be > 0");
-            assert!(r.cpus > 0.0, "{who}: cpus must be > 0");
+            // `is_finite()` first: NaN > 0.0 is false (so NaN would slip past a
+            // bare `> 0.0`) yet `format!("{:.1}", NAN)` renders "NaN" into YAML.
+            assert!(
+                r.cpus.is_finite() && r.cpus > 0.0,
+                "{who}: cpus must be finite and > 0"
+            );
             assert!(r.tmpfs_mib > 0, "{who}: tmpfs_mib must be > 0");
             if let Some(shm) = r.shm_mib {
                 assert!(shm > 0, "{who}: shm_mib, when set, must be > 0");

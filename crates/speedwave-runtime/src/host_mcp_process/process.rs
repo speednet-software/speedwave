@@ -325,7 +325,7 @@ impl<S: WorkerSpec> Drop for HostMcpProcess<S> {
 /// The greppable phrase the live-worker-kill WARN line carries. SSOT shared
 /// with `resources::OOM_MESSAGE`, whose exit-137 guidance tells users to grep
 /// for it — the two must never drift (a test in `resources.rs` pins it).
-pub const KILL_STALE_LOG_MARKER: &str = "killing a LIVE worker";
+pub(crate) const KILL_STALE_LOG_MARKER: &str = "killing a LIVE worker";
 
 /// Kill a stale node process recorded by a previous spawn. SSOT —
 /// replaces three identical `kill_stale_node` shims that used to live

@@ -178,9 +178,9 @@ Per-project granularity: different projects never block each other; the same pro
 
 After every `save_compose`, transactions call `compose_validate_with_retry(rt, project)` which runs `nerdctl compose -f <file> -p <project> config --quiet` inside the VM/distro. This catches virtiofs/9p propagation lag — the host atomic-write succeeded but the engine still sees stale or torn YAML.
 
-Retries on errors matching `is_propagation_error` (substrings `"undefined network"` and `"invalid compose project"`, both lowercased). Capped exponential backoff: 100/200/400/800/1600 ms between attempts, doubling each retry up to `COMPOSE_VALIDATE_MAX_DELAY_MS` = 1600 ms. Max `COMPOSE_VALIDATE_MAX_ATTEMPTS` = 6 attempts. Non-propagation errors propagate immediately.
+Retries on errors matching `is_propagation_error` (all lowercased): `"undefined network"`, `"invalid compose project"`, plus the schema/parse symptoms of a torn read — a truncated scalar makes compose-go report the field as the wrong type (`networks.<n>.driver`, `deploy.resources.limits.cpus`, `deploy.resources.limits.memory`) and a mid-line cut makes libyaml's scanner emit `"could not find expected"` / `"did not find expected"`. Capped exponential backoff: 100/200/400/800/1600 ms between attempts, doubling each retry up to `COMPOSE_VALIDATE_MAX_DELAY_MS` = 1600 ms. Max `COMPOSE_VALIDATE_MAX_ATTEMPTS` = 6 attempts. Non-propagation errors propagate immediately.
 
-The error-fragment strings are SSOT'd as `compose::UNDEFINED_NETWORK_ERROR_FRAGMENT` and `compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT`, shared between the host-side `validate_compose_network_refs` (which emits the fragment) and `runtime::is_propagation_error` (which recognises it).
+The error-fragment strings are SSOT'd as `compose::UNDEFINED_NETWORK_ERROR_FRAGMENT`, `compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT`, and `compose::COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS` (the torn-field / scanner symptoms above), shared between the host-side `validate_compose_network_refs` (which emits the network fragment) and `runtime::is_propagation_error` (which recognises them). The `deploy.resources.limits.cpus` case was surfaced in production by `mcp-office`.
 
 ## Network Cleanup (compose_down)
 

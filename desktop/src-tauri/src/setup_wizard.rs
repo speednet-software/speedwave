@@ -4424,6 +4424,15 @@ networks:
     }
 
     #[test]
+    fn lima_vm_config_unparseable_cpus_no_update() {
+        // Symmetric to the memory case: a present-but-garbage `cpus:` value is a
+        // hand-mangled file, not a missing SSOT line — don't clobber it.
+        let config =
+            with_provision_sentinel("vmType: vz\ncpus: lots\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n");
+        assert!(!lima_vm_config_needs_update_with(&config, 12, 4));
+    }
+
+    #[test]
     fn lima_vm_config_adaptive_upgrade_needed() {
         // 32 GiB host → desired 16 GiB → old 12 GiB config needs upgrade
         let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
