@@ -8433,7 +8433,7 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn test_claude_env_has_effort_level() {
+    fn test_claude_env_has_no_effort_level() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -8459,12 +8459,15 @@ services:
             .and_then(|e| e.as_sequence())
             .expect("claude service must have environment");
 
-        let has_effort_level = claude_env
-            .iter()
-            .any(|v| v.as_str() == Some("CLAUDE_CODE_EFFORT_LEVEL=auto"));
+        // Speedwave must NOT pin effort: a CLAUDE_CODE_EFFORT_LEVEL env var
+        // outranks the user's in-session /effort and settings.json (ADR-017).
+        let has_effort_level = claude_env.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s.starts_with("CLAUDE_CODE_EFFORT_LEVEL"))
+        });
         assert!(
-            has_effort_level,
-            "CLAUDE_CODE_EFFORT_LEVEL=auto must be in claude service environment"
+            !has_effort_level,
+            "CLAUDE_CODE_EFFORT_LEVEL must NOT be in claude service environment — it would block the user's /effort"
         );
 
         // Auto-connect to the Speedwave IDE Bridge on start, so the user does
