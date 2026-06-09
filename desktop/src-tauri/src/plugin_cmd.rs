@@ -50,6 +50,10 @@ pub(crate) struct PluginStatusEntry {
     /// True when the manifest declares `host_bridge`. Drives the
     /// frontend "Bridge connection" section visibility.
     pub(crate) has_host_bridge: bool,
+    /// Access-token expiry (ISO-8601) from the off-mount OAuth state, when the
+    /// plugin is OAuth-authorized. `None` for non-OAuth or unauthorized plugins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) oauth_expires_at: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -172,6 +176,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
                 verification_status: ui.verification_status.clone(),
                 verification_error: ui.verification_error.clone(),
                 has_host_bridge: false,
+                oauth_expires_at: None,
             });
             continue;
         };
@@ -194,7 +199,8 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             &project,
             sid,
         );
-        let oauth_authorized = plugin_oauth_authorized(&project, sid);
+        let oauth_expires_at = plugin_oauth_expires_at(&project, sid);
+        let oauth_authorized = oauth_expires_at.is_some();
 
         let mut current_values = HashMap::new();
         let mut configured_fields = Vec::new();
@@ -257,20 +263,28 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             verification_status: ui.verification_status.clone(),
             verification_error: ui.verification_error.clone(),
             has_host_bridge: manifest.host_bridge.is_some(),
+            oauth_expires_at,
         });
     }
 
     Ok(PluginsResponse { plugins: entries })
 }
 
-/// True when an authorized OAuth state file exists for this plugin (refresh
-/// token minted). OAuth credentials live off-mount, so `/tokens` presence is
-/// not the readiness signal — the state file is.
-fn plugin_oauth_authorized(project: &str, slug: &str) -> bool {
+/// Reads the off-mount OAuth state's `expiresAt` (ISO-8601), or `None` when the
+/// plugin is not authorized. OAuth credentials live off-mount, so the state
+/// file — not `/tokens` — is the readiness signal.
+fn plugin_oauth_expires_at(project: &str, slug: &str) -> Option<String> {
     let path = speedwave_runtime::plugin::oauth_state_file(project, slug);
-    std::fs::metadata(&path)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
+    let body = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    json.get("expiresAt")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// True when the plugin has an authorized OAuth state on disk.
+fn plugin_oauth_authorized(project: &str, slug: &str) -> bool {
+    plugin_oauth_expires_at(project, slug).is_some()
 }
 
 fn is_plugin_configured(
@@ -925,6 +939,7 @@ mod tests {
             verification_status: plugin::VerificationStatus::Verified,
             verification_error: None,
             has_host_bridge: false,
+            oauth_expires_at: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("test-plugin"));
@@ -960,6 +975,7 @@ mod tests {
             verification_status: plugin::VerificationStatus::Verified,
             verification_error: None,
             has_host_bridge: true,
+            oauth_expires_at: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r##""instructions":"# Setup"##));
@@ -1014,6 +1030,7 @@ mod tests {
             verification_status: plugin::VerificationStatus::Verified,
             verification_error: None,
             has_host_bridge: false,
+            oauth_expires_at: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("settings_schema"));
@@ -1880,16 +1897,24 @@ mod tests {
         }
     }
 
+    /// Writes a full authorized OAuth state file with the given `expiresAt`.
+    fn write_oauth_state(project: &str, slug: &str, expires_at: &str) {
+        let path = speedwave_runtime::plugin::oauth_state_file(project, slug);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!("{{\"refreshToken\":\"r\",\"expiresAt\":\"{expires_at}\"}}"),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn is_plugin_configured_true_for_oauth_plugin_with_state() {
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
         std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
 
-        // Write a non-empty authorized state file.
-        let state_path = speedwave_runtime::plugin::oauth_state_file("proj", "my-plugin");
-        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        std::fs::write(&state_path, "{\"refreshToken\":\"r\"}").unwrap();
+        write_oauth_state("proj", "my-plugin", "2026-01-01T00:00:00.000Z");
 
         let fields = vec![oauth_field("client_id")];
         let configured = is_plugin_configured(
@@ -1900,6 +1925,30 @@ mod tests {
             "my-plugin",
         );
         assert!(configured, "authorized oauth state -> configured");
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn plugin_oauth_expires_at_reads_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        assert_eq!(
+            plugin_oauth_expires_at("proj", "p"),
+            None,
+            "no state -> None"
+        );
+
+        write_oauth_state("proj", "p", "2026-06-09T12:00:00.000Z");
+        assert_eq!(
+            plugin_oauth_expires_at("proj", "p").as_deref(),
+            Some("2026-06-09T12:00:00.000Z")
+        );
 
         match prev {
             Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),

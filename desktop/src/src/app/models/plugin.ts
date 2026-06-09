@@ -112,6 +112,8 @@ export interface PluginStatusEntry {
   verification_error?: string;
   /** True when the manifest declares `host_bridge`. */
   has_host_bridge: boolean;
+  /** Access-token expiry (ISO-8601) when OAuth-authorized; absent otherwise. */
+  oauth_expires_at?: string;
 }
 
 /** Snapshot returned by the `plugin_bridge_get_status` Tauri command. */
