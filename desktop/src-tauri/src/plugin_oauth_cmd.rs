@@ -1,6 +1,6 @@
 // Plugin OAuth2 authorization_code flow (loopback redirect + PKCE). The
 // minted refresh token + client credentials stay host-side under oauth/; only
-// a short-lived access token reaches the plugin container. See ADR-060 ext.
+// a short-lived access token reaches the plugin container. See ADR-069.
 
 use crate::oauth_flow::{self, FlowRegistry};
 use crate::types::check_project;

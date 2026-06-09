@@ -1,5 +1,5 @@
 /**
- * Data-driven OAuth2 provider for plugins (ADR-060 extension).
+ * Data-driven OAuth2 provider for plugins (ADR-069).
  *
  * `token_url`, client id/secret, grant type, and auth style all come from the
  * stored state (host-validated at manifest install + start_plugin_oauth), so

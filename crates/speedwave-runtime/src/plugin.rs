@@ -152,8 +152,9 @@ pub enum TokenMount {
     },
 }
 
-/// OAuth grant type a plugin declares in its manifest. Gated at install by
-/// `consts::SUPPORTED_OAUTH_GRANT_TYPES`.
+/// The *initial* grant a manifest declares, gated by `SUPPORTED_OAUTH_GRANT_TYPES`.
+/// Distinct from the on-disk *refresh* grant (`oauth-state.ts::GrantType`):
+/// authorization_code/device_code persist as `refresh_token`. See ADR-069.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthGrantType {
@@ -184,7 +185,7 @@ pub enum OAuthAuthStyle {
 }
 
 /// OAuth2 declaration in `plugin.json`. Drives the host-side `generic` provider
-/// and the `start_plugin_oauth` flow. See ADR-060 extension.
+/// and the `start_plugin_oauth` flow. See ADR-069.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PluginOAuthSpec {
     pub grant_type: OAuthGrantType,
@@ -263,7 +264,7 @@ pub struct PluginManifest {
     #[serde(default)]
     pub host_bridge: Option<HostBridgeManifest>,
     /// Optional OAuth2 declaration. Drives host-side authorization + refresh
-    /// via the `oauth` worker; secrets stay off-mount. See ADR-060 extension.
+    /// via the `oauth` worker; secrets stay off-mount. See ADR-069.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<PluginOAuthSpec>,
 }
@@ -5337,6 +5338,18 @@ mod tests {
     #[test]
     fn validate_oauth_spec_accepts_valid() {
         assert!(validate_oauth_spec(Some(&valid_oauth_spec()), &oauth_auth_fields()).is_ok());
+    }
+
+    #[test]
+    fn supported_grant_types_are_known_variants() {
+        // Every gated grant string must round-trip to an OAuthGrantType, so the
+        // install gate can't admit a grant the enum / host flow doesn't model.
+        for g in consts::SUPPORTED_OAUTH_GRANT_TYPES {
+            let parsed: OAuthGrantType =
+                serde_json::from_value(serde_json::Value::String((*g).to_string()))
+                    .unwrap_or_else(|_| panic!("SUPPORTED grant '{g}' is not an OAuthGrantType"));
+            assert_eq!(parsed.as_str(), *g);
+        }
     }
 
     #[test]
