@@ -58,6 +58,105 @@ describe('refreshGenericToken', () => {
     }
   });
 
+  it('rejects an unparseable token URL', async () => {
+    const result = await refreshGenericToken(
+      refreshTokenReq({
+        providerData: { tokenUrl: 'not a url at all', clientId: 'cid' },
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('malformed');
+  });
+
+  it('rejects a token URL with embedded credentials', async () => {
+    const result = await refreshGenericToken(
+      refreshTokenReq({
+        providerData: { tokenUrl: 'https://user:pass@idp.example.com/token', clientId: 'cid' },
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('malformed');
+  });
+
+  it('rejects a localhost token URL', async () => {
+    const result = await refreshGenericToken(
+      refreshTokenReq({
+        providerData: { tokenUrl: 'https://localhost/token', clientId: 'cid' },
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('malformed');
+  });
+
+  it('rejects a success body with a non-positive expires_in', async () => {
+    mockJson({ body: { access_token: 'a', expires_in: 0 } });
+    const result = await refreshGenericToken(refreshTokenReq());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain('expires_in');
+  });
+
+  it('validateRequest requires providerData.tokenUrl', () => {
+    const err = genericProvider.validateRequest?.(
+      refreshTokenReq({ providerData: { clientId: 'cid' } })
+    );
+    expect(err?.code).toBe('missing_field');
+    expect(err?.message).toContain('tokenUrl');
+  });
+
+  it('validateRequest requires providerData.clientId', () => {
+    const err = genericProvider.validateRequest?.(
+      refreshTokenReq({ providerData: { tokenUrl: 'https://idp.example.com/token' } })
+    );
+    expect(err?.code).toBe('missing_field');
+    expect(err?.message).toContain('clientId');
+  });
+
+  it('actually fires the AbortController callback on the refresh timeout', async () => {
+    // Cover the `() => controller.abort()` arrow passed to setTimeout —
+    // production timer is TIMEOUTS.TOKEN_REFRESH_MS; fake timers fire it in ms.
+    vi.useFakeTimers();
+    try {
+      let observedSignal: AbortSignal | undefined;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+          observedSignal = init.signal as AbortSignal;
+          return new Promise((_resolve, reject) => {
+            observedSignal!.addEventListener('abort', () => {
+              reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+            });
+          });
+        })
+      );
+      const promise = refreshGenericToken(refreshTokenReq());
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await promise;
+      expect(observedSignal?.aborted).toBe(true);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('network');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('validateRequest requires clientSecret for client_credentials', () => {
+    const err = genericProvider.validateRequest?.(
+      refreshTokenReq({
+        grantType: 'client_credentials',
+        refreshToken: '',
+        providerData: { tokenUrl: 'https://idp.example.com/token', clientId: 'cid' },
+      })
+    );
+    expect(err?.code).toBe('missing_field');
+    expect(err?.message).toContain('clientSecret');
+  });
+
+  it('genericProvider.refresh delegates to refreshGenericToken', async () => {
+    mockJson({ body: { access_token: 'a', expires_in: 60 } });
+    const result = await genericProvider.refresh(refreshTokenReq());
+    expect(result.ok).toBe(true);
+  });
+
   it('accepts application/json with a charset parameter', async () => {
     mockJson({
       body: { access_token: 'a', expires_in: 60 },

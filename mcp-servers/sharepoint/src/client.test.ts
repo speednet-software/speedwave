@@ -355,6 +355,31 @@ describe('SharePointClient', () => {
       );
     });
 
+    it('state is a live view — a helper token write propagates to later requests', async () => {
+      // The shim's setter must mutate config.accessToken (not a copy), so a
+      // refresh performed by the helper sticks for every subsequent call.
+      fetchMock.mockResolvedValue({ ok: true, json: async () => ({ value: [] }) });
+      mockAuthedRequest.mockImplementationOnce(async (opts) => {
+        opts.state.accessToken = 'rotated-token';
+        return opts.send(opts.state.accessToken);
+      });
+
+      await client.listFiles();
+      await client.listFiles(); // default mock: sends state.accessToken
+
+      expect(fetchMock).toHaveBeenLastCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer rotated-token' }),
+        })
+      );
+    });
+
+    it('propagates a non-Abort fetch failure unchanged (no timeout rewrite)', async () => {
+      fetchMock.mockRejectedValueOnce(new Error('socket hang up'));
+      await expect(client.listFiles()).rejects.toThrow('socket hang up');
+    });
+
     it('passes the proactive-refresh window to authedRequest (the helper owns the decision)', async () => {
       const { PROACTIVE_REFRESH_SECONDS } = await import('@speedwave/mcp-shared');
       const nearExpiry = Math.floor(Date.now() / 1000) + 60;

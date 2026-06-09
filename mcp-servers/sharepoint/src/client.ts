@@ -131,18 +131,13 @@ export interface DriveItemForImage {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Helper function for conditional debug logging
- * Only logs when DEBUG environment variable is set
+ * Conditional debug logging — only when the DEBUG env var is set.
  * @param {string} message - Debug message
- * @param {unknown} [data] - Optional data to log
+ * @param {unknown} data - Context object to log alongside the message
  */
-function debugLog(message: string, data?: unknown): void {
+function debugLog(message: string, data: unknown): void {
   if (process.env.DEBUG) {
-    if (data !== undefined) {
-      console.log(`${ts()} ${message}`, data);
-    } else {
-      console.log(`${ts()} ${message}`);
-    }
+    console.log(`${ts()} ${message}`, data);
   }
 }
 
