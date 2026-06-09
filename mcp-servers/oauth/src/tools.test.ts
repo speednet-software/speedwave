@@ -23,6 +23,7 @@ describe('oauth tools', () => {
 
   const sharepointState: OAuthState = {
     provider: 'microsoft',
+    grantType: 'refresh_token',
     providerData: {
       clientId: '11111111-1111-1111-1111-111111111111',
       tenantId: 'common',

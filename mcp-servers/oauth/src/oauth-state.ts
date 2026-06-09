@@ -15,14 +15,17 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeRestrictedSecret } from '@speedwave/mcp-shared';
-import type { ProviderId } from './providers/types.js';
+import type { GrantType, ProviderId } from './providers/types.js';
 
 /** Per-service OAuth state on disk. See ADR-060 for field semantics. */
 export interface OAuthState {
   provider: ProviderId;
+  /** Grant the state uses. Absent (legacy SharePoint) → `refresh_token`. */
+  grantType: GrantType;
   providerData: Record<string, string>;
   scopes: string[];
   grantedScopes: string[];
+  /** Empty allowed only for `client_credentials` (re-mint, no refresh token). */
   refreshToken: string;
   expiresAt: string;
   lastRefreshAt: string;
@@ -84,8 +87,18 @@ export function assertOAuthState(value: unknown): OAuthState {
       throw new Error(`oauth state: providerData['${k}'] must be a string`);
     }
   }
-  if (typeof obj.refreshToken !== 'string' || !obj.refreshToken) {
-    throw new Error('oauth state: `refreshToken` must be a non-empty string');
+  // Absent grantType = legacy SharePoint state → refresh_token (CD-2 migration).
+  const grantType: GrantType =
+    obj.grantType === undefined ? 'refresh_token' : (obj.grantType as GrantType);
+  if (grantType !== 'refresh_token' && grantType !== 'client_credentials') {
+    throw new Error('oauth state: `grantType` must be refresh_token or client_credentials');
+  }
+  // refresh_token grant needs a token; client_credentials re-mints, so empty is OK.
+  if (typeof obj.refreshToken !== 'string') {
+    throw new Error('oauth state: `refreshToken` must be a string');
+  }
+  if (grantType === 'refresh_token' && !obj.refreshToken) {
+    throw new Error('oauth state: `refreshToken` must be non-empty for refresh_token grant');
   }
   if (typeof obj.expiresAt !== 'string' || Number.isNaN(Date.parse(obj.expiresAt))) {
     throw new Error('oauth state: `expiresAt` must be an ISO-8601 string');
@@ -101,6 +114,7 @@ export function assertOAuthState(value: unknown): OAuthState {
   }
   return {
     provider: obj.provider as ProviderId,
+    grantType,
     providerData: obj.providerData as Record<string, string>,
     scopes: obj.scopes as string[],
     grantedScopes: obj.grantedScopes as string[],
