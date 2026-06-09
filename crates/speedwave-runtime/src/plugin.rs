@@ -55,6 +55,11 @@ pub struct AuthFieldDef {
     /// Desktop form (HTML `pattern` attribute) and at save time on the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<AuthFieldValidation>,
+    /// Marks a field as an OAuth credential: filled by the host-driven flow and
+    /// saved off-mount under `~/.speedwave/oauth/<project>/<slug>.json`, never
+    /// into `/tokens`. Omitted manifests deserialize to `false`.
+    #[serde(default)]
+    pub oauth_flow: bool,
 }
 
 /// Allowed `auth_fields[].field_type` values. Public plugin contract — mirrored
@@ -147,6 +152,66 @@ pub enum TokenMount {
     },
 }
 
+/// OAuth grant type a plugin declares in its manifest. Gated at install by
+/// `consts::SUPPORTED_OAUTH_GRANT_TYPES`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthGrantType {
+    AuthorizationCode,
+    DeviceCode,
+    ClientCredentials,
+}
+
+impl OAuthGrantType {
+    /// Wire string, matching `serde(rename_all = "snake_case")`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OAuthGrantType::AuthorizationCode => "authorization_code",
+            OAuthGrantType::DeviceCode => "device_code",
+            OAuthGrantType::ClientCredentials => "client_credentials",
+        }
+    }
+}
+
+/// How client credentials reach the token endpoint: HTTP Basic header or POST
+/// body params. Defaults to Basic (RFC 6749 §2.3.1).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthAuthStyle {
+    #[default]
+    Basic,
+    Body,
+}
+
+/// OAuth2 declaration in `plugin.json`. Drives the host-side `generic` provider
+/// and the `start_plugin_oauth` flow. See ADR-060 extension.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PluginOAuthSpec {
+    pub grant_type: OAuthGrantType,
+    /// Token endpoint (code exchange / refresh / re-mint).
+    pub token_url: String,
+    /// Authorization endpoint (required for `authorization_code`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorize_url: Option<String>,
+    /// Device-authorization endpoint (required for `device_code`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_authorization_url: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub auth_style: OAuthAuthStyle,
+    /// `auth_fields[].key` carrying the client id.
+    pub client_id_field: String,
+    /// `auth_fields[].key` carrying the client secret (optional for public
+    /// `authorization_code` clients using PKCE only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_field: Option<String>,
+    /// Fixed loopback redirect port for IdPs that require a registered URI;
+    /// `None` picks an ephemeral port (RFC 8252 §7.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_port: Option<u16>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PluginManifest {
     pub name: String,
@@ -197,6 +262,10 @@ pub struct PluginManifest {
     /// token via env vars named here. See ADR-063.
     #[serde(default)]
     pub host_bridge: Option<HostBridgeManifest>,
+    /// Optional OAuth2 declaration. Drives host-side authorization + refresh
+    /// via the `oauth` worker; secrets stay off-mount. See ADR-060 extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<PluginOAuthSpec>,
 }
 
 /// Host-bridge declaration in `plugin.json`. Speedwave Desktop reads
@@ -494,23 +563,34 @@ pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
         .join(service_id))
 }
 
-/// Returns `~/.speedwave/oauth/<project>/<service_id>.json` — the host-only OAuth
-/// state file containing `refreshToken`, `clientId`, `tenantId`, scopes,
-/// `expiresAt`, `lastRefreshAt`, `grantedScopes` (ADR-060). This file is read
-/// and written only by the host (Tauri `oauth_cmd` for setup; the `oauth` worker
-/// for refresh). It is NOT mounted into any worker container.
+/// Host-only OAuth state `~/.speedwave/oauth/<project>/<service_id>.json`
+/// (refreshToken + providerData + scopes; ADR-060). Never mounted into a worker.
 pub fn oauth_state_file(project: &str, service_id: &str) -> PathBuf {
     oauth_state_file_in(consts::data_dir(), project, service_id)
 }
 
-/// Parameterised by `data_dir` so that one-shot migration code can avoid the
-/// `consts::data_dir()` `OnceLock` cache shared across the `cargo test` binary.
-/// Production callers go through `oauth_state_file` and inherit the SSOT path.
+/// `data_dir`-parameterised variant so migration/test code can bypass the
+/// `consts::data_dir()` `OnceLock`. Production goes through `oauth_state_file`.
 pub fn oauth_state_file_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
     data_dir
         .join(consts::OAUTH_SUBDIR)
         .join(project)
         .join(format!("{service_id}.json"))
+}
+
+/// Host-only pre-auth seed `~/.speedwave/oauth/<project>/<slug>.seed.json`:
+/// client id/secret saved before authorization. `start_plugin_oauth` reads it
+/// and writes the full state; never mounted into a worker.
+pub fn oauth_seed_file(project: &str, slug: &str) -> PathBuf {
+    oauth_seed_file_in(consts::data_dir(), project, slug)
+}
+
+/// `data_dir`-parameterised variant of [`oauth_seed_file`] for tests.
+pub fn oauth_seed_file_in(data_dir: &Path, project: &str, slug: &str) -> PathBuf {
+    data_dir
+        .join(consts::OAUTH_SUBDIR)
+        .join(project)
+        .join(format!("{slug}.seed.json"))
 }
 
 /// Testable version: constructs `<base>/.speedwave/tokens/<project>/<service_id>/`
@@ -942,6 +1022,125 @@ pub(crate) fn validate_manifest(
         validate_host_bridge_manifest(bridge)?;
     }
 
+    validate_oauth_spec(manifest.oauth.as_ref(), &manifest.auth_fields)?;
+
+    Ok(())
+}
+
+/// Validates a plugin's `oauth` block: cross-field invariant with
+/// `oauth_flow`, grant gating, grant-specific endpoints, SSRF on every URL,
+/// scope caps, and `client_*_field` references.
+fn validate_oauth_spec(
+    oauth: Option<&PluginOAuthSpec>,
+    auth_fields: &[AuthFieldDef],
+) -> anyhow::Result<()> {
+    let has_oauth_field = auth_fields.iter().any(|f| f.oauth_flow);
+    let Some(spec) = oauth else {
+        if has_oauth_field {
+            anyhow::bail!(
+                "auth_fields declares an `oauth_flow` field but the manifest has no `oauth` block"
+            );
+        }
+        return Ok(());
+    };
+    if !has_oauth_field {
+        anyhow::bail!(
+            "manifest declares an `oauth` block but no `auth_fields` entry sets `oauth_flow: true`"
+        );
+    }
+
+    if !consts::SUPPORTED_OAUTH_GRANT_TYPES.contains(&spec.grant_type.as_str()) {
+        anyhow::bail!(
+            "oauth.grant_type '{}' is not supported by this Speedwave version. Supported: {:?}",
+            spec.grant_type.as_str(),
+            consts::SUPPORTED_OAUTH_GRANT_TYPES
+        );
+    }
+
+    validate_oauth_url("oauth.token_url", &spec.token_url)?;
+    match spec.grant_type {
+        OAuthGrantType::AuthorizationCode => {
+            let url = spec.authorize_url.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("oauth.authorize_url is required for grant_type authorization_code")
+            })?;
+            validate_oauth_url("oauth.authorize_url", url)?;
+        }
+        OAuthGrantType::DeviceCode => {
+            let url = spec.device_authorization_url.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "oauth.device_authorization_url is required for grant_type device_code"
+                )
+            })?;
+            validate_oauth_url("oauth.device_authorization_url", url)?;
+        }
+        OAuthGrantType::ClientCredentials => {
+            if spec.client_secret_field.is_none() {
+                anyhow::bail!(
+                    "oauth.client_secret_field is required for grant_type client_credentials"
+                );
+            }
+        }
+    }
+
+    if spec.scopes.len() > consts::PLUGIN_OAUTH_SCOPES_MAX_COUNT {
+        anyhow::bail!(
+            "oauth.scopes must not exceed {} entries (got {})",
+            consts::PLUGIN_OAUTH_SCOPES_MAX_COUNT,
+            spec.scopes.len()
+        );
+    }
+    for scope in &spec.scopes {
+        if scope.is_empty() {
+            anyhow::bail!("oauth.scopes must not contain an empty entry");
+        }
+        if scope.len() > consts::PLUGIN_OAUTH_SCOPE_MAX_LEN {
+            anyhow::bail!(
+                "oauth.scopes entry exceeds {} bytes",
+                consts::PLUGIN_OAUTH_SCOPE_MAX_LEN
+            );
+        }
+        if scope.contains('\n') || scope.contains('\r') || scope.contains('\0') {
+            anyhow::bail!("oauth.scopes entry must not contain newlines or null bytes");
+        }
+    }
+
+    let has_field = |key: &str| auth_fields.iter().any(|f| f.key == key);
+    if !has_field(&spec.client_id_field) {
+        anyhow::bail!(
+            "oauth.client_id_field '{}' does not match any auth_fields key",
+            spec.client_id_field
+        );
+    }
+    if let Some(ref secret_key) = spec.client_secret_field {
+        if !has_field(secret_key) {
+            anyhow::bail!(
+                "oauth.client_secret_field '{}' does not match any auth_fields key",
+                secret_key
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// SSRF + length gate for one OAuth endpoint URL: https-only, blocks
+/// private/loopback via the shared validator, caps length. `field` names the
+/// manifest key for the error.
+fn validate_oauth_url(field: &str, url: &str) -> anyhow::Result<()> {
+    if url.len() > consts::PLUGIN_OAUTH_URL_MAX_LEN {
+        anyhow::bail!("{field} exceeds {} bytes", consts::PLUGIN_OAUTH_URL_MAX_LEN);
+    }
+    let parsed =
+        crate::url_validation::validate_url(url).map_err(|e| anyhow::anyhow!("{field} {e}"))?;
+    if parsed.scheme() != "https" {
+        anyhow::bail!("{field} must use https (got '{}')", parsed.scheme());
+    }
+    if crate::url_validation::is_private_on_premise(
+        &parsed,
+        crate::url_validation::PrivatePolicy::BlockLoopback,
+    ) {
+        anyhow::bail!("{field} must not point at a private or loopback address");
+    }
     Ok(())
 }
 
@@ -2315,6 +2514,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: Some(">=0.1.0".to_string()),
@@ -2324,6 +2524,7 @@ mod tests {
             requires_integrations: vec!["sharepoint".to_string()],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: PluginManifest = serde_json::from_str(&json).unwrap();
@@ -2435,6 +2636,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let tmp = tempfile::tempdir().unwrap();
             let result = validate_manifest(&manifest, tmp.path());
@@ -2467,6 +2669,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -2495,6 +2698,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         // No Containerfile created
@@ -2528,6 +2732,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -2574,6 +2779,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -2655,6 +2861,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
@@ -2697,6 +2904,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -2817,6 +3025,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:2.0.0");
     }
@@ -2842,6 +3051,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:custom-tag");
     }
@@ -2986,6 +3196,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -2996,6 +3207,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
                 AuthFieldDef {
                     key: "label".to_string(),
@@ -3006,6 +3218,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
             ],
             settings_schema: None,
@@ -3016,6 +3229,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3057,6 +3271,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -3067,6 +3282,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
             ],
             settings_schema: None,
@@ -3077,6 +3293,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3112,6 +3329,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3142,6 +3360,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -3151,6 +3370,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3190,6 +3410,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -3199,6 +3420,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -4201,6 +4423,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         // Replicate the duplicate check from install_plugin
@@ -4239,6 +4462,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let conflict_found = if let Some(ref sid) = conflict_manifest.service_id {
@@ -4288,6 +4512,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -4392,6 +4617,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -4423,6 +4649,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4449,6 +4676,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4475,6 +4703,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4501,6 +4730,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4527,6 +4757,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
@@ -4564,6 +4795,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4590,6 +4822,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4599,6 +4832,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4625,6 +4859,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4634,6 +4869,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -4665,6 +4901,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4694,6 +4931,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4720,6 +4958,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4755,6 +4994,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4787,6 +5027,7 @@ mod tests {
             requires_integrations: vec!["nonexistent-service".to_string()],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4819,6 +5060,7 @@ mod tests {
             requires_integrations: vec![consts::BUILT_IN_SERVICE_IDS[0].to_string()],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4845,6 +5087,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4854,6 +5097,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4939,6 +5183,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4948,6 +5193,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         }
     }
 
@@ -4961,6 +5207,7 @@ mod tests {
             required: true,
             description: None,
             validation,
+            oauth_flow: false,
         }
     }
 
@@ -5041,6 +5288,244 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&m, tmp.path()).unwrap_err().to_string();
         assert!(err.contains("invalid validation.pattern"), "got: {err}");
+    }
+
+    fn oauth_field(key: &str) -> AuthFieldDef {
+        AuthFieldDef {
+            key: key.to_string(),
+            label: key.to_string(),
+            field_type: "password".to_string(),
+            placeholder: "".to_string(),
+            is_secret: true,
+            required: true,
+            description: None,
+            validation: None,
+            oauth_flow: true,
+        }
+    }
+
+    /// auth_fields a `valid_oauth_spec` references (client id + secret).
+    fn oauth_auth_fields() -> Vec<AuthFieldDef> {
+        vec![oauth_field("client_id"), oauth_field("client_secret")]
+    }
+
+    fn valid_oauth_spec() -> PluginOAuthSpec {
+        PluginOAuthSpec {
+            grant_type: OAuthGrantType::AuthorizationCode,
+            token_url: "https://accounts.example.com/token".to_string(),
+            authorize_url: Some("https://accounts.example.com/authorize".to_string()),
+            device_authorization_url: None,
+            scopes: vec!["read".to_string(), "write".to_string()],
+            auth_style: OAuthAuthStyle::Basic,
+            client_id_field: "client_id".to_string(),
+            client_secret_field: Some("client_secret".to_string()),
+            redirect_port: None,
+        }
+    }
+
+    // Happy path: oauth_flow field + matching oauth block passes.
+    #[test]
+    fn validate_oauth_spec_accepts_valid() {
+        assert!(validate_oauth_spec(Some(&valid_oauth_spec()), &oauth_auth_fields()).is_ok());
+    }
+
+    // Edge: no oauth field and no oauth block — nothing to validate.
+    #[test]
+    fn validate_oauth_spec_ok_when_absent() {
+        let plain = field_with_validation(None);
+        assert!(validate_oauth_spec(None, &[plain]).is_ok());
+    }
+
+    // Error path: oauth_flow field without an oauth block.
+    #[test]
+    fn validate_oauth_spec_rejects_field_without_block() {
+        let err = validate_oauth_spec(None, &[oauth_field("client_id")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no `oauth` block"), "got: {err}");
+    }
+
+    // Error path: oauth block without any oauth_flow field.
+    #[test]
+    fn validate_oauth_spec_rejects_block_without_field() {
+        let plain = field_with_validation(None);
+        let err = validate_oauth_spec(Some(&valid_oauth_spec()), &[plain])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("oauth_flow: true"), "got: {err}");
+    }
+
+    // Error path: non-https endpoint is rejected by the SSRF/scheme gate.
+    #[test]
+    fn validate_oauth_spec_rejects_non_https() {
+        let mut spec = valid_oauth_spec();
+        spec.authorize_url = Some("http://accounts.example.com/authorize".to_string());
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must use https"), "got: {err}");
+    }
+
+    // Error path: loopback/private endpoint blocked by the shared validator.
+    #[test]
+    fn validate_oauth_spec_rejects_private_address() {
+        let mut spec = valid_oauth_spec();
+        spec.token_url = "https://127.0.0.1/token".to_string();
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("private") || err.contains("loopback"),
+            "got: {err}"
+        );
+    }
+
+    // Edge: oversized endpoint URL is rejected by the length cap.
+    #[test]
+    fn validate_oauth_spec_rejects_oversized_url() {
+        let mut spec = valid_oauth_spec();
+        let pad = "a".repeat(consts::PLUGIN_OAUTH_URL_MAX_LEN);
+        spec.authorize_url = Some(format!("https://example.com/{pad}"));
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds"), "got: {err}");
+    }
+
+    // Edge: too many scopes rejected by the count cap.
+    #[test]
+    fn validate_oauth_spec_rejects_too_many_scopes() {
+        let mut spec = valid_oauth_spec();
+        spec.scopes = (0..=consts::PLUGIN_OAUTH_SCOPES_MAX_COUNT)
+            .map(|i| format!("scope{i}"))
+            .collect();
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must not exceed"), "got: {err}");
+    }
+
+    // Edge: an oversized single scope is rejected by the per-scope length cap.
+    #[test]
+    fn validate_oauth_spec_rejects_oversized_scope() {
+        let mut spec = valid_oauth_spec();
+        spec.scopes = vec!["s".repeat(consts::PLUGIN_OAUTH_SCOPE_MAX_LEN + 1)];
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bytes"), "got: {err}");
+    }
+
+    // Edge: an empty scope entry is rejected.
+    #[test]
+    fn validate_oauth_spec_rejects_empty_scope() {
+        let mut spec = valid_oauth_spec();
+        spec.scopes = vec!["".to_string()];
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty"), "got: {err}");
+    }
+
+    // Reserved: a grant not in SUPPORTED_OAUTH_GRANT_TYPES is rejected even
+    // though the enum can represent it (grant gating per PR).
+    #[test]
+    fn validate_oauth_spec_rejects_unsupported_grant() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::DeviceCode;
+        spec.device_authorization_url = Some("https://idp.example.com/device".to_string());
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not supported"), "got: {err}");
+    }
+
+    // Error path: authorization_code without authorize_url.
+    #[test]
+    fn validate_oauth_spec_rejects_missing_authorize_url() {
+        let mut spec = valid_oauth_spec();
+        spec.authorize_url = None;
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("authorize_url is required"), "got: {err}");
+    }
+
+    // Error path: client_id_field references a non-existent auth_field.
+    #[test]
+    fn validate_oauth_spec_rejects_dangling_client_id_field() {
+        let mut spec = valid_oauth_spec();
+        spec.client_id_field = "nonexistent".to_string();
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("client_id_field"), "got: {err}");
+    }
+
+    // Error path: client_secret_field references a non-existent auth_field.
+    #[test]
+    fn validate_oauth_spec_rejects_dangling_client_secret_field() {
+        let mut spec = valid_oauth_spec();
+        spec.client_secret_field = Some("nonexistent".to_string());
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("client_secret_field"), "got: {err}");
+    }
+
+    // Seed file is under oauth/, distinct from the state file, never tokens/.
+    #[test]
+    fn oauth_seed_file_is_off_mount_and_distinct() {
+        let base = std::path::Path::new("/d");
+        let seed = oauth_seed_file_in(base, "proj", "my-plugin");
+        let state = oauth_state_file_in(base, "proj", "my-plugin");
+        assert!(seed.starts_with(base.join(consts::OAUTH_SUBDIR)));
+        assert!(!seed.starts_with(base.join("tokens")));
+        assert_ne!(seed, state);
+        assert!(seed.to_string_lossy().ends_with("my-plugin.seed.json"));
+    }
+
+    // Grant string mapping matches the wire form.
+    #[test]
+    fn oauth_grant_type_as_str() {
+        assert_eq!(
+            OAuthGrantType::AuthorizationCode.as_str(),
+            "authorization_code"
+        );
+        assert_eq!(OAuthGrantType::DeviceCode.as_str(), "device_code");
+        assert_eq!(
+            OAuthGrantType::ClientCredentials.as_str(),
+            "client_credentials"
+        );
+    }
+
+    // Default: omitted oauth_flow → false, omitted oauth → None, omitted
+    // auth_style → Basic.
+    #[test]
+    fn oauth_fields_default_when_omitted() {
+        let json = r#"{
+            "key": "token", "label": "T", "field_type": "password",
+            "placeholder": "", "is_secret": true
+        }"#;
+        let field: AuthFieldDef = serde_json::from_str(json).unwrap();
+        assert!(!field.oauth_flow);
+
+        let mjson = r#"{
+            "name": "Plain", "slug": "plain", "version": "1.0.0",
+            "description": "no oauth"
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(mjson).unwrap();
+        assert!(manifest.oauth.is_none());
+
+        let sjson = r#"{
+            "grant_type": "authorization_code",
+            "token_url": "https://idp.example.com/token",
+            "client_id_field": "client_id"
+        }"#;
+        let spec: PluginOAuthSpec = serde_json::from_str(sjson).unwrap();
+        assert_eq!(spec.auth_style, OAuthAuthStyle::Basic);
+        assert!(spec.client_secret_field.is_none());
+        assert!(spec.redirect_port.is_none());
     }
 
     #[test]
@@ -5446,6 +5931,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("ReadWrite must be rejected for plugins");
@@ -5484,6 +5970,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("slug colliding with built-in compose name must be rejected");
@@ -5543,6 +6030,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("dangerous env key must be rejected");
@@ -5596,6 +6084,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: Some(bridge),
             instructions: None,
+            oauth: None,
         }
     }
 
@@ -5946,6 +6435,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("mem_limit beyond cap must be rejected");
@@ -5978,6 +6468,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("cpu_limit beyond cap must be rejected");
@@ -6014,6 +6505,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err =
                 validate_manifest(&manifest, dir.path()).expect_err("cpu_limit must be rejected");
@@ -6056,6 +6548,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("non-object settings_schema must be rejected");
@@ -6095,6 +6588,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("oversized settings_schema must be rejected");
@@ -6133,6 +6627,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         validate_manifest(&manifest, dir.path()).expect("valid schema must pass");
     }
@@ -6865,6 +7360,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         }
     }
 

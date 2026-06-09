@@ -545,17 +545,18 @@ pub fn save_plugin_credentials(
     let svc_dir = token_dir_for(&project, sid)?;
     std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
 
+    // OAuth fields (`oauth_flow: true`) are kept off-mount: a compromised
+    // worker must not read a client secret from `/tokens`. They accumulate
+    // into the seed file instead of `svc_dir`.
+    let mut oauth_seed: HashMap<String, String> = HashMap::new();
+
     for (key, value) in &credentials {
         if !allowed_keys.contains(&key.as_str()) {
             return Err(format!("field '{}' not allowed for plugin '{}'", key, slug));
         }
         validate_credential_field(key, value)?;
         // Enforce the field's optional regex constraint host-side — the UI's
-        // HTML `pattern` check is advisory (a crafted IPC call bypasses it),
-        // so the authoritative check lives here, sharing the runtime SSOT so
-        // the anchoring matches the browser's full-match semantics exactly.
-        // The key passed the allow-list above, so it MUST resolve to a field;
-        // a miss is a logic error, not a reason to silently skip validation.
+        // HTML `pattern` check is advisory (a crafted IPC call bypasses it).
         let field = manifest
             .auth_fields
             .iter()
@@ -565,11 +566,42 @@ pub fn save_plugin_credentials(
             })?;
         plugin::validate_credential_value(field, value)?;
 
+        if field.oauth_flow {
+            oauth_seed.insert(key.clone(), value.clone());
+            continue;
+        }
+
         let file_path = svc_dir.join(key);
         std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
         crate::fs_perms::set_owner_only(&file_path)?;
     }
 
+    if !oauth_seed.is_empty() {
+        write_oauth_seed(&project, &slug, &oauth_seed)?;
+    }
+
+    Ok(())
+}
+
+/// Writes OAuth client credentials to the host-only pre-auth seed file
+/// (`oauth/<project>/<slug>.seed.json`, 0o600). Read by `start_plugin_oauth`;
+/// never mounted into a worker.
+fn write_oauth_seed(
+    project: &str,
+    slug: &str,
+    seed: &HashMap<String, String>,
+) -> Result<(), String> {
+    let path = plugin::oauth_seed_file(project, slug);
+    let parent = path.parent().ok_or_else(|| "seed: no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::to_string_pretty(seed).map_err(|e| e.to_string())? + "\n";
+    speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -854,6 +886,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             current_values: HashMap::new(),
             configured_fields: Vec::new(),
@@ -1036,6 +1069,7 @@ mod tests {
             required: true,
             description: None,
             validation: None,
+            oauth_flow: false,
         }];
         assert!(is_plugin_configured(
             std::path::Path::new("/nonexistent"),
@@ -1066,6 +1100,7 @@ mod tests {
             required: true,
             description: None,
             validation: None,
+            oauth_flow: false,
         }];
         assert!(!is_plugin_configured(
             std::path::Path::new("/nonexistent/path"),
@@ -1090,6 +1125,7 @@ mod tests {
             required: true,
             description: None,
             validation: None,
+            oauth_flow: false,
         }];
         assert!(is_plugin_configured(
             dir.path(),
@@ -1114,6 +1150,7 @@ mod tests {
             required: true,
             description: None,
             validation: None,
+            oauth_flow: false,
         }];
         assert!(!is_plugin_configured(
             dir.path(),
@@ -1135,6 +1172,7 @@ mod tests {
             required: false,
             description: None,
             validation: None,
+            oauth_flow: false,
         }];
         assert!(is_plugin_configured(
             dir.path(),
@@ -1157,6 +1195,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             },
             plugin::AuthFieldDef {
                 key: "extra_token".into(),
@@ -1167,6 +1206,7 @@ mod tests {
                 required: false,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             },
         ];
         assert!(!is_plugin_configured(
@@ -1300,6 +1340,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -1309,6 +1350,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let allowed_keys: Vec<&str> = manifest
@@ -1681,6 +1723,44 @@ mod tests {
         assert!(validate_credential_field("key", &over_limit).is_err());
     }
 
+    // OAuth seed lives under oauth/, NOT under the tokens/ mount — a worker
+    // must never read a client secret from /tokens.
+    #[test]
+    fn oauth_seed_path_is_off_mount() {
+        let base = std::path::Path::new("/data");
+        let seed = plugin::oauth_seed_file_in(base, "proj", "my-plugin");
+        let tokens = base.join("tokens");
+        assert!(!seed.starts_with(&tokens), "seed must not be under tokens/");
+        assert!(seed.starts_with(base.join(consts::OAUTH_SUBDIR)));
+        assert!(seed.to_string_lossy().ends_with("my-plugin.seed.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_oauth_seed_writes_owner_only_json() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let mut seed = HashMap::new();
+        seed.insert("client_id".to_string(), "abc".to_string());
+        seed.insert("client_secret".to_string(), "shhh".to_string());
+        write_oauth_seed("proj", "my-plugin", &seed).unwrap();
+
+        let path = plugin::oauth_seed_file("proj", "my-plugin");
+        let body = std::fs::read_to_string(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["client_secret"], "shhh");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "seed file must be chmod 600");
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
     #[test]
     fn set_plugin_enabled_rejects_unknown_service_id() {
         let service_id = "nonexistent-plugin";
@@ -1740,6 +1820,7 @@ mod tests {
             required: true,
             description: None,
             validation: None,
+            oauth_flow: false,
         }];
         assert!(blocks_auto_enable(&auth_fields));
     }
@@ -1755,6 +1836,7 @@ mod tests {
             required: false,
             description: None,
             validation: None,
+            oauth_flow: false,
         }];
         assert!(
             !blocks_auto_enable(&auth_fields),
@@ -1773,6 +1855,7 @@ mod tests {
             required: true,
             description: None,
             validation: None,
+            oauth_flow: false,
         }];
         assert!(!blocks_auto_enable(&auth_fields));
     }
@@ -1819,6 +1902,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -1828,6 +1912,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let allowed_keys: Vec<&str> = manifest
@@ -1868,6 +1953,7 @@ mod tests {
                 pattern: "^tok_[A-Za-z0-9_-]+$".to_string(),
                 message: Some("Personal Access Tokens start with tok_".to_string()),
             }),
+            oauth_flow: false,
         };
         let manifest = plugin::PluginManifest {
             name: "Example Plugin".to_string(),
@@ -1888,6 +1974,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let lookup = |key: &str, value: &str| -> Result<(), String> {
