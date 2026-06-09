@@ -82,10 +82,10 @@ pub async fn start_plugin_oauth(
     let pkce = speedwave_runtime::pkce::generate_pkce();
     let state = speedwave_runtime::pkce::generate_state();
 
-    // Bind the loopback callback server on 127.0.0.1 (browser-side, NOT
-    // host_bind_address which targets container reach). Fixed port if the
-    // manifest demands a registered redirect URI; else an ephemeral port.
+    // Bind the loopback callback server on 127.0.0.1 (browser-side). Fixed port
+    // if the manifest demands a registered redirect URI; else an ephemeral port.
     let bind_port = oauth.redirect_port.unwrap_or(0);
+    // SSOT-allow: browser-side OAuth redirect URI is 127.0.0.1, not the container-reach host_bind_address (WSL adapter IP on Windows). See ADR-069.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", bind_port))
         .await
         .map_err(|e| {
