@@ -139,6 +139,41 @@ fn redact_ms_error_description(raw: &str) -> String {
     "redacted".to_string()
 }
 
+/// Classifies a Microsoft token-poll body into a [`PollAction`], or `Ok(())`
+/// when it carries tokens. Pure — the shared poll loop drives the effects.
+fn classify_sharepoint_response(bytes: &[u8]) -> Result<(), oauth_flow::PollAction> {
+    use oauth_flow::PollAction;
+    if serde_json::from_slice::<MsTokenResponse>(bytes).is_ok() {
+        return Ok(());
+    }
+    if let Ok(err) = serde_json::from_slice::<MsTokenErrorResponse>(bytes) {
+        return Err(match err.error.as_str() {
+            "authorization_pending" => PollAction::KeepPolling,
+            "slow_down" => PollAction::SlowDown,
+            "expired_token" => {
+                PollAction::Expired("Device code expired — please try again".to_string())
+            }
+            "authorization_declined" => {
+                PollAction::Failed("Authorization was declined".to_string())
+            }
+            "bad_verification_code" => PollAction::Failed("Invalid verification code".to_string()),
+            other => {
+                let msg = err
+                    .error_description
+                    .as_deref()
+                    .map(redact_ms_error_description)
+                    .unwrap_or_else(|| other.to_string());
+                PollAction::Failed(msg)
+            }
+        });
+    }
+    let preview = String::from_utf8_lossy(bytes);
+    let truncated = preview.chars().take(200).collect::<String>();
+    Err(PollAction::Failed(format!(
+        "Unexpected response from Microsoft: {truncated}"
+    )))
+}
+
 fn save_tokens(
     project: &str,
     client_id: &str,
@@ -237,202 +272,36 @@ pub async fn start_sharepoint_oauth(
         request_id: request_id.clone(),
     };
 
-    let poll_cancel = cancel_token.clone();
-    let poll_request_id = request_id.clone();
     let poll_project = project.clone();
-    let poll_app = app.clone();
     let poll_client_id = client_id.clone();
     let poll_tenant_id = tenant_id.clone();
-    let device_code = dc_resp.device_code.clone();
-    let mut interval = dc_resp.interval;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(dc_resp.expires_in);
+    let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
+    let form_body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+        .append_pair("client_id", &client_id)
+        .append_pair("device_code", &dc_resp.device_code)
+        .finish();
 
-    tokio::spawn(async move {
-        let client = http_client;
-        let token_url = format!(
-            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-            tenant_id
-        );
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
-            .append_pair("client_id", &client_id)
-            .append_pair("device_code", &device_code)
-            .finish();
-
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                oauth_flow::emit_progress(
-                    &poll_app,
-                    &FLOW_STATE,
-                    "expired",
-                    "Device code expired — please try again",
-                    &poll_request_id,
-                );
-                FLOW_STATE.clear_if_current(&poll_request_id);
-                return;
-            }
-
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(interval)) => {}
-                () = poll_cancel.cancelled() => {
-                    oauth_flow::emit_progress(&poll_app, &FLOW_STATE, "cancelled", "OAuth flow cancelled", &poll_request_id);
-                    FLOW_STATE.clear_if_current(&poll_request_id);
-                    return;
-                }
-            }
-
-            let resp = client
-                .post(&token_url)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(body.clone())
-                .timeout(Duration::from_secs(30))
-                .send()
-                .await;
-
-            if poll_cancel.is_cancelled() {
-                oauth_flow::emit_progress(
-                    &poll_app,
-                    &FLOW_STATE,
-                    "cancelled",
-                    "OAuth flow cancelled",
-                    &poll_request_id,
-                );
-                FLOW_STATE.clear_if_current(&poll_request_id);
-                return;
-            }
-
-            match resp {
-                Ok(r) => {
-                    let status = r.status();
-                    let body_bytes = match crate::http_util::read_body_limited(r, "token").await {
-                        Ok(b) => b,
-                        Err(e) => {
-                            oauth_flow::emit_progress(
-                                &poll_app,
-                                &FLOW_STATE,
-                                "error",
-                                &e,
-                                &poll_request_id,
-                            );
-                            FLOW_STATE.clear_if_current(&poll_request_id);
-                            return;
-                        }
-                    };
-
-                    if let Ok(tokens) = serde_json::from_slice::<MsTokenResponse>(&body_bytes) {
-                        if let Err(e) =
-                            save_tokens(&poll_project, &poll_client_id, &poll_tenant_id, &tokens)
-                        {
-                            oauth_flow::emit_progress(
-                                &poll_app,
-                                &FLOW_STATE,
-                                "error",
-                                &format!("Failed to save tokens: {e}"),
-                                &poll_request_id,
-                            );
-                            FLOW_STATE.clear_if_current(&poll_request_id);
-                            return;
-                        }
-                        oauth_flow::emit_progress(
-                            &poll_app,
-                            &FLOW_STATE,
-                            "success",
-                            "Authentication successful",
-                            &poll_request_id,
-                        );
-                        FLOW_STATE.clear_if_current(&poll_request_id);
-                        return;
-                    }
-
-                    if let Ok(err) = serde_json::from_slice::<MsTokenErrorResponse>(&body_bytes) {
-                        match err.error.as_str() {
-                            "authorization_pending" => continue,
-                            "slow_down" => {
-                                interval += 5;
-                                continue;
-                            }
-                            "expired_token" => {
-                                oauth_flow::emit_progress(
-                                    &poll_app,
-                                    &FLOW_STATE,
-                                    "expired",
-                                    "Device code expired — please try again",
-                                    &poll_request_id,
-                                );
-                                FLOW_STATE.clear_if_current(&poll_request_id);
-                                return;
-                            }
-                            "authorization_declined" => {
-                                oauth_flow::emit_progress(
-                                    &poll_app,
-                                    &FLOW_STATE,
-                                    "error",
-                                    "Authorization was declined",
-                                    &poll_request_id,
-                                );
-                                FLOW_STATE.clear_if_current(&poll_request_id);
-                                return;
-                            }
-                            "bad_verification_code" => {
-                                oauth_flow::emit_progress(
-                                    &poll_app,
-                                    &FLOW_STATE,
-                                    "error",
-                                    "Invalid verification code",
-                                    &poll_request_id,
-                                );
-                                FLOW_STATE.clear_if_current(&poll_request_id);
-                                return;
-                            }
-                            other => {
-                                let msg = err
-                                    .error_description
-                                    .as_deref()
-                                    .map(redact_ms_error_description)
-                                    .unwrap_or_else(|| other.to_string());
-                                oauth_flow::emit_progress(
-                                    &poll_app,
-                                    &FLOW_STATE,
-                                    "error",
-                                    &msg,
-                                    &poll_request_id,
-                                );
-                                FLOW_STATE.clear_if_current(&poll_request_id);
-                                return;
-                            }
-                        }
-                    }
-
-                    let preview = String::from_utf8_lossy(&body_bytes);
-                    let truncated = if preview.len() > 200 {
-                        &preview[..200]
-                    } else {
-                        &preview
-                    };
-                    oauth_flow::emit_progress(
-                        &poll_app,
-                        &FLOW_STATE,
-                        "error",
-                        &format!("Unexpected response from Microsoft (HTTP {status}): {truncated}"),
-                        &poll_request_id,
-                    );
-                    FLOW_STATE.clear_if_current(&poll_request_id);
-                    return;
-                }
-                Err(e) => {
-                    oauth_flow::emit_progress(
-                        &poll_app,
-                        &FLOW_STATE,
-                        "error",
-                        &format!("Network error: {e}"),
-                        &poll_request_id,
-                    );
-                    FLOW_STATE.clear_if_current(&poll_request_id);
-                    return;
-                }
-            }
-        }
-    });
+    oauth_flow::run_device_poll(
+        app,
+        &FLOW_STATE,
+        request_id,
+        oauth_flow::DevicePollConfig {
+            client: http_client,
+            token_url,
+            form_body,
+            accept_json: false,
+            interval_secs: dc_resp.interval,
+            expires_in_secs: dc_resp.expires_in,
+        },
+        cancel_token,
+        classify_sharepoint_response,
+        move |bytes| {
+            let tokens: MsTokenResponse =
+                serde_json::from_slice(bytes).map_err(|e| format!("parse token: {e}"))?;
+            save_tokens(&poll_project, &poll_client_id, &poll_tenant_id, &tokens)
+        },
+    );
 
     Ok(info)
 }

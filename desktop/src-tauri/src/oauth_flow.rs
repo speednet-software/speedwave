@@ -107,6 +107,161 @@ pub(crate) fn emit_progress(
     }
 }
 
+/// What the device-poll loop does with one token-endpoint response. The
+/// per-IdP classifier maps a `(error_code, error_description)` to one of these.
+pub(crate) enum PollAction {
+    /// Keep polling at the current interval (`authorization_pending`).
+    KeepPolling,
+    /// Back off: add 5s to the interval, then keep polling (`slow_down`).
+    SlowDown,
+    /// Device code expired — emit `expired` status and stop.
+    Expired(String),
+    /// Terminal failure — emit `error` status with this message and stop.
+    Failed(String),
+}
+
+use std::time::Duration;
+use tokio::time::Instant;
+
+/// Inputs for [`run_device_poll`]. The two closures carry the only per-IdP
+/// differences: classifying a polling error and persisting a success body.
+pub(crate) struct DevicePollConfig {
+    pub client: reqwest::Client,
+    pub token_url: String,
+    pub form_body: String,
+    /// `true` for GitHub (`Accept: application/json`).
+    pub accept_json: bool,
+    pub interval_secs: u64,
+    pub expires_in_secs: u64,
+}
+
+/// Runs the device-code polling state machine shared by SharePoint and GitHub.
+/// `on_success(body)` parses+persists IdP-specific tokens; `classify(body)`
+/// returns `Ok(())` on success-shaped body, else a [`PollAction`]. The whole
+/// loop (deadline / sleep / cancel / network) is identical across IdPs.
+pub(crate) fn run_device_poll<C, S>(
+    app: tauri::AppHandle,
+    registry: &'static FlowRegistry,
+    request_id: String,
+    config: DevicePollConfig,
+    cancel: CancellationToken,
+    classify: C,
+    on_success: S,
+) where
+    C: Fn(&[u8]) -> Result<(), PollAction> + Send + 'static,
+    S: Fn(&[u8]) -> Result<(), String> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut interval = config.interval_secs;
+        let deadline = Instant::now() + Duration::from_secs(config.expires_in_secs);
+        loop {
+            if Instant::now() >= deadline {
+                emit_progress(
+                    &app,
+                    registry,
+                    "expired",
+                    "Device code expired — please try again",
+                    &request_id,
+                );
+                registry.clear_if_current(&request_id);
+                return;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(interval)) => {}
+                () = cancel.cancelled() => {
+                    emit_progress(&app, registry, "cancelled", "OAuth flow cancelled", &request_id);
+                    registry.clear_if_current(&request_id);
+                    return;
+                }
+            }
+
+            let mut req = config
+                .client
+                .post(&config.token_url)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(config.form_body.clone())
+                .timeout(Duration::from_secs(30));
+            if config.accept_json {
+                req = req.header("Accept", "application/json");
+            }
+            let resp = req.send().await;
+
+            if cancel.is_cancelled() {
+                emit_progress(
+                    &app,
+                    registry,
+                    "cancelled",
+                    "OAuth flow cancelled",
+                    &request_id,
+                );
+                registry.clear_if_current(&request_id);
+                return;
+            }
+
+            let bytes = match resp {
+                Ok(r) => match crate::http_util::read_body_limited(r, "token").await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        emit_progress(&app, registry, "error", &e, &request_id);
+                        registry.clear_if_current(&request_id);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    emit_progress(
+                        &app,
+                        registry,
+                        "error",
+                        &format!("Network error: {e}"),
+                        &request_id,
+                    );
+                    registry.clear_if_current(&request_id);
+                    return;
+                }
+            };
+
+            match classify(&bytes) {
+                Ok(()) => {
+                    if let Err(e) = on_success(&bytes) {
+                        emit_progress(
+                            &app,
+                            registry,
+                            "error",
+                            &format!("Failed to save tokens: {e}"),
+                            &request_id,
+                        );
+                    } else {
+                        emit_progress(
+                            &app,
+                            registry,
+                            "success",
+                            "Authentication successful",
+                            &request_id,
+                        );
+                    }
+                    registry.clear_if_current(&request_id);
+                    return;
+                }
+                Err(PollAction::KeepPolling) => continue,
+                Err(PollAction::SlowDown) => {
+                    interval += 5;
+                    continue;
+                }
+                Err(PollAction::Expired(msg)) => {
+                    emit_progress(&app, registry, "expired", &msg, &request_id);
+                    registry.clear_if_current(&request_id);
+                    return;
+                }
+                Err(PollAction::Failed(msg)) => {
+                    emit_progress(&app, registry, "error", &msg, &request_id);
+                    registry.clear_if_current(&request_id);
+                    return;
+                }
+            }
+        }
+    });
+}
+
 /// Atomic 0o600 write of a single credential into `svc_dir/<file_name>`.
 pub(crate) fn save_credential_file(
     svc_dir: &std::path::Path,
