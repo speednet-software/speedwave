@@ -1183,9 +1183,10 @@ fn validate_grant_endpoints(spec: &PluginOAuthSpec, derived: bool) -> anyhow::Re
     Ok(())
 }
 
-/// SSRF + length gate for one OAuth endpoint URL: https-only, blocks
-/// private/loopback via the shared validator, caps length. `field` names the
-/// manifest key for the error.
+/// SSRF + length gate for one OAuth endpoint URL: caps length, runs
+/// `validate_url` (which rejects every private/reserved/loopback IP and
+/// localhost domains), then enforces https. `field` names the manifest key
+/// for the error.
 fn validate_oauth_url(field: &str, url: &str) -> anyhow::Result<()> {
     if url.len() > consts::PLUGIN_OAUTH_URL_MAX_LEN {
         anyhow::bail!("{field} exceeds {} bytes", consts::PLUGIN_OAUTH_URL_MAX_LEN);
@@ -1194,12 +1195,6 @@ fn validate_oauth_url(field: &str, url: &str) -> anyhow::Result<()> {
         crate::url_validation::validate_url(url).map_err(|e| anyhow::anyhow!("{field} {e}"))?;
     if parsed.scheme() != "https" {
         anyhow::bail!("{field} must use https (got '{}')", parsed.scheme());
-    }
-    if crate::url_validation::is_private_on_premise(
-        &parsed,
-        crate::url_validation::PrivatePolicy::BlockLoopback,
-    ) {
-        anyhow::bail!("{field} must not point at a private or loopback address");
     }
     Ok(())
 }

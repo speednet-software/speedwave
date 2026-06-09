@@ -58,6 +58,35 @@ describe('refreshGenericToken', () => {
     }
   });
 
+  it('accepts application/json with a charset parameter', async () => {
+    mockJson({
+      body: { access_token: 'a', expires_in: 60 },
+      contentType: 'application/json; charset=utf-8',
+    });
+    const result = await refreshGenericToken(refreshTokenReq());
+    expect(result.ok).toBe(true);
+  });
+
+  it('accepts a +json suffix content-type (application/problem+json)', async () => {
+    mockJson({
+      body: { access_token: 'a', expires_in: 60 },
+      contentType: 'application/problem+json',
+    });
+    const result = await refreshGenericToken(refreshTokenReq());
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects a crafted content-type that merely contains "json"', async () => {
+    // /json/i substring matching would pass these — the anchored check must not.
+    mockJson({
+      body: { access_token: 'a', expires_in: 60 },
+      contentType: 'text/jsonx',
+    });
+    const result = await refreshGenericToken(refreshTokenReq());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain('content-type');
+  });
+
   it('rejects an unknown providerData.authStyle literal', async () => {
     const result = await refreshGenericToken(
       refreshTokenReq({

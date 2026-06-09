@@ -16,7 +16,9 @@ export async function readJsonCapped(
   response: Response
 ): Promise<{ ok: true; json: Record<string, unknown> } | { ok: false; message: string }> {
   const ctype = response.headers.get('content-type') ?? '';
-  if (!/json/i.test(ctype)) {
+  // application/json or a +json suffix type (e.g. application/problem+json) —
+  // a bare /json/ substring match would pass crafted types like text/jsonx.
+  if (!/^application\/(?:[^;]+\+)?json\b/i.test(ctype)) {
     return { ok: false, message: `unexpected content-type '${ctype}'` };
   }
   // Reject early when the endpoint declares an oversized body.

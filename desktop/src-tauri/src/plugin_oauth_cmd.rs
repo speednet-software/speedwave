@@ -504,10 +504,11 @@ fn persist_state(
     client_secret: Option<&str>,
     token: &TokenResponse,
 ) -> Result<(), String> {
-    let refresh_token = token
-        .refresh_token
-        .clone()
-        .ok_or_else(|| "token response had no refresh_token".to_string())?;
+    let refresh_token = token.refresh_token.clone().ok_or_else(|| {
+        "IdP returned no refresh_token — Speedwave's authorization_code flow requires one \
+         (use a confidential client or an IdP that issues refresh tokens with PKCE)"
+            .to_string()
+    })?;
     let granted: Vec<String> = token
         .scope
         .as_deref()
@@ -597,6 +598,8 @@ mod tests {
 
     // A successful authorization auto-enables the plugin (before emitting
     // success), so the user doesn't have to toggle it on manually.
+    // Limitation: a source-order check, not behavioral (the real ordering
+    // needs a Tauri AppHandle) — it pins statement ORDER, not execution.
     #[test]
     fn start_plugin_oauth_auto_enables_on_success() {
         let src = include_str!("plugin_oauth_cmd.rs");
