@@ -5,6 +5,7 @@ import {
   PluginAuthField,
   PluginSaveCredentialsEvent,
 } from '../../models/plugin';
+import { OauthConnectComponent } from '../../shared/oauth-connect/oauth-connect.component';
 
 /**
  * Renders a form for a plugin's `auth_fields[]`. Emits the filled subset
@@ -22,151 +23,174 @@ import {
  */
 @Component({
   selector: 'app-plugin-credentials-form',
-  imports: [CommonModule],
+  imports: [CommonModule, OauthConnectComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (authFields().length > 0) {
       <form (submit)="onSubmit($event)" data-testid="plugin-credentials-form">
         @for (field of authFields(); track field.key) {
-          <div class="my-4">
-            <label
-              class="mb-1.5 flex items-center gap-2 text-[13px] text-sw-text-muted"
-              [for]="'cred-' + field.key"
-              data-testid="cred-label"
-            >
-              <span>
-                {{ field.label }}
-                @if (field.required) {
-                  <span class="text-red-400" aria-label="required">*</span>
-                }
-              </span>
-              @if (isConfigured(field.key)) {
-                <span
-                  class="rounded bg-sw-success-dark px-1.5 py-0.5 text-[10px] font-medium text-sw-success-text"
-                  data-testid="cred-configured-badge"
-                  >✓ set</span
-                >
-                @if (confirmingClearKey === field.key) {
-                  <span class="text-[11px] text-red-300">Clear?</span>
-                  <button
-                    type="button"
-                    class="text-[11px] font-semibold text-red-300 underline"
-                    [attr.data-testid]="'cred-clear-confirm-' + field.key"
-                    (click)="confirmClear(field.key)"
-                  >
-                    Yes
-                  </button>
-                  <button
-                    type="button"
-                    class="text-[11px] text-sw-text-ghost underline"
-                    [attr.data-testid]="'cred-clear-cancel-' + field.key"
-                    (click)="cancelClear()"
-                  >
-                    Cancel
-                  </button>
-                } @else {
-                  <button
-                    type="button"
-                    class="text-[11px] text-sw-text-ghost underline hover:text-red-300"
-                    [attr.data-testid]="'cred-clear-' + field.key"
-                    (click)="requestClear(field.key)"
-                  >
-                    clear
-                  </button>
-                }
-              }
-            </label>
-            @if (field.description) {
-              <p
-                [id]="'cred-desc-' + field.key"
-                class="mb-1.5 text-[11px] leading-relaxed text-sw-text-ghost"
-                data-testid="cred-description"
+          @if (!field.oauth_flow) {
+            <div class="my-4">
+              <label
+                class="mb-1.5 flex items-center gap-2 text-[13px] text-sw-text-muted"
+                [for]="'cred-' + field.key"
+                data-testid="cred-label"
               >
-                {{ field.description }}
-              </p>
-            }
-            @if (field.field_type === 'textarea') {
-              <!-- Multi-line secret (PEM, service-account JSON). The HTML
+                <span>
+                  {{ field.label }}
+                  @if (field.required) {
+                    <span class="text-red-400" aria-label="required">*</span>
+                  }
+                </span>
+                @if (isConfigured(field.key)) {
+                  <span
+                    class="rounded bg-sw-success-dark px-1.5 py-0.5 text-[10px] font-medium text-sw-success-text"
+                    data-testid="cred-configured-badge"
+                    >✓ set</span
+                  >
+                  @if (confirmingClearKey === field.key) {
+                    <span class="text-[11px] text-red-300">Clear?</span>
+                    <button
+                      type="button"
+                      class="text-[11px] font-semibold text-red-300 underline"
+                      [attr.data-testid]="'cred-clear-confirm-' + field.key"
+                      (click)="confirmClear(field.key)"
+                    >
+                      Yes
+                    </button>
+                    <button
+                      type="button"
+                      class="text-[11px] text-sw-text-ghost underline"
+                      [attr.data-testid]="'cred-clear-cancel-' + field.key"
+                      (click)="cancelClear()"
+                    >
+                      Cancel
+                    </button>
+                  } @else {
+                    <button
+                      type="button"
+                      class="text-[11px] text-sw-text-ghost underline hover:text-red-300"
+                      [attr.data-testid]="'cred-clear-' + field.key"
+                      (click)="requestClear(field.key)"
+                    >
+                      clear
+                    </button>
+                  }
+                }
+              </label>
+              @if (field.description) {
+                <p
+                  [id]="'cred-desc-' + field.key"
+                  class="mb-1.5 text-[11px] leading-relaxed text-sw-text-ghost"
+                  data-testid="cred-description"
+                >
+                  {{ field.description }}
+                </p>
+              }
+              @if (field.field_type === 'textarea') {
+                <!-- Multi-line secret (PEM, service-account JSON). The HTML
                    pattern attribute is invalid on textarea, so the regex is
                    checked by JS at submit + the backend. Masked with
                    -webkit-text-security when is_secret (Tauri webviews are
                    Chromium/WebKit). -->
-              <textarea
-                [id]="'cred-' + field.key"
-                rows="3"
-                [placeholder]="
-                  isConfigured(field.key) ? '•••••••• stored — type to replace' : field.placeholder
-                "
-                [value]="getValue(field.key)"
-                (input)="onFieldInput(field.key, $event)"
-                (blur)="onFieldBlur(field, $event)"
-                autocomplete="off"
-                spellcheck="false"
-                [attr.maxlength]="maxCredentialBytes"
-                [attr.aria-describedby]="describedByFor(field.key)"
-                [attr.aria-invalid]="errorFor(field.key) ? 'true' : null"
-                [class.cred-secret-mask]="field.is_secret"
-                class="box-border w-full resize-y rounded border border-sw-border bg-sw-bg-darkest
+                <textarea
+                  [id]="'cred-' + field.key"
+                  rows="3"
+                  [placeholder]="
+                    isConfigured(field.key)
+                      ? '•••••••• stored — type to replace'
+                      : field.placeholder
+                  "
+                  [value]="getValue(field.key)"
+                  (input)="onFieldInput(field.key, $event)"
+                  (blur)="onFieldBlur(field, $event)"
+                  autocomplete="off"
+                  spellcheck="false"
+                  [attr.maxlength]="maxCredentialBytes"
+                  [attr.aria-describedby]="describedByFor(field.key)"
+                  [attr.aria-invalid]="errorFor(field.key) ? 'true' : null"
+                  [class.cred-secret-mask]="field.is_secret"
+                  class="box-border w-full resize-y rounded border border-sw-border bg-sw-bg-darkest
                        px-3 py-2.5 font-mono text-sm text-sw-text
                        focus:border-sw-accent focus:outline-none"
-                [attr.data-testid]="'cred-input-' + field.key"
-              ></textarea>
-            } @else {
-              <input
-                [id]="'cred-' + field.key"
-                [type]="field.field_type === 'password' ? 'password' : 'text'"
-                [placeholder]="
-                  isConfigured(field.key) ? '•••••••• stored — type to replace' : field.placeholder
-                "
-                [value]="getValue(field.key)"
-                (input)="onFieldInput(field.key, $event)"
-                (blur)="onFieldBlur(field, $event)"
-                autocomplete="off"
-                spellcheck="false"
-                [attr.maxlength]="maxCredentialBytes"
-                [attr.pattern]="field.validation?.pattern ?? null"
-                [attr.title]="field.validation?.message ?? null"
-                [attr.aria-describedby]="describedByFor(field.key)"
-                [attr.aria-invalid]="errorFor(field.key) ? 'true' : null"
-                class="box-border w-full rounded border border-sw-border bg-sw-bg-darkest
+                  [attr.data-testid]="'cred-input-' + field.key"
+                ></textarea>
+              } @else {
+                <input
+                  [id]="'cred-' + field.key"
+                  [type]="field.field_type === 'password' ? 'password' : 'text'"
+                  [placeholder]="
+                    isConfigured(field.key)
+                      ? '•••••••• stored — type to replace'
+                      : field.placeholder
+                  "
+                  [value]="getValue(field.key)"
+                  (input)="onFieldInput(field.key, $event)"
+                  (blur)="onFieldBlur(field, $event)"
+                  autocomplete="off"
+                  spellcheck="false"
+                  [attr.maxlength]="maxCredentialBytes"
+                  [attr.pattern]="field.validation?.pattern ?? null"
+                  [attr.title]="field.validation?.message ?? null"
+                  [attr.aria-describedby]="describedByFor(field.key)"
+                  [attr.aria-invalid]="errorFor(field.key) ? 'true' : null"
+                  class="box-border w-full rounded border border-sw-border bg-sw-bg-darkest
                        px-3 py-2.5 font-mono text-sm text-sw-text
                        focus:border-sw-accent focus:outline-none"
-                [attr.data-testid]="'cred-input-' + field.key"
-              />
-            }
-            @if (errorFor(field.key); as err) {
-              <p
-                [id]="'cred-err-' + field.key"
-                class="mt-1.5 text-[11px] leading-relaxed text-red-300"
-                role="alert"
-                [attr.data-testid]="'cred-error-' + field.key"
-              >
-                {{ err }}
-              </p>
-            }
-          </div>
+                  [attr.data-testid]="'cred-input-' + field.key"
+                />
+              }
+              @if (errorFor(field.key); as err) {
+                <p
+                  [id]="'cred-err-' + field.key"
+                  class="mt-1.5 text-[11px] leading-relaxed text-red-300"
+                  role="alert"
+                  [attr.data-testid]="'cred-error-' + field.key"
+                >
+                  {{ err }}
+                </p>
+              }
+            </div>
+          }
         }
-        <div class="mt-6 flex gap-3">
-          <button
-            type="submit"
-            [disabled]="!hasAnyValue() || inFlight()"
-            class="rounded bg-sw-accent px-4 py-2 font-mono text-[12px]
+
+        @if (hasOAuthFields()) {
+          <app-oauth-connect
+            [providerLabel]="providerLabel()"
+            [configured]="oauthConfigured()"
+            [status]="oauthStatus()"
+            [redirectUri]="oauthRedirectUri()"
+            [statusMessage]="oauthStatusMessage()"
+            [prerequisitesMet]="oauthPrerequisitesMet()"
+            [prerequisitesMissingMessage]="oauthPrerequisitesMissingMessage()"
+            (authorize)="authorizeOauth.emit()"
+            (cancelFlow)="cancelOauth.emit()"
+          />
+        }
+
+        @if (hasNonOAuthFields()) {
+          <div class="mt-6 flex gap-3">
+            <button
+              type="submit"
+              [disabled]="!hasAnyValue() || inFlight()"
+              class="rounded bg-sw-accent px-4 py-2 font-mono text-[12px]
                    text-sw-bg-darkest disabled:cursor-not-allowed disabled:opacity-40"
-            data-testid="save-credentials-btn"
-          >
-            {{ inFlight() ? 'Saving…' : 'Save credentials' }}
-          </button>
-          <button
-            type="button"
-            (click)="clear.emit()"
-            class="rounded border border-sw-border bg-transparent px-4 py-2
+              data-testid="save-credentials-btn"
+            >
+              {{ inFlight() ? 'Saving…' : 'Save credentials' }}
+            </button>
+            <button
+              type="button"
+              (click)="clear.emit()"
+              class="rounded border border-sw-border bg-transparent px-4 py-2
                    font-mono text-[12px] text-sw-text-muted hover:border-red-500/40
                    hover:text-red-300"
-            data-testid="reset-credentials-btn"
-          >
-            Reset all
-          </button>
-        </div>
+              data-testid="reset-credentials-btn"
+            >
+              Reset all
+            </button>
+          </div>
+        }
       </form>
     }
   `,
@@ -210,8 +234,51 @@ export class PluginCredentialsFormComponent {
    */
   readonly inFlight = input<boolean>(false);
 
+  // -- OAuth (authorization_code) flow, when the manifest declares oauth --
+  /** Brand shown in the OAuth button (plugin display name). */
+  readonly providerLabel = input<string>('provider');
+  /** Whether an authorized OAuth state already exists (reconnect copy). */
+  readonly oauthConfigured = input<boolean>(false);
+  /** Flow status from `plugin_oauth_progress` events. */
+  readonly oauthStatus = input<string | null>(null);
+  /** Loopback redirect URI to surface while awaiting the browser callback. */
+  readonly oauthRedirectUri = input<string | null>(null);
+  readonly oauthStatusMessage = input<string>('');
+  readonly authorizeOauth = output<void>();
+  readonly cancelOauth = output<void>();
+
   /** Template binding for the per-field byte cap (mirrors Rust SSOT). */
   protected readonly maxCredentialBytes = MAX_PLUGIN_CREDENTIAL_BYTES;
+
+  /** True when any auth field is OAuth-driven (renders the connect UI). */
+  hasOAuthFields(): boolean {
+    return this.authFields().some((f) => f.oauth_flow);
+  }
+
+  /** True when any field needs the typed-credentials Save button. */
+  hasNonOAuthFields(): boolean {
+    return this.authFields().some((f) => !f.oauth_flow);
+  }
+
+  /** Typed prerequisites (non-oauth required fields) for the OAuth button. */
+  private oauthPrerequisiteFields(): PluginAuthField[] {
+    return this.authFields().filter((f) => !f.oauth_flow && f.required);
+  }
+
+  /** Whether every typed prerequisite is either stored or freshly entered. */
+  oauthPrerequisitesMet(): boolean {
+    return this.oauthPrerequisiteFields().every(
+      (f) => this.isConfigured(f.key) || this.getValue(f.key).trim() !== ''
+    );
+  }
+
+  /** Hint listing the typed prerequisites still missing. */
+  oauthPrerequisitesMissingMessage(): string {
+    const missing = this.oauthPrerequisiteFields()
+      .filter((f) => !this.isConfigured(f.key) && this.getValue(f.key).trim() === '')
+      .map((f) => f.label);
+    return missing.length ? `Fill in ${missing.join(', ')} above to authorize.` : '';
+  }
 
   /**
    * Key of the field whose `clear` button was clicked; null when no confirm
