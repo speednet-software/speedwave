@@ -1082,6 +1082,16 @@ fn validate_oauth_spec(
         }
     }
 
+    // A fixed loopback redirect port must be a non-privileged user port; 0 is
+    // reserved to mean "ephemeral" (omit the field for that).
+    if let Some(port) = spec.redirect_port {
+        if port < 1024 {
+            anyhow::bail!(
+                "oauth.redirect_port must be >= 1024 (got {port}); omit it for an ephemeral port"
+            );
+        }
+    }
+
     if spec.scopes.len() > consts::PLUGIN_OAUTH_SCOPES_MAX_COUNT {
         anyhow::bail!(
             "oauth.scopes must not exceed {} entries (got {})",
@@ -5327,6 +5337,27 @@ mod tests {
     #[test]
     fn validate_oauth_spec_accepts_valid() {
         assert!(validate_oauth_spec(Some(&valid_oauth_spec()), &oauth_auth_fields()).is_ok());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_zero_redirect_port() {
+        let mut spec = valid_oauth_spec();
+        spec.redirect_port = Some(0);
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_privileged_redirect_port() {
+        let mut spec = valid_oauth_spec();
+        spec.redirect_port = Some(80);
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_accepts_user_redirect_port() {
+        let mut spec = valid_oauth_spec();
+        spec.redirect_port = Some(5005);
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_ok());
     }
 
     // Edge: no oauth field and no oauth block — nothing to validate.

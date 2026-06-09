@@ -45,13 +45,8 @@ pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), S
     let parent = path
         .parent()
         .ok_or_else(|| "oauth state: no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-    }
+    // Owner-only dir on both platforms (Unix 0o700 + Windows ACL).
+    crate::fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -191,7 +191,6 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
         let auth_fields: Vec<plugin::AuthFieldDef> = manifest.auth_fields.clone();
 
         let svc_token_dir = token_dir_for(&project, sid)?;
-        let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
         let configured = is_plugin_configured(
             &svc_token_dir,
             &manifest.auth_fields,
@@ -487,10 +486,12 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
             std::fs::remove_dir_all(&svc_dir).map_err(|e| e.to_string())?;
         }
         // Off-mount OAuth state/seed never live under tokens/, so the wipe
-        // above cannot reach them. forget logic deletes them directly.
+        // above cannot reach them. Keyed on service_id, matching every other
+        // OAuth off-mount path (validate_manifest enforces slug == service_id,
+        // but the key must stay consistent if that ever relaxes).
         for path in [
-            speedwave_runtime::plugin::oauth_state_file(project_name, &slug),
-            speedwave_runtime::plugin::oauth_seed_file(project_name, &slug),
+            speedwave_runtime::plugin::oauth_state_file(project_name, &service_id),
+            speedwave_runtime::plugin::oauth_seed_file(project_name, &service_id),
         ] {
             if let Err(e) = std::fs::remove_file(&path) {
                 if e.kind() != std::io::ErrorKind::NotFound {
@@ -622,7 +623,9 @@ pub fn save_plugin_credentials(
     }
 
     if !oauth_seed.is_empty() {
-        write_oauth_seed(&project, &slug, &oauth_seed)?;
+        // Key the seed on `sid` (service_id ?? slug), matching the token dir and
+        // every other OAuth off-mount path (state, access token, readiness).
+        write_oauth_seed(&project, sid, &oauth_seed)?;
     }
 
     Ok(())
@@ -638,13 +641,8 @@ fn write_oauth_seed(
 ) -> Result<(), String> {
     let path = plugin::oauth_seed_file(project, slug);
     let parent = path.parent().ok_or_else(|| "seed: no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-    }
+    // Owner-only dir on both platforms (Unix 0o700 + Windows ACL).
+    speedwave_runtime::fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
     let body = serde_json::to_string_pretty(seed).map_err(|e| e.to_string())? + "\n";
     speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())?;
     Ok(())
