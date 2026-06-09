@@ -1904,8 +1904,8 @@ mod tests {
         }
     }
 
-    // CD-4: an oauth_flow plugin is NOT configured until an authorized oauth
-    // state file exists — its secret lives off-mount, not in /tokens.
+    // An oauth_flow plugin is NOT configured until an authorized oauth state
+    // file exists — its secret lives off-mount, not in /tokens.
     #[test]
     fn is_plugin_configured_false_for_oauth_plugin_without_state() {
         let tmp = tempfile::tempdir().unwrap();

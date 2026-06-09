@@ -348,7 +348,7 @@ The Desktop app includes two Tauri commands that make HTTP requests to external 
 
 **SSRF mitigations:**
 
-- Reuses `url_validation::validate_url()` core logic (scheme, host, and IP validation with 50+ tests)
+- Reuses `url_validation::validate_url()` core logic (scheme, host, and IP validation with 50+ tests; the validator is the SSOT in `speedwave-runtime` since ADR-069, re-exported by desktop)
 - **Blocked:** loopback IPs (127.0.0.0/8, ::1), link-local/metadata IPs (169.254.0.0/16 including cloud metadata endpoint 169.254.169.254)
 - **Allowed with warning:** RFC1918 private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and IPv6 Unique Local Addresses (fc00::/7, RFC 4193) — self-hosted Redmine on private networks is the primary use case
 - Redirects blocked via `reqwest::redirect::Policy::none()`

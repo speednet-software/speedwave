@@ -87,7 +87,7 @@ export function assertOAuthState(value: unknown): OAuthState {
       throw new Error(`oauth state: providerData['${k}'] must be a string`);
     }
   }
-  // Absent grantType = legacy SharePoint state → refresh_token (CD-2 migration).
+  // Absent grantType = legacy SharePoint state → refresh_token (back-compat migration).
   const grantType: GrantType =
     obj.grantType === undefined ? 'refresh_token' : (obj.grantType as GrantType);
   if (grantType !== 'refresh_token' && grantType !== 'client_credentials') {

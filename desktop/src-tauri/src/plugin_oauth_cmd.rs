@@ -69,7 +69,7 @@ pub async fn start_plugin_oauth(
         .as_deref()
         .ok_or_else(|| "oauth.authorize_url missing".to_string())?;
 
-    // CD-6: credentials come from the seed saved by save_plugin_credentials,
+    // Credentials come from the seed saved by save_plugin_credentials,
     // not from the command args.
     let seed = read_oauth_seed(&project, &slug)?;
     let client_id = seed
