@@ -628,4 +628,73 @@ mod tests {
             None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
         }
     }
+
+    // -- classify_sharepoint_response: poll-loop mechanics (mirrors github) --
+
+    #[test]
+    fn classify_sp_accepts_success_body() {
+        let body =
+            br#"{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":3600}"#;
+        assert!(classify_sharepoint_response(200, body).is_ok());
+    }
+
+    #[test]
+    fn classify_sp_pending_keeps_polling() {
+        let body = br#"{"error":"authorization_pending"}"#;
+        assert!(matches!(
+            classify_sharepoint_response(400, body),
+            Err(oauth_flow::PollAction::KeepPolling)
+        ));
+    }
+
+    #[test]
+    fn classify_sp_slow_down_backs_off() {
+        let body = br#"{"error":"slow_down"}"#;
+        assert!(matches!(
+            classify_sharepoint_response(400, body),
+            Err(oauth_flow::PollAction::SlowDown)
+        ));
+    }
+
+    #[test]
+    fn classify_sp_expired_token_is_expired() {
+        let body = br#"{"error":"expired_token"}"#;
+        assert!(matches!(
+            classify_sharepoint_response(400, body),
+            Err(oauth_flow::PollAction::Expired(_))
+        ));
+    }
+
+    #[test]
+    fn classify_sp_declined_is_failed() {
+        let body = br#"{"error":"authorization_declined"}"#;
+        assert!(matches!(
+            classify_sharepoint_response(400, body),
+            Err(oauth_flow::PollAction::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn classify_sp_other_error_redacts_description() {
+        // The `other` branch routes error_description through redaction — a
+        // tenant/request detail must not leak verbatim into the failure message.
+        let body =
+            br#"{"error":"invalid_grant","error_description":"AADSTS9000 secret tenant detail"}"#;
+        match classify_sharepoint_response(400, body) {
+            Err(oauth_flow::PollAction::Failed(msg)) => {
+                assert!(!msg.contains("secret tenant detail"), "leaked: {msg}");
+            }
+            _ => panic!("expected Failed"),
+        }
+    }
+
+    #[test]
+    fn classify_sp_garbage_is_failed_with_http_status() {
+        match classify_sharepoint_response(503, b"not json") {
+            Err(oauth_flow::PollAction::Failed(msg)) => {
+                assert!(msg.contains("HTTP 503"), "status must surface: {msg}");
+            }
+            _ => panic!("expected Failed with HTTP status"),
+        }
+    }
 }
