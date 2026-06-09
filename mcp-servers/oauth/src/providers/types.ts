@@ -53,13 +53,13 @@ export interface OAuthProvider {
   readonly id: ProviderId;
   /**
    * Required keys of `providerData`; dispatcher validates pre-call. Used
-   *  when the provider does not supply its own {@link validateRequest}.
+   * when the provider does not supply its own {@link validateRequest}.
    */
   readonly requiredFields: readonly string[];
   /**
    * Per-request validation when requirements depend on grant/auth style
-   *  (generic provider). Returns an error to reject, or `null` to proceed.
-   *  When absent, the dispatcher falls back to {@link requiredFields}.
+   * (generic provider). Returns an error to reject, or `null` to proceed.
+   * When absent, the dispatcher falls back to {@link requiredFields}.
    */
   validateRequest?(req: RefreshRequest): RefreshError | null;
   refresh(req: RefreshRequest): Promise<RefreshResult>;

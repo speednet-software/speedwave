@@ -53,10 +53,12 @@ export interface DeviceCodeInfo {
 }
 
 /**
- * Progress event emitted by an OAuth flow. Device-code (built-in) uses
- * polling/success/error/cancelled/expired; authorization_code (plugin) adds
- * starting/awaiting_redirect/exchanging. `message` carries the redirect URI on
- * `awaiting_redirect`, otherwise a human-readable detail.
+ * Progress event emitted by an OAuth flow. The host emits
+ * awaiting_redirect/exchanging/success/error/cancelled/expired (Rust SSOT:
+ * `ProgressStatus` in `desktop/src-tauri/src/oauth_flow.rs`, test-pinned);
+ * `starting` and `polling` are frontend-local UI states never sent by the
+ * host. `message` carries the redirect URI on `awaiting_redirect`, otherwise
+ * a human-readable detail.
  */
 export interface OAuthProgressEvent {
   status:
@@ -71,6 +73,12 @@ export interface OAuthProgressEvent {
   message: string;
   request_id: string;
 }
+
+/**
+ * OAuth flow status — use this for component state/inputs so status string
+ *  comparisons stay compiler-checked against the union above.
+ */
+export type OAuthFlowStatus = OAuthProgressEvent['status'];
 
 /**
  * Result of validating one OS integration against macOS TCC at startup.

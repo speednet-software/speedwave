@@ -58,6 +58,54 @@ describe('refreshGenericToken', () => {
     }
   });
 
+  it('rejects an unknown providerData.authStyle literal', async () => {
+    const result = await refreshGenericToken(
+      refreshTokenReq({
+        providerData: {
+          tokenUrl: 'https://idp.example.com/token',
+          clientId: 'cid',
+          authStyle: 'header-magic',
+        },
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('malformed');
+      expect(result.error.message).toContain('authStyle');
+    }
+  });
+
+  it('rejects an unknown providerData.grantType literal', async () => {
+    const result = await refreshGenericToken(
+      refreshTokenReq({
+        grantType: undefined,
+        providerData: {
+          tokenUrl: 'https://idp.example.com/token',
+          clientId: 'cid',
+          grantType: 'implicit',
+        },
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('malformed');
+      expect(result.error.message).toContain('grantType');
+    }
+  });
+
+  it('validateRequest rejects an unknown authStyle before any network call', () => {
+    const err = genericProvider.validateRequest?.(
+      refreshTokenReq({
+        providerData: {
+          tokenUrl: 'https://idp.example.com/token',
+          clientId: 'cid',
+          authStyle: 'nope',
+        },
+      })
+    );
+    expect(err?.code).toBe('malformed');
+  });
+
   it('basic auth style: sends Authorization: Basic header', async () => {
     const fetchSpy = vi.fn().mockResolvedValue({
       status: 200,

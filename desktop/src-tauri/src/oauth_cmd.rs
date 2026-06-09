@@ -87,25 +87,34 @@ fn validate_tenant_id(tenant_id: &str) -> Result<(), String> {
     Err(format!("invalid tenant_id: {tenant_id}"))
 }
 
-fn save_oauth_state(
+/// Inputs for the SharePoint off-mount OAuth state write (ADR-060 split).
+struct SpOAuthState<'a> {
+    client_id: &'a str,
+    tenant_id: &'a str,
+    refresh_token: &'a str,
+    scopes: &'a str,
+    expires_in: u64,
+}
+
+/// `data_dir`-parameterised so tests pass a tempdir, bypassing the
+/// `consts::data_dir()` OnceLock (cf. `plugin::oauth_state_file_in`).
+/// Production reaches this via `save_tokens`.
+fn save_oauth_state_in(
+    data_dir: &std::path::Path,
     project: &str,
     service: &str,
-    client_id: &str,
-    tenant_id: &str,
-    refresh_token: &str,
-    scopes: &str,
-    expires_in: u64,
+    st: &SpOAuthState<'_>,
 ) -> Result<(), String> {
     let max = crate::types::MAX_CREDENTIAL_BYTES;
-    if refresh_token.len() > max {
+    if st.refresh_token.len() > max {
         return Err(format!("refresh_token exceeds {max} bytes"));
     }
-    let scopes_vec: Vec<String> = scopes.split_whitespace().map(String::from).collect();
+    let scopes_vec: Vec<String> = st.scopes.split_whitespace().map(String::from).collect();
     let mut provider_data = std::collections::BTreeMap::new();
-    provider_data.insert("clientId".to_string(), client_id.to_string());
-    provider_data.insert("tenantId".to_string(), tenant_id.to_string());
+    provider_data.insert("clientId".to_string(), st.client_id.to_string());
+    provider_data.insert("tenantId".to_string(), st.tenant_id.to_string());
 
-    let path = speedwave_runtime::plugin::oauth_state_file(project, service);
+    let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, service);
     speedwave_runtime::oauth_persist::write_oauth_state(
         &path,
         &speedwave_runtime::oauth_persist::OAuthStateParams {
@@ -114,8 +123,8 @@ fn save_oauth_state(
             provider_data,
             scopes: scopes_vec.clone(),
             granted_scopes: scopes_vec,
-            refresh_token,
-            expires_in,
+            refresh_token: st.refresh_token,
+            expires_in: st.expires_in,
         },
     )
 }
@@ -180,17 +189,36 @@ fn save_tokens(
     tenant_id: &str,
     tokens: &MsTokenResponse,
 ) -> Result<(), String> {
-    let svc_dir =
-        speedwave_runtime::plugin::token_dir(project, "sharepoint").map_err(|e| e.to_string())?;
-    save_credential_file(&svc_dir, "access_token", &tokens.access_token)?;
-    save_oauth_state(
+    save_tokens_in(
+        speedwave_runtime::consts::data_dir(),
         project,
-        "sharepoint",
         client_id,
         tenant_id,
-        &tokens.refresh_token,
-        speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
-        tokens.expires_in(),
+        tokens,
+    )
+}
+
+/// `data_dir`-parameterised variant (see `save_oauth_state_in`).
+fn save_tokens_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    client_id: &str,
+    tenant_id: &str,
+    tokens: &MsTokenResponse,
+) -> Result<(), String> {
+    let svc_dir = speedwave_runtime::plugin::token_dir_in(data_dir, project, "sharepoint");
+    save_credential_file(&svc_dir, "access_token", &tokens.access_token)?;
+    save_oauth_state_in(
+        data_dir,
+        project,
+        "sharepoint",
+        &SpOAuthState {
+            client_id,
+            tenant_id,
+            refresh_token: &tokens.refresh_token,
+            scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+            expires_in: tokens.expires_in(),
+        },
     )?;
     Ok(())
 }
@@ -213,7 +241,7 @@ pub async fn start_sharepoint_oauth(
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let cancel_token = CancellationToken::new();
-    let my_generation = FLOW_STATE.install(request_id.clone(), cancel_token.clone())?;
+    let my_generation = FLOW_STATE.install(request_id.clone(), cancel_token.clone());
 
     let scopes = speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES;
     let devicecode_url = format!(
@@ -260,7 +288,7 @@ pub async fn start_sharepoint_oauth(
         format!("Failed to parse device code response: {e}")
     })?;
 
-    if FLOW_STATE.current_generation()? != my_generation {
+    if FLOW_STATE.current_generation() != my_generation {
         FLOW_STATE.clear_if_current(&request_id);
         return Err("OAuth flow was cancelled".to_string());
     }
@@ -315,7 +343,6 @@ pub fn cancel_sharepoint_oauth() {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use serial_test::serial;
 
     // -- Tenant ID validation --
 
@@ -503,24 +530,27 @@ mod tests {
     // -- save_oauth_state (ADR-060 split) --
 
     #[test]
-    #[serial]
     fn save_oauth_state_writes_json_with_required_fields() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
-        save_oauth_state(
+        save_oauth_state_in(
+            tmp.path(),
             "test-project",
             "sharepoint",
-            "11111111-1111-1111-1111-111111111111",
-            "common",
-            "rt-secret",
-            speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
-            3600,
+            &SpOAuthState {
+                client_id: "11111111-1111-1111-1111-111111111111",
+                tenant_id: "common",
+                refresh_token: "rt-secret",
+                scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+                expires_in: 3600,
+            },
         )
         .unwrap();
 
-        let path = speedwave_runtime::plugin::oauth_state_file("test-project", "sharepoint");
+        let path = speedwave_runtime::plugin::oauth_state_file_in(
+            tmp.path(),
+            "test-project",
+            "sharepoint",
+        );
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(json["provider"], "microsoft");
@@ -549,52 +579,38 @@ mod tests {
                 & 0o777;
             assert_eq!(parent_mode, 0o700, "oauth/<project> dir must be 0o700");
         }
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn save_oauth_state_rejects_oversized_refresh_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
         let big = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
-        let result = save_oauth_state(
+        let result = save_oauth_state_in(
+            tmp.path(),
             "test-project",
             "sharepoint",
-            "11111111-1111-1111-1111-111111111111",
-            "common",
-            &big,
-            speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
-            3600,
+            &SpOAuthState {
+                client_id: "11111111-1111-1111-1111-111111111111",
+                tenant_id: "common",
+                refresh_token: &big,
+                scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+                expires_in: 3600,
+            },
         );
         assert!(result.unwrap_err().contains("refresh_token"));
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn save_tokens_splits_into_two_locations() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
         let tokens = MsTokenResponse {
             access_token: "at-secret".to_string(),
             refresh_token: "rt-secret".to_string(),
             _token_type: "Bearer".to_string(),
             expires_in: 3600,
         };
-        save_tokens(
+        save_tokens_in(
+            tmp.path(),
             "test-project",
             "11111111-1111-1111-1111-111111111111",
             "common",
@@ -602,18 +618,21 @@ mod tests {
         )
         .unwrap();
 
-        let at_path = speedwave_runtime::plugin::token_dir("test-project", "sharepoint")
-            .unwrap()
-            .join("access_token");
-        assert_eq!(std::fs::read_to_string(&at_path).unwrap(), "at-secret");
+        let svc_dir =
+            speedwave_runtime::plugin::token_dir_in(tmp.path(), "test-project", "sharepoint");
+        assert_eq!(
+            std::fs::read_to_string(svc_dir.join("access_token")).unwrap(),
+            "at-secret"
+        );
         assert!(
-            !speedwave_runtime::plugin::token_dir("test-project", "sharepoint")
-                .unwrap()
-                .join("refresh_token")
-                .exists(),
+            !svc_dir.join("refresh_token").exists(),
             "refresh_token must NOT be in the worker-mounted dir"
         );
-        let state_path = speedwave_runtime::plugin::oauth_state_file("test-project", "sharepoint");
+        let state_path = speedwave_runtime::plugin::oauth_state_file_in(
+            tmp.path(),
+            "test-project",
+            "sharepoint",
+        );
         let content = std::fs::read_to_string(&state_path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(json["refreshToken"], "rt-secret");
@@ -622,11 +641,6 @@ mod tests {
             "11111111-1111-1111-1111-111111111111"
         );
         assert_eq!(json["providerData"]["tenantId"], "common");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     // -- classify_sharepoint_response: poll-loop mechanics (mirrors github) --

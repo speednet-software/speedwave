@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
-import { DeviceCodeInfo, IntegrationStatusEntry } from '../../models/integration';
+import { DeviceCodeInfo, IntegrationStatusEntry, OAuthFlowStatus } from '../../models/integration';
 import { OauthConnectComponent } from '../../shared/oauth-connect/oauth-connect.component';
 
 /** Semantic states the header status dot can reflect. */
@@ -181,7 +181,7 @@ export interface SaveCredentialsEvent {
 export class ServiceCardComponent {
   readonly svc = input.required<IntegrationStatusEntry>();
   readonly expanded = input(false);
-  readonly oauthStatus = input<string | null>(null);
+  readonly oauthStatus = input<OAuthFlowStatus | null>(null);
   readonly deviceCodeInfo = input<DeviceCodeInfo | null>(null);
   readonly oauthStatusMessage = input('');
 

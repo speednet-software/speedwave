@@ -2,7 +2,7 @@
 // minted refresh token + client credentials stay host-side under oauth/; only
 // a short-lived access token reaches the plugin container. See ADR-069.
 
-use crate::oauth_flow::{self, FlowRegistry};
+use crate::oauth_flow::{self, FlowRegistry, ProgressStatus};
 use crate::types::check_project;
 use serde::Deserialize;
 use speedwave_runtime::plugin::{OAuthAuthStyle, OAuthGrantType, PluginOAuthSpec};
@@ -84,7 +84,7 @@ pub async fn start_plugin_oauth(
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let cancel = CancellationToken::new();
-    let my_generation = FLOW_STATE.install(request_id.clone(), cancel.clone())?;
+    let my_generation = FLOW_STATE.install(request_id.clone(), cancel.clone());
 
     let pkce = speedwave_runtime::pkce::generate_pkce();
     let state = speedwave_runtime::pkce::generate_state();
@@ -130,7 +130,7 @@ pub async fn start_plugin_oauth(
         oauth_flow::emit_progress(
             &app,
             &FLOW_STATE,
-            "awaiting_redirect",
+            ProgressStatus::AwaitingRedirect,
             &redirect_uri,
             &request_id,
         );
@@ -141,7 +141,7 @@ pub async fn start_plugin_oauth(
         let code = match wait_for_callback(&listener, &state, &cancel, &request_id).await {
             Ok(c) => c,
             Err(e) => {
-                emit_terminal(&app, &request_id, "error", &e);
+                emit_terminal(&app, &request_id, ProgressStatus::Error, &e);
                 return;
             }
         };
@@ -149,7 +149,13 @@ pub async fn start_plugin_oauth(
             return;
         }
 
-        oauth_flow::emit_progress(&app, &FLOW_STATE, "exchanging", "", &request_id);
+        oauth_flow::emit_progress(
+            &app,
+            &FLOW_STATE,
+            ProgressStatus::Exchanging,
+            "",
+            &request_id,
+        );
         let token = match exchange_code(
             &oauth,
             &token_url,
@@ -163,7 +169,7 @@ pub async fn start_plugin_oauth(
         {
             Ok(t) => t,
             Err(e) => {
-                emit_terminal(&app, &request_id, "error", &e);
+                emit_terminal(&app, &request_id, ProgressStatus::Error, &e);
                 return;
             }
         };
@@ -185,7 +191,7 @@ pub async fn start_plugin_oauth(
         .and_then(|()| write_access_token(&project, &slug, &token.access_token))
         .and_then(|()| project_base_url_to_mount(&project, &slug, &oauth, &seed))
         {
-            emit_terminal(&app, &request_id, "error", &e);
+            emit_terminal(&app, &request_id, ProgressStatus::Error, &e);
             return;
         }
         // A freshly-authorized OAuth plugin is now ready, so auto-enable it (the
@@ -194,7 +200,7 @@ pub async fn start_plugin_oauth(
             log::warn!("oauth[{slug}]: authorized but auto-enable failed: {e}");
         }
         FLOW_STATE.clear_if_current(&request_id);
-        oauth_flow::emit_progress(&app, &FLOW_STATE, "success", "", &request_id);
+        oauth_flow::emit_progress(&app, &FLOW_STATE, ProgressStatus::Success, "", &request_id);
     });
 
     Ok(resp)
@@ -202,8 +208,7 @@ pub async fn start_plugin_oauth(
 
 /// True when this flow was superseded by a newer one; clears its slot and logs.
 fn superseded(my_generation: u64, request_id: &str) -> bool {
-    let current = FLOW_STATE.current_generation().unwrap_or(my_generation);
-    if current != my_generation {
+    if FLOW_STATE.current_generation() != my_generation {
         FLOW_STATE.clear_if_current(request_id);
         true
     } else {
@@ -212,7 +217,7 @@ fn superseded(my_generation: u64, request_id: &str) -> bool {
 }
 
 /// Emit a terminal progress event and clear the flow slot.
-fn emit_terminal(app: &tauri::AppHandle, request_id: &str, status: &str, message: &str) {
+fn emit_terminal(app: &tauri::AppHandle, request_id: &str, status: ProgressStatus, message: &str) {
     oauth_flow::emit_progress(app, &FLOW_STATE, status, message, request_id);
     FLOW_STATE.clear_if_current(request_id);
 }
@@ -231,14 +236,11 @@ pub fn forget_plugin_oauth(project: String, slug: String) -> Result<(), String> 
     // Cancel any in-flight flow first, else it would re-create the files we
     // delete here when the user completes sign-in after disconnecting.
     FLOW_STATE.cancel();
-    let state = speedwave_runtime::plugin::oauth_state_file(&project, &slug);
-    let seed = speedwave_runtime::plugin::oauth_seed_file(&project, &slug);
+    crate::plugin_cmd::remove_oauth_offmount(&project, &slug)?;
     let access = access_token_path(&project, &slug)?;
-    for path in [state, seed, access] {
-        if let Err(e) = std::fs::remove_file(&path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!("failed to remove {}: {e}", path.display()));
-            }
+    if let Err(e) = std::fs::remove_file(&access) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("failed to remove {}: {e}", access.display()));
         }
     }
     Ok(())
@@ -512,21 +514,7 @@ fn persist_state(
         .map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
 
-    // The RESOLVED token_url — the worker's refresh re-reads this absolute URL.
-    let mut provider_data = std::collections::BTreeMap::new();
-    provider_data.insert("tokenUrl".to_string(), token_url.to_string());
-    provider_data.insert("clientId".to_string(), client_id.to_string());
-    if let Some(secret) = client_secret {
-        provider_data.insert("clientSecret".to_string(), secret.to_string());
-    }
-    provider_data.insert(
-        "authStyle".to_string(),
-        match oauth.auth_style {
-            OAuthAuthStyle::Basic => "basic",
-            OAuthAuthStyle::Body => "body",
-        }
-        .to_string(),
-    );
+    let provider_data = build_provider_data(oauth, token_url, client_id, client_secret);
 
     let path = speedwave_runtime::plugin::oauth_state_file(project, slug);
     speedwave_runtime::oauth_persist::write_oauth_state(
@@ -543,6 +531,32 @@ fn persist_state(
     )
 }
 
+/// providerData map the worker's generic refresh reads — these keys are its
+/// contract (`GenericProviderData` in `mcp-servers/oauth/src/providers/generic.ts`).
+/// `token_url` is the RESOLVED absolute URL the refresh re-reads.
+fn build_provider_data(
+    oauth: &PluginOAuthSpec,
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut provider_data = std::collections::BTreeMap::new();
+    provider_data.insert("tokenUrl".to_string(), token_url.to_string());
+    provider_data.insert("clientId".to_string(), client_id.to_string());
+    if let Some(secret) = client_secret {
+        provider_data.insert("clientSecret".to_string(), secret.to_string());
+    }
+    provider_data.insert(
+        "authStyle".to_string(),
+        match oauth.auth_style {
+            OAuthAuthStyle::Basic => "basic",
+            OAuthAuthStyle::Body => "body",
+        }
+        .to_string(),
+    );
+    provider_data
+}
+
 /// Writes the short-lived access token to the plugin's tokens dir (mounted ro).
 fn write_access_token(project: &str, slug: &str, access_token: &str) -> Result<(), String> {
     let path = access_token_path(project, slug)?;
@@ -554,10 +568,8 @@ fn write_access_token(project: &str, slug: &str, access_token: &str) -> Result<(
 
 /// `~/.speedwave/tokens/<project>/<slug>/access_token`.
 fn access_token_path(project: &str, slug: &str) -> Result<std::path::PathBuf, String> {
-    Ok(speedwave_runtime::consts::data_dir()
-        .join("tokens")
-        .join(project)
-        .join(slug)
+    Ok(speedwave_runtime::plugin::token_dir(project, slug)
+        .map_err(|e| e.to_string())?
         .join("access_token"))
 }
 
@@ -595,7 +607,9 @@ mod tests {
         let enable_pos = body
             .find("set_plugin_enabled_in_config(&project, &slug, true)")
             .expect("success path must auto-enable the plugin");
-        let success_pos = body.find(r#""success""#).expect("success event must exist");
+        let success_pos = body
+            .find("ProgressStatus::Success")
+            .expect("success event must exist");
         assert!(
             enable_pos < success_pos,
             "auto-enable must run before the success event"
@@ -749,5 +763,257 @@ mod tests {
     #[test]
     fn spec_round_trips_grant() {
         assert_eq!(spec().grant_type, OAuthGrantType::AuthorizationCode);
+    }
+
+    // An endless request line must not grow the accumulator unboundedly — the
+    // reader stops at MAX_REQUEST_LINE_BYTES and parses what it has.
+    #[tokio::test]
+    async fn read_callback_request_caps_oversized_request_line() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let writer = tokio::spawn(async move {
+            let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            // 2x the cap, no CRLF anywhere — forces the size-cap break.
+            let _ = client.write_all(b"GET /not-callback").await;
+            let _ = client
+                .write_all(&vec![b'a'; MAX_REQUEST_LINE_BYTES * 2])
+                .await;
+            let _ = client.flush().await;
+        });
+        let (mut server, _) = listener.accept().await.unwrap();
+        assert_eq!(read_callback_request(&mut server).await.unwrap(), None);
+        drop(server);
+        let _ = writer.await;
+    }
+
+    /// One-shot stub token endpoint: replies `status` + JSON `body`, returns
+    /// the raw request (headers + body) for assertions.
+    async fn stub_token_endpoint(
+        status: u16,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            let mut header_end = None;
+            let mut content_len = 0usize;
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        let headers = String::from_utf8_lossy(&req[..pos]).to_string();
+                        content_len = headers
+                            .lines()
+                            .find_map(|l| {
+                                let lower = l.to_ascii_lowercase();
+                                lower
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                    }
+                }
+                if let Some(he) = header_end {
+                    if req.len() >= he + content_len {
+                        break;
+                    }
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+            let _ = stream.shutdown().await;
+            String::from_utf8_lossy(&req).into_owned()
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn exchange_code_basic_style_uses_authorization_header() {
+        let (url, handle) = stub_token_endpoint(
+            200,
+            r#"{"access_token":"at","refresh_token":"rt","expires_in":900}"#,
+        )
+        .await;
+        let token = exchange_code(
+            &spec(),
+            &url,
+            "code1",
+            "http://127.0.0.1:1/callback",
+            "cid",
+            Some("sec"),
+            "ver",
+        )
+        .await
+        .unwrap();
+        assert_eq!(token.access_token, "at");
+        assert_eq!(token.refresh_token.as_deref(), Some("rt"));
+        assert_eq!(token.expires_in, 900);
+
+        let req = handle.await.unwrap();
+        // base64("cid:sec") — credentials travel in the header, not the form.
+        assert!(
+            req.contains("Y2lkOnNlYw=="),
+            "missing Basic credential: {req}"
+        );
+        let form = req.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(form.contains("grant_type=authorization_code"));
+        assert!(form.contains("code=code1"));
+        assert!(form.contains("code_verifier=ver"));
+        assert!(
+            !form.contains("client_id="),
+            "Basic style must not put client_id in the form"
+        );
+        assert!(!form.contains("client_secret="));
+    }
+
+    #[tokio::test]
+    async fn exchange_code_body_style_puts_credentials_in_form() {
+        let mut s = spec();
+        s.auth_style = OAuthAuthStyle::Body;
+        let (url, handle) =
+            stub_token_endpoint(200, r#"{"access_token":"at","expires_in":60}"#).await;
+        let token = exchange_code(
+            &s,
+            &url,
+            "code1",
+            "http://127.0.0.1:1/callback",
+            "cid",
+            Some("sec"),
+            "ver",
+        )
+        .await
+        .unwrap();
+        // RFC 6749 §5.1: expires_in present, refresh_token absent is valid.
+        assert_eq!(token.refresh_token, None);
+
+        let req = handle.await.unwrap();
+        assert!(!req.to_ascii_lowercase().contains("authorization:"));
+        let form = req.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(form.contains("client_id=cid"));
+        assert!(form.contains("client_secret=sec"));
+    }
+
+    #[tokio::test]
+    async fn exchange_code_surfaces_rfc6749_error_code() {
+        let (url, handle) = stub_token_endpoint(400, r#"{"error":"invalid_grant"}"#).await;
+        let err = exchange_code(
+            &spec(),
+            &url,
+            "c",
+            "http://127.0.0.1:1/callback",
+            "cid",
+            None,
+            "v",
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+        assert!(
+            err.contains("token exchange failed: invalid_grant"),
+            "got: {err}"
+        );
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn exchange_code_maps_unparseable_error_body_to_http_error() {
+        let (url, handle) = stub_token_endpoint(500, "not json at all").await;
+        let err = exchange_code(
+            &spec(),
+            &url,
+            "c",
+            "http://127.0.0.1:1/callback",
+            "cid",
+            None,
+            "v",
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+        assert!(
+            err.contains("token exchange failed: http_error"),
+            "got: {err}"
+        );
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_malformed_success_body() {
+        let (url, handle) = stub_token_endpoint(200, "{not valid json").await;
+        let err = exchange_code(
+            &spec(),
+            &url,
+            "c",
+            "http://127.0.0.1:1/callback",
+            "cid",
+            None,
+            "v",
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+        assert!(err.contains("malformed token response"), "got: {err}");
+        let _ = handle.await;
+    }
+
+    // An IdP returning an access token without refresh_token must fail loudly
+    // — silently authorizing without durable state strands the user in 1h.
+    #[test]
+    fn persist_state_rejects_missing_refresh_token() {
+        let token = TokenResponse {
+            access_token: "at".to_string(),
+            refresh_token: None,
+            expires_in: 3600,
+            scope: None,
+        };
+        let err = persist_state(
+            "proj",
+            "plug",
+            &spec(),
+            "https://idp.example.com/token",
+            "cid",
+            None,
+            &token,
+        )
+        .unwrap_err();
+        assert!(err.contains("no refresh_token"), "got: {err}");
+    }
+
+    // The worker's generic refresh reads these exact keys (GenericProviderData
+    // in generic.ts) — a renamed key breaks refresh after the first hour.
+    #[test]
+    fn build_provider_data_carries_worker_contract_keys() {
+        let data =
+            build_provider_data(&spec(), "https://idp.example.com/token", "cid", Some("sec"));
+        let keys: Vec<&str> = data.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["authStyle", "clientId", "clientSecret", "tokenUrl"]);
+        assert_eq!(data["authStyle"], "basic");
+        assert_eq!(data["tokenUrl"], "https://idp.example.com/token");
+        assert_eq!(data["clientId"], "cid");
+        assert_eq!(data["clientSecret"], "sec");
+    }
+
+    #[test]
+    fn build_provider_data_body_style_omits_absent_secret() {
+        let mut s = spec();
+        s.auth_style = OAuthAuthStyle::Body;
+        let data = build_provider_data(&s, "https://idp.example.com/token", "cid", None);
+        assert_eq!(data["authStyle"], "body");
+        assert!(!data.contains_key("clientSecret"));
     }
 }

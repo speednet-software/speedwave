@@ -708,6 +708,28 @@ describe('PluginDetailComponent', () => {
       expect(component.oauthRedirectUri).toBe('http://127.0.0.1:5005/callback');
     });
 
+    it('replays an awaiting_redirect event that arrived before start_plugin_oauth resolved', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_plugin_oauth') {
+          // The host's spawned task can emit before the IPC return resolves —
+          // such an event must be buffered and replayed, not dropped.
+          mockTauri.dispatchEvent('plugin_oauth_progress', {
+            status: 'awaiting_redirect',
+            message: 'http://127.0.0.1:6001/callback',
+            request_id: 'rid-early',
+          });
+          await Promise.resolve();
+          return { request_id: 'rid-early', expires_in: 60 };
+        }
+        return defaultInvokeHandler(cmd);
+      };
+      await component.handleStartPluginOAuth();
+      expect(component.oauthStatus).toBe('awaiting_redirect');
+      expect(component.oauthRedirectUri).toBe('http://127.0.0.1:6001/callback');
+    });
+
     it('progress success reloads the plugin and requests a restart', async () => {
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);

@@ -6,6 +6,7 @@ import {
   PluginSaveCredentialsEvent,
 } from '../../models/plugin';
 import { OauthConnectComponent } from '../../shared/oauth-connect/oauth-connect.component';
+import { OAuthFlowStatus } from '../../models/integration';
 
 /**
  * Renders a form for a plugin's `auth_fields[]`. Emits the filled subset
@@ -232,7 +233,7 @@ export class PluginCredentialsFormComponent {
   /** Whether an authorized OAuth state already exists (reconnect copy). */
   readonly oauthConfigured = input<boolean>(false);
   /** Flow status from `plugin_oauth_progress` events. */
-  readonly oauthStatus = input<string | null>(null);
+  readonly oauthStatus = input<OAuthFlowStatus | null>(null);
   /** Loopback redirect URI to surface while awaiting the browser callback. */
   readonly oauthRedirectUri = input<string | null>(null);
   readonly oauthStatusMessage = input<string>('');

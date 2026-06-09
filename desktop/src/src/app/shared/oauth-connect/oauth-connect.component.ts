@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
+import { OAuthFlowStatus } from '../../models/integration';
 
 /** Device-code flow info (SharePoint, GitHub). Absent for authorization_code. */
 export interface OAuthDeviceCode {
@@ -129,8 +130,8 @@ export class OauthConnectComponent {
   readonly providerLabel = input.required<string>();
   /** Whether the service already has a stored authorization (reconnect copy). */
   readonly configured = input(false);
-  /** Flow status: starting | awaiting_redirect | polling | success | error | expired. */
-  readonly status = input<string | null>(null);
+  /** Flow status (`OAuthFlowStatus` union); null = no flow yet. */
+  readonly status = input<OAuthFlowStatus | null>(null);
   /** Device-code info (device flow only). */
   readonly deviceCode = input<OAuthDeviceCode | null>(null);
   /** Loopback redirect URI (authorization_code flow only). */

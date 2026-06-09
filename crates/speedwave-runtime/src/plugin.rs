@@ -572,10 +572,13 @@ fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &st
 
 /// Returns `~/.speedwave/tokens/<project>/<service_id>/`
 pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
-    Ok(consts::data_dir()
-        .join("tokens")
-        .join(project)
-        .join(service_id))
+    Ok(token_dir_in(consts::data_dir(), project, service_id))
+}
+
+/// `data_dir`-parameterised variant (cf. `oauth_state_file_in`) so test code
+/// can bypass the `consts::data_dir()` OnceLock.
+pub fn token_dir_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
+    data_dir.join("tokens").join(project).join(service_id)
 }
 
 /// Host-only OAuth state `~/.speedwave/oauth/<project>/<service_id>.json`
@@ -1095,30 +1098,7 @@ fn validate_oauth_spec(
         validate_oauth_url("oauth.token_url", token_url)?;
     }
 
-    match spec.grant_type {
-        OAuthGrantType::AuthorizationCode if !derived => {
-            let url = spec.authorize_url.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("oauth.authorize_url is required for grant_type authorization_code")
-            })?;
-            validate_oauth_url("oauth.authorize_url", url)?;
-        }
-        OAuthGrantType::DeviceCode => {
-            let url = spec.device_authorization_url.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "oauth.device_authorization_url is required for grant_type device_code"
-                )
-            })?;
-            validate_oauth_url("oauth.device_authorization_url", url)?;
-        }
-        OAuthGrantType::ClientCredentials => {
-            if spec.client_secret_field.is_none() {
-                anyhow::bail!(
-                    "oauth.client_secret_field is required for grant_type client_credentials"
-                );
-            }
-        }
-        OAuthGrantType::AuthorizationCode => {} // derived: suffix checked above
-    }
+    validate_grant_endpoints(spec, derived)?;
 
     // A fixed loopback redirect port must be a non-privileged user port; 0 is
     // reserved to mean "ephemeral" (omit the field for that).
@@ -1168,6 +1148,38 @@ fn validate_oauth_spec(
         }
     }
 
+    Ok(())
+}
+
+/// Grant-specific endpoint requirements (`derived` = endpoints come from
+/// `base_url_field` + suffixes). Kept separate from the
+/// `SUPPORTED_OAUTH_GRANT_TYPES` gate so the not-yet-enabled grants stay
+/// directly unit-tested until their enabling PR widens the gate.
+fn validate_grant_endpoints(spec: &PluginOAuthSpec, derived: bool) -> anyhow::Result<()> {
+    match spec.grant_type {
+        OAuthGrantType::AuthorizationCode if !derived => {
+            let url = spec.authorize_url.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("oauth.authorize_url is required for grant_type authorization_code")
+            })?;
+            validate_oauth_url("oauth.authorize_url", url)?;
+        }
+        OAuthGrantType::DeviceCode => {
+            let url = spec.device_authorization_url.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "oauth.device_authorization_url is required for grant_type device_code"
+                )
+            })?;
+            validate_oauth_url("oauth.device_authorization_url", url)?;
+        }
+        OAuthGrantType::ClientCredentials => {
+            if spec.client_secret_field.is_none() {
+                anyhow::bail!(
+                    "oauth.client_secret_field is required for grant_type client_credentials"
+                );
+            }
+        }
+        OAuthGrantType::AuthorizationCode => {} // derived: suffix checked by caller
+    }
     Ok(())
 }
 
@@ -5597,6 +5609,83 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("must use https"), "got: {err}");
+    }
+
+    // The device_code / client_credentials branches below sit behind the
+    // SUPPORTED_OAUTH_GRANT_TYPES gate at install time; testing
+    // validate_grant_endpoints directly keeps them honest until the PRs that
+    // widen the gate land (ADR-069 staged rollout).
+
+    #[test]
+    fn grant_endpoints_device_code_requires_device_authorization_url() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::DeviceCode;
+        spec.device_authorization_url = None;
+        let err = validate_grant_endpoints(&spec, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("device_authorization_url is required"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn grant_endpoints_device_code_accepts_valid_url() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::DeviceCode;
+        spec.device_authorization_url = Some("https://accounts.example.com/devicecode".to_string());
+        assert!(validate_grant_endpoints(&spec, false).is_ok());
+    }
+
+    #[test]
+    fn grant_endpoints_device_code_rejects_private_url() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::DeviceCode;
+        spec.device_authorization_url = Some("https://192.168.1.1/devicecode".to_string());
+        let err = validate_grant_endpoints(&spec, false)
+            .unwrap_err()
+            .to_string();
+        // Rejected by the shared SSRF validator ("private/reserved IP").
+        assert!(err.contains("private"), "got: {err}");
+    }
+
+    #[test]
+    fn grant_endpoints_client_credentials_requires_secret_field() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::ClientCredentials;
+        spec.client_secret_field = None;
+        let err = validate_grant_endpoints(&spec, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("client_secret_field is required"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn grant_endpoints_client_credentials_accepts_with_secret() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::ClientCredentials;
+        assert!(validate_grant_endpoints(&spec, false).is_ok());
+    }
+
+    #[test]
+    fn grant_endpoints_authorization_code_requires_authorize_url_when_static() {
+        let mut spec = valid_oauth_spec();
+        spec.authorize_url = None;
+        let err = validate_grant_endpoints(&spec, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("authorize_url is required"), "got: {err}");
+    }
+
+    #[test]
+    fn grant_endpoints_authorization_code_derived_skips_authorize_url() {
+        let mut spec = valid_oauth_spec();
+        spec.authorize_url = None;
+        assert!(validate_grant_endpoints(&spec, true).is_ok());
     }
 
     // Error path: loopback/private endpoint blocked by the shared validator.

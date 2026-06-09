@@ -6,7 +6,8 @@
  * this provider re-validates the URL and hardens the HTTP call on every refresh.
  */
 
-import { TIMEOUTS } from '@speedwave/mcp-shared';
+import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
+import { readJsonCapped } from './http-body.js';
 import type {
   GrantType,
   OAuthProvider,
@@ -15,9 +16,6 @@ import type {
   RefreshResult,
 } from './types.js';
 
-/** Max token-response body we read before treating it as malformed. */
-const MAX_BODY_BYTES = 256 * 1024;
-
 /** providerData keys the generic provider reads. */
 interface GenericProviderData {
   tokenUrl: string;
@@ -25,6 +23,29 @@ interface GenericProviderData {
   clientSecret?: string;
   authStyle?: 'basic' | 'body';
   grantType?: GrantType;
+}
+
+/**
+ * Narrows untyped `providerData` to the generic shape. An unknown
+ * `authStyle`/`grantType` literal (tampered or future-version state file) is
+ * rejected rather than silently falling through to a default branch.
+ * @param raw - the stored providerData map
+ */
+function parseGenericProviderData(
+  raw: Record<string, string>
+): { ok: true; data: GenericProviderData } | { ok: false; message: string } {
+  const { tokenUrl = '', clientId = '', clientSecret, authStyle, grantType } = raw;
+  if (authStyle !== undefined && authStyle !== 'basic' && authStyle !== 'body') {
+    return { ok: false, message: "providerData.authStyle must be 'basic' or 'body'" };
+  }
+  if (
+    grantType !== undefined &&
+    grantType !== 'refresh_token' &&
+    grantType !== 'client_credentials'
+  ) {
+    return { ok: false, message: 'providerData.grantType is not a known grant' };
+  }
+  return { ok: true, data: { tokenUrl, clientId, clientSecret, authStyle, grantType } };
 }
 
 /** RFC 6749 §5.2 token-error codes — the only `error` values surfaced verbatim. */
@@ -40,10 +61,16 @@ const RFC6749_ERROR_CODES = new Set([
 /**
  * Keeps the `error` code only if it is a known RFC 6749 §5.2 value; a
  * data-driven IdP could otherwise stuff secrets into a free-form `error`.
+ * The raw value stays diagnosable via a capped worker-stderr breadcrumb —
+ * a bare `http: redacted` is unsupportable on its own.
  * @param errorCode - the IdP `error` field (or empty)
  */
 export function redactGenericError(errorCode: string): string {
-  return RFC6749_ERROR_CODES.has(errorCode) ? errorCode : 'redacted';
+  if (RFC6749_ERROR_CODES.has(errorCode)) return errorCode;
+  console.error(
+    `${ts()} oauth generic: non-RFC6749 token error redacted (first 64 chars): ${JSON.stringify(errorCode.slice(0, 64))}`
+  );
+  return 'redacted';
 }
 
 /**
@@ -83,73 +110,15 @@ function validateTokenUrl(raw: string): URL | null {
 }
 
 /**
- * Reads at most `MAX_BODY_BYTES` of the response (streaming, never buffering a
- * larger body), then parses JSON. A hostile token endpoint cannot OOM the
- * worker — the read aborts once the cap is crossed.
- * @param response - the token endpoint response
- */
-async function readJsonCapped(
-  response: Response
-): Promise<{ ok: true; json: Record<string, unknown> } | { ok: false; message: string }> {
-  const ctype = response.headers.get('content-type') ?? '';
-  if (!/json/i.test(ctype)) {
-    return { ok: false, message: `unexpected content-type '${ctype}'` };
-  }
-  // Reject early when the endpoint declares an oversized body.
-  const declared = Number(response.headers.get('content-length') ?? '');
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-    return { ok: false, message: `response exceeds ${MAX_BODY_BYTES} bytes` };
-  }
-
-  const text = await readTextCapped(response, MAX_BODY_BYTES);
-  if (text === null) {
-    return { ok: false, message: `response exceeds ${MAX_BODY_BYTES} bytes` };
-  }
-  try {
-    return { ok: true, json: JSON.parse(text) as Record<string, unknown> };
-  } catch (err) {
-    return {
-      ok: false,
-      message: `not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-}
-
-/**
- * Streams the response body, returning its text or `null` once `maxBytes` is
- * crossed (aborting the read). Context7 has an undici-specific counterpart; the
- * body types differ (WHATWG stream vs undici), so they stay separate.
- * @param response - the response whose body to read
- * @param maxBytes - upper bound on total bytes
- */
-async function readTextCapped(response: Response, maxBytes: number): Promise<string | null> {
-  const reader = response.body?.getReader();
-  if (!reader) {
-    // No stream (e.g. a test stub) — fall back to a buffered read with the cap.
-    const buf = await response.arrayBuffer();
-    return buf.byteLength > maxBytes ? null : Buffer.from(buf).toString('utf8');
-  }
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
-}
-
-/**
  * Refresh/re-mint an access token against a data-driven token endpoint.
  * @param req - the refresh request (providerData carries the endpoint + client)
  */
 export async function refreshGenericToken(req: RefreshRequest): Promise<RefreshResult> {
-  const data = req.providerData as unknown as GenericProviderData;
+  const parsed = parseGenericProviderData(req.providerData);
+  if (!parsed.ok) {
+    return { ok: false, error: { code: 'malformed', message: parsed.message } };
+  }
+  const data = parsed.data;
   const grantType: GrantType = req.grantType ?? data.grantType ?? 'refresh_token';
   const authStyle = data.authStyle ?? 'basic';
 
@@ -213,11 +182,11 @@ export async function refreshGenericToken(req: RefreshRequest): Promise<RefreshR
     };
   }
 
-  const parsed = await readJsonCapped(response);
-  if (!parsed.ok) {
-    return { ok: false, error: { code: 'malformed', message: parsed.message } };
+  const body = await readJsonCapped(response);
+  if (!body.ok) {
+    return { ok: false, error: { code: 'malformed', message: body.message } };
   }
-  const json = parsed.json;
+  const json = body.json;
 
   if (!response.ok) {
     const errCode = typeof json.error === 'string' ? json.error : 'http';
@@ -255,7 +224,9 @@ export const genericProvider: OAuthProvider = {
   id: 'generic',
   requiredFields: ['tokenUrl', 'clientId'],
   validateRequest(req: RefreshRequest): RefreshError | null {
-    const data = req.providerData as unknown as GenericProviderData;
+    const parsed = parseGenericProviderData(req.providerData);
+    if (!parsed.ok) return { code: 'malformed', message: parsed.message };
+    const data = parsed.data;
     const grantType: GrantType = req.grantType ?? data.grantType ?? 'refresh_token';
     if (!data.tokenUrl)
       return { code: 'missing_field', message: 'providerData.tokenUrl is required' };

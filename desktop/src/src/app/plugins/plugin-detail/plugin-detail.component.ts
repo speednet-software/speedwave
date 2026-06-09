@@ -16,7 +16,11 @@ import {
   PluginsResponse,
   PluginSaveCredentialsEvent,
 } from '../../models/plugin';
-import { IntegrationsResponse, OAuthProgressEvent } from '../../models/integration';
+import {
+  IntegrationsResponse,
+  OAuthFlowStatus,
+  OAuthProgressEvent,
+} from '../../models/integration';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
 import { PluginCredentialsFormComponent } from '../plugin-credentials-form/plugin-credentials-form.component';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
@@ -483,12 +487,17 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
 
   // -- OAuth (authorization_code) flow state --
   /** Current flow status; null when idle. Passed to the credentials form. */
-  oauthStatus: string | null = null;
+  oauthStatus: OAuthFlowStatus | null = null;
   oauthStatusMessage = '';
   /** Loopback redirect URI surfaced while awaiting the browser callback. */
   oauthRedirectUri: string | null = null;
   /** Correlates progress events to the in-flight flow. */
   private activeOAuthRequestId: string | null = null;
+  /**
+   * Latest event per request that arrived before `start_plugin_oauth`
+   *  returned its request_id (the emit can outrun the IPC return).
+   */
+  private pendingOAuthEvents = new Map<string, OAuthProgressEvent>();
   private unlistenOAuth: (() => void) | null = null;
 
   /** Handle for the M9 auto-fade timeout on `success` — cancelled on new mutations. */
@@ -773,6 +782,11 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
         slug,
       });
       this.activeOAuthRequestId = result.request_id;
+      // The host may have emitted (e.g. awaiting_redirect with the redirect
+      // URI) before the invoke resolved — replay the buffered event now.
+      const buffered = this.pendingOAuthEvents.get(result.request_id);
+      this.pendingOAuthEvents.clear();
+      if (buffered) await this.applyOAuthProgress(buffered, slug);
     } catch (e: unknown) {
       this.oauthStatus = 'error';
       this.oauthStatusMessage = e instanceof Error ? e.message : String(e);
@@ -791,6 +805,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     this.oauthStatus = null;
     this.oauthRedirectUri = null;
     this.activeOAuthRequestId = null;
+    this.pendingOAuthEvents.clear();
     this.cdr.markForCheck();
   }
 
@@ -803,27 +818,46 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     return this.tauri
       .listen<OAuthProgressEvent>('plugin_oauth_progress', async (event) => {
         const payload = (event as { payload: OAuthProgressEvent }).payload;
-        if (payload.request_id !== this.activeOAuthRequestId) return;
-        this.oauthStatus = payload.status;
-        // The host sends the redirect URI as the message on awaiting_redirect.
-        if (payload.status === 'awaiting_redirect') {
-          this.oauthRedirectUri = payload.message;
-        } else {
-          this.oauthStatusMessage = payload.message;
+        if (payload.request_id !== this.activeOAuthRequestId) {
+          // start_plugin_oauth may still be awaiting its IPC return — buffer
+          // the newest event per request so awaiting_redirect is not lost.
+          this.pendingOAuthEvents.set(payload.request_id, payload);
+          return;
         }
-        if (payload.status === 'success') {
-          this.activeOAuthRequestId = null;
-          this.oauthRedirectUri = null;
-          await this.loadPlugin(slug);
-          this.projectState.requestRestart();
-        }
-        if (['error', 'expired', 'cancelled'].includes(payload.status)) {
-          this.activeOAuthRequestId = null;
-          this.oauthRedirectUri = null;
-        }
-        this.cdr.markForCheck();
+        await this.applyOAuthProgress(payload, slug);
       })
-      .catch(() => () => {});
+      .catch((e: unknown) => {
+        // Without the listener the flow would look hung — leave a breadcrumb.
+        console.warn('plugin_oauth_progress listener registration failed', e);
+        return () => {};
+      });
+  }
+
+  /**
+   * Applies one progress event for the active flow — shared by the live
+   * listener and the pre-correlation buffer replay.
+   * @param payload - the progress event
+   * @param slug - the plugin slug whose flow is tracked
+   */
+  private async applyOAuthProgress(payload: OAuthProgressEvent, slug: string): Promise<void> {
+    this.oauthStatus = payload.status;
+    // The host sends the redirect URI as the message on awaiting_redirect.
+    if (payload.status === 'awaiting_redirect') {
+      this.oauthRedirectUri = payload.message;
+    } else {
+      this.oauthStatusMessage = payload.message;
+    }
+    if (payload.status === 'success') {
+      this.activeOAuthRequestId = null;
+      this.oauthRedirectUri = null;
+      await this.loadPlugin(slug);
+      this.projectState.requestRestart();
+    }
+    if (['error', 'expired', 'cancelled'].includes(payload.status)) {
+      this.activeOAuthRequestId = null;
+      this.oauthRedirectUri = null;
+    }
+    this.cdr.markForCheck();
   }
 
   /**

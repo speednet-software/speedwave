@@ -285,7 +285,17 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
 /// plugin is not authorized. OAuth credentials live off-mount, so the state
 /// file — not `/tokens` — is the readiness signal.
 fn plugin_oauth_expires_at(project: &str, slug: &str) -> Option<String> {
-    let path = speedwave_runtime::plugin::oauth_state_file(project, slug);
+    plugin_oauth_expires_at_in(speedwave_runtime::consts::data_dir(), project, slug)
+}
+
+/// `data_dir`-parameterised variant — tests pass a tempdir to bypass the
+/// `consts::data_dir()` OnceLock (cf. `plugin::oauth_state_file_in`).
+fn plugin_oauth_expires_at_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    slug: &str,
+) -> Option<String> {
+    let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, slug);
     let body = std::fs::read_to_string(&path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&body).ok()?;
     json.get("expiresAt")
@@ -294,15 +304,24 @@ fn plugin_oauth_expires_at(project: &str, slug: &str) -> Option<String> {
 }
 
 /// True when the plugin has an authorized OAuth state on disk.
-fn plugin_oauth_authorized(project: &str, slug: &str) -> bool {
-    plugin_oauth_expires_at(project, slug).is_some()
+fn plugin_oauth_authorized_in(data_dir: &std::path::Path, project: &str, slug: &str) -> bool {
+    plugin_oauth_expires_at_in(data_dir, project, slug).is_some()
 }
 
 /// Keys present in the off-mount pre-auth seed (the saved client credentials).
 /// These mark an `oauth_flow` field as "configured" so Authorize can unlock
 /// before any authorization has happened.
 fn oauth_seed_keys(project: &str, slug: &str) -> std::collections::HashSet<String> {
-    let path = speedwave_runtime::plugin::oauth_seed_file(project, slug);
+    oauth_seed_keys_in(speedwave_runtime::consts::data_dir(), project, slug)
+}
+
+/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
+fn oauth_seed_keys_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    slug: &str,
+) -> std::collections::HashSet<String> {
+    let path = speedwave_runtime::plugin::oauth_seed_file_in(data_dir, project, slug);
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|b| serde_json::from_str::<HashMap<String, String>>(&b).ok())
@@ -317,10 +336,29 @@ fn is_plugin_configured(
     project: &str,
     slug: &str,
 ) -> bool {
+    is_plugin_configured_in(
+        speedwave_runtime::consts::data_dir(),
+        svc_token_dir,
+        auth_fields,
+        requires_integrations,
+        project,
+        slug,
+    )
+}
+
+/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
+fn is_plugin_configured_in(
+    data_dir: &std::path::Path,
+    svc_token_dir: &std::path::Path,
+    auth_fields: &[plugin::AuthFieldDef],
+    requires_integrations: &[String],
+    project: &str,
+    slug: &str,
+) -> bool {
     // OAuth fields are stored off-mount; readiness for them = an authorized
     // state file, not a token in `/tokens`.
     let has_oauth = auth_fields.iter().any(|f| f.oauth_flow);
-    if has_oauth && !plugin_oauth_authorized(project, slug) {
+    if has_oauth && !plugin_oauth_authorized_in(data_dir, project, slug) {
         return false;
     }
 
@@ -513,10 +551,19 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
 
 /// Deletes the off-mount OAuth state + seed for a service (refresh token +
 /// client secret). Keyed on service_id, matching every other OAuth path.
-fn remove_oauth_offmount(project: &str, service_id: &str) -> Result<(), String> {
+pub(crate) fn remove_oauth_offmount(project: &str, service_id: &str) -> Result<(), String> {
+    remove_oauth_offmount_in(speedwave_runtime::consts::data_dir(), project, service_id)
+}
+
+/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
+fn remove_oauth_offmount_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service_id: &str,
+) -> Result<(), String> {
     for path in [
-        speedwave_runtime::plugin::oauth_state_file(project, service_id),
-        speedwave_runtime::plugin::oauth_seed_file(project, service_id),
+        speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, service_id),
+        speedwave_runtime::plugin::oauth_seed_file_in(data_dir, project, service_id),
     ] {
         if let Err(e) = std::fs::remove_file(&path) {
             if e.kind() != std::io::ErrorKind::NotFound {
@@ -670,7 +717,17 @@ fn write_oauth_seed(
     slug: &str,
     seed: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let path = plugin::oauth_seed_file(project, slug);
+    write_oauth_seed_in(speedwave_runtime::consts::data_dir(), project, slug, seed)
+}
+
+/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
+fn write_oauth_seed_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    slug: &str,
+    seed: &HashMap<String, String>,
+) -> Result<(), String> {
+    let path = plugin::oauth_seed_file_in(data_dir, project, slug);
     let parent = path.parent().ok_or_else(|| "seed: no parent".to_string())?;
     // Owner-only dir on both platforms (Unix 0o700 + Windows ACL).
     speedwave_runtime::fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
@@ -939,33 +996,24 @@ fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Resul
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use serial_test::serial;
 
     // remove_oauth_offmount must delete the off-mount state + seed (refresh
-    // token + client secret), and tolerate their absence.
+    // token + client secret), and tolerate their absence. Uses the `_in`
+    // variant so the tempdir bypasses the data_dir() OnceLock.
     #[test]
-    #[serial]
     fn remove_oauth_offmount_deletes_state_and_seed() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
-        let state = speedwave_runtime::plugin::oauth_state_file("proj", "svc");
-        let seed = speedwave_runtime::plugin::oauth_seed_file("proj", "svc");
+        let state = speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "proj", "svc");
+        let seed = speedwave_runtime::plugin::oauth_seed_file_in(tmp.path(), "proj", "svc");
         std::fs::create_dir_all(state.parent().unwrap()).unwrap();
         std::fs::write(&state, "{}").unwrap();
         std::fs::write(&seed, "{}").unwrap();
 
-        remove_oauth_offmount("proj", "svc").unwrap();
+        remove_oauth_offmount_in(tmp.path(), "proj", "svc").unwrap();
         assert!(!state.exists(), "state file must be deleted");
         assert!(!seed.exists(), "seed file must be deleted");
         // Idempotent: a second call on absent files is Ok (NotFound tolerated).
-        remove_oauth_offmount("proj", "svc").unwrap();
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
+        remove_oauth_offmount_in(tmp.path(), "proj", "svc").unwrap();
     }
 
     #[test]
@@ -1849,29 +1897,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     fn write_oauth_seed_writes_owner_only_json() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
         let mut seed = HashMap::new();
         seed.insert("client_id".to_string(), "abc".to_string());
         seed.insert("client_secret".to_string(), "shhh".to_string());
-        write_oauth_seed("proj", "my-plugin", &seed).unwrap();
+        write_oauth_seed_in(tmp.path(), "proj", "my-plugin", &seed).unwrap();
 
-        let path = plugin::oauth_seed_file("proj", "my-plugin");
+        let path = plugin::oauth_seed_file_in(tmp.path(), "proj", "my-plugin");
         let body = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["client_secret"], "shhh");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "seed file must be chmod 600");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
@@ -1933,17 +1972,19 @@ mod tests {
         }
     }
 
+    // The tests below use the `_in` variants with a tempdir directly — env-var
+    // juggling cannot work here because data_dir() pins via OnceLock at first
+    // call, which both flaked these tests and leaked fixtures into the real
+    // ~/.speedwave.
+
     // An oauth_flow plugin is NOT configured until an authorized oauth state
     // file exists — its secret lives off-mount, not in /tokens.
     #[test]
-    #[serial]
     fn is_plugin_configured_false_for_oauth_plugin_without_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
         let fields = vec![oauth_field("client_id")];
-        let configured = is_plugin_configured(
+        let configured = is_plugin_configured_in(
+            tmp.path(),
             std::path::Path::new("/nonexistent"),
             &fields,
             &[],
@@ -1951,16 +1992,11 @@ mod tests {
             "my-plugin",
         );
         assert!(!configured, "no oauth state -> not configured");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     /// Writes a full authorized OAuth state file with the given `expiresAt`.
-    fn write_oauth_state(project: &str, slug: &str, expires_at: &str) {
-        let path = speedwave_runtime::plugin::oauth_state_file(project, slug);
+    fn write_oauth_state(data_dir: &std::path::Path, project: &str, slug: &str, expires_at: &str) {
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, slug);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -1970,16 +2006,13 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn is_plugin_configured_true_for_oauth_plugin_with_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
-        write_oauth_state("proj", "my-plugin", "2026-01-01T00:00:00.000Z");
+        write_oauth_state(tmp.path(), "proj", "my-plugin", "2026-01-01T00:00:00.000Z");
 
         let fields = vec![oauth_field("client_id")];
-        let configured = is_plugin_configured(
+        let configured = is_plugin_configured_in(
+            tmp.path(),
             std::path::Path::new("/nonexistent"),
             &fields,
             &[],
@@ -1987,86 +2020,54 @@ mod tests {
             "my-plugin",
         );
         assert!(configured, "authorized oauth state -> configured");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn plugin_oauth_expires_at_reads_state_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
         assert_eq!(
-            plugin_oauth_expires_at("proj", "p"),
+            plugin_oauth_expires_at_in(tmp.path(), "proj", "p"),
             None,
             "no state -> None"
         );
 
-        write_oauth_state("proj", "p", "2026-06-09T12:00:00.000Z");
+        write_oauth_state(tmp.path(), "proj", "p", "2026-06-09T12:00:00.000Z");
         assert_eq!(
-            plugin_oauth_expires_at("proj", "p").as_deref(),
+            plugin_oauth_expires_at_in(tmp.path(), "proj", "p").as_deref(),
             Some("2026-06-09T12:00:00.000Z")
         );
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     // A seed file alone (credentials saved, not yet authorized) must NOT count
     // as authorized — only the full state file (<slug>.json) does.
     #[test]
-    #[serial]
     fn plugin_oauth_authorized_false_with_seed_but_no_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
-        let seed = speedwave_runtime::plugin::oauth_seed_file("proj", "p");
+        let seed = speedwave_runtime::plugin::oauth_seed_file_in(tmp.path(), "proj", "p");
         std::fs::create_dir_all(seed.parent().unwrap()).unwrap();
         std::fs::write(&seed, "{\"client_id\":\"abc\"}").unwrap();
 
         assert!(
-            !plugin_oauth_authorized("proj", "p"),
+            !plugin_oauth_authorized_in(tmp.path(), "proj", "p"),
             "seed present + state absent must be unauthorized"
         );
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     // A saved seed marks its fields configured (so Authorize unlocks) BEFORE any
     // authorization has happened — otherwise the button would deadlock.
     #[test]
-    #[serial]
     fn oauth_seed_keys_returns_saved_credential_keys() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
         assert!(
-            oauth_seed_keys("proj", "p").is_empty(),
+            oauth_seed_keys_in(tmp.path(), "proj", "p").is_empty(),
             "no seed -> no keys"
         );
 
-        let seed = speedwave_runtime::plugin::oauth_seed_file("proj", "p");
+        let seed = speedwave_runtime::plugin::oauth_seed_file_in(tmp.path(), "proj", "p");
         std::fs::create_dir_all(seed.parent().unwrap()).unwrap();
         std::fs::write(&seed, "{\"client_id\":\"a\",\"client_secret\":\"b\"}").unwrap();
-        let keys = oauth_seed_keys("proj", "p");
+        let keys = oauth_seed_keys_in(tmp.path(), "proj", "p");
         assert!(keys.contains("client_id") && keys.contains("client_secret"));
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     fn blocks_auto_enable(auth_fields: &[plugin::AuthFieldDef]) -> bool {
