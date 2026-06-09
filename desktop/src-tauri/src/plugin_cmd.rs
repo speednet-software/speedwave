@@ -670,7 +670,7 @@ fn require_verified(slug: &str) -> Result<(), String> {
 /// so callers that need to inspect declared fields (e.g. the
 /// `settings_schema` for `plugin_save_settings`) don't have to look
 /// it up a second time.
-fn require_verified_with_manifest(slug: &str) -> Result<plugin::PluginManifest, String> {
+pub(crate) fn require_verified_with_manifest(slug: &str) -> Result<plugin::PluginManifest, String> {
     let entries = plugin::list_for_ui();
     let entry = entries
         .into_iter()

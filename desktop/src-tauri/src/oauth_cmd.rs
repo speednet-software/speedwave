@@ -100,41 +100,24 @@ fn save_oauth_state(
     if refresh_token.len() > max {
         return Err(format!("refresh_token exceeds {max} bytes"));
     }
+    let scopes_vec: Vec<String> = scopes.split_whitespace().map(String::from).collect();
+    let mut provider_data = std::collections::BTreeMap::new();
+    provider_data.insert("clientId".to_string(), client_id.to_string());
+    provider_data.insert("tenantId".to_string(), tenant_id.to_string());
+
     let path = speedwave_runtime::plugin::oauth_state_file(project, service);
-    let parent = path.parent().ok_or_else(|| "no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-    }
-
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let expires_at_iso = iso8601_from_unix_ms(now_ms + expires_in.saturating_mul(1000));
-    let last_refresh_iso = iso8601_from_unix_ms(now_ms);
-
-    let scopes_vec: Vec<&str> = scopes.split_whitespace().collect();
-
-    let state = serde_json::json!({
-        "provider": crate::oauth_providers::MICROSOFT_PROVIDER_ID,
-        "providerData": {
-            "clientId": client_id,
-            "tenantId": tenant_id,
+    speedwave_runtime::oauth_persist::write_oauth_state(
+        &path,
+        &speedwave_runtime::oauth_persist::OAuthStateParams {
+            provider: crate::oauth_providers::MICROSOFT_PROVIDER_ID,
+            grant_type: None,
+            provider_data,
+            scopes: scopes_vec.clone(),
+            granted_scopes: scopes_vec,
+            refresh_token,
+            expires_in,
         },
-        "scopes": scopes_vec,
-        "grantedScopes": scopes_vec,
-        "refreshToken": refresh_token,
-        "expiresAt": expires_at_iso,
-        "lastRefreshAt": last_refresh_iso,
-    });
-    let body = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())? + "\n";
-    speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())?;
-    Ok(())
+    )
 }
 
 /// Keeps the AADSTS trace code; drops free text (ADR-060 live-compromise).
@@ -154,14 +137,6 @@ fn redact_ms_error_description(raw: &str) -> String {
         }
     }
     "redacted".to_string()
-}
-
-fn iso8601_from_unix_ms(unix_ms: u64) -> String {
-    let secs = (unix_ms / 1000) as i64;
-    let ms = (unix_ms % 1000) as u32;
-    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, ms * 1_000_000)
-        .unwrap_or_else(chrono::Utc::now);
-    dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
 fn save_tokens(
