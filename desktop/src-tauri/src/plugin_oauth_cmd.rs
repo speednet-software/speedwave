@@ -33,11 +33,11 @@ struct TokenErrorResponse {
     error: String,
 }
 
-/// Result returned to the UI on success.
+/// Returned immediately when the flow starts; the outcome arrives via
+/// `plugin_oauth_progress` events keyed on `request_id`.
 #[derive(serde::Serialize, Clone)]
 pub(crate) struct PluginOAuthResult {
     pub request_id: String,
-    pub expires_in: u64,
 }
 
 #[tauri::command]
@@ -111,52 +111,94 @@ pub async fn start_plugin_oauth(
     )
     .inspect_err(|_| FLOW_STATE.clear_if_current(&request_id))?;
 
-    oauth_flow::emit_progress(
-        &app,
-        &FLOW_STATE,
-        "awaiting_redirect",
-        &redirect_uri,
-        &request_id,
-    );
-    if let Err(e) = open::that(&auth_redirect) {
-        log::warn!("could not open browser automatically: {e}");
-    }
+    // Own everything the spawned task needs; the command returns request_id
+    // immediately so the UI can correlate progress events (the flow may block
+    // on the browser callback for up to 300s — it must not block the command).
+    let oauth = oauth.clone();
+    let resp = PluginOAuthResult {
+        request_id: request_id.clone(),
+    };
+    tokio::spawn(async move {
+        oauth_flow::emit_progress(
+            &app,
+            &FLOW_STATE,
+            "awaiting_redirect",
+            &redirect_uri,
+            &request_id,
+        );
+        if let Err(e) = open::that(&auth_redirect) {
+            log::warn!("could not open browser automatically: {e}");
+        }
 
-    // Await the callback (or cancel / timeout).
-    let code = wait_for_callback(&listener, &state, &cancel, &request_id).await?;
-    if FLOW_STATE.current_generation()? != my_generation {
+        let code = match wait_for_callback(&listener, &state, &cancel, &request_id).await {
+            Ok(c) => c,
+            Err(e) => {
+                emit_terminal(&app, &request_id, "error", &e);
+                return;
+            }
+        };
+        if superseded(my_generation, &request_id) {
+            return;
+        }
+
+        oauth_flow::emit_progress(&app, &FLOW_STATE, "exchanging", "", &request_id);
+        let token = match exchange_code(
+            &oauth,
+            &code,
+            &redirect_uri,
+            &client_id,
+            client_secret.as_deref(),
+            &pkce.verifier,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                emit_terminal(&app, &request_id, "error", &e);
+                return;
+            }
+        };
+        // Re-check after the exchange — reqwest ignores the CancellationToken,
+        // so a superseding flow could have started during the round-trip.
+        if superseded(my_generation, &request_id) {
+            return;
+        }
+
+        if let Err(e) = persist_state(
+            &project,
+            &slug,
+            &oauth,
+            &client_id,
+            client_secret.as_deref(),
+            &token,
+        )
+        .and_then(|()| write_access_token(&project, &slug, &token.access_token))
+        {
+            emit_terminal(&app, &request_id, "error", &e);
+            return;
+        }
         FLOW_STATE.clear_if_current(&request_id);
-        return Err("OAuth flow was superseded".to_string());
+        oauth_flow::emit_progress(&app, &FLOW_STATE, "success", "", &request_id);
+    });
+
+    Ok(resp)
+}
+
+/// True when this flow was superseded by a newer one; clears its slot and logs.
+fn superseded(my_generation: u64, request_id: &str) -> bool {
+    let current = FLOW_STATE.current_generation().unwrap_or(my_generation);
+    if current != my_generation {
+        FLOW_STATE.clear_if_current(request_id);
+        true
+    } else {
+        false
     }
+}
 
-    oauth_flow::emit_progress(&app, &FLOW_STATE, "exchanging", "", &request_id);
-    let token = exchange_code(
-        oauth,
-        &code,
-        &redirect_uri,
-        &client_id,
-        client_secret.as_deref(),
-        &pkce.verifier,
-    )
-    .await
-    .inspect_err(|_| FLOW_STATE.clear_if_current(&request_id))?;
-
-    persist_state(
-        &project,
-        &slug,
-        oauth,
-        &client_id,
-        client_secret.as_deref(),
-        &token,
-    )?;
-    write_access_token(&project, &slug, &token.access_token)?;
-
-    FLOW_STATE.clear_if_current(&request_id);
-    oauth_flow::emit_progress(&app, &FLOW_STATE, "success", "", &request_id);
-    Ok(PluginOAuthResult {
-        request_id,
-        expires_in: token.expires_in,
-    })
+/// Emit a terminal progress event and clear the flow slot.
+fn emit_terminal(app: &tauri::AppHandle, request_id: &str, status: &str, message: &str) {
+    oauth_flow::emit_progress(app, &FLOW_STATE, status, message, request_id);
+    FLOW_STATE.clear_if_current(request_id);
 }
 
 #[tauri::command]
@@ -170,6 +212,9 @@ pub fn cancel_plugin_oauth() {
 #[tauri::command]
 pub fn forget_plugin_oauth(project: String, slug: String) -> Result<(), String> {
     check_project(&project)?;
+    // Cancel any in-flight flow first, else it would re-create the files we
+    // delete here when the user completes sign-in after disconnecting.
+    FLOW_STATE.cancel();
     let state = speedwave_runtime::plugin::oauth_state_file(&project, &slug);
     let seed = speedwave_runtime::plugin::oauth_seed_file(&project, &slug);
     let access = access_token_path(&project, &slug)?;

@@ -768,10 +768,10 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     this.oauthRedirectUri = null;
     this.cdr.markForCheck();
     try {
-      const result = await this.tauri.invoke<{ request_id: string; expires_in: number }>(
-        'start_plugin_oauth',
-        { project: this.activeProject, slug }
-      );
+      const result = await this.tauri.invoke<{ request_id: string }>('start_plugin_oauth', {
+        project: this.activeProject,
+        slug,
+      });
       this.activeOAuthRequestId = result.request_id;
     } catch (e: unknown) {
       this.oauthStatus = 'error';
