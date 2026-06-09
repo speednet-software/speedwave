@@ -5380,6 +5380,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_oauth_spec_rejects_empty_token_url() {
+        let mut spec = valid_oauth_spec();
+        spec.token_url = String::new();
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_malformed_token_url() {
+        let mut spec = valid_oauth_spec();
+        spec.token_url = "not-a-url".to_string();
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_metadata_ip_token_url() {
+        // Cloud metadata endpoint must be blocked through the OAuth path.
+        let mut spec = valid_oauth_spec();
+        spec.token_url = "https://169.254.169.254/token".to_string();
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
     // Edge: oversized endpoint URL is rejected by the length cap.
     #[test]
     fn validate_oauth_spec_rejects_oversized_url() {

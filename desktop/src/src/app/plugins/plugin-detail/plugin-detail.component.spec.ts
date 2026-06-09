@@ -660,7 +660,10 @@ describe('PluginDetailComponent', () => {
       await component.handleStartPluginOAuth();
       expect(invokeSpy).toHaveBeenCalledWith(
         'start_plugin_oauth',
-        expect.objectContaining({ slug: component.plugin!.service_id ?? component.plugin!.slug })
+        expect.objectContaining({
+          project: 'test-project',
+          slug: component.plugin!.service_id ?? component.plugin!.slug,
+        })
       );
       expect(component.oauthStatus).toBe('starting');
     });

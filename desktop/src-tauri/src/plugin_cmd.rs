@@ -908,6 +908,7 @@ fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Resul
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn plugin_status_entry_serializes() {
@@ -1790,6 +1791,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn write_oauth_seed_writes_owner_only_json() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
@@ -1933,6 +1935,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn plugin_oauth_expires_at_reads_state_file() {
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
@@ -1948,6 +1951,30 @@ mod tests {
         assert_eq!(
             plugin_oauth_expires_at("proj", "p").as_deref(),
             Some("2026-06-09T12:00:00.000Z")
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    // A seed file alone (credentials saved, not yet authorized) must NOT count
+    // as authorized — only the full state file (<slug>.json) does.
+    #[test]
+    #[serial]
+    fn plugin_oauth_authorized_false_with_seed_but_no_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let seed = speedwave_runtime::plugin::oauth_seed_file("proj", "p");
+        std::fs::create_dir_all(seed.parent().unwrap()).unwrap();
+        std::fs::write(&seed, "{\"client_id\":\"abc\"}").unwrap();
+
+        assert!(
+            !plugin_oauth_authorized("proj", "p"),
+            "seed present + state absent must be unauthorized"
         );
 
         match prev {

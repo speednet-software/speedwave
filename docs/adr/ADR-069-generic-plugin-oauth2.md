@@ -5,13 +5,13 @@
 
 ## Decision
 
-Extend ADR-060 with a **data-driven** OAuth2 path for plugins. A plugin declares an `oauth` block in `plugin.json` (grant type, endpoints, scopes, auth style, which `auth_fields` carry the client id/secret). The worker gains a single `generic` provider driven by that declaration instead of a per-IdP module. Secrets (`client_secret`, `refresh_token`) stay **off-mount** under `~/.speedwave/oauth/<project>/<slug>.json`; only a short-lived bearer access token reaches the plugin container, exactly as for SharePoint. Three grants are supported, gated at install by a single supported-grants list.
+Extend ADR-060 with a **data-driven** OAuth2 path for plugins. A plugin declares an `oauth` block in `plugin.json` (grant type, endpoints, scopes, auth style, which `auth_fields` carry the client id/secret). The worker gains a single `generic` provider driven by that declaration instead of a per-IdP module. Secrets (`client_secret`, `refresh_token`) stay **off-mount** under `~/.speedwave/oauth/<project>/<slug>.json`; only a short-lived bearer access token reaches the plugin container, exactly as for SharePoint. The design covers three grants; `authorization_code` ships first and the install-time `SUPPORTED_OAUTH_GRANT_TYPES` gate widens per-PR as each grant lands.
 
 ## Identity model — per-human is the norm
 
 OAuth grants differ in **who acts**, which is the whole point for GLPI:
 
-- **`authorization_code`** (and `device_code`) are **user-delegated**: the human signs in through their own browser session and the IdP issues a token carrying their identity, so actions performed by the agent on their behalf are attributed to them. This is the same model SharePoint already uses (device-code: a specific human consents via Microsoft).[^1]
+- **`authorization_code`** (and `device_code`) are **user-delegated**: the human signs in through their own browser session and the IdP issues a token carrying their identity, so actions performed by the agent on their behalf are attributed to them. This is the same model SharePoint already uses (device-code: a specific human consents via Microsoft).[^1][^7]
 - **`client_credentials`** is a **machine identity**: actions land on the OAuth client's technical account regardless of which human is present.[^2] It does **not** satisfy GLPI's per-human requirement and is in scope only for genuinely machine-to-machine services.
 
 GLPI's API supports all three grants, and the actor in its historical records derives from the session bound to the access token,[^3] so `authorization_code` is the primary grant. Speedwave ships as a single installable app per developer machine, so the existing per-project state granularity (`oauth/<project>/<slug>.json`) is already per-human — no per-user dimension is added. The service log shows the human "via OAuth client speedwave-<slug>" (standard OAuth delegation); no additional host-side agent-action trail is recorded.
@@ -62,3 +62,5 @@ Manifest-declared URLs are dialed by the host, so every endpoint goes through th
 [^5]: OAuth 2.0 for Native Apps — loopback interface redirection and arbitrary-port allowance: <https://datatracker.ietf.org/doc/html/rfc8252#section-7.3>
 
 [^6]: OWASP SSRF prevention — validate and restrict outbound request targets: <https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html>
+
+[^7]: SharePoint's device-code flow is user-delegated — a specific human authenticates at Microsoft and the issued token represents that user (ADR-060 §"Decision"): <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>
