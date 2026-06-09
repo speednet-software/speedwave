@@ -140,7 +140,16 @@ pub async fn start_plugin_oauth(
 
         let code = match wait_for_callback(&listener, &state, &cancel, &request_id).await {
             Ok(c) => c,
-            Err(e) => {
+            Err(CallbackFailure::Cancelled) => {
+                emit_terminal(
+                    &app,
+                    &request_id,
+                    ProgressStatus::Cancelled,
+                    "OAuth flow cancelled",
+                );
+                return;
+            }
+            Err(CallbackFailure::Error(e)) => {
                 emit_terminal(&app, &request_id, ProgressStatus::Error, &e);
                 return;
             }
@@ -235,6 +244,9 @@ pub fn forget_plugin_oauth(project: String, slug: String) -> Result<(), String> 
     check_project(&project)?;
     // Cancel any in-flight flow first, else it would re-create the files we
     // delete here when the user completes sign-in after disconnecting.
+    // Intentionally global: the singleton FLOW_STATE holds at most one flow
+    // across all plugins, so disconnecting plugin B also cancels plugin A's
+    // in-flight flow (terminates with the quiet `cancelled` status).
     FLOW_STATE.cancel();
     crate::plugin_cmd::remove_oauth_offmount(&project, &slug)?;
     let access = access_token_path(&project, &slug)?;
@@ -282,6 +294,15 @@ fn build_authorize_url(
     Ok(url.to_string())
 }
 
+/// Why the callback wait ended without an authorization code. Cancellation is
+/// distinct so the UI gets the quiet `cancelled` terminal, not a red `error`
+/// (mirrors the device-code flow's direct `ProgressStatus::Cancelled`).
+#[derive(Debug)]
+enum CallbackFailure {
+    Cancelled,
+    Error(String),
+}
+
 /// Accepts one loopback connection, parses the callback, verifies `state`,
 /// returns the `code`. Honors cancellation and a fixed timeout.
 async fn wait_for_callback(
@@ -289,7 +310,7 @@ async fn wait_for_callback(
     expected_state: &str,
     cancel: &CancellationToken,
     request_id: &str,
-) -> Result<String, String> {
+) -> Result<String, CallbackFailure> {
     let accept = async {
         loop {
             let (mut stream, _) = listener
@@ -323,13 +344,13 @@ async fn wait_for_callback(
     tokio::select! {
         _ = cancel.cancelled() => {
             FLOW_STATE.clear_if_current(request_id);
-            Err("OAuth flow was cancelled".to_string())
+            Err(CallbackFailure::Cancelled)
         }
         _ = tokio::time::sleep(Duration::from_secs(300)) => {
             FLOW_STATE.clear_if_current(request_id);
-            Err("OAuth flow timed out".to_string())
+            Err(CallbackFailure::Error("OAuth flow timed out".to_string()))
         }
-        res = accept => res,
+        res = accept => res.map_err(CallbackFailure::Error),
     }
 }
 
@@ -606,7 +627,12 @@ mod tests {
         let start = src
             .find("pub async fn start_plugin_oauth(")
             .expect("start_plugin_oauth must exist");
-        let body = &src[start..start + 6000];
+        // Slice up to the next top-level item so the window tracks fn growth.
+        let end = src[start..]
+            .find("\n/// True when this flow was superseded")
+            .map(|p| start + p)
+            .expect("the fn following start_plugin_oauth must exist");
+        let body = &src[start..end];
         let enable_pos = body
             .find("set_plugin_enabled_in_config(&project, &slug, true)")
             .expect("success path must auto-enable the plugin");
@@ -766,6 +792,22 @@ mod tests {
     #[test]
     fn spec_round_trips_grant() {
         assert_eq!(spec().grant_type, OAuthGrantType::AuthorizationCode);
+    }
+
+    // User cancellation must surface as CallbackFailure::Cancelled (quiet
+    // `cancelled` UI terminal), never as the red `error` status.
+    #[tokio::test]
+    async fn wait_for_callback_cancellation_is_distinct_from_error() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = wait_for_callback(&listener, "st", &cancel, "rid").await;
+        assert!(
+            matches!(result, Err(CallbackFailure::Cancelled)),
+            "got: {result:?}"
+        );
     }
 
     // An endless request line must not grow the accumulator unboundedly — the
