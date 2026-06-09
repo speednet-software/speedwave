@@ -486,21 +486,26 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
             std::fs::remove_dir_all(&svc_dir).map_err(|e| e.to_string())?;
         }
         // Off-mount OAuth state/seed never live under tokens/, so the wipe
-        // above cannot reach them. Keyed on service_id, matching every other
-        // OAuth off-mount path (validate_manifest enforces slug == service_id,
-        // but the key must stay consistent if that ever relaxes).
-        for path in [
-            speedwave_runtime::plugin::oauth_state_file(project_name, &service_id),
-            speedwave_runtime::plugin::oauth_seed_file(project_name, &service_id),
-        ] {
-            if let Err(e) = std::fs::remove_file(&path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(format!("failed to remove {}: {e}", path.display()));
-                }
+        // above cannot reach them.
+        remove_oauth_offmount(project_name, &service_id)?;
+    }
+
+    Ok(())
+}
+
+/// Deletes the off-mount OAuth state + seed for a service (refresh token +
+/// client secret). Keyed on service_id, matching every other OAuth path.
+fn remove_oauth_offmount(project: &str, service_id: &str) -> Result<(), String> {
+    for path in [
+        speedwave_runtime::plugin::oauth_state_file(project, service_id),
+        speedwave_runtime::plugin::oauth_seed_file(project, service_id),
+    ] {
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("failed to remove {}: {e}", path.display()));
             }
         }
     }
-
     Ok(())
 }
 
@@ -910,31 +915,31 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    // remove_plugin must wipe off-mount OAuth secrets (refresh token + client
-    // secret in the state/seed) and the access token, not just the tokens dir.
+    // remove_oauth_offmount must delete the off-mount state + seed (refresh
+    // token + client secret), and tolerate their absence.
     #[test]
-    fn remove_plugin_clears_oauth_secrets() {
-        let src = include_str!("plugin_cmd.rs");
-        let start = src
-            .find("pub fn remove_plugin(")
-            .expect("remove_plugin must exist");
-        let end = src[start..]
-            .find("\n}\n")
-            .map(|e| start + e)
-            .unwrap_or(src.len());
-        let body = &src[start..end];
-        assert!(
-            body.contains("oauth_state_file"),
-            "remove_plugin must delete the off-mount oauth state file"
-        );
-        assert!(
-            body.contains("oauth_seed_file"),
-            "remove_plugin must delete the oauth seed file"
-        );
-        assert!(
-            body.contains("remove_dir_all"),
-            "remove_plugin must wipe the whole tokens dir (incl. access_token)"
-        );
+    #[serial]
+    fn remove_oauth_offmount_deletes_state_and_seed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let state = speedwave_runtime::plugin::oauth_state_file("proj", "svc");
+        let seed = speedwave_runtime::plugin::oauth_seed_file("proj", "svc");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state, "{}").unwrap();
+        std::fs::write(&seed, "{}").unwrap();
+
+        remove_oauth_offmount("proj", "svc").unwrap();
+        assert!(!state.exists(), "state file must be deleted");
+        assert!(!seed.exists(), "seed file must be deleted");
+        // Idempotent: a second call on absent files is Ok (NotFound tolerated).
+        remove_oauth_offmount("proj", "svc").unwrap();
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
     }
 
     #[test]
@@ -1905,6 +1910,7 @@ mod tests {
     // An oauth_flow plugin is NOT configured until an authorized oauth state
     // file exists — its secret lives off-mount, not in /tokens.
     #[test]
+    #[serial]
     fn is_plugin_configured_false_for_oauth_plugin_without_state() {
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
@@ -1938,6 +1944,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn is_plugin_configured_true_for_oauth_plugin_with_state() {
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();

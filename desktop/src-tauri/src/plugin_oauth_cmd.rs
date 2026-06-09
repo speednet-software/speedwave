@@ -298,7 +298,12 @@ async fn wait_for_callback(
                 Ok(None) => {
                     let _ = write_http_response(&mut stream, "Waiting…").await;
                 }
-                Err(_) => continue,
+                // A single broken connection (port scan, etc.) must not abort the
+                // flow — keep waiting, but record why for support.
+                Err(e) => {
+                    log::debug!("oauth callback read error (ignored): {e}");
+                    continue;
+                }
             }
         }
     };
@@ -363,13 +368,19 @@ fn parse_callback_query(query: &str, expected_state: &str) -> Result<String, Str
             _ => {}
         }
     }
-    if let Some(e) = err {
-        return Err(format!("authorization denied: {e}"));
-    }
+    // Verify CSRF state first — for BOTH the success and error branches, so a
+    // forged `?error=...` without a valid state can't terminate the flow
+    // (RFC 6749 §10.12).
     if state.as_deref() != Some(expected_state) {
         return Err("state mismatch (possible CSRF)".to_string());
     }
-    code.ok_or_else(|| "callback missing authorization code".to_string())
+    if let Some(e) = err {
+        return Err(format!("authorization denied: {e}"));
+    }
+    match code {
+        Some(c) if !c.is_empty() => Ok(c),
+        _ => Err("callback missing authorization code".to_string()),
+    }
 }
 
 /// Writes a minimal HTML response to the browser tab.
@@ -609,6 +620,20 @@ mod tests {
     fn parse_callback_query_rejects_missing_code() {
         let err = parse_callback_query("state=xyz", "xyz").unwrap_err();
         assert!(err.contains("missing authorization code"));
+    }
+
+    #[test]
+    fn parse_callback_query_checks_state_before_error() {
+        // A forged ?error= without a valid state is a CSRF mismatch, not a
+        // "provider denied" — state is verified first on both branches.
+        let err = parse_callback_query("error=access_denied", "xyz").unwrap_err();
+        assert!(err.contains("state mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_callback_query_rejects_empty_code() {
+        let err = parse_callback_query("code=&state=xyz", "xyz").unwrap_err();
+        assert!(err.contains("missing authorization code"), "got: {err}");
     }
 
     #[test]
