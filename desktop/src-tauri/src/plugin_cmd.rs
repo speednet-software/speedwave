@@ -429,9 +429,6 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
         .and_then(|m| m.service_id.as_deref())
         .map(|s| s.to_string())
         .unwrap_or_else(|| slug.clone());
-    let auth_fields: Vec<String> = manifest
-        .map(|m| m.auth_fields.iter().map(|f| f.key.clone()).collect())
-        .unwrap_or_default();
 
     // Delete plugin files from ~/.speedwave/plugins/<slug>/ and clean up
     // the cached container image. Runtime is best-effort: when the
@@ -473,26 +470,25 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
 
-    // Delete tokens from ~/.speedwave/tokens/<project>/<service_id>/
+    // Delete tokens from ~/.speedwave/tokens/<project>/<service_id>/ and the
+    // off-mount OAuth secrets (state + seed hold the refresh token + client
+    // secret; access_token is a literal filename, not an auth_fields key).
     for project_name in &project_names {
         let svc_dir = token_dir_for(project_name, &service_id)?;
         if svc_dir.exists() {
-            if auth_fields.is_empty() {
-                std::fs::remove_dir_all(&svc_dir).map_err(|e| e.to_string())?;
-            } else {
-                for field_key in &auth_fields {
-                    let path = svc_dir.join(field_key);
-                    if path.exists() {
-                        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-                    }
-                }
-                if svc_dir
-                    .read_dir()
-                    .map_err(|e| e.to_string())?
-                    .next()
-                    .is_none()
-                {
-                    std::fs::remove_dir(&svc_dir).map_err(|e| e.to_string())?;
+            // Whole-dir wipe covers access_token too — leaving it behind would
+            // both orphan a live bearer and block the empty-dir removal below.
+            std::fs::remove_dir_all(&svc_dir).map_err(|e| e.to_string())?;
+        }
+        // Off-mount OAuth state/seed never live under tokens/, so the wipe
+        // above cannot reach them. forget logic deletes them directly.
+        for path in [
+            speedwave_runtime::plugin::oauth_state_file(project_name, &slug),
+            speedwave_runtime::plugin::oauth_seed_file(project_name, &slug),
+        ] {
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("failed to remove {}: {e}", path.display()));
                 }
             }
         }
@@ -909,6 +905,33 @@ fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Resul
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    // remove_plugin must wipe off-mount OAuth secrets (refresh token + client
+    // secret in the state/seed) and the access token, not just the tokens dir.
+    #[test]
+    fn remove_plugin_clears_oauth_secrets() {
+        let src = include_str!("plugin_cmd.rs");
+        let start = src
+            .find("pub fn remove_plugin(")
+            .expect("remove_plugin must exist");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|e| start + e)
+            .unwrap_or(src.len());
+        let body = &src[start..end];
+        assert!(
+            body.contains("oauth_state_file"),
+            "remove_plugin must delete the off-mount oauth state file"
+        );
+        assert!(
+            body.contains("oauth_seed_file"),
+            "remove_plugin must delete the oauth seed file"
+        );
+        assert!(
+            body.contains("remove_dir_all"),
+            "remove_plugin must wipe the whole tokens dir (incl. access_token)"
+        );
+    }
 
     #[test]
     fn plugin_status_entry_serializes() {
