@@ -225,6 +225,48 @@ describe('refreshGenericToken', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe('network');
   });
+
+  it.each([
+    ['https://[::ffff:10.0.0.1]/token', 'ipv4-mapped private'],
+    ['https://100.64.0.1/token', 'CGNAT'],
+    ['https://0.0.0.1/token', '0.0.0.0/8'],
+    ['https://169.254.169.254/token', 'link-local metadata'],
+    ['http://idp.example.com/token', 'non-https'],
+  ])('rejects an unsafe token_url (%s)', async (tokenUrl) => {
+    const result = await refreshGenericToken(
+      refreshTokenReq({ providerData: { tokenUrl, clientId: 'c', authStyle: 'basic' } })
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('malformed');
+  });
+
+  it('streams and rejects an oversized body before fully buffering it', async () => {
+    // A real ReadableStream whose chunks exceed the 256 KiB cap.
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(128 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        status: 200,
+        ok: true,
+        headers: {
+          get: (h: string) => (h.toLowerCase() === 'content-type' ? 'application/json' : null),
+        },
+        body: stream,
+      })
+    );
+    const result = await refreshGenericToken(refreshTokenReq());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('malformed');
+    expect(cancelled).toBe(true); // read was aborted, not fully buffered
+  });
 });
 
 describe('genericProvider.validateRequest', () => {

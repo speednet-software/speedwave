@@ -59,19 +59,23 @@ function validateTokenUrl(raw: string): URL | null {
   }
   if (url.protocol !== 'https:') return null;
   if (url.username || url.password) return null;
-  const host = url.hostname.toLowerCase();
+  // Strip the brackets URL keeps on IPv6 literals (URL also lower-cases +
+  // normalizes ::ffff:10.0.0.1 to its hex form ::ffff:a00:1).
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (host === 'localhost' || host.endsWith('.localhost')) return null;
-  // Block obvious private/loopback literals; the host-side Rust validator is
-  // authoritative at install — this is defense-in-depth against a tampered file.
+  // Block private/loopback/link-local/CGNAT literals; the host-side Rust
+  // validator is authoritative at install — this is defense-in-depth against a
+  // tampered state file, not a complete reserved-range implementation.
   if (
     /^127\./.test(host) ||
-    host === '0.0.0.0' ||
+    /^0\./.test(host) ||
     /^10\./.test(host) ||
     /^192\.168\./.test(host) ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
     /^169\.254\./.test(host) ||
+    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host) ||
     host === '::1' ||
-    host === '[::1]'
+    host.startsWith('::ffff:') // any IPv4-mapped IPv6 — no legit IdP uses one
   ) {
     return null;
   }
@@ -79,7 +83,9 @@ function validateTokenUrl(raw: string): URL | null {
 }
 
 /**
- * Reads at most `MAX_BODY_BYTES` of the response, then parses JSON.
+ * Reads at most `MAX_BODY_BYTES` of the response (streaming, never buffering a
+ * larger body), then parses JSON. A hostile token endpoint cannot OOM the
+ * worker — the read aborts once the cap is crossed.
  * @param response - the token endpoint response
  */
 async function readJsonCapped(
@@ -89,12 +95,17 @@ async function readJsonCapped(
   if (!/json/i.test(ctype)) {
     return { ok: false, message: `unexpected content-type '${ctype}'` };
   }
-  const buf = await response.arrayBuffer();
-  if (buf.byteLength > MAX_BODY_BYTES) {
+  // Reject early when the endpoint declares an oversized body.
+  const declared = Number(response.headers.get('content-length') ?? '');
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    return { ok: false, message: `response exceeds ${MAX_BODY_BYTES} bytes` };
+  }
+
+  const text = await readTextCapped(response, MAX_BODY_BYTES);
+  if (text === null) {
     return { ok: false, message: `response exceeds ${MAX_BODY_BYTES} bytes` };
   }
   try {
-    const text = Buffer.from(buf).toString('utf8');
     return { ok: true, json: JSON.parse(text) as Record<string, unknown> };
   } catch (err) {
     return {
@@ -102,6 +113,35 @@ async function readJsonCapped(
       message: `not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+}
+
+/**
+ * Streams the response body, returning its text or `null` once `maxBytes` is
+ * crossed (aborting the read). Context7 has an undici-specific counterpart; the
+ * body types differ (WHATWG stream vs undici), so they stay separate.
+ * @param response - the response whose body to read
+ * @param maxBytes - upper bound on total bytes
+ */
+async function readTextCapped(response: Response, maxBytes: number): Promise<string | null> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    // No stream (e.g. a test stub) — fall back to a buffered read with the cap.
+    const buf = await response.arrayBuffer();
+    return buf.byteLength > maxBytes ? null : Buffer.from(buf).toString('utf8');
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
 }
 
 /**
