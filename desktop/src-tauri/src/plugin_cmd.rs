@@ -199,7 +199,13 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             &project,
             sid,
         );
-        let oauth_expires_at = plugin_oauth_expires_at(&project, sid);
+        // Only OAuth plugins can have an off-mount state file — skip the disk
+        // read for the rest.
+        let oauth_expires_at = if manifest.auth_fields.iter().any(|f| f.oauth_flow) {
+            plugin_oauth_expires_at(&project, sid)
+        } else {
+            None
+        };
         let oauth_authorized = oauth_expires_at.is_some();
 
         let mut current_values = HashMap::new();

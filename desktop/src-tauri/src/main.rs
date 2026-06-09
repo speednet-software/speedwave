@@ -1236,7 +1236,6 @@ pub(crate) fn oauth_reconcile_action(current: &[String], desired: &[String]) -> 
 /// integration with `uses_oauth_refresh = true` is enabled, or if the worker
 /// is already running. Returns true if a new worker was started this call.
 pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bool {
-    firewall::ensure_firewall_rule();
     let mut map = match oauth_arc.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1306,6 +1305,10 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         return false;
     }
     let consumer_refs: Vec<&str> = oauth_consumers.iter().map(String::as_str).collect();
+
+    // Only now that a spawn is certain — the rule must precede the worker's
+    // bind, but a NoChange / no-consumer toggle should not pay for it.
+    firewall::ensure_firewall_rule();
 
     let script = match speedwave_runtime::build::resolve_oauth_script() {
         Some(s) => s.to_string_lossy().to_string(),

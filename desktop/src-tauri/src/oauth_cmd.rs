@@ -141,7 +141,7 @@ fn redact_ms_error_description(raw: &str) -> String {
 
 /// Classifies a Microsoft token-poll body into a [`PollAction`], or `Ok(())`
 /// when it carries tokens. Pure — the shared poll loop drives the effects.
-fn classify_sharepoint_response(bytes: &[u8]) -> Result<(), oauth_flow::PollAction> {
+fn classify_sharepoint_response(status: u16, bytes: &[u8]) -> Result<(), oauth_flow::PollAction> {
     use oauth_flow::PollAction;
     if serde_json::from_slice::<MsTokenResponse>(bytes).is_ok() {
         return Ok(());
@@ -170,7 +170,7 @@ fn classify_sharepoint_response(bytes: &[u8]) -> Result<(), oauth_flow::PollActi
     let preview = String::from_utf8_lossy(bytes);
     let truncated = preview.chars().take(200).collect::<String>();
     Err(PollAction::Failed(format!(
-        "Unexpected response from Microsoft: {truncated}"
+        "Unexpected response from Microsoft (HTTP {status}): {truncated}"
     )))
 }
 

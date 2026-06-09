@@ -136,8 +136,8 @@ pub(crate) struct DevicePollConfig {
 }
 
 /// Runs the device-code polling state machine shared by SharePoint and GitHub.
-/// `on_success(body)` parses+persists IdP-specific tokens; `classify(body)`
-/// returns `Ok(())` on success-shaped body, else a [`PollAction`]. The whole
+/// `on_success(body)` parses+persists IdP-specific tokens; `classify(status,
+/// body)` returns `Ok(())` on a success-shaped body, else a [`PollAction`]. The
 /// loop (deadline / sleep / cancel / network) is identical across IdPs.
 pub(crate) fn run_device_poll<C, S>(
     app: tauri::AppHandle,
@@ -148,7 +148,7 @@ pub(crate) fn run_device_poll<C, S>(
     classify: C,
     on_success: S,
 ) where
-    C: Fn(&[u8]) -> Result<(), PollAction> + Send + 'static,
+    C: Fn(u16, &[u8]) -> Result<(), PollAction> + Send + 'static,
     S: Fn(&[u8]) -> Result<(), String> + Send + 'static,
 {
     tokio::spawn(async move {
@@ -198,15 +198,18 @@ pub(crate) fn run_device_poll<C, S>(
                 return;
             }
 
-            let bytes = match resp {
-                Ok(r) => match crate::http_util::read_body_limited(r, "token").await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        emit_progress(&app, registry, "error", &e, &request_id);
-                        registry.clear_if_current(&request_id);
-                        return;
+            let (status, bytes) = match resp {
+                Ok(r) => {
+                    let status = r.status().as_u16();
+                    match crate::http_util::read_body_limited(r, "token").await {
+                        Ok(b) => (status, b),
+                        Err(e) => {
+                            emit_progress(&app, registry, "error", &e, &request_id);
+                            registry.clear_if_current(&request_id);
+                            return;
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     emit_progress(
                         &app,
@@ -220,7 +223,7 @@ pub(crate) fn run_device_poll<C, S>(
                 }
             };
 
-            match classify(&bytes) {
+            match classify(status, &bytes) {
                 Ok(()) => {
                     if let Err(e) = on_success(&bytes) {
                         emit_progress(

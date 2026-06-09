@@ -45,7 +45,7 @@ static FLOW_STATE: FlowRegistry = FlowRegistry::new(PROGRESS_EVENT);
 /// `None` = keep polling (`authorization_pending` / `slow_down`).
 /// Classifies a GitHub token-poll body into a [`PollAction`], or `Ok(())` when
 /// it carries an access token. Pure — the shared poll loop drives the effects.
-fn classify_github_response(bytes: &[u8]) -> Result<(), oauth_flow::PollAction> {
+fn classify_github_response(status: u16, bytes: &[u8]) -> Result<(), oauth_flow::PollAction> {
     use oauth_flow::PollAction;
     if serde_json::from_slice::<GhTokenResponse>(bytes).is_ok() {
         return Ok(());
@@ -70,7 +70,7 @@ fn classify_github_response(bytes: &[u8]) -> Result<(), oauth_flow::PollAction> 
     let preview = String::from_utf8_lossy(bytes);
     let truncated = preview.chars().take(200).collect::<String>();
     Err(PollAction::Failed(format!(
-        "Unexpected response from GitHub: {truncated}"
+        "Unexpected response from GitHub (HTTP {status}): {truncated}"
     )))
 }
 
@@ -315,14 +315,14 @@ mod tests {
     #[test]
     fn classify_accepts_success_body() {
         let body = br#"{"access_token":"a","token_type":"bearer","scope":"repo"}"#;
-        assert!(classify_github_response(body).is_ok());
+        assert!(classify_github_response(200, body).is_ok());
     }
 
     #[test]
     fn classify_pending_keeps_polling() {
         let body = br#"{"error":"authorization_pending"}"#;
         assert!(matches!(
-            classify_github_response(body),
+            classify_github_response(200, body),
             Err(oauth_flow::PollAction::KeepPolling)
         ));
     }
@@ -331,7 +331,7 @@ mod tests {
     fn classify_slow_down_backs_off() {
         let body = br#"{"error":"slow_down"}"#;
         assert!(matches!(
-            classify_github_response(body),
+            classify_github_response(200, body),
             Err(oauth_flow::PollAction::SlowDown)
         ));
     }
@@ -340,7 +340,7 @@ mod tests {
     fn classify_expired_token_is_expired() {
         let body = br#"{"error":"expired_token"}"#;
         assert!(matches!(
-            classify_github_response(body),
+            classify_github_response(200, body),
             Err(oauth_flow::PollAction::Expired(_))
         ));
     }
@@ -349,16 +349,18 @@ mod tests {
     fn classify_access_denied_is_failed() {
         let body = br#"{"error":"access_denied"}"#;
         assert!(matches!(
-            classify_github_response(body),
+            classify_github_response(200, body),
             Err(oauth_flow::PollAction::Failed(_))
         ));
     }
 
     #[test]
-    fn classify_garbage_is_failed() {
-        assert!(matches!(
-            classify_github_response(b"not json"),
-            Err(oauth_flow::PollAction::Failed(_))
-        ));
+    fn classify_garbage_is_failed_with_http_status() {
+        match classify_github_response(502, b"not json") {
+            Err(oauth_flow::PollAction::Failed(msg)) => {
+                assert!(msg.contains("HTTP 502"), "status must surface: {msg}");
+            }
+            _ => panic!("expected Failed with HTTP status"),
+        }
     }
 }
