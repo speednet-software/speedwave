@@ -492,6 +492,33 @@ Behaviour to know:
 After saving or resetting, Speedwave requests a container restart so the
 worker picks up the change.
 
+### Plugin OAuth (Authorize)
+
+A plugin can declare an `oauth` block in `plugin.json` to authenticate against a
+third-party service through an OAuth2 flow instead of a pasted token. The flow
+runs on the host; only a short-lived access token reaches the plugin container,
+while the refresh token and client secret stay off-mount under
+`~/.speedwave/oauth/<project>/<slug>.json` (see
+[ADR-069](../adr/ADR-069-generic-plugin-oauth2.md)).
+
+How it works in the UI:
+
+1. Enter the plugin's OAuth **client id** (and **client secret** if the manifest
+   declares one) in the Credentials section and click **Save**. These are not
+   written to `/tokens` — they go to the off-mount seed file. The **Authorize**
+   button stays disabled until they are saved.
+2. Click **Sign in with `<plugin>`**. For the `authorization_code` grant a
+   browser tab opens; complete sign-in there. If the identity provider requires
+   a registered redirect URI, the UI shows the loopback URI to register.
+3. On success the plugin shows as configured and Speedwave requests a restart so
+   the worker picks up the access token.
+
+**Identity (who the service logs).** `authorization_code` and `device_code` are
+user-delegated: you sign in with your own account and the service attributes
+actions to **you**. `client_credentials` is a machine identity — actions land on
+the OAuth client's technical account, not a specific person. Choose the grant
+that matches your audit requirements.
+
 ### Bridge plugins — dev UX
 
 Plugins that pair a containerized worker with an external host application (e.g. a design-tool desktop app, an editor extension) declare a `host_bridge` block in `plugin.json` — see [ADR-063](../adr/ADR-063-host-bridge-generic.md). Speedwave Desktop spawns a loopback WebSocket relay per such plugin and injects the bridge URL + auth token into the worker's container.
