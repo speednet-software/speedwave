@@ -1210,6 +1210,28 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
 // longer spawns oauth/host_exec workers — Desktop is the sole supervisor; see
 // the dual-supervisor exit-137 note in `speedwave-cli::main`.)
 
+/// What to do with a running oauth worker given current vs. desired consumers.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OauthReconcile {
+    /// Consumer set unchanged — leave the worker as is.
+    NoChange,
+    /// Consumer set changed — stop the worker; respawn happens downstream.
+    /// `clear_bearer_map` when the desired set is empty (no respawn follows).
+    Respawn { clear_bearer_map: bool },
+}
+
+/// Pure reconcile decision for a running worker. `current`/`desired` must be
+/// sorted. Extracted so the transition logic is unit-testable without IO.
+pub(crate) fn oauth_reconcile_action(current: &[String], desired: &[String]) -> OauthReconcile {
+    if current == desired {
+        OauthReconcile::NoChange
+    } else {
+        OauthReconcile::Respawn {
+            clear_bearer_map: desired.is_empty(),
+        }
+    }
+}
+
 /// Spawn the per-project `oauth` worker on demand. No-op if no project
 /// integration with `uses_oauth_refresh = true` is enabled, or if the worker
 /// is already running. Returns true if a new worker was started this call.
@@ -1247,32 +1269,33 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         speedwave_runtime::compose::oauth_consumer_service_ids(&resolved, &installed);
     oauth_consumers.sort();
 
-    // A worker already running for this project may hold a stale consumer set
-    // (its bearer-map was fixed at spawn). If the enabled set changed — a plugin
-    // OAuth was toggled — stop it so it respawns below with a fresh bearer-map;
-    // its consumer containers are recreated on the next compose-up.
+    // A running worker may hold a stale consumer set (its bearer-map is fixed
+    // at spawn). Reconcile against the desired set — see oauth_reconcile_action.
     if let Some(running) = map.get(project) {
         let mut current: Vec<String> = running.spec().consumers().to_vec();
         current.sort();
-        if current == oauth_consumers {
-            return false; // up to date — nothing to do
-        }
-        log::info!(
-            "oauth[{project}]: consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
-        );
-        if let Some(mut proc) = map.remove(project) {
-            let _ = proc.stop();
-            proc.cleanup_files();
-        }
-        if oauth_consumers.is_empty() {
-            // No consumers left — also drop the stale bearer-map so compose
-            // stops injecting WORKER_OAUTH_URL into now-orphaned containers.
-            let dir = speedwave_runtime::oauth_process::oauth_project_dir(
-                speedwave_runtime::consts::data_dir(),
-                project,
-            );
-            let _ =
-                std::fs::remove_file(dir.join(speedwave_runtime::consts::OAUTH_BEARER_MAP_FILE));
+        match oauth_reconcile_action(&current, &oauth_consumers) {
+            OauthReconcile::NoChange => return false,
+            OauthReconcile::Respawn { clear_bearer_map } => {
+                log::info!(
+                    "oauth[{project}]: consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
+                );
+                if let Some(mut proc) = map.remove(project) {
+                    let _ = proc.stop();
+                    proc.cleanup_files();
+                }
+                if clear_bearer_map {
+                    // Drop the stale bearer-map so compose stops injecting into
+                    // now-orphaned containers (no respawn rewrites it).
+                    let dir = speedwave_runtime::oauth_process::oauth_project_dir(
+                        speedwave_runtime::consts::data_dir(),
+                        project,
+                    );
+                    let _ = std::fs::remove_file(
+                        dir.join(speedwave_runtime::consts::OAUTH_BEARER_MAP_FILE),
+                    );
+                }
+            }
         }
     }
 
@@ -2291,6 +2314,48 @@ fn main() {
 mod tests {
     use super::*;
     use config::{ProjectUserEntry, SpeedwaveUserConfig};
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn oauth_reconcile_no_change_when_sets_equal() {
+        assert_eq!(
+            oauth_reconcile_action(&v(&["a", "b"]), &v(&["a", "b"])),
+            OauthReconcile::NoChange
+        );
+    }
+
+    #[test]
+    fn oauth_reconcile_respawn_when_set_grows() {
+        assert_eq!(
+            oauth_reconcile_action(&v(&["a"]), &v(&["a", "b"])),
+            OauthReconcile::Respawn {
+                clear_bearer_map: false
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_reconcile_respawn_when_set_shrinks_but_nonempty() {
+        assert_eq!(
+            oauth_reconcile_action(&v(&["a", "b"]), &v(&["a"])),
+            OauthReconcile::Respawn {
+                clear_bearer_map: false
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_reconcile_clears_bearer_map_when_set_emptied() {
+        assert_eq!(
+            oauth_reconcile_action(&v(&["a"]), &[]),
+            OauthReconcile::Respawn {
+                clear_bearer_map: true
+            }
+        );
+    }
 
     #[test]
     fn plugin_bridge_credentials_response_wire_format() {
