@@ -211,10 +211,15 @@ describe('genericProvider.validateRequest', () => {
 });
 
 describe('redactGenericError', () => {
-  it('keeps the error code', () => {
+  it('keeps a known RFC 6749 error code', () => {
     expect(redactGenericError('invalid_grant')).toBe('invalid_grant');
+    expect(redactGenericError('invalid_client')).toBe('invalid_client');
   });
-  it('falls back to redacted when code is empty', () => {
+  it('redacts an empty code', () => {
     expect(redactGenericError('')).toBe('redacted');
+  });
+  it('redacts a non-enum (attacker-stuffed) error value', () => {
+    expect(redactGenericError('tenant=acme; refresh_token=LEAKED_abc')).toBe('redacted');
+    expect(redactGenericError('some_future_error')).toBe('redacted');
   });
 });

@@ -27,12 +27,23 @@ interface GenericProviderData {
   grantType?: GrantType;
 }
 
+/** RFC 6749 §5.2 token-error codes — the only `error` values surfaced verbatim. */
+const RFC6749_ERROR_CODES = new Set([
+  'invalid_request',
+  'invalid_client',
+  'invalid_grant',
+  'unauthorized_client',
+  'unsupported_grant_type',
+  'invalid_scope',
+]);
+
 /**
- * Drops IdP `error_description` free text; keeps only the `error` code.
+ * Keeps the `error` code only if it is a known RFC 6749 §5.2 value; a
+ * data-driven IdP could otherwise stuff secrets into a free-form `error`.
  * @param errorCode - the IdP `error` field (or empty)
  */
 export function redactGenericError(errorCode: string): string {
-  return errorCode || 'redacted';
+  return RFC6749_ERROR_CODES.has(errorCode) ? errorCode : 'redacted';
 }
 
 /**
