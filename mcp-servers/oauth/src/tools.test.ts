@@ -227,6 +227,31 @@ describe('oauth tools', () => {
       expect(await readAuditLog()).toContain('action=refresh outcome=ok');
     });
 
+    it('clamps an absurd expiresIn instead of throwing RangeError', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      refreshResult = {
+        ok: true,
+        value: {
+          accessToken: 'a',
+          refreshToken: 'r',
+          expiresIn: 1e16, // would overflow Date without the clamp
+          grantedScopes: sharepointState.scopes,
+        },
+      };
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBeFalsy();
+      const newState = JSON.parse(
+        await readFile(join(stateDir, 'sharepoint.json'), 'utf8')
+      ) as OAuthState;
+      // expiresAt is a valid, parseable, future ISO date (clamped, not NaN/throw).
+      expect(Number.isNaN(Date.parse(newState.expiresAt))).toBe(false);
+      expect(Date.parse(newState.expiresAt)).toBeGreaterThan(now);
+    });
+
     it('keeps old refresh token when Microsoft does not rotate', async () => {
       await seedBearerMap({ 'bearer-sp': 'sharepoint' });
       await seedState(sharepointState);

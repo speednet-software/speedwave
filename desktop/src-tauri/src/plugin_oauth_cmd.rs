@@ -15,12 +15,18 @@ const PROGRESS_EVENT: &str = "plugin_oauth_progress";
 
 static FLOW_STATE: FlowRegistry = FlowRegistry::new(PROGRESS_EVENT);
 
+/// RFC 6749 §5.1 makes `expires_in` OPTIONAL; default to 1h when omitted.
+fn default_expires_in() -> u64 {
+    3600
+}
+
 /// Token endpoint success payload (RFC 6749 §5.1).
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
+    #[serde(default = "default_expires_in")]
     expires_in: u64,
     #[serde(default)]
     scope: Option<String>,

@@ -18,6 +18,9 @@ import { appendAuditEvent } from './audit-log.js';
 /** Default rate-limit between refreshes when access token is still valid. */
 const DEFAULT_RATE_LIMIT_SECONDS = 1800;
 
+/** Upper bound on a token lifetime (10y) — mirrors the Rust oauth_persist clamp. */
+const MAX_EXPIRES_IN_SECONDS = 10 * 365 * 24 * 60 * 60;
+
 /**
  * Fallback validation for providers without `validateRequest` (e.g. Microsoft).
  * @param requiredFields - keys that must be present and non-empty
@@ -224,11 +227,14 @@ async function handleRefresh(
   }
 
   const nowMs = now();
+  // Clamp the IdP-supplied lifetime so `new Date(...)` stays in range — an
+  // absurd expiresIn would otherwise throw RangeError out of this handler.
+  const expiresInMs = Math.min(result.value.expiresIn, MAX_EXPIRES_IN_SECONDS) * 1000;
   const newState: OAuthState = {
     ...state,
     refreshToken: result.value.refreshToken ?? state.refreshToken,
     grantedScopes: result.value.grantedScopes,
-    expiresAt: new Date(nowMs + result.value.expiresIn * 1000).toISOString(),
+    expiresAt: new Date(nowMs + expiresInMs).toISOString(),
     lastRefreshAt: new Date(nowMs).toISOString(),
   };
   await saveOAuthState(deps.stateDir, service, newState);

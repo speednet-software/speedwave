@@ -30,9 +30,18 @@ pub struct OAuthStateParams<'a> {
     pub expires_in: u64,
 }
 
+/// Upper bound on a token lifetime (10 years in seconds) — anything larger is a
+/// malformed/hostile response; clamping keeps `now_ms + expires_in*1000` in range.
+const MAX_EXPIRES_IN_SECS: u64 = 10 * 365 * 24 * 60 * 60;
+
 /// Writes the OAuth state JSON to `path` (0o600, parent 0o700). The caller
-/// supplies an off-mount path from `plugin::oauth_state_file`.
+/// supplies an off-mount path from `plugin::oauth_state_file`. Rejects a
+/// non-positive `expires_in` (the SSOT mint guard) and clamps an absurd one.
 pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), String> {
+    if params.expires_in == 0 {
+        return Err("oauth state: expires_in must be > 0".to_string());
+    }
+    let expires_in = params.expires_in.min(MAX_EXPIRES_IN_SECS);
     let parent = path
         .parent()
         .ok_or_else(|| "oauth state: no parent".to_string())?;
@@ -69,7 +78,7 @@ pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), S
     obj.insert("refreshToken".into(), params.refresh_token.into());
     obj.insert(
         "expiresAt".into(),
-        iso8601_from_unix_ms(now_ms + params.expires_in.saturating_mul(1000)).into(),
+        iso8601_from_unix_ms(now_ms.saturating_add(expires_in.saturating_mul(1000))).into(),
     );
     obj.insert("lastRefreshAt".into(), iso8601_from_unix_ms(now_ms).into());
 
@@ -177,5 +186,37 @@ mod tests {
         .unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    fn params_with_expires(expires_in: u64) -> OAuthStateParams<'static> {
+        OAuthStateParams {
+            provider: "generic",
+            grant_type: Some("refresh_token"),
+            provider_data: BTreeMap::new(),
+            scopes: vec![],
+            granted_scopes: vec![],
+            refresh_token: "r",
+            expires_in,
+        }
+    }
+
+    #[test]
+    fn rejects_zero_expires_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            write_oauth_state(&tmp.path().join("z.json"), &params_with_expires(0)).unwrap_err();
+        assert!(err.contains("expires_in"), "got: {err}");
+    }
+
+    #[test]
+    fn clamps_absurd_expires_in_without_overflow() {
+        // u64::MAX would overflow `now_ms + expires_in*1000` without the clamp.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("big.json");
+        write_oauth_state(&path, &params_with_expires(u64::MAX)).unwrap();
+        let json = read_json(&path);
+        // Clamped: expiresAt is a valid future ISO date, not a wrapped/past one.
+        let exp = json["expiresAt"].as_str().unwrap();
+        assert!(exp.ends_with('Z') && exp.starts_with("20"), "got: {exp}");
     }
 }
