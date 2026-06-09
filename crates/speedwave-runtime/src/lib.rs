@@ -25,6 +25,7 @@ pub mod mcp_os_process;
 pub mod oauth_process;
 pub mod oauth_state_migration;
 pub mod os_prereqs;
+pub mod pkce;
 pub mod plugin;
 pub mod project;
 pub mod resources;
