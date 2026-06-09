@@ -39,6 +39,12 @@ Plugin containers inherit Speedwave's hardening (`cap_drop: ALL`, `no-new-privil
 - Slug regex `^[a-z][a-z0-9-]{0,63}$` is enforced by `validate_manifest()`. Mirror it in any new validation path; do not write a second regex.
 - Built-in service IDs (`BUILT_IN_SERVICE_IDS` in `consts.rs`) are reserved — plugins cannot use them. When adding a new built-in service, also add it to the blocklist.
 
+## OAuth refresh-retry (vendored helper)
+
+A plugin that consumes OAuth must **not** write its own token refresh-retry loop. It vendors `authedRequest` (+ the trimmed `oauth-client`) into `src/server/` — alongside the existing `mcp-shared` copy the plugin already carries — and uses it for every authenticated request: the helper refreshes the access token via the host `oauth` worker on an auth-failure status and retries once (see ADR-060). Non-standard auth-failure statuses are opt-in via `authFailureStatuses` (GLPI adds `400` on top of the default `401`).
+
+This is a **manual-sync** copy: until `@speedwave/mcp-shared` ships as an npm package, a change to `oauth-authed-request.ts` in this repo must be re-copied into each consuming plugin. Treat it like the rest of the vendored mcp-shared surface.
+
 ## Settings UI (Desktop)
 
 Frontend `PluginStatusEntry` (`desktop/src/src/app/models/plugin.ts`) must match Tauri command return types in `plugin_cmd.rs`. If you add a field on one side and not the other, the type system won't catch it — the JSON deserialiser silently drops it. Update both in the same commit and add a frontend test that asserts the shape.

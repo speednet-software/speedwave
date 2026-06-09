@@ -124,6 +124,10 @@ export {
 } from './oauth-client.js';
 export type { OAuthRefreshOptions, OAuthRefreshCode } from './oauth-client.js';
 
+// Shared reactive refresh-retry loop (ADR-060/069) — SSOT for all OAuth consumers
+export { authedRequest, RefreshLock } from './oauth-authed-request.js';
+export type { AuthedRequestOptions, AuthedTokenState } from './oauth-authed-request.js';
+
 // Connection status tracking (workers with external dependencies)
 export {
   ConnectionStatusTracker,

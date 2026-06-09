@@ -38,6 +38,9 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
       expiresIn: 3600,
       grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
     }),
+    // The shared refresh-retry loop is unit-tested in oauth-authed-request.test.ts;
+    // here we mock it to assert SharePoint delegates correctly. Default: one send.
+    authedRequest: vi.fn(),
     ts: () => '[00:00:00]',
   };
 });
@@ -45,9 +48,10 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
 const mockFs = vi.mocked(fs);
 const mockCreateWriteStream = vi.mocked(createWriteStream);
 const mockPipeline = vi.mocked(pipeline);
-const { loadToken, refreshAccessToken } = await import('@speedwave/mcp-shared');
+const { loadToken, refreshAccessToken, authedRequest } = await import('@speedwave/mcp-shared');
 const mockLoadToken = vi.mocked(loadToken);
 const mockOauthRefresh = vi.mocked(refreshAccessToken);
+const mockAuthedRequest = vi.mocked(authedRequest);
 
 // Test configuration
 const mockConfig: SharePointConfig = {
@@ -88,6 +92,9 @@ describe('SharePointClient', () => {
       expiresIn: 3600,
       grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
     });
+    // Default: delegate straight to `send` once (the no-refresh happy path).
+    // Refresh-specific tests override this per case.
+    mockAuthedRequest.mockImplementation((opts) => opts.send(opts.state.accessToken));
 
     // Create fresh client instance
     client = new SharePointClient({ ...mockConfig }, mockTokensDir);
@@ -141,114 +148,27 @@ describe('SharePointClient', () => {
 
   // 401 → host-side oauth worker refresh → retry. The new path (ADR-060)
   // replaces the v1 Microsoft endpoint hit; this batch covers the wiring.
-  describe('refreshAccessToken (delegated to host-side oauth worker)', () => {
-    it('on 401 calls oauthRefreshAccessToken and reloads access_token from /tokens', async () => {
-      // First call: Graph returns 401 → triggers refresh path.
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      mockOauthRefresh.mockResolvedValueOnce({
-        expiresIn: 3600,
-        grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
-      });
-      mockLoadToken.mockResolvedValueOnce('new-access-token-after-refresh');
-      // Retry call: Graph returns 200.
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
+  describe('auth delegation (host-side oauth worker, ADR-060)', () => {
+    it('delegates the Graph call to authedRequest with the sharepoint service + proactive window', async () => {
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
 
       await client.listFiles();
 
-      expect(mockOauthRefresh).toHaveBeenCalledWith({ service: 'sharepoint' });
-      expect(mockLoadToken).toHaveBeenCalled();
-    });
-
-    it('throws if oauth worker reports success but no access_token is written', async () => {
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      mockOauthRefresh.mockResolvedValueOnce({
-        expiresIn: 3600,
-        grantedScopes: [],
-      });
-      mockLoadToken.mockResolvedValueOnce(''); // empty / placeholder
-
-      await expect(client.listFiles()).rejects.toThrow(
-        /oauth worker returned success but access_token was not written/
+      expect(mockAuthedRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          service: 'sharepoint',
+          proactiveWithinSeconds: expect.any(Number),
+        })
       );
     });
 
-    it('propagates OAuthScopeMismatchError as-is so the tool layer can re-consent', async () => {
+    it('propagates OAuthScopeMismatchError from the helper as-is so the tool layer can re-consent', async () => {
       const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      mockOauthRefresh.mockRejectedValueOnce(
+      mockAuthedRequest.mockRejectedValueOnce(
         new OAuthScopeMismatchError('Sites.Manage.All not granted')
       );
 
       await expect(client.listFiles()).rejects.toThrow(/Sites\.Manage\.All not granted/);
-    });
-
-    it('wraps non-Error rejections from the oauth worker in Error', async () => {
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      mockOauthRefresh.mockRejectedValueOnce('plain string rejection');
-
-      await expect(client.listFiles()).rejects.toThrow(/plain string rejection/);
-    });
-  });
-
-  // debugLog() is gated by process.env.DEBUG and only fires from the
-  // callGraphAPI 401 → refresh path. Covers both DEBUG branches.
-  describe('debugLog (via callGraphAPI 401 → refresh path)', () => {
-    it('emits the refresh log line when DEBUG is set', async () => {
-      const prev = process.env.DEBUG;
-      process.env.DEBUG = '1';
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-      try {
-        fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-        mockOauthRefresh.mockResolvedValueOnce({
-          expiresIn: 3600,
-          grantedScopes: [],
-        });
-        mockLoadToken.mockResolvedValueOnce('fresh-token');
-        fetchMock.mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ value: [] }),
-        });
-
-        await client.listFiles();
-
-        expect(
-          logSpy.mock.calls.some((args) => String(args[0]).includes('Access token expired'))
-        ).toBe(true);
-      } finally {
-        logSpy.mockRestore();
-        if (prev === undefined) delete process.env.DEBUG;
-        else process.env.DEBUG = prev;
-      }
-    });
-
-    it('stays silent when DEBUG is not set', async () => {
-      const prev = process.env.DEBUG;
-      delete process.env.DEBUG;
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-      try {
-        fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-        mockOauthRefresh.mockResolvedValueOnce({
-          expiresIn: 3600,
-          grantedScopes: [],
-        });
-        mockLoadToken.mockResolvedValueOnce('fresh-token');
-        fetchMock.mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ value: [] }),
-        });
-
-        await client.listFiles();
-
-        expect(
-          logSpy.mock.calls.some((args) => String(args[0]).includes('Access token expired'))
-        ).toBe(false);
-      } finally {
-        logSpy.mockRestore();
-        if (prev !== undefined) process.env.DEBUG = prev;
-      }
     });
   });
 
@@ -413,344 +333,55 @@ describe('SharePointClient', () => {
       );
     });
 
-    it('should retry on 401 with refreshed token', async () => {
-      // First call returns 401 → triggers refresh (via mocked oauth-client) → retry
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-      // Retry succeeds
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ value: [] }),
+    it('flows a 401-retry result back through authedRequest (the helper owns the retry)', async () => {
+      // Simulate the helper's 401 → retry: send is called twice (first 401, then 200).
+      fetchMock
+        .mockResolvedValueOnce({ status: 401, ok: false })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+      mockAuthedRequest.mockImplementationOnce(async (opts) => {
+        await opts.send(opts.state.accessToken);
+        return opts.send(opts.state.accessToken);
       });
 
-      await client.listFiles();
+      const result = await client.listFiles();
 
-      // ADR-060: refresh is delegated to the host-side oauth worker (mocked).
-      // The fetch sequence is now: Initial(401) + Retry — not Initial + refresh + retry.
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(mockOauthRefresh).toHaveBeenCalledWith(
-        expect.objectContaining({ service: 'sharepoint' })
-      );
-    });
-
-    it('proactively refreshes before fetch when JWT exp is near', async () => {
-      // 60s expiry is well under the 120s proactive window even on a slow CI host.
-      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
-      const expiringClient = new SharePointClient(
-        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
-        mockTokensDir
-      );
-      mockLoadToken.mockResolvedValueOnce('post-proactive-refresh-token');
-      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
-
-      await expiringClient.listFiles();
-
-      expect(mockOauthRefresh).toHaveBeenCalledWith(
-        expect.objectContaining({ service: 'sharepoint' })
-      );
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.any(String),
+      expect(result.files).toEqual([]);
+      expect(mockAuthedRequest).toHaveBeenCalledWith(
         expect.objectContaining({
-          headers: expect.objectContaining({
-            Authorization: 'Bearer post-proactive-refresh-token',
-          }),
+          service: 'sharepoint',
+          proactiveWithinSeconds: expect.any(Number),
         })
       );
     });
 
-    it('does NOT proactively refresh when JWT exp is far in the future', async () => {
-      const farExpiry = Math.floor(Date.now() / 1000) + 3600;
-      const freshClient = new SharePointClient(
-        { ...mockConfig, accessToken: makeJwt({ exp: farExpiry }) },
-        mockTokensDir
-      );
-      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
-
-      await freshClient.listFiles();
-
-      expect(mockOauthRefresh).not.toHaveBeenCalled();
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-
-    it('falls back to existing token when proactive refresh fails with worker_unreachable', async () => {
-      const { OAuthRefreshError } = await import('@speedwave/mcp-shared');
-      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
-      const expiringClient = new SharePointClient(
-        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry, label: 'stale' }) },
-        mockTokensDir
-      );
-      // Proactive refresh fails — oauth worker unreachable.
-      mockOauthRefresh.mockRejectedValueOnce(
-        new OAuthRefreshError('worker_unreachable', 'cannot reach oauth worker')
-      );
-      // The Graph request proceeds with the stale (but still valid for ~60s) token.
-      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
-
-      await expiringClient.listFiles();
-
-      expect(mockOauthRefresh).toHaveBeenCalledTimes(1);
-      // listFiles still made its fetch with the existing (pre-refresh) token.
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-
-    it('falls back to existing token when proactive refresh fails with timeout', async () => {
-      const { OAuthRefreshError } = await import('@speedwave/mcp-shared');
+    it('passes the proactive-refresh window to authedRequest (the helper owns the decision)', async () => {
+      const { PROACTIVE_REFRESH_SECONDS } = await import('@speedwave/mcp-shared');
       const nearExpiry = Math.floor(Date.now() / 1000) + 60;
       const expiringClient = new SharePointClient(
         { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
         mockTokensDir
       );
-      mockOauthRefresh.mockRejectedValueOnce(
-        new OAuthRefreshError('timeout', 'oauth worker did not respond within 30s.')
-      );
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
 
       await expiringClient.listFiles();
 
-      expect(mockOauthRefresh).toHaveBeenCalledTimes(1);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(mockAuthedRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          service: 'sharepoint',
+          proactiveWithinSeconds: PROACTIVE_REFRESH_SECONDS,
+        })
+      );
     });
 
-    it('re-throws OAuthScopeMismatchError from proactive refresh (cannot self-heal)', async () => {
+    it('does not swallow OAuthScopeMismatchError surfaced by the helper (cannot self-heal)', async () => {
       const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
-      const expiringClient = new SharePointClient(
-        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
-        mockTokensDir
-      );
-      mockOauthRefresh.mockRejectedValueOnce(
+      mockAuthedRequest.mockRejectedValueOnce(
         new OAuthScopeMismatchError('Sites.Manage.All not granted')
       );
 
-      await expect(expiringClient.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-      // No fetch should have been attempted — scope mismatch will not be fixed by retry.
+      await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
+      // SharePoint never reached its own fetch — the helper rejected first.
       expect(fetchMock).not.toHaveBeenCalled();
-    });
-
-    it('proactive refresh double-check skips a redundant call when another caller already refreshed', async () => {
-      // Two concurrent calls enter proactive refresh because the cached JWT is
-      // near expiry. The mutex serializes them; the second one, after acquiring
-      // the lock, must observe that this.config.accessToken changed and SKIP
-      // its own oauth.refresh — otherwise we waste a round-trip to the host
-      // oauth worker on every overlapping tool call.
-      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
-      const client = new SharePointClient(
-        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
-        mockTokensDir
-      );
-      mockLoadToken.mockResolvedValueOnce('post-shared-refresh');
-      fetchMock.mockResolvedValue({ ok: true, json: async () => ({ value: [] }) });
-
-      await Promise.all([client.listFiles(), client.listFiles()]);
-
-      // Both calls completed but only ONE refresh round-trip happened.
-      expect(mockOauthRefresh).toHaveBeenCalledTimes(1);
-      // Both ultimately issued their Graph fetch using the refreshed token.
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    });
-
-    it('logs proactive refresh failure when the rejection is a non-Error value', async () => {
-      // refreshAccessToken could in theory reject with a plain string (older
-      // shared/oauth-client paths did so before typed errors landed). The
-      // fall-through path must still produce a usable warning instead of
-      // crashing on `e.message` of a non-Error.
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const nearExpiry = Math.floor(Date.now() / 1000) + 60;
-      const client = new SharePointClient(
-        { ...mockConfig, accessToken: makeJwt({ exp: nearExpiry }) },
-        mockTokensDir
-      );
-      mockOauthRefresh.mockRejectedValueOnce('opaque string failure');
-      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
-
-      await client.listFiles();
-
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('opaque string failure'));
-      // Fell through to Graph with the stale-but-still-valid token.
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      warnSpy.mockRestore();
-    });
-
-    it('should use already-refreshed token when double-check detects another thread refreshed it', async () => {
-      // The double-check locking path is exercised by making two concurrent requests.
-      // When both get 401 simultaneously, the second one to acquire the mutex finds that
-      // the token was already refreshed by the first, so it retries with the new token.
-
-      // Setup: two concurrent listFiles calls
-      // Call 1 (first to acquire mutex): 401 → refresh → retry succeeds
-      // Call 2 (second to acquire mutex): 401 → double-check sees token changed → retry succeeds
-      let fetchCallCount = 0;
-
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      global.fetch = vi.fn(async () => {
-        fetchCallCount++;
-        const n = fetchCallCount;
-
-        if (n === 1 || n === 2) {
-          // Both initial requests get 401
-          return { status: 401, ok: false } as Response;
-        }
-        if (n === 3) {
-          // Token refresh OAuth call (only one should happen)
-          return {
-            ok: true,
-            json: async () => ({
-              access_token: 'refreshed-token',
-              refresh_token: 'refreshed-refresh',
-              token_type: 'Bearer',
-              expires_in: 3600,
-            }),
-          } as Response;
-        }
-        // Retries for both requests succeed
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ value: [] }),
-        } as Response;
-      }) as typeof fetch;
-
-      // Run two concurrent requests
-      const [result1, result2] = await Promise.all([client.listFiles(), client.listFiles()]);
-
-      expect(result1.files).toEqual([]);
-      expect(result2.files).toEqual([]);
-      // Should be: 2 initial calls + 1 OAuth refresh + 2 retries = 5 calls
-      // OR: 2 initial + 1 OAuth + 1 double-check retry + 1 retry = 5 calls
-      expect(fetchCallCount).toBeGreaterThanOrEqual(4);
-    });
-
-    it('should timeout during retry after double-check detects token already refreshed', async () => {
-      // Two concurrent 401s; second hits double-check path; its retry times out
-      let fetchCallCount = 0;
-      mockFs.writeFile.mockResolvedValue(undefined);
-
-      global.fetch = vi.fn(async () => {
-        fetchCallCount++;
-        const n = fetchCallCount;
-        if (n === 1 || n === 2) {
-          return { status: 401, ok: false } as Response;
-        }
-        if (n === 3) {
-          // OAuth refresh succeeds
-          return {
-            ok: true,
-            json: async () => ({
-              access_token: 'new-token',
-              token_type: 'Bearer',
-              expires_in: 3600,
-            }),
-          } as Response;
-        }
-        // First retry after own-refresh succeeds; second retry (double-check path) times out
-        if (n === 4) {
-          return { ok: true, status: 200, json: async () => ({ value: [] }) } as Response;
-        }
-        // Double-check retry times out
-        const abortError = new Error('The operation was aborted');
-        abortError.name = 'AbortError';
-        throw abortError;
-      }) as typeof fetch;
-
-      // One will succeed, one might timeout — just ensure no unhandled rejection
-      const results = await Promise.allSettled([client.listFiles(), client.listFiles()]);
-      const rejected = results.filter((r) => r.status === 'rejected');
-      if (rejected.length > 0) {
-        const reason = (rejected[0] as PromiseRejectedResult).reason as Error;
-        expect(reason.message).toMatch(/timeout/i);
-      }
-    });
-
-    it('re-throws non-Abort retry errors verbatim after double-check sees a refreshed token', async () => {
-      // Surface real network failures during the post-double-check retry
-      // instead of swallowing them as timeouts — important for diagnostics
-      // when DNS dies mid-tool-call.
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockLoadToken
-        .mockResolvedValueOnce('first-refresh-token')
-        .mockResolvedValueOnce('first-refresh-token');
-      let fetchCallCount = 0;
-      global.fetch = vi.fn(async () => {
-        fetchCallCount++;
-        const n = fetchCallCount;
-        // Both initial calls 401.
-        if (n === 1 || n === 2) return { status: 401, ok: false } as Response;
-        // First retry (own-refresh) succeeds.
-        if (n === 3)
-          return { ok: true, status: 200, json: async () => ({ value: [] }) } as Response;
-        // Second retry (double-check path with token-changed) hits a non-Abort
-        // network blip — must surface verbatim, not as a timeout.
-        throw new TypeError('fetch failed');
-      }) as typeof fetch;
-
-      const results = await Promise.allSettled([client.listFiles(), client.listFiles()]);
-      const rejected = results.find((r) => r.status === 'rejected') as
-        | PromiseRejectedResult
-        | undefined;
-      expect(rejected).toBeDefined();
-      const err = (rejected as PromiseRejectedResult).reason as Error;
-      expect(err.message).not.toMatch(/timeout/i);
-      expect(err.message).toMatch(/fetch failed/);
-    });
-
-    it('wraps AbortError as a request-timeout message after double-check sees a refreshed token', async () => {
-      // Double-check path: second concurrent call's retry aborts. The error
-      // must be surfaced as the typed timeout message so diagnostics are
-      // consistent with the other retry paths.
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockLoadToken
-        .mockResolvedValueOnce('first-refresh-token')
-        .mockResolvedValueOnce('first-refresh-token');
-      let fetchCallCount = 0;
-      global.fetch = vi.fn(async () => {
-        fetchCallCount++;
-        const n = fetchCallCount;
-        if (n === 1 || n === 2) return { status: 401, ok: false } as Response;
-        if (n === 3)
-          return { ok: true, status: 200, json: async () => ({ value: [] }) } as Response;
-        const abortError = new Error('aborted');
-        abortError.name = 'AbortError';
-        throw abortError;
-      }) as typeof fetch;
-
-      const results = await Promise.allSettled([client.listFiles(), client.listFiles()]);
-      const rejected = results.find((r) => r.status === 'rejected') as
-        | PromiseRejectedResult
-        | undefined;
-      expect(rejected).toBeDefined();
-      const err = (rejected as PromiseRejectedResult).reason as Error;
-      expect(err.message).toMatch(/Graph API request timeout after/);
-    });
-
-    it('wraps AbortError as a request-timeout message during own-refresh retry', async () => {
-      // Reactive 401 → host oauth refresh writes new access_token → retry the
-      // Graph fetch. If THAT retry itself aborts, surface a typed timeout
-      // message so callers see "Graph API request timeout after Xms" instead
-      // of the raw AbortError name leaking into diagnostics.
-      mockLoadToken.mockResolvedValueOnce('post-refresh-token');
-      fetchMock
-        .mockResolvedValueOnce({ status: 401, ok: false }) // initial 401
-        .mockImplementationOnce(async () => {
-          // retry after refresh: aborts
-          const abortError = new Error('aborted');
-          abortError.name = 'AbortError';
-          throw abortError;
-        });
-
-      await expect(client.listFiles()).rejects.toThrow(/Graph API request timeout after/);
-    });
-
-    it('re-throws non-Abort retry errors verbatim during own-refresh retry', async () => {
-      // Same shape as above but the retry hits a non-Abort network blip
-      // (TypeError("fetch failed") from undici). Must not be misreported
-      // as a timeout — DNS / TCP / TLS failures need their real message.
-      mockLoadToken.mockResolvedValueOnce('post-refresh-token');
-      fetchMock
-        .mockResolvedValueOnce({ status: 401, ok: false })
-        .mockRejectedValueOnce(new TypeError('socket hang up'));
-
-      await expect(client.listFiles()).rejects.toThrow(/socket hang up/);
     });
 
     it('should merge custom headers with authorization', async () => {
@@ -969,22 +600,6 @@ describe('SharePointClient', () => {
     it('should timeout on slow Graph API response', async () => {
       // Mock slow response that takes longer than API_TIMEOUT_MS (30000ms)
       // We'll simulate abort by making fetch reject with AbortError
-      fetchMock.mockImplementationOnce(() => {
-        return new Promise((_, reject) => {
-          const error = new Error('The operation was aborted');
-          error.name = 'AbortError';
-          setTimeout(() => reject(error), 100);
-        });
-      });
-
-      await expect(client.listFiles()).rejects.toThrow(/timeout/i);
-    });
-
-    it('should timeout on slow token refresh', async () => {
-      // First call returns 401 (trigger refresh)
-      fetchMock.mockResolvedValueOnce({ status: 401, ok: false });
-
-      // Token refresh hangs and times out
       fetchMock.mockImplementationOnce(() => {
         return new Promise((_, reject) => {
           const error = new Error('The operation was aborted');
@@ -2473,30 +2088,23 @@ describe('SharePointClient', () => {
       }
     });
 
-    it('retries with refreshed access_token on initial 401', async () => {
-      // Cold-start scenario: /tokens/access_token is stale because the worker
-      // restarted long after the last activity. Without the refresh path,
-      // resolveCompositeSiteId would fail permanently — sharepoint container
-      // crashes with "401 Unauthorized" and never recovers (verified live).
+    it('delegates the cold-start lookup to authedRequest and returns its refreshed result', async () => {
+      // Cold-start scenario: /tokens/access_token is stale. The shared helper
+      // owns the 401 → refresh → retry; here we drive it via the mock (send
+      // twice: stale 401, then fresh 200) and assert the composite id flows out.
       const fetchMock = vi
         .fn()
-        // First call returns 401 with the stale bearer.
-        .mockResolvedValueOnce({
-          ok: false,
-          status: 401,
-          statusText: 'Unauthorized',
-        })
-        // Refresh succeeds → /tokens/access_token has a fresh bearer.
+        .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
         .mockResolvedValueOnce({
           ok: true,
           json: async () => ({ id: 'contoso.sharepoint.com,site-guid,web-guid' }),
         });
       global.fetch = fetchMock as unknown as typeof fetch;
-      mockOauthRefresh.mockResolvedValueOnce({
-        expiresIn: 3600,
-        grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
+      mockAuthedRequest.mockImplementationOnce(async (opts) => {
+        await opts.send(opts.state.accessToken);
+        opts.state.accessToken = 'a-fresh';
+        return opts.send(opts.state.accessToken);
       });
-      mockLoadToken.mockResolvedValueOnce('a-fresh');
 
       const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'a-stale', {
         tokensDir: '/test/tokens',
@@ -2505,25 +2113,25 @@ describe('SharePointClient', () => {
         ok: true,
         compositeId: 'contoso.sharepoint.com,site-guid,web-guid',
       });
-      // Refresh path: first fetch with stale token, then refresh, then retry
-      // with the fresh bearer.
+      expect(mockAuthedRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ service: 'sharepoint', tokensDir: '/test/tokens' })
+      );
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(fetchMock.mock.calls[1][1]).toMatchObject({
         headers: { Authorization: 'Bearer a-fresh' },
       });
     });
 
-    it('logs and continues when proactive refresh during init fails with a non-Error value', async () => {
-      // resolveCompositeSiteId triggers a refresh on first-call 401 (cold-start
-      // path). If oauth.refresh throws a plain string the catch must still log
-      // a usable warning instead of crashing on `e.message` and aborting init.
+    it('logs and continues when authedRequest rejects during init (refresh failure)', async () => {
+      // If the shared helper rejects during the cold-start lookup, the catch
+      // must log a usable warning and fall through to a bare lookup — not crash.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const fetchMock = vi
         .fn()
-        // First call: stale 401.
+        // Fall-through bare lookup after the helper rejected: stale 401.
         .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' });
       global.fetch = fetchMock as unknown as typeof fetch;
-      mockOauthRefresh.mockRejectedValueOnce('non-error string failure');
+      mockAuthedRequest.mockRejectedValueOnce('non-error string failure');
 
       const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'stale-tok', {
         refreshOn401: true,
@@ -2569,9 +2177,10 @@ describe('SharePointClient', () => {
       });
     });
 
-    it('also guards the post-401-refresh retry with an AbortSignal', async () => {
-      // After a 401 → refresh, the retry must carry the same timeout — pre-fix
-      // only the initial fetch had one.
+    it('guards both the initial and the post-401-refresh retry fetch with an AbortSignal', async () => {
+      // The cold-start `send` SharePoint passes to authedRequest wires a per-
+      // request AbortController. Drive the helper through both attempts (401,
+      // then 200) and assert each carries a signal — pre-fix only the initial had one.
       const fetchMock = vi
         .fn()
         .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
@@ -2580,8 +2189,10 @@ describe('SharePointClient', () => {
           json: async () => ({ id: 'contoso.sharepoint.com,site,web' }),
         });
       global.fetch = fetchMock as unknown as typeof fetch;
-      mockOauthRefresh.mockResolvedValueOnce({ expiresIn: 3600, grantedScopes: [] });
-      mockLoadToken.mockResolvedValueOnce('fresh-after-refresh');
+      mockAuthedRequest.mockImplementationOnce(async (opts) => {
+        await opts.send(opts.state.accessToken);
+        return opts.send(opts.state.accessToken);
+      });
 
       const result = await resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'stale-tok', {
         refreshOn401: true,

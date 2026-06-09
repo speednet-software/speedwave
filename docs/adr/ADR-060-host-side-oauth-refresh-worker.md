@@ -38,6 +38,10 @@ State lives at `~/.speedwave/oauth/<project>/<service>.json` (mode 0o600, parent
 
 A startup migration (`crates/speedwave-runtime/src/oauth_state_migration.rs`, also reused by Desktop's in-process repair) nests any legacy top-level `clientId`/`tenantId` under `providerData` — shape-only, idempotent, secrets are never fabricated or moved. The re-authorize banner is computed regardless of `configured` so a file too damaged to migrate still surfaces a recovery path.
 
+## Shared refresh-retry helper
+
+On-demand `refresh` is no longer re-implemented per worker. Every OAuth consumer (built-in workers plus plugins via a vendored copy) calls a shared `authedRequest` helper in `mcp-shared` (`mcp-servers/shared/src/oauth-authed-request.ts`): it issues the HTTP request, and on an auth-failure status calls `oauth.refresh()`, re-reads `/tokens/access_token`, and retries once — so the refresh-retry logic is SSOT, not duplicated. The auth-failure trigger is `[401]` by default per RFC 6750's `invalid_token` response,[^1] and consumers may add non-standard statuses (GLPI also treats `400` as expired-token). A `5xx` is a server fault and never triggers refresh. SharePoint delegates both its reactive and proactive (JWT `exp`) refresh to this helper.
+
 ## Rejected alternatives
 
 - **Keep SharePoint's `:rw` exception (ADR-009's original choice).** A `:rw` mount lets a compromised container rewrite the refresh token to one the attacker controls, persisting access past a user revoke, and any `/tokens` read path is a leak risk. Moving refresh host-side makes the gate systemic.
@@ -53,3 +57,5 @@ A startup migration (`crates/speedwave-runtime/src/oauth_state_migration.rs`, al
 - Microsoft Identity — device authorization grant (public client): <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>
 - Microsoft Identity — refresh-token redemption: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow#refresh-the-access-token>
 - Microsoft Identity — refresh-token revocation is a user/admin operation: <https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens#token-revocation>
+
+[^1]: RFC 6750 — a protected resource returns `401 Unauthorized` with `error="invalid_token"` when the access token is expired or otherwise invalid: <https://datatracker.ietf.org/doc/html/rfc6750#section-3.1>

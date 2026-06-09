@@ -40,6 +40,10 @@ A self-hosted IdP (e.g. GLPI[^8]) has no fixed `authorize_url`/`token_url` — t
 - Compose injection + worker respawn on consumer-set change — `crates/speedwave-runtime/src/compose.rs` (`oauth_consumer_service_ids`, `oauth_consumer_compose_name`), `desktop/src-tauri/src/main.rs` (`ensure_oauth_running`).
 - UI — `desktop/src/src/app/shared/oauth-connect/` (shared connect component), `plugin-credentials-form`, `plugin-detail`.
 
+## Refresh-retry in plugin workers
+
+Plugins reuse the shared `authedRequest` refresh-retry (ADR-060) by **vendoring** it — copying `oauth-authed-request.ts` plus a trimmed `oauth-client` into the plugin's own `src/server/`, the same literal-copy pattern already used for the rest of `mcp-shared` (since `@speedwave/mcp-shared` is not published to npm, a plugin cannot import it). Plugins must **not** hand-roll their own refresh loop. GLPI opts `400` into the auth-failure status set alongside the default `401`, because in our testing a GLPI 11 instance returns HTTP `400` (not `401`) for an expired token (observed instance behavior, not a documented contract).
+
 ## Security surface
 
 Manifest-declared URLs are dialed by the host, so every endpoint goes through the shared SSRF validator (https-only, no private/loopback) at install and again on each worker refresh — a signed plugin is **not** exempt.[^6] The worker hardens the data-driven token request (timeout, no redirect-following, content-type + body-size cap) and redacts IdP `error_description` free text. The `:ro`-everywhere token-mount invariant (ADR-060) is preserved: plugin OAuth secrets never enter `/tokens`.
