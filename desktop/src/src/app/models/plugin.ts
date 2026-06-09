@@ -26,6 +26,11 @@ export interface PluginAuthField {
    * `save_plugin_credentials`; `message` is shown on mismatch.
    */
   validation?: PluginAuthFieldValidation;
+  /**
+   * Marks an OAuth credential filled by the host-driven Authorize flow, not a
+   * text input. Stored off-mount. Mirrors Rust `AuthFieldDef.oauth_flow`.
+   */
+  oauth_flow?: boolean;
 }
 
 /** Regex constraint for a {@link PluginAuthField} value. */

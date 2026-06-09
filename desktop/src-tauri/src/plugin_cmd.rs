@@ -186,16 +186,27 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
         let auth_fields: Vec<plugin::AuthFieldDef> = manifest.auth_fields.clone();
 
         let svc_token_dir = token_dir_for(&project, sid)?;
+        let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
         let configured = is_plugin_configured(
             &svc_token_dir,
             &manifest.auth_fields,
             &manifest.requires_integrations,
             &project,
+            sid,
         );
+        let oauth_authorized = plugin_oauth_authorized(&project, sid);
 
         let mut current_values = HashMap::new();
         let mut configured_fields = Vec::new();
         for field in &manifest.auth_fields {
+            // OAuth fields are off-mount; their "configured" indicator reflects
+            // an authorized state file, not a token in `/tokens`.
+            if field.oauth_flow {
+                if oauth_authorized {
+                    configured_fields.push(field.key.clone());
+                }
+                continue;
+            }
             let path = svc_token_dir.join(&field.key);
             // Metadata-only existence + non-empty check — drives the
             // per-field "configured" indicator for ALL fields (secret or
@@ -252,17 +263,35 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
     Ok(PluginsResponse { plugins: entries })
 }
 
+/// True when an authorized OAuth state file exists for this plugin (refresh
+/// token minted). OAuth credentials live off-mount, so `/tokens` presence is
+/// not the readiness signal — the state file is.
+fn plugin_oauth_authorized(project: &str, slug: &str) -> bool {
+    let path = speedwave_runtime::plugin::oauth_state_file(project, slug);
+    std::fs::metadata(&path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+}
+
 fn is_plugin_configured(
     svc_token_dir: &std::path::Path,
     auth_fields: &[plugin::AuthFieldDef],
     requires_integrations: &[String],
     project: &str,
+    slug: &str,
 ) -> bool {
+    // OAuth fields are stored off-mount; readiness for them = an authorized
+    // state file, not a token in `/tokens`.
+    let has_oauth = auth_fields.iter().any(|f| f.oauth_flow);
+    if has_oauth && !plugin_oauth_authorized(project, slug) {
+        return false;
+    }
+
     let secret_fields: Vec<_> = auth_fields
         .iter()
-        .filter(|f| plugin::blocks_plugin_readiness(f))
+        .filter(|f| plugin::blocks_plugin_readiness(f) && !f.oauth_flow)
         .collect();
-    // Check secret fields if any exist
+    // Check non-oauth secret fields if any exist
     if !secret_fields.is_empty() {
         let all_present = secret_fields.iter().all(|f| {
             let path = svc_token_dir.join(&f.key);
@@ -1076,6 +1105,7 @@ mod tests {
             &fields,
             &[],
             "any-project",
+            "any-slug",
         ));
     }
 
@@ -1086,6 +1116,7 @@ mod tests {
             &[],
             &[],
             "any-project",
+            "any-slug",
         ));
     }
 
@@ -1107,6 +1138,7 @@ mod tests {
             &fields,
             &[],
             "any-project",
+            "any-slug",
         ));
     }
 
@@ -1131,7 +1163,8 @@ mod tests {
             dir.path(),
             &fields,
             &[],
-            "any-project"
+            "any-project",
+            "any-slug",
         ));
     }
 
@@ -1156,7 +1189,8 @@ mod tests {
             dir.path(),
             &fields,
             &[],
-            "any-project"
+            "any-project",
+            "any-slug",
         ));
     }
 
@@ -1178,7 +1212,8 @@ mod tests {
             dir.path(),
             &fields,
             &[],
-            "any-project"
+            "any-project",
+            "any-slug",
         ));
     }
 
@@ -1213,7 +1248,8 @@ mod tests {
             dir.path(),
             &fields,
             &[],
-            "any-project"
+            "any-project",
+            "any-slug",
         ));
     }
 
@@ -1788,6 +1824,7 @@ mod tests {
             &[],
             &["sharepoint".to_string()],
             "nonexistent-project",
+            "any-slug",
         );
         assert!(
             !configured,
@@ -1798,11 +1835,76 @@ mod tests {
     #[test]
     fn is_plugin_configured_true_when_no_required_integrations() {
         let dir = tempfile::tempdir().unwrap();
-        let configured = is_plugin_configured(dir.path(), &[], &[], "any-project");
+        let configured = is_plugin_configured(dir.path(), &[], &[], "any-project", "any-slug");
         assert!(
             configured,
             "should be true when no integrations required and no auth fields"
         );
+    }
+
+    fn oauth_field(key: &str) -> plugin::AuthFieldDef {
+        plugin::AuthFieldDef {
+            key: key.into(),
+            label: key.into(),
+            field_type: "password".into(),
+            placeholder: "".into(),
+            is_secret: true,
+            required: true,
+            description: None,
+            validation: None,
+            oauth_flow: true,
+        }
+    }
+
+    // CD-4: an oauth_flow plugin is NOT configured until an authorized oauth
+    // state file exists — its secret lives off-mount, not in /tokens.
+    #[test]
+    fn is_plugin_configured_false_for_oauth_plugin_without_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let fields = vec![oauth_field("client_id")];
+        let configured = is_plugin_configured(
+            std::path::Path::new("/nonexistent"),
+            &fields,
+            &[],
+            "proj",
+            "my-plugin",
+        );
+        assert!(!configured, "no oauth state -> not configured");
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn is_plugin_configured_true_for_oauth_plugin_with_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        // Write a non-empty authorized state file.
+        let state_path = speedwave_runtime::plugin::oauth_state_file("proj", "my-plugin");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, "{\"refreshToken\":\"r\"}").unwrap();
+
+        let fields = vec![oauth_field("client_id")];
+        let configured = is_plugin_configured(
+            std::path::Path::new("/nonexistent"),
+            &fields,
+            &[],
+            "proj",
+            "my-plugin",
+        );
+        assert!(configured, "authorized oauth state -> configured");
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
     }
 
     fn blocks_auto_enable(auth_fields: &[plugin::AuthFieldDef]) -> bool {
