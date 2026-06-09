@@ -120,14 +120,17 @@ describe('authedRequest', () => {
     expect(send).toHaveBeenCalledWith('fresh-token'); // refreshed before send
   });
 
-  // --- Proactive failure is non-fatal: fall through with the current token ---
+  // --- Proactive failure is non-fatal: fall through with the current token, but log it ---
   it('falls through to the request when a proactive refresh fails', async () => {
     accessTokenExpiresWithin.mockReturnValue(true);
     refreshAccessToken.mockRejectedValue(new Error('worker_unreachable'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const send = vi.fn().mockResolvedValue(resp(200));
     const out = await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
     expect(out.status).toBe(200);
     expect(send).toHaveBeenCalledWith('old-token'); // kept the pre-refresh token
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('proactive refresh failed'));
+    warn.mockRestore();
   });
 
   // --- Proactive scope-mismatch cannot self-heal — propagate, no request ---
@@ -150,7 +153,7 @@ describe('authedRequest', () => {
     expect(opts.state.accessToken).toBe('fresh-token');
   });
 
-  // --- Single-flight: concurrent 401s trigger ONE refresh, not N ---
+  // --- Single-flight: concurrent failures trigger ONE refresh, not N ---
   it('serializes concurrent refreshes — two parallel 401s refresh once', async () => {
     const lock = new RefreshLock();
     const state = { accessToken: 'old-token' };
@@ -166,7 +169,50 @@ describe('authedRequest', () => {
     ]);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
-    expect(refreshes).toBe(1); // second caller reused the first refresh (token changed)
+    expect(refreshes).toBe(1); // generation guard, not token-value comparison
+  });
+
+  // --- Single-flight holds even if the refreshed token is IDENTICAL ---
+  it('single-flights via generation even when the new token equals the old', async () => {
+    const lock = new RefreshLock();
+    const state = { accessToken: 'same-token' };
+    loadToken.mockResolvedValue('same-token'); // worker re-issues an identical token
+    let refreshes = 0;
+    refreshAccessToken.mockImplementation(async () => {
+      refreshes += 1;
+      return { expiresIn: 3600, grantedScopes: [] };
+    });
+    const mkSend = () => vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
+    await Promise.all([
+      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
+      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
+    ]);
+    expect(refreshes).toBe(1); // a string-identity guard would wrongly refresh twice here
+  });
+
+  // --- Proactive window provided but token fresh — no proactive refresh ---
+  it('does NOT proactively refresh when the token is not near expiry', async () => {
+    accessTokenExpiresWithin.mockReturnValue(false);
+    const send = vi.fn().mockResolvedValue(resp(200));
+    await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
+    expect(refreshAccessToken).not.toHaveBeenCalled();
+  });
+
+  // --- Chained: proactive refresh succeeds, server still 401s → reactive refresh ---
+  it('refreshes reactively after a proactive refresh when the server still 401s', async () => {
+    accessTokenExpiresWithin.mockReturnValue(true);
+    const send = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
+    const out = await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
+    expect(out.status).toBe(200);
+    expect(refreshAccessToken).toHaveBeenCalledTimes(2); // proactive + reactive
+  });
+
+  // --- Guard: a sub-400 status in authFailureStatuses is rejected ---
+  it('rejects authFailureStatuses containing a status below 400', async () => {
+    const send = vi.fn().mockResolvedValue(resp(200));
+    await expect(
+      authedRequest({ ...baseOpts(send), authFailureStatuses: [200, 401] })
+    ).rejects.toThrow(/>= 400/);
   });
 
   // --- Error path: refresh failure propagates ---

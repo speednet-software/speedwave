@@ -39,7 +39,8 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
       grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
     }),
     // The shared refresh-retry loop is unit-tested in oauth-authed-request.test.ts;
-    // here we mock it to assert SharePoint delegates correctly. Default: one send.
+    // here we mock it to assert SharePoint delegates correctly. Its default
+    // implementation (one send) is wired in beforeEach.
     authedRequest: vi.fn(),
     ts: () => '[00:00:00]',
   };

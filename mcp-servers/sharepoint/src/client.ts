@@ -15,6 +15,7 @@ import {
   withSetupGuidance,
   authedRequest,
   RefreshLock,
+  OAuthScopeMismatchError,
   PROACTIVE_REFRESH_SECONDS,
   ConnectionStatusTracker,
   memoizedPromise,
@@ -885,7 +886,7 @@ export type ResolveResult =
  * @param accessToken - bearer token used for the lookup
  * @param opts - cold-start refresh tuning
  * @param opts.tokensDir - tokens mount path (default `/tokens`); only read when refreshing
- * @param opts.refreshOn401 - retry once after `oauthRefreshAccessToken` when the lookup returns 401 (default true). Set false in unit tests that don't mock the refresh worker.
+ * @param opts.refreshOn401 - on a 401, refresh via `authedRequest` and retry once (default true). Set false in unit tests that don't mock the refresh worker.
  * @returns the composite id (or untouched value if already composite), or a typed error
  */
 export async function resolveCompositeSiteId(
@@ -941,6 +942,8 @@ export async function resolveCompositeSiteId(
           tokensDir,
         });
       } catch (err) {
+        // Scope mismatch can't self-heal — propagate so the re-consent UI fires.
+        if (err instanceof OAuthScopeMismatchError) throw err;
         console.warn(
           `${ts()} SharePoint site lookup: token refresh failed during init — ${err instanceof Error ? err.message : String(err)}`
         );

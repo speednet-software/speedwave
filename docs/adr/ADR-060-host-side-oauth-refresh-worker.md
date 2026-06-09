@@ -40,7 +40,7 @@ A startup migration (`crates/speedwave-runtime/src/oauth_state_migration.rs`, al
 
 ## Shared refresh-retry helper
 
-On-demand `refresh` is no longer re-implemented per worker. Every OAuth consumer (built-in workers plus plugins via a vendored copy) calls a shared `authedRequest` helper in `mcp-shared` (`mcp-servers/shared/src/oauth-authed-request.ts`): it issues the HTTP request, and on an auth-failure status calls `oauth.refresh()`, re-reads `/tokens/access_token`, and retries once — so the refresh-retry logic is SSOT, not duplicated. The auth-failure trigger is `[401]` by default per RFC 6750's `invalid_token` response,[^1] and consumers may add non-standard statuses (GLPI also treats `400` as expired-token). A `5xx` is a server fault and never triggers refresh. SharePoint delegates both its reactive and proactive (JWT `exp`) refresh to this helper.
+On-demand `refresh` is no longer re-implemented per worker. Every OAuth consumer (built-in workers plus plugins via a vendored copy) calls a shared `authedRequest` helper in `mcp-shared` (`mcp-servers/shared/src/oauth-authed-request.ts`): it issues the HTTP request, and on an auth-failure status calls `oauth.refresh()`, re-reads `/tokens/access_token`, and retries once — so the refresh-retry logic is SSOT, not duplicated. The auth-failure trigger is `[401]` by default per RFC 6750's `invalid_token` response,[^1] and consumers may add non-standard statuses (a GLPI 11 instance is observed to return `400` for an expired token — observed instance behavior, not a documented contract; see ADR-069). A `5xx` is a server fault and never triggers refresh. SharePoint delegates both its reactive and proactive (JWT `exp`) refresh to this helper.
 
 ## Rejected alternatives
 
