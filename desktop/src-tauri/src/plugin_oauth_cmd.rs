@@ -316,15 +316,31 @@ async fn wait_for_callback(
     }
 }
 
+/// Max bytes read while looking for the request line — a long `code`/`state`
+/// plus headers can exceed one TCP segment, so read until CRLF, not once.
+const MAX_REQUEST_LINE_BYTES: usize = 16 * 1024;
+
 /// Reads the HTTP request line; returns the `/callback?…` query string, or
-/// `None` for a non-callback path.
+/// `None` for a non-callback path. Reads until the first CRLF (bounded) so a
+/// fragmented or oversized request line is not silently truncated.
 async fn read_callback_request(
     stream: &mut tokio::net::TcpStream,
 ) -> Result<Option<String>, String> {
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
-    let head = String::from_utf8_lossy(&buf[..n]);
-    let first_line = head.lines().next().unwrap_or("");
+    let mut acc = Vec::with_capacity(512);
+    let mut chunk = [0u8; 1024];
+    let first_line = loop {
+        if let Some(pos) = acc.windows(2).position(|w| w == b"\r\n") {
+            break String::from_utf8_lossy(&acc[..pos]).into_owned();
+        }
+        if acc.len() >= MAX_REQUEST_LINE_BYTES {
+            break String::from_utf8_lossy(&acc).into_owned();
+        }
+        let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            break String::from_utf8_lossy(&acc).into_owned();
+        }
+        acc.extend_from_slice(&chunk[..n]);
+    };
     // "GET /callback?code=…&state=… HTTP/1.1"
     let target = first_line.split_whitespace().nth(1).unwrap_or("");
     if let Some(q) = target.strip_prefix("/callback?") {
@@ -526,6 +542,55 @@ mod tests {
     fn parse_callback_query_extracts_code_on_state_match() {
         let code = parse_callback_query("code=abc&state=xyz", "xyz").unwrap();
         assert_eq!(code, "abc");
+    }
+
+    // The request line may arrive split across TCP segments; read_callback_request
+    // must accumulate until CRLF, not truncate on the first read.
+    #[tokio::test]
+    async fn read_callback_request_handles_fragmented_request_line() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let writer = tokio::spawn(async move {
+            let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            // Split the request line mid-query, with a pause between writes.
+            client.write_all(b"GET /callback?code=ab").await.unwrap();
+            client.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            client
+                .write_all(b"c&state=xyz HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            client.flush().await.unwrap();
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        let query = read_callback_request(&mut server).await.unwrap();
+        assert_eq!(query.as_deref(), Some("code=abc&state=xyz"));
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_callback_request_returns_none_for_non_callback_path() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let writer = tokio::spawn(async move {
+            let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(b"GET /favicon.ico HTTP/1.1\r\n\r\n")
+                .await
+                .unwrap();
+            client.flush().await.unwrap();
+        });
+        let (mut server, _) = listener.accept().await.unwrap();
+        assert_eq!(read_callback_request(&mut server).await.unwrap(), None);
+        writer.await.unwrap();
     }
 
     #[test]
