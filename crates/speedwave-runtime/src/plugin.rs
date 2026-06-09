@@ -189,14 +189,28 @@ pub enum OAuthAuthStyle {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PluginOAuthSpec {
     pub grant_type: OAuthGrantType,
-    /// Token endpoint (code exchange / refresh / re-mint).
-    pub token_url: String,
-    /// Authorization endpoint (required for `authorization_code`).
+    /// Static token endpoint. Mutually exclusive with `base_url_field` (a
+    /// self-hosted IdP derives it per-instance — see `token_suffix`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_url: Option<String>,
+    /// Static authorization endpoint (`authorization_code`). Mutually exclusive
+    /// with `base_url_field`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorize_url: Option<String>,
     /// Device-authorization endpoint (required for `device_code`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_authorization_url: Option<String>,
+    /// `auth_fields[].key` carrying a per-instance base URL (self-hosted IdP).
+    /// The endpoints are this value + `authorize_suffix`/`token_suffix`,
+    /// resolved + SSRF-validated at authorize time, not install. See ADR-069.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url_field: Option<String>,
+    /// Path appended to the resolved base for the authorize endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorize_suffix: Option<String>,
+    /// Path appended to the resolved base for the token endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_suffix: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
     #[serde(default)]
@@ -1058,9 +1072,31 @@ fn validate_oauth_spec(
         );
     }
 
-    validate_oauth_url("oauth.token_url", &spec.token_url)?;
+    // Endpoints are either static URLs or derived from base_url_field + suffix
+    // (resolved + SSRF-validated at authorize time). Mutually exclusive.
+    let derived = spec.base_url_field.is_some();
+    if let Some(base_field) = spec.base_url_field.as_deref() {
+        if !auth_fields.iter().any(|f| f.key == base_field) {
+            anyhow::bail!("oauth.base_url_field '{base_field}' does not match any auth_fields key");
+        }
+        if spec.token_url.is_some() || spec.authorize_url.is_some() {
+            anyhow::bail!(
+                "oauth.base_url_field is mutually exclusive with token_url / authorize_url"
+            );
+        }
+        validate_oauth_suffix("oauth.token_suffix", spec.token_suffix.as_deref())?;
+        if spec.grant_type == OAuthGrantType::AuthorizationCode {
+            validate_oauth_suffix("oauth.authorize_suffix", spec.authorize_suffix.as_deref())?;
+        }
+    } else {
+        let token_url = spec.token_url.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("oauth.token_url (or oauth.base_url_field) is required")
+        })?;
+        validate_oauth_url("oauth.token_url", token_url)?;
+    }
+
     match spec.grant_type {
-        OAuthGrantType::AuthorizationCode => {
+        OAuthGrantType::AuthorizationCode if !derived => {
             let url = spec.authorize_url.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("oauth.authorize_url is required for grant_type authorization_code")
             })?;
@@ -1081,6 +1117,7 @@ fn validate_oauth_spec(
                 );
             }
         }
+        OAuthGrantType::AuthorizationCode => {} // derived: suffix checked above
     }
 
     // A fixed loopback redirect port must be a non-privileged user port; 0 is
@@ -1153,6 +1190,61 @@ fn validate_oauth_url(field: &str, url: &str) -> anyhow::Result<()> {
         anyhow::bail!("{field} must not point at a private or loopback address");
     }
     Ok(())
+}
+
+/// Validates a path suffix appended to a per-instance base URL: required,
+/// bounded, relative (leading `/`, no scheme/authority), no `..` traversal.
+fn validate_oauth_suffix(field: &str, suffix: Option<&str>) -> anyhow::Result<()> {
+    let s =
+        suffix.ok_or_else(|| anyhow::anyhow!("{field} is required with oauth.base_url_field"))?;
+    if s.is_empty() || !s.starts_with('/') {
+        anyhow::bail!("{field} must be a path starting with '/'");
+    }
+    if s.len() > consts::PLUGIN_OAUTH_SUFFIX_MAX_LEN {
+        anyhow::bail!(
+            "{field} exceeds {} bytes",
+            consts::PLUGIN_OAUTH_SUFFIX_MAX_LEN
+        );
+    }
+    if s.contains("..") || s.contains("://") || s.contains(['\n', '\r', '\0', ' ']) {
+        anyhow::bail!("{field} must be a clean relative path (no '..', scheme, or whitespace)");
+    }
+    Ok(())
+}
+
+/// Resolves the authorize + token endpoints for a derived (`base_url_field`)
+/// spec from the seed's base value, then SSRF-validates each resolved URL.
+/// Returns `(authorize_url, token_url)`. See ADR-069.
+pub fn resolve_oauth_endpoints(
+    spec: &PluginOAuthSpec,
+    seed: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<(Option<String>, String)> {
+    let base_field = spec
+        .base_url_field
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("resolve_oauth_endpoints called without base_url_field"))?;
+    let base = seed
+        .get(base_field)
+        .map(|v| v.trim_end_matches('/'))
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("base URL field '{base_field}' is not configured"))?;
+
+    let token_suffix = spec
+        .token_suffix
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("oauth.token_suffix missing"))?;
+    let token_url = format!("{base}{token_suffix}");
+    validate_oauth_url("resolved token_url", &token_url)?;
+
+    let authorize_url = match (spec.grant_type, spec.authorize_suffix.as_deref()) {
+        (OAuthGrantType::AuthorizationCode, Some(sfx)) => {
+            let url = format!("{base}{sfx}");
+            validate_oauth_url("resolved authorize_url", &url)?;
+            Some(url)
+        }
+        _ => None,
+    };
+    Ok((authorize_url, token_url))
 }
 
 /// Manifest-time checks for the optional `host_bridge` block. Mirrors
@@ -5323,9 +5415,12 @@ mod tests {
     fn valid_oauth_spec() -> PluginOAuthSpec {
         PluginOAuthSpec {
             grant_type: OAuthGrantType::AuthorizationCode,
-            token_url: "https://accounts.example.com/token".to_string(),
+            token_url: Some("https://accounts.example.com/token".to_string()),
             authorize_url: Some("https://accounts.example.com/authorize".to_string()),
             device_authorization_url: None,
+            base_url_field: None,
+            authorize_suffix: None,
+            token_suffix: None,
             scopes: vec!["read".to_string(), "write".to_string()],
             auth_style: OAuthAuthStyle::Basic,
             client_id_field: "client_id".to_string(),
@@ -5373,6 +5468,100 @@ mod tests {
         assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_ok());
     }
 
+    // -- derived endpoints (base_url_field + suffix) --
+
+    fn derived_oauth_spec() -> PluginOAuthSpec {
+        let mut spec = valid_oauth_spec();
+        spec.token_url = None;
+        spec.authorize_url = None;
+        spec.base_url_field = Some("base_url".to_string());
+        spec.authorize_suffix = Some("/authorize".to_string());
+        spec.token_suffix = Some("/token".to_string());
+        spec
+    }
+
+    fn derived_auth_fields() -> Vec<AuthFieldDef> {
+        vec![
+            oauth_field("client_id"),
+            oauth_field("client_secret"),
+            oauth_field("base_url"),
+        ]
+    }
+
+    #[test]
+    fn validate_oauth_spec_accepts_derived_endpoints() {
+        assert!(validate_oauth_spec(Some(&derived_oauth_spec()), &derived_auth_fields()).is_ok());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_base_url_field_with_static_url() {
+        let mut spec = derived_oauth_spec();
+        spec.token_url = Some("https://idp.example.com/token".to_string());
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_dangling_base_url_field() {
+        let mut spec = derived_oauth_spec();
+        spec.base_url_field = Some("nonexistent".to_string());
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_missing_token_suffix() {
+        let mut spec = derived_oauth_spec();
+        spec.token_suffix = None;
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_traversal_suffix() {
+        let mut spec = derived_oauth_spec();
+        spec.token_suffix = Some("/../etc/token".to_string());
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_non_relative_suffix() {
+        let mut spec = derived_oauth_spec();
+        spec.token_suffix = Some("token".to_string()); // no leading slash
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn resolve_oauth_endpoints_joins_base_and_suffix() {
+        let spec = derived_oauth_spec();
+        let mut seed = std::collections::HashMap::new();
+        seed.insert(
+            "base_url".to_string(),
+            "https://glpi.example.com/api.php".to_string(),
+        );
+        let (authorize, token) = resolve_oauth_endpoints(&spec, &seed).unwrap();
+        assert_eq!(token, "https://glpi.example.com/api.php/token");
+        assert_eq!(
+            authorize.as_deref(),
+            Some("https://glpi.example.com/api.php/authorize")
+        );
+    }
+
+    #[test]
+    fn resolve_oauth_endpoints_rejects_private_base() {
+        let spec = derived_oauth_spec();
+        let mut seed = std::collections::HashMap::new();
+        seed.insert(
+            "base_url".to_string(),
+            "https://127.0.0.1/api.php".to_string(),
+        );
+        assert!(resolve_oauth_endpoints(&spec, &seed).is_err());
+    }
+
+    #[test]
+    fn resolve_oauth_endpoints_errors_when_base_unconfigured() {
+        let spec = derived_oauth_spec();
+        let seed = std::collections::HashMap::new();
+        assert!(resolve_oauth_endpoints(&spec, &seed).is_err());
+    }
+
     // Edge: no oauth field and no oauth block — nothing to validate.
     #[test]
     fn validate_oauth_spec_ok_when_absent() {
@@ -5414,7 +5603,7 @@ mod tests {
     #[test]
     fn validate_oauth_spec_rejects_private_address() {
         let mut spec = valid_oauth_spec();
-        spec.token_url = "https://127.0.0.1/token".to_string();
+        spec.token_url = Some("https://127.0.0.1/token".to_string());
         let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
             .unwrap_err()
             .to_string();
@@ -5427,14 +5616,14 @@ mod tests {
     #[test]
     fn validate_oauth_spec_rejects_empty_token_url() {
         let mut spec = valid_oauth_spec();
-        spec.token_url = String::new();
+        spec.token_url = Some(String::new());
         assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
     }
 
     #[test]
     fn validate_oauth_spec_rejects_malformed_token_url() {
         let mut spec = valid_oauth_spec();
-        spec.token_url = "not-a-url".to_string();
+        spec.token_url = Some("not-a-url".to_string());
         assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
     }
 
@@ -5442,7 +5631,7 @@ mod tests {
     fn validate_oauth_spec_rejects_metadata_ip_token_url() {
         // Cloud metadata endpoint must be blocked through the OAuth path.
         let mut spec = valid_oauth_spec();
-        spec.token_url = "https://169.254.169.254/token".to_string();
+        spec.token_url = Some("https://169.254.169.254/token".to_string());
         assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
     }
 

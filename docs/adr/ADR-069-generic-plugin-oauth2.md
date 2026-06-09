@@ -25,6 +25,10 @@ The host runs the initial exchange:
 3. Open the browser to `authorize_url` with `redirect_uri` + `state` + `code_challenge`.
 4. Receive the callback, verify `state`, exchange the `code` (+ verifier) for access + refresh tokens, and persist the full state via the shared writer.
 
+## Instance-specific endpoints (self-hosted IdPs)
+
+A self-hosted IdP (e.g. GLPI[^8]) has no fixed `authorize_url`/`token_url` — they derive from the instance base URL the user enters. The manifest expresses this with `base_url_field` (naming an `auth_fields` key) plus `authorize_suffix`/`token_suffix`; it is mutually exclusive with the static `token_url`/`authorize_url`. The host resolves `base + suffix` from the seed at authorize time and **SSRF-validates the resolved URL then** (not at install, where the base is unknown). The **resolved** absolute URL is persisted into `providerData.tokenUrl`, so the worker's refresh path is unchanged. The base value is projected from the seed (SSOT) into the worker's `/tokens` mount so the worker can reach the API.
+
 ## Where it lives in code
 
 - Manifest schema + validation (grant gating, per-grant endpoints, SSRF, scope caps) — `crates/speedwave-runtime/src/plugin.rs` (`PluginOAuthSpec`, `validate_oauth_spec`).
@@ -64,3 +68,5 @@ Manifest-declared URLs are dialed by the host, so every endpoint goes through th
 [^6]: OWASP SSRF prevention — validate and restrict outbound request targets: <https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html>
 
 [^7]: SharePoint's device-code flow is user-delegated — a specific human authenticates at Microsoft and the issued token represents that user (ADR-060 §"Decision"): <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>
+
+[^8]: GLPI 11 is self-hosted; its High-Level REST API v2 OAuth endpoints are `<instance>/api.php/authorize` and `<instance>/api.php/token`, derived from the user's instance URL: <https://help.glpi-project.org/documentation/modules/configuration/general/api/restful-api-v2>

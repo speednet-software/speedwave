@@ -510,8 +510,15 @@ How it works in the UI:
 2. Click **Sign in with `<plugin>`**. For the `authorization_code` grant a
    browser tab opens; complete sign-in there. If the identity provider requires
    a registered redirect URI, the UI shows the loopback URI to register.
-3. On success the plugin shows as configured and Speedwave requests a restart so
-   the worker picks up the access token.
+3. On success the plugin is **auto-enabled** (a freshly-authorized OAuth plugin
+   is ready to run) and Speedwave shows the restart banner; click it so the
+   worker container starts and picks up the access token.
+
+**Self-hosted services.** When the OAuth endpoints depend on the instance (e.g. a
+self-hosted GLPI), the manifest declares `base_url_field` (naming the base-URL
+credential field) plus `authorize_suffix`/`token_suffix` instead of static
+`authorize_url`/`token_url`. The host resolves and SSRF-validates the endpoints
+from the base URL you enter at sign-in time.
 
 **Identity (who the service logs).** `authorization_code` and `device_code` are
 user-delegated: you sign in with your own account and the service attributes

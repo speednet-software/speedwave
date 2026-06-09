@@ -3086,13 +3086,19 @@ impl SecurityCheck {
                 plugin::TokenMount::ReadOnly => "ro",
                 plugin::TokenMount::ReadWrite { .. } => "rw",
             };
+            // An OAuth plugin consumes the host-side oauth worker, so it gets the
+            // same per-service bearer mount as SharePoint (ADR-069).
+            let extra_allowed: Vec<String> = if manifest.oauth.is_some() {
+                vec![format!("/secrets/oauth-auth-token-{sid}")]
+            } else {
+                Vec::new()
+            };
             let params = VolumeCheckParams {
                 container_name: &name,
                 expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
-                // Plugins do not currently use the host-side oauth worker.
-                extra_allowed_ro_targets: &[],
+                extra_allowed_ro_targets: &extra_allowed,
                 rules: VolumeCheckRules::PLUGIN,
             };
             let (base_violations, _) = validate_service_volume_mounts(service, &params);
@@ -9514,6 +9520,74 @@ services:
                 .iter()
                 .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
             "Plugin with only /tokens + /workspace should not trigger PLUGIN_NO_EXTRA_VOLUMES"
+        );
+    }
+
+    /// A plugin yaml with the oauth bearer mount the host injects for consumers.
+    fn oauth_consumer_plugin_yaml() -> String {
+        format!(
+            r#"
+version: "3"
+services:
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/.speedwave/oauth/test/bearer-example-plugin:/secrets/oauth-auth-token-example-plugin:ro
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user(),
+        )
+    }
+
+    #[test]
+    fn test_security_check_oauth_plugin_allows_bearer_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = oauth_consumer_plugin_yaml();
+        let mut manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+        manifest.oauth = oauth_plugin_manifest("example-plugin").oauth;
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
+            "OAuth plugin's bearer mount must be allowed, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_check_non_oauth_plugin_rejects_bearer_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = oauth_consumer_plugin_yaml();
+        // Manifest has NO oauth block — the bearer mount must NOT be allowed.
+        let manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
+            "a non-oauth plugin with a bearer mount must trigger PLUGIN_NO_EXTRA_VOLUMES"
         );
     }
 

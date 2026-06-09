@@ -64,13 +64,8 @@ pub async fn start_plugin_oauth(
             oauth.grant_type.as_str()
         ));
     }
-    let authorize_url = oauth
-        .authorize_url
-        .as_deref()
-        .ok_or_else(|| "oauth.authorize_url missing".to_string())?;
-
-    // Credentials come from the seed saved by save_plugin_credentials,
-    // not from the command args.
+    // Credentials + per-instance base URL come from the seed saved by
+    // save_plugin_credentials, not from the command args.
     let seed = read_oauth_seed(&project, &slug)?;
     let client_id = seed
         .get(&oauth.client_id_field)
@@ -80,6 +75,12 @@ pub async fn start_plugin_oauth(
         .client_secret_field
         .as_ref()
         .and_then(|k| seed.get(k).cloned());
+
+    // Static endpoints from the manifest, or per-instance ones resolved (and
+    // SSRF-validated) from the seed's base URL. See ADR-069.
+    let (resolved_authorize, token_url) = resolve_endpoints(oauth, &seed)?;
+    let authorize_url =
+        resolved_authorize.ok_or_else(|| "oauth.authorize_url missing".to_string())?;
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let cancel = CancellationToken::new();
@@ -108,7 +109,7 @@ pub async fn start_plugin_oauth(
     let redirect_uri = format!("http://127.0.0.1:{local_port}/callback");
 
     let auth_redirect = build_authorize_url(
-        authorize_url,
+        &authorize_url,
         &client_id,
         &redirect_uri,
         &oauth.scopes,
@@ -121,6 +122,7 @@ pub async fn start_plugin_oauth(
     // immediately so the UI can correlate progress events (the flow may block
     // on the browser callback for up to 300s — it must not block the command).
     let oauth = oauth.clone();
+    let seed = seed.clone();
     let resp = PluginOAuthResult {
         request_id: request_id.clone(),
     };
@@ -150,6 +152,7 @@ pub async fn start_plugin_oauth(
         oauth_flow::emit_progress(&app, &FLOW_STATE, "exchanging", "", &request_id);
         let token = match exchange_code(
             &oauth,
+            &token_url,
             &code,
             &redirect_uri,
             &client_id,
@@ -174,14 +177,21 @@ pub async fn start_plugin_oauth(
             &project,
             &slug,
             &oauth,
+            &token_url,
             &client_id,
             client_secret.as_deref(),
             &token,
         )
         .and_then(|()| write_access_token(&project, &slug, &token.access_token))
+        .and_then(|()| project_base_url_to_mount(&project, &slug, &oauth, &seed))
         {
             emit_terminal(&app, &request_id, "error", &e);
             return;
+        }
+        // A freshly-authorized OAuth plugin is now ready, so auto-enable it (the
+        // user still applies via the restart banner). Best-effort. See ADR-069.
+        if let Err(e) = crate::plugin_cmd::set_plugin_enabled_in_config(&project, &slug, true) {
+            log::warn!("oauth[{slug}]: authorized but auto-enable failed: {e}");
         }
         FLOW_STATE.clear_if_current(&request_id);
         oauth_flow::emit_progress(&app, &FLOW_STATE, "success", "", &request_id);
@@ -399,8 +409,47 @@ async fn write_http_response(stream: &mut tokio::net::TcpStream, body: &str) -> 
 }
 
 /// Exchanges the authorization code for tokens at the token endpoint.
+/// Returns `(authorize_url, token_url)`: static manifest URLs, or per-instance
+/// ones resolved + SSRF-validated from the seed's base. See ADR-069.
+fn resolve_endpoints(
+    oauth: &PluginOAuthSpec,
+    seed: &HashMap<String, String>,
+) -> Result<(Option<String>, String), String> {
+    if oauth.base_url_field.is_some() {
+        return speedwave_runtime::plugin::resolve_oauth_endpoints(oauth, seed)
+            .map_err(|e| e.to_string());
+    }
+    let token_url = oauth
+        .token_url
+        .clone()
+        .ok_or_else(|| "oauth.token_url missing".to_string())?;
+    Ok((oauth.authorize_url.clone(), token_url))
+}
+
+/// Copies the per-instance base URL from the seed into the worker's `/tokens`
+/// mount so the worker can read its API base. The seed remains the SSOT.
+fn project_base_url_to_mount(
+    project: &str,
+    slug: &str,
+    oauth: &PluginOAuthSpec,
+    seed: &HashMap<String, String>,
+) -> Result<(), String> {
+    let Some(field) = oauth.base_url_field.as_deref() else {
+        return Ok(());
+    };
+    let Some(value) = seed.get(field) else {
+        return Ok(());
+    };
+    let dir = access_token_path(project, slug)?
+        .parent()
+        .ok_or_else(|| "base projection: no parent".to_string())?
+        .to_path_buf();
+    oauth_flow::save_credential_file(&dir, field, value)
+}
+
 async fn exchange_code(
     oauth: &PluginOAuthSpec,
+    token_url: &str,
     code: &str,
     redirect_uri: &str,
     client_id: &str,
@@ -414,9 +463,7 @@ async fn exchange_code(
         ("redirect_uri", redirect_uri),
         ("code_verifier", verifier),
     ];
-    let mut req = client
-        .post(&oauth.token_url)
-        .timeout(Duration::from_secs(30));
+    let mut req = client.post(token_url).timeout(Duration::from_secs(30));
     match oauth.auth_style {
         OAuthAuthStyle::Basic => {
             req = req.basic_auth(client_id, client_secret);
@@ -450,6 +497,7 @@ fn persist_state(
     project: &str,
     slug: &str,
     oauth: &PluginOAuthSpec,
+    token_url: &str,
     client_id: &str,
     client_secret: Option<&str>,
     token: &TokenResponse,
@@ -464,8 +512,9 @@ fn persist_state(
         .map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
 
+    // The RESOLVED token_url — the worker's refresh re-reads this absolute URL.
     let mut provider_data = std::collections::BTreeMap::new();
-    provider_data.insert("tokenUrl".to_string(), oauth.token_url.clone());
+    provider_data.insert("tokenUrl".to_string(), token_url.to_string());
     provider_data.insert("clientId".to_string(), client_id.to_string());
     if let Some(secret) = client_secret {
         provider_data.insert("clientSecret".to_string(), secret.to_string());
@@ -520,15 +569,68 @@ mod tests {
     fn spec() -> PluginOAuthSpec {
         PluginOAuthSpec {
             grant_type: OAuthGrantType::AuthorizationCode,
-            token_url: "https://idp.example.com/token".to_string(),
+            token_url: Some("https://idp.example.com/token".to_string()),
             authorize_url: Some("https://idp.example.com/authorize".to_string()),
             device_authorization_url: None,
+            base_url_field: None,
+            authorize_suffix: None,
+            token_suffix: None,
             scopes: vec!["read".to_string(), "write".to_string()],
             auth_style: OAuthAuthStyle::Basic,
             client_id_field: "client_id".to_string(),
             client_secret_field: Some("client_secret".to_string()),
             redirect_port: None,
         }
+    }
+
+    // A successful authorization auto-enables the plugin (before emitting
+    // success), so the user doesn't have to toggle it on manually.
+    #[test]
+    fn start_plugin_oauth_auto_enables_on_success() {
+        let src = include_str!("plugin_oauth_cmd.rs");
+        let start = src
+            .find("pub async fn start_plugin_oauth(")
+            .expect("start_plugin_oauth must exist");
+        let body = &src[start..start + 6000];
+        let enable_pos = body
+            .find("set_plugin_enabled_in_config(&project, &slug, true)")
+            .expect("success path must auto-enable the plugin");
+        let success_pos = body.find(r#""success""#).expect("success event must exist");
+        assert!(
+            enable_pos < success_pos,
+            "auto-enable must run before the success event"
+        );
+    }
+
+    #[test]
+    fn resolve_endpoints_static_returns_manifest_urls() {
+        let (authorize, token) = resolve_endpoints(&spec(), &HashMap::new()).unwrap();
+        assert_eq!(token, "https://idp.example.com/token");
+        assert_eq!(
+            authorize.as_deref(),
+            Some("https://idp.example.com/authorize")
+        );
+    }
+
+    #[test]
+    fn resolve_endpoints_derived_joins_seed_base() {
+        let mut s = spec();
+        s.token_url = None;
+        s.authorize_url = None;
+        s.base_url_field = Some("base".to_string());
+        s.authorize_suffix = Some("/authorize".to_string());
+        s.token_suffix = Some("/token".to_string());
+        let mut seed = HashMap::new();
+        seed.insert(
+            "base".to_string(),
+            "https://glpi.example.com/api.php".to_string(),
+        );
+        let (authorize, token) = resolve_endpoints(&s, &seed).unwrap();
+        assert_eq!(token, "https://glpi.example.com/api.php/token");
+        assert_eq!(
+            authorize.as_deref(),
+            Some("https://glpi.example.com/api.php/authorize")
+        );
     }
 
     #[test]

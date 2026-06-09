@@ -1190,6 +1190,10 @@ pub const PLUGIN_BRIDGE_ROLES_MAX_COUNT: usize = 16;
 /// Max length of an OAuth endpoint URL in a plugin manifest.
 pub const PLUGIN_OAUTH_URL_MAX_LEN: usize = 2048;
 
+/// Max length of an `oauth.{authorize,token}_suffix` path appended to a
+/// per-instance base URL (e.g. `/authorize`). See ADR-069.
+pub const PLUGIN_OAUTH_SUFFIX_MAX_LEN: usize = 128;
+
 /// Max number of `oauth.scopes` entries.
 pub const PLUGIN_OAUTH_SCOPES_MAX_COUNT: usize = 64;
 

@@ -200,20 +200,26 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
         );
         // Only OAuth plugins can have an off-mount state file — skip the disk
         // read for the rest.
-        let oauth_expires_at = if manifest.auth_fields.iter().any(|f| f.oauth_flow) {
+        let has_oauth = manifest.auth_fields.iter().any(|f| f.oauth_flow);
+        let oauth_expires_at = if has_oauth {
             plugin_oauth_expires_at(&project, sid)
         } else {
             None
         };
         let oauth_authorized = oauth_expires_at.is_some();
+        let seed_keys = if has_oauth {
+            oauth_seed_keys(&project, sid)
+        } else {
+            std::collections::HashSet::new()
+        };
 
         let mut current_values = HashMap::new();
         let mut configured_fields = Vec::new();
         for field in &manifest.auth_fields {
-            // OAuth fields are off-mount; their "configured" indicator reflects
-            // an authorized state file, not a token in `/tokens`.
+            // An oauth_flow field is "configured" once its credential is SAVED
+            // to the seed (so Authorize can unlock before the flow runs).
             if field.oauth_flow {
-                if oauth_authorized {
+                if seed_keys.contains(&field.key) || oauth_authorized {
                     configured_fields.push(field.key.clone());
                 }
                 continue;
@@ -290,6 +296,18 @@ fn plugin_oauth_expires_at(project: &str, slug: &str) -> Option<String> {
 /// True when the plugin has an authorized OAuth state on disk.
 fn plugin_oauth_authorized(project: &str, slug: &str) -> bool {
     plugin_oauth_expires_at(project, slug).is_some()
+}
+
+/// Keys present in the off-mount pre-auth seed (the saved client credentials).
+/// These mark an `oauth_flow` field as "configured" so Authorize can unlock
+/// before any authorization has happened.
+fn oauth_seed_keys(project: &str, slug: &str) -> std::collections::HashSet<String> {
+    let path = speedwave_runtime::plugin::oauth_seed_file(project, slug);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|b| serde_json::from_str::<HashMap<String, String>>(&b).ok())
+        .map(|m| m.into_keys().collect())
+        .unwrap_or_default()
 }
 
 fn is_plugin_configured(
@@ -554,18 +572,26 @@ pub fn set_plugin_enabled(
         }
     }
 
+    set_plugin_enabled_in_config(&project, &service_id, enabled)
+}
+
+/// Writes the enabled flag for a plugin into the project config (no verify gate
+/// — callers gate as needed). Used by set_plugin_enabled and the OAuth success
+/// path (a freshly-authorized plugin auto-enables; see ADR-069).
+pub(crate) fn set_plugin_enabled_in_config(
+    project: &str,
+    plugin_key: &str,
+    enabled: bool,
+) -> Result<(), String> {
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
-
         let entry = user_config
             .projects
             .iter_mut()
             .find(|p| p.name == project)
             .ok_or_else(|| anyhow::anyhow!("project '{}' not found", project))?;
-
         let integrations = entry.integrations.get_or_insert_with(Default::default);
-        integrations.set_plugin_enabled(&service_id, enabled);
-
+        integrations.set_plugin_enabled(plugin_key, enabled);
         config::save_user_config(&user_config)
     })
     .map_err(|e| e.to_string())
@@ -2010,6 +2036,32 @@ mod tests {
             !plugin_oauth_authorized("proj", "p"),
             "seed present + state absent must be unauthorized"
         );
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    // A saved seed marks its fields configured (so Authorize unlocks) BEFORE any
+    // authorization has happened — otherwise the button would deadlock.
+    #[test]
+    #[serial]
+    fn oauth_seed_keys_returns_saved_credential_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        assert!(
+            oauth_seed_keys("proj", "p").is_empty(),
+            "no seed -> no keys"
+        );
+
+        let seed = speedwave_runtime::plugin::oauth_seed_file("proj", "p");
+        std::fs::create_dir_all(seed.parent().unwrap()).unwrap();
+        std::fs::write(&seed, "{\"client_id\":\"a\",\"client_secret\":\"b\"}").unwrap();
+        let keys = oauth_seed_keys("proj", "p");
+        assert!(keys.contains("client_id") && keys.contains("client_secret"));
 
         match prev {
             Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
