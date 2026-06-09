@@ -179,6 +179,52 @@ describe('refreshGenericToken', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe('network');
   });
+
+  it('rejects a response body over the size cap', async () => {
+    // 257 KiB > MAX_BODY_BYTES (256 KiB).
+    const big = new ArrayBuffer(257 * 1024);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        status: 200,
+        ok: true,
+        headers: { get: () => 'application/json' },
+        arrayBuffer: async () => big,
+      })
+    );
+    const result = await refreshGenericToken(refreshTokenReq());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('malformed');
+  });
+
+  it('refuses to follow a redirect (3xx)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        status: 302,
+        ok: false,
+        headers: { get: () => 'text/html' },
+        arrayBuffer: async () => new ArrayBuffer(0),
+      })
+    );
+    const result = await refreshGenericToken(refreshTokenReq());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('http');
+  });
+
+  it('aborts on timeout (AbortError surfaces as network)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        return Promise.reject(err);
+      })
+    );
+    const result = await refreshGenericToken(refreshTokenReq());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('network');
+  });
 });
 
 describe('genericProvider.validateRequest', () => {
