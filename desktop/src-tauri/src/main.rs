@@ -1222,10 +1222,6 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
             return false;
         }
     };
-    if map.contains_key(project) {
-        return false;
-    }
-
     // Check if any OAuth-consuming integration is enabled for this project.
     let user_config = match config::load_user_config() {
         Ok(c) => c,
@@ -1243,20 +1239,50 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     };
     let resolved = config::resolve_integrations(&project_dir, &user_config, project);
 
-    // List of enabled OAuth-consuming integrations (drives bearer-map).
-    let oauth_consumers: Vec<&'static str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
-        .iter()
-        .filter(|d| {
-            d.uses_oauth_refresh && resolved.is_service_enabled(d.config_key).unwrap_or(false)
-        })
-        .map(|d| d.config_key)
-        .collect();
+    // OAuth-consuming services enabled for this project (built-ins + plugins
+    // with `oauth`). SSOT helper keeps this list identical to the one compose
+    // injection reads from the bearer-map.
+    let installed = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
+    let mut oauth_consumers =
+        speedwave_runtime::compose::oauth_consumer_service_ids(&resolved, &installed);
+    oauth_consumers.sort();
+
+    // A worker already running for this project may hold a stale consumer set
+    // (its bearer-map was fixed at spawn). If the enabled set changed — a plugin
+    // OAuth was toggled — stop it so it respawns below with a fresh bearer-map;
+    // its consumer containers are recreated on the next compose-up.
+    if let Some(running) = map.get(project) {
+        let mut current: Vec<String> = running.spec().consumers().to_vec();
+        current.sort();
+        if current == oauth_consumers {
+            return false; // up to date — nothing to do
+        }
+        log::info!(
+            "oauth[{project}]: consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
+        );
+        if let Some(mut proc) = map.remove(project) {
+            let _ = proc.stop();
+            proc.cleanup_files();
+        }
+        if oauth_consumers.is_empty() {
+            // No consumers left — also drop the stale bearer-map so compose
+            // stops injecting WORKER_OAUTH_URL into now-orphaned containers.
+            let dir = speedwave_runtime::oauth_process::oauth_project_dir(
+                speedwave_runtime::consts::data_dir(),
+                project,
+            );
+            let _ =
+                std::fs::remove_file(dir.join(speedwave_runtime::consts::OAUTH_BEARER_MAP_FILE));
+        }
+    }
+
     if oauth_consumers.is_empty() {
         log::debug!(
             "ensure_oauth_running: no oauth-consuming integration enabled for '{project}' — not spawning"
         );
         return false;
     }
+    let consumer_refs: Vec<&str> = oauth_consumers.iter().map(String::as_str).collect();
 
     let script = match speedwave_runtime::build::resolve_oauth_script() {
         Some(s) => s.to_string_lossy().to_string(),
@@ -1272,7 +1298,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         project,
         &script,
         speedwave_runtime::consts::data_dir(),
-        &oauth_consumers,
+        &consumer_refs,
     ) {
         Ok(proc) => {
             log::info!("oauth[{project}]: started (port {})", proc.port());
