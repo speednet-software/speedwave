@@ -648,6 +648,46 @@ describe('PluginDetailComponent', () => {
     });
   });
 
+  describe('plugin OAuth flow', () => {
+    it('handleStartPluginOAuth invokes start_plugin_oauth and tracks request_id', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_plugin_oauth') return { request_id: 'req-1', expires_in: 3600 };
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.handleStartPluginOAuth();
+      expect(invokeSpy).toHaveBeenCalledWith(
+        'start_plugin_oauth',
+        expect.objectContaining({ slug: component.plugin!.service_id ?? component.plugin!.slug })
+      );
+      expect(component.oauthStatus).toBe('starting');
+    });
+
+    it('surfaces an error when start_plugin_oauth rejects', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_plugin_oauth') throw new Error('not configured yet');
+        return undefined;
+      };
+      await component.handleStartPluginOAuth();
+      expect(component.oauthStatus).toBe('error');
+      expect(component.oauthStatusMessage).toContain('not configured');
+    });
+
+    it('handleCancelPluginOAuth clears flow state', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      component.oauthStatus = 'awaiting_redirect';
+      component.oauthRedirectUri = 'http://127.0.0.1:5000/callback';
+      await component.handleCancelPluginOAuth();
+      expect(component.oauthStatus).toBeNull();
+      expect(component.oauthRedirectUri).toBeNull();
+    });
+  });
+
   describe('danger zone / uninstall', () => {
     it('renders the danger zone on the dashboard tab', async () => {
       const { component, fixture } = setup();

@@ -16,7 +16,7 @@ import {
   PluginsResponse,
   PluginSaveCredentialsEvent,
 } from '../../models/plugin';
-import { IntegrationsResponse } from '../../models/integration';
+import { IntegrationsResponse, OAuthProgressEvent } from '../../models/integration';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
 import { PluginCredentialsFormComponent } from '../plugin-credentials-form/plugin-credentials-form.component';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
@@ -372,9 +372,16 @@ const instructionsMarked = new Marked({
                     [authFields]="plugin.auth_fields"
                     [configuredFields]="plugin.configured_fields"
                     [inFlight]="saving"
+                    [providerLabel]="plugin.name"
+                    [oauthConfigured]="plugin.configured"
+                    [oauthStatus]="oauthStatus"
+                    [oauthRedirectUri]="oauthRedirectUri"
+                    [oauthStatusMessage]="oauthStatusMessage"
                     (save)="onSaveCredentials($event)"
                     (clear)="confirmingReset = true"
                     (clearField)="onClearField($event)"
+                    (authorizeOauth)="handleStartPluginOAuth()"
+                    (cancelOauth)="handleCancelPluginOAuth()"
                   />
                   @if (confirmingReset) {
                     <div class="mt-4 flex items-center gap-3">
@@ -474,6 +481,16 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
    */
   saving = false;
 
+  // -- OAuth (authorization_code) flow state --
+  /** Current flow status; null when idle. Passed to the credentials form. */
+  oauthStatus: string | null = null;
+  oauthStatusMessage = '';
+  /** Loopback redirect URI surfaced while awaiting the browser callback. */
+  oauthRedirectUri: string | null = null;
+  /** Correlates progress events to the in-flight flow. */
+  private activeOAuthRequestId: string | null = null;
+  private unlistenOAuth: (() => void) | null = null;
+
   /** Handle for the M9 auto-fade timeout on `success` — cancelled on new mutations. */
   private successFadeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -527,6 +544,8 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     await this.loadIntegrationStatuses();
     this.cdr.markForCheck();
 
+    this.unlistenOAuth = await this.subscribePluginOAuthProgress(slug);
+
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
       await this.loadActiveProject();
       const currentSlug = this.route.snapshot.paramMap.get('slug');
@@ -546,6 +565,10 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     if (this.unsubProjectReady) {
       this.unsubProjectReady();
       this.unsubProjectReady = null;
+    }
+    if (this.unlistenOAuth) {
+      this.unlistenOAuth();
+      this.unlistenOAuth = null;
     }
     this.cancelSuccessFade();
   }
@@ -730,6 +753,77 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
       (slug, project) => ({ project, slug, credentials: event.credentials }),
       `Credentials saved (${fieldCount} field${fieldCount === 1 ? '' : 's'})`
     );
+  }
+
+  /**
+   * Starts the plugin's authorization_code OAuth flow. Client credentials must
+   * already be saved (the host reads them from the seed; the Authorize button is
+   * gated on the configured badge). Opens the browser and awaits the callback.
+   */
+  async handleStartPluginOAuth(): Promise<void> {
+    const slug = this.plugin?.service_id ?? this.plugin?.slug;
+    if (!slug || !this.activeProject) return;
+    this.oauthStatus = 'starting';
+    this.oauthStatusMessage = '';
+    this.oauthRedirectUri = null;
+    this.cdr.markForCheck();
+    try {
+      const result = await this.tauri.invoke<{ request_id: string; expires_in: number }>(
+        'start_plugin_oauth',
+        { project: this.activeProject, slug }
+      );
+      this.activeOAuthRequestId = result.request_id;
+    } catch (e: unknown) {
+      this.oauthStatus = 'error';
+      this.oauthStatusMessage = e instanceof Error ? e.message : String(e);
+      this.activeOAuthRequestId = null;
+      this.cdr.markForCheck();
+    }
+  }
+
+  /** Cancels an in-flight plugin OAuth flow. */
+  async handleCancelPluginOAuth(): Promise<void> {
+    try {
+      await this.tauri.invoke('cancel_plugin_oauth');
+    } catch {
+      // Best-effort — the loopback server also times out on its own.
+    }
+    this.oauthStatus = null;
+    this.oauthRedirectUri = null;
+    this.activeOAuthRequestId = null;
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Subscribes to `plugin_oauth_progress`; updates status/redirect and reloads
+   * the plugin (configured badge) + requests a restart on success.
+   * @param slug - the plugin slug whose flow to track
+   */
+  private subscribePluginOAuthProgress(slug: string): Promise<() => void> {
+    return this.tauri
+      .listen<OAuthProgressEvent>('plugin_oauth_progress', async (event) => {
+        const payload = (event as { payload: OAuthProgressEvent }).payload;
+        if (payload.request_id !== this.activeOAuthRequestId) return;
+        this.oauthStatus = payload.status;
+        // The host sends the redirect URI as the message on awaiting_redirect.
+        if (payload.status === 'awaiting_redirect') {
+          this.oauthRedirectUri = payload.message;
+        } else {
+          this.oauthStatusMessage = payload.message;
+        }
+        if (payload.status === 'success') {
+          this.activeOAuthRequestId = null;
+          this.oauthRedirectUri = null;
+          await this.loadPlugin(slug);
+          this.projectState.requestRestart();
+        }
+        if (['error', 'expired', 'cancelled'].includes(payload.status)) {
+          this.activeOAuthRequestId = null;
+          this.oauthRedirectUri = null;
+        }
+        this.cdr.markForCheck();
+      })
+      .catch(() => () => {});
   }
 
   /**

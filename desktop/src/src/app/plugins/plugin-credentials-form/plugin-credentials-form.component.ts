@@ -265,19 +265,21 @@ export class PluginCredentialsFormComponent {
     return this.authFields().filter((f) => !f.oauth_flow && f.required);
   }
 
-  /** Whether every typed prerequisite is either stored or freshly entered. */
+  /**
+   * Whether every typed prerequisite is SAVED. Authorize reads credentials from
+   * the host-side seed (written by Save), so freshly-typed-but-unsaved values
+   * do not count — the user must Save first, then Authorize.
+   */
   oauthPrerequisitesMet(): boolean {
-    return this.oauthPrerequisiteFields().every(
-      (f) => this.isConfigured(f.key) || this.getValue(f.key).trim() !== ''
-    );
+    return this.oauthPrerequisiteFields().every((f) => this.isConfigured(f.key));
   }
 
-  /** Hint listing the typed prerequisites still missing. */
+  /** Hint listing the prerequisites still needing to be saved. */
   oauthPrerequisitesMissingMessage(): string {
     const missing = this.oauthPrerequisiteFields()
-      .filter((f) => !this.isConfigured(f.key) && this.getValue(f.key).trim() === '')
+      .filter((f) => !this.isConfigured(f.key))
       .map((f) => f.label);
-    return missing.length ? `Fill in ${missing.join(', ')} above to authorize.` : '';
+    return missing.length ? `Save ${missing.join(', ')} above first, then authorize.` : '';
   }
 
   /**

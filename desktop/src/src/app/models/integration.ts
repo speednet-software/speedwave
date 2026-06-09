@@ -52,9 +52,22 @@ export interface DeviceCodeInfo {
   request_id: string;
 }
 
-/** Progress event emitted by the OAuth polling task. */
+/**
+ * Progress event emitted by an OAuth flow. Device-code (built-in) uses
+ * polling/success/error/cancelled/expired; authorization_code (plugin) adds
+ * starting/awaiting_redirect/exchanging. `message` carries the redirect URI on
+ * `awaiting_redirect`, otherwise a human-readable detail.
+ */
 export interface OAuthProgressEvent {
-  status: 'polling' | 'success' | 'error' | 'cancelled' | 'expired';
+  status:
+    | 'starting'
+    | 'awaiting_redirect'
+    | 'exchanging'
+    | 'polling'
+    | 'success'
+    | 'error'
+    | 'cancelled'
+    | 'expired';
   message: string;
   request_id: string;
 }
