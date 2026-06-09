@@ -38,3 +38,11 @@ Service globals are injected automatically based on enabled integrations (no imp
   - Writing to or deleting SharePoint documents
 - NEVER write to or delete files outside `/workspace` and `$HOME` without explicit user confirmation
 - Always confirm before any other destructive operation on user data
+
+## Authentication errors
+
+When a tool fails with an authentication/authorization error (a message mentioning "authentication", "token", "unauthorized", "401", or "scope"):
+
+- Speedwave refreshes access tokens automatically, so a transient failure usually clears on a retry. Retry the operation **once**.
+- If it still fails, the service's authorization has expired or lacks the required scopes. Tell the user to **Reconnect** the integration: Desktop → Settings → Integrations → [service] → Reconnect (or re-enter the plugin's credentials). You cannot fix this from inside the container.
+- Do NOT loop retrying the same failing call — surface the reconnect step and stop.

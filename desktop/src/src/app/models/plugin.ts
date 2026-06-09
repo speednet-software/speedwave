@@ -26,6 +26,11 @@ export interface PluginAuthField {
    * `save_plugin_credentials`; `message` is shown on mismatch.
    */
   validation?: PluginAuthFieldValidation;
+  /**
+   * Marks an OAuth credential filled by the host-driven Authorize flow, not a
+   * text input. Stored off-mount. Mirrors Rust `AuthFieldDef.oauth_flow`.
+   */
+  oauth_flow?: boolean;
 }
 
 /** Regex constraint for a {@link PluginAuthField} value. */
@@ -107,6 +112,8 @@ export interface PluginStatusEntry {
   verification_error?: string;
   /** True when the manifest declares `host_bridge`. */
   has_host_bridge: boolean;
+  /** Access-token expiry (ISO-8601) when OAuth-authorized; absent otherwise. */
+  oauth_expires_at?: string;
 }
 
 /** Snapshot returned by the `plugin_bridge_get_status` Tauri command. */

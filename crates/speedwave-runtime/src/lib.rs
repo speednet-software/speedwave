@@ -22,9 +22,11 @@ pub mod log_file;
 pub mod log_sanitizer;
 pub mod log_ts;
 pub mod mcp_os_process;
+pub mod oauth_persist;
 pub mod oauth_process;
 pub mod oauth_state_migration;
 pub mod os_prereqs;
+pub mod pkce;
 pub mod plugin;
 pub mod project;
 pub mod resources;
@@ -40,6 +42,7 @@ pub mod stream;
 pub mod transcription;
 pub mod tz;
 pub mod update;
+pub mod url_validation;
 pub mod validation;
 
 /// Test-only re-exports of internal transaction helpers.

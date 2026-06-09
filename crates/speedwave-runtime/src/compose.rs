@@ -1660,43 +1660,67 @@ fn apply_oauth_config_with_paths(
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
 
-    // service_id (slug) → bearer value
-    let mut consumers: std::collections::BTreeMap<&str, String> = Default::default();
-    for (bearer, service) in &bearer_map {
-        consumers.insert(service.as_str(), bearer.clone());
-    }
-
-    // Iterate built-in descriptors and inject for those that opted in.
-    // SSOT: `McpServiceDescriptor::uses_oauth_refresh` (one flag flip per
-    // integration, no hardcoded list here).
-    for descriptor in consts::TOGGLEABLE_MCP_SERVICES.iter() {
-        if !descriptor.uses_oauth_refresh {
-            continue;
-        }
-        let service_id = descriptor.config_key;
-        let compose_service = descriptor.compose_name;
-        let Some(bearer) = consumers.get(service_id) else {
-            continue;
-        };
+    // Inject for every consumer in the bearer-map. The map is the SSOT for who
+    // consumes oauth — the supervisor writes it from the spawn consumer list
+    // (built-ins AND plugins), so this loop needs no hardcoded service list and
+    // covers plugins through the same code path.
+    for (bearer, service_id) in &bearer_map {
+        let compose_service = oauth_consumer_compose_name(service_id);
         let bearer_file = state_dir.join(format!("bearer-{service_id}"));
         if !bearer_file.exists() {
-            // Write per-service bearer file lazily on first compose render
-            // (chmod 0o600 via the SSOT helper from PR1).
+            // Lazily write the per-service bearer file (chmod 0o600).
             if let Err(e) = crate::fs_perms::write_restricted_file(&bearer_file, bearer) {
                 log::warn!("oauth: failed to write per-service bearer for '{service_id}': {e}");
                 continue;
             }
         }
-        ensure_host_gateway_extra_host(&mut doc, compose_service)?;
-        inject_env_into(&mut doc, compose_service, "WORKER_OAUTH_URL", &url);
+        ensure_host_gateway_extra_host(&mut doc, &compose_service)?;
+        inject_env_into(&mut doc, &compose_service, "WORKER_OAUTH_URL", &url);
         let mount = format!(
             "{}:/secrets/oauth-auth-token-{service_id}:ro",
             to_engine_path(&bearer_file)?
         );
-        add_service_volume(&mut doc, compose_service, &mount);
+        add_service_volume(&mut doc, &compose_service, &mount);
     }
 
     Ok(serde_yaml_ng::to_string(&doc)?)
+}
+
+/// Resolves an OAuth consumer's compose service name: a built-in uses its
+/// descriptor `compose_name`, a plugin derives `mcp-<slug>`. SSOT shared by the
+/// spawn-side consumer list and compose injection so they cannot diverge.
+pub fn oauth_consumer_compose_name(service_id: &str) -> String {
+    consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .find(|d| d.config_key == service_id)
+        .map(|d| d.compose_name.to_string())
+        .unwrap_or_else(|| crate::plugin::derive_compose_name(service_id))
+}
+
+/// The OAuth consumer service ids enabled for a project: built-ins with
+/// `uses_oauth_refresh` plus plugins whose manifest declares `oauth`. SSOT for
+/// the spawn consumer list — the same set the bearer-map (and thus compose
+/// injection) is built from, so spawn-decision and injection cannot diverge.
+pub fn oauth_consumer_service_ids(
+    resolved: &crate::config::ResolvedIntegrationsConfig,
+    enabled_plugins: &[crate::plugin::PluginManifest],
+) -> Vec<String> {
+    let mut out: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .filter(|d| {
+            d.uses_oauth_refresh && resolved.is_service_enabled(d.config_key).unwrap_or(false)
+        })
+        .map(|d| d.config_key.to_string())
+        .collect();
+    for m in enabled_plugins {
+        if m.oauth.is_some() {
+            let sid = m.service_id.as_deref().unwrap_or(&m.slug);
+            if resolved.is_plugin_enabled(sid) {
+                out.push(sid.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Read the oauth bearer-map JSON (bearer → service). Returns `None` on any IO
@@ -3062,13 +3086,19 @@ impl SecurityCheck {
                 plugin::TokenMount::ReadOnly => "ro",
                 plugin::TokenMount::ReadWrite { .. } => "rw",
             };
+            // An OAuth plugin consumes the host-side oauth worker, so it gets the
+            // same per-service bearer mount as SharePoint (ADR-069).
+            let extra_allowed: Vec<String> = if manifest.oauth.is_some() {
+                vec![format!("/secrets/oauth-auth-token-{sid}")]
+            } else {
+                Vec::new()
+            };
             let params = VolumeCheckParams {
                 container_name: &name,
                 expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
-                // Plugins do not currently use the host-side oauth worker.
-                extra_allowed_ro_targets: &[],
+                extra_allowed_ro_targets: &extra_allowed,
                 rules: VolumeCheckRules::PLUGIN,
             };
             let (base_violations, _) = validate_service_volume_mounts(service, &params);
@@ -5181,6 +5211,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
@@ -7669,6 +7700,114 @@ services:
     }
 
     #[test]
+    fn test_oauth_config_injects_into_plugin_consumer() {
+        // A plugin slug in the bearer-map must get WORKER_OAUTH_URL + bearer
+        // mount on its derived compose service (`mcp-<slug>`), with no built-in
+        // descriptor entry — the injection loop is bearer-map-driven, not
+        // descriptor-driven.
+        let compose = r#"
+services:
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+  mcp-glpi:
+    image: speedwave-mcp-glpi:latest
+    environment:
+      - PORT=3001
+    volumes:
+      - /test/.speedwave/tokens/test/glpi:/tokens:ro
+"#;
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        write_live_oauth_lock(&lock_path, 49305);
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-glpi-uuid": "glpi"}"#).unwrap();
+
+        let result =
+            apply_oauth_config_with_paths(compose, tmp.path(), &lock_path, &bearer_map_path)
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+
+        let env = service_env(&doc, "mcp-glpi");
+        assert!(
+            find_env_value(&env, "WORKER_OAUTH_URL=").is_some(),
+            "plugin consumer must get WORKER_OAUTH_URL"
+        );
+        let vols: Vec<String> = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-glpi"))
+            .and_then(|s| s.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            vols.iter()
+                .any(|v| v.contains(":/secrets/oauth-auth-token-glpi:ro")),
+            "plugin consumer must get its bearer mount, got: {vols:?}"
+        );
+    }
+
+    #[test]
+    fn oauth_consumer_compose_name_resolves_builtin_and_plugin() {
+        assert_eq!(oauth_consumer_compose_name("sharepoint"), "mcp-sharepoint");
+        // Unknown id → plugin derivation.
+        assert_eq!(oauth_consumer_compose_name("glpi"), "mcp-glpi");
+    }
+
+    fn oauth_plugin_manifest(slug: &str) -> crate::plugin::PluginManifest {
+        let json = format!(
+            r#"{{
+                "name": "{slug}", "service_id": "{slug}", "slug": "{slug}",
+                "version": "1.0.0", "description": "d",
+                "auth_fields": [{{"key":"client_id","label":"id","field_type":"text","placeholder":"","is_secret":false,"oauth_flow":true}}],
+                "oauth": {{"grant_type":"authorization_code","token_url":"https://idp/token","authorize_url":"https://idp/authorize","client_id_field":"client_id"}}
+            }}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn oauth_consumer_service_ids_includes_builtins_and_enabled_oauth_plugins() {
+        let mut resolved = crate::config::ResolvedIntegrationsConfig {
+            sharepoint: true,
+            ..Default::default()
+        };
+        resolved.plugins.insert("glpi".to_string(), true);
+        resolved.plugins.insert("disabled-plug".to_string(), false);
+
+        let plugins = vec![
+            oauth_plugin_manifest("glpi"),
+            oauth_plugin_manifest("disabled-plug"),
+        ];
+        let ids = oauth_consumer_service_ids(&resolved, &plugins);
+        assert!(ids.contains(&"sharepoint".to_string()), "built-in included");
+        assert!(
+            ids.contains(&"glpi".to_string()),
+            "enabled oauth plugin included"
+        );
+        assert!(
+            !ids.contains(&"disabled-plug".to_string()),
+            "disabled plugin excluded"
+        );
+    }
+
+    #[test]
+    fn oauth_consumer_service_ids_excludes_plugin_without_oauth() {
+        let mut resolved = crate::config::ResolvedIntegrationsConfig::default();
+        resolved.plugins.insert("plain".to_string(), true);
+        // A plugin manifest with no oauth block, enabled.
+        let plain: crate::plugin::PluginManifest = serde_json::from_str(
+            r#"{"name":"plain","service_id":"plain","slug":"plain","version":"1.0.0","description":"d"}"#,
+        )
+        .unwrap();
+        let ids = oauth_consumer_service_ids(&resolved, &[plain]);
+        assert!(ids.is_empty(), "plugin without oauth is not a consumer");
+    }
+
+    #[test]
     fn test_oauth_config_writes_per_service_bearer_file() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
@@ -9289,6 +9428,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         }
     }
 
@@ -9380,6 +9520,74 @@ services:
                 .iter()
                 .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
             "Plugin with only /tokens + /workspace should not trigger PLUGIN_NO_EXTRA_VOLUMES"
+        );
+    }
+
+    /// A plugin yaml with the oauth bearer mount the host injects for consumers.
+    fn oauth_consumer_plugin_yaml() -> String {
+        format!(
+            r#"
+version: "3"
+services:
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/.speedwave/oauth/test/bearer-example-plugin:/secrets/oauth-auth-token-example-plugin:ro
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user(),
+        )
+    }
+
+    #[test]
+    fn test_security_check_oauth_plugin_allows_bearer_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = oauth_consumer_plugin_yaml();
+        let mut manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+        manifest.oauth = oauth_plugin_manifest("example-plugin").oauth;
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
+            "OAuth plugin's bearer mount must be allowed, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_check_non_oauth_plugin_rejects_bearer_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = oauth_consumer_plugin_yaml();
+        // Manifest has NO oauth block — the bearer mount must NOT be allowed.
+        let manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
+            "a non-oauth plugin with a bearer mount must trigger PLUGIN_NO_EXTRA_VOLUMES"
         );
     }
 
@@ -9634,6 +9842,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
@@ -9684,6 +9893,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let svc = plugin::generate_plugin_service(
             &manifest,
@@ -9781,6 +9991,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -10147,6 +10358,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         // generate_plugin_service requires a port for MCP plugins,
@@ -11081,6 +11293,7 @@ networks:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         }];
 
         // Compose with plugin service already present (as apply_plugins would leave it)
@@ -11198,6 +11411,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
@@ -12264,6 +12478,7 @@ services:
             requires_integrations: vec![],
             host_bridge,
             instructions: None,
+            oauth: None,
         };
         plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
     }

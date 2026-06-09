@@ -20,6 +20,7 @@ describe('oauth-state', () => {
 
   const sample: OAuthState = {
     provider: 'microsoft',
+    grantType: 'refresh_token',
     providerData: {
       clientId: '11111111-1111-1111-1111-111111111111',
       tenantId: 'common',
@@ -57,6 +58,33 @@ describe('oauth-state', () => {
       });
       const result = await loadOAuthState(dir, 'sharepoint');
       expect(result).toEqual(sample);
+    });
+
+    it('defaults grantType to refresh_token for legacy state (no grantType)', async () => {
+      const { grantType: _g, ...legacy } = sample;
+      await writeFile(join(dir, 'legacy.json'), JSON.stringify(legacy), { mode: 0o600 });
+      const result = await loadOAuthState(dir, 'legacy');
+      expect(result?.grantType).toBe('refresh_token');
+    });
+
+    it('accepts empty refreshToken for client_credentials grant', async () => {
+      const cc = { ...sample, grantType: 'client_credentials', refreshToken: '' };
+      await writeFile(join(dir, 'cc.json'), JSON.stringify(cc), { mode: 0o600 });
+      const result = await loadOAuthState(dir, 'cc');
+      expect(result?.grantType).toBe('client_credentials');
+      expect(result?.refreshToken).toBe('');
+    });
+
+    it('rejects empty refreshToken for refresh_token grant', async () => {
+      const bad = { ...sample, grantType: 'refresh_token', refreshToken: '' };
+      await writeFile(join(dir, 'bad.json'), JSON.stringify(bad), { mode: 0o600 });
+      await expect(loadOAuthState(dir, 'bad')).rejects.toThrow(/non-empty for refresh_token/);
+    });
+
+    it('rejects an unknown grantType', async () => {
+      const bad = { ...sample, grantType: 'implicit' };
+      await writeFile(join(dir, 'badgrant.json'), JSON.stringify(bad), { mode: 0o600 });
+      await expect(loadOAuthState(dir, 'badgrant')).rejects.toThrow(/grantType/);
     });
 
     it('throws on malformed JSON', async () => {

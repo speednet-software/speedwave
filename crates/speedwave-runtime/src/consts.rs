@@ -1187,6 +1187,24 @@ pub const PLUGIN_BRIDGE_AUTH_NAME_MAX_LEN: usize = 128;
 /// from inflating bridge state with thousands of roles.
 pub const PLUGIN_BRIDGE_ROLES_MAX_COUNT: usize = 16;
 
+/// Max length of an OAuth endpoint URL in a plugin manifest.
+pub const PLUGIN_OAUTH_URL_MAX_LEN: usize = 2048;
+
+/// Max length of an `oauth.{authorize,token}_suffix` path appended to a
+/// per-instance base URL (e.g. `/authorize`). See ADR-069.
+pub const PLUGIN_OAUTH_SUFFIX_MAX_LEN: usize = 128;
+
+/// Max number of `oauth.scopes` entries.
+pub const PLUGIN_OAUTH_SCOPES_MAX_COUNT: usize = 64;
+
+/// Max length of a single `oauth.scopes` entry.
+pub const PLUGIN_OAUTH_SCOPE_MAX_LEN: usize = 256;
+
+/// OAuth grant types the host can execute; `validate_manifest` rejects any
+/// other so a signed plugin can't declare a flow the app won't perform. Widen
+/// in the PR that implements the grant, not before.
+pub const SUPPORTED_OAUTH_GRANT_TYPES: &[&str] = &["authorization_code"];
+
 /// Pure, testable function for resolving the data directory.
 /// `env_val` = None or empty string → `home.join(DATA_DIR)` (empty string treated as unset)
 /// `env_val` = absolute path → returns that path

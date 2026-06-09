@@ -9,11 +9,16 @@
  */
 
 /** SSOT — widen this union when adding an IdP. */
-export type ProviderId = 'microsoft';
+export type ProviderId = 'microsoft' | 'generic';
+
+/** OAuth grant the stored state was minted with; drives generic refresh. */
+export type GrantType = 'refresh_token' | 'client_credentials';
 
 /** Inputs for an OAuth refresh round-trip. */
 export interface RefreshRequest {
-  /** Long-lived refresh token issued by the IdP. */
+  /** Grant the state uses. Defaults to `refresh_token` for legacy state. */
+  grantType?: GrantType;
+  /** Long-lived refresh token. Empty for `client_credentials` (re-mint). */
   refreshToken: string;
   /** Scopes requested at refresh time (caller-supplied, IdP-validated). */
   scopes: string[];
@@ -46,7 +51,16 @@ export type RefreshResult =
 /** One IdP implementation registered in the provider registry. */
 export interface OAuthProvider {
   readonly id: ProviderId;
-  /** Required keys of `providerData`; dispatcher validates pre-call. */
+  /**
+   * Required keys of `providerData`; dispatcher validates pre-call. Used
+   * when the provider does not supply its own {@link validateRequest}.
+   */
   readonly requiredFields: readonly string[];
+  /**
+   * Per-request validation when requirements depend on grant/auth style
+   * (generic provider). Returns an error to reject, or `null` to proceed.
+   * When absent, the dispatcher falls back to {@link requiredFields}.
+   */
+  validateRequest?(req: RefreshRequest): RefreshError | null;
   refresh(req: RefreshRequest): Promise<RefreshResult>;
 }

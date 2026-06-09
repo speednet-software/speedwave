@@ -8,6 +8,7 @@
  */
 
 import { TIMEOUTS } from '@speedwave/mcp-shared';
+import { readJsonCapped } from './http-body.js';
 import type { OAuthProvider, RefreshRequest, RefreshResult } from './types.js';
 
 /** Inputs for the Microsoft v2 refresh-token POST. */
@@ -73,6 +74,7 @@ export async function refreshMicrosoftToken(
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      redirect: 'manual',
       signal: controller.signal,
     });
   } catch (err) {
@@ -87,18 +89,23 @@ export async function refreshMicrosoftToken(
     clearTimeout(timeoutId);
   }
 
-  let json: Record<string, unknown>;
-  try {
-    json = (await response.json()) as Record<string, unknown>;
-  } catch (err) {
+  // A 3xx is not a valid token response — refuse rather than follow a
+  // Location header (mirrors the generic provider's hardening).
+  if (response.status >= 300 && response.status < 400) {
     return {
       ok: false,
-      error: {
-        code: 'malformed',
-        message: `Microsoft response is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-      },
+      error: { code: 'http', message: `unexpected redirect ${response.status}` },
     };
   }
+
+  const parsedBody = await readJsonCapped(response);
+  if (!parsedBody.ok) {
+    return {
+      ok: false,
+      error: { code: 'malformed', message: `Microsoft response: ${parsedBody.message}` },
+    };
+  }
+  const json = parsedBody.json;
 
   if (!response.ok) {
     const errCode = typeof json.error === 'string' ? json.error : 'http';
