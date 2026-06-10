@@ -8,6 +8,7 @@ import type {
   ProjectSwitchFailedPayload,
 } from '../models/update';
 import { CLOUDSTORAGE_TCC_PREFIX, cloudstorageProviderDisplayName } from './cloudstorage-prefix';
+import { HealthStoreService } from './health-store.service';
 import type { HealthReport } from '../models/health';
 
 /** Poll cadence for the post-start health gate. */
@@ -90,6 +91,7 @@ export class ProjectStateService {
   private initialized = false;
   private tauri = inject(TauriService);
   private log = inject(LoggerService);
+  private healthStore = inject(HealthStoreService);
   /**
    * Set of integration status re-fetchers registered by the integrations component;
    * called after a failed restart so the toggled-on row reverts to reality.
@@ -299,7 +301,10 @@ export class ProjectStateService {
           project: this.activeProject,
         });
         // No report = health unverifiable (non-Tauri/test harness) — pass through.
-        if (!report || report.overall_healthy) return;
+        if (!report) return;
+        // Seed the shared snapshot so views render real data the moment the overlay lifts.
+        this.healthStore.health.set(report);
+        if (report.overall_healthy) return;
         last = report;
       } catch {
         // Transient probe failure — keep polling until the deadline.

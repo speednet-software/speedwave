@@ -1,7 +1,8 @@
-import { Injectable, OnDestroy, inject, signal } from '@angular/core';
+import { Injectable, OnDestroy, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { LoggerService } from './logger.service';
+import { HealthStoreService } from './health-store.service';
 import type { HealthReport } from '../models/health';
 
 /** How often the polling loop refreshes the health snapshot. */
@@ -24,9 +25,10 @@ export class SystemHealthService implements OnDestroy {
   private readonly tauri = inject(TauriService);
   private readonly projectState = inject(ProjectStateService);
   private readonly log = inject(LoggerService);
+  private readonly store = inject(HealthStoreService);
 
-  /** Latest health report; `null` until the first fetch lands. */
-  readonly health = signal<HealthReport | null>(null);
+  /** Latest health report (SSOT in HealthStoreService); `null` until the first fetch lands. */
+  readonly health = this.store.health;
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private unsubProjectSettled: (() => void) | null = null;

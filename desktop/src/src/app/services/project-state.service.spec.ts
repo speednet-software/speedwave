@@ -4,6 +4,7 @@ import { ProjectStateService, unhealthySummary } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
+import { HealthStoreService } from './health-store.service';
 import type { HealthReport } from '../models/health';
 
 function makeMockLogger() {
@@ -257,6 +258,33 @@ describe('ProjectStateService', () => {
       await service.init();
 
       expect(service.status).toBe('ready');
+    });
+
+    it('seeds the shared health store with the gate snapshot', async () => {
+      const healthy = makeHealth({});
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: true };
+          case 'get_health':
+            return healthy;
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      expect(service.status).toBe('ready');
+      expect(TestBed.inject(HealthStoreService).health()).toEqual(healthy);
     });
 
     it('keeps polling through transient get_health failures', async () => {
