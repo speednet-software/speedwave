@@ -431,6 +431,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             badge,
             oauth_action_required,
             oauth_identity: oauth_identity_for(&project, svc),
+            oauth_provider_label: svc_desc.oauth_provider_label.map(str::to_string),
         });
     }
 

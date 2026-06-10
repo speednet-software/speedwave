@@ -536,6 +536,9 @@ pub struct McpServiceDescriptor {
     pub oauth_state_fields: Option<&'static [&'static str]>,
     /// Optional UI badge label (e.g. "BETA", "NEW"). `None` = no badge.
     pub badge: Option<&'static str>,
+    /// IdP brand name for OAuth button copy ("Sign in with <label>").
+    /// `None` for services without an OAuth flow.
+    pub oauth_provider_label: Option<&'static str>,
     /// True if this worker runs on its own egress-less network `{NETWORK_NAME}_{config_key}`
     /// (e.g. `office`) rather than only the shared project network. When such a service is
     /// disabled, its dedicated network and the hub's attachment to it are removed from compose.
@@ -595,6 +598,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         credential_files: &["access_token"],
         oauth_state_fields: Some(&["refresh_token"]),
         badge: None,
+        oauth_provider_label: Some("Slack"),
         egress_less: false,
         uses_oauth_refresh: true,
         resources: STANDARD_WORKER_RESOURCES,
@@ -705,6 +709,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "lastRefreshAt",
         ]),
         badge: None,
+        oauth_provider_label: Some("Microsoft"),
         egress_less: false,
         uses_oauth_refresh: true,
         resources: STANDARD_WORKER_RESOURCES,
@@ -762,6 +767,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         ],
         oauth_state_fields: None,
         badge: None,
+        oauth_provider_label: None,
         egress_less: false,
         uses_oauth_refresh: false,
         resources: STANDARD_WORKER_RESOURCES,
@@ -801,6 +807,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         credential_files: &["token", "host_url"],
         oauth_state_fields: None,
         badge: None,
+        oauth_provider_label: None,
         egress_less: false,
         uses_oauth_refresh: false,
         resources: STANDARD_WORKER_RESOURCES,
@@ -832,6 +839,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         // Reconnect path (UI "Reconnect to GitHub") covers token revocation.
         oauth_state_fields: None,
         badge: None,
+        oauth_provider_label: Some("GitHub"),
         egress_less: false,
         uses_oauth_refresh: false,
         // 256m (not 128m): Octokit + throttling/retry plugins + octokit.paginate
@@ -920,6 +928,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         ],
         oauth_state_fields: None,
         badge: None,
+        oauth_provider_label: None,
         egress_less: false,
         uses_oauth_refresh: false,
         resources: STANDARD_WORKER_RESOURCES,
@@ -935,6 +944,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         credential_files: &[],
         oauth_state_fields: None,
         badge: Some("BETA"),
+        oauth_provider_label: None,
         egress_less: true,
         uses_oauth_refresh: false,
         // 1g + 512m /tmp: LibreOffice headless on a non-trivial .pptx.
@@ -956,6 +966,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         credential_files: &[],
         oauth_state_fields: None,
         badge: Some("BETA"),
+        oauth_provider_label: None,
         egress_less: false,
         uses_oauth_refresh: false,
         // 2g + 1g /tmp + 2g shm: Chromium IPC needs shm above the 64m default
@@ -992,6 +1003,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         credential_files: &["api_key"],
         oauth_state_fields: None,
         badge: Some("Anonymous"),
+        oauth_provider_label: None,
         egress_less: false,
         uses_oauth_refresh: false,
         resources: STANDARD_WORKER_RESOURCES,

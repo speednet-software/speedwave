@@ -23,11 +23,16 @@ export interface IntegrationStatusEntry {
   badge?: string;
   /**
    * Reason the integration needs the user's attention even though it is
-   * configured. Currently only SharePoint sets this — when `grantedScopes`
-   * is a strict subset of the required scopes (typically after migration),
-   * the UI shows a "Re-authorize" banner. Undefined = no action required.
+   * configured (OAuth-refresh services: SharePoint, Slack) — granted scopes
+   * are a strict subset of the required set, the state is stale, or the
+   * Slack refresh token aged out. The UI shows a "Re-authorize" banner.
+   * Undefined = no action required.
    */
   oauth_action_required?: string;
+  /** "Connected to <workspace>" hint (Slack: teamName · authedUserId). */
+  oauth_identity?: string;
+  /** IdP brand name for OAuth button copy, from the Rust descriptor SSOT. */
+  oauth_provider_label?: string;
 }
 
 /** Status and configuration details for a native OS integration. */
@@ -42,6 +47,11 @@ export interface OsIntegrationStatusEntry {
 export interface IntegrationsResponse {
   services: IntegrationStatusEntry[];
   os: OsIntegrationStatusEntry[];
+}
+
+/** Result of starting a loopback (authorization_code) flow — Slack, plugins. */
+export interface LoopbackFlowStart {
+  request_id: string;
 }
 
 /** Information returned when starting the Device Code Flow. */

@@ -134,6 +134,8 @@ pub(crate) struct IntegrationStatusEntry {
     /// "Connected to <workspace>" hint for OAuth services persisting identity
     /// in providerData (Slack: teamName · authedUserId). `None` = nothing to show.
     pub(crate) oauth_identity: Option<String>,
+    /// IdP brand name for OAuth button copy, from the descriptor SSOT.
+    pub(crate) oauth_provider_label: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
