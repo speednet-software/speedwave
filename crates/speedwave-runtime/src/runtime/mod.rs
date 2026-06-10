@@ -2352,6 +2352,10 @@ services:
         assert!(is_propagation_error(&anyhow::anyhow!(
             "yaml: line 8: did not find expected key"
         )));
+        // A cut at end-of-document (file truncated mid-write) — yaml-go variant.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "failed to parse compose.yml: yaml: line 365: found unexpected end of stream"
+        )));
         // A torn `cpus:` value under deploy.resources.limits surfaces as the
         // compose-go schema type error for that field (real-world: mcp-office).
         assert!(is_propagation_error(&anyhow::anyhow!(

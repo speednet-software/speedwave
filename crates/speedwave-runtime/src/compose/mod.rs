@@ -470,6 +470,7 @@ pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
     "memory must be a string",         // deploy.resources.limits.memory torn
     "could not find expected",
     "did not find expected",
+    "found unexpected end of stream", // file truncated mid-document (yaml-go)
 ];
 
 /// Asserts every `services.<svc>.networks: [name]` reference resolves to a
