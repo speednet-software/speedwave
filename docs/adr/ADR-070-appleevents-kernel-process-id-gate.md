@@ -1,4 +1,4 @@
-# ADR-069: AppleEvents permission gate via `typeKernelProcessID` addressing
+# ADR-070: AppleEvents permission gate via `typeKernelProcessID` addressing
 
 > **Status:** Accepted (2026-06-09)
 > **Context:** The Mail/Notes native CLIs probe Automation (Apple Events) permission through `AppleEventsGate`. An earlier revision addressed the target app by bundle id and intermittently returned `procNotFound (-600)` even when the app was running and `osascript` could reach it. This ADR records why the gate resolves a PID first and addresses the target by kernel process id, and the exact OSStatus → status mapping. It complements [ADR-049](ADR-049-tcc-sub-identifiers-and-applevents-gate.md), which introduced the unified `PermissionGate` and TCC sub-identifiers.

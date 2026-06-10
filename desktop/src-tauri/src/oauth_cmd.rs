@@ -2,7 +2,7 @@
 
 use crate::oauth_flow::{
     self, emit_error, save_credential_file, DeviceCodeInfo, DeviceCodeProvider, FlowRegistry,
-    PollStep,
+    PollStep, ProgressStatus,
 };
 use crate::types::check_project;
 use serde::Deserialize;
@@ -90,54 +90,46 @@ fn validate_tenant_id(tenant_id: &str) -> Result<(), String> {
     Err(format!("invalid tenant_id: {tenant_id}"))
 }
 
-fn save_oauth_state(
+/// Inputs for the SharePoint off-mount OAuth state write (ADR-060 split).
+struct SpOAuthState<'a> {
+    client_id: &'a str,
+    tenant_id: &'a str,
+    refresh_token: &'a str,
+    scopes: &'a str,
+    expires_in: u64,
+}
+
+/// `data_dir`-parameterised so tests pass a tempdir, bypassing the
+/// `consts::data_dir()` OnceLock (cf. `plugin::oauth_state_file_in`).
+/// Production reaches this via `save_tokens`.
+fn save_oauth_state_in(
+    data_dir: &std::path::Path,
     project: &str,
     service: &str,
-    client_id: &str,
-    tenant_id: &str,
-    refresh_token: &str,
-    scopes: &str,
-    expires_in: u64,
+    st: &SpOAuthState<'_>,
 ) -> Result<(), String> {
     let max = crate::types::MAX_CREDENTIAL_BYTES;
-    if refresh_token.len() > max {
+    if st.refresh_token.len() > max {
         return Err(format!("refresh_token exceeds {max} bytes"));
     }
-    let path = speedwave_runtime::plugin::oauth_state_file(project, service);
-    let parent = path.parent().ok_or_else(|| "no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let scopes_vec: Vec<String> = st.scopes.split_whitespace().map(String::from).collect();
+    let mut provider_data = std::collections::BTreeMap::new();
+    provider_data.insert("clientId".to_string(), st.client_id.to_string());
+    provider_data.insert("tenantId".to_string(), st.tenant_id.to_string());
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-    }
-
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let expires_at_iso = iso8601_from_unix_ms(now_ms + expires_in.saturating_mul(1000));
-    let last_refresh_iso = iso8601_from_unix_ms(now_ms);
-
-    let scopes_vec: Vec<&str> = scopes.split_whitespace().collect();
-
-    let state = serde_json::json!({
-        "provider": crate::oauth_providers::MICROSOFT_PROVIDER_ID,
-        "providerData": {
-            "clientId": client_id,
-            "tenantId": tenant_id,
+    let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, service);
+    speedwave_runtime::oauth_persist::write_oauth_state(
+        &path,
+        &speedwave_runtime::oauth_persist::OAuthStateParams {
+            provider: crate::oauth_providers::MICROSOFT_PROVIDER_ID,
+            grant_type: None,
+            provider_data,
+            scopes: scopes_vec.clone(),
+            granted_scopes: scopes_vec,
+            refresh_token: st.refresh_token,
+            expires_in: st.expires_in,
         },
-        "scopes": scopes_vec,
-        "grantedScopes": scopes_vec,
-        "refreshToken": refresh_token,
-        "expiresAt": expires_at_iso,
-        "lastRefreshAt": last_refresh_iso,
-    });
-    let body = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())? + "\n";
-    speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())?;
-    Ok(())
+    )
 }
 
 /// Keeps the AADSTS trace code; drops free text (ADR-060 live-compromise).
@@ -159,12 +151,37 @@ fn redact_ms_error_description(raw: &str) -> String {
     "redacted".to_string()
 }
 
-fn iso8601_from_unix_ms(unix_ms: u64) -> String {
-    let secs = (unix_ms / 1000) as i64;
-    let ms = (unix_ms % 1000) as u32;
-    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, ms * 1_000_000)
-        .unwrap_or_else(chrono::Utc::now);
-    dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+/// Classifies a Microsoft token-poll body into a [`PollAction`], or `Ok(())`
+/// when it carries tokens. Pure — the shared poll loop drives the effects.
+fn classify_sharepoint_response(status: u16, bytes: &[u8]) -> Result<(), oauth_flow::PollAction> {
+    use oauth_flow::PollAction;
+    if serde_json::from_slice::<MsTokenResponse>(bytes).is_ok() {
+        return Ok(());
+    }
+    if let Ok(err) = serde_json::from_slice::<MsTokenErrorResponse>(bytes) {
+        return Err(match err.error.as_str() {
+            "authorization_pending" => PollAction::KeepPolling,
+            "slow_down" => PollAction::SlowDown,
+            "expired_token" => PollAction::Expired(oauth_flow::DEVICE_CODE_EXPIRED_MSG.to_string()),
+            "authorization_declined" => {
+                PollAction::Failed("Authorization was declined".to_string())
+            }
+            "bad_verification_code" => PollAction::Failed("Invalid verification code".to_string()),
+            other => {
+                let msg = err
+                    .error_description
+                    .as_deref()
+                    .map(redact_ms_error_description)
+                    .unwrap_or_else(|| other.to_string());
+                PollAction::Failed(msg)
+            }
+        });
+    }
+    let preview = String::from_utf8_lossy(bytes);
+    let truncated = preview.chars().take(200).collect::<String>();
+    Err(PollAction::Failed(format!(
+        "Unexpected response from Microsoft (HTTP {status}): {truncated}"
+    )))
 }
 
 fn save_tokens(
@@ -173,17 +190,36 @@ fn save_tokens(
     tenant_id: &str,
     tokens: &MsTokenResponse,
 ) -> Result<(), String> {
-    let svc_dir =
-        speedwave_runtime::plugin::token_dir(project, "sharepoint").map_err(|e| e.to_string())?;
-    save_credential_file(&svc_dir, "access_token", &tokens.access_token)?;
-    save_oauth_state(
+    save_tokens_in(
+        speedwave_runtime::consts::data_dir(),
         project,
-        "sharepoint",
         client_id,
         tenant_id,
-        &tokens.refresh_token,
-        speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
-        tokens.expires_in(),
+        tokens,
+    )
+}
+
+/// `data_dir`-parameterised variant (see `save_oauth_state_in`).
+fn save_tokens_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    client_id: &str,
+    tenant_id: &str,
+    tokens: &MsTokenResponse,
+) -> Result<(), String> {
+    let svc_dir = speedwave_runtime::plugin::token_dir_in(data_dir, project, "sharepoint");
+    save_credential_file(&svc_dir, "access_token", &tokens.access_token)?;
+    save_oauth_state_in(
+        data_dir,
+        project,
+        "sharepoint",
+        &SpOAuthState {
+            client_id,
+            tenant_id,
+            refresh_token: &tokens.refresh_token,
+            scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+            expires_in: tokens.expires_in(),
+        },
     )?;
     Ok(())
 }
@@ -216,44 +252,24 @@ impl DeviceCodeProvider for SharepointProvider {
         http_status: reqwest::StatusCode,
         body_bytes: &[u8],
     ) -> PollStep {
-        if let Ok(tokens) = serde_json::from_slice::<MsTokenResponse>(body_bytes) {
-            if let Err(e) = save_tokens(&self.project, &self.client_id, &self.tenant_id, &tokens) {
-                return emit_error(format!("Failed to save tokens: {e}"));
+        match classify_sharepoint_response(http_status.as_u16(), body_bytes) {
+            Ok(()) => {
+                let tokens: MsTokenResponse = match serde_json::from_slice(body_bytes) {
+                    Ok(t) => t,
+                    Err(e) => return emit_error(format!("Failed to parse token response: {e}")),
+                };
+                if let Err(e) =
+                    save_tokens(&self.project, &self.client_id, &self.tenant_id, &tokens)
+                {
+                    return emit_error(format!("Failed to save tokens: {e}"));
+                }
+                PollStep::Emit {
+                    status: ProgressStatus::Success,
+                    message: "Authentication successful".to_string(),
+                }
             }
-            return PollStep::Emit {
-                status: "success",
-                message: "Authentication successful".to_string(),
-            };
+            Err(action) => action.into_step(),
         }
-
-        if let Ok(err) = serde_json::from_slice::<MsTokenErrorResponse>(body_bytes) {
-            return match err.error.as_str() {
-                "authorization_pending" => PollStep::KeepPolling { slow_down: false },
-                "slow_down" => PollStep::KeepPolling { slow_down: true },
-                "expired_token" => PollStep::Emit {
-                    status: "expired",
-                    message: oauth_flow::DEVICE_CODE_EXPIRED_MSG.to_string(),
-                },
-                "authorization_declined" => emit_error("Authorization was declined".to_string()),
-                "bad_verification_code" => emit_error("Invalid verification code".to_string()),
-                other => emit_error(
-                    err.error_description
-                        .as_deref()
-                        .map(redact_ms_error_description)
-                        .unwrap_or_else(|| other.to_string()),
-                ),
-            };
-        }
-
-        let preview = String::from_utf8_lossy(body_bytes);
-        let truncated = if preview.len() > 200 {
-            &preview[..200]
-        } else {
-            &preview
-        };
-        emit_error(format!(
-            "Unexpected response from Microsoft (HTTP {http_status}): {truncated}"
-        ))
     }
 }
 
@@ -275,7 +291,7 @@ pub async fn start_sharepoint_oauth(
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let cancel_token = CancellationToken::new();
-    let my_generation = FLOW_STATE.install(request_id.clone(), cancel_token.clone())?;
+    let my_generation = FLOW_STATE.install(request_id.clone(), cancel_token.clone());
 
     let scopes = speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES;
     let devicecode_url = format!(
@@ -322,7 +338,7 @@ pub async fn start_sharepoint_oauth(
         format!("Failed to parse device code response: {e}")
     })?;
 
-    if FLOW_STATE.current_generation()? != my_generation {
+    if FLOW_STATE.current_generation() != my_generation {
         FLOW_STATE.clear_if_current(&request_id);
         return Err("OAuth flow was cancelled".to_string());
     }
@@ -558,24 +574,27 @@ mod tests {
     // -- save_oauth_state (ADR-060 split) --
 
     #[test]
-    #[serial]
     fn save_oauth_state_writes_json_with_required_fields() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
-        save_oauth_state(
+        save_oauth_state_in(
+            tmp.path(),
             "test-project",
             "sharepoint",
-            "11111111-1111-1111-1111-111111111111",
-            "common",
-            "rt-secret",
-            speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
-            3600,
+            &SpOAuthState {
+                client_id: "11111111-1111-1111-1111-111111111111",
+                tenant_id: "common",
+                refresh_token: "rt-secret",
+                scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+                expires_in: 3600,
+            },
         )
         .unwrap();
 
-        let path = speedwave_runtime::plugin::oauth_state_file("test-project", "sharepoint");
+        let path = speedwave_runtime::plugin::oauth_state_file_in(
+            tmp.path(),
+            "test-project",
+            "sharepoint",
+        );
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(json["provider"], "microsoft");
@@ -604,11 +623,6 @@ mod tests {
                 & 0o777;
             assert_eq!(parent_mode, 0o700, "oauth/<project> dir must be 0o700");
         }
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     /// SSOT parity guard: the written key set must equal the schema that
@@ -616,7 +630,6 @@ mod tests {
     /// rename on either side (e.g. `refreshToken` → `refresh_token`) breaks token
     /// refresh at runtime with no other guard — this pins it at build time.
     #[test]
-    #[serial]
     fn save_oauth_state_key_set_matches_documented_ts_schema() {
         // Mirror of OAuthState in oauth-state.ts (top-level + providerData keys).
         const EXPECTED_TOP_LEVEL: &[&str] = &[
@@ -631,21 +644,25 @@ mod tests {
         const EXPECTED_PROVIDER_DATA: &[&str] = &["clientId", "tenantId"];
 
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
-        save_oauth_state(
+        save_oauth_state_in(
+            tmp.path(),
             "test-project",
             "sharepoint",
-            "11111111-1111-1111-1111-111111111111",
-            "common",
-            "rt-secret",
-            speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
-            3600,
+            &SpOAuthState {
+                client_id: "11111111-1111-1111-1111-111111111111",
+                tenant_id: "common",
+                refresh_token: "rt-secret",
+                scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+                expires_in: 3600,
+            },
         )
         .unwrap();
 
-        let path = speedwave_runtime::plugin::oauth_state_file("test-project", "sharepoint");
+        let path = speedwave_runtime::plugin::oauth_state_file_in(
+            tmp.path(),
+            "test-project",
+            "sharepoint",
+        );
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
 
@@ -674,52 +691,38 @@ mod tests {
             pd_keys, expected_pd,
             "oauth.json providerData keys drifted from the Microsoft schema"
         );
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn save_oauth_state_rejects_oversized_refresh_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
         let big = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
-        let result = save_oauth_state(
+        let result = save_oauth_state_in(
+            tmp.path(),
             "test-project",
             "sharepoint",
-            "11111111-1111-1111-1111-111111111111",
-            "common",
-            &big,
-            speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
-            3600,
+            &SpOAuthState {
+                client_id: "11111111-1111-1111-1111-111111111111",
+                tenant_id: "common",
+                refresh_token: &big,
+                scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+                expires_in: 3600,
+            },
         );
         assert!(result.unwrap_err().contains("refresh_token"));
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     #[test]
-    #[serial]
     fn save_tokens_splits_into_two_locations() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-
         let tokens = MsTokenResponse {
             access_token: "at-secret".to_string(),
             refresh_token: "rt-secret".to_string(),
             _token_type: "Bearer".to_string(),
             expires_in: 3600,
         };
-        save_tokens(
+        save_tokens_in(
+            tmp.path(),
             "test-project",
             "11111111-1111-1111-1111-111111111111",
             "common",
@@ -727,18 +730,21 @@ mod tests {
         )
         .unwrap();
 
-        let at_path = speedwave_runtime::plugin::token_dir("test-project", "sharepoint")
-            .unwrap()
-            .join("access_token");
-        assert_eq!(std::fs::read_to_string(&at_path).unwrap(), "at-secret");
+        let svc_dir =
+            speedwave_runtime::plugin::token_dir_in(tmp.path(), "test-project", "sharepoint");
+        assert_eq!(
+            std::fs::read_to_string(svc_dir.join("access_token")).unwrap(),
+            "at-secret"
+        );
         assert!(
-            !speedwave_runtime::plugin::token_dir("test-project", "sharepoint")
-                .unwrap()
-                .join("refresh_token")
-                .exists(),
+            !svc_dir.join("refresh_token").exists(),
             "refresh_token must NOT be in the worker-mounted dir"
         );
-        let state_path = speedwave_runtime::plugin::oauth_state_file("test-project", "sharepoint");
+        let state_path = speedwave_runtime::plugin::oauth_state_file_in(
+            tmp.path(),
+            "test-project",
+            "sharepoint",
+        );
         let content = std::fs::read_to_string(&state_path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(json["refreshToken"], "rt-secret");
@@ -747,10 +753,74 @@ mod tests {
             "11111111-1111-1111-1111-111111111111"
         );
         assert_eq!(json["providerData"]["tenantId"], "common");
+    }
 
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+    // -- classify_sharepoint_response: poll-loop mechanics (mirrors github) --
+
+    #[test]
+    fn classify_sp_accepts_success_body() {
+        let body =
+            br#"{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":3600}"#;
+        assert!(classify_sharepoint_response(200, body).is_ok());
+    }
+
+    #[test]
+    fn classify_sp_pending_keeps_polling() {
+        let body = br#"{"error":"authorization_pending"}"#;
+        assert!(matches!(
+            classify_sharepoint_response(400, body),
+            Err(oauth_flow::PollAction::KeepPolling)
+        ));
+    }
+
+    #[test]
+    fn classify_sp_slow_down_backs_off() {
+        let body = br#"{"error":"slow_down"}"#;
+        assert!(matches!(
+            classify_sharepoint_response(400, body),
+            Err(oauth_flow::PollAction::SlowDown)
+        ));
+    }
+
+    #[test]
+    fn classify_sp_expired_token_is_expired() {
+        let body = br#"{"error":"expired_token"}"#;
+        assert!(matches!(
+            classify_sharepoint_response(400, body),
+            Err(oauth_flow::PollAction::Expired(_))
+        ));
+    }
+
+    #[test]
+    fn classify_sp_declined_is_failed() {
+        let body = br#"{"error":"authorization_declined"}"#;
+        assert!(matches!(
+            classify_sharepoint_response(400, body),
+            Err(oauth_flow::PollAction::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn classify_sp_other_error_redacts_description() {
+        // The `other` branch routes error_description through redaction — a
+        // tenant/request detail must not leak verbatim into the failure message.
+        let body =
+            br#"{"error":"invalid_grant","error_description":"AADSTS9000 secret tenant detail"}"#;
+        match classify_sharepoint_response(400, body) {
+            Err(oauth_flow::PollAction::Failed(msg)) => {
+                assert!(!msg.contains("secret tenant detail"), "leaked: {msg}");
+            }
+            _ => panic!("expected Failed"),
+        }
+    }
+
+    #[test]
+    fn classify_sp_garbage_is_failed_with_http_status() {
+        match classify_sharepoint_response(503, b"not json") {
+            Err(oauth_flow::PollAction::Failed(msg)) => {
+                assert!(msg.contains("HTTP 503"), "status must surface: {msg}");
+            }
+            _ => panic!("expected Failed with HTTP status"),
         }
     }
 
@@ -793,7 +863,7 @@ mod tests {
         let body = br#"{"error":"expired_token"}"#;
         match provider().handle_token_response(ok_status(), body) {
             PollStep::Emit { status, message } => {
-                assert_eq!(status, "expired");
+                assert_eq!(status, ProgressStatus::Expired);
                 assert_eq!(message, oauth_flow::DEVICE_CODE_EXPIRED_MSG);
             }
             PollStep::KeepPolling { .. } => panic!("expired_token must terminate"),
@@ -805,7 +875,7 @@ mod tests {
         let body = br#"{"error":"authorization_declined"}"#;
         match provider().handle_token_response(ok_status(), body) {
             PollStep::Emit { status, message } => {
-                assert_eq!(status, "error");
+                assert_eq!(status, ProgressStatus::Error);
                 assert!(message.contains("declined"));
             }
             PollStep::KeepPolling { .. } => panic!("declined must terminate"),
@@ -818,7 +888,7 @@ mod tests {
             br#"{"error":"interaction_required","error_description":"AADSTS50079: leak here"}"#;
         match provider().handle_token_response(ok_status(), body) {
             PollStep::Emit { status, message } => {
-                assert_eq!(status, "error");
+                assert_eq!(status, ProgressStatus::Error);
                 assert_eq!(message, "AADSTS50079");
                 assert!(!message.contains("leak"));
             }
@@ -831,7 +901,7 @@ mod tests {
         let body = b"<html>nonsense</html>";
         match provider().handle_token_response(ok_status(), body) {
             PollStep::Emit { status, message } => {
-                assert_eq!(status, "error");
+                assert_eq!(status, ProgressStatus::Error);
                 assert!(message.contains("Unexpected response from Microsoft"));
             }
             PollStep::KeepPolling { .. } => panic!("garbage body must terminate"),
@@ -847,7 +917,7 @@ mod tests {
 
         let body = br#"{"access_token":"at-secret","refresh_token":"rt-secret","token_type":"Bearer","expires_in":3600}"#;
         match provider().handle_token_response(ok_status(), body) {
-            PollStep::Emit { status, .. } => assert_eq!(status, "success"),
+            PollStep::Emit { status, .. } => assert_eq!(status, ProgressStatus::Success),
             PollStep::KeepPolling { .. } => panic!("success must terminate"),
         }
         let at_path = speedwave_runtime::plugin::token_dir("test-project", "sharepoint")

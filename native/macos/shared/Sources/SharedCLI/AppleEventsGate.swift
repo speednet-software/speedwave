@@ -6,7 +6,7 @@ import Foundation
 /// Two-stage authorization (NSWorkspace pid → `typeKernelProcessID` AEAddressDesc)
 /// avoids the `procNotFound (-600)` bundle-id bug; optional AppleScript probe
 /// preserves the v1 real-data-access invariant. Rationale + OSStatus mapping:
-/// see docs/adr/ADR-069-appleevents-kernel-process-id-gate.md.
+/// see docs/adr/ADR-070-appleevents-kernel-process-id-gate.md.
 public struct AppleEventsGate: PermissionGate {
     public let targetBundleId: String
     public let dataAccessScript: String?

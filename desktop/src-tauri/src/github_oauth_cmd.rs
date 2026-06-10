@@ -3,7 +3,7 @@
 
 use crate::oauth_flow::{
     self, emit_error, save_credential_file, DeviceCodeInfo, DeviceCodeProvider, FlowRegistry,
-    PollStep,
+    PollStep, ProgressStatus,
 };
 use crate::types::check_project;
 use serde::Deserialize;
@@ -46,6 +46,37 @@ struct GhTokenErrorResponse {
 static FLOW_STATE: FlowRegistry = FlowRegistry::new(PROGRESS_EVENT);
 
 /// `None` = keep polling (`authorization_pending` / `slow_down`).
+/// Classifies a GitHub token-poll body into a [`PollAction`], or `Ok(())` when
+/// it carries an access token. Pure — the shared poll loop drives the effects.
+fn classify_github_response(status: u16, bytes: &[u8]) -> Result<(), oauth_flow::PollAction> {
+    use oauth_flow::PollAction;
+    if serde_json::from_slice::<GhTokenResponse>(bytes).is_ok() {
+        return Ok(());
+    }
+    if let Ok(err) = serde_json::from_slice::<GhTokenErrorResponse>(bytes) {
+        return match map_github_error(err.error.as_str()) {
+            None if err.error == "slow_down" => Err(PollAction::SlowDown),
+            None => Err(PollAction::KeepPolling),
+            Some(msg) => {
+                let full = err
+                    .error_description
+                    .map(|d| format!("{msg} ({d})"))
+                    .unwrap_or_else(|| msg.to_string());
+                if err.error == "expired_token" {
+                    Err(PollAction::Expired(full))
+                } else {
+                    Err(PollAction::Failed(full))
+                }
+            }
+        };
+    }
+    let preview = String::from_utf8_lossy(bytes);
+    let truncated = preview.chars().take(200).collect::<String>();
+    Err(PollAction::Failed(format!(
+        "Unexpected response from GitHub (HTTP {status}): {truncated}"
+    )))
+}
+
 fn map_github_error(code: &str) -> Option<&'static str> {
     match code {
         "authorization_pending" | "slow_down" => None,
@@ -92,54 +123,26 @@ impl DeviceCodeProvider for GithubProvider {
         body_bytes: &[u8],
     ) -> PollStep {
         // GitHub returns 200 for both success and polling errors.
-        if let Ok(tokens) = serde_json::from_slice::<GhTokenResponse>(body_bytes) {
-            let svc_dir = match speedwave_runtime::plugin::token_dir(&self.project, "github") {
-                Ok(d) => d,
-                Err(e) => return emit_error(format!("Failed to resolve token dir: {e}")),
-            };
-            if let Err(e) = save_credential_file(&svc_dir, "token", &tokens.access_token) {
-                return emit_error(format!("Failed to save token: {e}"));
-            }
-            return PollStep::Emit {
-                status: "success",
-                message: "Authentication successful".to_string(),
-            };
-        }
-
-        if let Ok(err) = serde_json::from_slice::<GhTokenErrorResponse>(body_bytes) {
-            match map_github_error(err.error.as_str()) {
-                None => {
-                    return PollStep::KeepPolling {
-                        slow_down: err.error == "slow_down",
-                    }
+        match classify_github_response(http_status.as_u16(), body_bytes) {
+            Ok(()) => {
+                let tokens: GhTokenResponse = match serde_json::from_slice(body_bytes) {
+                    Ok(t) => t,
+                    Err(e) => return emit_error(format!("Failed to parse token response: {e}")),
+                };
+                let svc_dir = match speedwave_runtime::plugin::token_dir(&self.project, "github") {
+                    Ok(d) => d,
+                    Err(e) => return emit_error(format!("Failed to resolve token dir: {e}")),
+                };
+                if let Err(e) = save_credential_file(&svc_dir, "token", &tokens.access_token) {
+                    return emit_error(format!("Failed to save token: {e}"));
                 }
-                Some(msg) => {
-                    let full = err
-                        .error_description
-                        .map(|d| format!("{msg} ({d})"))
-                        .unwrap_or_else(|| msg.to_string());
-                    let status = if err.error == "expired_token" {
-                        "expired"
-                    } else {
-                        "error"
-                    };
-                    return PollStep::Emit {
-                        status,
-                        message: full,
-                    };
+                PollStep::Emit {
+                    status: ProgressStatus::Success,
+                    message: "Authentication successful".to_string(),
                 }
             }
+            Err(action) => action.into_step(),
         }
-
-        let preview = String::from_utf8_lossy(body_bytes);
-        let truncated = if preview.len() > 200 {
-            &preview[..200]
-        } else {
-            &preview
-        };
-        emit_error(format!(
-            "Unexpected response from GitHub (HTTP {http_status}): {truncated}"
-        ))
     }
 }
 
@@ -156,7 +159,7 @@ pub async fn start_github_oauth(
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let cancel_token = CancellationToken::new();
-    let my_generation = FLOW_STATE.install(request_id.clone(), cancel_token.clone())?;
+    let my_generation = FLOW_STATE.install(request_id.clone(), cancel_token.clone());
 
     // GitHub: must send `Accept: application/json` or response is form-encoded.
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -200,7 +203,7 @@ pub async fn start_github_oauth(
         format!("Failed to parse device code response: {e}")
     })?;
 
-    if FLOW_STATE.current_generation()? != my_generation {
+    if FLOW_STATE.current_generation() != my_generation {
         FLOW_STATE.clear_if_current(&request_id);
         return Err("OAuth flow was cancelled".to_string());
     }
@@ -384,7 +387,7 @@ mod tests {
     fn provider_expired_token_emits_expired_status() {
         let body = br#"{"error":"expired_token"}"#;
         match provider().handle_token_response(ok_status(), body) {
-            PollStep::Emit { status, .. } => assert_eq!(status, "expired"),
+            PollStep::Emit { status, .. } => assert_eq!(status, ProgressStatus::Expired),
             PollStep::KeepPolling { .. } => panic!("expired_token must terminate"),
         }
     }
@@ -394,7 +397,7 @@ mod tests {
         let body = br#"{"error":"access_denied"}"#;
         match provider().handle_token_response(ok_status(), body) {
             PollStep::Emit { status, message } => {
-                assert_eq!(status, "error");
+                assert_eq!(status, ProgressStatus::Error);
                 assert!(message.contains("denied"));
             }
             PollStep::KeepPolling { .. } => panic!("access_denied must terminate"),
@@ -406,7 +409,7 @@ mod tests {
         let body = b"<html>nonsense</html>";
         match provider().handle_token_response(ok_status(), body) {
             PollStep::Emit { status, message } => {
-                assert_eq!(status, "error");
+                assert_eq!(status, ProgressStatus::Error);
                 assert!(message.contains("Unexpected response from GitHub"));
             }
             PollStep::KeepPolling { .. } => panic!("garbage body must terminate"),
@@ -423,7 +426,7 @@ mod tests {
         let body = br#"{"access_token":"gho_secret","token_type":"bearer"}"#;
         let step = provider().handle_token_response(ok_status(), body);
         match step {
-            PollStep::Emit { status, .. } => assert_eq!(status, "success"),
+            PollStep::Emit { status, .. } => assert_eq!(status, ProgressStatus::Success),
             PollStep::KeepPolling { .. } => panic!("success must terminate"),
         }
         let token_path = speedwave_runtime::plugin::token_dir("p", "github")
@@ -434,6 +437,60 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
             None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    // -- classify_github_response: poll-loop mechanics --
+
+    #[test]
+    fn classify_accepts_success_body() {
+        let body = br#"{"access_token":"a","token_type":"bearer","scope":"repo"}"#;
+        assert!(classify_github_response(200, body).is_ok());
+    }
+
+    #[test]
+    fn classify_pending_keeps_polling() {
+        let body = br#"{"error":"authorization_pending"}"#;
+        assert!(matches!(
+            classify_github_response(200, body),
+            Err(oauth_flow::PollAction::KeepPolling)
+        ));
+    }
+
+    #[test]
+    fn classify_slow_down_backs_off() {
+        let body = br#"{"error":"slow_down"}"#;
+        assert!(matches!(
+            classify_github_response(200, body),
+            Err(oauth_flow::PollAction::SlowDown)
+        ));
+    }
+
+    #[test]
+    fn classify_expired_token_is_expired() {
+        let body = br#"{"error":"expired_token"}"#;
+        assert!(matches!(
+            classify_github_response(200, body),
+            Err(oauth_flow::PollAction::Expired(_))
+        ));
+    }
+
+    #[test]
+    fn classify_access_denied_is_failed() {
+        let body = br#"{"error":"access_denied"}"#;
+        assert!(matches!(
+            classify_github_response(200, body),
+            Err(oauth_flow::PollAction::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn classify_garbage_is_failed_with_http_status() {
+        match classify_github_response(502, b"not json") {
+            Err(oauth_flow::PollAction::Failed(msg)) => {
+                assert!(msg.contains("HTTP 502"), "status must surface: {msg}");
+            }
+            _ => panic!("expected Failed with HTTP status"),
         }
     }
 }

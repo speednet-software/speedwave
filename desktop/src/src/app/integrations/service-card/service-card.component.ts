@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
-import { DeviceCodeInfo, IntegrationStatusEntry } from '../../models/integration';
+import { DeviceCodeInfo, IntegrationStatusEntry, OAuthFlowStatus } from '../../models/integration';
+import { OauthConnectComponent } from '../../shared/oauth-connect/oauth-connect.component';
 
 /** Semantic states the header status dot can reflect. */
 export type ServiceStatusDot = 'connected' | 'configuring' | 'error' | 'disabled';
@@ -14,7 +15,7 @@ export interface SaveCredentialsEvent {
 /** Reusable card for a single MCP integration service. */
 @Component({
   selector: 'app-service-card',
-  imports: [],
+  imports: [OauthConnectComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -129,112 +130,18 @@ export interface SaveCredentialsEvent {
             }
 
             @if (hasOAuthFields()) {
-              <div
-                class="my-4 rounded ring-1 ring-[var(--line)] bg-[var(--bg-2)] p-4"
-                data-testid="oauth-section"
-              >
-                @if (
-                  !deviceCodeInfo() && oauthStatus() !== 'polling' && oauthStatus() !== 'starting'
-                ) {
-                  @if (svc().configured) {
-                    <button
-                      type="button"
-                      class="mono text-[11px] text-[var(--ink-dim)] underline decoration-dotted underline-offset-2 hover:text-[var(--ink)]"
-                      data-testid="btn-reconnect-oauth"
-                      (click)="onStartOAuth()"
-                    >
-                      Reconnect to {{ oauthProviderLabel() }}
-                    </button>
-                  } @else {
-                    <button
-                      type="button"
-                      class="mono rounded ring-1 ring-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                      data-testid="btn-start-oauth"
-                      [disabled]="!oauthPrerequisitesMet()"
-                      [attr.title]="
-                        oauthPrerequisitesMet() ? null : oauthPrerequisitesMissingMessage()
-                      "
-                      (click)="onStartOAuth()"
-                    >
-                      Sign in with {{ oauthProviderLabel() }}
-                    </button>
-                    @if (!oauthPrerequisitesMet()) {
-                      <p
-                        class="mono mt-2 text-[11px] text-[var(--ink-dim)]"
-                        data-testid="oauth-prereq-hint"
-                      >
-                        {{ oauthPrerequisitesMissingMessage() }}
-                      </p>
-                    }
-                  }
-                }
-                @if (oauthStatus() === 'starting') {
-                  <p
-                    class="mono text-[12px] text-[var(--ink-dim)] my-2"
-                    data-testid="polling-status"
-                  >
-                    Connecting to {{ oauthProviderLabel() }}...
-                  </p>
-                  <button
-                    type="button"
-                    class="mono rounded ring-1 ring-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10 mt-2"
-                    data-testid="btn-cancel-oauth"
-                    (click)="cancelOAuth.emit()"
-                  >
-                    Cancel
-                  </button>
-                }
-                @if (deviceCodeInfo(); as info) {
-                  <p class="mono text-[12px] text-[var(--ink-dim)]">Enter this code:</p>
-                  <div
-                    class="mono text-[24px] font-bold tracking-[4px] text-[var(--accent)] my-3 text-center"
-                    data-testid="user-code"
-                  >
-                    {{ info.user_code }}
-                  </div>
-                  <div class="flex items-center gap-2.5 my-2 flex-wrap">
-                    <button
-                      type="button"
-                      class="mono rounded ring-1 ring-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90"
-                      data-testid="btn-link"
-                      (click)="openVerificationUrl.emit(info.verification_uri)"
-                    >
-                      Open {{ oauthProviderLabel() }} Sign-in
-                    </button>
-                    <span
-                      class="mono text-[11px] text-[var(--ink-dim)] select-all break-all"
-                      data-testid="verification-url"
-                      >{{ info.verification_uri }}</span
-                    >
-                  </div>
-                  @if (oauthStatus() === 'polling') {
-                    <p
-                      class="mono text-[12px] text-[var(--ink-dim)] my-2"
-                      data-testid="polling-status"
-                    >
-                      Waiting for sign-in...
-                    </p>
-                  }
-                  <button
-                    type="button"
-                    class="mono rounded ring-1 ring-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10 mt-2"
-                    data-testid="btn-cancel-oauth"
-                    (click)="cancelOAuth.emit()"
-                  >
-                    Cancel
-                  </button>
-                }
-                @if (oauthStatus() === 'success') {
-                  <p class="mono text-[12px] text-[var(--green)]" data-testid="oauth-success">
-                    Authentication successful
-                  </p>
-                }
-                @if (oauthStatus() === 'error' || oauthStatus() === 'expired') {
-                  <p class="mono text-[12px] text-red-300" data-testid="oauth-error">
-                    {{ oauthStatusMessage() }}
-                  </p>
-                }
-              </div>
+              <app-oauth-connect
+                [providerLabel]="oauthProviderLabel()"
+                [configured]="svc().configured"
+                [status]="oauthStatus()"
+                [deviceCode]="deviceCodeInfo()"
+                [statusMessage]="oauthStatusMessage()"
+                [prerequisitesMet]="oauthPrerequisitesMet()"
+                [prerequisitesMissingMessage]="oauthPrerequisitesMissingMessage()"
+                (authorize)="onStartOAuth()"
+                (cancelFlow)="cancelOAuth.emit()"
+                (openUrl)="openVerificationUrl.emit($event)"
+              />
             }
 
             <div class="flex gap-3 mt-4">
@@ -274,7 +181,7 @@ export interface SaveCredentialsEvent {
 export class ServiceCardComponent {
   readonly svc = input.required<IntegrationStatusEntry>();
   readonly expanded = input(false);
-  readonly oauthStatus = input<string | null>(null);
+  readonly oauthStatus = input<OAuthFlowStatus | null>(null);
   readonly deviceCodeInfo = input<DeviceCodeInfo | null>(null);
   readonly oauthStatusMessage = input('');
 

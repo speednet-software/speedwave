@@ -1316,7 +1316,9 @@ fn rollback_integration_to_disabled(project: &str, service: &str) {
 pub async fn restart_integration_containers(
     project: String,
     just_enabled: Option<String>,
+    oauth: tauri::State<'_, crate::reconcile::SharedOauth>,
 ) -> Result<(), String> {
+    let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         crate::containers_cmd::ensure_images_ready()?;
         check_project(&project)?;
@@ -1359,6 +1361,10 @@ pub async fn restart_integration_containers(
                 log::error!("restart_integration_containers: compose_down error: {e}");
                 anyhow::anyhow!("{e}")
             })?;
+
+            // Respawn the oauth worker before compose render so the bearer-map
+            // is current after a plugin OAuth toggle (ADR-069). Best-effort.
+            crate::ensure_oauth_running(&oauth_arc, &project);
 
             use crate::types::IntoAnyhow;
             crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
@@ -2005,6 +2011,28 @@ mod tests {
             "ensure_project_images_built (offset {}) must appear before compose_down (offset {}) in restart_integration_containers",
             build_pos,
             down_pos
+        );
+    }
+
+    #[test]
+    fn restart_reconciles_oauth_worker_before_compose_render() {
+        // The oauth worker must respawn before compose render so the bearer-map
+        // is current after a plugin OAuth toggle.
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers function must exist");
+        let fn_body = &source[fn_start..];
+
+        let oauth_pos = fn_body
+            .find("ensure_oauth_running")
+            .expect("restart must reconcile the oauth worker (ensure_oauth_running)");
+        let render_pos = fn_body
+            .find("render_and_save_compose")
+            .expect("render_and_save_compose call must exist");
+        assert!(
+            oauth_pos < render_pos,
+            "ensure_oauth_running (offset {oauth_pos}) must run before render_and_save_compose (offset {render_pos})"
         );
     }
 

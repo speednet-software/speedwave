@@ -866,13 +866,19 @@ impl SecurityCheck {
                 plugin::TokenMount::ReadOnly => "ro",
                 plugin::TokenMount::ReadWrite { .. } => "rw",
             };
+            // An OAuth plugin consumes the host-side oauth worker, so it gets the
+            // same per-service bearer mount as SharePoint (ADR-069).
+            let extra_allowed: Vec<String> = if manifest.oauth.is_some() {
+                vec![format!("/secrets/oauth-auth-token-{sid}")]
+            } else {
+                Vec::new()
+            };
             let params = VolumeCheckParams {
                 container_name: &name,
                 expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
-                // Plugins do not currently use the host-side oauth worker.
-                extra_allowed_ro_targets: &[],
+                extra_allowed_ro_targets: &extra_allowed,
                 rules: VolumeCheckRules::PLUGIN,
             };
             let (base_violations, _) = validate_service_volume_mounts(service, &params);

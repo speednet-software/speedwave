@@ -25,8 +25,7 @@
   "author": "Speednet",
   "license": "Apache-2.0",
   "dependencies": {
-    "@speedwave/mcp-shared": "file:../shared",
-    "async-mutex": "^0.5.0"
+    "@speedwave/mcp-shared": "file:../shared"
   },
   "devDependencies": {
     "@eslint/js": "^9.16.0",

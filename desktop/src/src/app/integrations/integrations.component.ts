@@ -15,6 +15,7 @@ import {
   DeviceCodeInfo,
   IntegrationsResponse,
   IntegrationStatusEntry,
+  OAuthFlowStatus,
   OAuthProgressEvent,
   OsIntegrationStatusEntry,
   OsIntegrationValidation,
@@ -379,7 +380,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private static validationByProject = new Map<string, Promise<void>>();
 
   /** OAuth state */
-  oauthStatus: string | null = null;
+  oauthStatus: OAuthFlowStatus | null = null;
   deviceCodeInfo: DeviceCodeInfo | null = null;
   oauthStatusMessage = '';
   activeOAuthRequestId: string | null = null;
@@ -485,7 +486,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         }
         this.cdr.markForCheck();
       })
-      .catch(() => () => {});
+      .catch((e: unknown) => {
+        // Without the listener the flow would look hung — leave a breadcrumb.
+        this.logger.warn(`${eventName} listener registration failed: ${String(e)}`);
+        return () => {};
+      });
   }
 
   /** Cleans up event listeners. */

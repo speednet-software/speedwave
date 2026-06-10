@@ -75,7 +75,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-066](ADR-066-locked-runtime-per-project-compose-lock.md)          | `LockedRuntime` wrapper enforcing per-project compose transaction lock                   | Accepted              |
 | [ADR-067](ADR-067-host-addressing-ssot-windows-wsl2-mirrored.md)       | `HostAddressing` SSOT — host bind / container gateway under WSL2 mirrored networking     | Accepted              |
 | [ADR-068](ADR-068-resource-budget-ssot.md)                             | Resource budget SSOT — container memory/CPU + adaptive VM sizing (fixed 6 GiB Claude)    | Accepted              |
-| [ADR-069](ADR-069-appleevents-kernel-process-id-gate.md)               | AppleEvents permission gate via `typeKernelProcessID` addressing                         | Accepted              |
+| [ADR-069](ADR-069-generic-plugin-oauth2.md)                            | Generic plugin OAuth2 via host-side worker — per-human identity, PKCE loopback           | Accepted              |
+| [ADR-070](ADR-070-appleevents-kernel-process-id-gate.md)               | AppleEvents permission gate via `typeKernelProcessID` addressing                         | Accepted              |
 
 ## Creating a New ADR
 
