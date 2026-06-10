@@ -304,6 +304,10 @@ export function createSessionRateLimiter() {
 
     valid.push(now);
     hits.set(key, valid);
+    // Evict idle keys so the map does not grow unboundedly across ephemeral sessions.
+    for (const [k, stamps] of hits) {
+      if (k !== key && stamps.every((t) => now - t >= HUB_RATE_LIMIT_WINDOW_MS)) hits.delete(k);
+    }
     next();
   };
 }

@@ -295,4 +295,27 @@ describe('createSessionRateLimiter', () => {
     limiter(req, mockRes(), next);
     expect(next).toHaveBeenCalledTimes(1);
   });
+
+  it('evicts idle session keys so the bucket map does not grow unboundedly', () => {
+    vi.useFakeTimers();
+    try {
+      const limiter = createSessionRateLimiter();
+      const idle = mockReq({}, '198.51.100.1');
+      const active = mockReq({}, '198.51.100.2');
+      const next: NextFunction = vi.fn();
+      // Idle session hits once, then never again.
+      limiter(idle, mockRes(), next);
+      // After the window elapses, the active session's request must drop the idle
+      // key; a now-quiet idle session that comes back is allowed (not stuck at limit).
+      vi.advanceTimersByTime(61_000);
+      limiter(active, mockRes(), next);
+      // Idle session can immediately fire 100 fresh requests (its stale bucket was evicted, not retained).
+      const res = mockRes();
+      for (let i = 0; i < 100; i++) limiter(idle, mockRes(), next);
+      limiter(idle, res, next);
+      expect(res.statusCode).toBe(429);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -120,6 +120,7 @@ Environment variables defined in `claude.env` are passed directly to Claude Code
   1. `claude.env.ANTHROPIC_MODEL` (highest precedence; matches v1 behaviour and works for any provider).
   2. `claude.llm.model` for the `anthropic` provider — the runtime injects it as `ANTHROPIC_MODEL` at compose-render time.
      Empty/whitespace falls through to Claude Code's built-in default.
+     > **Repo override caveat:** `ANTHROPIC_MODEL` is the one Anthropic env key a checked-in repo `.speedwave.json` may set (the deny-list strips `ANTHROPIC_BASE_URL`/`AUTH_TOKEN`/`CUSTOM_HEADERS`). A cloned repo can therefore pin a more expensive model and bill it against your key. Review a repo's `claude.env` before opening it, or set the model in user config (`~/.speedwave/config.json`), which always wins.
 - Custom variables can be used by MCP servers or Claude Code configuration
 - Variables are injected at container start via the compose template
 

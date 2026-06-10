@@ -93,8 +93,9 @@ public func parseEmailDetail(_ output: String, id: String) throws -> [String: An
         "sender": parts[1].trimmingCharacters(in: .whitespaces),
         "date": parts[2].trimmingCharacters(in: .whitespaces),
         "read": parts[3].trimmingCharacters(in: .whitespaces) == "true",
-        "to": parts[4].trimmingCharacters(in: .whitespaces)
+        "to": parts[4]
             .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty },
         "body": parts[5...].joined(separator: "||").trimmingCharacters(in: .whitespaces),
     ]
