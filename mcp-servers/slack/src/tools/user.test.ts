@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { withSetupGuidance } from '@speedwave/mcp-shared';
+import { withSetupGuidance, RefreshLock } from '@speedwave/mcp-shared';
 import { handleGetUsers, createUserTools } from './user-tools.js';
 import type { SlackClients } from '../client.js';
 
@@ -25,8 +25,9 @@ import * as client from '../client.js';
 /** Helper: clients object representing "tokens missing" — replaces null. */
 function unconfiguredClients(): SlackClients {
   return {
-    bot: {} as any,
     user: {} as any,
+    tokenState: { accessToken: '' },
+    lock: new RefreshLock(),
     _tokensStatus: 'missing',
   };
 }
@@ -37,8 +38,9 @@ describe('user-tools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClients = {
-      bot: {} as any,
       user: {} as any,
+      tokenState: { accessToken: '' },
+      lock: new RefreshLock(),
       _tokensStatus: 'present',
     };
   });
@@ -261,8 +263,9 @@ describe('createUserTools (with clients — configured path)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClients = {
-      bot: {} as any,
       user: {} as any,
+      tokenState: { accessToken: '' },
+      lock: new RefreshLock(),
       _tokensStatus: 'present',
     };
   });

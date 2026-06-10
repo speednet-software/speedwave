@@ -32,6 +32,7 @@ interface GetChannelMessagesParams {
   limit?: number;
   oldest?: string;
   latest?: string;
+  cursor?: string;
 }
 
 //===============================================================================
@@ -80,20 +81,22 @@ const sendChannelTool: Tool = {
 
 const getChannelMessagesTool: Tool = {
   name: 'getChannelMessages',
-  description: 'Get messages from a channel. Full data, no truncation.',
+  description:
+    'Get one page of messages from a channel (newest first). Iterate with `cursor` (from `next_cursor`) to read the full history.',
   inputSchema: {
     type: 'object',
     properties: {
       channel: { type: 'string', description: 'Channel ID or name' },
-      limit: { type: 'number', description: 'Max messages (default 50)' },
-      oldest: { type: 'string', description: 'Start timestamp' },
-      latest: { type: 'string', description: 'End timestamp' },
+      limit: { type: 'number', description: 'Max messages per page, 1-100 (default 50)' },
+      oldest: { type: 'string', description: 'Only messages after this Slack timestamp' },
+      latest: { type: 'string', description: 'Only messages before this Slack timestamp' },
+      cursor: { type: 'string', description: 'Pagination cursor from a previous next_cursor' },
     },
     required: ['channel'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { deferLoading: true },
-  keywords: ['slack', 'read', 'message', 'history', 'channel', 'get'],
+  keywords: ['slack', 'read', 'message', 'history', 'channel', 'get', 'pagination'],
   example: 'const messages = await slack.getChannelMessages({ channel: "#general", limit: 10 })',
   outputSchema: {
     type: 'object',
@@ -111,6 +114,11 @@ const getChannelMessagesTool: Tool = {
           },
         },
       },
+      next_cursor: {
+        type: 'string',
+        description: 'Pass as `cursor` to fetch the next (older) page; absent on the last page',
+      },
+      has_more: { type: 'boolean', description: 'True when another page exists' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -121,12 +129,12 @@ const getChannelMessagesTool: Tool = {
       input: { channel: '#general' },
     },
     {
-      description: 'Partial: limit messages',
-      input: { channel: '#engineering', limit: 50 },
+      description: 'Partial: time window',
+      input: { channel: '#engineering', oldest: '1717000000.000000', limit: 50 },
     },
     {
-      description: 'Full: read by channel ID with limit',
-      input: { channel: 'C0123ABC456', limit: 100 },
+      description: 'Full: next page by cursor',
+      input: { channel: 'C0123ABC456', limit: 100, cursor: 'dXNlcjpVMDYxTkZUVDI=' },
     },
   ],
 };

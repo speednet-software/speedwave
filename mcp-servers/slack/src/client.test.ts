@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { withSetupGuidance } from '@speedwave/mcp-shared';
+import { withSetupGuidance, RefreshLock, OAuthRefreshError } from '@speedwave/mcp-shared';
 import {
   formatSlackError,
+  isSlackAuthExpiredError,
+  slackCall,
   SlackClients,
-  SlackMessage,
-  SlackChannel,
   initializeSlackClients,
   sendChannel,
   readChannel,
@@ -35,34 +35,77 @@ const mockWebClientInstance = {
   },
 };
 
-// Mock @slack/web-api - use class for vitest 4.x compatibility
+// Mock @slack/web-api - use class for vitest 4.x compatibility. The mock
+// records the constructor token so slackCall's recreate-on-rotation check
+// (`client.token !== token`) behaves like the real WebClient.
 vi.mock('@slack/web-api', () => ({
-  WebClient: vi.fn().mockImplementation(function (this: typeof mockWebClientInstance) {
+  WebClient: vi.fn().mockImplementation(function (
+    this: typeof mockWebClientInstance & { token?: string },
+    token?: string
+  ) {
     Object.assign(this, mockWebClientInstance);
+    this.token = token;
   }),
 }));
 
-// Mock fs/promises
+// Mock fs/promises. The named `readFile` mirrors the default-object one
+// because @speedwave/mcp-shared's oauth-client imports it as a named binding
+// from 'node:fs/promises' (the slackCall refresh path reads the bearer file).
+const { readFileMock } = vi.hoisted(() => ({ readFileMock: vi.fn() }));
 vi.mock('fs/promises', () => ({
-  default: {
-    readFile: vi.fn(),
-  },
+  default: { readFile: readFileMock },
+  readFile: readFileMock,
 }));
+
+/** Configured client container whose user mock keeps per-test method stubs. */
+function presentClients(): SlackClients {
+  return {
+    user: {
+      token: 'xoxe.xoxp-test',
+      chat: { postMessage: vi.fn() },
+      conversations: { list: vi.fn(), history: vi.fn() },
+      users: { lookupByEmail: vi.fn() },
+    } as unknown as WebClient,
+    tokenState: { accessToken: 'xoxe.xoxp-test' },
+    lock: new RefreshLock(),
+    _tokensStatus: 'present',
+  };
+}
 
 describe('slack client', () => {
   describe('formatSlackError', () => {
-    it('formats authentication errors', () => {
+    it('formats authentication errors with reconnect guidance', () => {
       const errors = [
         { data: { error: 'not_authed' } },
         { data: { error: 'invalid_auth' } },
+        { data: { error: 'token_expired' } },
         { data: { error: 'token_revoked' } },
       ];
 
       for (const error of errors) {
         const message = formatSlackError(error);
-        expect(message).toContain('Authentication failed');
-        expect(message).toBe(withSetupGuidance('Authentication failed. Check your Slack tokens.'));
+        expect(message).toBe(
+          withSetupGuidance(
+            'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
+          )
+        );
       }
+    });
+
+    it('maps an invalid_grant refresh failure to reconnect guidance', () => {
+      const error = new OAuthRefreshError('tool_error', 'invalid_grant: token_revoked');
+      const message = formatSlackError(error);
+      expect(message).toBe(
+        withSetupGuidance(
+          'Slack sign-in expired. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
+        )
+      );
+    });
+
+    it('surfaces other refresh failures with their detail', () => {
+      const error = new OAuthRefreshError('worker_unreachable', 'cannot reach oauth worker');
+      const message = formatSlackError(error);
+      expect(message).toBe('Slack token refresh failed: cannot reach oauth worker');
     });
 
     it('formats permission errors', () => {
@@ -135,10 +178,28 @@ describe('slack client', () => {
     });
   });
 
+  describe('isSlackAuthExpiredError', () => {
+    it('matches token_expired and invalid_auth', () => {
+      expect(isSlackAuthExpiredError({ data: { error: 'token_expired' } })).toBe(true);
+      expect(isSlackAuthExpiredError({ data: { error: 'invalid_auth' } })).toBe(true);
+    });
+
+    it('treats terminal states as non-refreshable', () => {
+      expect(isSlackAuthExpiredError({ data: { error: 'token_revoked' } })).toBe(false);
+      expect(isSlackAuthExpiredError({ data: { error: 'account_inactive' } })).toBe(false);
+    });
+
+    it('ignores non-auth errors and malformed shapes', () => {
+      expect(isSlackAuthExpiredError({ data: { error: 'channel_not_found' } })).toBe(false);
+      expect(isSlackAuthExpiredError(new Error('boom'))).toBe(false);
+      expect(isSlackAuthExpiredError(undefined)).toBe(false);
+      expect(isSlackAuthExpiredError(null)).toBe(false);
+    });
+  });
+
   describe('initializeSlackClients', () => {
     beforeEach(() => {
       vi.clearAllMocks();
-      // Clear console.log and console.error spies
       vi.spyOn(console, 'log').mockImplementation(() => {});
       vi.spyOn(console, 'error').mockImplementation(() => {});
       vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -148,50 +209,36 @@ describe('slack client', () => {
       vi.restoreAllMocks();
     });
 
-    it('successfully initializes clients with valid tokens', async () => {
-      vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('xoxb-bot-token-123\n')
-        .mockResolvedValueOnce('xoxp-user-token-456\n');
+    it('successfully initializes the client with a valid access token', async () => {
+      vi.mocked(fs.readFile).mockResolvedValueOnce('xoxe.xoxp-access-token-123\n');
 
       const clients = await initializeSlackClients();
 
-      expect(clients).not.toBeNull();
-      expect(clients?.bot).toBeDefined();
-      expect(clients?.user).toBeDefined();
-      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('✅ Slack: Tokens loaded'));
+      expect(clients._tokensStatus).toBe('present');
+      expect(clients.user).toBeDefined();
+      expect(clients.tokenState.accessToken).toBe('xoxe.xoxp-access-token-123');
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringContaining('✅ Slack: Access token loaded')
+      );
     });
 
-    it('returns clients with _tokensStatus=missing when bot token is empty', async () => {
-      vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('  \n')
-        .mockResolvedValueOnce('xoxp-user-token-456\n');
+    it('returns _tokensStatus=missing when the access token is empty', async () => {
+      vi.mocked(fs.readFile).mockResolvedValueOnce('  \n');
 
       const result = await initializeSlackClients();
       expect(result._tokensStatus).toBe('missing');
       expect(console.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Slack tokens are empty or missing')
+        expect.stringContaining('Slack access token is empty or missing')
       );
     });
 
-    it('returns clients with _tokensStatus=missing when user token is empty', async () => {
-      vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('xoxb-bot-token-123\n')
-        .mockResolvedValueOnce('  \n');
-
-      const result = await initializeSlackClients();
-      expect(result._tokensStatus).toBe('missing');
-      expect(console.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Slack tokens are empty or missing')
-      );
-    });
-
-    it('returns clients with _tokensStatus=missing when tokens cannot be read', async () => {
+    it('returns _tokensStatus=missing when the token cannot be read', async () => {
       vi.mocked(fs.readFile).mockRejectedValueOnce(new Error('ENOENT: no such file'));
 
       const result = await initializeSlackClients();
       expect(result._tokensStatus).toBe('missing');
       expect(console.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to load Slack tokens')
+        expect.stringContaining('Failed to load Slack access token')
       );
     });
 
@@ -206,39 +253,31 @@ describe('slack client', () => {
       expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('plain string failure'));
     });
 
-    it('trims whitespace from tokens', async () => {
-      vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('  xoxb-bot-token-123  \n')
-        .mockResolvedValueOnce('\txoxp-user-token-456\t\n');
+    it('trims whitespace from the access token', async () => {
+      vi.mocked(fs.readFile).mockResolvedValueOnce('  xoxe.xoxp-access-token-123  \n');
 
       const clients = await initializeSlackClients();
 
-      expect(clients).not.toBeNull();
-      expect(WebClient).toHaveBeenCalledWith('xoxb-bot-token-123');
-      expect(WebClient).toHaveBeenCalledWith('xoxp-user-token-456');
+      expect(clients._tokensStatus).toBe('present');
+      expect(WebClient).toHaveBeenCalledWith('xoxe.xoxp-access-token-123');
     });
 
-    it('background bot.auth.test failure marks tracker failed (covers !res.ok throw path)', async () => {
-      // Both reads succeed → present path runs → backgroundConnectionTest fires.
-      vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('xoxb-bot-token-123')
-        .mockResolvedValueOnce('xoxp-user-token-456');
+    it('background auth.test failure marks tracker failed (covers !res.ok throw path)', async () => {
+      vi.mocked(fs.readFile).mockResolvedValueOnce('xoxe.xoxp-access-token-123');
       mockWebClientInstance.auth.test.mockResolvedValueOnce({
         ok: false,
-        error: 'invalid_auth',
+        error: 'account_inactive',
       });
 
       const clients = await initializeSlackClients();
       expect(clients._tokensStatus).toBe('present');
       // Wait for the background promise to settle.
       await vi.waitFor(() => expect(clients.statusTracker!.getStatus()).toBe('failed'));
-      expect(clients.statusTracker!.getError()).toContain('invalid_auth');
+      expect(clients.statusTracker!.getError()).toContain('account_inactive');
     });
 
-    it('background bot.auth.test reporting not-ok without explicit error uses fallback message', async () => {
-      vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('xoxb-bot-token-123')
-        .mockResolvedValueOnce('xoxp-user-token-456');
+    it('background auth.test reporting not-ok without explicit error uses fallback message', async () => {
+      vi.mocked(fs.readFile).mockResolvedValueOnce('xoxe.xoxp-access-token-123');
       mockWebClientInstance.auth.test.mockResolvedValueOnce({ ok: false });
 
       const clients = await initializeSlackClients();
@@ -247,24 +286,103 @@ describe('slack client', () => {
     });
   });
 
+  describe('slackCall', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      process.env.WORKER_OAUTH_URL = 'http://oauth.test/mcp';
+    });
+
+    afterEach(() => {
+      delete process.env.WORKER_OAUTH_URL;
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    /** Stubs the oauth worker JSON-RPC refresh round-trip as a success. */
+    function stubOauthWorkerSuccess(): void {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: '1',
+            result: {
+              content: [
+                { type: 'text', text: JSON.stringify({ expiresIn: 43200, grantedScopes: [] }) },
+              ],
+            },
+          }),
+        })
+      );
+    }
+
+    it('refreshes once on token_expired and retries with the rotated token', async () => {
+      stubOauthWorkerSuccess();
+      vi.mocked(fs.readFile)
+        .mockResolvedValueOnce('bearer-uuid') // /secrets/oauth-auth-token-slack
+        .mockResolvedValueOnce('xoxe.xoxp-rotated\n'); // /tokens/access_token re-read
+
+      const clients = presentClients();
+      const apiCall = vi
+        .fn()
+        .mockRejectedValueOnce({ data: { error: 'token_expired' } })
+        .mockResolvedValueOnce({ ok: true });
+
+      const result = await slackCall(clients, (c) => apiCall(c));
+
+      expect(result).toEqual({ ok: true });
+      expect(apiCall).toHaveBeenCalledTimes(2);
+      expect(clients.tokenState.accessToken).toBe('xoxe.xoxp-rotated');
+      // WebClient recreated with the rotated token (state transition).
+      expect(WebClient).toHaveBeenCalledWith('xoxe.xoxp-rotated');
+      expect(clients.user.token).toBe('xoxe.xoxp-rotated');
+    });
+
+    it('does not refresh on a terminal token_revoked error', async () => {
+      const fetchSpy = vi.fn();
+      vi.stubGlobal('fetch', fetchSpy);
+      const clients = presentClients();
+      const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_revoked' } });
+
+      await expect(slackCall(clients, (c) => apiCall(c))).rejects.toEqual({
+        data: { error: 'token_revoked' },
+      });
+      expect(apiCall).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('propagates a refresh failure without retrying the call', async () => {
+      // No WORKER_OAUTH_URL → refreshAccessToken throws not_configured.
+      delete process.env.WORKER_OAUTH_URL;
+      const clients = presentClients();
+      const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_expired' } });
+
+      await expect(slackCall(clients, (c) => apiCall(c))).rejects.toThrow(OAuthRefreshError);
+      expect(apiCall).toHaveBeenCalledTimes(1);
+    });
+
+    it('reuses the existing WebClient when the token has not changed', async () => {
+      const clients = presentClients();
+      const seen: unknown[] = [];
+      await slackCall(clients, async (c) => {
+        seen.push(c);
+        return 'ok';
+      });
+      expect(seen[0]).toBe(clients.user);
+      expect(WebClient).not.toHaveBeenCalled();
+    });
+  });
+
   describe('sendChannel', () => {
     let mockClients: SlackClients;
 
     beforeEach(() => {
       vi.clearAllMocks();
-      mockClients = {
-        bot: {
-          chat: { postMessage: vi.fn() },
-          conversations: { list: vi.fn(), history: vi.fn() },
-          users: { lookupByEmail: vi.fn() },
-        } as any,
-        user: {
-          chat: { postMessage: vi.fn() },
-          conversations: { list: vi.fn(), history: vi.fn() },
-          users: { lookupByEmail: vi.fn() },
-        } as any,
-        _tokensStatus: 'present',
-      };
+      mockClients = presentClients();
     });
 
     it('sends message to channel by ID', async () => {
@@ -446,19 +564,7 @@ describe('slack client', () => {
 
     beforeEach(() => {
       vi.clearAllMocks();
-      mockClients = {
-        bot: {
-          chat: { postMessage: vi.fn() },
-          conversations: { list: vi.fn(), history: vi.fn() },
-          users: { lookupByEmail: vi.fn() },
-        } as any,
-        user: {
-          chat: { postMessage: vi.fn() },
-          conversations: { list: vi.fn(), history: vi.fn() },
-          users: { lookupByEmail: vi.fn() },
-        } as any,
-        _tokensStatus: 'present',
-      };
+      mockClients = presentClients();
     });
 
     it('reads messages from channel by ID', async () => {
@@ -503,7 +609,7 @@ describe('slack client', () => {
       });
       expect(mockHistory).toHaveBeenCalledWith({
         channel: 'C12345678',
-        limit: 20,
+        limit: 50,
       });
     });
 
@@ -529,7 +635,7 @@ describe('slack client', () => {
       });
     });
 
-    it('uses default limit of 20', async () => {
+    it('uses default limit of 50 (matches the tool schema)', async () => {
       const mockHistory = vi.fn().mockResolvedValue({ messages: [] });
       mockClients.user.conversations.history = mockHistory;
 
@@ -539,7 +645,7 @@ describe('slack client', () => {
 
       expect(mockHistory).toHaveBeenCalledWith({
         channel: 'C12345678',
-        limit: 20,
+        limit: 50,
       });
     });
 
@@ -571,6 +677,67 @@ describe('slack client', () => {
         channel: 'C12345678',
         limit: 100,
       });
+    });
+
+    it('forwards oldest/latest/cursor to conversations.history', async () => {
+      const mockHistory = vi.fn().mockResolvedValue({ messages: [] });
+      mockClients.user.conversations.history = mockHistory;
+
+      await readChannel(mockClients, {
+        channel: 'C12345678',
+        oldest: '1717000000.000000',
+        latest: '1718000000.000000',
+        cursor: 'cur-abc',
+        limit: 10,
+      });
+
+      expect(mockHistory).toHaveBeenCalledWith({
+        channel: 'C12345678',
+        limit: 10,
+        oldest: '1717000000.000000',
+        latest: '1718000000.000000',
+        cursor: 'cur-abc',
+      });
+    });
+
+    it('returns next_cursor and has_more for a paginated response', async () => {
+      const mockHistory = vi.fn().mockResolvedValue({
+        messages: [{ user: 'U1', text: 'm', ts: '1.0', type: 'message' }],
+        has_more: true,
+        response_metadata: { next_cursor: 'cur-next' },
+      });
+      mockClients.user.conversations.history = mockHistory;
+
+      const result = await readChannel(mockClients, { channel: 'C12345678' });
+
+      expect(result.next_cursor).toBe('cur-next');
+      expect(result.has_more).toBe(true);
+    });
+
+    it('omits next_cursor on the last page (empty cursor string)', async () => {
+      const mockHistory = vi.fn().mockResolvedValue({
+        messages: [],
+        has_more: false,
+        response_metadata: { next_cursor: '' },
+      });
+      mockClients.user.conversations.history = mockHistory;
+
+      const result = await readChannel(mockClients, { channel: 'C12345678' });
+
+      expect(result.next_cursor).toBeUndefined();
+      expect(result.has_more).toBe(false);
+    });
+
+    it('derives has_more from next_cursor when has_more is absent', async () => {
+      const mockHistory = vi.fn().mockResolvedValue({
+        messages: [],
+        response_metadata: { next_cursor: 'cur-next' },
+      });
+      mockClients.user.conversations.history = mockHistory;
+
+      const result = await readChannel(mockClients, { channel: 'C12345678' });
+
+      expect(result.has_more).toBe(true);
     });
 
     it('handles messages with missing fields', async () => {
@@ -622,6 +789,7 @@ describe('slack client', () => {
       });
 
       expect(result.messages).toEqual([]);
+      expect(result.has_more).toBe(false);
     });
 
     it('handles missing messages array', async () => {
@@ -642,19 +810,7 @@ describe('slack client', () => {
 
     beforeEach(() => {
       vi.clearAllMocks();
-      mockClients = {
-        bot: {
-          chat: { postMessage: vi.fn() },
-          conversations: { list: vi.fn(), history: vi.fn() },
-          users: { lookupByEmail: vi.fn() },
-        } as any,
-        user: {
-          chat: { postMessage: vi.fn() },
-          conversations: { list: vi.fn(), history: vi.fn() },
-          users: { lookupByEmail: vi.fn() },
-        } as any,
-        _tokensStatus: 'present',
-      };
+      mockClients = presentClients();
     });
 
     it('returns list of channels user is member of', async () => {
@@ -831,19 +987,7 @@ describe('slack client', () => {
 
     beforeEach(() => {
       vi.clearAllMocks();
-      mockClients = {
-        bot: {
-          chat: { postMessage: vi.fn() },
-          conversations: { list: vi.fn(), history: vi.fn() },
-          users: { lookupByEmail: vi.fn() },
-        } as any,
-        user: {
-          chat: { postMessage: vi.fn() },
-          conversations: { list: vi.fn(), history: vi.fn() },
-          users: { lookupByEmail: vi.fn() },
-        } as any,
-        _tokensStatus: 'present',
-      };
+      mockClients = presentClients();
     });
 
     it('returns user by email', async () => {
@@ -949,8 +1093,9 @@ describe('slack client', () => {
     });
 
     it('throws error for other API errors', async () => {
+      // token_revoked is terminal: no refresh attempt, error passes through.
       const mockLookup = vi.fn().mockRejectedValue({
-        data: { error: 'invalid_auth' },
+        data: { error: 'token_revoked' },
       });
 
       mockClients.user.users.lookupByEmail = mockLookup;
@@ -960,7 +1105,7 @@ describe('slack client', () => {
           email: 'test@example.com',
         })
       ).rejects.toEqual({
-        data: { error: 'invalid_auth' },
+        data: { error: 'token_revoked' },
       });
     });
 

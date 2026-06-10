@@ -1,18 +1,14 @@
 /**
  * Slack API Client module providing isolated client for mcp-slack worker
  * @module slack/client
- * Slack API Client
  *
- * Isolated Slack client for mcp-slack worker.
- * ONLY has access to Slack tokens - no other service tokens.
- *
- * Security:
- * - Tokens read from /tokens/ (RO mount)
- * - Tokens NEVER exposed in responses
- * - Blast radius containment: only Slack exposed if compromised
+ * Isolated Slack client for mcp-slack worker. ONLY has access to the Slack
+ * user access token (`/tokens/access_token`, RO mount) — refreshed by the
+ * host-side oauth worker (ADR-060/071). All calls run as the signed-in user.
  *
  * Error Handling Convention:
- * - Factory functions (initializeSlackClients) return null on config failures (graceful degradation)
+ * - initializeSlackClients returns a `_tokensStatus:'missing'` container on
+ *   config failures (graceful degradation), never throws
  * - Instance methods throw errors on API failures
  */
 
@@ -29,31 +25,37 @@ import {
   ConnectionStatusTracker,
   backgroundConnectionTest,
   loadTokenFile,
+  authedSdkCall,
+  RefreshLock,
+  OAuthRefreshError,
+  type AuthedTokenState,
 } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Types
 //═══════════════════════════════════════════════════════════════════════════════
 
-/** Whether Slack tokens were loadable at startup. */
+/** Whether the Slack access token was loadable at startup. */
 export type SlackTokensStatus = 'present' | 'missing';
 
 /**
- * Container for bot and user Slack WebClient instances.
+ * Container for the Slack user WebClient plus its refresh plumbing.
  *
- * Returned in **every** state, including when tokens are absent — callers
- * check `_tokensStatus === 'missing'` rather than null. This matches the
- * status-aware pattern used by every other worker after this PR (no more
- * `if (!client) throw 'not configured'` branches scattered across handlers).
+ * Returned in **every** state, including when the token is absent — callers
+ * check `_tokensStatus === 'missing'` rather than null. `user` is recreated
+ * by {@link slackCall} whenever the rotating token changes on disk.
  *
- * `statusTracker` is optional only so tool-level unit tests can mock with
- * `{ bot, user }` without constructing a tracker; runtime always populates it.
+ * `statusTracker` is optional only so tool-level unit tests can mock without
+ * constructing a tracker; runtime always populates it.
  */
 export interface SlackClients {
-  bot: WebClient;
   user: WebClient;
+  /** Mutable holder for the current rotating access token. */
+  tokenState: AuthedTokenState;
+  /** Serializes refreshes so concurrent auth failures trigger one refresh. */
+  lock: RefreshLock;
   statusTracker?: ConnectionStatusTracker;
-  /** Whether bot/user tokens were loaded — drives "not configured" semantics. */
+  /** Whether the access token was loaded — drives "not configured" semantics. */
   _tokensStatus: SlackTokensStatus;
 }
 
@@ -108,65 +110,64 @@ export interface SlackUser {
   email?: string;
 }
 
+/** One page of channel history (cursor pagination over conversations.history). */
+export interface SlackHistoryPage {
+  messages: SlackMessage[];
+  /** Pass back as `cursor` to fetch the next (older) page. */
+  next_cursor?: string;
+  has_more: boolean;
+}
+
 //═══════════════════════════════════════════════════════════════════════════════
 // Client Factory
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Initialize Slack clients from tokens
- * Loads bot_token and user_token from /tokens/ directory.
+ * Initialize the Slack client from the OAuth access token.
+ * Loads `access_token` from /tokens/ (written at sign-in by Desktop and on
+ * every refresh by the host-side oauth worker).
  *
- * IMPORTANT: Returns null (not throws) when tokens are missing or invalid.
- * This enables "graceful degradation" - server starts even without config:
- * - User can run `speedwave up` without configuring all integrations
- * - Healthcheck reports `configured: false` for unconfigured services
- * - Tools return clear "not configured" error when called
+ * IMPORTANT: Returns a `'missing'` container (not throws) when the token is
+ * absent. This enables "graceful degradation" — the server starts even
+ * without config and tools return a clear "not configured" error.
  *
- * DO NOT change this to throw - it breaks container startup for unconfigured services.
- * @returns Initialized clients, or null if tokens not found/invalid
+ * DO NOT change this to throw — it breaks container startup for unconfigured services.
+ * @returns Initialized clients (status carried in `_tokensStatus`)
  */
 export async function initializeSlackClients(): Promise<SlackClients> {
-  /**
-   * Build the "tokens missing" container. Tools see `_tokensStatus='missing'`
-   * and return a clear setup-guidance error. We hand out placeholder
-   * WebClients (with a sentinel token) so the type stays narrow and we never
-   * carry nullable handles around the codebase.
-   */
   const tokensMissing = (): SlackClients => ({
-    bot: new WebClient('xoxb-not-configured'),
     user: new WebClient('xoxp-not-configured'),
+    tokenState: { accessToken: '' },
+    lock: new RefreshLock(),
     statusTracker: new ConnectionStatusTracker(),
     _tokensStatus: 'missing',
   });
 
   try {
-    const botToken = await loadTokenFile('bot_token');
-    const userToken = await loadTokenFile('user_token');
-
-    // Validate tokens are not empty
-    const missingTokens: string[] = [];
-    if (!botToken) missingTokens.push('bot_token');
-    if (!userToken) missingTokens.push('user_token');
-
-    if (missingTokens.length > 0) {
+    const accessToken = await loadTokenFile('access_token');
+    if (!accessToken) {
       console.warn(
-        `${ts()} ${withSetupGuidance(`Slack tokens are empty or missing. Missing: ${missingTokens.join(', ')}.`)}`
+        `${ts()} ${withSetupGuidance('Slack access token is empty or missing. Sign in with Slack in Speedwave Desktop.')}`
       );
       return tokensMissing();
     }
 
-    console.log(`${ts()} ✅ Slack: Tokens loaded`);
+    console.log(`${ts()} ✅ Slack: Access token loaded`);
 
-    const bot = new WebClient(botToken);
-    const user = new WebClient(userToken);
     const statusTracker = new ConnectionStatusTracker();
-    // Background sanity check — confirms the bot token is live so healthCheck
-    // can surface a real status. Bolt SDK lazy-connects per call, so we ping
-    // explicitly here to mirror the other workers' init contract.
+    const clients: SlackClients = {
+      user: new WebClient(accessToken),
+      tokenState: { accessToken },
+      lock: new RefreshLock(),
+      statusTracker,
+      _tokensStatus: 'present',
+    };
+    // Background sanity check through the refresh wrapper, so a worker booting
+    // with an expired rotating token self-heals instead of reporting failure.
     backgroundConnectionTest(
       statusTracker,
       async () => {
-        const res = await bot.auth.test();
+        const res = await slackCall(clients, (c) => c.auth.test());
         if (!res.ok) {
           throw new Error(res.error ?? 'auth.test reported not ok');
         }
@@ -174,13 +175,57 @@ export async function initializeSlackClients(): Promise<SlackClients> {
       'Slack'
     );
 
-    return { bot, user, statusTracker, _tokensStatus: 'present' };
+    return clients;
   } catch (error) {
     console.warn(
-      `${ts()} ${withSetupGuidance(`Failed to load Slack tokens: ${error instanceof Error ? error.message : 'Unknown error'}.`)}`
+      `${ts()} ${withSetupGuidance(`Failed to load Slack access token: ${error instanceof Error ? error.message : 'Unknown error'}.`)}`
     );
     return tokensMissing();
   }
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Refresh wrapper
+//═══════════════════════════════════════════════════════════════════════════════
+
+/** Slack platform errors that mean "token stale" → refresh + retry once. */
+const AUTH_EXPIRED_ERRORS = new Set(['token_expired', 'invalid_auth']);
+
+/**
+ * True when a thrown `@slack/web-api` error indicates a stale access token.
+ * Terminal states (`token_revoked`, `account_inactive`) deliberately return
+ * false — a refresh cannot heal them and would burn the rate window.
+ * @param err - error thrown by a WebClient call
+ */
+export function isSlackAuthExpiredError(err: unknown): boolean {
+  const slackError = (err as { data?: { error?: string } } | null | undefined)?.data?.error;
+  return typeof slackError === 'string' && AUTH_EXPIRED_ERRORS.has(slackError);
+}
+
+/**
+ * Run a WebClient call with rotating-token semantics: on a stale-token error,
+ * `authedSdkCall` refreshes once via the oauth worker (single-flight) and
+ * retries once. The WebClient binds its token at construction, so it is
+ * recreated whenever the token on disk rotated.
+ * @param clients - the client container
+ * @param fn - the SDK call to execute
+ */
+export async function slackCall<T>(
+  clients: SlackClients,
+  fn: (client: WebClient) => Promise<T>
+): Promise<T> {
+  return authedSdkCall({
+    service: 'slack',
+    state: clients.tokenState,
+    lock: clients.lock,
+    isAuthError: isSlackAuthExpiredError,
+    send: async (token) => {
+      if (clients.user.token !== token) {
+        clients.user = new WebClient(token);
+      }
+      return fn(clients.user);
+    },
+  });
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -194,6 +239,17 @@ export async function initializeSlackClients(): Promise<SlackClients> {
  * @returns {string} Formatted, user-friendly error message
  */
 export function formatSlackError(error: unknown): string {
+  // Refresh-path failures (oauth worker): an invalid_grant class means the
+  // refresh token is dead (30-day expiry, revocation) — only a new sign-in helps.
+  if (error instanceof OAuthRefreshError) {
+    if (error.message.includes('invalid_grant')) {
+      return withSetupGuidance(
+        'Slack sign-in expired. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
+      );
+    }
+    return `Slack token refresh failed: ${error.message}`;
+  }
+
   // Handle @slack/web-api error responses
   const e = error as { message?: string; data?: { error?: string }; error?: string };
   const slackError = e.data?.error || e.error;
@@ -201,13 +257,16 @@ export function formatSlackError(error: unknown): string {
   if (
     slackError === 'not_authed' ||
     slackError === 'invalid_auth' ||
+    slackError === 'token_expired' ||
     slackError === 'token_revoked'
   ) {
-    return withSetupGuidance('Authentication failed. Check your Slack tokens.');
+    return withSetupGuidance(
+      'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
+    );
   }
 
   if (slackError === 'missing_scope' || slackError === 'restricted_action') {
-    return 'Permission denied. Your Slack tokens may not have sufficient permissions.';
+    return 'Permission denied. Your Slack sign-in may not have sufficient permissions.';
   }
 
   if (slackError === 'channel_not_found') {
@@ -241,12 +300,12 @@ export function formatSlackError(error: unknown): string {
 /**
  * Resolve channel name/id to channel ID
  * Supports: #channel-name, channel-name, or C123ABC (ID)
- * @param {WebClient} client - Slack WebClient instance
+ * @param {SlackClients} clients - Slack client container
  * @param {string} channel - Channel name or ID
  * @returns {Promise<string>} Channel ID
  * @throws {Error} If channel not found
  */
-async function resolveChannelId(client: WebClient, channel: string): Promise<string> {
+async function resolveChannelId(clients: SlackClients, channel: string): Promise<string> {
   // If already looks like an ID, return as-is
   if (/^[CDG][A-Z0-9]+$/.test(channel)) {
     return channel;
@@ -256,10 +315,12 @@ async function resolveChannelId(client: WebClient, channel: string): Promise<str
   const channelName = channel.replace(/^#/, '');
 
   // List channels to find by name
-  const result = await client.conversations.list({
-    types: 'public_channel,private_channel',
-    limit: 1000,
-  });
+  const result = await slackCall(clients, (c) =>
+    c.conversations.list({
+      types: 'public_channel,private_channel',
+      limit: 1000,
+    })
+  );
 
   interface Channel {
     id?: string;
@@ -283,8 +344,8 @@ async function resolveChannelId(client: WebClient, channel: string): Promise<str
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Send message to channel (as user, not bot)
- * @param {SlackClients} clients - Slack client instances
+ * Send message to channel (as the signed-in user)
+ * @param {SlackClients} clients - Slack client container
  * @param {Object} params - Parameters
  * @param {string} params.channel - Channel name or ID
  * @param {string} params.message - Message text to send
@@ -295,12 +356,14 @@ export async function sendChannel(
   clients: SlackClients,
   params: { channel: string; message: string }
 ): Promise<{ ok: boolean; ts?: string; channel?: string }> {
-  const channelId = await resolveChannelId(clients.user, params.channel);
+  const channelId = await resolveChannelId(clients, params.channel);
 
-  const result = (await clients.user.chat.postMessage({
-    channel: channelId,
-    text: params.message,
-  })) as ChatPostMessageResponse;
+  const result = (await slackCall(clients, (c) =>
+    c.chat.postMessage({
+      channel: channelId,
+      text: params.message,
+    })
+  )) as ChatPostMessageResponse;
 
   return {
     ok: result.ok || false,
@@ -310,25 +373,35 @@ export async function sendChannel(
 }
 
 /**
- * Read message history from channel
- * @param {SlackClients} clients - Slack client instances
+ * Read message history from channel, with cursor pagination and an optional
+ * timestamp window (`oldest`/`latest`) — iterate `next_cursor` to export the
+ * full history.
+ * @param {SlackClients} clients - Slack client container
  * @param {Object} params - Parameters
  * @param {string} params.channel - Channel name or ID
- * @param {number} [params.limit=20] - Maximum number of messages (1-100)
- * @returns {Promise<Object>} Object containing array of messages
+ * @param {number} [params.limit=50] - Maximum messages per page (1-100)
+ * @param {string} [params.oldest] - Only messages after this timestamp
+ * @param {string} [params.latest] - Only messages before this timestamp
+ * @param {string} [params.cursor] - Cursor from a previous page
+ * @returns {Promise<SlackHistoryPage>} One page of messages
  * @throws {Error} If reading fails
  */
 export async function readChannel(
   clients: SlackClients,
-  params: { channel: string; limit?: number }
-): Promise<{ messages: SlackMessage[] }> {
-  const channelId = await resolveChannelId(clients.user, params.channel);
-  const limit = Math.min(Math.max(params.limit || 20, 1), 100);
+  params: { channel: string; limit?: number; oldest?: string; latest?: string; cursor?: string }
+): Promise<SlackHistoryPage> {
+  const channelId = await resolveChannelId(clients, params.channel);
+  const limit = Math.min(Math.max(params.limit || 50, 1), 100);
 
-  const result = (await clients.user.conversations.history({
-    channel: channelId,
-    limit,
-  })) as ConversationsHistoryResponse;
+  const result = (await slackCall(clients, (c) =>
+    c.conversations.history({
+      channel: channelId,
+      limit,
+      ...(params.oldest ? { oldest: params.oldest } : {}),
+      ...(params.latest ? { latest: params.latest } : {}),
+      ...(params.cursor ? { cursor: params.cursor } : {}),
+    })
+  )) as ConversationsHistoryResponse;
 
   interface RawMessage {
     user?: string;
@@ -346,12 +419,17 @@ export async function readChannel(
     username: msg.username,
   }));
 
-  return { messages };
+  const nextCursor = result.response_metadata?.next_cursor || undefined;
+  return {
+    messages,
+    next_cursor: nextCursor,
+    has_more: result.has_more ?? Boolean(nextCursor),
+  };
 }
 
 /**
  * List channels the user is a member of
- * @param {SlackClients} clients - Slack client instances
+ * @param {SlackClients} clients - Slack client container
  * @param {Object} [options] - Optional parameters
  * @param {string} [options.types] - Channel types to include (default: public_channel,private_channel)
  * @returns {Promise<Object>} Object containing array of channels
@@ -362,11 +440,13 @@ export async function getChannels(
   options?: { types?: string }
 ): Promise<{ channels: SlackChannel[] }> {
   const types = options?.types || 'public_channel,private_channel';
-  const result = (await clients.user.conversations.list({
-    types,
-    exclude_archived: true,
-    limit: 1000,
-  })) as ConversationsListResponse;
+  const result = (await slackCall(clients, (c) =>
+    c.conversations.list({
+      types,
+      exclude_archived: true,
+      limit: 1000,
+    })
+  )) as ConversationsListResponse;
 
   interface RawChannel {
     id?: string;
@@ -393,7 +473,7 @@ export async function getChannels(
 
 /**
  * Get user by email address
- * @param {SlackClients} clients - Slack client instances
+ * @param {SlackClients} clients - Slack client container
  * @param {Object} params - Parameters
  * @param {string} params.email - Email address to look up
  * @returns {Promise<Object>} Object containing user info or null if not found
@@ -404,9 +484,11 @@ export async function getUsers(
   params: { email: string }
 ): Promise<{ user: SlackUser | null }> {
   try {
-    const result = (await clients.user.users.lookupByEmail({
-      email: params.email,
-    })) as UsersLookupByEmailResponse;
+    const result = (await slackCall(clients, (c) =>
+      c.users.lookupByEmail({
+        email: params.email,
+      })
+    )) as UsersLookupByEmailResponse;
 
     if (!result.user) {
       return { user: null };

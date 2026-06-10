@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { withSetupGuidance } from '@speedwave/mcp-shared';
+import { withSetupGuidance, RefreshLock } from '@speedwave/mcp-shared';
 import {
   handleSendChannel,
   handleGetChannelMessages,
@@ -33,8 +33,9 @@ import { WebClient } from '@slack/web-api';
 /** Helper: clients object representing "tokens missing" — replaces null. */
 function unconfiguredClients(): SlackClients {
   return {
-    bot: new WebClient('xoxb-not-configured'),
     user: new WebClient('xoxp-not-configured'),
+    tokenState: { accessToken: '' },
+    lock: new RefreshLock(),
     _tokensStatus: 'missing',
   };
 }
@@ -45,8 +46,9 @@ describe('channel-tools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClients = {
-      bot: {} as any,
       user: {} as any,
+      tokenState: { accessToken: 'xoxp-test' },
+      lock: new RefreshLock(),
       _tokensStatus: 'present',
     };
   });
@@ -144,14 +146,14 @@ describe('channel-tools', () => {
         { user: 'U123', text: 'Hello', ts: '1234567890.123456', type: 'message' },
         { user: 'U456', text: 'World', ts: '1234567891.123456', type: 'message' },
       ];
-      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages });
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
 
       const result = await handleGetChannelMessages(mockClients, {
         channel: '#general',
       });
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual({ messages: mockMessages });
+      expect(result.data).toEqual({ messages: mockMessages, has_more: false });
       expect(client.readChannel).toHaveBeenCalledWith(mockClients, {
         channel: '#general',
       });
@@ -164,7 +166,7 @@ describe('channel-tools', () => {
         ts: `${1234567890 + i}.123456`,
         type: 'message',
       }));
-      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages });
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
 
       const result = await handleGetChannelMessages(mockClients, {
         channel: '#general',
@@ -183,7 +185,7 @@ describe('channel-tools', () => {
       const mockMessages = [
         { user: 'U123', text: 'Recent', ts: '1234567890.123456', type: 'message' },
       ];
-      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages });
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
 
       const result = await handleGetChannelMessages(mockClients, {
         channel: '#general',
@@ -192,7 +194,7 @@ describe('channel-tools', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual({ messages: mockMessages });
+      expect(result.data).toEqual({ messages: mockMessages, has_more: false });
       expect(client.readChannel).toHaveBeenCalledWith(mockClients, {
         channel: '#general',
         oldest: '1234567880.000000',
@@ -201,7 +203,7 @@ describe('channel-tools', () => {
     });
 
     it('returns empty array when no messages found', async () => {
-      vi.mocked(client.readChannel).mockResolvedValue({ messages: [] });
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: [], has_more: false });
 
       const result = await handleGetChannelMessages(mockClients, {
         channel: '#general',
@@ -427,8 +429,9 @@ describe('createChannelTools (with clients — configured path)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClients = {
-      bot: {} as any,
       user: {} as any,
+      tokenState: { accessToken: 'xoxp-test' },
+      lock: new RefreshLock(),
       _tokensStatus: 'present',
     };
   });
@@ -449,7 +452,7 @@ describe('createChannelTools (with clients — configured path)', () => {
 
   it('getChannelMessages handler routes to handler when clients are configured', async () => {
     const mockMessages = [{ user: 'U123', text: 'Hi', ts: '12345.67890', type: 'message' }];
-    vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages });
+    vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
 
     const tools = createChannelTools(mockClients);
     const readHandler = tools.find((t) => t.tool.name === 'getChannelMessages')!.handler;
