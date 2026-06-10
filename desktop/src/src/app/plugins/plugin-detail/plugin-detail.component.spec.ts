@@ -648,6 +648,159 @@ describe('PluginDetailComponent', () => {
     });
   });
 
+  describe('plugin OAuth flow', () => {
+    it('handleStartPluginOAuth invokes start_plugin_oauth and tracks request_id', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_plugin_oauth') return { request_id: 'req-1', expires_in: 3600 };
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.handleStartPluginOAuth();
+      expect(invokeSpy).toHaveBeenCalledWith(
+        'start_plugin_oauth',
+        expect.objectContaining({
+          project: 'test-project',
+          slug: component.plugin!.service_id ?? component.plugin!.slug,
+        })
+      );
+      expect(component.oauthStatus).toBe('starting');
+    });
+
+    it('surfaces an error when start_plugin_oauth rejects', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_plugin_oauth') throw new Error('not configured yet');
+        return undefined;
+      };
+      await component.handleStartPluginOAuth();
+      expect(component.oauthStatus).toBe('error');
+      expect(component.oauthStatusMessage).toContain('not configured');
+    });
+
+    it('handleCancelPluginOAuth clears flow state', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      component.oauthStatus = 'awaiting_redirect';
+      component.oauthRedirectUri = 'http://127.0.0.1:5000/callback';
+      await component.handleCancelPluginOAuth();
+      expect(component.oauthStatus).toBeNull();
+      expect(component.oauthRedirectUri).toBeNull();
+    });
+
+    it('progress event surfaces the redirect URI on awaiting_redirect', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'start_plugin_oauth'
+          ? Promise.resolve({ request_id: 'rid', expires_in: 60 })
+          : defaultInvokeHandler(cmd);
+      await component.handleStartPluginOAuth();
+
+      mockTauri.dispatchEvent('plugin_oauth_progress', {
+        status: 'awaiting_redirect',
+        message: 'http://127.0.0.1:5005/callback',
+        request_id: 'rid',
+      });
+      await Promise.resolve();
+      expect(component.oauthRedirectUri).toBe('http://127.0.0.1:5005/callback');
+    });
+
+    it('replays an awaiting_redirect event that arrived before start_plugin_oauth resolved', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_plugin_oauth') {
+          // The host's spawned task can emit before the IPC return resolves —
+          // such an event must be buffered and replayed, not dropped.
+          mockTauri.dispatchEvent('plugin_oauth_progress', {
+            status: 'awaiting_redirect',
+            message: 'http://127.0.0.1:6001/callback',
+            request_id: 'rid-early',
+          });
+          await Promise.resolve();
+          return { request_id: 'rid-early', expires_in: 60 };
+        }
+        return defaultInvokeHandler(cmd);
+      };
+      await component.handleStartPluginOAuth();
+      expect(component.oauthStatus).toBe('awaiting_redirect');
+      expect(component.oauthRedirectUri).toBe('http://127.0.0.1:6001/callback');
+    });
+
+    it('progress success reloads the plugin and requests a restart', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'start_plugin_oauth'
+          ? Promise.resolve({ request_id: 'rid', expires_in: 60 })
+          : defaultInvokeHandler(cmd);
+      await component.handleStartPluginOAuth();
+      const projectState = TestBed.inject(ProjectStateService);
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+
+      mockTauri.dispatchEvent('plugin_oauth_progress', {
+        status: 'success',
+        message: '',
+        request_id: 'rid',
+      });
+      // The success handler awaits loadPlugin (an async invoke) before
+      // requestRestart — let the macrotask queue drain.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(restartSpy).toHaveBeenCalled();
+      expect(component.oauthRedirectUri).toBeNull();
+    });
+
+    it('progress error clears flow state', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'start_plugin_oauth'
+          ? Promise.resolve({ request_id: 'rid', expires_in: 60 })
+          : defaultInvokeHandler(cmd);
+      await component.handleStartPluginOAuth();
+      component.oauthRedirectUri = 'http://127.0.0.1:5005/callback';
+
+      mockTauri.dispatchEvent('plugin_oauth_progress', {
+        status: 'error',
+        message: 'invalid_grant',
+        request_id: 'rid',
+      });
+      await Promise.resolve();
+      expect(component.oauthStatus).toBe('error');
+      expect(component.oauthRedirectUri).toBeNull();
+    });
+
+    it('ignores progress events for a stale request_id', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'start_plugin_oauth'
+          ? Promise.resolve({ request_id: 'rid', expires_in: 60 })
+          : defaultInvokeHandler(cmd);
+      await component.handleStartPluginOAuth();
+
+      mockTauri.dispatchEvent('plugin_oauth_progress', {
+        status: 'success',
+        message: '',
+        request_id: 'OTHER-rid',
+      });
+      await Promise.resolve();
+      // status stays 'starting' from handleStartPluginOAuth — the stale event is dropped.
+      expect(component.oauthStatus).toBe('starting');
+    });
+
+    it('cleans up the plugin_oauth_progress listener on destroy', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      expect(mockTauri.listenHandlers['plugin_oauth_progress']).toBeDefined();
+      component.ngOnDestroy();
+      expect(mockTauri.listenHandlers['plugin_oauth_progress']).toBeUndefined();
+    });
+  });
+
   describe('danger zone / uninstall', () => {
     it('renders the danger zone on the dashboard tab', async () => {
       const { component, fixture } = setup();

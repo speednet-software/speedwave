@@ -37,6 +37,7 @@ mod oauth_login_cmd;
 mod oauth_providers;
 mod paste_cmd;
 mod patch_emitter;
+mod plugin_oauth_cmd;
 // `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
 // which is Windows-only (gnome-terminal / xterm spawning was removed with the
 // Linux backend in ADR-059). Gating the module declaration keeps clippy quiet
@@ -1205,14 +1206,36 @@ pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str
 }
 
 // (`is_service_enabled` lives on `ResolvedIntegrationsConfig` in
-// `speedwave-runtime::config` — used here and in the CLI's
-// `maybe_spawn_oauth_worker` so the match arms stay in one place.)
+// `speedwave-runtime::config` so the match arms stay in one place. The CLI no
+// longer spawns oauth/host_exec workers — Desktop is the sole supervisor; see
+// the dual-supervisor exit-137 note in `speedwave-cli::main`.)
+
+/// What to do with a running oauth worker given current vs. desired consumers.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OauthReconcile {
+    /// Consumer set unchanged — leave the worker as is.
+    NoChange,
+    /// Consumer set changed — stop the worker; respawn happens downstream.
+    /// `clear_bearer_map` when the desired set is empty (no respawn follows).
+    Respawn { clear_bearer_map: bool },
+}
+
+/// Pure reconcile decision for a running worker. `current`/`desired` must be
+/// sorted. Extracted so the transition logic is unit-testable without IO.
+pub(crate) fn oauth_reconcile_action(current: &[String], desired: &[String]) -> OauthReconcile {
+    if current == desired {
+        OauthReconcile::NoChange
+    } else {
+        OauthReconcile::Respawn {
+            clear_bearer_map: desired.is_empty(),
+        }
+    }
+}
 
 /// Spawn the per-project `oauth` worker on demand. No-op if no project
 /// integration with `uses_oauth_refresh = true` is enabled, or if the worker
 /// is already running. Returns true if a new worker was started this call.
 pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bool {
-    firewall::ensure_firewall_rule();
     let mut map = match oauth_arc.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -1220,10 +1243,6 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
             return false;
         }
     };
-    if map.contains_key(project) {
-        return false;
-    }
-
     // Check if any OAuth-consuming integration is enabled for this project.
     let user_config = match config::load_user_config() {
         Ok(c) => c,
@@ -1241,20 +1260,55 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     };
     let resolved = config::resolve_integrations(&project_dir, &user_config, project);
 
-    // List of enabled OAuth-consuming integrations (drives bearer-map).
-    let oauth_consumers: Vec<&'static str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
-        .iter()
-        .filter(|d| {
-            d.uses_oauth_refresh && resolved.is_service_enabled(d.config_key).unwrap_or(false)
-        })
-        .map(|d| d.config_key)
-        .collect();
+    // OAuth-consuming services enabled for this project (built-ins + plugins
+    // with `oauth`). SSOT helper keeps this list identical to the one compose
+    // injection reads from the bearer-map.
+    let installed = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
+    let mut oauth_consumers =
+        speedwave_runtime::compose::oauth_consumer_service_ids(&resolved, &installed);
+    oauth_consumers.sort();
+
+    // A running worker may hold a stale consumer set (its bearer-map is fixed
+    // at spawn). Reconcile against the desired set — see oauth_reconcile_action.
+    if let Some(running) = map.get(project) {
+        let mut current: Vec<String> = running.spec().consumers().to_vec();
+        current.sort();
+        match oauth_reconcile_action(&current, &oauth_consumers) {
+            OauthReconcile::NoChange => return false,
+            OauthReconcile::Respawn { clear_bearer_map } => {
+                log::info!(
+                    "oauth[{project}]: consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
+                );
+                if let Some(mut proc) = map.remove(project) {
+                    let _ = proc.stop();
+                    proc.cleanup_files();
+                }
+                if clear_bearer_map {
+                    // Drop the stale bearer-map so compose stops injecting into
+                    // now-orphaned containers (no respawn rewrites it).
+                    let dir = speedwave_runtime::oauth_process::oauth_project_dir(
+                        speedwave_runtime::consts::data_dir(),
+                        project,
+                    );
+                    let _ = std::fs::remove_file(
+                        dir.join(speedwave_runtime::consts::OAUTH_BEARER_MAP_FILE),
+                    );
+                }
+            }
+        }
+    }
+
     if oauth_consumers.is_empty() {
         log::debug!(
             "ensure_oauth_running: no oauth-consuming integration enabled for '{project}' — not spawning"
         );
         return false;
     }
+    let consumer_refs: Vec<&str> = oauth_consumers.iter().map(String::as_str).collect();
+
+    // Only now that a spawn is certain — the rule must precede the worker's
+    // bind, but a NoChange / no-consumer toggle should not pay for it.
+    firewall::ensure_firewall_rule();
 
     let script = match speedwave_runtime::build::resolve_oauth_script() {
         Some(s) => s.to_string_lossy().to_string(),
@@ -1270,7 +1324,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         project,
         &script,
         speedwave_runtime::consts::data_dir(),
-        &oauth_consumers,
+        &consumer_refs,
     ) {
         Ok(proc) => {
             log::info!("oauth[{project}]: started (port {})", proc.port());
@@ -2114,6 +2168,9 @@ fn main() {
             oauth_cmd::cancel_sharepoint_oauth,
             github_oauth_cmd::start_github_oauth,
             github_oauth_cmd::cancel_github_oauth,
+            plugin_oauth_cmd::start_plugin_oauth,
+            plugin_oauth_cmd::cancel_plugin_oauth,
+            plugin_oauth_cmd::forget_plugin_oauth,
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,
@@ -2260,6 +2317,48 @@ fn main() {
 mod tests {
     use super::*;
     use config::{ProjectUserEntry, SpeedwaveUserConfig};
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn oauth_reconcile_no_change_when_sets_equal() {
+        assert_eq!(
+            oauth_reconcile_action(&v(&["a", "b"]), &v(&["a", "b"])),
+            OauthReconcile::NoChange
+        );
+    }
+
+    #[test]
+    fn oauth_reconcile_respawn_when_set_grows() {
+        assert_eq!(
+            oauth_reconcile_action(&v(&["a"]), &v(&["a", "b"])),
+            OauthReconcile::Respawn {
+                clear_bearer_map: false
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_reconcile_respawn_when_set_shrinks_but_nonempty() {
+        assert_eq!(
+            oauth_reconcile_action(&v(&["a", "b"]), &v(&["a"])),
+            OauthReconcile::Respawn {
+                clear_bearer_map: false
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_reconcile_clears_bearer_map_when_set_emptied() {
+        assert_eq!(
+            oauth_reconcile_action(&v(&["a"]), &[]),
+            OauthReconcile::Respawn {
+                clear_bearer_map: true
+            }
+        );
+    }
 
     #[test]
     fn plugin_bridge_credentials_response_wire_format() {

@@ -322,6 +322,11 @@ impl<S: WorkerSpec> Drop for HostMcpProcess<S> {
     }
 }
 
+/// The greppable phrase the live-worker-kill WARN line carries. SSOT shared
+/// with `resources::OOM_MESSAGE`, whose exit-137 guidance tells users to grep
+/// for it — the two must never drift (a test in `resources.rs` pins it).
+pub(crate) const KILL_STALE_LOG_MARKER: &str = "killing a LIVE worker";
+
 /// Kill a stale node process recorded by a previous spawn. SSOT —
 /// replaces three identical `kill_stale_node` shims that used to live
 /// in each worker module.
@@ -331,8 +336,14 @@ pub fn kill_stale_node(pid: u32, service_tag: &str) {
         return;
     }
     // `is_node_process` already confirmed PID is alive (ps -p succeeded),
-    // so no second liveness probe is needed.
-    log::info!("{service_tag}: killing stale worker (PID {pid})");
+    // so no second liveness probe is needed. A LIVE node here is a smell:
+    // the sole owner's watchdog respawns only when its worker is dead, so a
+    // live worker at spawn time means a second supervisor is racing us (the
+    // dual-supervisor exit-137 bug — see ADR-060 / project_oauth_dual_supervisor_137).
+    // WARN, not INFO, so the next occurrence is a single greppable line.
+    log::warn!(
+        "{service_tag}: {KILL_STALE_LOG_MARKER} (PID {pid}) at spawn — possible second supervisor racing this one"
+    );
     kill_process(pid);
 }
 
@@ -480,6 +491,19 @@ mod tests {
     fn kill_stale_node_skips_pid_1() {
         // PID 1 is init/launchd; is_node_process returns false → no kill.
         kill_stale_node(1, "test");
+    }
+
+    #[test]
+    fn kill_stale_node_warn_uses_shared_marker() {
+        // The WARN line MUST carry KILL_STALE_LOG_MARKER — that const is the
+        // grep hint embedded in resources::OOM_MESSAGE. Source-string guard so a
+        // refactor can't drop the marker from the format string while keeping
+        // the const, which would silently break the exit-137 diagnostic.
+        let source = include_str!("process.rs");
+        assert!(
+            source.contains("{service_tag}: {KILL_STALE_LOG_MARKER} (PID {pid})"),
+            "kill_stale_node WARN line must interpolate KILL_STALE_LOG_MARKER"
+        );
     }
 
     /// FakeEnv proves that apply_child_env composes with WorkerSpec::apply_env

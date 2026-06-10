@@ -93,10 +93,11 @@ desktop/src-tauri/notes-cli
 desktop/src-tauri/reminders-cli
 desktop/src-tauri/audio-capture-cli
 
-# Bundled container build context, mcp-os, and host_exec worker (copied before Tauri build)
+# Bundled container build context + host workers (mcp-os, host_exec, oauth) — staged before Tauri build
 desktop/src-tauri/build-context/
 desktop/src-tauri/mcp-os/
 desktop/src-tauri/host_exec/
+desktop/src-tauri/oauth/
 .e2e-artifacts/
 
 # Local Python venvs (test tooling)

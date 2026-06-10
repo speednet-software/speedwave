@@ -12,11 +12,32 @@ import type { ToolDefinition, ToolHandlerContext, ToolsCallResult } from '@speed
 import { writeRestrictedSecret, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { loadOAuthState, saveOAuthState, loadBearerMap, type OAuthState } from './oauth-state.js';
 import { getProvider, knownProviderIds } from './providers/registry.js';
-import type { OAuthProvider } from './providers/types.js';
+import type { OAuthProvider, RefreshError } from './providers/types.js';
 import { appendAuditEvent } from './audit-log.js';
 
 /** Default rate-limit between refreshes when access token is still valid. */
 const DEFAULT_RATE_LIMIT_SECONDS = 1800;
+
+/** Upper bound on a token lifetime (10y) — mirrors the Rust oauth_persist clamp. */
+const MAX_EXPIRES_IN_SECONDS = 10 * 365 * 24 * 60 * 60;
+
+/**
+ * Fallback validation for providers without `validateRequest` (e.g. Microsoft).
+ * @param requiredFields - keys that must be present and non-empty
+ * @param providerData - the stored IdP fields to check
+ */
+function missingStaticField(
+  requiredFields: readonly string[],
+  providerData: Record<string, string>
+): RefreshError | null {
+  for (const field of requiredFields) {
+    const value = providerData[field];
+    if (typeof value !== 'string' || !value) {
+      return { code: 'missing_field', message: `providerData['${field}'] is required` };
+    }
+  }
+  return null;
+}
 
 /** Injected paths and overrides for {@link buildTools}. */
 export interface ToolDeps {
@@ -147,20 +168,26 @@ async function handleRefresh(
     );
   }
 
-  for (const field of provider.requiredFields) {
-    const value = state.providerData[field];
-    if (typeof value !== 'string' || !value) {
-      await appendAuditEvent(deps.auditLogPath, {
-        ts,
-        project: deps.project,
-        service,
-        action: 'refresh',
-        outcome: { error: 'missing_field' },
-      });
-      return errorResult(
-        `missing_field: providerData['${field}'] is required by provider '${provider.id}'`
-      );
-    }
+  const refreshReq = {
+    grantType: state.grantType,
+    providerData: state.providerData,
+    scopes: state.scopes,
+    refreshToken: state.refreshToken,
+  };
+  // Provider-specific validation when requirements depend on grant/auth style
+  // (generic); otherwise fall back to the static requiredFields list.
+  const validationError = provider.validateRequest
+    ? provider.validateRequest(refreshReq)
+    : missingStaticField(provider.requiredFields, state.providerData);
+  if (validationError) {
+    await appendAuditEvent(deps.auditLogPath, {
+      ts,
+      project: deps.project,
+      service,
+      action: 'refresh',
+      outcome: { error: 'missing_field' },
+    });
+    return errorResult(`${validationError.code}: ${validationError.message}`);
   }
 
   // Rate limit: if access token is still valid AND last refresh was within the
@@ -186,11 +213,7 @@ async function handleRefresh(
     );
   }
 
-  const result = await provider.refresh({
-    providerData: state.providerData,
-    scopes: state.scopes,
-    refreshToken: state.refreshToken,
-  });
+  const result = await provider.refresh(refreshReq);
 
   if (!result.ok) {
     await appendAuditEvent(deps.auditLogPath, {
@@ -204,11 +227,14 @@ async function handleRefresh(
   }
 
   const nowMs = now();
+  // Clamp the IdP-supplied lifetime so `new Date(...)` stays in range — an
+  // absurd expiresIn would otherwise throw RangeError out of this handler.
+  const expiresInMs = Math.min(result.value.expiresIn, MAX_EXPIRES_IN_SECONDS) * 1000;
   const newState: OAuthState = {
     ...state,
     refreshToken: result.value.refreshToken ?? state.refreshToken,
     grantedScopes: result.value.grantedScopes,
-    expiresAt: new Date(nowMs + result.value.expiresIn * 1000).toISOString(),
+    expiresAt: new Date(nowMs + expiresInMs).toISOString(),
     lastRefreshAt: new Date(nowMs).toISOString(),
   };
   await saveOAuthState(deps.stateDir, service, newState);

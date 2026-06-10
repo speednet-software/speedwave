@@ -19,7 +19,7 @@
 - Does this add a new attack surface? Document it and mitigate it.
 - Does this require mounting host filesystem into a container? Minimize scope, use `:ro` wherever possible.
 - Does it accept a URL, hostname, or IP from config / repo `.speedwave.json` / user input? It must go through the shared SSRF validator (`url_validation::validate_url` + the appropriate `PrivatePolicy`). See `.claude/rules/local-llm.md` for the full policy and the metadata-endpoint threat model. Repo `.speedwave.json` must never override `provider`/`base_url`-class fields.
-- Does it run on the **host** (Tauri/Desktop) and call out over HTTP? Apply the layered hardening from ADR-041: `redirect::Policy::none()`, request timeout, body-size cap, `Content-Type` allow-list. Do **not** copy these constants — reuse `desktop/src-tauri/src/url_validation.rs` and `http_util.rs`.
+- Does it run on the **host** (Tauri/Desktop) and call out over HTTP? Apply the layered hardening from ADR-041: `redirect::Policy::none()`, request timeout, body-size cap, `Content-Type` allow-list. Do **not** copy these constants — reuse the shared SSRF validator (`crates/speedwave-runtime/src/url_validation.rs`, the SSOT since ADR-069; desktop re-exports it) and `desktop/src-tauri/src/http_util.rs`.
 
 ## macOS bundle integrity (delivery requirement)
 

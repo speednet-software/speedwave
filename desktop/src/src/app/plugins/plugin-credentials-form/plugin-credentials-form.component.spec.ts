@@ -266,6 +266,40 @@ describe('PluginCredentialsFormComponent', () => {
     expect(saveSpy).toHaveBeenCalledWith({ credentials: { example_pat: 'ex_TEST' } });
   });
 
+  it('renders a typed input for oauth_flow client fields and emits their value on save', () => {
+    // An oauth_flow:true client field (e.g. client_id) must be typeable AND be
+    // submitted, so save_plugin_credentials can route it to the off-mount seed.
+    fixture.componentRef.setInput('authFields', [
+      {
+        key: 'client_id',
+        label: 'Client ID',
+        field_type: 'text',
+        placeholder: 'cid',
+        is_secret: false,
+        required: true,
+        oauth_flow: true,
+      },
+    ]);
+    fixture.detectChanges();
+
+    const input = fixture.nativeElement.querySelector(
+      '[data-testid="cred-input-client_id"]'
+    ) as HTMLInputElement;
+    expect(input).not.toBeNull();
+
+    const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
+    component.save.subscribe(saveSpy);
+    setInputValue(fixture, '[data-testid="cred-input-client_id"]', 'cid-123');
+    fixture.detectChanges();
+    (
+      fixture.nativeElement.querySelector(
+        '[data-testid="plugin-credentials-form"]'
+      ) as HTMLFormElement
+    ).dispatchEvent(new Event('submit'));
+
+    expect(saveSpy).toHaveBeenCalledWith({ credentials: { client_id: 'cid-123' } });
+  });
+
   it('emits clear event when Reset all is clicked', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();

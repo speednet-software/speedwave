@@ -181,10 +181,10 @@ pub fn render_compose_in(
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
-    // Adaptive Claude container memory based on host resources.
-    // SSOT: resources::effective_claude_memory_gib() handles platform detection.
-    let claude_mem = crate::resources::effective_claude_memory_gib();
-    yaml = yaml.replace("${CLAUDE_MEMORY}", &format!("{}g", claude_mem));
+    // Container resource limits (mem/cpu/tmpfs/shm). SSOT: resources.rs table +
+    // McpServiceDescriptor.resources. Renderer substitutes the placeholders the
+    // template carries instead of YAML literals; drift test enforces parity.
+    yaml = apply_container_resources(&yaml);
 
     // Inject Claude environment variables from resolved config
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
@@ -255,6 +255,53 @@ pub fn render_compose_in(
     yaml = harden_env_scalar_quoting(&yaml)?;
 
     Ok(yaml)
+}
+
+/// Canonical memory/tmpfs/shm rendering — MiB as `Nm` (e.g. `512m`).
+fn format_mib(mib: u32) -> String {
+    format!("{mib}m")
+}
+
+/// Canonical CPU rendering — one decimal (e.g. `2.0`).
+fn format_cpus(cpus: f32) -> String {
+    format!("{cpus:.1}")
+}
+
+/// Substitutes every `${…_MEM|_CPUS|_TMPFS|_SHM}` placeholder in the compose
+/// template from the resource SSOT (resources.rs table +
+/// `McpServiceDescriptor.resources`). Memory/tmpfs/shm are always emitted in
+/// MiB (`Nm`) for one canonical format; CPU as one-decimal (`2.0`). The
+/// resource-drift test asserts the template carries exactly these placeholders.
+fn apply_container_resources(yaml: &str) -> String {
+    use crate::resources::{ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES};
+
+    // Substitute the ${PREFIX_*} placeholders for one container into `out`.
+    fn apply(out: &mut String, prefix: &str, r: &ContainerResources) {
+        *out = out.replace(&format!("${{{prefix}_MEM}}"), &format_mib(r.mem_mib));
+        *out = out.replace(&format!("${{{prefix}_CPUS}}"), &format_cpus(r.cpus));
+        *out = out.replace(&format!("${{{prefix}_TMPFS}}"), &format_mib(r.tmpfs_mib));
+        if let Some(shm) = r.shm_mib {
+            *out = out.replace(&format!("${{{prefix}_SHM}}"), &format_mib(shm));
+        }
+    }
+
+    let mut out = yaml.to_string();
+
+    // Only Claude's mem placeholder is special-cased: it uses the legacy
+    // ${CLAUDE_MEMORY} name, not the uniform ${CLAUDE_MEM} that `apply` emits.
+    // CPUS and TMPFS already match the ${CLAUDE_*} shape, so `apply` handles
+    // them (and its ${CLAUDE_MEM} replace no-ops — that placeholder is absent).
+    out = out.replace("${CLAUDE_MEMORY}", &format_mib(CLAUDE_RESOURCES.mem_mib));
+    apply(&mut out, "CLAUDE", &CLAUDE_RESOURCES);
+    apply(&mut out, "MCP_HUB", &HUB_RESOURCES);
+
+    for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+        // compose_name "mcp-slack" → placeholder prefix "MCP_SLACK".
+        let prefix = svc.compose_name.to_ascii_uppercase().replace('-', "_");
+        apply(&mut out, &prefix, &svc.resources);
+    }
+
+    out
 }
 
 /// Creates the secrets directory for a project with restrictive permissions (chmod 700).
@@ -373,6 +420,24 @@ pub(crate) const UNDEFINED_NETWORK_ERROR_FRAGMENT: &str = "undefined network";
 /// when a compose.yml references an undefined network — recognised by
 /// `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose project";
+
+/// SSOT for compose schema/parse error fragments that appear when the VM-side
+/// engine reads a stale or torn virtiofs/9p page — e.g. the networks section
+/// (last in the file) truncated mid-`driver:` yields a null driver ("must be a
+/// string"), or a mid-line cut yields a YAML parse error. Recognised by
+/// `runtime::is_propagation_error` for retry-on-propagation-lag.
+pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
+    // A torn/stale virtiofs page truncates a scalar, so compose-go's schema
+    // validator reports the field as the wrong type. Each fragment is scoped to
+    // a specific generated field (path + type), never the bare "must be a
+    // string" — our renderer always emits valid values, so any of these can
+    // only mean a truncated read, which a retry resolves. See ADR-068.
+    "driver must be a string",         // networks.<n>.driver torn
+    "cpus must be a number or string", // deploy.resources.limits.cpus torn
+    "memory must be a string",         // deploy.resources.limits.memory torn
+    "could not find expected",
+    "did not find expected",
+];
 
 /// Asserts every `services.<svc>.networks: [name]` reference resolves to a
 /// declared top-level `networks.<name>` entry. Catches render bugs and torn
@@ -1571,10 +1636,19 @@ fn apply_oauth_config_with_paths(
     lock_path: &std::path::Path,
     bearer_map_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let port = match read_lock_port(lock_path, crate::host_mcp_process::lock::LockService::Oauth) {
-        Some(p) => p,
-        None => return Ok(yaml.to_string()),
+    // A Desktop hard-kill (kill -9 / crash) orphans the VM but never runs the
+    // graceful `cleanup_files()` path, so `lock.json` survives pointing at a
+    // dead worker. Injecting that stale port would make every container-side
+    // OAuth refresh hit connection-refused — worse than the "not configured"
+    // state. Gate on PID liveness: a dead/absent worker is treated as absent.
+    let lock = match crate::host_mcp_process::lock::read(
+        lock_path,
+        crate::host_mcp_process::lock::LockService::Oauth,
+    ) {
+        Some(l) if crate::host_mcp_process::probe::is_pid_alive(l.pid) => l,
+        _ => return Ok(yaml.to_string()),
     };
+    let port = lock.port;
     let bearer_map = match read_oauth_bearer_map(bearer_map_path) {
         Some(m) => m,
         None => return Ok(yaml.to_string()),
@@ -1586,43 +1660,67 @@ fn apply_oauth_config_with_paths(
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
 
-    // service_id (slug) → bearer value
-    let mut consumers: std::collections::BTreeMap<&str, String> = Default::default();
-    for (bearer, service) in &bearer_map {
-        consumers.insert(service.as_str(), bearer.clone());
-    }
-
-    // Iterate built-in descriptors and inject for those that opted in.
-    // SSOT: `McpServiceDescriptor::uses_oauth_refresh` (one flag flip per
-    // integration, no hardcoded list here).
-    for descriptor in consts::TOGGLEABLE_MCP_SERVICES.iter() {
-        if !descriptor.uses_oauth_refresh {
-            continue;
-        }
-        let service_id = descriptor.config_key;
-        let compose_service = descriptor.compose_name;
-        let Some(bearer) = consumers.get(service_id) else {
-            continue;
-        };
+    // Inject for every consumer in the bearer-map. The map is the SSOT for who
+    // consumes oauth — the supervisor writes it from the spawn consumer list
+    // (built-ins AND plugins), so this loop needs no hardcoded service list and
+    // covers plugins through the same code path.
+    for (bearer, service_id) in &bearer_map {
+        let compose_service = oauth_consumer_compose_name(service_id);
         let bearer_file = state_dir.join(format!("bearer-{service_id}"));
         if !bearer_file.exists() {
-            // Write per-service bearer file lazily on first compose render
-            // (chmod 0o600 via the SSOT helper from PR1).
+            // Lazily write the per-service bearer file (chmod 0o600).
             if let Err(e) = crate::fs_perms::write_restricted_file(&bearer_file, bearer) {
                 log::warn!("oauth: failed to write per-service bearer for '{service_id}': {e}");
                 continue;
             }
         }
-        ensure_host_gateway_extra_host(&mut doc, compose_service)?;
-        inject_env_into(&mut doc, compose_service, "WORKER_OAUTH_URL", &url);
+        ensure_host_gateway_extra_host(&mut doc, &compose_service)?;
+        inject_env_into(&mut doc, &compose_service, "WORKER_OAUTH_URL", &url);
         let mount = format!(
             "{}:/secrets/oauth-auth-token-{service_id}:ro",
             to_engine_path(&bearer_file)?
         );
-        add_service_volume(&mut doc, compose_service, &mount);
+        add_service_volume(&mut doc, &compose_service, &mount);
     }
 
     Ok(serde_yaml_ng::to_string(&doc)?)
+}
+
+/// Resolves an OAuth consumer's compose service name: a built-in uses its
+/// descriptor `compose_name`, a plugin derives `mcp-<slug>`. SSOT shared by the
+/// spawn-side consumer list and compose injection so they cannot diverge.
+pub fn oauth_consumer_compose_name(service_id: &str) -> String {
+    consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .find(|d| d.config_key == service_id)
+        .map(|d| d.compose_name.to_string())
+        .unwrap_or_else(|| crate::plugin::derive_compose_name(service_id))
+}
+
+/// The OAuth consumer service ids enabled for a project: built-ins with
+/// `uses_oauth_refresh` plus plugins whose manifest declares `oauth`. SSOT for
+/// the spawn consumer list — the same set the bearer-map (and thus compose
+/// injection) is built from, so spawn-decision and injection cannot diverge.
+pub fn oauth_consumer_service_ids(
+    resolved: &crate::config::ResolvedIntegrationsConfig,
+    enabled_plugins: &[crate::plugin::PluginManifest],
+) -> Vec<String> {
+    let mut out: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .filter(|d| {
+            d.uses_oauth_refresh && resolved.is_service_enabled(d.config_key).unwrap_or(false)
+        })
+        .map(|d| d.config_key.to_string())
+        .collect();
+    for m in enabled_plugins {
+        if m.oauth.is_some() {
+            let sid = m.service_id.as_deref().unwrap_or(&m.slug);
+            if resolved.is_plugin_enabled(sid) {
+                out.push(sid.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Read the oauth bearer-map JSON (bearer → service). Returns `None` on any IO
@@ -1648,9 +1746,11 @@ fn apply_worker_config(
     env_var: &str,
     secret_name: &str,
 ) -> anyhow::Result<String> {
-    let port = match read_lock_port(lock_path, service) {
-        Some(p) => p,
-        None => return Ok(yaml.to_string()),
+    // PID-liveness gate (symmetric to apply_oauth_config_with_paths): a stale
+    // lock.json after a Desktop hard-kill would inject a dead WORKER_*_URL.
+    let port = match crate::host_mcp_process::lock::read(lock_path, service) {
+        Some(l) if crate::host_mcp_process::probe::is_pid_alive(l.pid) => l.port,
+        _ => return Ok(yaml.to_string()),
     };
     let token = match std::fs::read_to_string(token_mount_path) {
         Ok(s) => s.trim().to_string(),
@@ -1678,12 +1778,9 @@ fn apply_worker_config(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Read a worker's port from its `lock.json`. `None` when the file is
-/// absent or the JSON is unparseable / has the wrong `service` tag.
-///
-/// Each worker manager migrates pre-PR3 layout to `lock.json` before
-/// completing `spawn_*`, so by the time compose reads the port the
-/// JSON must exist; no legacy fallback is required here.
+/// Read a worker's port from its `lock.json`. Test-only since the production
+/// paths now read the full lock to also gate on PID liveness.
+#[cfg(test)]
 fn read_lock_port(
     lock_path: &std::path::Path,
     service: crate::host_mcp_process::lock::LockService,
@@ -2989,13 +3086,19 @@ impl SecurityCheck {
                 plugin::TokenMount::ReadOnly => "ro",
                 plugin::TokenMount::ReadWrite { .. } => "rw",
             };
+            // An OAuth plugin consumes the host-side oauth worker, so it gets the
+            // same per-service bearer mount as SharePoint (ADR-069).
+            let extra_allowed: Vec<String> = if manifest.oauth.is_some() {
+                vec![format!("/secrets/oauth-auth-token-{sid}")]
+            } else {
+                Vec::new()
+            };
             let params = VolumeCheckParams {
                 container_name: &name,
                 expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
-                // Plugins do not currently use the host-side oauth worker.
-                extra_allowed_ro_targets: &[],
+                extra_allowed_ro_targets: &extra_allowed,
                 rules: VolumeCheckRules::PLUGIN,
             };
             let (base_violations, _) = validate_service_volume_mounts(service, &params);
@@ -4385,15 +4488,11 @@ services:
         assert!(yaml.contains(&format!("{prefix}_test-project_claude")));
         assert!(yaml.contains(&format!("{prefix}_test-project_mcp_hub")));
         assert!(yaml.contains("/workspace"));
-        // ${CLAUDE_MEMORY} must be substituted with a concrete value (e.g. "8g")
+        // Resource placeholders must all be substituted; the concrete values are
+        // asserted against the SSOT by `resources_render_from_ssot`.
         assert!(
-            !yaml.contains("${CLAUDE_MEMORY}"),
-            "CLAUDE_MEMORY placeholder must be substituted"
-        );
-        assert!(
-            yaml.lines()
-                .any(|l| l.trim().starts_with("memory:") && l.contains('g')),
-            "rendered YAML must contain a concrete memory limit (e.g. memory: 8g)"
+            !yaml.contains("${CLAUDE_MEMORY}") && !yaml.contains("${MCP_"),
+            "resource placeholders must be substituted"
         );
         // Verify it's valid YAML
         let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -4531,11 +4630,8 @@ services:
                 .unwrap_or(false),
             "mcp-playwright must set read_only: true"
         );
-        assert_eq!(
-            pw.get("shm_size").and_then(|v| v.as_str()),
-            Some("2g"),
-            "mcp-playwright must set shm_size: 2g for Chromium IPC"
-        );
+        // shm_size comes from the SSOT (McpServiceDescriptor.resources.shm_mib),
+        // guarded by `resources_render_from_ssot` — not duplicated here.
         let cap_drop = pw
             .get("cap_drop")
             .and_then(|v| v.as_sequence())
@@ -4758,10 +4854,10 @@ services:
         );
     }
 
-    /// mcp-github must render with the standard worker hardening AND its non-standard
-    /// 256m memory cap (Octokit + `octokit.paginate` need more headroom than the 128m
-    /// other API workers use — see the comment in compose.template.yml). Also verifies
-    /// the read-only, project-scoped `/tokens` mount and `PORT=PORT_WORKER`.
+    /// mcp-github must render with the standard worker hardening, the read-only
+    /// project-scoped `/tokens` mount, and `PORT=PORT_WORKER`. Its memory cap
+    /// comes from the SSOT (McpServiceDescriptor.resources) and is guarded by
+    /// `resources_render_from_ssot`, not duplicated here.
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_github_service_present() {
@@ -4810,17 +4906,6 @@ services:
         assert!(sec_opt
             .iter()
             .any(|s| s.as_str() == Some("no-new-privileges:true")));
-
-        // Non-standard, load-bearing memory cap.
-        assert_eq!(
-            gh.get("deploy")
-                .and_then(|d| d.get("resources"))
-                .and_then(|r| r.get("limits"))
-                .and_then(|l| l.get("memory"))
-                .and_then(|m| m.as_str()),
-            Some("256m"),
-            "mcp-github must keep its 256m memory limit (Octokit footprint)"
-        );
 
         // Token mount: only its own service dir, read-only, under the project's tokens path.
         let volumes = gh
@@ -5126,6 +5211,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
@@ -6302,6 +6388,134 @@ services:
         COMPOSE_TEMPLATE.replace("${HOST_GATEWAY}", &host_gateway_ip().expect("test"))
     }
 
+    // --- Resource SSOT works (ADR-068) -----------------------------------------
+    // One test proving the centralization holds: the renderer fills every
+    // container's mem/cpu/tmpfs/shm from the SSOT (resources.rs table +
+    // McpServiceDescriptor.resources), and no resource placeholder is left
+    // behind. If the renderer stops reading the SSOT, a service's value drifts,
+    // or a placeholder is misnamed, this fails.
+
+    /// Reads a service's mem/cpu/tmpfs/shm out of the rendered doc and asserts
+    /// they equal its SSOT entry. Iterating callers stay literal-free.
+    fn assert_resources_from_ssot(
+        doc: &serde_yaml_ng::Value,
+        service: &str,
+        ssot: &crate::resources::ContainerResources,
+    ) {
+        let svc = &doc["services"][service];
+        let parse = |s: &str| crate::plugin::parse_mem_limit_to_mib(s).expect("mem parse");
+        let mem = svc["deploy"]["resources"]["limits"]["memory"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{service}: missing memory"));
+        let cpus: f32 = svc["deploy"]["resources"]["limits"]["cpus"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{service}: missing cpus"))
+            .parse()
+            .expect("cpus parse");
+        let tmpfs = svc["tmpfs"][0]
+            .as_str()
+            .and_then(|e| e.rsplit("size=").next())
+            .unwrap_or_else(|| panic!("{service}: missing tmpfs size"));
+        let shm = svc["shm_size"].as_str().map(parse);
+
+        assert_eq!(parse(mem), ssot.mem_mib as u64, "{service}: memory");
+        assert!((cpus - ssot.cpus).abs() < f32::EPSILON, "{service}: cpus");
+        assert_eq!(parse(tmpfs), ssot.tmpfs_mib as u64, "{service}: tmpfs");
+        assert_eq!(shm, ssot.shm_mib.map(|m| m as u64), "{service}: shm");
+    }
+
+    #[test]
+    fn resources_render_from_ssot() {
+        let yaml =
+            apply_container_resources(COMPOSE_TEMPLATE).replace("${HOST_GATEWAY}", "127.0.0.1");
+        let doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&yaml).expect("rendered template must be valid YAML");
+
+        // Every container's resources come from the SSOT.
+        assert_resources_from_ssot(&doc, "claude", &crate::resources::CLAUDE_RESOURCES);
+        assert_resources_from_ssot(&doc, "mcp-hub", &crate::resources::HUB_RESOURCES);
+        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+            assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
+        }
+        // No RESOURCE placeholder left unsubstituted. Only the families this
+        // function owns — other ${…} (IMAGE_*, NETWORK_NAME, …) are filled by
+        // later render stages and are intentionally still present here.
+        for marker in ["_MEM}", "_CPUS}", "_TMPFS}", "_SHM}", "${CLAUDE_MEMORY}"] {
+            assert!(
+                !yaml.contains(marker),
+                "unsubstituted resource placeholder containing {marker}"
+            );
+        }
+
+        // The RAW template must carry a placeholder for each worker's mem/cpu —
+        // catches a regression where a literal equal to the SSOT value is
+        // hardcoded back in (which the rendered-value check above would miss).
+        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+            let prefix = svc.compose_name.to_ascii_uppercase().replace('-', "_");
+            assert!(
+                COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_MEM}}")),
+                "{}: template must carry ${{{prefix}_MEM}}, not a literal",
+                svc.compose_name
+            );
+            assert!(
+                COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_CPUS}}")),
+                "{}: template must carry ${{{prefix}_CPUS}}, not a literal",
+                svc.compose_name
+            );
+            // tmpfs is the axis most prone to a silent re-hardcode (SSOT value
+            // often equals the literal, e.g. size=64m), so it needs the same
+            // raw-template presence guard as _MEM/_CPUS — the rendered-value
+            // check alone would not catch a literal that coincidentally matches.
+            assert!(
+                COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_TMPFS}}")),
+                "{}: template must carry ${{{prefix}_TMPFS}}, not a literal",
+                svc.compose_name
+            );
+            // A `_SHM` placeholder must exist in the template IFF the descriptor
+            // sets shm_mib. A descriptor with Some(shm) but no placeholder would
+            // silently never apply (apply() no-ops); a placeholder with None
+            // would survive as a leftover marker. Assert both directions.
+            assert_eq!(
+                COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_SHM}}")),
+                svc.resources.shm_mib.is_some(),
+                "{}: template ${{{prefix}_SHM}} placeholder must match descriptor shm_mib",
+                svc.compose_name
+            );
+        }
+
+        // Same raw-template guard for the always-on containers — a literal
+        // equal to the SSOT value passes the rendered check, only the
+        // placeholder proves the template still defers. (claude mem is legacy.)
+        for placeholder in [
+            "${CLAUDE_MEMORY}",
+            "${CLAUDE_CPUS}",
+            "${CLAUDE_TMPFS}",
+            "${MCP_HUB_MEM}",
+            "${MCP_HUB_CPUS}",
+            "${MCP_HUB_TMPFS}",
+        ] {
+            assert!(
+                COMPOSE_TEMPLATE.contains(placeholder),
+                "template must carry {placeholder}, not a literal"
+            );
+        }
+    }
+
+    #[test]
+    fn format_mib_renders_mebibyte_suffix() {
+        assert_eq!(format_mib(0), "0m");
+        assert_eq!(format_mib(64), "64m");
+        assert_eq!(format_mib(6144), "6144m");
+    }
+
+    #[test]
+    fn format_cpus_renders_one_decimal() {
+        assert_eq!(format_cpus(0.5), "0.5");
+        assert_eq!(format_cpus(2.0), "2.0");
+        // Whole and >1 values still carry exactly one decimal place.
+        assert_eq!(format_cpus(4.0), "4.0");
+    }
+
     /// Write a fixture lock.json + standalone token mount file, for the
     /// given service. Returns `(token_mount_path, lock_path)` — both are
     /// inputs to `apply_*_config_with_path*`.
@@ -6313,7 +6527,8 @@ services:
         let token_path = tmp.join("auth-token");
         let lock_path = tmp.join(consts::PER_PROJECT_LOCK_FILE);
         std::fs::write(&token_path, "test-token").unwrap();
-        let lock = LockFile::new(service, 12345, 4007, "test-token".into());
+        // PID = this test process so apply_worker_config's liveness gate passes.
+        let lock = LockFile::new(service, std::process::id(), 4007, "test-token".into());
         lock::write(&lock_path, &lock).unwrap();
         (token_path, lock_path)
     }
@@ -6374,17 +6589,77 @@ services:
         );
     }
 
+    /// Like the live helper but reaps a real child for a deterministically-dead
+    /// PID, so apply_worker_config's liveness gate treats the lock as absent.
+    fn write_dead_lock_and_token_mount(
+        tmp: &std::path::Path,
+        service: crate::host_mcp_process::lock::LockService,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use crate::host_mcp_process::lock::{self, LockFile};
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("cmd")
+                    .args(["/C", "exit"])
+                    .spawn()
+            })
+            .expect("spawn a trivially-exiting child");
+        let dead_pid = child.id();
+        child.wait().expect("reap child");
+
+        let token_path = tmp.join("auth-token");
+        let lock_path = tmp.join(consts::PER_PROJECT_LOCK_FILE);
+        std::fs::write(&token_path, "test-token").unwrap();
+        lock::write(
+            &lock_path,
+            &LockFile::new(service, dead_pid, 4007, "test-token".into()),
+        )
+        .unwrap();
+        (token_path, lock_path)
+    }
+
+    /// A stale host_exec lock (dead PID, Desktop hard-kill) must not inject a
+    /// dead WORKER_HOST_EXEC_URL.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn apply_host_exec_config_skipped_when_worker_pid_is_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, lock_path) = write_dead_lock_and_token_mount(
+            tmp.path(),
+            crate::host_mcp_process::lock::LockService::HostExec,
+        );
+        let yaml = render_substituted_template();
+        let result = apply_host_exec_config_with_paths(&yaml, &token_path, &lock_path).unwrap();
+        assert_eq!(
+            result, yaml,
+            "stale host_exec lock with a dead PID must be treated as absent — no injection"
+        );
+    }
+
+    /// Same regression guard for the mcp-os entry point (also routes through
+    /// apply_worker_config).
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn apply_mcp_os_config_skipped_when_worker_pid_is_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, lock_path) = write_dead_lock_and_token_mount(
+            tmp.path(),
+            crate::host_mcp_process::lock::LockService::McpOs,
+        );
+        let yaml = render_substituted_template();
+        let result = apply_mcp_os_config_with_path(&yaml, &token_path, &lock_path).unwrap();
+        assert_eq!(
+            result, yaml,
+            "stale mcp-os lock with a dead PID must be treated as absent — no injection"
+        );
+    }
+
     #[test]
     #[serial_test::serial(host_addressing)]
     fn apply_oauth_config_adds_host_gateway_to_each_consumer() {
-        use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        lock::write(
-            &lock_path,
-            &LockFile::new(LockService::Oauth, 12345, 4090, "supervisor".into()),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 4090);
         let bearer_map_path = tmp.path().join("bearer-map.json");
         std::fs::write(
             &bearer_map_path,
@@ -6933,7 +7208,7 @@ services:
             &lock_path,
             &LockFile::new(
                 LockService::McpOs,
-                12345,
+                std::process::id(),
                 54321,
                 "test-uuid-token-abc".into(),
             ),
@@ -7163,7 +7438,7 @@ services:
             &lock_path,
             &LockFile::new(
                 LockService::HostExec,
-                12345,
+                std::process::id(),
                 49215,
                 "host-exec-uuid-token".into(),
             ),
@@ -7285,6 +7560,22 @@ services:
       - /test/project:/workspace:rw
 "#;
 
+    /// Write an oauth `lock.json` whose PID is THIS test process — guaranteed
+    /// alive, so the injection path's liveness gate passes. Tests that want a
+    /// dead worker pass a bogus PID directly.
+    fn write_live_oauth_lock(lock_path: &std::path::Path, port: u16) {
+        crate::host_mcp_process::lock::write(
+            lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                std::process::id(),
+                port,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_oauth_config_skipped_when_port_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -7305,16 +7596,7 @@ services:
     fn test_oauth_config_skipped_when_bearer_map_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49300,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49300);
         let result = apply_oauth_config_with_paths(
             VALID_COMPOSE_WITH_SHAREPOINT,
             tmp.path(),
@@ -7332,16 +7614,7 @@ services:
     fn test_oauth_config_skipped_when_bearer_map_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49300,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49300);
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, "{}").unwrap();
         let result = apply_oauth_config_with_paths(
@@ -7361,16 +7634,7 @@ services:
     fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49301,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49301);
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp-uuid": "sharepoint"}"#).unwrap();
 
@@ -7436,19 +7700,118 @@ services:
     }
 
     #[test]
+    fn test_oauth_config_injects_into_plugin_consumer() {
+        // A plugin slug in the bearer-map must get WORKER_OAUTH_URL + bearer
+        // mount on its derived compose service (`mcp-<slug>`), with no built-in
+        // descriptor entry — the injection loop is bearer-map-driven, not
+        // descriptor-driven.
+        let compose = r#"
+services:
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+  mcp-glpi:
+    image: speedwave-mcp-glpi:latest
+    environment:
+      - PORT=3001
+    volumes:
+      - /test/.speedwave/tokens/test/glpi:/tokens:ro
+"#;
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        write_live_oauth_lock(&lock_path, 49305);
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-glpi-uuid": "glpi"}"#).unwrap();
+
+        let result =
+            apply_oauth_config_with_paths(compose, tmp.path(), &lock_path, &bearer_map_path)
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+
+        let env = service_env(&doc, "mcp-glpi");
+        assert!(
+            find_env_value(&env, "WORKER_OAUTH_URL=").is_some(),
+            "plugin consumer must get WORKER_OAUTH_URL"
+        );
+        let vols: Vec<String> = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-glpi"))
+            .and_then(|s| s.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            vols.iter()
+                .any(|v| v.contains(":/secrets/oauth-auth-token-glpi:ro")),
+            "plugin consumer must get its bearer mount, got: {vols:?}"
+        );
+    }
+
+    #[test]
+    fn oauth_consumer_compose_name_resolves_builtin_and_plugin() {
+        assert_eq!(oauth_consumer_compose_name("sharepoint"), "mcp-sharepoint");
+        // Unknown id → plugin derivation.
+        assert_eq!(oauth_consumer_compose_name("glpi"), "mcp-glpi");
+    }
+
+    fn oauth_plugin_manifest(slug: &str) -> crate::plugin::PluginManifest {
+        let json = format!(
+            r#"{{
+                "name": "{slug}", "service_id": "{slug}", "slug": "{slug}",
+                "version": "1.0.0", "description": "d",
+                "auth_fields": [{{"key":"client_id","label":"id","field_type":"text","placeholder":"","is_secret":false,"oauth_flow":true}}],
+                "oauth": {{"grant_type":"authorization_code","token_url":"https://idp/token","authorize_url":"https://idp/authorize","client_id_field":"client_id"}}
+            }}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn oauth_consumer_service_ids_includes_builtins_and_enabled_oauth_plugins() {
+        let mut resolved = crate::config::ResolvedIntegrationsConfig {
+            sharepoint: true,
+            ..Default::default()
+        };
+        resolved.plugins.insert("glpi".to_string(), true);
+        resolved.plugins.insert("disabled-plug".to_string(), false);
+
+        let plugins = vec![
+            oauth_plugin_manifest("glpi"),
+            oauth_plugin_manifest("disabled-plug"),
+        ];
+        let ids = oauth_consumer_service_ids(&resolved, &plugins);
+        assert!(ids.contains(&"sharepoint".to_string()), "built-in included");
+        assert!(
+            ids.contains(&"glpi".to_string()),
+            "enabled oauth plugin included"
+        );
+        assert!(
+            !ids.contains(&"disabled-plug".to_string()),
+            "disabled plugin excluded"
+        );
+    }
+
+    #[test]
+    fn oauth_consumer_service_ids_excludes_plugin_without_oauth() {
+        let mut resolved = crate::config::ResolvedIntegrationsConfig::default();
+        resolved.plugins.insert("plain".to_string(), true);
+        // A plugin manifest with no oauth block, enabled.
+        let plain: crate::plugin::PluginManifest = serde_json::from_str(
+            r#"{"name":"plain","service_id":"plain","slug":"plain","version":"1.0.0","description":"d"}"#,
+        )
+        .unwrap();
+        let ids = oauth_consumer_service_ids(&resolved, &[plain]);
+        assert!(ids.is_empty(), "plugin without oauth is not a consumer");
+    }
+
+    #[test]
     fn test_oauth_config_writes_per_service_bearer_file() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49301,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49301);
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-x": "sharepoint"}"#).unwrap();
 
@@ -7489,16 +7852,7 @@ services:
     fn test_oauth_config_does_not_inject_into_slack_or_redmine() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                12345,
-                49301,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
+        write_live_oauth_lock(&lock_path, 49301);
         let bearer_map_path = tmp.path().join(".bearer-map.json");
         std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
 
@@ -7543,6 +7897,53 @@ services:
                 "{non_oauth_service}: oauth bearer must NOT be mounted, vols={vols:?}"
             );
         }
+    }
+
+    /// Regression guard: after a Desktop hard-kill the graceful cleanup never
+    /// runs, so `lock.json` survives pointing at a dead PID. The injection path
+    /// must treat that as absent (no `WORKER_OAUTH_URL`) instead of wiring up a
+    /// dead port that fails every container-side refresh with connection-refused.
+    #[test]
+    fn test_oauth_config_skipped_when_worker_pid_is_dead() {
+        // Reap a real child so its PID is deterministically dead (not merely
+        // "probably unused") — avoids the 999999-might-exist flakiness.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("cmd")
+                    .args(["/C", "exit"])
+                    .spawn()
+            })
+            .expect("spawn a trivially-exiting child");
+        let dead_pid = child.id();
+        child.wait().expect("reap child");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        crate::host_mcp_process::lock::write(
+            &lock_path,
+            &crate::host_mcp_process::lock::LockFile::new(
+                crate::host_mcp_process::lock::LockService::Oauth,
+                dead_pid,
+                49301,
+                "supervisor".into(),
+            ),
+        )
+        .unwrap();
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
+
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_SHAREPOINT,
+            tmp.path(),
+            &lock_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE_WITH_SHAREPOINT,
+            "stale lock with a dead PID must be treated as absent — no injection"
+        );
     }
 
     /// Helper: read environment sequence for a given compose service name.
@@ -8171,7 +8572,7 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn test_claude_env_has_effort_level() {
+    fn test_claude_env_has_no_effort_level() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -8197,12 +8598,15 @@ services:
             .and_then(|e| e.as_sequence())
             .expect("claude service must have environment");
 
-        let has_effort_level = claude_env
-            .iter()
-            .any(|v| v.as_str() == Some("CLAUDE_CODE_EFFORT_LEVEL=auto"));
+        // Speedwave must NOT pin effort: a CLAUDE_CODE_EFFORT_LEVEL env var
+        // outranks the user's in-session /effort and settings.json (ADR-017).
+        let has_effort_level = claude_env.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s.starts_with("CLAUDE_CODE_EFFORT_LEVEL"))
+        });
         assert!(
-            has_effort_level,
-            "CLAUDE_CODE_EFFORT_LEVEL=auto must be in claude service environment"
+            !has_effort_level,
+            "CLAUDE_CODE_EFFORT_LEVEL must NOT be in claude service environment — it would block the user's /effort"
         );
 
         // Auto-connect to the Speedwave IDE Bridge on start, so the user does
@@ -9024,6 +9428,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         }
     }
 
@@ -9115,6 +9520,74 @@ services:
                 .iter()
                 .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
             "Plugin with only /tokens + /workspace should not trigger PLUGIN_NO_EXTRA_VOLUMES"
+        );
+    }
+
+    /// A plugin yaml with the oauth bearer mount the host injects for consumers.
+    fn oauth_consumer_plugin_yaml() -> String {
+        format!(
+            r#"
+version: "3"
+services:
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/.speedwave/oauth/test/bearer-example-plugin:/secrets/oauth-auth-token-example-plugin:ro
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user(),
+        )
+    }
+
+    #[test]
+    fn test_security_check_oauth_plugin_allows_bearer_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = oauth_consumer_plugin_yaml();
+        let mut manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+        manifest.oauth = oauth_plugin_manifest("example-plugin").oauth;
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
+            "OAuth plugin's bearer mount must be allowed, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_check_non_oauth_plugin_rejects_bearer_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = oauth_consumer_plugin_yaml();
+        // Manifest has NO oauth block — the bearer mount must NOT be allowed.
+        let manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
+            "a non-oauth plugin with a bearer mount must trigger PLUGIN_NO_EXTRA_VOLUMES"
         );
     }
 
@@ -9369,6 +9842,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
@@ -9419,6 +9893,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let svc = plugin::generate_plugin_service(
             &manifest,
@@ -9516,6 +9991,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -9882,6 +10358,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         // generate_plugin_service requires a port for MCP plugins,
@@ -10816,6 +11293,7 @@ networks:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         }];
 
         // Compose with plugin service already present (as apply_plugins would leave it)
@@ -10933,6 +11411,7 @@ services:
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
@@ -11999,6 +12478,7 @@ services:
             requires_integrations: vec![],
             host_bridge,
             instructions: None,
+            oauth: None,
         };
         plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
     }

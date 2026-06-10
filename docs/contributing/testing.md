@@ -183,7 +183,7 @@ Three BATS files guard the release pipeline against silent failures (Issue #26).
 
 `host_exec` (ADR-054) is exercised at three levels in CI:
 
-- **Unit / integration (Rust + TS + Angular):** `host_exec::validate_host_exec_config` (in `crates/speedwave-runtime/src/host_exec.rs`), the per-project process manager (`crates/speedwave-runtime/src/host_exec_process.rs` — two-projects two-ports, env-allowlist, login-shell PATH recovery, the chmod-600 file bookkeeping, stale-PID kill), the compose wiring (`compose.rs` — `WORKER_HOST_EXEC_URL` per project, `ENABLED_SERVICES` membership, the security-test exception), the Tauri settings commands (`host_exec_cmd.rs`), the CLI worker spawn (`crates/speedwave-cli/src/main.rs`), the TypeScript worker (`mcp-servers/host_exec/` — vitest, 100% lines/funcs/statements, `c8` branch ≥ 90% — incl. the process-tree `SIGKILL` on Unix, the per-stream output cap, the audit-log redaction), and the Angular Integrations card (`host-exec-config.component.spec.ts` — the danger modal that is the consent, the recipe editor, the docker-lifecycle warning, every validation path).
+- **Unit / integration (Rust + TS + Angular):** `host_exec::validate_host_exec_config` (in `crates/speedwave-runtime/src/host_exec.rs`), the per-project process manager (`crates/speedwave-runtime/src/host_exec_process.rs` — two-projects two-ports, env-allowlist, login-shell PATH recovery, the chmod-600 file bookkeeping, stale-PID kill), the compose wiring (`compose.rs` — `WORKER_HOST_EXEC_URL` per project, `ENABLED_SERVICES` membership, the security-test exception), the Tauri settings commands (`host_exec_cmd.rs`), the TypeScript worker (`mcp-servers/host_exec/` — vitest, 100% lines/funcs/statements, `c8` branch ≥ 90% — incl. the process-tree `SIGKILL` on Unix, the per-stream output cap, the audit-log redaction), and the Angular Integrations card (`host-exec-config.component.spec.ts` — the danger modal that is the consent, the recipe editor, the docker-lifecycle warning, every validation path).
 - **CLI E2E (bats — `make test-e2e`):** `_tests/e2e/host-exec.bats` verifies the wire-format contract end-to-end through the real `speedwave` binary — a valid camelCase user config survives `speedwave check` unchanged; a `hostExec` block in repo `.speedwave.json` is silently ignored; a malformed user config does not panic the CLI.
 - **Manual smoke (live Claude — see below):** the scenarios that require a real Anthropic API turn through the MCP hub and a live worker process.
 
@@ -209,8 +209,9 @@ These verify Claude's view of `host_exec` — what comes back in a tool result, 
 #     - Claude reports a structured result with status="exited", exitCode 0,
 #       the `docker ps` output in stdout, and durationMs.
 #   Then run the SAME thing via the CLI:  `speedwave` in project A's dir, ask
-#   Claude to run the docker_ps recipe — it works (the CLI spawned the worker
-#   before compose_up; the hub got WORKER_HOST_EXEC_URL).
+#   Claude to run the docker_ps recipe — it works because the Desktop app
+#   (running, a hard CLI prerequisite) already spawned the worker; the CLI reads
+#   the Desktop-held lock/bearer-map and the hub got WORKER_HOST_EXEC_URL.
 
 # Scenario (d) — exit ≠ 0 is a successful ToolResult, not a tool error
 #   Add a recipe that intentionally fails:

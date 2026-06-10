@@ -5,6 +5,8 @@ import {
   PluginAuthField,
   PluginSaveCredentialsEvent,
 } from '../../models/plugin';
+import { OauthConnectComponent } from '../../shared/oauth-connect/oauth-connect.component';
+import { OAuthFlowStatus } from '../../models/integration';
 
 /**
  * Renders a form for a plugin's `auth_fields[]`. Emits the filled subset
@@ -22,7 +24,7 @@ import {
  */
 @Component({
   selector: 'app-plugin-credentials-form',
-  imports: [CommonModule],
+  imports: [CommonModule, OauthConnectComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (authFields().length > 0) {
@@ -146,6 +148,21 @@ import {
             }
           </div>
         }
+
+        @if (hasOAuthFields()) {
+          <app-oauth-connect
+            [providerLabel]="providerLabel()"
+            [configured]="oauthConfigured()"
+            [status]="oauthStatus()"
+            [redirectUri]="oauthRedirectUri()"
+            [statusMessage]="oauthStatusMessage()"
+            [prerequisitesMet]="oauthPrerequisitesMet()"
+            [prerequisitesMissingMessage]="oauthPrerequisitesMissingMessage()"
+            (authorize)="authorizeOauth.emit()"
+            (cancelFlow)="cancelOauth.emit()"
+          />
+        }
+
         <div class="mt-6 flex gap-3">
           <button
             type="submit"
@@ -210,8 +227,48 @@ export class PluginCredentialsFormComponent {
    */
   readonly inFlight = input<boolean>(false);
 
+  // -- OAuth (authorization_code) flow, when the manifest declares oauth --
+  /** Brand shown in the OAuth button (plugin display name). */
+  readonly providerLabel = input<string>('provider');
+  /** Whether an authorized OAuth state already exists (reconnect copy). */
+  readonly oauthConfigured = input<boolean>(false);
+  /** Flow status from `plugin_oauth_progress` events. */
+  readonly oauthStatus = input<OAuthFlowStatus | null>(null);
+  /** Loopback redirect URI to surface while awaiting the browser callback. */
+  readonly oauthRedirectUri = input<string | null>(null);
+  readonly oauthStatusMessage = input<string>('');
+  readonly authorizeOauth = output<void>();
+  readonly cancelOauth = output<void>();
+
   /** Template binding for the per-field byte cap (mirrors Rust SSOT). */
   protected readonly maxCredentialBytes = MAX_PLUGIN_CREDENTIAL_BYTES;
+
+  /** True when any auth field is OAuth-driven (renders the connect UI). */
+  hasOAuthFields(): boolean {
+    return this.authFields().some((f) => f.oauth_flow);
+  }
+
+  /** Required OAuth client-credential fields that must be saved before Authorize. */
+  private oauthPrerequisiteFields(): PluginAuthField[] {
+    return this.authFields().filter((f) => f.oauth_flow && f.required);
+  }
+
+  /**
+   * Whether every typed prerequisite is SAVED. Authorize reads credentials from
+   * the host-side seed (written by Save), so freshly-typed-but-unsaved values
+   * do not count — the user must Save first, then Authorize.
+   */
+  oauthPrerequisitesMet(): boolean {
+    return this.oauthPrerequisiteFields().every((f) => this.isConfigured(f.key));
+  }
+
+  /** Hint listing the prerequisites still needing to be saved. */
+  oauthPrerequisitesMissingMessage(): string {
+    const missing = this.oauthPrerequisiteFields()
+      .filter((f) => !this.isConfigured(f.key))
+      .map((f) => f.label);
+    return missing.length ? `Save ${missing.join(', ')} above first, then authorize.` : '';
+  }
 
   /**
    * Key of the field whose `clear` button was clicked; null when no confirm

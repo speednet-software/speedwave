@@ -28,7 +28,7 @@ Live compromise is **not** mitigated by isolation alone. An attacker with RCE in
 - `:ro`-everywhere mount enforcement (no SharePoint special case) — `crates/speedwave-runtime/src/compose.rs` (`validate_service_volume_mounts`)
 - SharePoint credential descriptor (`access_token`, `site_id` only) and OAuth state field allowlist — `crates/speedwave-runtime/src/consts.rs` (`credential_files`, `oauth_state_fields`)
 - OAuth request scopes SSOT — `crates/speedwave-runtime/src/consts.rs` (`SHAREPOINT_OAUTH_SCOPES`)
-- Spawn on project switch / compose-up when an OAuth service is enabled — `desktop/src-tauri/src/main.rs` (`ensure_oauth_running`), `crates/speedwave-cli/src/main.rs` (`maybe_spawn_oauth_worker`)
+- Spawn on project switch / compose-up when an OAuth service is enabled — `desktop/src-tauri/src/main.rs` (`ensure_oauth_running`). The Desktop app is the **sole** spawner; the CLI (a Desktop-dependent client) does not spawn the worker — it reads the Desktop-held lock/bearer-map from disk. A second CLI-side supervisor caused the dual-supervisor exit-137 cycle, removed per ADR-068 §"Not every exit 137 is OOM".
 - Device-code flow that seeds the state — `desktop/src-tauri/src/oauth_cmd.rs`
 - SharePoint token manager (now health-only, no token writes) — `mcp-servers/sharepoint/src/token-manager.ts`
 
@@ -37,6 +37,10 @@ Live compromise is **not** mitigated by isolation alone. An attacker with RCE in
 State lives at `~/.speedwave/oauth/<project>/<service>.json` (mode 0o600, parent 0o700), never mounted into any container. Each file carries `provider`, `providerData` (IdP-specific keys — for Microsoft `clientId` + `tenantId`), `scopes`, `grantedScopes`, `refreshToken`, `expiresAt`, `lastRefreshAt`. A bearer → service map and an append-only audit log (rotated past ~1 MiB, one historical copy) sit alongside it in the same per-project directory. The whole tree is enumerated by the file-security check, so a world-readable mode regression is caught by `speedwave check` and auto-fixed on startup.
 
 A startup migration (`crates/speedwave-runtime/src/oauth_state_migration.rs`, also reused by Desktop's in-process repair) nests any legacy top-level `clientId`/`tenantId` under `providerData` — shape-only, idempotent, secrets are never fabricated or moved. The re-authorize banner is computed regardless of `configured` so a file too damaged to migrate still surfaces a recovery path.
+
+## Shared refresh-retry helper
+
+On-demand `refresh` is no longer re-implemented per worker. Every OAuth consumer (built-in workers plus plugins via a vendored copy) calls a shared `authedRequest` helper in `mcp-shared` (`mcp-servers/shared/src/oauth-authed-request.ts`): it issues the HTTP request, and on an auth-failure status calls `oauth.refresh()`, re-reads `/tokens/access_token`, and retries once — so the refresh-retry logic is SSOT, not duplicated. The auth-failure trigger is `[401]` by default per RFC 6750's `invalid_token` response,[^1] and consumers may add non-standard statuses (a GLPI 11 instance is observed to return `400` for an expired token — observed instance behavior, not a documented contract; see ADR-069). A `5xx` is a server fault and never triggers refresh. SharePoint delegates both its reactive and proactive (JWT `exp`) refresh to this helper.
 
 ## Rejected alternatives
 
@@ -53,3 +57,5 @@ A startup migration (`crates/speedwave-runtime/src/oauth_state_migration.rs`, al
 - Microsoft Identity — device authorization grant (public client): <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>
 - Microsoft Identity — refresh-token redemption: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow#refresh-the-access-token>
 - Microsoft Identity — refresh-token revocation is a user/admin operation: <https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens#token-revocation>
+
+[^1]: RFC 6750 — a protected resource returns `401 Unauthorized` with `error="invalid_token"` when the access token is expired or otherwise invalid: <https://datatracker.ietf.org/doc/html/rfc6750#section-3.1>

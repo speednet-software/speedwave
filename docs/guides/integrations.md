@@ -241,9 +241,11 @@ SharePoint integration combines two Microsoft Graph surfaces: a SharePoint docum
 **OAuth refresh flow.** The SharePoint worker takes two paths to refreshing its access token; both end at `oauth.refresh()` on the host-side `oauth` worker (see [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)).
 
 - _Proactive_ — before every Graph API call the worker reads the JWT `exp` claim from the cached access token. If it expires within 120 s, it calls `oauth.refresh()` first to avoid a 401 round-trip and the race window where the oauth watchdog has just respawned the worker (rotating `WORKER_OAUTH_URL`). If the proactive refresh fails (`worker_unreachable` / `timeout`), the worker logs a warning and falls through to the Graph call with the still-valid existing token — `OAuthScopeMismatchError` is the exception and is re-thrown immediately because no retry can fix it.
-- _Reactive_ — a 401 from Graph triggers the same `oauth.refresh()` under a mutex, then retries the original request.
+- _Reactive_ — a 401 from Graph triggers the same `oauth.refresh()`, serialized by the helper's single-flight lock so concurrent 401s refresh once, then retries the original request. Both paths run through the shared `authedRequest` helper in `mcp-shared`, so the refresh-retry logic is identical across every OAuth integration.
 
 In both paths the oauth worker reads `refreshToken` from `oauth.json`, calls Microsoft's `/oauth2/v2.0/token` endpoint, writes the new `access_token` to `/tokens/access_token`, and the SharePoint worker re-reads it. The SharePoint container never sees the refresh token. If Microsoft returns `scope_mismatch` (e.g. after a scope bump or admin policy change), the failure surfaces as an `OAUTH_SCOPE_MISMATCH` error that the Desktop UI uses to trigger re-consent. If the host oauth worker is unreachable (e.g. mid-respawn), the caller gets `OAuthRefreshError(worker_unreachable)` with a "Restart the project from Speedwave Desktop" recovery hint.
+
+**Authentication errors.** Speedwave refreshes expired access tokens reactively — when a tool call fails with an auth error, the worker refreshes the token and retries once, so transient expiry is invisible. If a tool still fails with an authentication error after that, the refresh token itself is exhausted or revoked; reconnect the integration from its card in **Settings** to sign in again.
 
 ### Office — Documents
 
@@ -305,7 +307,7 @@ Playwright is unique among the built-in integrations in three ways:
 
 - **No credentials.** It accesses public URLs and may navigate to services running on the host loopback (e.g. local dev servers like `http://host.docker.internal:4200` for an Angular project — see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)). There is no `/tokens` mount and no credential file. Enabling the integration requires no configuration.
 - **No `/workspace` mount.** Screenshots, PDFs, and page dumps are returned to Claude as base64 payloads rather than written to the project. This keeps a compromised Chromium from exfiltrating repo contents.
-- **Higher resource limits.** `shm_size: 2g` (Chromium IPC needs it), `tmpfs /tmp: 1g` (Chromium caches heavily), `cpus: 2.0`, `memory: 2048m` — noticeably larger than the 128 MiB budget given to HTTP-only workers.
+- **Higher resource limits.** Chromium needs a large shared-memory segment (IPC) and tmpfs (heavy caching) plus more CPU/memory than an HTTP-only worker — noticeably larger than the 128 MiB budget given to those. The exact numbers are SSOT'd on the `playwright` descriptor in `crates/speedwave-runtime/src/consts.rs` (`McpServiceDescriptor.resources`), not here; see ADR-068. These values are read by the renderer, so this paragraph intentionally avoids restating them to prevent drift.
 
 Container hardening is otherwise identical to every other MCP worker: `cap_drop: ALL`, `no-new-privileges:true`, `read_only: true` root filesystem, `noexec,nosuid` on `/tmp`. Chromium runs with `--no-sandbox` because the Lima/WSL2 VM + container capability-drop layer replaces its in-process sandbox (see [ADR-004](../adr/ADR-004-wsl2-and-nerdctl-on-windows.md)). Each container restart wipes `/tmp` (tmpfs-backed), giving the same ephemeral-profile guarantee as `--isolated` — no cookies, no storage state persist between invocations.
 
@@ -491,6 +493,40 @@ Behaviour to know:
 
 After saving or resetting, Speedwave requests a container restart so the
 worker picks up the change.
+
+### Plugin OAuth (Authorize)
+
+A plugin can declare an `oauth` block in `plugin.json` to authenticate against a
+third-party service through an OAuth2 flow instead of a pasted token. The flow
+runs on the host; only a short-lived access token reaches the plugin container,
+while the refresh token and client secret stay off-mount under
+`~/.speedwave/oauth/<project>/<slug>.json` (see
+[ADR-069](../adr/ADR-069-generic-plugin-oauth2.md)).
+
+How it works in the UI:
+
+1. Enter the plugin's OAuth **client id** (and **client secret** if the manifest
+   declares one) in the Credentials section and click **Save**. These are not
+   written to `/tokens` — they go to the off-mount seed file. The **Authorize**
+   button stays disabled until they are saved.
+2. Click **Sign in with `<plugin>`**. For the `authorization_code` grant a
+   browser tab opens; complete sign-in there. If the identity provider requires
+   a registered redirect URI, the UI shows the loopback URI to register.
+3. On success the plugin is **auto-enabled** (a freshly-authorized OAuth plugin
+   is ready to run) and Speedwave shows the restart banner; click it so the
+   worker container starts and picks up the access token.
+
+**Self-hosted services.** When the OAuth endpoints depend on the instance (e.g. a
+self-hosted GLPI), the manifest declares `base_url_field` (naming the base-URL
+credential field) plus `authorize_suffix`/`token_suffix` instead of static
+`authorize_url`/`token_url`. The host resolves and SSRF-validates the endpoints
+from the base URL you enter at sign-in time.
+
+**Identity (who the service logs).** `authorization_code` and `device_code` are
+user-delegated: you sign in with your own account and the service attributes
+actions to **you**. `client_credentials` is a machine identity — actions land on
+the OAuth client's technical account, not a specific person. Choose the grant
+that matches your audit requirements.
 
 ### Bridge plugins — dev UX
 

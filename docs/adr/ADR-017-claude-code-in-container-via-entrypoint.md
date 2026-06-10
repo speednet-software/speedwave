@@ -31,7 +31,7 @@ User-overridable defaults live in `crates/speedwave-runtime/src/defaults.rs::bas
 - `IS_SANDBOX=1` — signals a sandboxed environment so `--dangerously-skip-permissions` is accepted regardless of effective UID. Both supported platforms (macOS Lima, Windows WSL2) run the container as UID 1000, so the root-user check already passes; this is defense-in-depth (see ADR-026).
 - `CLAUDE_CODE_NO_FLICKER=1` — enables the alt-screen / differential (focus-view) renderer, mitigating PTY write-side backpressure that froze long streaming sessions in the CLI.
 
-A separate template-sourced flag, `CLAUDE_CODE_EFFORT_LEVEL=auto` in `containers/compose.template.yml`, is Speedwave policy rather than a tuning knob. `auto` means "use the model's own default effort"; a compose test asserts the value is exactly `auto`.
+Speedwave deliberately does **not** set `CLAUDE_CODE_EFFORT_LEVEL`. The env var outranks the user's in-session `/effort` and the persisted `settings.json`,[^effort] so pinning it (even to `auto`) blocks the user from changing effort — `/effort max` reports "Not applied: env override". Omitting it lets Claude Code use the model's own default effort while keeping `/effort` working and persisted to `settings.json` (see ADR-022). A compose test asserts the var is absent from the `claude` service environment.
 
 ## Persistent state
 
@@ -49,6 +49,8 @@ Claude Code's binary and user data persist across container rebuilds via a per-p
 
 - **Install on the host** — bypasses all container security controls (ADR-009) and gives Claude Code unrestricted host access.
 - **`npm install -g @anthropic-ai/claude-code`** (used in v1) — the npm package was deprecated in favor of the native installer; v2 uses the native installer only.
+
+[^effort]: Claude Code resolves settings with environment variables taking precedence over `settings.json`; `CLAUDE_CODE_EFFORT_LEVEL` is documented in the environment-variable reference. https://docs.claude.com/en/docs/claude-code/settings#environment-variables
 
 ---
 

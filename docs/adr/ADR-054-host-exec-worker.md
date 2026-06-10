@@ -26,7 +26,7 @@ This is a deliberate, scoped weakening of Speedwave's container-isolation model:
 - Hub/compose wiring — `apply_host_exec_config_in`, `host_exec_gateway_url`, the `WORKER_HOST_EXEC_URL` env + per-project bearer-token mount, and adding `host_exec` to `ENABLED_SERVICES` when enabled, in `crates/speedwave-runtime/src/compose.rs`.
 - Worker — the TypeScript MCP server (`shell:false`, detached own process group, per-stream output cap with ANSI strip, per-command timeout → process-group `SIGKILL`, full-argv audit log with `env` values redacted) in `mcp-servers/host_exec/`.
 - Desktop — Tauri commands `get_host_exec` / `set_host_exec_enabled` / `host_exec_save_settings` / `host_exec_load_settings` / `host_exec_resolve_executable` in `desktop/src-tauri/src/host_exec_cmd.rs`; lifecycle (`ensure_host_exec_running`, login-shell `PATH` recovery, the per-project worker map + watchdog) in `desktop/src-tauri/src/main.rs`; teardown in `desktop/src-tauri/src/reconcile.rs`.
-- CLI — `maybe_spawn_host_exec_worker` spawns the worker before render/compose in `crates/speedwave-cli/src/main.rs`.
+- CLI — does **not** spawn the worker. The Desktop app (a hard CLI prerequisite) is the sole spawner; the CLI reads the Desktop-held `lock.json` + bearer-map from disk via `apply_host_exec_config_in` during render. Two supervisors racing one worker caused the dual-supervisor exit-137 cycle — see ADR-068 §"Not every exit 137 is OOM".
 - Frontend — `desktop/src/src/app/models/host-exec.ts` and the gated-toggle card in `desktop/src/src/app/integrations/host-exec-config/`.
 
 ## Rejected alternatives

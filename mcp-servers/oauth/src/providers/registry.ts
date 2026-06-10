@@ -1,8 +1,10 @@
 import type { OAuthProvider, ProviderId } from './types.js';
 import { microsoftProvider } from './microsoft.js';
+import { genericProvider } from './generic.js';
 
 const REGISTRY: Record<ProviderId, OAuthProvider> = {
   microsoft: microsoftProvider,
+  generic: genericProvider,
 };
 
 /**
