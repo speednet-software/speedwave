@@ -723,6 +723,20 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="health-mcpos"]')).not.toBeNull();
   });
 
+  it('shows a neutral checking placeholder until the first health snapshot lands', async () => {
+    // No snapshot yet: get_health yields nothing, so the strip must not claim "degraded".
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_all_logs') return '';
+      return undefined;
+    };
+    await component.ngOnInit();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="health-checking"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="health-overall"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="health-mcpos"]')).toBeNull();
+  });
+
   it('computed signals reflect the current health snapshot', async () => {
     await component.ngOnInit();
     fixture.detectChanges();

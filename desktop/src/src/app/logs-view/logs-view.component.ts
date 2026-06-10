@@ -188,112 +188,119 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
       role="status"
       aria-label="System health summary"
     >
-      <button
-        type="button"
-        class="flex items-center gap-2 text-[13px]"
-        data-testid="health-overall"
-        [style.color]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
-        [attr.aria-expanded]="detailsOpen()"
-        aria-controls="logs-status-details"
-        (click)="toggleDetails()"
-        [title]="detailsOpen() ? 'Hide details' : 'Show details'"
-      >
-        <span
-          class="dot"
-          [style.background]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
-        ></span>
-        <span class="font-medium">{{ overallHealthy() ? 'healthy' : 'degraded' }}</span>
-        <span
-          class="mono text-[10px] text-[var(--ink-mute)]"
-          [style.transform]="detailsOpen() ? 'rotate(180deg)' : null"
-          aria-hidden="true"
-          >▾</span
+      @if (!healthLoaded()) {
+        <div class="flex items-center gap-2 text-[13px]" data-testid="health-checking">
+          <span class="dot" [style.background]="'var(--ink-mute)'"></span>
+          <span class="text-[var(--ink-mute)]">checking system health…</span>
+        </div>
+      } @else {
+        <button
+          type="button"
+          class="flex items-center gap-2 text-[13px]"
+          data-testid="health-overall"
+          [style.color]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
+          [attr.aria-expanded]="detailsOpen()"
+          aria-controls="logs-status-details"
+          (click)="toggleDetails()"
+          [title]="detailsOpen() ? 'Hide details' : 'Show details'"
         >
-      </button>
-
-      <span
-        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
-        aria-hidden="true"
-      ></span>
-
-      <div class="flex items-center gap-2 text-[12px]" data-testid="health-vm">
-        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">vm</span>
-        <span
-          class="dot"
-          [style.background]="vmRunning() ? 'var(--green)' : 'var(--accent)'"
-        ></span>
-        <span [style.color]="vmRunning() ? 'var(--ink)' : 'var(--accent)'">{{ vmLabel() }}</span>
-        <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ vmDetail() }}</span>
-      </div>
-
-      <span
-        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
-        aria-hidden="true"
-      ></span>
-
-      <div class="flex items-center gap-2 text-[12px]" data-testid="health-containers">
-        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-          >containers</span
-        >
-        <span
-          class="dot"
-          [style.background]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--green)'"
-        ></span>
-        <span [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink)'">{{
-          containersLabel()
-        }}</span>
-        <span
-          class="mono text-[10px]"
-          [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink-mute)'"
-          >· {{ containersDetail() }}</span
-        >
-      </div>
-
-      <span
-        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
-        aria-hidden="true"
-      ></span>
-
-      <div class="flex items-center gap-2 text-[12px]" data-testid="health-bridge">
-        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-          >ide_bridge</span
-        >
-        <span
-          class="dot"
-          [style.background]="bridgeConnected() ? 'var(--green)' : 'var(--ink-mute)'"
-        ></span>
-        <span [style.color]="bridgeConnected() ? 'var(--ink)' : 'var(--ink-mute)'">{{
-          bridgeConnected() ? 'connected' : 'disconnected'
-        }}</span>
-        <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ bridgeDetail() }}</span>
-        @if (bridgeShowConnectLink()) {
-          <a
-            routerLink="/integrations"
-            fragment="ide-bridge"
-            class="mono text-[10px] text-[var(--accent)] hover:underline"
-            data-testid="bridge-connect-link"
-            >connect →</a
+          <span
+            class="dot"
+            [style.background]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
+          ></span>
+          <span class="font-medium">{{ overallHealthy() ? 'healthy' : 'degraded' }}</span>
+          <span
+            class="mono text-[10px] text-[var(--ink-mute)]"
+            [style.transform]="detailsOpen() ? 'rotate(180deg)' : null"
+            aria-hidden="true"
+            >▾</span
           >
-        }
-      </div>
+        </button>
 
-      <span
-        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
-        aria-hidden="true"
-      ></span>
-
-      <div class="flex items-center gap-2 text-[12px]" data-testid="health-mcpos">
-        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-          >mcp_os</span
-        >
         <span
-          class="dot"
-          [style.background]="mcpOsRunning() ? 'var(--green)' : 'var(--ink-mute)'"
+          class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+          aria-hidden="true"
         ></span>
-        <span [style.color]="mcpOsRunning() ? 'var(--ink)' : 'var(--ink-mute)'">{{
-          mcpOsRunning() ? 'running' : 'stopped'
-        }}</span>
-      </div>
+
+        <div class="flex items-center gap-2 text-[12px]" data-testid="health-vm">
+          <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">vm</span>
+          <span
+            class="dot"
+            [style.background]="vmRunning() ? 'var(--green)' : 'var(--accent)'"
+          ></span>
+          <span [style.color]="vmRunning() ? 'var(--ink)' : 'var(--accent)'">{{ vmLabel() }}</span>
+          <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ vmDetail() }}</span>
+        </div>
+
+        <span
+          class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+          aria-hidden="true"
+        ></span>
+
+        <div class="flex items-center gap-2 text-[12px]" data-testid="health-containers">
+          <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            >containers</span
+          >
+          <span
+            class="dot"
+            [style.background]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--green)'"
+          ></span>
+          <span [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink)'">{{
+            containersLabel()
+          }}</span>
+          <span
+            class="mono text-[10px]"
+            [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink-mute)'"
+            >· {{ containersDetail() }}</span
+          >
+        </div>
+
+        <span
+          class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+          aria-hidden="true"
+        ></span>
+
+        <div class="flex items-center gap-2 text-[12px]" data-testid="health-bridge">
+          <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            >ide_bridge</span
+          >
+          <span
+            class="dot"
+            [style.background]="bridgeConnected() ? 'var(--green)' : 'var(--ink-mute)'"
+          ></span>
+          <span [style.color]="bridgeConnected() ? 'var(--ink)' : 'var(--ink-mute)'">{{
+            bridgeConnected() ? 'connected' : 'disconnected'
+          }}</span>
+          <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ bridgeDetail() }}</span>
+          @if (bridgeShowConnectLink()) {
+            <a
+              routerLink="/integrations"
+              fragment="ide-bridge"
+              class="mono text-[10px] text-[var(--accent)] hover:underline"
+              data-testid="bridge-connect-link"
+              >connect →</a
+            >
+          }
+        </div>
+
+        <span
+          class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+          aria-hidden="true"
+        ></span>
+
+        <div class="flex items-center gap-2 text-[12px]" data-testid="health-mcpos">
+          <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            >mcp_os</span
+          >
+          <span
+            class="dot"
+            [style.background]="mcpOsRunning() ? 'var(--green)' : 'var(--ink-mute)'"
+          ></span>
+          <span [style.color]="mcpOsRunning() ? 'var(--ink)' : 'var(--ink-mute)'">{{
+            mcpOsRunning() ? 'running' : 'stopped'
+          }}</span>
+        </div>
+      }
 
       <div class="ml-auto flex items-center gap-2">
         <button
@@ -597,6 +604,9 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   readonly levelChips = LEVEL_CHIPS;
 
   /** Whether the overall system is healthy. */
+  /** False until the first health snapshot lands — render neutral, not "degraded". */
+  readonly healthLoaded = computed<boolean>(() => this.health() !== null);
+
   readonly overallHealthy = computed<boolean>(() => this.health()?.overall_healthy ?? false);
 
   /** Whether the VM is reported as running. */
