@@ -375,7 +375,7 @@ pub struct IdeBridge {
 
     // Mirrored from `inner` (in production) or supplied by the caller
     // (in `new_with_paths`). Tests read these directly via field access.
-    tcp_port: u16,
+    _tcp_port: u16,
     lock_file_path: PathBuf,
     /// `_`-prefix because the field is only read inside `#[cfg(test)]
     /// fn write_lock_file` — no production read site exists, but tests
@@ -417,7 +417,7 @@ impl IdeBridge {
         let (upstream_changed_tx, _) = tokio::sync::broadcast::channel(4);
         Ok(Self {
             inner: Some(inner),
-            tcp_port,
+            _tcp_port: tcp_port,
             lock_file_path,
             _auth: auth,
             upstream: Arc::new(Mutex::new(None)),
@@ -426,10 +426,7 @@ impl IdeBridge {
         })
     }
 
-    pub fn port(&self) -> u16 {
-        self.tcp_port
-    }
-
+    #[cfg(test)]
     pub fn upstream_info(&self) -> Option<(String, u16)> {
         self.upstream
             .lock()
@@ -494,7 +491,7 @@ impl IdeBridge {
         let (upstream_changed_tx, _) = tokio::sync::broadcast::channel(4);
         Self {
             inner: None,
-            tcp_port,
+            _tcp_port: tcp_port,
             lock_file_path,
             _auth: Arc::new(Mutex::new(AuthState::new(auth_token.to_string()))),
             upstream: Arc::new(Mutex::new(None)),
@@ -1251,7 +1248,7 @@ mod tests {
     #[test]
     fn test_ide_bridge_new_returns_valid_instance() {
         let bridge = IdeBridge::new().unwrap();
-        assert!(bridge.tcp_port > 0, "TCP port should be assigned");
+        assert!(bridge._tcp_port > 0, "TCP port should be assigned");
         // Path under the bridge subdir; the data dir prefix is determined
         // by SPEEDWAVE_DATA_DIR (may be overridden by other tests in this
         // binary), so we assert on the bridge-specific suffix only.

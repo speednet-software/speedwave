@@ -1,16 +1,12 @@
-//! State-tree types for JSON-Patch stream protocol (ADR-042).
-//!
-//! Defines the conversation state shape that the Angular frontend holds as a
-//! signal and updates via `json_patch::Patch` operations. Every type is
-//! `serde`-serializable so patches can be applied via `json_patch::patch`.
+//! Conversation state-tree shapes (ADR-042) mirrored by the Angular
+//! frontend (`models/state-tree.ts`, `models/chat.ts::MessageBlock`).
+//! The frontend rebuilds this tree from its legacy fields after every
+//! mutation; AskUser/queue types here also ride `chat_stream` chunks.
 
 use serde::{Deserialize, Serialize};
 
-/// Root conversation state held by the UI as a single signal.
+/// Root conversation state held by the UI as a single signal (ADR-042).
 ///
-/// Every Tauri event emitted from Rust is a `json_patch::Patch` applied to a
-/// value of this type (see ADR-042). Reducer must stay pure: history replay +
-/// patch sequence must converge on the same state regardless of delivery time.
 /// Manual `Debug` is implemented below to redact `session_id`; per
 /// `.claude/rules/logging.md`, structs containing per-session identifiers
 /// must redact them in `Debug` output so accidental `format!("{state:?}")`
@@ -56,7 +52,7 @@ impl std::fmt::Debug for ConversationState {
 /// live inside the entry's `blocks` vector.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ConversationEntry {
-    /// Stable monotonic index allocated by `EntryIndexProvider` (ADR-044).
+    /// Stable monotonic index, never reused within a session (ADR-044).
     pub index: usize,
     /// Who authored this entry.
     pub role: EntryRole,
@@ -139,8 +135,8 @@ pub struct TurnUsage {
     pub cache_write_tokens: u64,
 }
 
-/// Rolling totals for the whole session. Bound by the same handler that
-/// emits per-entry `meta` patches so `sum(entries.meta.*) == session_totals`.
+/// Rolling totals for the whole session. Maintained by the same handler
+/// that fills per-entry `meta` so `sum(entries.meta.*) == session_totals`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 pub struct SessionTotals {
     /// Cumulative input tokens across the session.
@@ -176,13 +172,13 @@ pub struct QueuedMessage {
 /// desktop `StreamChunk` event family (`desktop/src-tauri/src/chat.rs`) but
 /// represents the aggregated state after delta application — not the event.
 ///
-/// Tagged enum: serde serializes as `{"kind":"Text","content":"..."}` so a
-/// JSON Patch can replace a block in-place without a re-typing dance.
+/// Tagged enum: serde serializes as `{"kind":"text","content":"..."}` —
+/// mirrored by `models/chat.ts::MessageBlock` (CLAUDE.md SSOT alignment).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageBlock {
     /// Rendered assistant/user text. Markdown preserved verbatim; rendering
-    /// happens in the UI. Streaming appends to `content` via `Replace` patches.
+    /// happens in the UI. Streaming appends to `content`.
     Text {
         /// Current text content (may grow during streaming).
         content: String,
@@ -243,7 +239,9 @@ pub enum MessageBlock {
     },
     /// User-attached image (metadata only; bytes live on disk per ADR-065).
     Image {
+        /// MIME type of the attached image.
         media_type: String,
+        /// Optional alt text.
         #[serde(default)]
         alt: Option<String>,
     },
@@ -270,7 +268,7 @@ pub const MAX_ASK_USER_WIRE_BYTES: usize = 64 * 1024;
 /// host translates the camelCase boundary at parse time
 /// (`StreamParser::parse_ask_user_question`); fields here use snake_case
 /// because that's the convention for everything we persist or send to the
-/// Angular frontend through the patch stream. **If you add a field here,
+/// Angular frontend. **If you add a field here,
 /// update the manual extraction in the parser too** — the type does not
 /// auto-deserialize from SDK input.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

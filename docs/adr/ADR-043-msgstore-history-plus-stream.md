@@ -1,6 +1,6 @@
 # ADR-043: MsgStore — Broadcast Channel Plus Bounded History
 
-> **Status:** Accepted
+> **Status:** Retired (2026-06-10) — `MsgStore`, the `MsgStoreRegistry`, and the `subscribe_session`/`chat_patch::*` Tauri bridge were deleted together with the JSON-Patch wire transport (see the [ADR-042](ADR-042-json-patch-stream-protocol.md) status note). This document records the original design.
 > **Context:** The JSON-Patch stream of a live Claude Code session (ADR-042) must reach multiple consumers — the chat view, a re-opened window, a diagnostic export — without racing, dropping, or duplicating state, and a late subscriber must see the full conversation from the start.
 
 ## Decision

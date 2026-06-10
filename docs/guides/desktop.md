@@ -113,7 +113,7 @@ There is no client-side gate on the active model — every provider gets a chanc
 
 **Known limitation — no persistence**: attachment bytes live in the composer for the live session only. After a Desktop reload the chat history shows an `🖼 (filename)` placeholder pill instead of the thumbnail — the bytes themselves are not stored to disk (Claude Code's session JSONL is read-only per ADR-046, and a dedicated image store is future work).
 
-The CLI (`speedwave run`, which launches Claude Code's TUI in the container) does **not** yet support image paste — the TUI's native paste reads the host clipboard, which the container cannot see. A host-side clipboard watcher is planned in a separate spike + PR.
+The CLI (bare `speedwave`, which launches Claude Code's TUI in the container) does **not** yet support image paste — the TUI's native paste reads the host clipboard, which the container cannot see. A host-side clipboard watcher is planned in a separate spike + PR.
 
 ## Project switcher
 

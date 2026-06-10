@@ -2,14 +2,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
+import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
 
 describe('ProjectStateService', () => {
   let service: ProjectStateService;
   let mockTauri: MockTauriService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(() => {
     mockTauri = new MockTauriService();
+    mockLogger = makeMockLogger();
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'list_projects':
@@ -30,7 +37,11 @@ describe('ProjectStateService', () => {
     };
 
     TestBed.configureTestingModule({
-      providers: [ProjectStateService, { provide: TauriService, useValue: mockTauri }],
+      providers: [
+        ProjectStateService,
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     });
     service = TestBed.inject(ProjectStateService);
   });
@@ -71,6 +82,33 @@ describe('ProjectStateService', () => {
       // Listeners should still work
       mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
       expect(service.status).toBe('switching');
+    });
+
+    it('sets status=error and logs when invoke fails INSIDE Tauri', async () => {
+      mockTauri.runningInTauri = true;
+      mockTauri.invokeHandler = async () => {
+        throw new Error('list_projects boom');
+      };
+
+      await service.init();
+
+      expect(service.status).toBe('error');
+      expect(service.error).toContain('list_projects boom');
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('init failed: list_projects boom')
+      );
+    });
+
+    it('stays silent (no error status, no log) when invoke fails OUTSIDE Tauri', async () => {
+      mockTauri.runningInTauri = false;
+      mockTauri.invokeHandler = async () => {
+        throw new Error('not in Tauri');
+      };
+
+      await service.init();
+
+      expect(service.status).toBe('loading');
+      expect(mockLogger.error).not.toHaveBeenCalled();
     });
   });
 
@@ -631,9 +669,13 @@ describe('ProjectStateService', () => {
       expect(service.status).toBe('ready');
     });
 
-    it('retryAuth stays in auth_required when auth check fails', async () => {
+    it('retryAuth sets error (NOT auth_required) and logs when the auth check throws', async () => {
       service.activeProject = 'test';
       service.status = 'auth_required';
+      const failed = vi.fn();
+      const settled = vi.fn();
+      service.onProjectFailed(failed);
+      service.onProjectSettled(settled);
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_auth_status') throw new Error('connection refused');
@@ -641,7 +683,15 @@ describe('ProjectStateService', () => {
       };
 
       await service.retryAuth();
-      expect(service.status).toBe('auth_required');
+
+      // A failed check must not masquerade as "not authenticated".
+      expect(service.status).toBe('error');
+      expect(service.error).toContain('connection refused');
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('retryAuth check failed: connection refused')
+      );
+      expect(failed).toHaveBeenCalledWith(expect.stringContaining('connection refused'));
+      expect(settled).toHaveBeenCalled();
     });
 
     it('retryAuth sets auth_required when no auth configured', async () => {
@@ -744,6 +794,23 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(false);
       expect(service.restarting).toBe(false);
       expect(service.restartError).toBe('');
+    });
+
+    it('restartContainers logs (not console) when invalidate_slash_cache fails but still succeeds', async () => {
+      service.requestRestart();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'invalidate_slash_cache') throw new Error('cache gone');
+        return undefined;
+      };
+
+      await service.restartContainers();
+
+      // The slash-cache miss is non-fatal: restart still completes.
+      expect(service.needsRestart).toBe(false);
+      expect(service.restartError).toBe('');
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('invalidate_slash_cache failed: cache gone')
+      );
     });
 
     it('restartContainers fires notifyChange at each state transition', async () => {

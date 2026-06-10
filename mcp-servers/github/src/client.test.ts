@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vite
 import type { GitHubConfig, GitHubClient as GitHubClientType } from './client.js';
 
 // ── Mock functions shared across tests ───────────────────────────────────────
-const mockLoadToken = vi.fn();
+const mockLoadTokenFile = vi.fn();
 
 /** Mutable holder so each test can swap the Octokit instance the mocked constructor returns. */
 const octokitHolder: { instance: Record<string, unknown> | null } = { instance: null };
@@ -31,12 +31,12 @@ vi.mock('@octokit/rest', () => {
 vi.mock('@octokit/plugin-throttling', () => ({ throttling: {} }));
 vi.mock('@octokit/plugin-retry', () => ({ retry: {} }));
 
-// Mock shared module — keep real exports, override loadToken + ts.
+// Mock shared module — keep real exports, override loadTokenFile + ts.
 vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@speedwave/mcp-shared')>();
   return {
     ...actual,
-    loadToken: mockLoadToken,
+    loadTokenFile: mockLoadTokenFile,
     ts: () => '[00:00:00]',
   };
 });
@@ -1903,14 +1903,14 @@ describe('initializeGitHubClient', () => {
   });
 
   it('returns a client when the token is found and the connection test succeeds', async () => {
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     octokitHolder.instance = {
       rest: {
         users: { getAuthenticated: vi.fn().mockResolvedValue({ data: { login: 'octocat' } }) },
       },
     };
     const client = await initializeGitHubClient();
-    expect(mockLoadToken).toHaveBeenCalledWith('/tokens/token');
+    expect(mockLoadTokenFile).toHaveBeenCalledWith('token');
     expect(client).not.toBeNull();
     const opts = mockOctokitConstructor.mock.calls[
       mockOctokitConstructor.mock.calls.length - 1
@@ -1918,35 +1918,27 @@ describe('initializeGitHubClient', () => {
     expect(opts.auth).toBe('test-token');
   });
 
-  it('uses TOKENS_DIR for the token path when set', async () => {
+  it('loads the token by name via loadTokenFile regardless of TOKENS_DIR', async () => {
+    // The TOKENS_DIR-or-/tokens resolution now lives in the shared loadTokenFile
+    // (tested in shared/security.test.ts), so the worker just passes the name.
     process.env.TOKENS_DIR = '/custom/tokens';
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     octokitHolder.instance = {
       rest: { users: { getAuthenticated: vi.fn().mockResolvedValue({ data: {} }) } },
     };
     await initializeGitHubClient();
-    expect(mockLoadToken).toHaveBeenCalledWith('/custom/tokens/token');
-  });
-
-  it('appends "/token" verbatim even when TOKENS_DIR has a trailing slash', async () => {
-    process.env.TOKENS_DIR = '/custom/tokens/';
-    mockLoadToken.mockResolvedValue('test-token');
-    octokitHolder.instance = {
-      rest: { users: { getAuthenticated: vi.fn().mockResolvedValue({ data: {} }) } },
-    };
-    await initializeGitHubClient();
-    expect(mockLoadToken).toHaveBeenCalledWith('/custom/tokens//token');
+    expect(mockLoadTokenFile).toHaveBeenCalledWith('token');
   });
 
   it('returns null when the token is empty', async () => {
-    mockLoadToken.mockResolvedValue('');
+    mockLoadTokenFile.mockResolvedValue('');
     const result = await initializeGitHubClient();
     expect(result).toBeNull();
     expect(console.warn).toHaveBeenCalled();
   });
 
   it('returns null when the token is null', async () => {
-    mockLoadToken.mockResolvedValue(null);
+    mockLoadTokenFile.mockResolvedValue(null);
     const result = await initializeGitHubClient();
     expect(result).toBeNull();
     expect(console.warn).toHaveBeenCalled();
@@ -1956,7 +1948,7 @@ describe('initializeGitHubClient', () => {
     // Init no longer blocks on testConnection — it kicks the check into the
     // background. The client is returned immediately; healthCheck reads the
     // tracker to surface the failure.
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     octokitHolder.instance = {
       rest: {
         users: {
@@ -1970,7 +1962,7 @@ describe('initializeGitHubClient', () => {
   });
 
   it('initializeGitHubClient resolves quickly when testConnection hangs', async () => {
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     octokitHolder.instance = {
       rest: {
         users: {
@@ -1987,7 +1979,7 @@ describe('initializeGitHubClient', () => {
 
   it('status tracker drives makeStandardHealthCheck — bg failure makes hc throw', async () => {
     const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     octokitHolder.instance = {
       rest: {
         users: {
@@ -2006,7 +1998,7 @@ describe('initializeGitHubClient', () => {
 
   it('status tracker drives makeStandardHealthCheck — unknown during warmup is healthy', async () => {
     const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     octokitHolder.instance = {
       rest: {
         users: {
@@ -2032,7 +2024,7 @@ describe('initializeGitHubClient', () => {
   });
 
   it('returns null when loadToken throws, logging the error detail', async () => {
-    mockLoadToken.mockRejectedValue(new Error('EACCES: permission denied, open /tokens/token'));
+    mockLoadTokenFile.mockRejectedValue(new Error('EACCES: permission denied, open /tokens/token'));
     const result = await initializeGitHubClient();
     expect(result).toBeNull();
     // The warning must carry the underlying error (a permissions failure must be
@@ -2047,7 +2039,7 @@ describe('initializeGitHubClient', () => {
   it('falls back to error.message when the thrown Error has no stack', async () => {
     const e = new Error('no-stack error');
     e.stack = undefined;
-    mockLoadToken.mockRejectedValue(e);
+    mockLoadTokenFile.mockRejectedValue(e);
     const result = await initializeGitHubClient();
     expect(result).toBeNull();
     const warned = (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
@@ -2057,7 +2049,7 @@ describe('initializeGitHubClient', () => {
   });
 
   it('stringifies a non-Error thrown value', async () => {
-    mockLoadToken.mockRejectedValue('plain string failure');
+    mockLoadTokenFile.mockRejectedValue('plain string failure');
     const result = await initializeGitHubClient();
     expect(result).toBeNull();
     const warned = (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls

@@ -385,21 +385,22 @@ mod tests {
 
     /// Full upgrade-path e2e: migration against the *real* bundled mcp-os
     /// worker (Express server with all routes), not the stub
-    /// `FAKE_WORKER_JS`. `#[ignore]`d because it depends on the desktop
-    /// bundle being built; run with `cargo test -- --ignored` after
-    /// `make build-desktop`. PID 1 in the legacy fixture is the safe
-    /// stale-PID choice — `kill_stale_node`'s `is_node_process` gate
-    /// ignores init/launchd, keeping the test hermetic against the
-    /// host system.
-    #[cfg(unix)]
+    /// `FAKE_WORKER_JS`. Gated behind the `mcp-os-bundle-e2e` feature (not
+    /// `#[ignore]`, which nothing in the test pipeline runs) because it
+    /// depends on the staged desktop bundle. `make test-mcp-os-bundle`
+    /// stages the bundle then runs it under the feature. PID 1 in the
+    /// legacy fixture is the safe stale-PID choice — `kill_stale_node`'s
+    /// `is_node_process` gate ignores init/launchd, keeping the test
+    /// hermetic against the host system.
+    #[cfg(all(unix, feature = "mcp-os-bundle-e2e"))]
     #[test]
-    #[ignore = "requires desktop/src-tauri/mcp-os bundle — run after make build-desktop"]
     #[serial(env)]
     fn upgrade_path_with_real_bundled_mcp_os() {
         let script = "../../desktop/src-tauri/mcp-os/os/dist/index.js";
         assert!(
             std::path::Path::new(script).exists(),
-            "bundled mcp-os missing at {script} — run `make build-desktop` first"
+            "bundled mcp-os missing at {script} — run via `make test-mcp-os-bundle` \
+             (it stages the worker before enabling the mcp-os-bundle-e2e feature)"
         );
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("mcp-os-port"), "12345").unwrap();

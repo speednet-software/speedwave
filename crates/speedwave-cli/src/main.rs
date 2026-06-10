@@ -1,6 +1,4 @@
-// CLI binary intentionally uses stdout/stderr for user output.
-#![allow(clippy::print_stdout, clippy::print_stderr)]
-#![allow(missing_docs)]
+//! `speedwave` CLI: runs Claude Code in a hardened per-project container.
 
 use speedwave_runtime::compose::{self, SecurityCheck, SecurityRule};
 use speedwave_runtime::config;
@@ -15,6 +13,48 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod paste_watcher;
+
+/// Redact secrets from one CLI output line via the `log_sanitizer` SSOT.
+/// Split out from [`emit`] so the redaction is unit-testable without
+/// capturing stdout.
+fn sanitize_output_line(line: &str) -> String {
+    speedwave_runtime::log_sanitizer::sanitize(line)
+}
+
+/// Redact secrets from an error before it is interpolated into user-facing
+/// output. Error chains from config/compose/OAuth handling can carry tokens;
+/// sanitizing at the interpolation site (not only in [`emit`]) keeps the
+/// diagnostic useful while guaranteeing no secret reaches the terminal.
+fn redact_err(e: &impl std::fmt::Display) -> String {
+    sanitize_output_line(&e.to_string())
+}
+
+/// Single output sink. CLI user-facing output legitimately goes to
+/// stdout/stderr (per logging.md); routing every `out!`/`err!` through this
+/// one function localizes the print lint here instead of a crate-level allow.
+/// Every line passes through the `log_sanitizer` SSOT so a secret can never
+/// reach the terminal even if an upstream error string carries one.
+#[allow(clippy::print_stdout, clippy::print_stderr)]
+fn emit(to_stderr: bool, args: std::fmt::Arguments<'_>) {
+    let line = sanitize_output_line(&args.to_string());
+    if to_stderr {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
+}
+
+/// Print a line to stdout (normal CLI result output).
+macro_rules! out {
+    () => { emit(false, format_args!("")) };
+    ($($arg:tt)*) => { emit(false, format_args!($($arg)*)) };
+}
+
+/// Print a line to stderr (diagnostics, prompts, errors).
+macro_rules! err {
+    () => { emit(true, format_args!("")) };
+    ($($arg:tt)*) => { emit(true, format_args!($($arg)*)) };
+}
 
 #[derive(Debug, PartialEq)]
 enum CliAction {
@@ -259,9 +299,10 @@ fn maybe_print_update_hint() {
                 semver::Version::parse(&cache.latest_version),
             ) {
                 if latest > cur {
-                    eprintln!(
+                    err!(
                         "Update available: speedwave {} -> {}. Run: speedwave self-update",
-                        current, cache.latest_version
+                        current,
+                        cache.latest_version
                     );
                 }
             }
@@ -330,8 +371,8 @@ fn run_self_update() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to locate current binary: {e}"))?;
 
     let current = env!("CARGO_PKG_VERSION");
-    println!("Current version: {}", current);
-    println!("Checking for updates...");
+    out!("Current version: {}", current);
+    out!("Checking for updates...");
 
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
@@ -349,15 +390,16 @@ fn run_self_update() -> anyhow::Result<()> {
     });
 
     if status.updated() {
-        println!("Updated to version {}.", status.version());
-        println!("Rebuilding container images...");
+        out!("Updated to version {}.", status.version());
+        out!("Rebuilding container images...");
         if let Err(e) = run_rebuild(&exe_path) {
-            eprintln!("Binary updated successfully, but container rebuild failed: {e}");
+            let e = redact_err(&e);
+            err!("Binary updated successfully, but container rebuild failed: {e}");
             std::process::exit(1);
         }
-        println!("Container images rebuilt successfully.");
+        out!("Container images rebuilt successfully.");
     } else {
-        println!("Already up to date ({}).", current);
+        out!("Already up to date ({}).", current);
     }
 
     Ok(())
@@ -373,7 +415,7 @@ fn validate_project_name(name: &str) -> Result<(), String> {
 /// runtime or any I/O so users can discover commands before Desktop is
 /// running (or while troubleshooting a broken setup).
 fn print_help() {
-    println!(
+    out!(
         "\
 speedwave — run Claude Code in a hardened container per project
 
@@ -402,12 +444,12 @@ Most commands require Speedwave Desktop to be running. See docs/guides/cli.md.",
 }
 
 fn runtime_not_available() -> ! {
-    eprintln!("Speedwave runtime is not running.");
-    eprintln!("CLI requires Speedwave Desktop to be running with a completed setup.");
-    eprintln!("1. Open Speedwave.app");
-    eprintln!("2. Complete the Setup Wizard");
-    eprintln!("3. Start your project");
-    eprintln!("Then run `speedwave` again.");
+    err!("Speedwave runtime is not running.");
+    err!("CLI requires Speedwave Desktop to be running with a completed setup.");
+    err!("1. Open Speedwave.app");
+    err!("2. Complete the Setup Wizard");
+    err!("3. Start your project");
+    err!("Then run `speedwave` again.");
     std::process::exit(1);
 }
 
@@ -422,7 +464,7 @@ fn main() -> anyhow::Result<()> {
         #[cfg(not(debug_assertions))]
         {
             let _ = &default_hook;
-            eprintln!("PANIC: {sanitized}");
+            err!("PANIC: {sanitized}");
         }
     }));
 
@@ -461,7 +503,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     let action = parse_action(&args).unwrap_or_else(|msg| {
-        eprintln!("{}", msg);
+        err!("{}", msg);
         std::process::exit(1);
     });
 
@@ -481,7 +523,8 @@ fn main() -> anyhow::Result<()> {
     // Handle `speedwave self-update` before anything else
     if action == CliAction::SelfUpdate {
         if let Err(e) = run_self_update() {
-            eprintln!("Self-update failed: {e}");
+            let e = redact_err(&e);
+            err!("Self-update failed: {e}");
             std::process::exit(1);
         }
         std::process::exit(0);
@@ -496,11 +539,11 @@ fn main() -> anyhow::Result<()> {
     // already exited above.
     if !skip_plugin_audit(&action) {
         if let Err(failures) = speedwave_runtime::plugin::audit_all() {
-            eprintln!("Plugin verification failed:");
+            err!("Plugin verification failed:");
             for (slug, reason) in &failures {
-                eprintln!("  • {slug}: {reason}");
+                err!("  • {slug}: {reason}");
             }
-            eprintln!(
+            err!(
                 "\nFix: speedwave plugin remove <slug>   OR   \
                  rm -rf ~/.speedwave/plugins/<slug>/\nThen reinstall a signed plugin."
             );
@@ -524,12 +567,12 @@ fn main() -> anyhow::Result<()> {
         let canonical_str = canonical.to_string_lossy().to_string();
         match speedwave_runtime::project::add_project(&name, &canonical_str) {
             Ok(()) => {
-                println!("Project '{}' registered at {}", name, canonical_str);
+                out!("Project '{}' registered at {}", name, canonical_str);
             }
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("already registered") || msg.contains("already exists") {
-                    println!("{}", msg);
+                    out!("{}", msg);
                 } else {
                     return Err(e);
                 }
@@ -545,21 +588,23 @@ fn main() -> anyhow::Result<()> {
             runtime_not_available();
         }
         let user_config = config::load_user_config().unwrap_or_else(|e| {
-            eprintln!("Failed to load config: {e}");
+            err!("Failed to load config: {err}", err = redact_err(&e));
             std::process::exit(1);
         });
         let project_name = resolve_action_project(&action, &user_config)?;
-        println!("Updating containers for project '{}'...", project_name);
+        out!("Updating containers for project '{}'...", project_name);
         match update::update_containers(&runtime, &project_name) {
             Ok(result) => {
-                println!(
+                out!(
                     "Updated {} containers ({} images rebuilt)",
-                    result.containers_recreated, result.images_rebuilt
+                    result.containers_recreated,
+                    result.images_rebuilt
                 );
                 std::process::exit(0);
             }
             Err(e) => {
-                eprintln!("Container update failed: {e}");
+                let e = redact_err(&e);
+                err!("Container update failed: {e}");
                 std::process::exit(1);
             }
         }
@@ -570,7 +615,7 @@ fn main() -> anyhow::Result<()> {
     // CLAUDE_HOME mount. No runtime needed.
     if let CliAction::Logout(_) = action {
         let user_config = config::load_user_config().unwrap_or_else(|e| {
-            eprintln!("Failed to load config: {e}");
+            err!("Failed to load config: {err}", err = redact_err(&e));
             std::process::exit(1);
         });
         let project_name = resolve_action_project(&action, &user_config)?;
@@ -580,11 +625,9 @@ fn main() -> anyhow::Result<()> {
             &project_name,
         )?;
         if removed == 0 {
-            eprintln!("No Claude credentials found for project '{project_name}'.");
+            err!("No Claude credentials found for project '{project_name}'.");
         } else {
-            eprintln!(
-                "Removed Claude credentials for project '{project_name}' ({removed} file(s))."
-            );
+            err!("Removed Claude credentials for project '{project_name}' ({removed} file(s)).");
         }
         std::process::exit(0);
     }
@@ -599,13 +642,14 @@ fn main() -> anyhow::Result<()> {
             let outcome = plugin::install_plugin(std::path::Path::new(path), rt_ref, &mut |_| {})?;
             match outcome {
                 plugin::InstallOutcome::Installed(manifest) => {
-                    println!(
+                    out!(
                         "Plugin '{}' ({}) installed successfully",
-                        manifest.name, manifest.slug
+                        manifest.name,
+                        manifest.slug
                     );
                 }
                 plugin::InstallOutcome::InstalledPendingBuild(manifest) => {
-                    eprintln!(
+                    err!(
                         "Plugin '{}' ({}) installed; image build failed and will retry on next launch",
                         manifest.name, manifest.slug
                     );
@@ -620,7 +664,7 @@ fn main() -> anyhow::Result<()> {
             // stays usable as a recovery/diagnostic path).
             let plugins = plugin::list_for_ui();
             if plugins.is_empty() {
-                println!("No plugins installed");
+                out!("No plugins installed");
             } else {
                 for e in &plugins {
                     let name = e
@@ -634,10 +678,10 @@ fn main() -> anyhow::Result<()> {
                         .map(|m| m.version.as_str())
                         .unwrap_or("?");
                     if e.verification_status == plugin::VerificationStatus::Verified {
-                        println!("{name} ({}): {version}  [verified]", e.slug);
+                        out!("{name} ({}): {version}  [verified]", e.slug);
                     } else {
                         let reason = e.verification_error.as_deref().unwrap_or("unverified");
-                        println!("{name} ({}): {version}  [UNVERIFIED: {reason}]", e.slug);
+                        out!("{name} ({}): {version}  [UNVERIFIED: {reason}]", e.slug);
                     }
                 }
             }
@@ -648,7 +692,7 @@ fn main() -> anyhow::Result<()> {
             let rt_ref: Option<&speedwave_runtime::runtime::LockedRuntime> =
                 if rt.is_available() { Some(&rt) } else { None };
             plugin::remove_plugin(slug, rt_ref)?;
-            println!("Plugin '{}' removed", slug);
+            out!("Plugin '{}' removed", slug);
             std::process::exit(0);
         }
         CliAction::PluginEnable {
@@ -699,9 +743,11 @@ fn main() -> anyhow::Result<()> {
             let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
             integrations.set_plugin_enabled(service_id, true);
             config::save_user_config(&user_config)?;
-            println!(
+            out!(
                 "Plugin '{}' (service_id: {}) enabled for project '{}'",
-                display_name, service_id, project
+                display_name,
+                service_id,
+                project
             );
             std::process::exit(0);
         }
@@ -739,9 +785,11 @@ fn main() -> anyhow::Result<()> {
             let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
             integrations.set_plugin_enabled(service_id, false);
             config::save_user_config(&user_config)?;
-            println!(
+            out!(
                 "Plugin '{}' (service_id: {}) disabled for project '{}'",
-                display_name, service_id, project
+                display_name,
+                service_id,
+                project
             );
             std::process::exit(0);
         }
@@ -758,7 +806,7 @@ fn main() -> anyhow::Result<()> {
 
     // Load config once — used for both project resolution and compose rendering
     let user_config = config::load_user_config().unwrap_or_else(|e| {
-        eprintln!("Failed to load config: {e}");
+        err!("Failed to load config: {err}", err = redact_err(&e));
         std::process::exit(1);
     });
 
@@ -841,7 +889,7 @@ fn main() -> anyhow::Result<()> {
         // Non-blocking warnings (e.g. nested virtualization) — printed in both OK and FAILED paths
         let os_warnings = speedwave_runtime::os_prereqs::check_os_warnings();
         for w in &os_warnings {
-            eprintln!("  WARNING: {w}\n");
+            err!("  WARNING: {w}\n");
         }
 
         // ANSI color codes (only when stderr is a terminal)
@@ -851,35 +899,35 @@ fn main() -> anyhow::Result<()> {
         let reset = if use_color { "\x1b[0m" } else { "" };
 
         if prereq_violations.is_empty() && security_violations.is_empty() {
-            println!("speedwave check OK -- all system checks passed");
-            eprintln!();
+            out!("speedwave check OK -- all system checks passed");
+            err!();
             for rule in SecurityRule::iter() {
-                eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
+                err!("  {green}OK{reset}    {}  {}", rule, rule.description());
             }
             std::process::exit(0);
         } else {
-            eprintln!("speedwave check FAILED -- containers NOT started\n");
+            err!("speedwave check FAILED -- containers NOT started\n");
             let failed_rules: std::collections::HashSet<SecurityRule> =
                 security_violations.iter().map(|v| v.rule).collect();
             for rule in SecurityRule::iter() {
                 if failed_rules.contains(&rule) {
-                    eprintln!("  {red}FAIL{reset}  {}  {}", rule, rule.description());
+                    err!("  {red}FAIL{reset}  {}  {}", rule, rule.description());
                 } else {
-                    eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
+                    err!("  {green}OK{reset}    {}  {}", rule, rule.description());
                 }
             }
             if !prereq_violations.is_empty() {
-                eprintln!();
+                err!();
                 for v in &prereq_violations {
-                    eprintln!("  {} -- {}", v.rule, v.message);
-                    eprintln!("  Fix: {}\n", v.remediation);
+                    err!("  {} -- {}", v.rule, v.message);
+                    err!("  Fix: {}\n", v.remediation);
                 }
             }
             if !security_violations.is_empty() {
-                eprintln!();
+                err!();
                 for v in &security_violations {
-                    eprintln!("  [{}] {} -- {}", v.container, v.rule, v.message);
-                    eprintln!("  Fix: {}\n", v.remediation);
+                    err!("  [{}] {} -- {}", v.container, v.rule, v.message);
+                    err!("  Fix: {}\n", v.remediation);
                 }
             }
             std::process::exit(1);
@@ -888,20 +936,20 @@ fn main() -> anyhow::Result<()> {
 
     // Mandatory prereq + security gate before container start
     if !prereq_violations.is_empty() {
-        eprintln!("speedwave check FAILED -- containers NOT started\n");
+        err!("speedwave check FAILED -- containers NOT started\n");
         for v in &prereq_violations {
-            eprintln!("  {} -- {}", v.rule, v.message);
-            eprintln!("  Fix: {}\n", v.remediation);
+            err!("  {} -- {}", v.rule, v.message);
+            err!("  Fix: {}\n", v.remediation);
         }
         std::process::exit(1);
     }
     speedwave_runtime::fs_security::ensure_data_dir_permissions(&project_name)?;
     let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
     if !violations.is_empty() {
-        eprintln!("speedwave check FAILED -- containers NOT started\n");
+        err!("speedwave check FAILED -- containers NOT started\n");
         for v in &violations {
-            eprintln!("  [{}] {} -- {}", v.container, v.rule, v.message);
-            eprintln!("  Fix: {}\n", v.remediation);
+            err!("  [{}] {} -- {}", v.container, v.rule, v.message);
+            err!("  Fix: {}\n", v.remediation);
         }
         std::process::exit(1);
     }
@@ -930,7 +978,7 @@ fn main() -> anyhow::Result<()> {
     // User types /login; Claude writes ~/.claude/.credentials.json to the
     // per-project CLAUDE_HOME mount. Speedwave persists nothing itself.
     if let CliAction::Login(_) = action {
-        eprintln!("Starting Claude Code. Type /login at the prompt, then /quit when done.");
+        err!("Starting Claude Code. Type /login at the prompt, then /quit when done.");
         let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
         exec_cmd.extend(resolved.flags.iter().map(String::as_str));
         let status = runtime
@@ -955,7 +1003,7 @@ fn main() -> anyhow::Result<()> {
 
     let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
     if is_oom {
-        eprintln!("{}", speedwave_runtime::resources::OOM_MESSAGE);
+        err!("{}", speedwave_runtime::resources::OOM_MESSAGE);
     }
     // Normalize: when OOM is detected via signal()==Some(9) (Linux),
     // code() returns None. Return 137 for consistency with macOS
@@ -2084,4 +2132,32 @@ mod tests {
     // ignores args, but Windows has no built-in that exits non-zero when
     // given an arbitrary argument. The nonexistent-binary test covers the
     // Windows error path.
+
+    #[test]
+    fn emit_output_line_redacts_secrets() {
+        // A Bearer token leaked into an error string must never reach the
+        // terminal — every out!/err! line goes through this sanitizer.
+        let redacted = sanitize_output_line("Failed: Bearer sk-secret-value-123");
+        assert!(
+            !redacted.contains("sk-secret-value-123"),
+            "leaked: {redacted}"
+        );
+        assert!(redacted.contains("REDACTED"), "not redacted: {redacted}");
+    }
+
+    #[test]
+    fn emit_output_line_passes_normal_text_through() {
+        let out = sanitize_output_line("Project 'demo' registered at /workspace");
+        assert_eq!(out, "Project 'demo' registered at /workspace");
+    }
+
+    #[test]
+    fn redact_err_strips_secrets_from_error_chains() {
+        // An error carrying a token must be redacted before it is interpolated
+        // into an `err!`/`out!` line (config/compose/OAuth error chains).
+        let err = anyhow::anyhow!("compose render failed: Authorization: Bearer sk-leak-xyz");
+        let red = redact_err(&err);
+        assert!(!red.contains("sk-leak-xyz"), "leaked: {red}");
+        assert!(red.contains("REDACTED"), "not redacted: {red}");
+    }
 }

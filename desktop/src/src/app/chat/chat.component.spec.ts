@@ -7,7 +7,12 @@ import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
+import { LoggerService } from '../services/logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
 
 describe('ChatComponent', () => {
   let component: ChatComponent;
@@ -16,9 +21,11 @@ describe('ChatComponent', () => {
   let chatState: ChatStateService;
   let projectState: ProjectStateService;
   let uiState: UiStateService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
+    mockLogger = makeMockLogger();
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
@@ -47,7 +54,10 @@ describe('ChatComponent', () => {
 
     await TestBed.configureTestingModule({
       imports: [ChatComponent, RouterModule.forRoot([])],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ChatComponent);
@@ -315,7 +325,6 @@ describe('ChatComponent', () => {
 
     it('sets historyError on backend failure', async () => {
       projectState.activeProject = 'test';
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') throw new Error('network error');
         return undefined;
@@ -325,8 +334,9 @@ describe('ChatComponent', () => {
 
       expect(component.historyError).toContain('Failed to load conversations');
       expect(component.conversations).toEqual([]);
-      expect(errorSpy).toHaveBeenCalledWith('loadConversations failed:', expect.any(Error));
-      errorSpy.mockRestore();
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('loadConversations failed: Error: network error')
+      );
     });
 
     it('sets historyLoading while loading', async () => {
@@ -434,7 +444,6 @@ describe('ChatComponent', () => {
       component.conversations = [
         { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
       ];
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'delete_conversation') throw new Error('io error');
         return undefined;
@@ -444,7 +453,9 @@ describe('ChatComponent', () => {
 
       expect(component.historyError).toContain('Failed to delete conversation');
       expect(component.conversations.length).toBe(1);
-      errorSpy.mockRestore();
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('deleteConversation failed: Error: io error')
+      );
     });
 
     it('resets live chat when deleting the active session', async () => {
@@ -531,7 +542,6 @@ describe('ChatComponent', () => {
   describe('loadProjectMemory', () => {
     it('logs error on failure', async () => {
       projectState.activeProject = 'test';
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('disk failure');
         return undefined;
@@ -540,8 +550,9 @@ describe('ChatComponent', () => {
       await component.loadProjectMemory();
 
       expect(component.projectMemory).toBe('');
-      expect(errorSpy).toHaveBeenCalledWith('loadProjectMemory failed:', expect.any(Error));
-      errorSpy.mockRestore();
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('loadProjectMemory failed: Error: disk failure')
+      );
     });
 
     it('sets projectMemory on success', async () => {
@@ -578,7 +589,6 @@ describe('ChatComponent', () => {
 
     it('surfaces user-facing memoryError on backend failure (parity with historyError)', async () => {
       projectState.activeProject = 'test';
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('disk failure');
         return undefined;
@@ -588,12 +598,10 @@ describe('ChatComponent', () => {
 
       expect(component.memoryError).toContain('Failed to load memory');
       expect(component.memoryError).toContain('disk failure');
-      errorSpy.mockRestore();
     });
 
     it('clears memoryError on a subsequent successful load', async () => {
       projectState.activeProject = 'test';
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       let shouldFail = true;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') {
@@ -611,7 +619,6 @@ describe('ChatComponent', () => {
 
       expect(component.memoryError).toBe('');
       expect(component.projectMemory).toBe('# recovered');
-      errorSpy.mockRestore();
     });
 
     it('does not set memoryError when no active project', async () => {
@@ -849,6 +856,9 @@ describe('ChatComponent', () => {
       projectState.status = 'ready';
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
+      // Stop-button visibility is driven by `isStreamingFromState()`; the
+      // signal projection only refreshes once notifyChange rebuilds the tree.
+      chatState['notifyChange']();
       fixture.detectChanges();
       fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
       expect(spy).toHaveBeenCalledTimes(1);
@@ -885,6 +895,9 @@ describe('ChatComponent', () => {
           },
         ],
       });
+      // `hasUnansweredQuestion` reads `currentBlocksFromState()`; the signal
+      // projection only sees the block once notifyChange rebuilds the tree.
+      chatState['notifyChange']();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();
     });

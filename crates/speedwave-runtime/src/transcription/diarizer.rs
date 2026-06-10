@@ -204,6 +204,7 @@ pub struct MockDiarizer {
 
 #[cfg(test)]
 impl MockDiarizer {
+    /// Creates a mock diarizer producing `n_speakers` (min 1) speakers.
     pub fn new(n_speakers: u32) -> Self {
         Self {
             n_speakers: n_speakers.max(1),

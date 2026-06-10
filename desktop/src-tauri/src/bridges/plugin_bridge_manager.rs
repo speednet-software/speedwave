@@ -20,10 +20,10 @@ pub fn init_and_start(plugin_bridges: &SharedPluginBridges, app_handle: &AppHand
         }
     };
     for vp in plugins {
-        let Some(manifest) = vp.manifest.host_bridge.clone() else {
+        let Some(manifest) = vp.manifest().host_bridge.clone() else {
             continue;
         };
-        spawn_one(&vp.manifest.slug, manifest, plugin_bridges, app_handle);
+        spawn_one(&vp.manifest().slug, manifest, plugin_bridges, app_handle);
     }
 }
 
@@ -46,8 +46,8 @@ pub fn respawn_for(slug: &str, app_handle: &AppHandle) {
     let manifest = match speedwave_runtime::plugin::list_verified_plugins() {
         Ok(plugins) => plugins
             .into_iter()
-            .find(|vp| vp.manifest.slug == slug)
-            .and_then(|vp| vp.manifest.host_bridge.clone()),
+            .find(|vp| vp.manifest().slug == slug)
+            .and_then(|vp| vp.manifest().host_bridge.clone()),
         Err(e) => {
             log::warn!("plugin bridge[{slug}] respawn: list_verified_plugins failed: {e}");
             return;

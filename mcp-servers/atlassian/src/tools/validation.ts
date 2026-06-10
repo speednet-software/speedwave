@@ -7,17 +7,17 @@
  */
 
 import {
+  withClientValidation,
   type ToolsCallResult,
   type jsonResult,
   type textResult,
-  errorResult,
-  notConfiguredMessage,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import type { StorageBodyInput } from '../adf.js';
 
 /**
- * Wrap a tool handler with client-presence and error handling.
+ * Wrap a tool handler with client-presence and error handling (shared Family-B
+ * wrapper {@link withClientValidation}).
  * @template T - The tool's parsed input params type.
  * @param client - The Atlassian client (or `null` when the service is unconfigured).
  * @param handler - The handler, invoked only when `client` is non-null.
@@ -30,16 +30,10 @@ export function withValidation<T>(
     params: T
   ) => Promise<ReturnType<typeof jsonResult> | ReturnType<typeof textResult>>
 ): (params: T) => Promise<ToolsCallResult> {
-  return async (params: T) => {
-    if (!client) {
-      return errorResult(notConfiguredMessage('Atlassian'));
-    }
-    try {
-      return await handler(client, params);
-    } catch (error) {
-      return errorResult(AtlassianClient.formatError(error));
-    }
-  };
+  return withClientValidation(client, handler, {
+    serviceName: 'Atlassian',
+    formatError: (error) => AtlassianClient.formatError(error),
+  });
 }
 
 /**

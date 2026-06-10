@@ -22,6 +22,13 @@
 #     https://mcr.microsoft.com/v2/playwright/manifests/v1.59.1-jammy | grep -i digest
 FROM mcr.microsoft.com/playwright:v1.59.1-jammy@sha256:8a0360d39d1973be506dd59002904a774f6d697d4946c94063b3fd006461c8ff
 
+# tzdata for the TZ env injected by compose — keep aligned with tz.rs (CLAUDE.md
+# SSOT). The jammy base image (apt) usually ships it, but install explicitly so a
+# numeric TZ offset never leaks (no-op when already present).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 # @playwright/mcp is Microsoft's official MCP server for Playwright.
 # Version is pinned; bump deliberately as part of a regular dependency-update cadence.
 ARG PLAYWRIGHT_MCP_VERSION=0.0.70

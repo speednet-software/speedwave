@@ -1,4 +1,5 @@
 import { inject, Injectable, OnDestroy, signal, type Signal } from '@angular/core';
+import { warn as pluginLogWarn } from '@tauri-apps/plugin-log';
 import { NativeThemeAdapter, type EffectiveMode } from './native-theme-adapter';
 
 export type { EffectiveMode } from './native-theme-adapter';
@@ -77,7 +78,7 @@ function getDarkMQ(): MediaQueryList | null {
       ? window.matchMedia('(prefers-color-scheme: dark)')
       : null;
   } catch (err) {
-    console.warn('ThemeService: matchMedia unavailable', err);
+    pluginLogWarn(`ThemeService: matchMedia unavailable: ${String(err)}`).catch(() => {});
     return null;
   }
 }

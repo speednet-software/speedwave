@@ -16,8 +16,14 @@
 
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import fs from 'fs/promises';
-import path from 'path';
-import { TIMEOUTS, ts, withSetupGuidance, memoizedPromise } from '@speedwave/mcp-shared';
+import {
+  TIMEOUTS,
+  ts,
+  withSetupGuidance,
+  memoizedPromise,
+  loadTokenFile,
+  tokensDir,
+} from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Axios Retry Config Extension
@@ -638,20 +644,7 @@ interface TimeEntryPayload {
 // Token Loading
 //═══════════════════════════════════════════════════════════════════════════════
 
-const TOKENS_DIR = process.env.TOKENS_DIR || '/tokens';
-
 const REDMINE_STATUS_MAP: Record<string, number> = { active: 1, closed: 9, archived: 5 };
-
-/**
- * Load Redmine API key from tokens directory.
- * @returns Promise resolving to the API key string.
- * @throws {Error} When token file cannot be read.
- */
-async function loadApiKey(): Promise<string> {
-  const tokenPath = path.join(TOKENS_DIR, 'api_key');
-  const token = await fs.readFile(tokenPath, 'utf-8');
-  return token.trim();
-}
 
 /**
  * Load Redmine project configuration from /tokens/config.json.
@@ -659,7 +652,7 @@ async function loadApiKey(): Promise<string> {
  */
 async function loadRedmineConfig(): Promise<RedmineProjectConfig | null> {
   try {
-    const configData = await fs.readFile(`${TOKENS_DIR}/config.json`, 'utf-8');
+    const configData = await fs.readFile(`${tokensDir()}/config.json`, 'utf-8');
     return JSON.parse(configData);
   } catch (error) {
     if (error instanceof SyntaxError) {
@@ -1700,7 +1693,7 @@ export class RedmineClient {
  */
 export async function initializeRedmineClient(): Promise<RedmineClient | null> {
   try {
-    const apiKey = await loadApiKey();
+    const apiKey = await loadTokenFile('api_key');
 
     // Validate API key is not empty (0-byte placeholder file)
     if (!apiKey) {

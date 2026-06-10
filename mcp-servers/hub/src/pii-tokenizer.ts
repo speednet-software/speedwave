@@ -1,34 +1,7 @@
 /**
- * PII Tokenizer - Protect sensitive data from reaching the model
+ * Replaces PII (email, phone, PESEL, NIP, IBAN, card, API key, sensitive fields) with tokens
+ * before data reaches the model, and resolves tokens back to real values for MCP-to-MCP calls.
  * @module pii-tokenizer
- *
- * This module replaces Personally Identifiable Information (PII) with tokens
- * before data is sent to the model, and resolves tokens back to real values
- * for MCP-to-MCP calls.
- *
- * Flow:
- * 1. MCP response contains real data (email: "alice@example.com")
- * 2. tokenizePII replaces with token (email: "[EMAIL:TOKEN_A1B2C3]")
- * 3. Model sees tokenized data, generates code referencing tokens
- * 4. detokenizePII resolves tokens for actual MCP calls
- * 5. Real data flows MCP→MCP, never touching model context
- *
- * Supported PII types:
- * - EMAIL: Email addresses
- * - PHONE_PL: Polish phone numbers (+48 xxx xxx xxx)
- * - PESEL: Polish national ID (11 digits with checksum)
- * - NIP: Polish tax ID (10 digits with checksum)
- * - IBAN: International Bank Account Number
- * - CARD: Credit card numbers (Luhn validated)
- * - API_KEY: Common API key patterns (sk-xxx, AIza-xxx)
- * - SENSITIVE_FIELD: Values of fields with sensitive names (password, token, secret, etc.)
- *
- * TODO: Consider splitting into separate modules for better separation of concerns:
- * - pii-patterns.ts: PII_PATTERNS regex definitions
- * - pii-validators.ts: Validation functions (validatePESEL, validateNIP, luhnCheck)
- * - pii-tokenizer.ts: PIITokenizer class
- * - pii-context.ts: PIIContext class for execution-scoped token management
- * Current implementation works correctly but mixes pattern definitions, validators, and tokenization logic.
  */
 
 import { PIIType, PIITokenEntry } from './hub-types.js';

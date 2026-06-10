@@ -1,9 +1,12 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { TauriService } from './tauri.service';
+import { LoggerService } from './logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { DEFAULT_CONTEXT_TOKENS, type AnthropicModel } from '../models/llm';
+import { calculateCost, _resetPricingToSeedForTest } from '../chat/pricing';
+import type { TurnUsage } from '../models/chat';
 
 const FIXTURE: AnthropicModel[] = [
   {
@@ -32,10 +35,30 @@ const FIXTURE: AnthropicModel[] = [
   },
 ];
 
+// Pricing fields the real `list_anthropic_models` payload carries (the Rust
+// SSOT serialized). The mock returns them so the service can seed the pricing
+// index; the `AnthropicModel` type omits them, so cast on assignment. Rates
+// are deliberately off-catalog so the "seeds the pricing index" test proves
+// the backend numbers overrode the bootstrap seed.
+const PRICED_FIXTURE = FIXTURE.map((m) => ({
+  ...m,
+  pricing: { input: 9, cachedInput: 0.9, cacheWrite: 11.25, output: 45 },
+  pricing_1m:
+    m.context_tokens >= 1_000_000
+      ? { input: 9, cachedInput: 0.9, cacheWrite: 11.25, output: 45 }
+      : null,
+})) as unknown as AnthropicModel[];
+
 describe('AnthropicModelsService', () => {
   let service: AnthropicModelsService;
   let mockTauri: MockTauriService;
   let invokeCount: number;
+  let logger: {
+    warn: ReturnType<typeof vi.fn>;
+    error: ReturnType<typeof vi.fn>;
+    info: ReturnType<typeof vi.fn>;
+    debug: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     invokeCount = 0;
@@ -43,12 +66,17 @@ describe('AnthropicModelsService', () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_anthropic_models') {
         invokeCount++;
-        return FIXTURE;
+        return PRICED_FIXTURE;
       }
       return undefined;
     };
+    logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
     TestBed.configureTestingModule({
-      providers: [AnthropicModelsService, { provide: TauriService, useValue: mockTauri }],
+      providers: [
+        AnthropicModelsService,
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: logger },
+      ],
     });
     service = TestBed.inject(AnthropicModelsService);
   });
@@ -56,7 +84,7 @@ describe('AnthropicModelsService', () => {
   describe('list()', () => {
     it('fetches the catalog from the backend on first call', async () => {
       const list = await service.list();
-      expect(list).toEqual(FIXTURE);
+      expect(list).toEqual(PRICED_FIXTURE);
       expect(invokeCount).toBe(1);
     });
 
@@ -69,11 +97,31 @@ describe('AnthropicModelsService', () => {
 
     it('deduplicates concurrent in-flight fetches', async () => {
       const [a, b, c] = await Promise.all([service.list(), service.list(), service.list()]);
-      expect(a).toEqual(FIXTURE);
-      expect(b).toEqual(FIXTURE);
-      expect(c).toEqual(FIXTURE);
+      expect(a).toEqual(PRICED_FIXTURE);
+      expect(b).toEqual(PRICED_FIXTURE);
+      expect(c).toEqual(PRICED_FIXTURE);
       // Only one backend invoke despite three concurrent callers.
       expect(invokeCount).toBe(1);
+    });
+
+    it('seeds the cost-meter pricing index from the same payload', async () => {
+      _resetPricingToSeedForTest();
+      await service.list();
+      const usage: TurnUsage = {
+        input_tokens: 1_000_000,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+      };
+      // 1M input @ the off-catalog fixture rate ($9) — proves pricing.ts was
+      // populated from the backend payload, overriding the bootstrap seed ($5).
+      expect(calculateCost('claude-opus-4-8', usage)).toBeCloseTo(9, 6);
+    });
+
+    afterEach(() => {
+      // Restore the bootstrap seed so off-catalog fixture rates don't leak
+      // into other specs that read pricing.ts.
+      _resetPricingToSeedForTest();
     });
 
     it('returns an empty list when the backend rejects (browser dev mode / IPC error)', async () => {
@@ -83,13 +131,69 @@ describe('AnthropicModelsService', () => {
       service.resetForTesting();
       const list = await service.list();
       expect(list).toEqual([]);
+      expect(logger.warn).toHaveBeenCalledOnce();
     });
 
-    it('returns an empty list when the backend returns a non-array payload', async () => {
+    it('does NOT cache on failure — the next call retries the backend', async () => {
+      // Regression: a transient failure used to cache `[]`, permanently
+      // emptying the model list. The cache must stay null so a recovered
+      // backend repopulates on the next call.
+      let calls = 0;
+      mockTauri.invokeHandler = async () => {
+        calls++;
+        if (calls === 1) throw new Error('transient IPC failure');
+        return PRICED_FIXTURE;
+      };
+      service.resetForTesting();
+
+      const first = await service.list();
+      expect(first).toEqual([]); // failure → empty, not cached
+
+      const second = await service.list();
+      expect(second).toEqual(PRICED_FIXTURE); // retried and succeeded
+      expect(calls).toBe(2);
+    });
+
+    it('returns an empty list and warns when the backend returns a non-array payload', async () => {
       mockTauri.invokeHandler = async () => 'not-an-array' as unknown;
       service.resetForTesting();
       const list = await service.list();
       expect(list).toEqual([]);
+      expect(logger.warn).toHaveBeenCalledOnce();
+    });
+
+    it('does NOT cache a non-array payload — the next call retries', async () => {
+      let calls = 0;
+      mockTauri.invokeHandler = async () => {
+        calls++;
+        return calls === 1 ? ('garbage' as unknown) : PRICED_FIXTURE;
+      };
+      service.resetForTesting();
+      expect(await service.list()).toEqual([]);
+      expect(await service.list()).toEqual(PRICED_FIXTURE);
+      expect(calls).toBe(2);
+    });
+  });
+
+  describe('latestNonOpusModelId()', () => {
+    it('returns null before the catalog has loaded', () => {
+      expect(service.latestNonOpusModelId()).toBeNull();
+    });
+
+    it('returns the latest non-Opus (Sonnet) model id once loaded', async () => {
+      await service.list();
+      expect(service.latestNonOpusModelId()).toBe('claude-sonnet-4-6');
+    });
+
+    it('falls back to the first latest entry when every latest model is Opus', async () => {
+      const opusOnly = [
+        { id: 'claude-opus-4-8', family: 'Opus 4.8', context_tokens: 1_000_000, latest: true },
+        { id: 'claude-opus-4-7', family: 'Opus 4.7', context_tokens: 1_000_000, latest: false },
+      ] as unknown as AnthropicModel[];
+      mockTauri.invokeHandler = async () => opusOnly;
+      service.resetForTesting();
+      await service.list();
+      expect(service.latestNonOpusModelId()).toBe('claude-opus-4-8');
     });
   });
 

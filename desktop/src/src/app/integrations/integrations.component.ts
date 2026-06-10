@@ -488,7 +488,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       })
       .catch((e: unknown) => {
         // Without the listener the flow would look hung — leave a breadcrumb.
-        console.warn(`${eventName} listener registration failed`, e);
+        this.logger.warn(`${eventName} listener registration failed: ${String(e)}`);
         return () => {};
       });
   }
@@ -653,12 +653,13 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * SharePoint mounts /tokens read-write for OAuth refresh; everything else is read-only.
+   * Every built-in worker mounts /tokens read-only (ADR-060: OAuth refresh
+   * moved to the host-side oauth worker, so no worker needs :rw).
    * @param svc - the integration status entry
    */
   mountFor(svc: IntegrationStatusEntry): string {
     if (!svc.configured) return '—';
-    return svc.service === 'sharepoint' ? ':rw' : ':ro';
+    return ':ro';
   }
 
   /**

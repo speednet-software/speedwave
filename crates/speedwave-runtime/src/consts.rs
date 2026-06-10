@@ -1,15 +1,21 @@
+//! Crate-wide constants: data-dir names, service registry, reserved env keys.
+
 use crate::resources::{ContainerResources, STANDARD_WORKER_RESOURCES};
 
-pub const APP_NAME: &str = "speedwave";
+/// Env var overriding the data-dir location.
 pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
+/// Subdirectory under the data dir holding the Lima VM state.
 pub const LIMA_SUBDIR: &str = "lima";
+/// Default data-dir basename under the user's home.
 pub const DATA_DIR: &str = ".speedwave";
 /// Per-project Claude Code home directory under the data dir
 /// (`<data_dir>/claude-home/<project>/`) — holds credentials, sessions, and
 /// the `.clipboard-bridge` file. This is the SSOT; do not hard-code the
 /// `"claude-home"` literal at call sites.
 pub const CLAUDE_HOME_SUBDIR: &str = "claude-home";
+/// CLI binary name.
 pub const CLI_BINARY: &str = "speedwave";
+/// Prefix for per-project compose project names and networks.
 pub const COMPOSE_PREFIX: &str = "speedwave";
 /// Port on which `mcp-hub` listens inside the compose network.
 ///
@@ -46,12 +52,12 @@ pub const MCP_OS_LEGACY_PID_FILE: &str = "mcp-os-pid";
 /// alongside the audit log; carries `{service, pid, port, authToken,
 /// transport}` and is the SSOT for compose port injection + watchdog.
 pub const MCP_OS_LOCK_FILE: &str = "mcp-os.lock.json";
+/// Log filename for the mcp-os host process.
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
 
-/// Per-project unified lock file (PR3). Sits next to the audit log
-/// inside each per-project state directory. SSOT — pre-PR3 callers used
-/// three separate `port`/`pid`/`auth-token` files (see deprecated
-/// per-worker consts below).
+/// Per-project unified lock file. Sits next to the audit log inside each
+/// per-project state directory and is the SSOT for compose port injection +
+/// watchdog — it supersedes the legacy split `port`/`pid`/`auth-token` files.
 pub const PER_PROJECT_LOCK_FILE: &str = "lock.json";
 
 /// Subdirectory under the data dir holding per-project `host_exec` state.
@@ -68,9 +74,6 @@ pub const HOST_EXEC_AUTH_TOKEN_FILE: &str = "auth-token";
 /// Per-project audit log; env values redacted (ADR-054 §"Security model").
 pub const HOST_EXEC_LOG_FILE: &str = "log";
 
-/// Per-command timeout (7 min, fits under the hub's 600s long timeout).
-pub const HOST_EXEC_TIMEOUT_MS: u64 = 420_000;
-
 /// TCP connection probe timeout used by host-process liveness checks
 /// (oauth_process, host_exec_process). SSOT for both modules — see ADR-060.
 pub const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
@@ -80,10 +83,6 @@ pub const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 pub const PORT_PROBE_ATTEMPTS: u8 = 3;
 /// Backoff between TCP probe attempts.
 pub const PORT_PROBE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
-/// Per-stream stdout/stderr tail-cap.
-pub const HOST_EXEC_MAX_OUTPUT_BYTES: usize = 64 * 1024;
-/// Per-stream line cap, applied alongside the byte cap.
-pub const HOST_EXEC_MAX_OUTPUT_LINES: usize = 2000;
 /// Ceiling on a recipe parameter's value length and on the declared `maxLen`.
 pub const HOST_EXEC_PARAM_MAX_LEN: usize = 65536;
 /// Sanity ceiling on a parameter's regex `pattern` length (semantics live in the worker).
@@ -136,12 +135,10 @@ pub const OAUTH_BEARER_MAP_FILE: &str = ".bearer-map.json";
 pub const OAUTH_LOG_FILE: &str = "audit.log";
 /// Mode for the per-project oauth state directory (owner-only).
 pub const OAUTH_PROJECT_DIR_MODE: u32 = 0o700;
-/// Min seconds between successful refresh attempts per service when the
-/// current access token is still valid. Slows down a compromised-caller
-/// refresh-in-a-loop attack; cannot stop it (ADR-060 §"Threat model").
-pub const OAUTH_REFRESH_RATE_LIMIT_SECONDS: u64 = 1800;
 
+/// Log filename for the Claude session output.
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
+/// Path to the Claude Code binary inside the container.
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
 /// PATH set inside containers for the `speedwave` user.
@@ -222,8 +219,10 @@ pub const NERDCTL_FULL_VERSION: &str = "2.1.2";
 /// SHA256 checksums for the nerdctl-full bundle downloads.
 /// Source: https://github.com/containerd/nerdctl/releases/download/v2.1.2/SHA256SUMS
 /// Update these when bumping NERDCTL_FULL_VERSION above.
+/// SHA256 of the amd64 nerdctl-full bundle.
 pub const NERDCTL_FULL_SHA256_AMD64: &str =
     "b3ab8564c8fa6feb89d09bee881211b700b047373c767bec38256d0d68f93074";
+/// SHA256 of the arm64 nerdctl-full bundle.
 pub const NERDCTL_FULL_SHA256_ARM64: &str =
     "1b52f32b7d5bbf63005bceb6a3cacd237d2fa8f1d05bb590e8ce58731779b9ee";
 
@@ -231,15 +230,19 @@ pub const NERDCTL_FULL_SHA256_ARM64: &str =
 /// Uses the `releases/24.04/current` path (latest daily build of 24.04 LTS).
 /// SHA256 checksums below pin the exact rootfs version — update both URL and SHA256 when bumping.
 /// See issue #183 for planned migration to a self-built rootfs.
+/// amd64 Ubuntu WSL rootfs download URL.
 pub const WSL_ROOTFS_URL_AMD64: &str =
     "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz";
+/// arm64 Ubuntu WSL rootfs download URL.
 pub const WSL_ROOTFS_URL_ARM64: &str =
     "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-arm64-24.04lts.rootfs.tar.gz";
 
 /// SHA256 checksums for the WSL2 rootfs downloads.
 /// Update these when bumping the rootfs version above.
+/// SHA256 of the amd64 WSL rootfs.
 pub const WSL_ROOTFS_SHA256_AMD64: &str =
     "2a790896740b14d637dbdc583cce1ba081ac53b9e9cdb46dc09a2f73abbd9934";
+/// SHA256 of the arm64 WSL rootfs.
 pub const WSL_ROOTFS_SHA256_ARM64: &str =
     "e113b8c49af3ab49b992b8e29550fc921e689f211abc338176f8243786173a32";
 
@@ -419,11 +422,9 @@ pub struct McpAuthFieldDescriptor {
     pub placeholder: &'static str,
     /// Whether this field contains a secret (token, key, etc.).
     pub is_secret: bool,
-    /// Whether this field is stored inside a `config.json` file rather than
-    /// as an individual credential file. Used by Redmine's `host_url`
-    /// and `project_id` fields. Equivalent to `storage ==
-    /// FieldStorage::WorkerMountedConfig` and kept for backwards-compat
-    /// with existing callsites; new code should branch on `storage`.
+    /// Mirror of `storage == FieldStorage::WorkerMountedConfig`. Derive it via
+    /// [`McpAuthFieldDescriptor::stored_in_config_json`] instead of reading this
+    /// field; it stays only until the Desktop call sites migrate to the method.
     pub stored_in_config_json: bool,
     /// Whether this field is obtained via an OAuth flow rather than manual entry.
     /// Fields with `oauth_flow: true` are hidden from the credential form and
@@ -433,12 +434,21 @@ pub struct McpAuthFieldDescriptor {
     /// Optional fields are shown in the UI but do not block the
     /// "Configured" status when left empty.
     pub optional: bool,
-    /// Physical storage tier (plan §PR3:290-299). Drives storage routing for
+    /// Physical storage tier (ADR-060). Drives storage routing for
     /// `save_integration_credentials`, `is_service_configured`, and
     /// `delete_integration_credentials` in the Desktop crate.
     pub storage: FieldStorage,
     /// Optional help text rendered under the input. `None` = no hint.
     pub hint: Option<&'static str>,
+}
+
+impl McpAuthFieldDescriptor {
+    /// True when the field lives inside the per-service `config.json` (the
+    /// `WorkerMountedConfig` storage tier) rather than its own credential file.
+    /// SSOT — call this instead of reading the `stored_in_config_json` field.
+    pub fn stored_in_config_json(&self) -> bool {
+        self.storage == FieldStorage::WorkerMountedConfig
+    }
 }
 
 /// OAuth scopes requested during the SharePoint Device Code Flow.
@@ -492,7 +502,7 @@ pub struct McpServiceDescriptor {
     pub credential_files: &'static [&'static str],
     /// `Some(_)` for OAuth-using services: the field names that live in
     /// `oauth/<project>/<service>.json` (NOT mounted into the worker). `None`
-    /// for services without OAuth state. Plan §PR3:290-299.
+    /// for services without OAuth state. See ADR-060.
     pub oauth_state_fields: Option<&'static [&'static str]>,
     /// Optional UI badge label (e.g. "BETA", "NEW"). `None` = no badge.
     pub badge: Option<&'static str>,
@@ -634,7 +644,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 ),
             },
         ],
-        // Plan §PR3:290-299: only files PHYSICALLY mounted into the worker.
+        // Only files PHYSICALLY mounted into the worker (ADR-060).
         // refresh_token / client_id / tenant_id moved off-mount to
         // `oauth/<project>/sharepoint.json` — see `oauth_state_fields` below.
         credential_files: &["access_token", "site_id"],
@@ -1129,7 +1139,9 @@ pub const PLUGIN_CPU_LIMIT_MAX: f32 = 4.0;
 /// generous (half the 4.0 cap) — plugins are unpredictable third-party code.
 /// Capped by `plugin_defaults_within_caps`; SSOT for `generate_plugin_service`.
 pub const PLUGIN_DEFAULT_MEM: &str = "128m";
+/// Default plugin CPU limit (cores) when the manifest omits it.
 pub const PLUGIN_DEFAULT_CPU: &str = "2.0";
+/// Default plugin tmpfs size when the manifest omits it.
 pub const PLUGIN_DEFAULT_TMPFS: &str = "512m";
 
 /// Upper bound (bytes) for two distinct JSON blobs in the plugin system,
@@ -1494,8 +1506,10 @@ mod tests {
         }
     }
 
-    /// Guard: every config_key in TOGGLEABLE_MCP_SERVICES must have a corresponding
-    /// WORKER_*_URL env var name following the naming convention.
+    /// Guard: every descriptor's `worker_env` / `compose_name` literal must
+    /// equal the value the derivation fns produce from its `config_key`. The
+    /// literal, the compose template, and the derivation fns are a triple-encoded
+    /// SSOT — a typo like `WORKER_SHARE_POINT_URL` must fail here, not at runtime.
     #[test]
     fn test_toggleable_worker_env_vars_follow_convention() {
         for svc in TOGGLEABLE_MCP_SERVICES {
@@ -1510,6 +1524,18 @@ mod tests {
                 "Worker env var for '{}' must end with _URL, got: {}",
                 svc.config_key,
                 svc.worker_env
+            );
+            assert_eq!(
+                svc.worker_env,
+                crate::plugin::derive_worker_env(svc.config_key),
+                "worker_env literal for '{}' must equal derive_worker_env(config_key)",
+                svc.config_key
+            );
+            assert_eq!(
+                svc.compose_name,
+                crate::plugin::derive_compose_name(svc.config_key),
+                "compose_name literal for '{}' must equal derive_compose_name(config_key)",
+                svc.config_key
             );
         }
     }
@@ -1633,11 +1659,10 @@ mod tests {
 
     #[test]
     fn test_auth_field_keys_subset_of_credential_files_or_oauth_state() {
-        // Plan §PR3:290-299: every UI field must land in exactly one of the
-        // two physical storage tiers — `credential_files` (mounted into the
-        // worker) or `oauth_state_fields` (off-mount, in `oauth/<project>/
-        // <service>.json`). The split is what makes the SharePoint refresh
-        // token off-mount.
+        // Every UI field must land in exactly one of the two physical storage
+        // tiers — `credential_files` (mounted into the worker) or
+        // `oauth_state_fields` (off-mount, in `oauth/<project>/<service>.json`).
+        // The split is what makes the SharePoint refresh token off-mount (ADR-060).
         for svc in TOGGLEABLE_MCP_SERVICES {
             for field in svc.auth_fields {
                 let in_creds = svc.credential_files.contains(&field.key);
@@ -1739,6 +1764,30 @@ mod tests {
                     !field.stored_in_config_json,
                     "field '{}' in service '{}' should not have stored_in_config_json=true",
                     field.key, svc.config_key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stored_in_config_json_method_matches_storage_tier() {
+        // The derived method is the SSOT; the temporary `stored_in_config_json`
+        // field must agree with it until the Desktop call sites migrate.
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            for field in svc.auth_fields {
+                assert_eq!(
+                    field.stored_in_config_json(),
+                    field.storage == FieldStorage::WorkerMountedConfig,
+                    "{}.{}: method must derive from storage tier",
+                    svc.config_key,
+                    field.key
+                );
+                assert_eq!(
+                    field.stored_in_config_json(),
+                    field.stored_in_config_json,
+                    "{}.{}: derived method and mirror field disagree",
+                    svc.config_key,
+                    field.key
                 );
             }
         }
@@ -1850,9 +1899,9 @@ mod tests {
     }
 
     /// Every `auth_fields[*].key` must live in `credential_files` OR
-    /// `oauth_state_fields` (plan §PR3:290-299). The UI collects values for
-    /// all auth fields; the storage tier is decided by `FieldStorage`. A field
-    /// that landed in neither list would be silently dropped on save.
+    /// `oauth_state_fields` (ADR-060). The UI collects values for all auth
+    /// fields; the storage tier is decided by `FieldStorage`. A field that
+    /// landed in neither list would be silently dropped on save.
     #[test]
     fn test_auth_field_key_has_a_storage_tier() {
         for svc in TOGGLEABLE_MCP_SERVICES {
@@ -2385,6 +2434,94 @@ mod tests {
         assert!(
             src.lines().any(|l| l.trim() == expected),
             "compose.template.yml must contain '{expected}' in extra_hosts"
+        );
+    }
+
+    /// Parses the quoted entries of a TS `export const NAME ... = [ ... ];`
+    /// array literal out of a TS source file. Used by the host-exec mirror
+    /// guards below — keeps the Rust SSOT and the Desktop mirror in lockstep.
+    fn parse_ts_string_array(src: &str, name: &str) -> Vec<String> {
+        let decl = format!("export const {name}");
+        let start = src
+            .find(&decl)
+            .unwrap_or_else(|| panic!("host-exec.ts must declare `{decl}`"));
+        // Anchor on the assignment `=`, then the first `[` — skips the
+        // `: readonly string[]` type annotation, whose own `[]` precedes it.
+        let eq = src[start..]
+            .find('=')
+            .map(|i| start + i)
+            .expect("array assignment `=` not found");
+        let open = src[eq..]
+            .find('[')
+            .map(|i| eq + i)
+            .expect("array literal `[` not found");
+        let close = src[open..]
+            .find(']')
+            .map(|i| open + i)
+            .expect("array literal `]` not found");
+        let body = &src[open + 1..close];
+        let re = regex::Regex::new(r#"['"]([^'"]*)['"]"#).unwrap();
+        re.captures_iter(body).map(|c| c[1].to_string()).collect()
+    }
+
+    // Cross-language SSOT: the Desktop host-exec mirror (`host-exec.ts`) must
+    // carry the exact same launcher / meta-tool / reserved-env lists as the
+    // Rust SSOT — same pattern as `host_gateway_alias_matches_mcp_shared_ts`.
+    // A missing Windows interpreter or env key in the TS mirror trips these.
+
+    #[test]
+    fn host_exec_shell_launchers_match_ts_mirror() {
+        let src = include_str!("../../../desktop/src/src/app/models/host-exec.ts");
+        let ts = parse_ts_string_array(src, "HOST_EXEC_SHELL_LAUNCHERS");
+        let rust: Vec<&str> = HOST_EXEC_SHELL_LAUNCHERS.to_vec();
+        assert_eq!(
+            ts, rust,
+            "host-exec.ts HOST_EXEC_SHELL_LAUNCHERS must mirror the Rust SSOT exactly"
+        );
+    }
+
+    #[test]
+    fn host_exec_meta_tools_match_ts_mirror() {
+        let src = include_str!("../../../desktop/src/src/app/models/host-exec.ts");
+        let ts = parse_ts_string_array(src, "HOST_EXEC_META_TOOLS");
+        let rust: Vec<&str> = HOST_EXEC_META_TOOLS.to_vec();
+        assert_eq!(
+            ts, rust,
+            "host-exec.ts HOST_EXEC_META_TOOLS must mirror the Rust SSOT exactly"
+        );
+    }
+
+    #[test]
+    fn host_exec_reserved_env_keys_match_ts_mirror() {
+        let src = include_str!("../../../desktop/src/src/app/models/host-exec.ts");
+        let ts = parse_ts_string_array(src, "HOST_EXEC_RESERVED_ENV_KEYS");
+        let rust: Vec<&str> = RESERVED_ENV_KEYS.to_vec();
+        assert_eq!(
+            ts, rust,
+            "host-exec.ts HOST_EXEC_RESERVED_ENV_KEYS must mirror RESERVED_ENV_KEYS exactly"
+        );
+    }
+
+    // Cross-language SSOT: the plugin slug regex `SLUG_PATTERN` (plugin.rs) is
+    // mirrored in the oauth worker as `SERVICE_SLUG_RE` (defense in depth on
+    // the bearer-map path). Extract both literals from source and compare.
+    #[test]
+    fn plugin_slug_pattern_matches_oauth_state_ts() {
+        let plugin_src = include_str!("../../../crates/speedwave-runtime/src/plugin.rs");
+        let slug_re = regex::Regex::new(r#"const SLUG_PATTERN: &str = r"([^"]+)";"#).unwrap();
+        let rust_pattern = &slug_re
+            .captures(plugin_src)
+            .expect("plugin.rs must declare `const SLUG_PATTERN`")[1];
+
+        let ts_src = include_str!("../../../mcp-servers/oauth/src/oauth-state.ts");
+        let ts_re = regex::Regex::new(r"const SERVICE_SLUG_RE = /(.+?)/;").unwrap();
+        let ts_pattern = &ts_re
+            .captures(ts_src)
+            .expect("oauth-state.ts must declare `const SERVICE_SLUG_RE`")[1];
+
+        assert_eq!(
+            ts_pattern, rust_pattern,
+            "oauth-state.ts SERVICE_SLUG_RE must mirror plugin.rs SLUG_PATTERN"
         );
     }
 

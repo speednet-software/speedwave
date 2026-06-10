@@ -31,6 +31,7 @@ vi.mock('node:util', async () => {
 
 // Import after mocks are set up
 import { resolvePaths, runCommand, buildChildEnv, SAFE_ENV_KEYS } from './platform-runner.js';
+import { BASE_SAFE_ENV_KEYS } from '@speedwave/mcp-shared';
 import { ALLOWED_COMMANDS } from './tools/index.js';
 
 describe('platform-runner', () => {
@@ -456,6 +457,10 @@ describe('platform-runner', () => {
       for (const key of keys) {
         expect(safeKeys.has(key), `Unexpected key in child env: ${key}`).toBe(true);
       }
+    });
+
+    it('SAFE_ENV_KEYS is exactly the shared BASE_SAFE_ENV_KEYS core', () => {
+      expect([...SAFE_ENV_KEYS]).toEqual([...BASE_SAFE_ENV_KEYS]);
     });
   });
 });

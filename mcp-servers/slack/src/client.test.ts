@@ -195,13 +195,15 @@ describe('slack client', () => {
       );
     });
 
-    it('uses "Unknown error" when a non-Error value is thrown (still returns missing)', async () => {
-      // Simulate a non-Error rejection (e.g., a plain string thrown)
+    it('wraps a non-Error fs rejection into an errno-aware message (still returns missing)', async () => {
+      // The shared loadTokenFile wraps any non-Error rejection into a proper
+      // Error ("Failed to read token file: … (plain string failure)"), so the
+      // message — not "Unknown error" — surfaces in the warning.
       vi.mocked(fs.readFile).mockRejectedValueOnce('plain string failure');
 
       const result = await initializeSlackClients();
       expect(result._tokensStatus).toBe('missing');
-      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Unknown error'));
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('plain string failure'));
     });
 
     it('trims whitespace from tokens', async () => {

@@ -61,33 +61,30 @@ jobs:
           # have identical content. Main then gets a version bump (release-
           # please), so we exclude version/release files from the diff.
           # Any remaining difference = genuinely new work on dev.
-          VERSION_EXCLUDES=(
-            ':!.release-please-manifest.json'
-            ':!release-please-config.json'
-            ':!.github/workflows/release-please.yml'
-            ':!CHANGELOG.md'
-            ':!package.json' ':!package-lock.json'
-            ':!desktop/src/package.json' ':!desktop/src/package-lock.json'
-            ':!desktop/src-tauri/tauri.conf.json'
-            ':!desktop/src-tauri/Cargo.toml' ':!desktop/src-tauri/Cargo.lock'
-            ':!crates/speedwave-runtime/Cargo.toml'
-            ':!crates/speedwave-cli/Cargo.toml'
-            ':!Cargo.lock'
-            ':!mcp-servers/hub/package.json' ':!mcp-servers/shared/package.json'
-            ':!mcp-servers/slack/package.json' ':!mcp-servers/sharepoint/package.json'
-            ':!mcp-servers/redmine/package.json' ':!mcp-servers/gitlab/package.json'
-            ':!mcp-servers/github/package.json' ':!mcp-servers/atlassian/package.json'
-            ':!mcp-servers/office/package.json'
-            ':!mcp-servers/os/package.json' ':!mcp-servers/host_exec/package.json'
-            ':!mcp-servers/oauth/package.json' ':!mcp-servers/context7/package.json'
-            ':!mcp-servers/playwright/package.json'
-            ':!mcp-servers/package-lock.json'
-            ':!native/macos/calendar/Resources/Info.plist'
-            ':!native/macos/reminders/Resources/Info.plist'
-            ':!native/macos/mail/Resources/Info.plist'
-            ':!native/macos/notes/Resources/Info.plist'
-            ':!native/macos/audio-capture/Resources/Info.plist'
+          #
+          # The per-package version files are derived at runtime from
+          # release-please-config.json `extra-files` (the SSOT — see CLAUDE.md),
+          # so adding a worker there needs no edit here. Only files release-
+          # please bumps but does NOT list in extra-files stay inline below
+          # (its own manifest/config/workflow, lockfiles, CHANGELOG).
+          mapfile -t RP_EXTRA_FILES < <(
+            jq -r '.packages["."]["extra-files"][] | if type=="string" then . else .path end' \
+              release-please-config.json
           )
+          STATIC_VERSION_FILES=(
+            .release-please-manifest.json
+            release-please-config.json
+            .github/workflows/release-please.yml
+            CHANGELOG.md
+            package-lock.json
+            mcp-servers/package-lock.json
+            Cargo.lock
+            desktop/src-tauri/Cargo.lock
+          )
+          VERSION_EXCLUDES=()
+          for f in "${RP_EXTRA_FILES[@]}" "${STATIC_VERSION_FILES[@]}"; do
+            VERSION_EXCLUDES+=(":!$f")
+          done
           CONTENT_DIFF=$(git diff --name-only origin/dev origin/main -- . "${VERSION_EXCLUDES[@]}")
 
           if [ -z "$CONTENT_DIFF" ]; then
@@ -118,46 +115,12 @@ jobs:
           else
             echo "Merge conflicts detected — attempting auto-resolution of version files"
 
-            # Auto-resolve version files (main wins — it has the latest release version).
-            # Keep this list a superset of release-please-config.json `extra-files` —
-            # any file release-please version-bumps will conflict on backmerge. See
-            # CLAUDE.md SSOT-alignment note for the procedure when adding a worker.
-            AUTO_RESOLVE_FILES=(
-              .release-please-manifest.json
-              release-please-config.json
-              .github/workflows/release-please.yml
-              package.json
-              package-lock.json
-              desktop/src/package.json
-              desktop/src/package-lock.json
-              desktop/src-tauri/tauri.conf.json
-              crates/speedwave-runtime/Cargo.toml
-              crates/speedwave-cli/Cargo.toml
-              desktop/src-tauri/Cargo.toml
-              mcp-servers/hub/package.json
-              mcp-servers/shared/package.json
-              mcp-servers/slack/package.json
-              mcp-servers/sharepoint/package.json
-              mcp-servers/redmine/package.json
-              mcp-servers/gitlab/package.json
-              mcp-servers/github/package.json
-              mcp-servers/atlassian/package.json
-              mcp-servers/office/package.json
-              mcp-servers/os/package.json
-              mcp-servers/host_exec/package.json
-              mcp-servers/oauth/package.json
-              mcp-servers/context7/package.json
-              mcp-servers/playwright/package.json
-              mcp-servers/package-lock.json
-              Cargo.lock
-              desktop/src-tauri/Cargo.lock
-              CHANGELOG.md
-              native/macos/calendar/Resources/Info.plist
-              native/macos/reminders/Resources/Info.plist
-              native/macos/mail/Resources/Info.plist
-              native/macos/notes/Resources/Info.plist
-              native/macos/audio-capture/Resources/Info.plist
-            )
+            # Auto-resolve version files (main wins — it has the latest release
+            # version). Same SSOT as VERSION_EXCLUDES above: extra-files from
+            # release-please-config.json plus the static files release-please
+            # bumps but does not list (manifest/config/workflow, lockfiles,
+            # CHANGELOG). Adding a worker to extra-files needs no edit here.
+            AUTO_RESOLVE_FILES=("${RP_EXTRA_FILES[@]}" "${STATIC_VERSION_FILES[@]}")
 
             for f in "${AUTO_RESOLVE_FILES[@]}"; do
               if git diff --name-only --diff-filter=U | grep -qx "$f"; then

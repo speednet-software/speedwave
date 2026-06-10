@@ -1,29 +1,7 @@
 /**
- * Code Executor - AsyncFunction with Restricted Context
+ * Executes model-generated JavaScript in a restricted AsyncFunction sandbox: forbidden-pattern
+ * validation, prototype-chain hardening (ADR-029), timeout, PII tokenization, container isolation.
  * @module executor
- *
- * Executes model-generated JavaScript code in a restricted context.
- * Security is provided by:
- * - Forbidden pattern validation (no eval, require, process, fs, etc.)
- * - Prototype chain traversal prevention (ADR-029)
- * - Restricted context (only whitelisted globals injected)
- * - Execution timeout
- * - PII tokenization (sensitive data replaced before reaching model)
- * - Docker container isolation (no-new-privileges, cap_drop: ALL)
- *
- * Security Model:
- * ✅ AsyncFunction with restricted globals (no process, require, fs)
- * ✅ Forbidden pattern validation before execution
- * ✅ Prototype chain hardening — .constructor, __proto__, getPrototypeOf, Proxy, Reflect blocked (ADR-029)
- * ✅ Timeout enforcement
- * ✅ Docker isolation (container has no tokens, read-only fs)
- * ✅ Error sanitization
- *
- * Architecture:
- * - HTTP bridge to isolated MCP workers
- * - Hub has NO tokens - only orchestrates
- * - Workers have per-service token isolation
- * - Graceful degradation (unavailable services return null)
  */
 
 import { IToolResult } from './hub-types.js';
@@ -182,10 +160,8 @@ interface AuditContext {
 }
 
 /**
- * Create audit context for tracking tool executions
- * Logs each tool call with timestamp and parameters.
- * Note: Sensitive data is protected by PII Tokenizer before reaching Claude.
- * Local console logs are not sanitized as they stay within Docker container.
+ * Create audit context for tracking tool executions.
+ * Logs each tool call; sensitive data is protected by the PII Tokenizer before reaching Claude.
  * @returns A new audit context instance
  */
 function createAuditContext(): AuditContext {
@@ -201,10 +177,8 @@ function createAuditContext(): AuditContext {
         params: (params ?? {}) as Record<string, unknown>,
       };
       entries.push(entry);
-      const auditTs = entry.timestamp.replace('T', ' ').substring(0, 19);
-      console.log(
-        `${ts()} [${auditTs}] [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})})`
-      );
+      // ts() is the SSOT log prefix; the ISO timestamp stays in the structured AuditEntry.
+      console.log(`${ts()} [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})})`);
     },
   };
 }

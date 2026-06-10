@@ -199,7 +199,8 @@ public func performCheckPermission(gate: PermissionGate, entity: PermissionEntit
         return finalizeResult(status: initial, entity: entity, gate: gate)
     }
 
-    // Status is .notDetermined — fire the request and wait for the prompt.
+    // Status is .notDetermined or .targetNotRunning — fire the request and wait.
+    // (.targetNotRunning lets AppleEventsGate auto-launch Mail/Notes before probing.)
     logTrace("performCheckPermission firing requestAccess entity=\(entity.rawValue)")
     let semaphore = DispatchSemaphore(value: 0)
     var requestGranted = false

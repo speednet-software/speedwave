@@ -29,7 +29,7 @@ pub type DriversHandle = Arc<Mutex<HashMap<Uuid, StopSignal>>>;
 /// double-spawning on repeated `subscribe_transcript` calls.
 pub type ForwardersHandle = Arc<Mutex<HashSet<Uuid>>>;
 
-/// Per-session event name. Mirror of `subscribe_cmd::patch_event_name`.
+/// Per-session Tauri event name for transcript streams.
 pub fn transcript_event_name(id: Uuid) -> String {
     format!("transcript_event::{id}")
 }

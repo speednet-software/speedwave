@@ -1,5 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
+import { LoggerService } from './logger.service';
 import type {
   BundleReconcileStatus,
   ProjectEntry,
@@ -68,6 +69,7 @@ export class ProjectStateService {
 
   private initialized = false;
   private tauri = inject(TauriService);
+  private log = inject(LoggerService);
   /**
    * Set of integration status re-fetchers registered by the integrations component;
    * called after a failed restart so the toggled-on row reverts to reality.
@@ -142,8 +144,18 @@ export class ProjectStateService {
       } else {
         await this.ensureContainersRunning();
       }
-    } catch {
-      // Outside Tauri — stay 'loading', listeners still ready
+    } catch (err) {
+      if (!this.tauri.isRunningInTauri()) {
+        // Outside Tauri — stay 'loading', listeners still ready.
+        return;
+      }
+      // Inside Tauri the initial project/reconcile lookup genuinely failed;
+      // surface it instead of leaving the UI stuck on the loading overlay.
+      const msg = err instanceof Error ? err.message : String(err);
+      this.status = 'error';
+      this.error = msg;
+      this.log.error(`[ProjectStateService] init failed: ${msg}`);
+      this.notifyChange();
     }
   }
 
@@ -267,9 +279,17 @@ export class ProjectStateService {
         this.status = 'auth_required';
         this.notifyChange();
       }
-    } catch {
-      this.status = 'auth_required';
+    } catch (err) {
+      // The auth check itself failed (transient IPC error) — this is NOT the
+      // same as "the user is not authenticated", so do not fall through to
+      // auth_required. Surface it as an error the user can retry.
+      const msg = err instanceof Error ? err.message : String(err);
+      this.status = 'error';
+      this.error = msg;
+      this.log.error(`[ProjectStateService] retryAuth check failed: ${msg}`);
       this.notifyChange();
+      this.notifyFailed(msg);
+      this.notifySettled();
     }
   }
 
@@ -362,7 +382,8 @@ export class ProjectStateService {
       try {
         await this.tauri.invoke('invalidate_slash_cache', { projectId: project });
       } catch (err: unknown) {
-        console.warn('[ProjectStateService] invalidate_slash_cache failed:', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log.warn(`[ProjectStateService] invalidate_slash_cache failed: ${msg}`);
       }
     } catch (e: unknown) {
       this.restartError = e instanceof Error ? e.message : String(e);

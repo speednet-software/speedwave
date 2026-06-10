@@ -260,107 +260,36 @@ fn force_remove_project_networks_with_retry(
     });
 }
 
-/// Lima-flavoured force-remove. Same shape as
-/// `super::force_remove_project_containers`, but every per-container `rm -f`
-/// is wrapped in `retry_on_eof`, and the **last** attempt appends `--time=0`
-/// so nerdctl skips the graceful SIGTERM/SIGKILL window. Without `--time=0`
-/// the last attempt would just hit the same EOF: at that point we want a hard
-/// kill, not another graceful stop.
+/// Lima-flavoured force-remove. Delegates the orchestration (ps → id batch →
+/// per-name) to `super::force_remove_project_containers_with_run_fn`; each
+/// `rm -f` batch is wrapped in `retry_on_eof`, and the **last** attempt appends
+/// `--time=0` so nerdctl skips the graceful SIGTERM/SIGKILL window. Without
+/// `--time=0` the last attempt would just hit the same EOF: at that point we
+/// want a hard kill, not another graceful stop.
 fn force_remove_project_containers_with_retry(
     runner: &dyn CommandRunner,
     cmd: &str,
     project: &str,
     nerdctl_prefix: &[&str],
 ) {
-    let filter = format!("label=com.docker.compose.project={project}");
-    let mut ps_args: Vec<&str> = nerdctl_prefix.to_vec();
-    ps_args.extend_from_slice(&["ps", "-a", "--filter", &filter, "-q"]);
-
-    // ps is read-only; an EOF here just means we lose the id list, not a
-    // half-removed container. Keep the original best-effort behaviour.
-    let id_targets = match runner.run(cmd, &ps_args) {
-        Ok(output) => super::cleanup_targets_from_ps_output(&output),
-        Err(e) => {
-            log::debug!("force_remove_project_containers: ps failed for {project}: {e}");
-            Vec::new()
-        }
-    };
-    let name_targets = super::configured_project_container_names(project);
-
-    if id_targets.is_empty() && name_targets.is_empty() {
-        return;
-    }
-
-    if !id_targets.is_empty() {
-        log::info!(
-            "force_remove_project_containers: removing {} stale container id(s) for {project}",
-            id_targets.len()
-        );
-        let label = format!("force_remove_project_containers ids({project})");
-        let mut attempt = 0usize;
-        let result = retry_on_eof(&label, || {
-            attempt += 1;
-            // On the final attempt we escalate to `--time=0` so nerdctl
-            // sends SIGKILL immediately instead of waiting for another
-            // graceful stop window that we already know times out.
-            let force_kill = attempt == RETRY_MAX_ATTEMPTS;
-            run_rm_force_lima(runner, cmd, nerdctl_prefix, &id_targets, force_kill)
-        });
-        if let Err(e) = result {
-            log::warn!("force_remove_project_containers: rm -f by id failed for {project}: {e}");
-        }
-    }
-
-    for container_name in &name_targets {
-        let single_target = vec![container_name.clone()];
-        let label = format!("force_remove_project_containers name({container_name})");
-        let mut attempt = 0usize;
-        let result = retry_on_eof(&label, || {
-            attempt += 1;
-            // Same `--time=0` escalation as the id branch above: we'd rather
-            // hard-kill the container than log another graceful-stop EOF.
-            let force_kill = attempt == RETRY_MAX_ATTEMPTS;
-            run_rm_force_lima(runner, cmd, nerdctl_prefix, &single_target, force_kill)
-        });
-        match result {
-            Ok(()) => {}
-            Err(e) if super::is_missing_container_error(&e) => {
-                log::debug!(
-                    "force_remove_project_containers: {project} target '{container_name}' already gone: {e}"
-                );
-            }
-            Err(e) => {
-                log::warn!(
-                    "force_remove_project_containers: rm -f by name failed for {project} target '{container_name}': {e}"
-                );
-            }
-        }
-    }
-}
-
-/// Runs `nerdctl rm -f [--time=0] <targets...>` through the supplied runner.
-/// `force_kill` toggles the `--time=0` flag so callers can escalate to a hard
-/// kill on the final retry without duplicating the argv plumbing.
-fn run_rm_force_lima(
-    runner: &dyn CommandRunner,
-    cmd: &str,
-    nerdctl_prefix: &[&str],
-    targets: &[String],
-    force_kill: bool,
-) -> anyhow::Result<()> {
-    if targets.is_empty() {
-        return Ok(());
-    }
-
-    let mut rm_args: Vec<&str> = nerdctl_prefix.to_vec();
-    rm_args.extend_from_slice(&["rm", "-f"]);
-    if force_kill {
-        rm_args.push("--time=0");
-    }
-    for target in targets {
-        rm_args.push(target.as_str());
-    }
-    runner.run(cmd, &rm_args).map(|_| ())
+    super::force_remove_project_containers_with_run_fn(
+        runner,
+        cmd,
+        project,
+        nerdctl_prefix,
+        |targets| {
+            let label = format!("force_remove_project_containers({project})");
+            let mut attempt = 0usize;
+            retry_on_eof(&label, || {
+                attempt += 1;
+                // On the final attempt we escalate to `--time=0` so nerdctl
+                // sends SIGKILL immediately instead of waiting for another
+                // graceful stop window that we already know times out.
+                let force_kill = attempt == RETRY_MAX_ATTEMPTS;
+                super::run_rm_force(runner, cmd, nerdctl_prefix, targets, force_kill)
+            })
+        },
+    );
 }
 
 impl ContainerRuntime for LimaRuntime {
@@ -1207,19 +1136,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // run_rm_force_lima --time=0 escalation
+    // run_rm_force --time=0 escalation (shared SSOT argv builder in mod.rs)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_run_rm_force_lima_appends_time_zero_only_when_force_kill() {
+    fn test_run_rm_force_appends_time_zero_only_when_force_kill() {
         let runner = MockRunner::new()
             .with_response("nerdctl rm -f a", "")
             .with_response("nerdctl rm -f --time=0 a", "");
 
         // Graceful path — no --time=0
-        run_rm_force_lima(&runner, "nerdctl", &[], &["a".to_string()], false).unwrap();
+        crate::runtime::run_rm_force(&runner, "nerdctl", &[], &["a".to_string()], false).unwrap();
         // Force-kill path — emits --time=0
-        run_rm_force_lima(&runner, "nerdctl", &[], &["a".to_string()], true).unwrap();
+        crate::runtime::run_rm_force(&runner, "nerdctl", &[], &["a".to_string()], true).unwrap();
     }
 
     /// End-to-end check that `force_remove_project_containers_with_retry`
@@ -1490,7 +1419,11 @@ mod tests {
                 .copied()
                 .chain(args.iter().copied())
                 .collect();
-            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec");
+            crate::runtime::test_support::assert_quoting_roundtrips(
+                &remote_cmd,
+                &expected,
+                "container_exec",
+            );
 
             // Same check for the piped variant.
             let runner = mock_runner_with_vm_running();
@@ -1508,31 +1441,12 @@ mod tests {
                 .copied()
                 .chain(args.iter().copied())
                 .collect();
-            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec_piped");
+            crate::runtime::test_support::assert_quoting_roundtrips(
+                &remote_cmd,
+                &expected,
+                "container_exec_piped",
+            );
         }
-    }
-
-    /// Verifies that `remote_cmd` is a valid POSIX shell command by
-    /// round-tripping through `shlex::split` and asserting the parsed
-    /// argv equals the original. If the quoting were broken, the
-    /// parser would either fail (returning `None`) or would split into
-    /// a different argv shape than what we encoded.
-    ///
-    /// We deliberately do NOT spawn `bash -n` here even though it would
-    /// be the canonical syntax check: Git Bash on `windows-latest`
-    /// corrupts multi-byte UTF-8 in command-line args/scripts, see Git
-    /// for Windows / claude-code#31295. A pure-Rust roundtrip via the
-    /// same `shlex` crate that produced the quoting is the lossless,
-    /// platform-independent equivalent.
-    fn assert_quoting_roundtrips(remote_cmd: &str, expected_argv: &[&str], variant: &str) {
-        let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {
-            panic!("shlex::split rejected {variant} remote_cmd built from {expected_argv:?} → {remote_cmd:?}")
-        });
-        assert_eq!(
-            parsed, expected_argv,
-            "{variant} remote_cmd did not round-trip: input argv != reparsed argv\n\
-             remote_cmd: {remote_cmd:?}",
-        );
     }
 
     #[test]

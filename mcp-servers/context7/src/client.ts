@@ -197,12 +197,8 @@ export class Context7Client {
         if (status === 200) {
           return { body, tier };
         }
-
-        const err = mapErrorStatus(status, body, response.headers, tier, !!this.apiKey);
-        if (!err.retryable || attempt === MAX_RETRIES) {
-          throw err;
-        }
-        lastError = err;
+        // Non-200: throw; the catch below makes the single retry decision.
+        throw mapErrorStatus(status, body, response.headers, tier, !!this.apiKey);
       } catch (e) {
         if (e instanceof Context7Error) {
           if (!e.retryable || attempt === MAX_RETRIES) throw e;

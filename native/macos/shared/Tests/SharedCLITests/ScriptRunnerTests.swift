@@ -190,6 +190,68 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(result.count, 0)
     }
 
+    // MARK: - parseEmailDetail (shared by AppleMailClient/OutlookClient getEmail)
+
+    func testParseEmailDetailHappyPath() throws {
+        let output = "Hello||alice@example.com||2024-01-01||true||bob@x.com,carol@y.com||Body text"
+        let dict = try parseEmailDetail(output, id: "msg-1")
+        XCTAssertEqual(dict["id"] as? String, "msg-1")
+        XCTAssertEqual(dict["subject"] as? String, "Hello")
+        XCTAssertEqual(dict["sender"] as? String, "alice@example.com")
+        XCTAssertEqual(dict["date"] as? String, "2024-01-01")
+        XCTAssertEqual(dict["read"] as? Bool, true)
+        XCTAssertEqual(dict["to"] as? [String], ["bob@x.com", "carol@y.com"])
+        XCTAssertEqual(dict["body"] as? String, "Body text")
+    }
+
+    func testParseEmailDetailBodyContainingDelimiter() throws {
+        // Body may itself contain "||" — fields 6+ must be re-joined verbatim.
+        let output = "Subj||from@x||2024-01-01||false||to@x||line1 || line2 || line3"
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["read"] as? Bool, false)
+        XCTAssertEqual(dict["body"] as? String, "line1 || line2 || line3")
+    }
+
+    func testParseEmailDetailEmptyToListFiltersToEmptyArray() throws {
+        // A trailing comma / empty to-field must yield [] not [""] .
+        let output = "Subj||from@x||2024-01-01||true||||Body"
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["to"] as? [String], [])
+    }
+
+    func testParseEmailDetailTrimsFieldWhitespace() throws {
+        let output = " Subj || from@x || 2024-01-01 || true || a@x , b@y || Body "
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["subject"] as? String, "Subj")
+        XCTAssertEqual(dict["sender"] as? String, "from@x")
+        XCTAssertEqual(dict["to"] as? [String], ["a@x", "b@y"])
+        XCTAssertEqual(dict["body"] as? String, "Body")
+    }
+
+    func testParseEmailDetailReadFalseWhenNotLiteralTrue() throws {
+        let output = "Subj||from@x||2024-01-01||no||to@x||Body"
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["read"] as? Bool, false)
+    }
+
+    func testParseEmailDetailThrowsOnTooFewFields() {
+        // Only 5 fields → must throw .scriptFailed("Unexpected email format").
+        let output = "Subj||from@x||2024-01-01||true||to@x"
+        XCTAssertThrowsError(try parseEmailDetail(output, id: "id")) { error in
+            guard case ScriptError.scriptFailed(let msg) = error else {
+                return XCTFail("expected .scriptFailed, got \(error)")
+            }
+            XCTAssertEqual(msg, "Unexpected email format")
+        }
+    }
+
+    func testParseEmailDetailExactlySixFieldsHasEmptyBody() throws {
+        // Boundary: exactly 6 fields with an empty body field is valid.
+        let output = "Subj||from@x||2024-01-01||true||to@x||"
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["body"] as? String, "")
+    }
+
     // MARK: - ScriptError Descriptions
 
     func testScriptErrorFailedDescription() {

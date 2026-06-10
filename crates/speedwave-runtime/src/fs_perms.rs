@@ -1,17 +1,130 @@
-//! Restricted-file write helpers used by host-side worker supervisors.
+//! Cross-platform owner-only file/directory permission utilities.
 //!
-//! All worker auth tokens, PID files, and OAuth state files must be written
-//! such that only the current user can read them. Unix: `chmod 0o600`.
-//! Windows: ACL replacement via `icacls /inheritance:r /grant:r <user>:(F)`.
+//! All worker auth tokens, PID files, OAuth state, pasted attachments, and
+//! plugin credentials must be readable only by the current user. Unix:
+//! `chmod 0o600` (files) / `0o700` (dirs). Windows: the DACL is replaced with a
+//! single `GENERIC_ALL` ACE for the current user (`SetNamedSecurityInfoW`) — one
+//! mechanism, no subprocess and no PATH dependence.
 //!
-//! Single SSOT — previously duplicated in `desktop/src-tauri/src/mcp_os_process.rs`
-//! and `crates/speedwave-runtime/src/host_exec_process.rs`. A third copy would
-//! have appeared for the OAuth worker; PR1 extracted before that.
+//! Single SSOT — both the runtime supervisors and the Desktop layer call these.
+//! Previously the Win32 DACL helper lived separately in
+//! `desktop/src-tauri/src/fs_perms.rs`; it was consolidated here.
 
 use std::io::Write;
 use std::path::Path;
 
 use tempfile::NamedTempFile;
+
+/// Restrict file permissions to owner-only access.
+/// - Unix: `chmod 0o600`
+/// - Windows: DACL with a single `GENERIC_ALL` ACE for the current user
+pub fn set_owner_only(path: &Path) -> Result<(), String> {
+    set_owner_only_with_mode(path, 0o600)
+}
+
+/// Restrict directory permissions to owner-only access.
+/// - Unix: `chmod 0o700`
+/// - Windows: DACL with a single `GENERIC_ALL` ACE for the current user
+pub fn set_owner_only_dir(path: &Path) -> Result<(), String> {
+    set_owner_only_with_mode(path, 0o700)
+}
+
+/// SSOT for [`set_owner_only`] and [`set_owner_only_dir`]. Unix mode differs
+/// between files (`0o600`) and dirs (`0o700`); on Windows `SE_FILE_OBJECT`
+/// handles both, so the ACL helper is shared and `_mode` is ignored there.
+fn set_owner_only_with_mode(path: &Path, _mode: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(_mode))
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(windows)]
+    {
+        set_windows_acl_owner_only(path)?;
+    }
+
+    Ok(())
+}
+
+/// Restrict a file or directory to the current user only via a Windows DACL.
+/// **Returns `Err` on any Win32 failure** — the caller must treat the target as
+/// world-readable and remove/quarantine it, since a silent failure would leave
+/// secrets exposed on disk.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_ALL};
+    use windows_sys::Win32::Security::Authorization::{
+        SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE,
+        PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token_handle = std::mem::zeroed();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
+            return Err("OpenProcessToken failed".to_string());
+        }
+        let mut buf = vec![0u8; 256];
+        let mut returned = 0u32;
+        if GetTokenInformation(
+            token_handle,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+            &mut returned,
+        ) == 0
+        {
+            CloseHandle(token_handle);
+            return Err("GetTokenInformation failed".to_string());
+        }
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let ea = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: GENERIC_ALL,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: 0,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_USER,
+                ptstrName: user.User.Sid as *mut _,
+            },
+        };
+        let mut new_acl: *mut ACL = std::ptr::null_mut();
+        if SetEntriesInAclW(1, &ea, std::ptr::null_mut(), &mut new_acl) != 0 {
+            CloseHandle(token_handle);
+            return Err("SetEntriesInAclW failed".to_string());
+        }
+        let wide_path: Vec<u16> = path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let rc = SetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            new_acl,
+            std::ptr::null_mut(),
+        );
+        LocalFree(new_acl.cast());
+        CloseHandle(token_handle);
+        if rc != 0 {
+            return Err(format!("SetNamedSecurityInfoW failed: rc={rc}"));
+        }
+        Ok(())
+    }
+}
 
 /// Flushes a file's data to stable media. On macOS plain `fsync` returns before
 /// APFS hits the platter, so `F_FULLFSYNC` is preferred; if the filesystem
@@ -86,12 +199,12 @@ fn fsync_parent_dir(_dir: &Path) {}
 ///   the destination is the new file or the old one, never a partial write.
 /// - Windows: tightens the ACL on the tempfile **before** rename, so the
 ///   destination path never appears world-readable to a concurrent reader.
-///   Previous behavior (`fs::write(dest) + icacls dest`) opened a TOCTOU window
+///   Previous behavior (`fs::write(dest) + ACL on dest`) opened a TOCTOU window
 ///   where the destination file existed with the inherited (potentially
 ///   world-readable) DACL between the two syscalls. `persist()` uses
 ///   `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which is atomic on NTFS.
-///   **An `icacls` failure returns `Err`** — the tempfile is dropped before
-///   ever appearing at `path`, so no secret leaks. ADR-009 makes Windows ACL
+///   **A DACL failure returns `Err`** — the tempfile is dropped before ever
+///   appearing at `path`, so no secret leaks. ADR-009 makes Windows ACL
 ///   failure a hard error so the owner-only invariant is real.
 ///
 /// Existing directories at `path` are removed first (consistent with prior behavior).
@@ -138,42 +251,19 @@ fn write_restricted_file_synced(
 
     #[cfg(windows)]
     {
-        // Tighten ACL on the **tempfile** before rename. The tempfile path is
-        // in the same parent directory as the destination (so rename is atomic),
-        // but the random prefix makes a concurrent reader unable to guess it.
-        // After `persist()` the destination already has the restricted DACL.
-        let status = crate::binary::system_command("icacls")
-            .args([
-                tmp.path().as_os_str(),
-                "/inheritance:r".as_ref(),
-                "/grant:r".as_ref(),
-            ])
-            .arg(format!(
-                "{}:(F)",
-                std::env::var("USERNAME").unwrap_or_default()
-            ))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => {
-                // `tmp` is dropped here, which removes it — the destination
-                // path is never touched, so no secret leaks.
-                anyhow::bail!(
-                    "icacls failed (exit {}) on tempfile for {}: refusing to leave a world-readable secret",
-                    s,
-                    path.display()
-                );
-            }
-            Err(e) => {
-                anyhow::bail!(
-                    "failed to run icacls on tempfile for {}: {} — refusing to leave a world-readable secret",
-                    path.display(),
-                    e
-                );
-            }
-        }
+        // Tighten the DACL on the **tempfile** before rename. The tempfile path
+        // is in the same parent directory as the destination (so rename is
+        // atomic), but the random prefix makes a concurrent reader unable to
+        // guess it. After `persist()` the destination already has the
+        // restricted DACL. A failure drops `tmp` (removing it) and bails —
+        // the destination path is never touched, so no secret leaks.
+        set_windows_acl_owner_only(tmp.path()).map_err(|e| {
+            anyhow::anyhow!(
+                "DACL tighten failed on tempfile for {}: {} — refusing to leave a world-readable secret",
+                path.display(),
+                e
+            )
+        })?;
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -243,7 +333,8 @@ pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Resul
 }
 
 /// Creates `path` (if missing) and sets it to owner-only perms.
-/// Unix: `chmod 0o700`. Windows: `icacls /inheritance:r /grant:r <user>:(F)`.
+/// Unix: `chmod 0o700`. Windows: DACL with a single `GENERIC_ALL` ACE for the
+/// current user.
 ///
 /// Idempotent: re-runs harmless. Callers iterate parents themselves
 /// (e.g. `tokens/` → `tokens/<project>/` → `tokens/<project>/<service>/`).
@@ -258,24 +349,9 @@ pub fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
 
     #[cfg(windows)]
     {
-        let status = crate::binary::system_command("icacls")
-            .args([
-                path.as_os_str(),
-                "/inheritance:r".as_ref(),
-                "/grant:r".as_ref(),
-            ])
-            .arg(format!(
-                "{}:(F)",
-                std::env::var("USERNAME").unwrap_or_default()
-            ))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => anyhow::bail!("icacls failed (exit {}) on directory {}", s, path.display()),
-            Err(e) => anyhow::bail!("failed to run icacls on {}: {}", path.display(), e),
-        }
+        set_windows_acl_owner_only(path).map_err(|e| {
+            anyhow::anyhow!("DACL tighten failed on directory {}: {}", path.display(), e)
+        })?;
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -767,6 +843,140 @@ mod tests {
         assert!(
             fsync_at < persist_at,
             "fsync_file_durable must run BEFORE tmp.persist — reordering reintroduces the torn-write bug"
+        );
+    }
+
+    // ── set_owner_only (file) / set_owner_only_dir ───────────────────────
+
+    #[test]
+    fn set_owner_only_sets_600_on_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"secret")
+            .unwrap();
+
+        set_owner_only(&path).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "expected 0o600, got 0o{mode:o}");
+        }
+    }
+
+    #[test]
+    fn set_owner_only_preserves_file_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, r#"{"key":"value"}"#).unwrap();
+
+        set_owner_only(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, r#"{"key":"value"}"#);
+    }
+
+    #[test]
+    fn set_owner_only_fails_on_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does_not_exist.txt");
+
+        let result = set_owner_only(&path);
+        assert!(result.is_err(), "should fail on nonexistent file");
+    }
+
+    #[test]
+    fn set_owner_only_works_on_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::File::create(&path).unwrap();
+
+        set_owner_only(&path).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "expected 0o600, got 0o{mode:o}");
+        }
+    }
+
+    #[test]
+    fn set_owner_only_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        std::fs::write(&path, "abc123").unwrap();
+
+        set_owner_only(&path).unwrap();
+        set_owner_only(&path).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "expected 0o600, got 0o{mode:o}");
+        }
+    }
+
+    #[test]
+    fn set_owner_only_dir_sets_700_on_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("subdir");
+        std::fs::create_dir(&target).unwrap();
+
+        set_owner_only_dir(&target).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
+        }
+    }
+
+    #[test]
+    fn set_owner_only_dir_works_on_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("existing");
+        std::fs::create_dir(&target).unwrap();
+        // Place a file inside — perms change on dir must not affect contents.
+        std::fs::write(target.join("file.txt"), b"contents").unwrap();
+
+        set_owner_only_dir(&target).unwrap();
+
+        let content = std::fs::read_to_string(target.join("file.txt")).unwrap();
+        assert_eq!(content, "contents");
+    }
+
+    #[test]
+    fn set_owner_only_dir_fails_on_nonexistent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("does_not_exist");
+
+        let result = set_owner_only_dir(&target);
+        assert!(result.is_err(), "should fail on nonexistent directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_owner_only_tightens_world_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loose.txt");
+        std::fs::write(&path, "open").unwrap();
+
+        // Start with 0o644 (world-readable).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        set_owner_only(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "expected 0o600 after tightening, got 0o{mode:o}"
         );
     }
 }

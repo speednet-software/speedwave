@@ -18,6 +18,7 @@ import type {
 } from '../models/transcript';
 import { ChatStateService } from './chat-state.service';
 import { TauriService } from './tauri.service';
+import { LoggerService } from './logger.service';
 
 /** Event name the Rust backend emits per model-download progress update. */
 const MODEL_PROGRESS_EVENT = 'transcription_model_status';
@@ -41,6 +42,7 @@ function pairsToRecord(pairs: SpeakerNamePairs): Record<number, string> {
 export class TranscriptionService {
   private readonly tauri = inject(TauriService);
   private readonly chatState = inject(ChatStateService);
+  private readonly log = inject(LoggerService);
 
   private readonly activeSignal = signal<TranscriptSession | null>(null);
   private lastSeq = 0;
@@ -129,7 +131,7 @@ export class TranscriptionService {
       try {
         this.patchUnlisten();
       } catch (e) {
-        console.warn('transcription detach failed:', e);
+        this.log.warn(`transcription detach failed: ${String(e)}`);
       }
       this.patchUnlisten = null;
     }

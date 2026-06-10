@@ -1,3 +1,5 @@
+//! Container image build orchestration and SSOT image catalogue.
+
 use crate::bundle;
 use crate::config::ResolvedIntegrationsConfig;
 use std::path::PathBuf;
@@ -24,18 +26,30 @@ const MCP_IMAGE_PREFIX: &str = "speedwave-mcp-";
 /// Build args for the Claude container — passes the pinned version to Containerfile.claude.
 const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults::CLAUDE_VERSION)];
 
+/// Claude Code container image name.
 pub const IMAGE_CLAUDE: &str = "speedwave-claude";
+/// MCP hub image name.
 pub const IMAGE_MCP_HUB: &str = "speedwave-mcp-hub";
+/// Slack MCP worker image name.
 pub const IMAGE_MCP_SLACK: &str = "speedwave-mcp-slack";
+/// SharePoint MCP worker image name.
 pub const IMAGE_MCP_SHAREPOINT: &str = "speedwave-mcp-sharepoint";
+/// Redmine MCP worker image name.
 pub const IMAGE_MCP_REDMINE: &str = "speedwave-mcp-redmine";
+/// GitLab MCP worker image name.
 pub const IMAGE_MCP_GITLAB: &str = "speedwave-mcp-gitlab";
+/// GitHub MCP worker image name.
 pub const IMAGE_MCP_GITHUB: &str = "speedwave-mcp-github";
+/// Atlassian MCP worker image name.
 pub const IMAGE_MCP_ATLASSIAN: &str = "speedwave-mcp-atlassian";
+/// Office documents MCP worker image name.
 pub const IMAGE_MCP_OFFICE: &str = "speedwave-mcp-office";
+/// Playwright MCP worker image name.
 pub const IMAGE_MCP_PLAYWRIGHT: &str = "speedwave-mcp-playwright";
+/// Context7 MCP worker image name.
 pub const IMAGE_MCP_CONTEXT7: &str = "speedwave-mcp-context7";
 
+/// All container images built by Speedwave (SSOT, aligned with `bundle-build-context.sh`).
 pub const IMAGES: &[ImageDef] = &[
     ImageDef {
         name: IMAGE_CLAUDE,
@@ -147,6 +161,7 @@ const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duratio
 #[cfg(test)]
 const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
 
+/// Tags an image name with the bundle id (`name:bundle_id`).
 pub fn image_ref(name: &str, bundle_id: &str) -> String {
     format!("{name}:{bundle_id}")
 }
@@ -476,6 +491,7 @@ fn write_resources_marker_to(
 /// can interpolate `{e}` directly without adding their own diagnostic hints.
 #[derive(Debug)]
 pub struct SnapshotterRecoveryFailed {
+    /// The underlying build error after prune-and-retry also failed.
     pub inner: anyhow::Error,
 }
 

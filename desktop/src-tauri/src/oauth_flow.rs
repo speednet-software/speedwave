@@ -145,6 +145,31 @@ pub(crate) fn emit_progress(
     }
 }
 
+/// Canonical "device code expired" message — one wording across providers.
+pub(crate) const DEVICE_CODE_EXPIRED_MSG: &str = "Device code expired — please try again.";
+
+/// One step of the device-code polling decision, returned by the provider after
+/// it inspects a token-endpoint response. The loop turns this into the right
+/// `emit_progress` call + terminate, or keeps polling.
+pub(crate) enum PollStep {
+    /// Emit `(status, message)` and end the flow (success or terminal error).
+    Emit {
+        status: ProgressStatus,
+        message: String,
+    },
+    /// Keep polling. `slow_down` bumps the interval by 5 s (RFC 8628 §3.5).
+    KeepPolling { slow_down: bool },
+}
+
+/// Terminal `PollStep::Emit` with the `Error` status — the common shape both
+/// providers return for save/parse/unexpected-response failures.
+pub(crate) fn emit_error(message: String) -> PollStep {
+    PollStep::Emit {
+        status: ProgressStatus::Error,
+        message,
+    }
+}
+
 /// What the device-poll loop does with one token-endpoint response. The
 /// per-IdP classifier maps a `(error_code, error_description)` to one of these.
 pub(crate) enum PollAction {
@@ -158,155 +183,149 @@ pub(crate) enum PollAction {
     Failed(String),
 }
 
-/// Applies one classified poll response: bumps the interval on `SlowDown`,
-/// returns the terminal `(status, message)` when the loop must stop.
-fn apply_poll_action(action: PollAction, interval: &mut u64) -> Option<(ProgressStatus, String)> {
-    match action {
-        PollAction::KeepPolling => None,
-        PollAction::SlowDown => {
-            *interval += 5;
-            None
+impl PollAction {
+    /// Bridges a pure classification into the loop's [`PollStep`] vocabulary.
+    pub(crate) fn into_step(self) -> PollStep {
+        match self {
+            PollAction::KeepPolling => PollStep::KeepPolling { slow_down: false },
+            PollAction::SlowDown => PollStep::KeepPolling { slow_down: true },
+            PollAction::Expired(message) => PollStep::Emit {
+                status: ProgressStatus::Expired,
+                message,
+            },
+            PollAction::Failed(message) => PollStep::Emit {
+                status: ProgressStatus::Error,
+                message,
+            },
         }
-        PollAction::Expired(msg) => Some((ProgressStatus::Expired, msg)),
-        PollAction::Failed(msg) => Some((ProgressStatus::Error, msg)),
     }
 }
 
-use std::time::Duration;
-use tokio::time::Instant;
+/// Per-provider token-endpoint behaviour. The shared `run_device_code_poll`
+/// owns the deadline / cancel / sleep / HTTP / read-body state machine; the
+/// provider supplies only what differs: the request and the response handling
+/// (including any token persistence, which classifies its own failures).
+pub(crate) trait DeviceCodeProvider: Send + Sync + 'static {
+    /// Builds the token-endpoint POST (URL, body, provider-specific headers).
+    /// Called once per poll iteration from the shared loop.
+    fn token_request(&self, client: &reqwest::Client) -> reqwest::RequestBuilder;
 
-/// Inputs for [`run_device_poll`]. The two closures carry the only per-IdP
-/// differences: classifying a polling error and persisting a success body.
-pub(crate) struct DevicePollConfig {
-    pub client: reqwest::Client,
-    pub token_url: String,
-    pub form_body: String,
-    /// `true` for GitHub (`Accept: application/json`).
-    pub accept_json: bool,
-    pub interval_secs: u64,
-    pub expires_in_secs: u64,
+    /// Classifies a token-endpoint response. `body_bytes` is the size-limited
+    /// body. On success the provider persists tokens and returns a terminal
+    /// `Emit`; on `authorization_pending`/`slow_down` it returns `KeepPolling`;
+    /// on a terminal error it returns `Emit` with the user-facing message.
+    fn handle_token_response(
+        &self,
+        http_status: reqwest::StatusCode,
+        body_bytes: &[u8],
+    ) -> PollStep;
 }
 
-/// Runs the device-code polling state machine shared by SharePoint and GitHub.
-/// `on_success(body)` parses+persists IdP-specific tokens; `classify(status,
-/// body)` returns `Ok(())` on a success-shaped body, else a [`PollAction`]. The
-/// loop (deadline / sleep / cancel / network) is identical across IdPs.
-pub(crate) fn run_device_poll<C, S>(
-    app: tauri::AppHandle,
-    registry: &'static FlowRegistry,
-    request_id: String,
-    config: DevicePollConfig,
-    cancel: CancellationToken,
-    classify: C,
-    on_success: S,
-) where
-    C: Fn(u16, &[u8]) -> Result<(), PollAction> + Send + 'static,
-    S: Fn(&[u8]) -> Result<(), String> + Send + 'static,
-{
-    tokio::spawn(async move {
-        let mut interval = config.interval_secs;
-        let deadline = Instant::now() + Duration::from_secs(config.expires_in_secs);
-        loop {
-            if Instant::now() >= deadline {
+/// Shared device-code polling loop (RFC 8628 §3.4–3.5). Drives the deadline,
+/// cancellation, fixed-interval sleep, token POST, body-size guard, and
+/// progress emission; delegates request construction + response classification
+/// to `provider`. Always clears the `FLOW_STATE` entry for `request_id` on
+/// every exit so a superseding flow is never erased.
+pub(crate) struct DeviceCodePoll {
+    pub app: tauri::AppHandle,
+    pub registry: &'static FlowRegistry,
+    pub cancel: CancellationToken,
+    pub request_id: String,
+    pub http_client: reqwest::Client,
+    pub interval: u64,
+    pub expires_in: u64,
+}
+
+pub(crate) async fn run_device_code_poll<P: DeviceCodeProvider>(poll: DeviceCodePoll, provider: P) {
+    let DeviceCodePoll {
+        app,
+        registry,
+        cancel,
+        request_id,
+        http_client,
+        mut interval,
+        expires_in,
+    } = poll;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(expires_in);
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            emit_progress(
+                &app,
+                registry,
+                ProgressStatus::Expired,
+                DEVICE_CODE_EXPIRED_MSG,
+                &request_id,
+            );
+            registry.clear_if_current(&request_id);
+            return;
+        }
+
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_secs(interval)) => {}
+            () = cancel.cancelled() => {
+                emit_progress(&app, registry, ProgressStatus::Cancelled, "OAuth flow cancelled", &request_id);
+                registry.clear_if_current(&request_id);
+                return;
+            }
+        }
+
+        let resp = provider
+            .token_request(&http_client)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await;
+
+        if cancel.is_cancelled() {
+            emit_progress(
+                &app,
+                registry,
+                ProgressStatus::Cancelled,
+                "OAuth flow cancelled",
+                &request_id,
+            );
+            registry.clear_if_current(&request_id);
+            return;
+        }
+
+        let r = match resp {
+            Ok(r) => r,
+            Err(e) => {
                 emit_progress(
                     &app,
                     registry,
-                    ProgressStatus::Expired,
-                    "Device code expired — please try again",
+                    ProgressStatus::Error,
+                    &format!("Network error: {e}"),
                     &request_id,
                 );
                 registry.clear_if_current(&request_id);
                 return;
             }
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(interval)) => {}
-                () = cancel.cancelled() => {
-                    emit_progress(&app, registry, ProgressStatus::Cancelled, "OAuth flow cancelled", &request_id);
-                    registry.clear_if_current(&request_id);
-                    return;
-                }
-            }
+        };
 
-            let mut req = config
-                .client
-                .post(&config.token_url)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(config.form_body.clone())
-                .timeout(Duration::from_secs(30));
-            if config.accept_json {
-                req = req.header("Accept", "application/json");
-            }
-            let resp = req.send().await;
-
-            if cancel.is_cancelled() {
-                emit_progress(
-                    &app,
-                    registry,
-                    ProgressStatus::Cancelled,
-                    "OAuth flow cancelled",
-                    &request_id,
-                );
+        let http_status = r.status();
+        let body_bytes = match crate::http_util::read_body_limited(r, "token").await {
+            Ok(b) => b,
+            Err(e) => {
+                emit_progress(&app, registry, ProgressStatus::Error, &e, &request_id);
                 registry.clear_if_current(&request_id);
                 return;
             }
+        };
 
-            let (status, bytes) = match resp {
-                Ok(r) => {
-                    let status = r.status().as_u16();
-                    match crate::http_util::read_body_limited(r, "token").await {
-                        Ok(b) => (status, b),
-                        Err(e) => {
-                            emit_progress(&app, registry, ProgressStatus::Error, &e, &request_id);
-                            registry.clear_if_current(&request_id);
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    emit_progress(
-                        &app,
-                        registry,
-                        ProgressStatus::Error,
-                        &format!("Network error: {e}"),
-                        &request_id,
-                    );
-                    registry.clear_if_current(&request_id);
-                    return;
-                }
-            };
-
-            match classify(status, &bytes) {
-                Ok(()) => {
-                    if let Err(e) = on_success(&bytes) {
-                        emit_progress(
-                            &app,
-                            registry,
-                            ProgressStatus::Error,
-                            &format!("Failed to save tokens: {e}"),
-                            &request_id,
-                        );
-                    } else {
-                        emit_progress(
-                            &app,
-                            registry,
-                            ProgressStatus::Success,
-                            "Authentication successful",
-                            &request_id,
-                        );
-                    }
-                    registry.clear_if_current(&request_id);
-                    return;
-                }
-                Err(action) => {
-                    if let Some((status, msg)) = apply_poll_action(action, &mut interval) {
-                        emit_progress(&app, registry, status, &msg, &request_id);
-                        registry.clear_if_current(&request_id);
-                        return;
-                    }
+        match provider.handle_token_response(http_status, &body_bytes) {
+            PollStep::Emit { status, message } => {
+                emit_progress(&app, registry, status, &message, &request_id);
+                registry.clear_if_current(&request_id);
+                return;
+            }
+            PollStep::KeepPolling { slow_down } => {
+                if slow_down {
+                    interval += 5;
                 }
             }
         }
-    });
+    }
 }
 
 /// Atomic 0o600 write of a single credential into `svc_dir/<file_name>`.
@@ -402,36 +421,41 @@ mod tests {
     }
 
     #[test]
-    fn apply_poll_action_keep_polling_leaves_interval() {
-        let mut interval = 5;
-        assert!(apply_poll_action(PollAction::KeepPolling, &mut interval).is_none());
-        assert_eq!(interval, 5);
+    fn poll_action_keep_polling_maps_without_slow_down() {
+        match PollAction::KeepPolling.into_step() {
+            PollStep::KeepPolling { slow_down } => assert!(!slow_down),
+            PollStep::Emit { .. } => panic!("KeepPolling must not terminate"),
+        }
     }
 
     #[test]
-    fn apply_poll_action_slow_down_adds_five() {
-        let mut interval = 5;
-        assert!(apply_poll_action(PollAction::SlowDown, &mut interval).is_none());
-        assert_eq!(interval, 10);
+    fn poll_action_slow_down_maps_with_slow_down() {
+        match PollAction::SlowDown.into_step() {
+            PollStep::KeepPolling { slow_down } => assert!(slow_down),
+            PollStep::Emit { .. } => panic!("SlowDown must not terminate"),
+        }
     }
 
     #[test]
-    fn apply_poll_action_expired_is_terminal() {
-        let mut interval = 5;
-        let (status, msg) =
-            apply_poll_action(PollAction::Expired("gone".to_string()), &mut interval).unwrap();
-        assert_eq!(status, ProgressStatus::Expired);
-        assert_eq!(msg, "gone");
-        assert_eq!(interval, 5);
+    fn poll_action_expired_is_terminal() {
+        match PollAction::Expired("gone".to_string()).into_step() {
+            PollStep::Emit { status, message } => {
+                assert_eq!(status, ProgressStatus::Expired);
+                assert_eq!(message, "gone");
+            }
+            PollStep::KeepPolling { .. } => panic!("Expired must terminate"),
+        }
     }
 
     #[test]
-    fn apply_poll_action_failed_is_terminal_error() {
-        let mut interval = 5;
-        let (status, msg) =
-            apply_poll_action(PollAction::Failed("boom".to_string()), &mut interval).unwrap();
-        assert_eq!(status, ProgressStatus::Error);
-        assert_eq!(msg, "boom");
+    fn poll_action_failed_is_terminal_error() {
+        match PollAction::Failed("boom".to_string()).into_step() {
+            PollStep::Emit { status, message } => {
+                assert_eq!(status, ProgressStatus::Error);
+                assert_eq!(message, "boom");
+            }
+            PollStep::KeepPolling { .. } => panic!("Failed must terminate"),
+        }
     }
 
     // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union):
@@ -462,6 +486,16 @@ mod tests {
         assert_eq!(
             ts, rust,
             "integration.ts status union drifted from ProgressStatus"
+        );
+    }
+
+    #[test]
+    fn device_code_expired_msg_is_reconciled_single_wording() {
+        // Both providers emit this exact string on expiry — the GitHub
+        // ("reconnect") / SharePoint ("try again") drift was reconciled here.
+        assert_eq!(
+            DEVICE_CODE_EXPIRED_MSG,
+            "Device code expired — please try again."
         );
     }
 

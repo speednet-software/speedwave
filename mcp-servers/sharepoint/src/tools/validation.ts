@@ -1,29 +1,14 @@
 /**
  * Validation Helpers for Tool Parameters
+ *
+ * `withValidation` delegates to the shared Family-A wrapper
+ * ({@link withResultValidation}) with compact JSON output (indent 0).
+ * `validateGraphId` is a SharePoint-specific extra kept local.
  */
 
-import { ToolsCallResult } from '@speedwave/mcp-shared';
+import { withResultValidation, type ToolResult, type ToolsCallResult } from '@speedwave/mcp-shared';
 
-/**
- * Result from a tool handler
- */
-export interface ToolResult {
-  success: boolean;
-  data?: unknown;
-  error?: { code: string; message: string };
-}
-
-function validateParams(params: unknown): params is Record<string, unknown> {
-  return params !== null && typeof params === 'object' && !Array.isArray(params);
-}
-
-function formatResult(result: ToolResult): ToolsCallResult {
-  if (result.success) {
-    return { content: [{ type: 'text', text: JSON.stringify(result.data) }] };
-  } else {
-    return { content: [{ type: 'text', text: JSON.stringify(result.error) }], isError: true };
-  }
-}
+export type { ToolResult };
 
 /**
  * Permitted characters in a Microsoft Graph id segment used in page/list/item/column
@@ -59,30 +44,11 @@ export function validateGraphId(value: unknown, fieldName: string): ToolResult |
 }
 
 /**
- * Wrap handler with parameter validation
- * @param handler - Tool handler function
+ * Wrap handler with parameter validation (compact JSON output, indent 0).
+ * @param handler - Tool handler function.
  */
 export function withValidation<T>(
   handler: (params: T) => ToolResult | Promise<ToolResult>
 ): (params: Record<string, unknown>) => Promise<ToolsCallResult> {
-  return async (params: Record<string, unknown>) => {
-    if (!validateParams(params)) {
-      return formatResult({
-        success: false,
-        error: { code: 'INVALID_INPUT', message: 'Tool parameters must be a non-null object' },
-      });
-    }
-    try {
-      const result = await handler(params as T);
-      return formatResult(result);
-    } catch (error) {
-      return formatResult({
-        success: false,
-        error: {
-          code: 'HANDLER_ERROR',
-          message: error instanceof Error ? error.message : String(error),
-        },
-      });
-    }
-  };
+  return withResultValidation(handler, 0);
 }

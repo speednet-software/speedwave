@@ -11,6 +11,7 @@ import {
 import { Router } from '@angular/router';
 
 import { TranscriptionService } from '../services/transcription.service';
+import { LoggerService } from '../services/logger.service';
 import type { TranscriptSession } from '../models/transcript';
 import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
 import { LiveTranscriptComponent } from './live-transcript/live-transcript.component';
@@ -121,6 +122,7 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
 
   private readonly transcription = inject(TranscriptionService);
   private readonly router = inject(Router);
+  private readonly log = inject(LoggerService);
 
   /** The active session (live snapshot from the service). */
   readonly active = computed<TranscriptSession | null>(() => this.transcription.active());
@@ -135,7 +137,7 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     try {
       this.enabled.set(await this.transcription.isEnabled());
     } catch (err) {
-      console.warn('meeting-transcription init failed:', err);
+      this.log.warn(`meeting-transcription init failed: ${String(err)}`);
       this.enabled.set(false);
     }
   }
@@ -200,7 +202,7 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
       await this.transcription.openMicrophonePrivacyPane();
       await this.transcription.openAudioCapturePrivacyPane();
     } catch (err) {
-      console.warn('open privacy pane failed:', err);
+      this.log.warn(`open privacy pane failed: ${String(err)}`);
     }
   }
 }

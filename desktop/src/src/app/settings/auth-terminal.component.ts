@@ -10,6 +10,7 @@ import {
 } from '@angular/core';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from '../services/tauri.service';
+import { LoggerService } from '../services/logger.service';
 
 /**
  * OAuth login instructions card.
@@ -96,6 +97,7 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private clipboard = inject(Clipboard);
+  private log = inject(LoggerService);
   private pollTimer?: ReturnType<typeof setInterval>;
   private copyTimer?: ReturnType<typeof setTimeout>;
 
@@ -120,7 +122,7 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
       .catch((err: unknown) => {
         // Non-fatal: the Windows PowerShell hint just won't show. Login still
         // works. Log so the failure isn't completely invisible.
-        console.warn('auth-terminal: get_platform failed:', err);
+        this.log.warn(`auth-terminal: get_platform failed: ${String(err)}`);
       });
     this.startPolling();
   }
@@ -192,7 +194,7 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
         // disappearing) leaves a trace instead of an infinite silent poll.
         const msg = typeof err === 'string' ? err : String(err);
         if (!/container|not running|starting/i.test(msg)) {
-          console.debug('auth-terminal: get_auth_status poll error:', err);
+          this.log.debug(`auth-terminal: get_auth_status poll error: ${msg}`);
         }
       }
     }, 3000);

@@ -3,16 +3,16 @@
 //! Composer wires `queue_message` when `is_streaming` is true (turn already
 //! running) and `cancel_queued_message` for the explicit X button. Drain
 //! happens server-side from the stream-reader thread when a `Result` event
-//! arrives — the frontend never explicitly drains, it just observes the
-//! `state.pending_queue` patch flip back to `null`.
+//! arrives — the frontend never explicitly drains, it clears its local slot
+//! on the `QueueDrained` chat_stream event.
 
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::session::QueuedMessageService;
 use speedwave_runtime::stream::QueuedMessage;
 
 /// Frontend-facing payload for a queued message — mirrors
-/// `speedwave_runtime::stream::QueuedMessage` exactly so the same JSON shape
-/// flows through patches and through these RPC return types.
+/// `speedwave_runtime::stream::QueuedMessage` exactly so the chat_stream
+/// events and these RPC return types share one JSON shape.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct QueuedMessagePayload {
     pub text: String,
@@ -54,7 +54,6 @@ pub async fn queue_message(
     session_id: String,
     text: String,
     state: tauri::State<'_, QueuedMessageService>,
-    registry: tauri::State<'_, crate::subscribe_cmd::MsgStoreRegistry>,
 ) -> Result<Option<QueuedMessagePayload>, String> {
     if text.len() > MAX_QUEUED_LEN {
         return Err("Message too long".to_string());
@@ -63,19 +62,12 @@ pub async fn queue_message(
         return Err("session_id required".to_string());
     }
     let msg = QueuedMessage {
-        text: text.clone(),
+        text,
         queued_at: now_ms(),
     };
     let prior = state
-        .queue(&session_id, msg.clone())
+        .queue(&session_id, msg)
         .map(QueuedMessagePayload::from);
-    // ADR-042/045 mirror: surface the new slot to state-tree subscribers.
-    use speedwave_runtime::stream::msg_store::LogMsg;
-    use speedwave_runtime::stream::ConversationPatch;
-    let store = registry.store_for(&session_id);
-    store.push(LogMsg::JsonPatch(ConversationPatch::set_pending_queue(
-        Some(msg),
-    )));
     Ok(prior)
 }
 
@@ -86,33 +78,11 @@ pub async fn queue_message(
 pub async fn cancel_queued_message(
     session_id: String,
     state: tauri::State<'_, QueuedMessageService>,
-    registry: tauri::State<'_, crate::subscribe_cmd::MsgStoreRegistry>,
 ) -> Result<bool, String> {
     if session_id.is_empty() {
         return Err("session_id required".to_string());
     }
-    let was_set = state.cancel(&session_id);
-    // ADR-042/045 mirror: clear the state-tree slot for any subscribers.
-    use speedwave_runtime::stream::msg_store::LogMsg;
-    use speedwave_runtime::stream::ConversationPatch;
-    let store = registry.store_for(&session_id);
-    store.push(LogMsg::JsonPatch(ConversationPatch::set_pending_queue(
-        None,
-    )));
-    Ok(was_set)
-}
-
-/// Read-only peek for diagnostics or recovery (e.g. on app restart). The
-/// composer normally relies on the state-tree patch stream, not this.
-#[tauri::command]
-pub async fn peek_queued_message(
-    session_id: String,
-    state: tauri::State<'_, QueuedMessageService>,
-) -> Result<Option<QueuedMessagePayload>, String> {
-    if session_id.is_empty() {
-        return Err("session_id required".to_string());
-    }
-    Ok(state.peek(&session_id).map(QueuedMessagePayload::from))
+    Ok(state.cancel(&session_id))
 }
 
 #[cfg(test)]

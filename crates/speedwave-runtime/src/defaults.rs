@@ -1,22 +1,44 @@
+//! Built-in default config values and the Anthropic model catalogue (SSOT).
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Pinned Claude Code version installed inside the container.
 pub const CLAUDE_VERSION: &str = "2.1.154";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
+/// Per-model price list, USD per 1 million tokens. SSOT for the Desktop
+/// cost meter (`chat/pricing.ts` derives from this via `list_anthropic_models`).
+///
+/// `cached_input` is the prompt-cache read rate; `cache_write` the cache
+/// creation rate. Across the Claude 4.x generation cache-read is 10% of the
+/// base input rate and cache-write 125% — but we store the resolved numbers
+/// rather than ratios so a future per-model deviation is a single edit here.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ModelPricing {
+    /// Standard (non-cached) input tokens.
+    pub input: f64,
+    /// Prompt-cache read tokens.
+    pub cached_input: f64,
+    /// Prompt-cache write (creation) tokens.
+    pub cache_write: f64,
+    /// Generated output tokens.
+    pub output: f64,
+}
+
 /// Single source of truth for the Anthropic models surfaced in the
-/// Settings → LLM Provider dropdown.
+/// Settings → LLM Provider dropdown and the Desktop cost meter.
 ///
 /// Sourced from the official catalog at
 /// <https://platform.claude.com/docs/en/about-claude/models/overview>.
 /// Bump this list when Anthropic ships a new family — every consumer
-/// (frontend dropdown, future CLI flags, docs) reads from here.
+/// (frontend dropdown, cost meter, future CLI flags, docs) reads from here.
 ///
 /// `latest` flags the actively recommended families (rendered in the
 /// "Latest" optgroup); the rest are legacy entries that still work but
 /// should nudge users toward the current generation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnthropicModelInfo {
     /// Stable API alias (no snapshot date). Sent to Claude Code via
     /// `ANTHROPIC_MODEL`. Pinning the dated form would force a config
@@ -31,7 +53,44 @@ pub struct AnthropicModelInfo {
     /// still-available legacy snapshots; deprecated/retired models are
     /// removed from the list outright.
     pub latest: bool,
+    /// Price of the base model id (e.g. `claude-sonnet-4-6`).
+    pub pricing: ModelPricing,
+    /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-4-6[1m]`),
+    /// present only when `context_tokens >= 1_000_000`. Some families (Sonnet)
+    /// bill the 1M window at a premium over the base rate; Opus 1M is the base
+    /// rate. `None` for sub-1M models, which have no `[1m]` variant.
+    pub pricing_1m: Option<ModelPricing>,
 }
+
+// Published per-MTok rates (platform.claude.com/docs/en/pricing). Opus 4.5+
+// is $5/$25; the full 1M window is standard-priced, so the `[1m]` rate equals
+// the base. Sonnet 4.6 is $3/$15 base with a 1M-context premium ($6/$22.5).
+// Haiku 4.5 is $1/$5 and has no 1M variant. Cache-read = 10% of input,
+// cache-write = 125% of input across the 4.x generation.
+const OPUS_PRICING: ModelPricing = ModelPricing {
+    input: 5.0,
+    cached_input: 0.5,
+    cache_write: 6.25,
+    output: 25.0,
+};
+const SONNET_PRICING: ModelPricing = ModelPricing {
+    input: 3.0,
+    cached_input: 0.3,
+    cache_write: 3.75,
+    output: 15.0,
+};
+const SONNET_PRICING_1M: ModelPricing = ModelPricing {
+    input: 6.0,
+    cached_input: 0.6,
+    cache_write: 7.5,
+    output: 22.5,
+};
+const HAIKU_PRICING: ModelPricing = ModelPricing {
+    input: 1.0,
+    cached_input: 0.1,
+    cache_write: 1.25,
+    output: 5.0,
+};
 
 /// Curated list of Anthropic models available via Claude Code.
 /// **Order matters** — frontend renders this list as-is.
@@ -47,30 +106,40 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Opus 4.8",
         context_tokens: 1_000_000,
         latest: true,
+        pricing: OPUS_PRICING,
+        pricing_1m: Some(OPUS_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-sonnet-4-6",
         family: "Sonnet 4.6",
         context_tokens: 1_000_000,
         latest: true,
+        pricing: SONNET_PRICING,
+        pricing_1m: Some(SONNET_PRICING_1M),
     },
     AnthropicModelInfo {
         id: "claude-haiku-4-5",
         family: "Haiku 4.5",
         context_tokens: 200_000,
         latest: true,
+        pricing: HAIKU_PRICING,
+        pricing_1m: None,
     },
     AnthropicModelInfo {
         id: "claude-opus-4-7",
         family: "Opus 4.7",
         context_tokens: 1_000_000,
         latest: false,
+        pricing: OPUS_PRICING,
+        pricing_1m: Some(OPUS_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-6",
         family: "Opus 4.6",
         context_tokens: 1_000_000,
         latest: false,
+        pricing: OPUS_PRICING,
+        pricing_1m: Some(OPUS_PRICING),
     },
 ];
 
@@ -96,6 +165,7 @@ pub fn default_anthropic_family_label() -> Option<&'static str> {
         .map(|m| m.family)
 }
 
+/// Default Claude Code CLI flags applied to every session.
 pub const DEFAULT_FLAGS: &[&str] = &[
     // SECURITY RATIONALE: --dangerously-skip-permissions is safe in this context because:
     // 1. Claude runs in an isolated container (Lima VM / WSL2) — kernel-level isolation
@@ -126,6 +196,7 @@ pub const DEFAULT_FLAGS: &[&str] = &[
     "summarized",
 ];
 
+/// Base environment variables injected into every Claude container.
 pub fn base_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
     env.insert("CLAUDE_CODE_ENABLE_TELEMETRY".into(), "0".into());
@@ -457,6 +528,50 @@ mod tests {
                     m.id
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_model_has_well_formed_pricing() {
+        // The Desktop cost meter derives from these numbers — a zero or
+        // inverted rate would render a misleading cost. Guard the business
+        // invariants (cache-read cheaper than input, cache-write dearer)
+        // for every catalog entry and its 1M variant.
+        fn check(label: &str, p: &ModelPricing) {
+            assert!(p.input > 0.0, "{label}: input rate must be positive");
+            assert!(p.output > 0.0, "{label}: output rate must be positive");
+            assert!(
+                p.cached_input < p.input,
+                "{label}: cache-read must be cheaper than input"
+            );
+            assert!(
+                p.cache_write > p.input,
+                "{label}: cache-write must be dearer than input"
+            );
+        }
+        for m in ANTHROPIC_MODELS {
+            check(m.id, &m.pricing);
+            if let Some(p) = &m.pricing_1m {
+                check(m.id, p);
+            }
+        }
+    }
+
+    #[test]
+    fn one_m_pricing_present_iff_million_token_context() {
+        // The `[1m]` id only exists for 1M-context families (the suffix that
+        // unlocks the upgraded window — see `anthropic_default_models_env`).
+        // A `pricing_1m` on a sub-1M model, or its absence on a 1M model,
+        // would leave the cost meter unable to price the served id.
+        for m in ANTHROPIC_MODELS {
+            let is_million = m.context_tokens >= 1_000_000;
+            assert_eq!(
+                m.pricing_1m.is_some(),
+                is_million,
+                "{}: pricing_1m presence must mirror context_tokens >= 1M (was {})",
+                m.id,
+                m.context_tokens
+            );
         }
     }
 

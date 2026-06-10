@@ -1,6 +1,9 @@
 // SharePoint OAuth Device Code Flow. Two-file persistence per ADR-060.
 
-use crate::oauth_flow::{self, save_credential_file, DeviceCodeInfo, FlowRegistry};
+use crate::oauth_flow::{
+    self, emit_error, save_credential_file, DeviceCodeInfo, DeviceCodeProvider, FlowRegistry,
+    PollStep, ProgressStatus,
+};
 use crate::types::check_project;
 use serde::Deserialize;
 use std::time::Duration;
@@ -159,9 +162,7 @@ fn classify_sharepoint_response(status: u16, bytes: &[u8]) -> Result<(), oauth_f
         return Err(match err.error.as_str() {
             "authorization_pending" => PollAction::KeepPolling,
             "slow_down" => PollAction::SlowDown,
-            "expired_token" => {
-                PollAction::Expired("Device code expired — please try again".to_string())
-            }
+            "expired_token" => PollAction::Expired(oauth_flow::DEVICE_CODE_EXPIRED_MSG.to_string()),
             "authorization_declined" => {
                 PollAction::Failed("Authorization was declined".to_string())
             }
@@ -221,6 +222,55 @@ fn save_tokens_in(
         },
     )?;
     Ok(())
+}
+
+/// SharePoint/Microsoft device-code polling behaviour. Drives the shared
+/// `run_device_code_poll` loop in `oauth_flow`.
+struct SharepointProvider {
+    project: String,
+    client_id: String,
+    tenant_id: String,
+    device_code: String,
+    token_url: String,
+}
+
+impl DeviceCodeProvider for SharepointProvider {
+    fn token_request(&self, client: &reqwest::Client) -> reqwest::RequestBuilder {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+            .append_pair("client_id", &self.client_id)
+            .append_pair("device_code", &self.device_code)
+            .finish();
+        client
+            .post(&self.token_url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body)
+    }
+
+    fn handle_token_response(
+        &self,
+        http_status: reqwest::StatusCode,
+        body_bytes: &[u8],
+    ) -> PollStep {
+        match classify_sharepoint_response(http_status.as_u16(), body_bytes) {
+            Ok(()) => {
+                let tokens: MsTokenResponse = match serde_json::from_slice(body_bytes) {
+                    Ok(t) => t,
+                    Err(e) => return emit_error(format!("Failed to parse token response: {e}")),
+                };
+                if let Err(e) =
+                    save_tokens(&self.project, &self.client_id, &self.tenant_id, &tokens)
+                {
+                    return emit_error(format!("Failed to save tokens: {e}"));
+                }
+                PollStep::Emit {
+                    status: ProgressStatus::Success,
+                    message: "Authentication successful".to_string(),
+                }
+            }
+            Err(action) => action.into_step(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -300,36 +350,29 @@ pub async fn start_sharepoint_oauth(
         request_id: request_id.clone(),
     };
 
-    let poll_project = project.clone();
-    let poll_client_id = client_id.clone();
-    let poll_tenant_id = tenant_id.clone();
-    let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
-    let form_body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
-        .append_pair("client_id", &client_id)
-        .append_pair("device_code", &dc_resp.device_code)
-        .finish();
-
-    oauth_flow::run_device_poll(
-        app,
-        &FLOW_STATE,
-        request_id,
-        oauth_flow::DevicePollConfig {
-            client: http_client,
-            token_url,
-            form_body,
-            accept_json: false,
-            interval_secs: dc_resp.interval,
-            expires_in_secs: dc_resp.expires_in,
-        },
-        cancel_token,
-        classify_sharepoint_response,
-        move |bytes| {
-            let tokens: MsTokenResponse =
-                serde_json::from_slice(bytes).map_err(|e| format!("parse token: {e}"))?;
-            save_tokens(&poll_project, &poll_client_id, &poll_tenant_id, &tokens)
-        },
+    let token_url = format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        tenant_id
     );
+    let provider = SharepointProvider {
+        project: project.clone(),
+        client_id: client_id.clone(),
+        tenant_id: tenant_id.clone(),
+        device_code: dc_resp.device_code.clone(),
+        token_url,
+    };
+    tokio::spawn(oauth_flow::run_device_code_poll(
+        oauth_flow::DeviceCodePoll {
+            app: app.clone(),
+            registry: &FLOW_STATE,
+            cancel: cancel_token.clone(),
+            request_id: request_id.clone(),
+            http_client,
+            interval: dc_resp.interval,
+            expires_in: dc_resp.expires_in,
+        },
+        provider,
+    ));
 
     Ok(info)
 }
@@ -343,6 +386,7 @@ pub fn cancel_sharepoint_oauth() {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // -- Tenant ID validation --
 
@@ -581,6 +625,74 @@ mod tests {
         }
     }
 
+    /// SSOT parity guard: the written key set must equal the schema that
+    /// `mcp-servers/oauth/src/oauth-state.ts::assertOAuthState` requires. A field
+    /// rename on either side (e.g. `refreshToken` → `refresh_token`) breaks token
+    /// refresh at runtime with no other guard — this pins it at build time.
+    #[test]
+    fn save_oauth_state_key_set_matches_documented_ts_schema() {
+        // Mirror of OAuthState in oauth-state.ts (top-level + providerData keys).
+        const EXPECTED_TOP_LEVEL: &[&str] = &[
+            "provider",
+            "providerData",
+            "scopes",
+            "grantedScopes",
+            "refreshToken",
+            "expiresAt",
+            "lastRefreshAt",
+        ];
+        const EXPECTED_PROVIDER_DATA: &[&str] = &["clientId", "tenantId"];
+
+        let tmp = tempfile::tempdir().unwrap();
+        save_oauth_state_in(
+            tmp.path(),
+            "test-project",
+            "sharepoint",
+            &SpOAuthState {
+                client_id: "11111111-1111-1111-1111-111111111111",
+                tenant_id: "common",
+                refresh_token: "rt-secret",
+                scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+                expires_in: 3600,
+            },
+        )
+        .unwrap();
+
+        let path = speedwave_runtime::plugin::oauth_state_file_in(
+            tmp.path(),
+            "test-project",
+            "sharepoint",
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        let top_keys: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected_top: std::collections::BTreeSet<&str> =
+            EXPECTED_TOP_LEVEL.iter().copied().collect();
+        assert_eq!(
+            top_keys, expected_top,
+            "oauth.json top-level keys drifted from assertOAuthState schema"
+        );
+
+        let pd_keys: std::collections::BTreeSet<&str> = json["providerData"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected_pd: std::collections::BTreeSet<&str> =
+            EXPECTED_PROVIDER_DATA.iter().copied().collect();
+        assert_eq!(
+            pd_keys, expected_pd,
+            "oauth.json providerData keys drifted from the Microsoft schema"
+        );
+    }
+
     #[test]
     fn save_oauth_state_rejects_oversized_refresh_token() {
         let tmp = tempfile::tempdir().unwrap();
@@ -709,6 +821,113 @@ mod tests {
                 assert!(msg.contains("HTTP 503"), "status must surface: {msg}");
             }
             _ => panic!("expected Failed with HTTP status"),
+        }
+    }
+
+    // -- SharepointProvider::handle_token_response classification --
+
+    fn provider() -> SharepointProvider {
+        SharepointProvider {
+            project: "test-project".to_string(),
+            client_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            tenant_id: "common".to_string(),
+            device_code: "dc".to_string(),
+            token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token".to_string(),
+        }
+    }
+
+    fn ok_status() -> reqwest::StatusCode {
+        reqwest::StatusCode::OK
+    }
+
+    #[test]
+    fn provider_authorization_pending_keeps_polling() {
+        let body = br#"{"error":"authorization_pending"}"#;
+        match provider().handle_token_response(ok_status(), body) {
+            PollStep::KeepPolling { slow_down } => assert!(!slow_down),
+            PollStep::Emit { .. } => panic!("pending must keep polling"),
+        }
+    }
+
+    #[test]
+    fn provider_slow_down_keeps_polling_with_slow_down() {
+        let body = br#"{"error":"slow_down"}"#;
+        match provider().handle_token_response(ok_status(), body) {
+            PollStep::KeepPolling { slow_down } => assert!(slow_down),
+            PollStep::Emit { .. } => panic!("slow_down must keep polling"),
+        }
+    }
+
+    #[test]
+    fn provider_expired_token_emits_canonical_expired_message() {
+        let body = br#"{"error":"expired_token"}"#;
+        match provider().handle_token_response(ok_status(), body) {
+            PollStep::Emit { status, message } => {
+                assert_eq!(status, ProgressStatus::Expired);
+                assert_eq!(message, oauth_flow::DEVICE_CODE_EXPIRED_MSG);
+            }
+            PollStep::KeepPolling { .. } => panic!("expired_token must terminate"),
+        }
+    }
+
+    #[test]
+    fn provider_declined_emits_error() {
+        let body = br#"{"error":"authorization_declined"}"#;
+        match provider().handle_token_response(ok_status(), body) {
+            PollStep::Emit { status, message } => {
+                assert_eq!(status, ProgressStatus::Error);
+                assert!(message.contains("declined"));
+            }
+            PollStep::KeepPolling { .. } => panic!("declined must terminate"),
+        }
+    }
+
+    #[test]
+    fn provider_unknown_error_redacts_description() {
+        let body =
+            br#"{"error":"interaction_required","error_description":"AADSTS50079: leak here"}"#;
+        match provider().handle_token_response(ok_status(), body) {
+            PollStep::Emit { status, message } => {
+                assert_eq!(status, ProgressStatus::Error);
+                assert_eq!(message, "AADSTS50079");
+                assert!(!message.contains("leak"));
+            }
+            PollStep::KeepPolling { .. } => panic!("unknown error must terminate"),
+        }
+    }
+
+    #[test]
+    fn provider_unparseable_body_emits_unexpected_error() {
+        let body = b"<html>nonsense</html>";
+        match provider().handle_token_response(ok_status(), body) {
+            PollStep::Emit { status, message } => {
+                assert_eq!(status, ProgressStatus::Error);
+                assert!(message.contains("Unexpected response from Microsoft"));
+            }
+            PollStep::KeepPolling { .. } => panic!("garbage body must terminate"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn provider_success_saves_tokens_and_emits_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+
+        let body = br#"{"access_token":"at-secret","refresh_token":"rt-secret","token_type":"Bearer","expires_in":3600}"#;
+        match provider().handle_token_response(ok_status(), body) {
+            PollStep::Emit { status, .. } => assert_eq!(status, ProgressStatus::Success),
+            PollStep::KeepPolling { .. } => panic!("success must terminate"),
+        }
+        let at_path = speedwave_runtime::plugin::token_dir("test-project", "sharepoint")
+            .unwrap()
+            .join("access_token");
+        assert_eq!(std::fs::read_to_string(&at_path).unwrap(), "at-secret");
+
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
         }
     }
 }

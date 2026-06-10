@@ -1,12 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { ToolNormalizerService } from './tool-normalizer.service';
+import { LoggerService } from './logger.service';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
 
 describe('ToolNormalizerService', () => {
   let service: ToolNormalizerService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(() => {
-    TestBed.configureTestingModule({ providers: [ToolNormalizerService] });
+    mockLogger = makeMockLogger();
+    TestBed.configureTestingModule({
+      providers: [ToolNormalizerService, { provide: LoggerService, useValue: mockLogger }],
+    });
     service = TestBed.inject(ToolNormalizerService);
   });
 
@@ -85,16 +94,12 @@ describe('ToolNormalizerService', () => {
     expect(result).toEqual({ kind: 'generic', raw_json: json });
   });
 
-  it('returns generic for invalid JSON and logs a warning', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('returns generic for invalid JSON and logs a warning via LoggerService', () => {
     const result = service.normalize('Bash', 'not json');
     expect(result).toEqual({ kind: 'generic', raw_json: 'not json' });
-    expect(warnSpy).toHaveBeenCalledWith(
-      'Failed to parse tool input for "Bash":',
-      'not json',
-      expect.any(SyntaxError)
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to parse tool input for "Bash": not json')
     );
-    warnSpy.mockRestore();
   });
 
   it('returns generic for empty string', () => {

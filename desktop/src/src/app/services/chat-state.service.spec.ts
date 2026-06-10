@@ -8,16 +8,23 @@ import {
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
+import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import type { StreamChunk } from '../models/chat';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
+
 describe('ChatStateService', () => {
   let service: ChatStateService;
   let mockTauri: MockTauriService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(() => {
     mockTauri = new MockTauriService();
+    mockLogger = makeMockLogger();
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
@@ -43,7 +50,11 @@ describe('ChatStateService', () => {
     };
 
     TestBed.configureTestingModule({
-      providers: [ChatStateService, { provide: TauriService, useValue: mockTauri }],
+      providers: [
+        ChatStateService,
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     });
 
     service = TestBed.inject(ChatStateService);
@@ -54,11 +65,10 @@ describe('ChatStateService', () => {
   });
 
   describe('init', () => {
-    it('logs startChatSession error without blocking projectState', async () => {
+    it('surfaces a non-auth startChatSession failure to projectState and the logger', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
 
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_chat') throw new Error('chat backend crashed');
         if (cmd === 'list_projects')
@@ -71,12 +81,34 @@ describe('ChatStateService', () => {
       await service.init();
       // startChatSession is fire-and-forget — flush microtask queue
       await new Promise((r) => setTimeout(r, 0));
-      // start_chat failure should NOT block projectState — containers are still running,
-      // only the Claude session failed (rate limit, OOM, etc). sendMessage auto-retry
-      // handles session recovery.
-      expect(projectState.status).toBe('ready');
-      expect(errorSpy).toHaveBeenCalledWith('Failed to start chat session:', expect.any(Error));
-      errorSpy.mockRestore();
+
+      // A non-auth start_chat failure used to be silent (console.error only).
+      // It must now surface in the UI so the chat is not a dead surface.
+      expect(projectState.status).toBe('error');
+      expect(projectState.error).toContain('chat backend crashed');
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to start chat session: Error: chat backend crashed')
+      );
+    });
+
+    it('maps a "not authenticated" startChatSession failure to auth_required (not error)', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat') throw new Error('not authenticated');
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(projectState.status).toBe('auth_required');
+      expect(mockLogger.error).not.toHaveBeenCalled();
     });
 
     it('only runs init once', async () => {
@@ -569,15 +601,15 @@ describe('ChatStateService', () => {
     });
 
     it('does not notify on unknown chunk type', () => {
-      const cb = vi.fn();
-      service.onChange(cb);
+      // No state change ⇒ no rebuild ⇒ the state() signal keeps its identity.
+      const before = service.state();
 
       service.handleStreamChunk({
         chunk_type: 'UnknownFutureType' as StreamChunk['chunk_type'],
         data: {},
       } as StreamChunk);
 
-      expect(cb).not.toHaveBeenCalled();
+      expect(service.state()).toBe(before);
       expect(service.currentBlocks).toHaveLength(0);
       expect(service.isStreaming).toBe(false);
     });
@@ -817,13 +849,18 @@ describe('ChatStateService', () => {
       expect(service.sessionStats).toBeNull();
     });
 
-    it('notifies change listeners', () => {
-      const cb = vi.fn();
-      service.onChange(cb);
+    it('rebuilds the state-tree signal', () => {
+      service._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'x' } });
+      expect(service.state().entries.length).toBeGreaterThan(0);
 
       service.resetForNewConversation();
 
-      expect(cb).toHaveBeenCalled();
+      // Reset wipes legacy fields and the rebuild projects an empty tree.
+      expect(service.state().entries).toEqual([]);
+      expect(service.state().is_streaming).toBe(false);
     });
   });
 
@@ -838,24 +875,25 @@ describe('ChatStateService', () => {
     });
   });
 
-  describe('onChange', () => {
-    it('notifies listeners on stream chunk', () => {
-      const cb = vi.fn();
-      service.onChange(cb);
-
+  describe('state-tree signal rebuild on mutation', () => {
+    it('rebuilds the signal on a stream chunk so projections refresh', () => {
+      const before = service.state();
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
 
-      expect(cb).toHaveBeenCalled();
+      // A mutating chunk rebuilds the tree to a fresh identity and the
+      // streaming projection reflects the new content.
+      expect(service.state()).not.toBe(before);
+      expect(service.currentBlocksFromState()).toEqual([{ type: 'text', content: 'hi' }]);
+      expect(service.isStreamingFromState()).toBe(true);
     });
 
-    it('returns unsubscribe function', () => {
-      const cb = vi.fn();
-      const unsub = service.onChange(cb);
-      unsub();
-
-      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
-
-      expect(cb).not.toHaveBeenCalled();
+    it('leaves the signal untouched when a chunk produces no state change', () => {
+      const before = service.state();
+      service.handleStreamChunk({
+        chunk_type: 'UnknownFutureType' as StreamChunk['chunk_type'],
+        data: {},
+      } as StreamChunk);
+      expect(service.state()).toBe(before);
     });
   });
 
@@ -1100,6 +1138,36 @@ describe('ChatStateService', () => {
       };
       const recovered = stateBlocksToMessageBlocks(messageBlocksToState([block]));
       expect(recovered).toEqual([block]);
+    });
+  });
+
+  describe('stateBlocksToMessageBlocks unknown-kind handling (ADR-042 drift guard)', () => {
+    it('renders a placeholder error block instead of silently dropping an unknown kind', () => {
+      // Simulate a new Rust MessageBlock variant the TS union does not yet know.
+      const unknown = { kind: 'future_widget', payload: 42 } as unknown as Parameters<
+        typeof stateBlocksToMessageBlocks
+      >[0][number];
+
+      const out = stateBlocksToMessageBlocks([unknown]);
+
+      expect(out).toEqual([{ type: 'error', content: 'Unsupported message block: future_widget' }]);
+    });
+
+    it('preserves known blocks around an unknown one rather than aborting the loop', () => {
+      const known = { kind: 'text', content: 'hello' } as Parameters<
+        typeof stateBlocksToMessageBlocks
+      >[0][number];
+      const unknown = { kind: 'mystery' } as unknown as Parameters<
+        typeof stateBlocksToMessageBlocks
+      >[0][number];
+
+      const out = stateBlocksToMessageBlocks([known, unknown, known]);
+
+      expect(out).toEqual([
+        { type: 'text', content: 'hello' },
+        { type: 'error', content: 'Unsupported message block: mystery' },
+        { type: 'text', content: 'hello' },
+      ]);
     });
   });
 
@@ -1618,11 +1686,9 @@ describe('ChatStateService', () => {
       service._setState({
         messages: [{ role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 }],
       });
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const ok = service.copyMessage(0);
       expect(ok).toBe(false);
-      expect(warnSpy).toHaveBeenCalled();
-      warnSpy.mockRestore();
+      expect(mockLogger.warn).toHaveBeenCalled();
     });
   });
 
@@ -2071,8 +2137,8 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── ADR-042/043 — JSON Patch state-tree reducer ──────────────────────────
-  describe('state-tree signal + applyLogMsg', () => {
+  // ── ADR-042 — state-tree signal projections (legacy fields → tree) ──────
+  describe('state-tree signal projections', () => {
     it('initial state matches DEFAULT_STATE_TREE', () => {
       const s = service.state();
       expect(s.session_id).toBeNull();
@@ -2080,118 +2146,6 @@ describe('ChatStateService', () => {
       expect(s.is_streaming).toBe(false);
       expect(s.pending_queue).toBeNull();
       expect(s.session_totals.cost).toBe(0);
-    });
-
-    it('SessionStarted lifecycle commits session_id', () => {
-      service.applyLogMsg({ type: 'session_started', data: { session_id: 'abc-123' } });
-      expect(service.state().session_id).toBe('abc-123');
-    });
-
-    it('JsonPatch sets is_streaming to true via /is_streaming', () => {
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [{ op: 'replace', path: '/is_streaming', value: true }],
-      });
-      expect(service.state().is_streaming).toBe(true);
-    });
-
-    it('JsonPatch sequence stays consistent (apply then apply equals composed)', () => {
-      // Bring up an entry then replace its text — final state must match
-      // a single composed patch (associativity property).
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [
-          {
-            op: 'add',
-            path: '/entries/0',
-            value: {
-              index: 0,
-              role: 'assistant',
-              uuid: null,
-              uuid_status: 'pending',
-              blocks: [{ kind: 'text', content: '' }],
-              meta: null,
-              edited_at: null,
-              timestamp: 1,
-            },
-          },
-        ],
-      });
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [{ op: 'replace', path: '/entries/0/blocks/0/content', value: 'hi' }],
-      });
-      expect(service.state().entries).toHaveLength(1);
-      const entry = service.state().entries[0];
-      expect(entry.blocks[0]).toEqual({ kind: 'text', content: 'hi' });
-    });
-
-    it('Resync replaces the entire state-tree wholesale', () => {
-      service.applyLogMsg({
-        type: 'session_started',
-        data: { session_id: 'old' },
-      });
-      service.applyLogMsg({
-        type: 'resync',
-        data: {
-          session_id: 'replaced',
-          entries: [],
-          session_totals: {
-            input_tokens: 1,
-            output_tokens: 2,
-            cache_read_tokens: 3,
-            cache_write_tokens: 4,
-            cost: 0.5,
-            turn_count: 1,
-          },
-          pending_queue: null,
-          model: 'opus-4.7',
-          is_streaming: false,
-        },
-      });
-      const s = service.state();
-      expect(s.session_id).toBe('replaced');
-      expect(s.session_totals.input_tokens).toBe(1);
-      expect(s.model).toBe('opus-4.7');
-    });
-
-    it('SessionEnded forces is_streaming back to false', () => {
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [{ op: 'replace', path: '/is_streaming', value: true }],
-      });
-      expect(service.state().is_streaming).toBe(true);
-      service.applyLogMsg({ type: 'session_ended' });
-      expect(service.state().is_streaming).toBe(false);
-    });
-
-    it('Bad patch is dropped without throwing or mutating state', () => {
-      const before = service.state();
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [{ op: 'replace', path: '/missing/key/that/does/not/exist', value: 1 }],
-      });
-      warnSpy.mockRestore();
-      expect(service.state()).toBe(before);
-    });
-
-    it('subscribeToSession invokes subscribe_session and listens on the returned event', async () => {
-      const calls: Array<{ cmd: string; args: unknown }> = [];
-      const listenCalls: string[] = [];
-      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
-        calls.push({ cmd, args });
-        if (cmd === 'subscribe_session') return { event_name: 'chat_patch::sess-1' };
-        return undefined;
-      };
-      mockTauri.listen = (async (event: string, _handler: unknown) => {
-        listenCalls.push(event);
-        return () => undefined;
-      }) as typeof mockTauri.listen;
-
-      await service.subscribeToSession('sess-1');
-      expect(calls).toEqual([{ cmd: 'subscribe_session', args: { sessionId: 'sess-1' } }]);
-      expect(listenCalls).toEqual(['chat_patch::sess-1']);
     });
 
     it('messagesFromState mirrors messages getter after streaming a turn', () => {
@@ -2234,20 +2188,6 @@ describe('ChatStateService', () => {
       // _setState does NOT trigger notifyChange — drive a chunk to fire it.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'tick' } });
       expect(service.pendingQueueFromState()?.text).toBe('next');
-    });
-
-    it('subscribeToSession is idempotent for the same session id', async () => {
-      const calls: Array<{ cmd: string }> = [];
-      mockTauri.invokeHandler = async (cmd: string) => {
-        calls.push({ cmd });
-        if (cmd === 'subscribe_session') return { event_name: 'chat_patch::sess-x' };
-        return undefined;
-      };
-      mockTauri.listen = (async () => () => undefined) as typeof mockTauri.listen;
-      await service.subscribeToSession('sess-x');
-      await service.subscribeToSession('sess-x');
-      const subscribeCalls = calls.filter((c) => c.cmd === 'subscribe_session');
-      expect(subscribeCalls).toHaveLength(1);
     });
   });
 
@@ -2310,14 +2250,12 @@ describe('ChatStateService', () => {
     });
 
     it('logs at debug level on backend failure without throwing', async () => {
-      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_llm_config') throw new Error('backend gone');
         return undefined;
       };
       await expect(service.refreshLlmConfigCache()).resolves.toBeUndefined();
-      expect(debugSpy).toHaveBeenCalled();
-      debugSpy.mockRestore();
+      expect(mockLogger.debug).toHaveBeenCalled();
     });
 
     it('does not dedupe — every call hits the backend', async () => {

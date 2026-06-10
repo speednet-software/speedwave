@@ -9,32 +9,22 @@
  * @module host_exec/env
  */
 
+import { BASE_SAFE_ENV_KEYS } from '@speedwave/mcp-shared';
+
 /**
  * Environment variable names safe to pass through from the worker's environment
  * to a recipe child. Anything not on this list — and explicitly any
  * `HOST_EXEC_*` — is dropped. `PATH` here is the *recovered login-shell PATH*
  * the Tauri side passed to the worker (a GUI-launched Desktop app's bare PATH
  * lacks `/opt/homebrew/bin` etc.).
+ *
+ * Built from the shared 14-key core ({@link BASE_SAFE_ENV_KEYS}) plus the extra
+ * keys build tooling needs (TERM, Windows locators, JVM/Go/Rust/Docker).
  */
 export const SAFE_ENV_KEYS: readonly string[] = [
-  // Process / shell environment
-  'PATH',
-  'HOME',
-  'USER',
-  'LOGNAME',
-  'SHELL',
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
+  ...BASE_SAFE_ENV_KEYS,
   // Terminal (some tools format differently with no TERM; harmless to pass)
   'TERM',
-  // macOS
-  'DEVELOPER_DIR',
-  'SDKROOT',
-  '__CF_USER_TEXT_ENCODING',
   // Windows
   'USERPROFILE',
   'SYSTEMROOT',

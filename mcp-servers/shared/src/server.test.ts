@@ -445,9 +445,11 @@ describe('server', () => {
         expect(response).toEqual({ status: 'error' });
       });
 
-      it('does not log health check error details when auth is configured', async () => {
+      it('logs health check failures even when auth is configured', async () => {
+        // Every prod worker sets auth, so health failures must still be logged
+        // (the former `!auth` gate silenced them where they matter most).
         const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-        const customHealthCheck = vi.fn().mockRejectedValue(new Error('Secret database info'));
+        const customHealthCheck = vi.fn().mockRejectedValue(new Error('connection refused'));
 
         const server = createMCPServer({
           name: 'auth-health-test',
@@ -465,9 +467,10 @@ describe('server', () => {
 
         await healthRoute.route.stack[0].handle(req, res);
 
-        // Should NOT log error details when auth is configured
         const errorCalls = consoleSpy.mock.calls.map((call) => call.join(' '));
-        expect(errorCalls.some((msg) => msg.includes('Secret database info'))).toBe(false);
+        expect(
+          errorCalls.some((msg) => msg.includes('[auth-health-test] Health check failed'))
+        ).toBe(true);
 
         consoleSpy.mockRestore();
       });

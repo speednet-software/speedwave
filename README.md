@@ -104,6 +104,7 @@ graph TB
 
 | Topic                  | Link                                                                             |
 | ---------------------- | -------------------------------------------------------------------------------- |
+| Documentation index    | [docs/](docs/README.md)                                                          |
 | Getting started        | [docs/getting-started/](docs/getting-started/README.md)                          |
 | Architecture           | [docs/architecture/](docs/architecture/README.md)                                |
 | Security model         | [docs/architecture/security.md](docs/architecture/security.md)                   |

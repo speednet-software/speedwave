@@ -268,7 +268,7 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
         this.projects.set(result.projects);
         this.activeProject.set(result.active_project);
       } catch (err) {
-        console.error('project settled: failed to refresh project list:', err);
+        this.logger.error(`project settled: failed to refresh project list: ${String(err)}`);
       }
     });
   }

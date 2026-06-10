@@ -1,3 +1,5 @@
+//! Host OS prerequisite checks (virtualization, WSL2/Lima availability).
+
 use std::fmt;
 
 /// Compile-time enumeration of OS prerequisite rules.
@@ -18,8 +20,11 @@ impl fmt::Display for PrereqRule {
 /// A single OS prerequisite violation with actionable remediation.
 #[derive(Debug)]
 pub struct PrereqViolation {
+    /// Which prerequisite rule was violated.
     pub rule: PrereqRule,
+    /// Human-readable description of the violation.
     pub message: String,
+    /// Actionable remediation steps.
     pub remediation: &'static str,
 }
 
