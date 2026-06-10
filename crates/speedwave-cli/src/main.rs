@@ -21,6 +21,14 @@ fn sanitize_output_line(line: &str) -> String {
     speedwave_runtime::log_sanitizer::sanitize(line)
 }
 
+/// Redact secrets from an error before it is interpolated into user-facing
+/// output. Error chains from config/compose/OAuth handling can carry tokens;
+/// sanitizing at the interpolation site (not only in [`emit`]) keeps the
+/// diagnostic useful while guaranteeing no secret reaches the terminal.
+fn redact_err(e: &impl std::fmt::Display) -> String {
+    sanitize_output_line(&e.to_string())
+}
+
 /// Single output sink. CLI user-facing output legitimately goes to
 /// stdout/stderr (per logging.md); routing every `out!`/`err!` through this
 /// one function localizes the print lint here instead of a crate-level allow.
@@ -385,6 +393,7 @@ fn run_self_update() -> anyhow::Result<()> {
         out!("Updated to version {}.", status.version());
         out!("Rebuilding container images...");
         if let Err(e) = run_rebuild(&exe_path) {
+            let e = redact_err(&e);
             err!("Binary updated successfully, but container rebuild failed: {e}");
             std::process::exit(1);
         }
@@ -514,6 +523,7 @@ fn main() -> anyhow::Result<()> {
     // Handle `speedwave self-update` before anything else
     if action == CliAction::SelfUpdate {
         if let Err(e) = run_self_update() {
+            let e = redact_err(&e);
             err!("Self-update failed: {e}");
             std::process::exit(1);
         }
@@ -578,7 +588,7 @@ fn main() -> anyhow::Result<()> {
             runtime_not_available();
         }
         let user_config = config::load_user_config().unwrap_or_else(|e| {
-            err!("Failed to load config: {e}");
+            err!("Failed to load config: {err}", err = redact_err(&e));
             std::process::exit(1);
         });
         let project_name = resolve_action_project(&action, &user_config)?;
@@ -593,6 +603,7 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(0);
             }
             Err(e) => {
+                let e = redact_err(&e);
                 err!("Container update failed: {e}");
                 std::process::exit(1);
             }
@@ -604,7 +615,7 @@ fn main() -> anyhow::Result<()> {
     // CLAUDE_HOME mount. No runtime needed.
     if let CliAction::Logout(_) = action {
         let user_config = config::load_user_config().unwrap_or_else(|e| {
-            err!("Failed to load config: {e}");
+            err!("Failed to load config: {err}", err = redact_err(&e));
             std::process::exit(1);
         });
         let project_name = resolve_action_project(&action, &user_config)?;
@@ -795,7 +806,7 @@ fn main() -> anyhow::Result<()> {
 
     // Load config once — used for both project resolution and compose rendering
     let user_config = config::load_user_config().unwrap_or_else(|e| {
-        err!("Failed to load config: {e}");
+        err!("Failed to load config: {err}", err = redact_err(&e));
         std::process::exit(1);
     });
 
@@ -2138,5 +2149,15 @@ mod tests {
     fn emit_output_line_passes_normal_text_through() {
         let out = sanitize_output_line("Project 'demo' registered at /workspace");
         assert_eq!(out, "Project 'demo' registered at /workspace");
+    }
+
+    #[test]
+    fn redact_err_strips_secrets_from_error_chains() {
+        // An error carrying a token must be redacted before it is interpolated
+        // into an `err!`/`out!` line (config/compose/OAuth error chains).
+        let err = anyhow::anyhow!("compose render failed: Authorization: Bearer sk-leak-xyz");
+        let red = redact_err(&err);
+        assert!(!red.contains("sk-leak-xyz"), "leaked: {red}");
+        assert!(red.contains("REDACTED"), "not redacted: {red}");
     }
 }
