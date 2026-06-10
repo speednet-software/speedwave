@@ -304,7 +304,7 @@ describe('Context7Client error mapping', () => {
         },
       });
     await expect(client.searchLibraries('react', 'q')).rejects.toThrow(
-      /Tier: pro\. Resets at 2026/
+      /Tier: pro\. Resets at \d{4}/
     );
   });
 

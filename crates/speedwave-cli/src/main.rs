@@ -14,15 +14,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod paste_watcher;
 
+/// Redact secrets from one CLI output line via the `log_sanitizer` SSOT.
+/// Split out from [`emit`] so the redaction is unit-testable without
+/// capturing stdout.
+fn sanitize_output_line(line: &str) -> String {
+    speedwave_runtime::log_sanitizer::sanitize(line)
+}
+
 /// Single output sink. CLI user-facing output legitimately goes to
 /// stdout/stderr (per logging.md); routing every `out!`/`err!` through this
 /// one function localizes the print lint here instead of a crate-level allow.
+/// Every line passes through the `log_sanitizer` SSOT so a secret can never
+/// reach the terminal even if an upstream error string carries one.
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 fn emit(to_stderr: bool, args: std::fmt::Arguments<'_>) {
+    let line = sanitize_output_line(&args.to_string());
     if to_stderr {
-        eprintln!("{args}");
+        eprintln!("{line}");
     } else {
-        println!("{args}");
+        println!("{line}");
     }
 }
 
@@ -2111,4 +2121,22 @@ mod tests {
     // ignores args, but Windows has no built-in that exits non-zero when
     // given an arbitrary argument. The nonexistent-binary test covers the
     // Windows error path.
+
+    #[test]
+    fn emit_output_line_redacts_secrets() {
+        // A Bearer token leaked into an error string must never reach the
+        // terminal — every out!/err! line goes through this sanitizer.
+        let redacted = sanitize_output_line("Failed: Bearer sk-secret-value-123");
+        assert!(
+            !redacted.contains("sk-secret-value-123"),
+            "leaked: {redacted}"
+        );
+        assert!(redacted.contains("REDACTED"), "not redacted: {redacted}");
+    }
+
+    #[test]
+    fn emit_output_line_passes_normal_text_through() {
+        let out = sanitize_output_line("Project 'demo' registered at /workspace");
+        assert_eq!(out, "Project 'demo' registered at /workspace");
+    }
 }
