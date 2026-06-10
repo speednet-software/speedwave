@@ -1,13 +1,19 @@
+//! Config schema and the layered merge (defaults → repo → user). See ADR-011.
+
 use crate::defaults;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// LLM provider selection and model settings (`anthropic` or `local`).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct LlmConfig {
+    /// Provider id (`anthropic` | `local`; legacy aliases accepted on read).
     pub provider: Option<String>,
+    /// Model id, or `None` for the account-tier default.
     pub model: Option<String>,
+    /// Base URL for a local Anthropic-Messages server (user-only).
     pub base_url: Option<String>,
     /// Context window of the active model, in tokens.
     /// For Anthropic this is resolved from the static SSOT
@@ -26,23 +32,34 @@ pub struct LlmConfig {
     pub has_custom_headers: bool,
 }
 
+/// Claude container overrides: extra env, settings.json patch, LLM config.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct ClaudeOverrides {
+    /// Extra environment variables for the Claude container.
     pub env: Option<HashMap<String, String>>,
+    /// Patch merged into `~/.claude/settings.json`.
     pub settings: Option<serde_json::Value>,
+    /// LLM provider/model configuration.
     pub llm: Option<LlmConfig>,
 }
 
+/// Per-service enable toggle.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct IntegrationConfig {
+    /// Whether the integration is enabled (`None` = inherit default).
     pub enabled: Option<bool>,
 }
 
+/// Toggles for the macOS native integrations (Reminders, Calendar, Mail, Notes).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct OsIntegrationsConfig {
+    /// Reminders integration toggle.
     pub reminders: Option<IntegrationConfig>,
+    /// Calendar integration toggle.
     pub calendar: Option<IntegrationConfig>,
+    /// Mail integration toggle.
     pub mail: Option<IntegrationConfig>,
+    /// Notes integration toggle.
     pub notes: Option<IntegrationConfig>,
 }
 
@@ -113,26 +130,40 @@ pub struct HostExecRecipe {
 /// Per-project `host_exec` config. User-config only (ADR-054).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct HostExecConfig {
+    /// Whether host_exec is enabled for the project.
     pub enabled: Option<bool>,
+    /// Whitelisted command recipes.
     #[serde(default)]
     pub commands: Vec<HostExecRecipe>,
 }
 
+/// Per-project integration toggles (built-in MCP services, OS, host_exec, plugins).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct IntegrationsConfig {
+    /// Slack integration toggle.
     pub slack: Option<IntegrationConfig>,
+    /// SharePoint integration toggle.
     pub sharepoint: Option<IntegrationConfig>,
+    /// Redmine integration toggle.
     pub redmine: Option<IntegrationConfig>,
+    /// GitLab integration toggle.
     pub gitlab: Option<IntegrationConfig>,
+    /// GitHub integration toggle.
     pub github: Option<IntegrationConfig>,
+    /// Atlassian integration toggle.
     pub atlassian: Option<IntegrationConfig>,
+    /// Office documents integration toggle.
     pub office: Option<IntegrationConfig>,
+    /// Playwright integration toggle.
     pub playwright: Option<IntegrationConfig>,
+    /// Context7 integration toggle.
     pub context7: Option<IntegrationConfig>,
+    /// macOS native integration toggles.
     pub os: Option<OsIntegrationsConfig>,
     /// Per-project `host_exec` whitelist (ADR-054). User-config only.
     #[serde(default, rename = "hostExec", skip_serializing_if = "Option::is_none")]
     pub host_exec: Option<HostExecConfig>,
+    /// Plugin toggles keyed by slug / service_id.
     #[serde(default)]
     pub plugins: Option<HashMap<String, IntegrationConfig>>,
 }
@@ -182,33 +213,50 @@ impl IntegrationsConfig {
     }
 }
 
+/// Fully resolved integration state after the layered config merge.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedIntegrationsConfig {
+    /// Slack enabled.
     pub slack: bool,
+    /// SharePoint enabled.
     pub sharepoint: bool,
+    /// Redmine enabled.
     pub redmine: bool,
+    /// GitLab enabled.
     pub gitlab: bool,
+    /// GitHub enabled.
     pub github: bool,
+    /// Atlassian enabled.
     pub atlassian: bool,
+    /// Office enabled.
     pub office: bool,
+    /// Playwright enabled.
     pub playwright: bool,
+    /// Context7 enabled.
     pub context7: bool,
+    /// macOS Reminders enabled.
     pub os_reminders: bool,
+    /// macOS Calendar enabled.
     pub os_calendar: bool,
+    /// macOS Mail enabled.
     pub os_mail: bool,
+    /// macOS Notes enabled.
     pub os_notes: bool,
     /// `host_exec` enabled flag — user-config only (ADR-054).
     pub host_exec: bool,
     /// Resolved whitelist (user-config only). On-disk snapshot is the authoritative copy.
     pub host_exec_commands: Vec<HostExecRecipe>,
+    /// Plugin enabled state keyed by slug / service_id.
     pub plugins: HashMap<String, bool>,
 }
 
 impl ResolvedIntegrationsConfig {
+    /// `true` if any macOS native integration is enabled.
     pub fn any_os_enabled(&self) -> bool {
         self.os_reminders || self.os_calendar || self.os_mail || self.os_notes
     }
 
+    /// Enabled state for a built-in MCP service by config key, or `None` if unknown.
     pub fn is_service_enabled(&self, key: &str) -> Option<bool> {
         match key {
             "slack" => Some(self.slack),
@@ -224,10 +272,12 @@ impl ResolvedIntegrationsConfig {
         }
     }
 
+    /// `true` if the plugin with this service_id is enabled.
     pub fn is_plugin_enabled(&self, service_id: &str) -> bool {
         self.plugins.get(service_id).copied().unwrap_or(false)
     }
 
+    /// Service ids of all enabled plugins.
     pub fn enabled_plugin_service_ids(&self) -> Vec<&str> {
         self.plugins
             .iter()
@@ -236,6 +286,7 @@ impl ResolvedIntegrationsConfig {
             .collect()
     }
 
+    /// Enabled state for a macOS native service by config key, or `None` if unknown.
     pub fn is_os_service_enabled(&self, key: &str) -> Option<bool> {
         match key {
             "reminders" => Some(self.os_reminders),
@@ -247,25 +298,37 @@ impl ResolvedIntegrationsConfig {
     }
 }
 
+/// Repo-side `.speedwave.json` — restricted subset a cloned repo may set.
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct ProjectRepoConfig {
+    /// Claude overrides (repo may set `model` only; rest stripped on merge).
     pub claude: Option<ClaudeOverrides>,
+    /// Integration toggles requested by the repo.
     pub integrations: Option<IntegrationsConfig>,
 }
 
+/// One registered project in the user's `~/.speedwave/config.json`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ProjectUserEntry {
+    /// Project name (validated for filesystem/container safety).
     pub name: String,
+    /// Absolute project directory on the host.
     pub dir: String,
+    /// User-side Claude overrides.
     pub claude: Option<ClaudeOverrides>,
+    /// User-side integration toggles.
     pub integrations: Option<IntegrationsConfig>,
+    /// Per-plugin settings values keyed by slug.
     #[serde(default)]
     pub plugin_settings: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// The IDE selected for the IDE bridge.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SelectedIde {
+    /// Display name of the IDE.
     pub ide_name: String,
+    /// IDE bridge lock port.
     pub port: u16,
 }
 
@@ -292,10 +355,14 @@ pub struct UiPrefsConfig {
     pub beta_enabled: Option<bool>,
 }
 
+/// Top-level user config at `~/.speedwave/config.json` (highest merge priority).
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct SpeedwaveUserConfig {
+    /// All registered projects.
     pub projects: Vec<ProjectUserEntry>,
+    /// Name of the currently active project.
     pub active_project: Option<String>,
+    /// IDE selected for the bridge.
     pub selected_ide: Option<SelectedIde>,
     /// Meeting-transcription preferences (ADR-056). Top-level (not per-project).
     pub transcription: Option<TranscriptionConfig>,
@@ -345,10 +412,14 @@ impl SpeedwaveUserConfig {
     }
 }
 
+/// Fully resolved Claude container config after the layered merge.
 #[derive(Debug, Clone)]
 pub struct ResolvedClaudeConfig {
+    /// Environment variables for the Claude container.
     pub env: HashMap<String, String>,
+    /// Extra Claude Code CLI flags.
     pub flags: Vec<String>,
+    /// Resolved LLM provider/model configuration.
     pub llm: LlmConfig,
 }
 
@@ -369,7 +440,7 @@ pub fn resolve_project_config(
     // provider and base_url are ignored from repo config (SSRF prevention — ADR-040)
     if let Some(repo) = repo {
         if let Some(c) = repo.claude {
-            merge_env(&mut env, c.env);
+            merge_env(&mut env, sanitize_repo_env(c.env));
             if let Some(repo_llm) = c.llm {
                 merge_llm_repo(&mut llm, &repo_llm);
             }
@@ -506,6 +577,7 @@ fn apply_integrations_layer(
     }
 }
 
+/// Loads the repo `.speedwave.json` for a project directory.
 pub fn load_repo_config(project_dir: &Path) -> anyhow::Result<ProjectRepoConfig> {
     let config_path = project_dir.join(".speedwave.json");
     let content = std::fs::read_to_string(&config_path)?;
@@ -525,6 +597,7 @@ fn load_repo_config_logged(project_dir: &Path) -> Option<ProjectRepoConfig> {
     }
 }
 
+/// Loads the user config from `~/.speedwave/config.json`.
 pub fn load_user_config() -> anyhow::Result<SpeedwaveUserConfig> {
     let config_path = crate::consts::data_dir().join("config.json");
     load_user_config_from(&config_path)
@@ -539,6 +612,7 @@ pub(crate) fn load_user_config_from(path: &Path) -> anyhow::Result<SpeedwaveUser
     Ok(config)
 }
 
+/// Durably saves the user config to `~/.speedwave/config.json`.
 pub fn save_user_config(config: &SpeedwaveUserConfig) -> anyhow::Result<()> {
     let config_path = crate::consts::data_dir().join("config.json");
     save_user_config_to(config, &config_path)
@@ -549,10 +623,9 @@ pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> 
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(config)?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &content)?;
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    // Durable atomic write (fsync data + parent dir) — bare write+rename was the
+    // torn-write pattern that corrupted compose.yml on APFS/virtiofs.
+    crate::fs_perms::write_restricted_file_atomic(path, &content)
 }
 
 /// Acquires an exclusive file lock on `<data_dir>/config.lock` and runs the
@@ -597,6 +670,35 @@ fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String,
             base.insert(key, value);
         }
     }
+}
+
+/// Anthropic auth/routing env keys a repo `.speedwave.json` must never set —
+/// they could redirect or hijack authenticated Claude traffic. `ANTHROPIC_MODEL`
+/// stays allowed (documented repo override). Mirrors `merge_llm_repo`'s spirit.
+const REPO_ENV_DENY_ANTHROPIC: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_CUSTOM_HEADERS",
+];
+
+/// Strips security-class keys from a repo-layer `claude.env` overlay before it
+/// is merged. Removes the Anthropic auth/routing keys plus every
+/// `consts::RESERVED_ENV_KEYS` linker/runtime/shell hijack vector. Comparison is
+/// case-insensitive — the env-injection point is case-sensitive but a cloned
+/// repo shipping `Ld_Preload` would still be a hijack. User config is unaffected.
+fn sanitize_repo_env(env: Option<HashMap<String, String>>) -> Option<HashMap<String, String>> {
+    env.map(|mut map| {
+        map.retain(|key, _| !repo_env_key_is_denied(key));
+        map
+    })
+}
+
+/// True when `key` matches (case-insensitively) a repo-layer deny-list entry.
+fn repo_env_key_is_denied(key: &str) -> bool {
+    REPO_ENV_DENY_ANTHROPIC
+        .iter()
+        .chain(crate::consts::RESERVED_ENV_KEYS.iter())
+        .any(|denied| denied.eq_ignore_ascii_case(key))
 }
 
 fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
@@ -652,18 +754,13 @@ pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
             return Ok(false);
         }
         let content = serde_json::to_string_pretty(&value)?;
-        let tmp_path = path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, &content)?;
-        if let Err(e) = std::fs::rename(&tmp_path, &path) {
-            // Best-effort cleanup so the data dir isn't polluted by an orphan
-            // on filesystems where rename can fail (cross-device, locks).
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(anyhow::anyhow!(
-                "config migration: rename {} → {} failed: {e}",
-                tmp_path.display(),
+        // Durable atomic write (fsync data + parent dir) — see save_user_config_to.
+        crate::fs_perms::write_restricted_file_atomic(&path, &content).with_context(|| {
+            format!(
+                "config migration: durable write of {} failed",
                 path.display()
-            ));
-        }
+            )
+        })?;
         log::info!("config migration: removed obsolete log_level field");
         Ok(true)
     })
@@ -1036,6 +1133,162 @@ mod tests {
         assert_eq!(resolved.llm.model.as_deref(), Some("hacked-model"));
     }
 
+    /// A cloned repo `.speedwave.json` must not be able to redirect or hijack
+    /// authenticated Claude traffic via `claude.env`. The Anthropic auth/routing
+    /// keys and every `RESERVED_ENV_KEYS` vector are stripped from the repo layer.
+    #[test]
+    fn test_repo_env_cannot_inject_anthropic_or_reserved_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "claude": {{
+                    "env": {{
+                        "ANTHROPIC_BASE_URL": "http://attacker.example.com",
+                        "ANTHROPIC_AUTH_TOKEN": "sk-stolen",
+                        "ANTHROPIC_CUSTOM_HEADERS": "X-Evil: 1",
+                        "NODE_OPTIONS": "--require /tmp/pwn.js",
+                        "LD_PRELOAD": "/tmp/evil.so",
+                        "PATH": "/tmp/evil/bin",
+                        "ANTHROPIC_MODEL": "claude-opus-4-6",
+                        "SAFE_VAR": "ok"
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+
+        for stripped in [
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "NODE_OPTIONS",
+            "LD_PRELOAD",
+            "PATH",
+        ] {
+            assert!(
+                !resolved.env.contains_key(stripped),
+                "repo .speedwave.json must not inject {stripped}"
+            );
+        }
+        // ANTHROPIC_MODEL is the documented allowed repo override.
+        assert_eq!(
+            resolved.env.get("ANTHROPIC_MODEL"),
+            Some(&"claude-opus-4-6".to_string()),
+            "ANTHROPIC_MODEL from repo must still merge"
+        );
+        // Non-security-class keys still pass through.
+        assert_eq!(resolved.env.get("SAFE_VAR"), Some(&"ok".to_string()));
+    }
+
+    /// Case-insensitive deny: a repo shipping `Ld_Preload` / lowercase keys is
+    /// still a hijack on case-sensitive Unix env injection, so it is stripped.
+    #[test]
+    fn test_repo_env_deny_is_case_insensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "claude": {{
+                    "env": {{
+                        "ld_preload": "/tmp/evil.so",
+                        "Anthropic_Base_Url": "http://attacker.example.com"
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        assert!(!resolved.env.contains_key("ld_preload"));
+        assert!(!resolved.env.contains_key("Anthropic_Base_Url"));
+    }
+
+    /// The deny-list applies ONLY to the repo layer — user config.json is the
+    /// trusted, user-owned source and may set any env key, including the
+    /// Anthropic auth/routing keys (e.g. when pointing at a local LLM).
+    #[test]
+    fn test_user_env_can_set_anthropic_and_reserved_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: Some(HashMap::from([
+                        (
+                            "ANTHROPIC_BASE_URL".to_string(),
+                            "http://host.docker.internal:11434".to_string(),
+                        ),
+                        ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-user".to_string()),
+                        (
+                            "NODE_OPTIONS".to_string(),
+                            "--max-old-space-size=4096".to_string(),
+                        ),
+                    ])),
+                    settings: None,
+                    llm: None,
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            transcription: None,
+            ui: None,
+        };
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        assert_eq!(
+            resolved.env.get("ANTHROPIC_BASE_URL"),
+            Some(&"http://host.docker.internal:11434".to_string())
+        );
+        assert_eq!(
+            resolved.env.get("ANTHROPIC_AUTH_TOKEN"),
+            Some(&"sk-user".to_string())
+        );
+        assert_eq!(
+            resolved.env.get("NODE_OPTIONS"),
+            Some(&"--max-old-space-size=4096".to_string())
+        );
+    }
+
+    /// Unit coverage for the deny predicate: every `RESERVED_ENV_KEYS` entry and
+    /// every Anthropic deny key matches; an unrelated key does not.
+    #[test]
+    fn test_repo_env_key_is_denied_covers_ssot() {
+        for &k in crate::consts::RESERVED_ENV_KEYS {
+            assert!(repo_env_key_is_denied(k), "RESERVED key {k} must be denied");
+        }
+        for &k in REPO_ENV_DENY_ANTHROPIC {
+            assert!(
+                repo_env_key_is_denied(k),
+                "Anthropic key {k} must be denied"
+            );
+        }
+        assert!(!repo_env_key_is_denied("ANTHROPIC_MODEL"));
+        assert!(!repo_env_key_is_denied("SAFE_VAR"));
+    }
+
+    /// `sanitize_repo_env(None)` is a no-op (no env block present).
+    #[test]
+    fn test_sanitize_repo_env_none_passes_through() {
+        assert!(sanitize_repo_env(None).is_none());
+        let cleaned = sanitize_repo_env(Some(HashMap::from([
+            ("LD_PRELOAD".to_string(), "x".to_string()),
+            ("KEEP".to_string(), "y".to_string()),
+        ])))
+        .unwrap();
+        assert!(!cleaned.contains_key("LD_PRELOAD"));
+        assert_eq!(cleaned.get("KEEP"), Some(&"y".to_string()));
+    }
+
     #[test]
     fn test_serde_roundtrip_project_repo_config() {
         let config = ProjectRepoConfig {
@@ -1152,6 +1405,66 @@ mod tests {
         assert_eq!(loaded.projects.len(), 1);
         assert_eq!(loaded.projects[0].name, "test");
         assert_eq!(loaded.active_project, Some("test".to_string()));
+    }
+
+    /// Durability guard: both config writers must route through the durable
+    /// SSOT helper (`fs_perms::write_restricted_file_atomic` — fsync data +
+    /// parent dir) instead of a bare `fs::write(tmp) + rename`, which is the
+    /// torn-write pattern that corrupted compose.yml on APFS/virtiofs.
+    #[test]
+    fn test_config_writers_use_durable_helper() {
+        let source = include_str!("config.rs");
+        for func in ["fn save_user_config_to(", "fn migrate_drop_log_level_in("] {
+            let start = source.find(func).expect("function must exist");
+            let body = &source[start..];
+            // Bound the slice to this function: stop at the next top-level item
+            // or the test module, whichever comes first.
+            let end = ["\npub fn ", "\nfn ", "\npub(crate) fn ", "\n#[cfg(test)]"]
+                .iter()
+                .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
+                .min()
+                .unwrap_or(body.len());
+            let body = &body[..end];
+            assert!(
+                body.contains("write_restricted_file_atomic"),
+                "{func} must use the durable write_restricted_file_atomic helper"
+            );
+            assert!(
+                !body.contains("std::fs::rename("),
+                "{func} must not hand-roll write+rename (use the durable helper)"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_user_config_durable_mode_and_roundtrip() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "durable".to_string(),
+                dir: "/tmp/durable".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: Some("durable".to_string()),
+            selected_ide: None,
+            transcription: None,
+            ui: None,
+        };
+        save_user_config_to(&config, &config_path).unwrap();
+        // Durable helper writes owner-only perms.
+        let mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "config.json must be 0o600 after durable write");
+        let loaded = load_user_config_from(&config_path).unwrap();
+        assert_eq!(loaded.projects[0].name, "durable");
     }
 
     #[test]

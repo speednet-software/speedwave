@@ -96,6 +96,7 @@ Each MCP integration requires specific credentials to function. Fields marked as
 | Redmine     | `api_key`, `host_url`                              | `project_id` (scope operations to a default project)                   |
 | Office      | _(none — no credentials required)_                 | —                                                                      |
 | Playwright  | _(none — no credentials required)_                 | —                                                                      |
+| Context7    | _(none — anonymous mode works)_                    | `api_key` (higher rate limits; anonymous is per-IP rate-limited)       |
 
 ### Enabling an integration — first build on demand
 
@@ -572,7 +573,7 @@ containers/claude-resources/
 │       ├── office/               # MCP — linked when `office` ∈ ENABLED_SERVICES
 │       ├── playwright/           # MCP — linked when `playwright` ∈ ENABLED_SERVICES
 │       ├── context7/             # MCP — linked when `context7` ∈ ENABLED_SERVICES
-│       ├── slack/sharepoint/redmine/gitlab/github/atlassian/  # MCP — same pattern
+│       ├── sharepoint/redmine/gitlab/github/atlassian/  # MCP — same pattern (slack ships no skill)
 │       └── reminders/calendar/mail/notes/                     # OS sub-services (see Runtime behavior)
 ├── commands/
 │   └── integrations/<config_key>/    # same convention for commands

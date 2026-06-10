@@ -1,5 +1,5 @@
-// CloudStorage TCC detection, probe, classification, and upstream helper.
-//
+//! CloudStorage TCC detection, probe, classification, and upstream helper.
+//!
 // macOS CloudStorage services (OneDrive, Dropbox, Google Drive) require
 // Transparency Consent and Control (TCC) permission before the app can
 // read directories managed by those services. When TCC is missing,
@@ -35,8 +35,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Known CloudStorage provider identifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloudStorageProvider {
+    /// Microsoft OneDrive.
     OneDrive,
+    /// Dropbox.
     Dropbox,
+    /// Google Drive.
     GoogleDrive,
 }
 

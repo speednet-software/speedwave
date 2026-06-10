@@ -23,13 +23,12 @@ import {
   ConversationsHistoryResponse,
   UsersLookupByEmailResponse,
 } from '@slack/web-api';
-import fs from 'fs/promises';
-import path from 'path';
 import {
   ts,
   withSetupGuidance,
   ConnectionStatusTracker,
   backgroundConnectionTest,
+  loadTokenFile,
 } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -110,24 +109,6 @@ export interface SlackUser {
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
-// Token Loading
-//═══════════════════════════════════════════════════════════════════════════════
-
-const TOKENS_DIR = process.env.TOKENS_DIR || '/tokens';
-
-/**
- * Load a token from the tokens directory
- * @param {string} tokenName - Name of the token file
- * @returns {Promise<string>} Token content (trimmed)
- * @throws {Error} If token file cannot be read
- */
-async function loadToken(tokenName: string): Promise<string> {
-  const tokenPath = path.join(TOKENS_DIR, tokenName);
-  const token = await fs.readFile(tokenPath, 'utf-8');
-  return token.trim();
-}
-
-//═══════════════════════════════════════════════════════════════════════════════
 // Client Factory
 //═══════════════════════════════════════════════════════════════════════════════
 
@@ -159,8 +140,8 @@ export async function initializeSlackClients(): Promise<SlackClients> {
   });
 
   try {
-    const botToken = await loadToken('bot_token');
-    const userToken = await loadToken('user_token');
+    const botToken = await loadTokenFile('bot_token');
+    const userToken = await loadTokenFile('user_token');
 
     // Validate tokens are not empty
     const missingTokens: string[] = [];

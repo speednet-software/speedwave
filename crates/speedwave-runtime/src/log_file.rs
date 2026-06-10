@@ -4,7 +4,9 @@
 
 use std::path::Path;
 
-/// Open a log file for appending with chmod 600 on Unix. `None` on error.
+/// Open a log file for appending with chmod 600 on Unix. `None` on error
+/// (logged via the `log` facade — a different sink, so no recursion — so a
+/// path that loses all session logging is visible, not silently swallowed).
 pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.append(true).create(true);
@@ -13,7 +15,13 @@ pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    opts.open(path).ok()
+    match opts.open(path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            log::warn!("cannot open log file {}: {e}", path.display());
+            None
+        }
+    }
 }
 
 /// Write `<ISO> [prefix: ]line` to the log. Errors silently ignored.
@@ -93,6 +101,8 @@ mod tests {
 
     #[test]
     fn open_log_file_returns_none_for_invalid_path() {
+        // Exercises the error arm: returns None (and logs a warn so the
+        // lost-logging condition is visible rather than silently swallowed).
         let path = std::path::Path::new("/nonexistent/dir/impossible.log");
         let file = open_log_file(path);
         assert!(file.is_none(), "should return None for invalid path");

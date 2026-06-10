@@ -441,6 +441,19 @@ test-transcription:
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription transcription::)
 	@echo "✅ audio-transcription tests passed"
 
+# Runs the mcp-os upgrade-path test against the *real* bundled worker (not the
+# stub). Gated behind the `mcp-os-bundle-e2e` feature — never `#[ignore]`,
+# which nothing in the pipeline runs. `build-mcp` produces the source dists;
+# `bundle-build-context.sh` stages them into desktop/src-tauri/mcp-os/ with the
+# @speedwave/mcp-shared tree the worker resolves at runtime; then we run only
+# that one test under the feature.
+test-mcp-os-bundle: build-mcp
+	@echo "🧪 Staging the real mcp-os worker bundle..."
+	@bash scripts/bundle-build-context.sh
+	@echo "🧪 Running the mcp-os upgrade-path test against the bundled worker..."
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features mcp-os-bundle-e2e upgrade_path_with_real_bundled_mcp_os)
+	@echo "✅ mcp-os bundle upgrade-path test passed"
+
 test-cli:
 	@echo "🧪 Testing CLI..."
 	@cargo test -p speedwave-cli
@@ -461,6 +474,11 @@ else
 endif
 	@"$(MAKE)" verify-bundled-assets
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
+	@# The bundle is staged above (bundle-build-context.sh + build-mcp), so run
+	@# the mcp-os upgrade-path test against the real worker here (Unix-only, like
+	@# its `#[cfg(all(unix, feature = "mcp-os-bundle-e2e"))]` gate). Never
+	@# `#[ignore]`d — this is the make invocation that actually runs it.
+	@if [ "$(OS)" != "Windows_NT" ]; then "$(MAKE)" test-mcp-os-bundle; fi
 	@echo "✅ Desktop tests passed"
 
 # ── Angular tests ───────────────────────────────────────────────────────────

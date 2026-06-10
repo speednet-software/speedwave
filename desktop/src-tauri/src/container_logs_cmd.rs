@@ -1,51 +1,7 @@
-// Tauri commands for viewing container and compose logs.
+// Tauri commands for the unified `/logs` view (`get_all_logs`).
 
 use crate::logging_cmd::desktop_log_dir;
 use crate::types::check_project;
-
-/// Validate that a container name starts with the Speedwave compose prefix
-/// and contains only safe characters (alphanumeric, underscore, hyphen, dot).
-fn validate_container_name(container: &str) -> Result<(), String> {
-    if !container.starts_with(&format!("{}_", speedwave_runtime::consts::compose_prefix())) {
-        return Err(format!(
-            "Invalid container name: must start with '{}_'",
-            speedwave_runtime::consts::compose_prefix()
-        ));
-    }
-    if !container
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-    {
-        return Err("Invalid container name: contains illegal characters".to_string());
-    }
-    Ok(())
-}
-
-/// Parse the project name from a Claude container name.
-/// Expected format: `{compose_prefix()}_{project}_claude`.
-fn parse_claude_project(container: &str) -> Result<String, String> {
-    parse_claude_project_with_prefix(speedwave_runtime::consts::compose_prefix(), container)
-}
-
-/// Parameterised by `compose_prefix` so unit tests avoid the
-/// `consts::compose_prefix()` `OnceLock`, which resolves the process-global
-/// `data_dir()` basename.
-fn parse_claude_project_with_prefix(
-    compose_prefix: &str,
-    container: &str,
-) -> Result<String, String> {
-    let prefix = format!("{compose_prefix}_");
-    let without_prefix = container
-        .strip_prefix(&prefix)
-        .ok_or_else(|| "Not a claude container".to_string())?;
-    let project = without_prefix
-        .strip_suffix("_claude")
-        .ok_or_else(|| "Not a claude container".to_string())?;
-    if project.is_empty() {
-        return Err("Not a claude container".to_string());
-    }
-    Ok(project.to_string())
-}
 
 /// Read a log file, take the last `tail` lines, and sanitize secrets.
 /// Returns an empty string if the file does not exist.
@@ -98,99 +54,6 @@ fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
     }
     let start = combined.len().saturating_sub(tail);
     speedwave_runtime::log_sanitizer::sanitize(&combined[start..].join("\n"))
-}
-
-#[tauri::command]
-pub(crate) async fn get_container_logs(
-    container: String,
-    tail: Option<u32>,
-) -> Result<String, String> {
-    validate_container_name(&container)?;
-    let tail = tail.unwrap_or(200).min(10_000);
-    tokio::task::spawn_blocking(move || {
-        let rt = speedwave_runtime::runtime::detect_runtime();
-        if !rt.is_available() {
-            return Err("Container runtime is not available. Please ensure the runtime is started before viewing logs.".to_string());
-        }
-        rt.container_logs(&container, tail)
-            .map(|logs| speedwave_runtime::log_sanitizer::sanitize(&logs))
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn get_compose_logs(project: String, tail: Option<u32>) -> Result<String, String> {
-    check_project(&project)?;
-    let tail = tail.unwrap_or(200).min(10_000);
-    tokio::task::spawn_blocking(move || {
-        let rt = speedwave_runtime::runtime::detect_runtime();
-        if !rt.is_available() {
-            return Err("Container runtime is not available. Please ensure the runtime is started before viewing logs.".to_string());
-        }
-        rt.compose_logs(&project, tail)
-            .map(|logs| speedwave_runtime::log_sanitizer::sanitize(&logs))
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
-        let log_path = speedwave_runtime::consts::mcp_os_log_path();
-        let tail = tail.unwrap_or(200).min(10_000) as usize;
-        read_tail_sanitized(&log_path, tail)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Audit/stdout log of the per-project `host_exec` worker (`<data_dir>/host-exec/<project>/log`).
-#[tauri::command]
-pub(crate) async fn get_host_exec_logs(
-    project: String,
-    tail: Option<u32>,
-) -> Result<String, String> {
-    check_project(&project)?;
-    tokio::task::spawn_blocking(move || {
-        let log_path = host_exec_log_path(&project);
-        let tail = tail.unwrap_or(200).min(10_000) as usize;
-        read_tail_sanitized(&log_path, tail)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Path to a project's `host_exec` worker log (matches `host_exec_process` /
-/// `host_exec_cmd`'s state-dir layout).
-fn host_exec_log_path(project: &str) -> std::path::PathBuf {
-    speedwave_runtime::host_exec::host_exec_project_dir(
-        speedwave_runtime::consts::data_dir(),
-        project,
-    )
-    .join(speedwave_runtime::consts::HOST_EXEC_LOG_FILE)
-}
-
-#[tauri::command]
-pub(crate) async fn get_claude_session_logs(
-    container: String,
-    tail: Option<u32>,
-) -> Result<String, String> {
-    validate_container_name(&container)?;
-    let project = parse_claude_project(&container)?;
-    check_project(&project)?;
-
-    let tail = tail.unwrap_or(200).min(10_000) as usize;
-
-    tokio::task::spawn_blocking(move || {
-        let log_path = speedwave_runtime::consts::claude_session_log_path(&project);
-        read_tail_sanitized(&log_path, tail)
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -367,9 +230,8 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
 /// for the renderer, especially since the frontend further filters by source
 /// in the dropdown.
 ///
-/// Backwards-compatible with `get_compose_logs`: that command still exists for
-/// callers that want compose-only output (e.g. diagnostics export). New
-/// frontend code should prefer this command.
+/// Compose-only output (e.g. diagnostics export) reads `rt.compose_logs`
+/// directly; this is the only log command the webview invokes.
 #[tauri::command]
 pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<String, String> {
     check_project(&project)?;
@@ -425,33 +287,7 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
 mod tests {
     use super::*;
 
-    // -- Container name validation --
-
-    #[test]
-    fn validate_container_name_accepts_valid() {
-        let pfx = speedwave_runtime::consts::compose_prefix();
-        assert!(validate_container_name(&format!("{pfx}_acme_claude")).is_ok());
-        assert!(validate_container_name(&format!("{pfx}_proj.v1_mcp-hub")).is_ok());
-    }
-
-    #[test]
-    fn validate_container_name_rejects_missing_prefix() {
-        assert!(validate_container_name("random_container").is_err());
-    }
-
-    #[test]
-    fn validate_container_name_rejects_shell_characters() {
-        let pfx = speedwave_runtime::consts::compose_prefix();
-        assert!(validate_container_name(&format!("{pfx}_acme;rm -rf /")).is_err());
-    }
-
-    #[test]
-    fn validate_container_name_rejects_path_traversal() {
-        let pfx = speedwave_runtime::consts::compose_prefix();
-        assert!(validate_container_name(&format!("{pfx}_../etc/passwd")).is_err());
-    }
-
-    // -- Log sanitization tests (get_container_logs / get_compose_logs) --
+    // -- Log sanitization tests (compose / container log content) --
 
     #[test]
     fn container_logs_sanitize_bearer_token() {
@@ -554,78 +390,6 @@ mod tests {
         assert_eq!(
             sanitized, raw,
             "Plain log lines without secrets should pass through unchanged"
-        );
-    }
-
-    // -- Claude session logs: project parsing from container name --
-    //
-    // Tests use the `_with_prefix` variant with the fixed `COMPOSE_PREFIX`
-    // literal so they do not depend on the process-global `data_dir()` basename.
-
-    #[test]
-    fn parse_project_from_claude_container() {
-        let project = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_myproject_claude",
-        )
-        .unwrap();
-        assert_eq!(project, "myproject");
-    }
-
-    #[test]
-    fn parse_project_from_dotted_container_name() {
-        let project = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_proj.v1_claude",
-        )
-        .unwrap();
-        assert_eq!(project, "proj.v1");
-    }
-
-    #[test]
-    fn parse_project_rejects_non_claude_container() {
-        let result = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_myproject_mcp-hub",
-        );
-        assert!(result.is_err(), "non-claude container should be rejected");
-    }
-
-    #[test]
-    fn parse_project_rejects_missing_prefix() {
-        let result = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "other_myproject_claude",
-        );
-        assert!(result.is_err(), "missing prefix should be rejected");
-    }
-
-    #[test]
-    fn parse_project_validates_extracted_project() {
-        // Container with ".." in project name → check_project rejects it
-        let project = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_.._claude",
-        )
-        .unwrap();
-        let result = crate::types::check_project(&project);
-        assert!(
-            result.is_err(),
-            "path traversal project should be rejected by check_project"
-        );
-    }
-
-    #[test]
-    fn parse_project_dotted_name_passes_check_project() {
-        let project = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_proj.v1_claude",
-        )
-        .unwrap();
-        let result = crate::types::check_project(&project);
-        assert!(
-            result.is_ok(),
-            "proj.v1 should pass check_project: {result:?}"
         );
     }
 
@@ -985,15 +749,6 @@ mod tests {
             out.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#),
             "host-exec content must pass through verbatim with only the prefix, got: {out}"
         );
-    }
-
-    #[test]
-    fn host_exec_log_path_uses_per_project_state_dir() {
-        let p = host_exec_log_path("myproj");
-        let s = p.to_string_lossy();
-        assert!(s.contains("host-exec"), "path: {s}");
-        assert!(s.contains("myproj"), "path: {s}");
-        assert!(s.ends_with("log"), "path: {s}");
     }
 
     // ── read_tail_desktop_logs tests ─────────────────────────────────────────

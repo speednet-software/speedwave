@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { BASE_SAFE_ENV_KEYS } from '@speedwave/mcp-shared';
 import { buildRecipeEnv, SAFE_ENV_KEYS } from './env.js';
 
 describe('SAFE_ENV_KEYS', () => {
@@ -6,6 +7,13 @@ describe('SAFE_ENV_KEYS', () => {
     for (const k of SAFE_ENV_KEYS) {
       expect(k.startsWith('HOST_EXEC_')).toBe(false);
     }
+  });
+  it('extends the shared BASE_SAFE_ENV_KEYS core', () => {
+    for (const k of BASE_SAFE_ENV_KEYS) {
+      expect(SAFE_ENV_KEYS).toContain(k);
+    }
+    // host_exec adds extras on top of the 14-key core.
+    expect(SAFE_ENV_KEYS.length).toBeGreaterThan(BASE_SAFE_ENV_KEYS.length);
   });
   it('includes the toolchain locators recipes commonly need', () => {
     for (const k of [

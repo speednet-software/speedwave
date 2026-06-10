@@ -283,9 +283,9 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
       try {
         await options.healthCheck();
       } catch (error) {
-        if (!options.auth) {
-          console.error(`[${name}] Health check failed:`, error);
-        }
+        // Always log: every prod worker sets auth, so gating on `!auth` meant
+        // health failures were never logged where they matter most.
+        console.error(`[${name}] Health check failed:`, error);
         res.status(500).json({ status: 'error' });
         return;
       }

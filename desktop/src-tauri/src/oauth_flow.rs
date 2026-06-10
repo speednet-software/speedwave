@@ -107,6 +107,158 @@ pub(crate) fn emit_progress(
     }
 }
 
+/// Canonical "device code expired" message — one wording across providers.
+pub(crate) const DEVICE_CODE_EXPIRED_MSG: &str = "Device code expired — please try again.";
+
+/// One step of the device-code polling decision, returned by the provider after
+/// it inspects a token-endpoint response. The loop turns this into the right
+/// `emit_progress` call + terminate, or keeps polling.
+pub(crate) enum PollStep {
+    /// Emit `(status, message)` and end the flow (success or terminal error).
+    Emit {
+        status: &'static str,
+        message: String,
+    },
+    /// Keep polling. `slow_down` bumps the interval by 5 s (RFC 8628 §3.5).
+    KeepPolling { slow_down: bool },
+}
+
+/// Terminal `PollStep::Emit` with the `"error"` status — the common shape both
+/// providers return for save/parse/unexpected-response failures.
+pub(crate) fn emit_error(message: String) -> PollStep {
+    PollStep::Emit {
+        status: "error",
+        message,
+    }
+}
+
+/// Per-provider token-endpoint behaviour. The shared `run_device_code_poll`
+/// owns the deadline / cancel / sleep / HTTP / read-body state machine; the
+/// provider supplies only what differs: the request and the response handling
+/// (including any token persistence, which classifies its own failures).
+pub(crate) trait DeviceCodeProvider: Send + Sync + 'static {
+    /// Builds the token-endpoint POST (URL, body, provider-specific headers).
+    /// Called once per poll iteration from the shared loop.
+    fn token_request(&self, client: &reqwest::Client) -> reqwest::RequestBuilder;
+
+    /// Classifies a token-endpoint response. `body_bytes` is the size-limited
+    /// body. On success the provider persists tokens and returns a terminal
+    /// `Emit`; on `authorization_pending`/`slow_down` it returns `KeepPolling`;
+    /// on a terminal error it returns `Emit` with the user-facing message.
+    fn handle_token_response(
+        &self,
+        http_status: reqwest::StatusCode,
+        body_bytes: &[u8],
+    ) -> PollStep;
+}
+
+/// Shared device-code polling loop (RFC 8628 §3.4–3.5). Drives the deadline,
+/// cancellation, fixed-interval sleep, token POST, body-size guard, and
+/// progress emission; delegates request construction + response classification
+/// to `provider`. Always clears the `FLOW_STATE` entry for `request_id` on
+/// every exit so a superseding flow is never erased.
+pub(crate) struct DeviceCodePoll {
+    pub app: tauri::AppHandle,
+    pub registry: &'static FlowRegistry,
+    pub cancel: CancellationToken,
+    pub request_id: String,
+    pub http_client: reqwest::Client,
+    pub interval: u64,
+    pub expires_in: u64,
+}
+
+pub(crate) async fn run_device_code_poll<P: DeviceCodeProvider>(poll: DeviceCodePoll, provider: P) {
+    let DeviceCodePoll {
+        app,
+        registry,
+        cancel,
+        request_id,
+        http_client,
+        mut interval,
+        expires_in,
+    } = poll;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(expires_in);
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            emit_progress(
+                &app,
+                registry,
+                "expired",
+                DEVICE_CODE_EXPIRED_MSG,
+                &request_id,
+            );
+            registry.clear_if_current(&request_id);
+            return;
+        }
+
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_secs(interval)) => {}
+            () = cancel.cancelled() => {
+                emit_progress(&app, registry, "cancelled", "OAuth flow cancelled", &request_id);
+                registry.clear_if_current(&request_id);
+                return;
+            }
+        }
+
+        let resp = provider
+            .token_request(&http_client)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await;
+
+        if cancel.is_cancelled() {
+            emit_progress(
+                &app,
+                registry,
+                "cancelled",
+                "OAuth flow cancelled",
+                &request_id,
+            );
+            registry.clear_if_current(&request_id);
+            return;
+        }
+
+        let r = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                emit_progress(
+                    &app,
+                    registry,
+                    "error",
+                    &format!("Network error: {e}"),
+                    &request_id,
+                );
+                registry.clear_if_current(&request_id);
+                return;
+            }
+        };
+
+        let http_status = r.status();
+        let body_bytes = match crate::http_util::read_body_limited(r, "token").await {
+            Ok(b) => b,
+            Err(e) => {
+                emit_progress(&app, registry, "error", &e, &request_id);
+                registry.clear_if_current(&request_id);
+                return;
+            }
+        };
+
+        match provider.handle_token_response(http_status, &body_bytes) {
+            PollStep::Emit { status, message } => {
+                emit_progress(&app, registry, status, &message, &request_id);
+                registry.clear_if_current(&request_id);
+                return;
+            }
+            PollStep::KeepPolling { slow_down } => {
+                if slow_down {
+                    interval += 5;
+                }
+            }
+        }
+    }
+}
+
 /// Atomic 0o600 write of a single credential into `svc_dir/<file_name>`.
 pub(crate) fn save_credential_file(
     svc_dir: &std::path::Path,
@@ -171,6 +323,16 @@ mod tests {
         assert!(token.is_cancelled());
         assert!(reg.state.lock().unwrap().current.is_none());
         assert!(reg.current_generation().unwrap() > before);
+    }
+
+    #[test]
+    fn device_code_expired_msg_is_reconciled_single_wording() {
+        // Both providers emit this exact string on expiry — the GitHub
+        // ("reconnect") / SharePoint ("try again") drift was reconciled here.
+        assert_eq!(
+            DEVICE_CODE_EXPIRED_MSG,
+            "Device code expired — please try again."
+        );
     }
 
     #[test]

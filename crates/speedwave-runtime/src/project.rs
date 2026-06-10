@@ -1,3 +1,5 @@
+//! Per-project registration, data-dir layout, and isolation setup.
+
 use crate::{compose, config, runtime, validation};
 use std::path::Path;
 
@@ -488,8 +490,11 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn rollback_cleans_up_dirs_on_config_save_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
         let tmp = tempfile::tempdir().unwrap();
 
         // Create a project directory
@@ -497,22 +502,40 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
         let canonical_dir = std::fs::canonicalize(&project_dir).unwrap();
 
-        // Create data_dir without a config.json (load returns default).
-        // Pre-create config.json.tmp as a directory so that
-        // save_user_config_to fails on std::fs::write (EISDIR) after
-        // init_project_dirs_in has already created the project dirs.
+        // load_user_config_from returns default when config.json is absent, so
+        // init_project_dirs_in runs and creates the per-project dirs inside the
+        // pre-created subdirs below. We then make data_dir itself read-only:
+        // save_user_config_to's atomic write needs to create a sibling temp file
+        // directly in data_dir, which fails — exercising the rollback path
+        // without relying on a fixed `.tmp` sibling name.
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        std::fs::create_dir_all(data_dir.join("config.json.tmp")).unwrap();
+        for sub in &["compose", "context", crate::consts::CLAUDE_HOME_SUBDIR] {
+            std::fs::create_dir_all(data_dir.join(sub)).unwrap();
+        }
+        // Token dirs nest one level deeper (tokens/<project>/<svc>); pre-create
+        // through the project level so only the service leaf is created inside.
+        std::fs::create_dir_all(data_dir.join("tokens").join("rollback-test")).unwrap();
+
+        let mut perms = std::fs::metadata(&data_dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&data_dir, perms).unwrap();
 
         let result =
             add_project_with_data_dir("rollback-test", &canonical_dir.to_string_lossy(), &data_dir);
+
+        // Restore write perms so cleanup/asserts and tempdir drop can proceed.
+        let mut restore = std::fs::metadata(&data_dir).unwrap().permissions();
+        restore.set_mode(0o755);
+        std::fs::set_permissions(&data_dir, restore).unwrap();
+
         assert!(
             result.is_err(),
             "should fail because config write is blocked"
         );
 
-        // Verify rollback: project directories should have been cleaned up
+        // Verify rollback: per-project directories should have been cleaned up
+        // (their writable parents survive — only the <project> leaf is removed).
         for sub in &[
             "tokens",
             "compose",

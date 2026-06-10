@@ -1,3 +1,5 @@
+//! Container runtime abstraction: `LockedRuntime` façade over Lima/WSL2 backends.
+
 use crate::binary;
 use crate::consts;
 use serde_json::Value;
@@ -107,15 +109,12 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// Lima override: copies to `~/.speedwave/build-cache/` when outside `~` (VM only mounts `~`).
     /// WSL override: converts `C:\…` → `/mnt/c/…`.
     ///
-    /// Both supported runtimes mediate via a VM, so the default identity pass-through
-    /// is never the right answer in production — it exists only so the trait stays
-    /// implementable in tests.
+    /// Both supported runtimes mediate via a VM, so no default identity
+    /// pass-through is provided — every impl MUST translate the path.
     fn prepare_build_context(
         &self,
         build_root: &std::path::Path,
-    ) -> anyhow::Result<std::path::PathBuf> {
-        Ok(build_root.to_path_buf())
-    }
+    ) -> anyhow::Result<std::path::PathBuf>;
     fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
     /// Returns `true` if the given image tag exists in the container runtime.
@@ -123,14 +122,10 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// Recreates all containers using `--force-recreate --remove-orphans`.
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
 
-    /// Validates compose.yml as the container engine sees it — production
-    /// runtimes MUST override. Default body is for test stubs only.
-    fn compose_validate(&self, _project: &str) -> anyhow::Result<()> {
-        log::error!(
-            "compose_validate: default no-op called — production runtime forgot to override"
-        );
-        Ok(())
-    }
+    /// Validates compose.yml as the container engine sees it. Every impl MUST
+    /// run the engine's `compose config` so a silent no-op cannot mask a torn
+    /// or invalid compose file.
+    fn compose_validate(&self, project: &str) -> anyhow::Result<()>;
 
     /// Removes dangling images and build cache (not tagged images).
     ///
@@ -141,11 +136,10 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// images survive a partial-build retry.
     ///
     /// This bug affects all containerd overlayfs setups, including Lima VM
-    /// (LimaRuntime) and WSL2 (WslRuntime). Both runtime implementations
-    /// override this method with `nerdctl system prune --force`.
-    fn system_prune(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    /// (LimaRuntime) and WSL2 (WslRuntime). Every impl MUST run
+    /// `nerdctl system prune --force` — a silent no-op would leave the stale
+    /// snapshotter state in place and re-trigger the rename failure.
+    fn system_prune(&self) -> anyhow::Result<()>;
 
     /// Remove image tags. `force=true` = `rmi --force` (used by
     /// `prune_old_bundle_images` and plugin-uninstall).
@@ -193,9 +187,10 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// Only safe to call when no containers are running (e.g. during initial
     /// setup). Call-sites with running containers should propagate the error
     /// with diagnostic hints instead.
-    fn restart_container_engine(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    ///
+    /// Every impl MUST perform the restart — a silent no-op would report
+    /// "engine restarted" to a caller recovering from a containerd hang.
+    fn restart_container_engine(&self) -> anyhow::Result<()>;
 
     /// Stops the underlying VM (e.g. Lima on macOS) to free reserved RAM.
     ///
@@ -249,18 +244,24 @@ pub(crate) trait ContainerRuntime: Send + Sync {
 /// Output of a [`ContainerRuntime::vm_exec`] call.
 #[derive(Debug, Clone)]
 pub struct VmExecOutput {
+    /// Process exit status.
     pub status: std::process::ExitStatus,
+    /// Captured stdout bytes.
     pub stdout: Vec<u8>,
+    /// Captured stderr bytes.
     pub stderr: Vec<u8>,
 }
 
 impl VmExecOutput {
+    /// `true` if the process exited successfully.
     pub fn ok(&self) -> bool {
         self.status.success()
     }
+    /// stdout as a lossy UTF-8 string.
     pub fn stdout_str(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.stdout)
     }
+    /// stderr as a lossy UTF-8 string.
     pub fn stderr_str(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.stderr)
     }
@@ -347,7 +348,9 @@ pub(crate) fn vm_exec_run(
     })
 }
 
+/// Runs external commands; abstracted so tests can inject a fake.
 pub trait CommandRunner: Send + Sync {
+    /// Runs `cmd args`, returning trimmed stdout on success.
     fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String>;
 
     /// Like `run`, but merges stdout and stderr on success.
@@ -452,6 +455,7 @@ pub trait CommandRunner: Send + Sync {
     }
 }
 
+/// Production [`CommandRunner`] that spawns real processes.
 pub struct RealRunner;
 
 /// Combines two output streams, returning whichever is non-empty (or both joined by newline).
@@ -644,12 +648,17 @@ pub(crate) fn cleanup_targets_from_ps_output(ps_output: &str) -> Vec<String> {
     targets
 }
 
-#[cfg(any(target_os = "windows", test))]
-fn run_rm_force(
+/// Runs `nerdctl rm -f [--time=0] <targets...>` through the supplied runner.
+/// `force_kill` toggles `--time=0` so callers can escalate to a hard kill
+/// (skip the graceful SIGTERM/SIGKILL window) without duplicating the argv
+/// plumbing. WSL/tests always pass `false`; Lima passes `true` on the final
+/// retry attempt.
+pub(crate) fn run_rm_force(
     runner: &dyn CommandRunner,
     cmd: &str,
     nerdctl_prefix: &[&str],
     targets: &[String],
+    force_kill: bool,
 ) -> anyhow::Result<()> {
     if targets.is_empty() {
         return Ok(());
@@ -657,6 +666,9 @@ fn run_rm_force(
 
     let mut rm_args: Vec<&str> = nerdctl_prefix.to_vec();
     rm_args.extend_from_slice(&["rm", "-f"]);
+    if force_kill {
+        rm_args.push("--time=0");
+    }
     for target in targets {
         rm_args.push(target.as_str());
     }
@@ -786,6 +798,7 @@ fn log_container_states(runtime: &LockedRuntime, project: &str, when: &str) {
     }
 }
 
+/// Probes a container until it can run an exec, surfacing health failures.
 pub fn ensure_exec_healthy(
     runtime: &LockedRuntime,
     project: &str,
@@ -888,22 +901,25 @@ fn is_propagation_error(e: &anyhow::Error) -> bool {
             .any(|frag| s.contains(frag))
 }
 
-/// Force-remove any containers still registered in the nerdctl name-store for
-/// the given compose project.  Called after `compose down --remove-orphans` to
-/// work around a nerdctl bug where ghost name-store entries survive and cause
-/// "name already used" on the next `compose up`.
+/// Shared `force_remove_project_containers` algorithm parameterised on a
+/// remove closure so Lima can wrap each call in `retry_on_eof` (with `--time=0`
+/// escalation on the final attempt) while WSL/tests call the runner directly.
 ///
-/// `nerdctl_prefix` is the command slice needed to reach nerdctl
-/// (e.g. `&["shell", "speedwave", "--", "sudo", "nerdctl"]` for Lima).
-///
-/// Best-effort: failures are logged but never propagated.
-#[cfg(any(target_os = "windows", test))]
-pub(crate) fn force_remove_project_containers(
+/// Called after `compose down --remove-orphans` to work around a nerdctl bug
+/// where ghost name-store entries survive and cause "name already used" on the
+/// next `compose up`. The `rm` closure removes a batch of targets (best-effort;
+/// it owns any retry policy). `nerdctl_prefix` is the command slice needed to
+/// reach nerdctl (e.g. `&["shell", "speedwave", "--", "sudo", "nerdctl"]` for
+/// Lima). Best-effort: failures are logged but never propagated.
+pub(crate) fn force_remove_project_containers_with_run_fn<RmFn>(
     runner: &dyn CommandRunner,
     cmd: &str,
     project: &str,
     nerdctl_prefix: &[&str],
-) {
+    rm: RmFn,
+) where
+    RmFn: Fn(&[String]) -> anyhow::Result<()>,
+{
     let filter = format!("label=com.docker.compose.project={project}");
     let mut ps_args: Vec<&str> = nerdctl_prefix.to_vec();
     ps_args.extend_from_slice(&["ps", "-a", "--filter", &filter, "-q"]);
@@ -926,14 +942,14 @@ pub(crate) fn force_remove_project_containers(
             "force_remove_project_containers: removing {} stale container id(s) for {project}",
             id_targets.len()
         );
-        if let Err(e) = run_rm_force(runner, cmd, nerdctl_prefix, &id_targets) {
+        if let Err(e) = rm(&id_targets) {
             log::warn!("force_remove_project_containers: rm -f by id failed for {project}: {e}");
         }
     }
 
     for container_name in &name_targets {
         let single_target = vec![container_name.clone()];
-        match run_rm_force(runner, cmd, nerdctl_prefix, &single_target) {
+        match rm(&single_target) {
             Ok(()) => {}
             Err(e) if is_missing_container_error(&e) => {
                 log::debug!(
@@ -947,6 +963,19 @@ pub(crate) fn force_remove_project_containers(
             }
         }
     }
+}
+
+/// WSL/test variant — each `rm -f` runs once (no `--time=0`), no retry.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn force_remove_project_containers(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+) {
+    force_remove_project_containers_with_run_fn(runner, cmd, project, nerdctl_prefix, |targets| {
+        run_rm_force(runner, cmd, nerdctl_prefix, targets, false)
+    });
 }
 
 /// Shared `force_remove_project_networks` algorithm parameterised on a run
@@ -1088,6 +1117,30 @@ impl Drop for TermGuard {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::CommandRunner;
+
+    /// Verifies `remote_cmd` is a valid POSIX shell command by round-tripping
+    /// through `shlex::split` and asserting the parsed argv equals `expected_argv`.
+    /// Shared by the lima/wsl transport tests.
+    ///
+    /// We deliberately do NOT spawn `bash -n` even though it would be the
+    /// canonical syntax check: Git Bash on `windows-latest` corrupts multi-byte
+    /// UTF-8 in command-line args/scripts (Git for Windows / claude-code#31295).
+    /// A pure-Rust roundtrip via the same `shlex` crate that produced the quoting
+    /// is the lossless, platform-independent equivalent.
+    pub(crate) fn assert_quoting_roundtrips(
+        remote_cmd: &str,
+        expected_argv: &[&str],
+        variant: &str,
+    ) {
+        let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {
+            panic!("shlex::split rejected {variant} remote_cmd built from {expected_argv:?} → {remote_cmd:?}")
+        });
+        assert_eq!(
+            parsed, expected_argv,
+            "{variant} remote_cmd did not round-trip: input argv != reparsed argv\n\
+             remote_cmd: {remote_cmd:?}",
+        );
+    }
 
     pub struct MockRunner {
         pub responses: std::collections::HashMap<String, anyhow::Result<String>>,
@@ -1721,6 +1774,73 @@ services:
         );
     }
 
+    #[test]
+    fn run_rm_force_appends_time_zero_only_when_force_kill() {
+        let runner = test_support::MockRunner::new()
+            .with_response("nerdctl rm -f a b", "")
+            .with_response("nerdctl rm -f --time=0 a b", "");
+        let targets = vec!["a".to_string(), "b".to_string()];
+        // Graceful path — no --time=0.
+        run_rm_force(&runner, "nerdctl", &[], &targets, false).unwrap();
+        // Force-kill path — emits --time=0.
+        run_rm_force(&runner, "nerdctl", &[], &targets, true).unwrap();
+    }
+
+    #[test]
+    fn run_rm_force_empty_targets_is_noop() {
+        // No targets → no command issued, returns Ok. MockRunner would error
+        // on any unexpected command, so reaching Ok proves nothing ran.
+        let runner = test_support::MockRunner::new();
+        run_rm_force(&runner, "nerdctl", &[], &[], true).unwrap();
+    }
+
+    #[test]
+    fn force_remove_containers_run_fn_receives_id_batch_then_each_name() {
+        // The shared algorithm must hand the rm closure: first the id batch
+        // (all ids at once), then one single-element batch per configured name.
+        let project = format!(
+            "run-fn-batches-{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .subsec_nanos()
+        );
+        // SSOT-allow: production read path is keyed on the OnceLock data_dir().
+        let compose_dir = crate::consts::data_dir().join("compose").join(&project);
+        std::fs::create_dir_all(&compose_dir).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(compose_dir.clone());
+        std::fs::write(
+            compose_dir.join("compose.yml"),
+            "services:\n  claude:\n    container_name: speedwave_tmp_claude\n",
+        )
+        .unwrap();
+
+        let ps_key =
+            format!("nerdctl ps -a --filter label=com.docker.compose.project={project} -q");
+        let runner = test_support::MockRunner::new().with_response(&ps_key, "id-1\nid-2\n");
+
+        let batches: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let batches_clone = Arc::clone(&batches);
+        force_remove_project_containers_with_run_fn(&runner, "nerdctl", &project, &[], |targets| {
+            batches_clone.lock().unwrap().push(targets.to_vec());
+            Ok(())
+        });
+
+        assert_eq!(
+            batches.lock().unwrap().as_slice(),
+            &[
+                vec!["id-1".to_string(), "id-2".to_string()],
+                vec!["speedwave_tmp_claude".to_string()],
+            ]
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Stale container detection & recovery tests
     // -----------------------------------------------------------------------
@@ -2004,6 +2124,20 @@ services:
                 .is_ok(),
             "default remove_images with tags should return Ok (no-op)"
         );
+    }
+
+    #[test]
+    fn noop_runtime_required_methods_are_callable() {
+        // `compose_validate`, `system_prune`, `restart_container_engine`, and
+        // `prepare_build_context` are now REQUIRED trait methods (no default
+        // body). This pins that every impl — including the test stub — supplies
+        // them, so a production runtime can never silently inherit a no-op.
+        let rt = NoopRuntime;
+        assert!(rt.compose_validate("proj").is_ok());
+        assert!(rt.system_prune().is_ok());
+        assert!(rt.restart_container_engine().is_ok());
+        let root = std::path::Path::new("/some/build/root");
+        assert_eq!(rt.prepare_build_context(root).unwrap(), root.to_path_buf());
     }
 
     #[test]
@@ -2351,5 +2485,20 @@ impl ContainerRuntime for NoopRuntime {
     }
     fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+    fn compose_validate(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn system_prune(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn restart_container_engine(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn prepare_build_context(
+        &self,
+        build_root: &std::path::Path,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        Ok(build_root.to_path_buf())
     }
 }

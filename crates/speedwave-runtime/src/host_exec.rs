@@ -75,20 +75,6 @@ fn is_token_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// True if `recipe` is a docker/podman lifecycle command — UI warning hint only.
-/// Mirrored as `isContainerLifecycleRecipe` in `models/host-exec.ts`.
-pub fn is_container_lifecycle_recipe(recipe: &HostExecRecipe) -> bool {
-    const LIFECYCLE: &[&str] = &["up", "down", "exec", "rm", "prune"];
-    let base = exec_basename_lower(&recipe.exec);
-    if base != "docker" && base != "docker-compose" && base != "podman" {
-        return false;
-    }
-    recipe
-        .args
-        .iter()
-        .any(|a| LIFECYCLE.contains(&a.to_ascii_lowercase().as_str()))
-}
-
 /// Validates the `commands` whitelist (an empty list is valid). Returns the first error.
 pub fn validate_host_exec_config(cfg: &HostExecConfig) -> anyhow::Result<()> {
     let name_re = recipe_name_re()?;
@@ -847,47 +833,30 @@ mod tests {
         assert!(validate_host_exec_config(&cfg(vec![r])).is_err());
     }
 
-    // -- container-lifecycle hint (UI warning, not enforced) -----------------
+    // -- container-lifecycle recipes (validation, not enforcement) -----------
 
     #[test]
-    fn container_lifecycle_recipes_are_still_valid_but_flagged() {
-        // `docker`/`docker-compose`/`podman` + a lifecycle verb is a UI-warning
-        // hint only — `validate_host_exec_config` accepts it (the enable
-        // consent + the audit log are the controls now; ADR-054 §Negative).
+    fn container_lifecycle_recipes_still_validate() {
+        // `docker`/`docker-compose`/`podman` + a lifecycle verb is accepted by
+        // `validate_host_exec_config` — the enable consent + the audit log are
+        // the controls now (ADR-054 §Negative). The amber UI warning that flags
+        // these lives in the consumed TS `isContainerLifecycleRecipe`
+        // (`models/host-exec.ts`); Rust has no production use for the heuristic.
         for (exec, args) in [
             ("docker", &["compose", "up", "-d"][..]),
             ("docker-compose", &["down"][..]),
             ("podman", &["compose", "up"][..]),
             ("/usr/bin/docker", &["compose", "rm", "-f"][..]),
             ("docker", &["system", "prune"][..]),
+            // Non-lifecycle docker must validate too.
+            ("docker", &["compose", "ps"][..]),
+            ("docker", &["build", "-t", "x", "."][..]),
+            ("docker", &["compose", "logs"][..]),
         ] {
             let r = recipe("c", exec, args);
-            assert!(
-                is_container_lifecycle_recipe(&r),
-                "{exec} {args:?} should be flagged"
-            );
             validate_host_exec_config(&cfg(vec![r]))
                 .unwrap_or_else(|e| panic!("{exec} {args:?} must still validate; got: {e}"));
         }
-        // Non-lifecycle docker (`ps`, `build`, `logs`) is not flagged.
-        for args in [
-            &["compose", "ps"][..],
-            &["build", "-t", "x", "."][..],
-            &["compose", "logs"][..],
-        ] {
-            let r = recipe("c", "docker", args);
-            assert!(
-                !is_container_lifecycle_recipe(&r),
-                "docker {args:?} should not be flagged"
-            );
-            validate_host_exec_config(&cfg(vec![r])).unwrap();
-        }
-        // A non-container exec is never flagged regardless of args.
-        assert!(!is_container_lifecycle_recipe(&recipe(
-            "c",
-            "./gradlew",
-            &["up"]
-        )));
     }
 
     // -- helper unit tests ---------------------------------------------------

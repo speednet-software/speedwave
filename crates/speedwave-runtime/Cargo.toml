@@ -28,10 +28,7 @@ base64 = "0.22"
 rand = "0.8.6"
 semver = "1"
 url = "2"
-json-patch = "4"
 tokio = { version = "1", default-features = false, features = ["sync"] }
-futures-core = "0.3"
-async-stream = "0.3"
 parking_lot = "0.12"
 dashmap = "6"
 shlex = "2.0"
@@ -85,6 +82,10 @@ cpal = { version = "0.17", optional = true }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    # Owner-only DACL in `fs_perms` (SetEntriesInAclW / SetNamedSecurityInfoW
+    # + LocalFree). Authorization gates the ACL APIs; Memory gates LocalFree.
+    "Win32_Security_Authorization",
+    "Win32_System_Memory",
     "Win32_System_JobObjects",
     # JOBOBJECT_EXTENDED_LIMIT_INFORMATION is gated behind
     # Win32_System_Threading in windows-sys 0.61 (compiler hint:
@@ -106,6 +107,12 @@ windows-capture = ["dep:cpal"]
 # Re-exports `runtime::test_support` with mock builders, so downstream test
 # code can construct `LockedRuntime` without seeing the (pub(crate)) trait.
 test-support = []
+# Enables the mcp-os upgrade-path test that runs against the *real* bundled
+# desktop worker (`desktop/src-tauri/mcp-os/os/dist/index.js`) instead of the
+# stub. Off by default because the worker must be staged first; the
+# `make test-mcp-os-bundle` target builds the bundle, then runs the test under
+# this feature. See ADR-048.
+mcp-os-bundle-e2e = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

@@ -18,9 +18,13 @@ pub const CLAUDE_MEMORY_GIB: u32 = 6;
 /// `cpus` which is fractional cores.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContainerResources {
+    /// Hard memory cap, MiB.
     pub mem_mib: u32,
+    /// CPU cap in fractional cores.
     pub cpus: f32,
+    /// tmpfs `/tmp` size, MiB.
     pub tmpfs_mib: u32,
+    /// Shared-memory size, MiB; `None` keeps the 64 MiB default.
     pub shm_mib: Option<u32>,
 }
 

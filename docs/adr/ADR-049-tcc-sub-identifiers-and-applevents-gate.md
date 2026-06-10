@@ -25,7 +25,7 @@ This is described here, not in another ADR. The legacy TCC.db rows were keyed by
 ## Where it lives in code
 
 - Sub-identifier + TCC-service mapping and error text — `subBundleIdentifier(for:)`, `tccServiceName(for:)`, `composeErrorMessage` in `native/macos/shared/Sources/SharedCLI/Utilities.swift`
-- Canonical status enum + Apple Events OSStatus mapping (`noErr`→granted, `errAEEventNotPermitted` -1743→denied, `errAEEventWouldRequireUserConsent` -1744→notDetermined, `procNotFound` -600→targetNotRunning, else unknown) and the second-phase data-access probe — `native/macos/shared/Sources/SharedCLI/AppleEventsGate.swift`
+- Canonical status enum + Apple Events OSStatus mapping (`noErr`→granted, `errAEEventNotPermitted` -1743→denied, `errAEEventWouldRequireUserConsent` -1744→notDetermined, `procNotFound` -600→targetNotRunning, else unknown) and the second-phase data-access probe — `native/macos/shared/Sources/SharedCLI/AppleEventsGate.swift`. The `typeKernelProcessID` addressing that backs the `procNotFound` fix is detailed in [ADR-069](ADR-069-appleevents-kernel-process-id-gate.md).
 - Per-CLI embedded plists and `-sectcreate` linker flag — `native/macos/{calendar,reminders,mail,notes}/Resources/Info.plist` and each `Package.swift`
 - Build-time version stamping from `desktop/src-tauri/tauri.conf.json` — `scripts/build-native-macos.sh`
 - Post-sign identifier assertion — `verify_identifier` in `scripts/sign-bundled-binaries.sh`

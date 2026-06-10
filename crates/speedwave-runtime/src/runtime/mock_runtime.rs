@@ -12,51 +12,81 @@ use std::sync::{Arc, Mutex};
 /// Shared introspection handles cloned into the mock before wrapping.
 #[derive(Clone, Default)]
 pub struct MockHandles {
+    /// Recorded `compose_up` project args.
     pub up_calls: Arc<Mutex<Vec<String>>>,
+    /// Recorded `compose_down` project args.
     pub down_calls: Arc<Mutex<Vec<String>>>,
+    /// Recorded `compose_up_recreate` project args.
     pub recreate_calls: Arc<Mutex<Vec<String>>>,
+    /// Recorded `compose_ps` project args.
     pub ps_calls: Arc<Mutex<Vec<String>>>,
+    /// Recorded `compose_logs` project args.
     pub logs_calls: Arc<Mutex<Vec<String>>>,
+    /// Recorded `compose_validate` project args.
     pub validate_calls: Arc<Mutex<Vec<String>>>,
+    /// Recorded `build_image` calls.
     pub build_calls: Arc<Mutex<Vec<BuildCall>>>,
+    /// Recorded container exec calls.
     pub exec_calls: Arc<Mutex<Vec<ExecCall>>>,
+    /// Count of `ensure_ready` calls.
     pub ensure_ready_calls: Arc<AtomicUsize>,
+    /// Recorded `vm_exec` calls.
     pub vm_exec_calls: Arc<Mutex<Vec<VmExecCall>>>,
+    /// Recorded `remove_images` calls (tags, force).
     pub remove_images_calls: Arc<Mutex<Vec<(Vec<String>, bool)>>>,
+    /// Recorded prune calls by kind.
     pub prune_calls: Arc<Mutex<Vec<&'static str>>>,
+    /// Count of `restart_container_engine` calls.
     pub restart_engine_calls: Arc<AtomicUsize>,
+    /// Count of `stop_vm` calls.
     pub stop_vm_calls: Arc<AtomicUsize>,
+    /// Count of `reset_vm` calls.
     pub reset_vm_calls: Arc<AtomicUsize>,
+    /// Whether `prepare_build_context` was called.
     pub prepare_build_context_calls: Arc<AtomicBool>,
 }
 
+/// Recorded arguments of a `build_image` call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildCall {
+    /// Image tag.
     pub tag: String,
+    /// Build context directory.
     pub context_dir: String,
+    /// Containerfile path.
     pub containerfile: String,
+    /// Build args passed.
     pub build_args: Vec<(String, String)>,
 }
 
+/// Recorded arguments of a container exec call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecCall {
+    /// Target container.
     pub container: String,
+    /// Command argv.
     pub argv: Vec<String>,
 }
 
+/// Recorded arguments of a `vm_exec` call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VmExecCall {
+    /// Command executed.
     pub cmd: String,
+    /// Command args.
     pub args: Vec<String>,
 }
 
 impl MockHandles {
+    /// Projects passed to `compose_up`.
     pub fn up_projects(&self) -> Vec<String> {
         self.up_calls.lock().unwrap().clone()
     }
+    /// Projects passed to `compose_down`.
     pub fn down_projects(&self) -> Vec<String> {
         self.down_calls.lock().unwrap().clone()
     }
+    /// Tags passed to `build_image`.
     pub fn build_tags(&self) -> Vec<String> {
         self.build_calls
             .lock()
@@ -65,9 +95,11 @@ impl MockHandles {
             .map(|c| c.tag.clone())
             .collect()
     }
+    /// Number of `build_image` calls.
     pub fn build_call_count(&self) -> usize {
         self.build_calls.lock().unwrap().len()
     }
+    /// `true` if `tag` was built.
     pub fn was_built(&self, tag: &str) -> bool {
         self.build_calls
             .lock()
@@ -75,12 +107,15 @@ impl MockHandles {
             .iter()
             .any(|c| c.tag == tag)
     }
+    /// Number of `ensure_ready` calls.
     pub fn ensure_ready_count(&self) -> usize {
         self.ensure_ready_calls.load(Ordering::SeqCst)
     }
+    /// `true` if any project was recreated.
     pub fn was_recreated(&self) -> bool {
         !self.recreate_calls.lock().unwrap().is_empty()
     }
+    /// Number of `reset_vm` calls.
     pub fn reset_vm_count(&self) -> usize {
         self.reset_vm_calls.load(Ordering::SeqCst)
     }
@@ -148,6 +183,7 @@ impl Default for MockRuntimeBuilder {
 }
 
 impl MockRuntimeBuilder {
+    /// Creates a builder with default (success) behaviour.
     pub fn new() -> Self {
         Self {
             handles: MockHandles::default(),
@@ -185,30 +221,37 @@ impl MockRuntimeBuilder {
         }
     }
 
+    /// Clones the introspection handles for later assertions.
     pub fn handles(&self) -> MockHandles {
         self.handles.clone()
     }
 
+    /// Makes `ensure_ready` fail with `msg`.
     pub fn with_ensure_ready_error(mut self, msg: &str) -> Self {
         self.ensure_ready_result = ResultCell::Err(msg.to_string());
         self
     }
+    /// Sets the value returned by `is_available`.
     pub fn with_is_available(mut self, available: bool) -> Self {
         self.is_available = available;
         self
     }
+    /// Makes `compose_up` fail for these projects.
     pub fn with_fail_on_up(mut self, projects: &[&str]) -> Self {
         self.fail_on_up = projects.iter().map(|s| s.to_string()).collect();
         self
     }
+    /// Makes `compose_down` fail for these projects.
     pub fn with_fail_on_down(mut self, projects: &[&str]) -> Self {
         self.fail_on_down = projects.iter().map(|s| s.to_string()).collect();
         self
     }
+    /// Makes `compose_up_recreate` fail for these projects.
     pub fn with_fail_on_recreate(mut self, projects: &[&str]) -> Self {
         self.fail_on_recreate = projects.iter().map(|s| s.to_string()).collect();
         self
     }
+    /// Sets the exact `image_exists` result for `tag`.
     pub fn with_image_exists(self, tag: &str, exists: bool) -> Self {
         self.image_exists
             .lock()
@@ -216,6 +259,7 @@ impl MockRuntimeBuilder {
             .insert(tag.to_string(), exists);
         self
     }
+    /// Makes `image_exists` fail with `msg`.
     pub fn with_image_exists_error(mut self, msg: &str) -> Self {
         self.image_exists_error = Some(msg.to_string());
         self
@@ -234,6 +278,7 @@ impl MockRuntimeBuilder {
         self.image_missing_substrings.push(substring.to_string());
         self
     }
+    /// Makes `build_image(tag)` fail with `msg`.
     pub fn with_build_error_for(mut self, tag: &str, msg: &str) -> Self {
         let map = match self.build_image_result {
             BuildResult::ErrPerTag(m) => m,
@@ -244,6 +289,7 @@ impl MockRuntimeBuilder {
         self.build_image_result = BuildResult::ErrPerTag(new_map);
         self
     }
+    /// Makes every `build_image` fail with `msg`.
     pub fn with_all_builds_failing(mut self, msg: &str) -> Self {
         self.build_image_result = BuildResult::AllErr(msg.to_string());
         self
@@ -279,6 +325,7 @@ impl MockRuntimeBuilder {
         self.exec_piped_script = Some(script.to_string());
         self
     }
+    /// Makes `container_exec_piped` fail with `msg`.
     pub fn with_exec_piped_error(mut self, msg: &str) -> Self {
         self.exec_piped_error = Some(msg.to_string());
         self
@@ -304,14 +351,17 @@ impl MockRuntimeBuilder {
         self.validate_script.lock().unwrap().push(result);
         self
     }
+    /// Makes `reset_vm` fail with `msg`.
     pub fn with_reset_vm_error(mut self, msg: &str) -> Self {
         self.reset_vm_result = Err(msg.to_string());
         self
     }
+    /// Makes `stop_vm` fail with `msg`.
     pub fn with_stop_vm_error(mut self, msg: &str) -> Self {
         self.stop_vm_result = Err(msg.to_string());
         self
     }
+    /// Sets the path `prepare_build_context` returns.
     pub fn with_prepare_build_context_root(mut self, root: std::path::PathBuf) -> Self {
         self.prepare_build_context_root = Some(root);
         self

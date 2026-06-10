@@ -11,6 +11,7 @@ import { Marked } from 'marked';
 import { ActivatedRoute, Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { LoggerService } from '../../services/logger.service';
 import {
   PluginStatusEntry,
   PluginsResponse,
@@ -482,6 +483,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+  private log = inject(LoggerService);
   private activeProject: string | null = null;
   private unsubProjectReady: (() => void) | null = null;
 
@@ -667,11 +669,11 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     this.success = successMsg;
     this.projectState.requestRestart();
     // Refresh state (e.g. configured badge). `loadPlugin` swallows its error
-    // into `this.error`; downgrade to a caveat on the success line + console
+    // into `this.error`; downgrade to a caveat on the success line + log
     // so a stale view is signalled rather than hidden under the success msg.
     await this.loadPlugin(slug);
     if (this.error) {
-      console.warn('plugin reload after mutation failed:', this.error);
+      this.log.warn(`plugin reload after mutation failed: ${this.error}`);
       this.error = '';
       this.success = `${successMsg} — but the view could not refresh; reopen the plugin to see the latest state.`;
     }
@@ -814,7 +816,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
       // Non-fatal: the integration badges fall back to "not configured". Log
       // so the failure isn't invisible — a swallowed get_integrations error
       // would otherwise masquerade as genuinely unconfigured integrations.
-      console.warn('loadIntegrationStatuses: get_integrations failed:', e);
+      this.log.warn(`loadIntegrationStatuses: get_integrations failed: ${String(e)}`);
     }
   }
 }

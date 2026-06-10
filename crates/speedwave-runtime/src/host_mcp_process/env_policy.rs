@@ -33,6 +33,7 @@ pub const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[];
 /// provide a `FakeEnv` so they don't race with each other or with
 /// concurrent Speedwave instances on the host.
 pub trait EnvSource {
+    /// Looks up an environment value by key.
     fn var(&self, key: &str) -> Option<String>;
 }
 

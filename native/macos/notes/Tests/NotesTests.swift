@@ -59,6 +59,73 @@ final class NotesTests: XCTestCase {
         XCTAssertNil(body)
     }
 
+    // MARK: - runCLI command table (NotesCLI.commands)
+
+    func testCommandTableHasAllExpectedKeys() {
+        let expected: Set<String> = [
+            "list_folders", "list_notes", "get_note", "search_notes",
+            "create_note", "update_note", "delete_note",
+        ]
+        XCTAssertEqual(Set(NotesCLI.commands.keys), expected,
+                       "command table must dispatch exactly the documented commands (minus check_permission)")
+    }
+
+    func testCommandTableKeysAreSubsetOfCommandList() {
+        // Each dispatch key (plus check_permission) must appear in the advertised command list.
+        for key in NotesCLI.commands.keys {
+            XCTAssertTrue(NotesCLI.commandList.contains(key),
+                          "command '\(key)' missing from advertised commandList")
+        }
+        XCTAssertTrue(NotesCLI.commandList.contains("check_permission"))
+    }
+
+    func testGetNoteCommandThrowsMissingIdBeforeScriptRuns() {
+        // Required-field validation must fire before any AppleScript is spawned.
+        let handler = NotesCLI.commands["get_note"]!
+        XCTAssertThrowsError(try handler([:])) { error in
+            guard case NotesCLIError.missingField(let f) = error else {
+                return XCTFail("expected missingField, got \(error)")
+            }
+            XCTAssertEqual(f, "id")
+        }
+    }
+
+    func testSearchNotesCommandThrowsMissingQuery() {
+        let handler = NotesCLI.commands["search_notes"]!
+        XCTAssertThrowsError(try handler(["limit": 5])) { error in
+            guard case NotesCLIError.missingField("query") = error else {
+                return XCTFail("expected missingField(query), got \(error)")
+            }
+        }
+    }
+
+    func testCreateNoteCommandThrowsMissingTitle() {
+        let handler = NotesCLI.commands["create_note"]!
+        XCTAssertThrowsError(try handler(["body": "x"])) { error in
+            guard case NotesCLIError.missingField("title") = error else {
+                return XCTFail("expected missingField(title), got \(error)")
+            }
+        }
+    }
+
+    func testUpdateNoteCommandThrowsMissingId() {
+        let handler = NotesCLI.commands["update_note"]!
+        XCTAssertThrowsError(try handler(["title": "x"])) { error in
+            guard case NotesCLIError.missingField("id") = error else {
+                return XCTFail("expected missingField(id), got \(error)")
+            }
+        }
+    }
+
+    func testDeleteNoteCommandThrowsMissingId() {
+        let handler = NotesCLI.commands["delete_note"]!
+        XCTAssertThrowsError(try handler([:])) { error in
+            guard case NotesCLIError.missingField("id") = error else {
+                return XCTFail("expected missingField(id), got \(error)")
+            }
+        }
+    }
+
     // MARK: - Permission Check Script
 
     func testPermissionCheckScriptAccessesData() {

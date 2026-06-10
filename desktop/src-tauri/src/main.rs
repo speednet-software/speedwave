@@ -1,26 +1,26 @@
-// Speedwave Desktop — Tauri v2 backend
-//
-// Thin #[tauri::command] wrappers that delegate to the existing module functions.
-// Each command converts anyhow::Result into Result<T, String> (Tauri requires
-// serializable errors).
+//! Speedwave Desktop — Tauri v2 backend.
+//!
+//! Thin `#[tauri::command]` wrappers delegating to module functions; each
+//! converts `anyhow::Result` into `Result<T, String>` for serializable errors.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#![allow(missing_docs)]
 
 mod auth;
 mod auth_commands;
 mod bridges;
 mod chat;
+mod chat_session_cmd;
 mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
 mod firewall;
-mod fs_perms;
 mod git_cmd;
 mod health;
+mod health_cmd;
 mod history;
+mod history_cmd;
 mod host_exec_cmd;
 mod host_path;
 mod http_util;
@@ -28,6 +28,7 @@ mod http_util;
 mod installer_hooks;
 use bridges::ide_bridge;
 mod github_oauth_cmd;
+mod ide_bridge_cmd;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
@@ -36,7 +37,6 @@ mod oauth_flow;
 mod oauth_login_cmd;
 mod oauth_providers;
 mod paste_cmd;
-mod patch_emitter;
 // `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
 // which is Windows-only (gnome-terminal / xterm spawning was removed with the
 // Linux backend in ADR-059). Gating the module declaration keeps clippy quiet
@@ -44,13 +44,13 @@ mod patch_emitter;
 #[cfg(target_os = "windows")]
 mod path_util;
 mod plugin_cmd;
+mod project_cmd;
 mod queue_cmd;
 mod reconcile;
 mod redmine_api_cmd;
 mod retry_cmd;
 mod setup_wizard;
 mod slash_cmd;
-mod subscribe_cmd;
 mod system_settings_cmd;
 mod transcription_cmd;
 mod tray;
@@ -61,10 +61,11 @@ mod updater;
 mod url_validation;
 mod window;
 
-use types::{check_project, ProjectEntry, ProjectList};
+// `check_project` is re-exported at the crate root because `diagnostics`
+// reaches it via `super::check_project`; keep it resolvable here.
+use types::check_project;
 
 use chat::{ChatSession, SharedChatSession};
-use health::HealthMonitor;
 use speedwave_runtime::config;
 
 use serde::Serialize;
@@ -77,6 +78,9 @@ use reconcile::{
     ExitCleanupContext, SharedAutoCheckHandle, SharedHostExec, SharedIdeBridge, SharedMcpOs,
     SharedOauth, SharedPluginBridges,
 };
+
+// Re-export project-switch helpers consumed via `crate::` from containers_cmd.
+pub(crate) use project_cmd::{rebind_chat, rollback_and_emit_failed};
 
 pub(crate) use host_path::recovered_host_path;
 use speedwave_runtime::host_exec_process::{write_host_exec_config_snapshot, HostExecProcess};
@@ -150,729 +154,12 @@ static OAUTH_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
 static HOST_EXEC_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-// ---------------------------------------------------------------------------
-// Chat commands
-// ---------------------------------------------------------------------------
-
-const MSG_NOT_AUTHENTICATED: &str = "Claude is not authenticated. Please authenticate first.";
-
-/// Shared implementation for `start_chat` and `resume_conversation`.
-///
-/// 1. Acquires the per-project compose lock via `rt.transaction()` and verifies
-///    Claude auth (which also runs `ensure_exec_healthy`).
-/// 2. Extracts the old session from the mutex and stops it **outside** the
-///    session lock — `stop()` can block on `child.wait()` / reader thread
-///    join, and holding the session mutex during that time would starve
-///    `send_message`.
-/// 3. Re-acquires the session lock and starts the new session.
-fn start_session_inner(
-    project: &str,
-    resume_session_id: Option<&str>,
-    session_arc: SharedChatSession,
-    host_exec_arc: SharedHostExec,
-    oauth_arc: SharedOauth,
-    app_handle: tauri::AppHandle,
-) -> Result<(), String> {
-    let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, project);
-    let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
-
-    containers_cmd::ensure_images_ready()?;
-
-    if host_exec_just_started || oauth_just_started {
-        host_exec_cmd::recreate_project_containers_if_running(project);
-    }
-
-    // Per-project compose lock serialises auth check with concurrent compose ops.
-    log::info!("start_session_inner: acquiring compose lock");
-    let rt = speedwave_runtime::runtime::detect_runtime();
-    // `_rt` unused: `check_claude_auth` builds its own runtime; HELD_LOCKS
-    // makes that call reentrant within this thread + project.
-    rt.transaction(project, |_rt| -> anyhow::Result<()> {
-        log::info!("start_session_inner: compose lock acquired, checking auth");
-        let authed = setup_wizard::check_claude_auth(project)?;
-        if !authed {
-            anyhow::bail!("{}", MSG_NOT_AUTHENTICATED);
-        }
-        Ok(())
-    })
-    .map_err(|e| e.to_string())?;
-
-    // Extract old session and stop it outside the lock.
-    log::info!("start_session_inner: extracting old session");
-    let mut old_session = {
-        let mut guard = session_arc
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
-        std::mem::replace(&mut *guard, ChatSession::new(project))
-    };
-    log::info!("start_session_inner: stopping old session (outside lock)");
-    old_session.stop().map_err(|e| e.to_string())?;
-    drop(old_session);
-
-    // Start the new session under the lock.
-    log::info!("start_session_inner: starting new session");
-    let mut session = session_arc
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
-    let result = session
-        .start(app_handle, resume_session_id)
-        .map_err(|e| e.to_string());
-    log::info!("start_session_inner: session.start result={result:?}");
-    result
-}
-
-#[tauri::command]
-async fn start_chat(
-    project: String,
-    app_handle: tauri::AppHandle,
-    state: tauri::State<'_, SharedChatSession>,
-    host_exec: tauri::State<'_, SharedHostExec>,
-    oauth: tauri::State<'_, SharedOauth>,
-) -> Result<(), String> {
-    check_project(&project)?;
-    log::info!("start_chat: project={project}");
-    let session_arc = state.inner().clone();
-    let host_exec_arc = host_exec.inner().clone();
-    let oauth_arc = oauth.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        start_session_inner(
-            &project,
-            None,
-            session_arc,
-            host_exec_arc,
-            oauth_arc,
-            app_handle,
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn send_message(
-    blocks: Vec<chat::WireContentBlock>,
-    display_text: String,
-    state: tauri::State<'_, SharedChatSession>,
-) -> Result<(), String> {
-    // `display_text` is the local-bubble preview; wire-size guard is in `send_message`.
-    if display_text.len() > chat::MAX_MESSAGE_LEN {
-        return Err("Message too long".to_string());
-    }
-    log::info!(
-        "send_message: blocks={}, display_len={}",
-        blocks.len(),
-        display_text.len()
-    );
-    let session_arc = state.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        let mut session = session_arc.try_lock().map_err(|_| {
-            log::info!("send_message: try_lock failed (session busy)");
-            "no active session (session is being started)".to_string()
-        })?;
-        log::info!("send_message: lock acquired, sending");
-        session.send_message(&blocks).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn submit_question_answer(
-    tool_use_id: String,
-    question_idx: usize,
-    answer: String,
-    state: tauri::State<'_, SharedChatSession>,
-) -> Result<(), String> {
-    if answer.len() > chat::MAX_ASK_USER_ANSWER_LEN {
-        return Err("Answer too long".to_string());
-    }
-    let session_arc = state.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        let mut session = session_arc
-            .try_lock()
-            .map_err(|_| "no active session (session is being started)".to_string())?;
-        session
-            .submit_question_answer(&tool_use_id, question_idx, &answer)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-fn stop_chat_inner(session_arc: SharedChatSession) -> Result<(), String> {
-    let mut session = session_arc
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
-    session.interrupt().map_err(|e| e.to_string())
-}
-
-/// Tauri command — delegates to [`ChatSession::interrupt`].
-#[tauri::command]
-async fn stop_chat(state: tauri::State<'_, SharedChatSession>) -> Result<(), String> {
-    log::info!("stop_chat: interrupting turn");
-    let session_arc = state.inner().clone();
-    tokio::task::spawn_blocking(move || stop_chat_inner(session_arc))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-// ---------------------------------------------------------------------------
-// Chat history commands
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-async fn list_conversations(project: String) -> Result<Vec<history::ConversationSummary>, String> {
-    tokio::task::spawn_blocking(move || {
-        check_project(&project)?;
-        log::info!("list_conversations: project={project}");
-        history::list_conversations(&project).map_err(|e| {
-            log::error!("list_conversations: error: {e}");
-            e.to_string()
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn get_conversation(
-    project: String,
-    session_id: String,
-) -> Result<history::ConversationTranscript, String> {
-    tokio::task::spawn_blocking(move || {
-        check_project(&project)?;
-        log::info!("get_conversation: project={project}");
-        history::get_conversation(&project, &session_id).map_err(|e| {
-            log::error!("get_conversation: error: {e}");
-            e.to_string()
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn delete_conversation(project: String, session_id: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        check_project(&project)?;
-        log::info!("delete_conversation: project={project}");
-        history::delete_conversation(&project, &session_id).map_err(|e| {
-            log::error!("delete_conversation: error: {e}");
-            e.to_string()
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn get_project_memory(project: String) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
-        check_project(&project)?;
-        log::info!("get_project_memory: project={project}");
-        history::get_project_memory(&project).map_err(|e| {
-            log::error!("get_project_memory: error: {e}");
-            e.to_string()
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn resume_conversation(
-    project: String,
-    session_id: String,
-    app_handle: tauri::AppHandle,
-    state: tauri::State<'_, SharedChatSession>,
-    host_exec: tauri::State<'_, SharedHostExec>,
-    oauth: tauri::State<'_, SharedOauth>,
-) -> Result<(), String> {
-    check_project(&project)?;
-    history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
-    log::info!("resume_conversation: project={project}");
-    let session_arc = state.inner().clone();
-    let host_exec_arc = host_exec.inner().clone();
-    let oauth_arc = oauth.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        start_session_inner(
-            &project,
-            Some(&session_id),
-            session_arc,
-            host_exec_arc,
-            oauth_arc,
-            app_handle,
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-// ---------------------------------------------------------------------------
-// Project management commands
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-fn list_projects() -> Result<ProjectList, String> {
-    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let projects = user_config
-        .projects
-        .iter()
-        .map(|p| ProjectEntry {
-            name: p.name.clone(),
-            dir: p.dir.clone(),
-        })
-        .collect();
-    Ok(ProjectList {
-        projects,
-        active_project: user_config.active_project,
-    })
-}
-
-/// Switches the active project in-memory. Extracted for testability.
-fn apply_switch_project(
-    user_config: &mut config::SpeedwaveUserConfig,
-    name: &str,
-) -> anyhow::Result<()> {
-    if user_config.find_project(name).is_none() {
-        anyhow::bail!("Project '{}' not found", name);
-    }
-    user_config.active_project = Some(name.to_string());
-    Ok(())
-}
-
-#[tauri::command]
-async fn switch_project(
-    name: String,
-    app: tauri::AppHandle,
-    chat_state: tauri::State<'_, SharedChatSession>,
-    host_exec: tauri::State<'_, SharedHostExec>,
-) -> Result<(), String> {
-    use containers_cmd::{switch_project_core, teardown_and_restore, teardown_only, SwitchResult};
-
-    // Config is committed first to keep the config lock brief — holding it
-    // across the blocking container transition would starve other config
-    // readers. If the container switch fails, rollback_and_emit_failed
-    // restores active_project to `previous`.
-    let previous = config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
-        let prev = user_config.active_project.clone();
-        apply_switch_project(&mut user_config, &name)?;
-        config::save_user_config(&user_config)?;
-        Ok(prev)
-    })
-    .map_err(|e| e.to_string())?;
-
-    // Tear down the previous project's `host_exec` worker (best-effort).
-    if let Some(ref prev) = previous {
-        if prev != &name {
-            reconcile::teardown_host_exec_for_project(host_exec.inner(), prev);
-        }
-    }
-
-    use tauri::Emitter;
-    let _ = app.emit(
-        "project_switch_started",
-        serde_json::json!({ "project": name }),
-    );
-
-    // Container transaction: wait for images → stop previous → recreate new
-    let prev_clone = previous.clone();
-    let new_clone = name.clone();
-    let switch_result = tokio::task::spawn_blocking(move || {
-        if let Err(e) = containers_cmd::ensure_images_ready() {
-            return SwitchResult::Failed {
-                error: e,
-                cleanup_error: None,
-            };
-        }
-        let rt = speedwave_runtime::runtime::detect_runtime();
-        switch_project_core(&prev_clone, &new_clone, &rt, &|proj, rt| {
-            check_project(proj)?;
-            // Lazy build for the destination project (ADR-057).
-            if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
-                return Err(format!("Image build failed: {sanitized}"));
-            }
-            // compose_down(prev) already handled by switch_project_core step 2.
-            // Wrap the destination project's render → validate → up sequence in a
-            // single transaction so it shares semantics with every other compose
-            // callsite (see ADR-066) and benefits from compose_validate_with_retry's
-            // virtiofs/9p propagation-lag recovery.
-            use crate::types::IntoAnyhow;
-            rt.transaction(proj, |rt| -> anyhow::Result<()> {
-                containers_cmd::render_and_save_compose(proj).into_anyhow()?;
-                speedwave_runtime::runtime::compose_validate_with_retry(rt, proj)?;
-                rt.compose_up_recreate(proj)?;
-                Ok(())
-            })
-            .map_err(|e| e.to_string())
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if let SwitchResult::Failed {
-        error,
-        cleanup_error,
-    } = switch_result
-    {
-        let full_error = rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
-        return Err(full_error);
-    }
-
-    // Rebind chat session (spawn_blocking: rebind_chat acquires Mutex and calls session.start)
-    let rebind_name = name.clone();
-    let rebind_app = app.clone();
-    let rebind_state = chat_state.inner().clone();
-    let rebind_result: Result<(), String> =
-        tokio::task::spawn_blocking(move || rebind_chat(&rebind_name, &rebind_app, &rebind_state))
-            .await
-            .map_err(|e| e.to_string())?;
-
-    if let Err(e) = rebind_result {
-        // Restore previous project containers + chat
-        let mut cleanup_parts: Vec<String> = Vec::new();
-
-        let prev_for_restore = previous.clone();
-        let new_for_teardown = name.clone();
-        let restore_result: Result<(), String> = tokio::task::spawn_blocking(move || {
-            let rt = speedwave_runtime::runtime::detect_runtime();
-            match &prev_for_restore {
-                Some(prev) => teardown_and_restore(&new_for_teardown, prev, &rt),
-                None => teardown_only(&new_for_teardown, &rt).map_or(Ok(()), Err),
-            }
-        })
-        .await
-        .unwrap_or_else(|je| Err(format!("join error: {je}")));
-
-        if let Err(ref re) = restore_result {
-            if previous.is_some() {
-                cleanup_parts.push(format!(
-                    "Container restore failed: {re}. \
-                     System may be without running containers — run speedwave to restart."
-                ));
-            } else {
-                cleanup_parts.push(format!("Teardown of new project incomplete: {re}"));
-            }
-        }
-
-        if let Some(ref prev) = previous {
-            if restore_result.is_ok() {
-                let rb_prev = prev.clone();
-                let rb_app = app.clone();
-                let rb_state = chat_state.inner().clone();
-                let rb_result: Result<(), String> =
-                    tokio::task::spawn_blocking(move || rebind_chat(&rb_prev, &rb_app, &rb_state))
-                        .await
-                        .unwrap_or_else(|je| Err(format!("join error: {je}")));
-
-                if let Err(re) = rb_result {
-                    cleanup_parts.push(format!(
-                        "Containers restored but chat rebind to '{prev}' failed: {re}"
-                    ));
-                }
-            }
-        }
-
-        let cleanup_error = if cleanup_parts.is_empty() {
-            None
-        } else {
-            Some(cleanup_parts.join(". "))
-        };
-
-        let full_error =
-            rollback_and_emit_failed(&app, previous, &e.to_string(), cleanup_error.as_deref());
-        return Err(full_error);
-    }
-
-    let _ = app.emit(
-        "project_switch_succeeded",
-        serde_json::json!({ "project": name }),
-    );
-    Ok(())
-}
-
-fn rebind_chat(
-    project: &str,
-    app: &tauri::AppHandle,
-    chat_state: &SharedChatSession,
-) -> Result<(), String> {
-    check_project(project)?;
-    let mut session = chat_state
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
-    session.stop().map_err(|e| e.to_string())?;
-    *session = ChatSession::new(project);
-    session.start(app.clone(), None).map_err(|e| e.to_string())
-}
-
-/// Parses a prefix-encoded CloudStorage TCC error into the `(stable_id, dir)`
-/// pair if present, otherwise returns `None`.
-///
-/// Format produced by `cloudstorage::check_project_readable_or_err`:
-/// `"CloudStorage TCC required: {stable_id}|{dir}"`. Tolerates extra suffix
-/// text that downstream wrappers may have appended after the dir.
-fn parse_cloudstorage_tcc_error(error: &str) -> Option<(&str, &str)> {
-    let body = error.strip_prefix(speedwave_runtime::cloudstorage::CLOUDSTORAGE_TCC_PREFIX)?;
-    let pipe_idx = body.find('|')?;
-    let (stable_id, rest) = body.split_at(pipe_idx);
-    // rest starts with '|'
-    let dir = rest[1..]
-        .split_once(". ")
-        .map(|(d, _)| d)
-        .unwrap_or(&rest[1..]);
-    Some((stable_id, dir))
-}
-
-/// Builds the JSON payload for the `project_switch_failed` Tauri event.
-///
-/// Pure function (no IO) so it can be unit-tested independently of Tauri.
-/// When the error string is prefix-encoded with `CLOUDSTORAGE_TCC_PREFIX`,
-/// emits structured `error_kind`/`provider`/`project_dir` fields so the
-/// frontend can route to the CloudStorage remediation modal. Otherwise
-/// emits only `project` + `error`.
-pub(crate) fn compute_project_switch_failure_payload(
-    previous: Option<&str>,
-    full_error: &str,
-) -> serde_json::Value {
-    use speedwave_runtime::cloudstorage::CloudStorageProvider;
-
-    if let Some((stable_id, dir)) = parse_cloudstorage_tcc_error(full_error) {
-        let provider = CloudStorageProvider::from_stable_id(stable_id);
-        return serde_json::json!({
-            "project": previous,
-            "error": full_error,
-            "error_kind": "cloudstorage_tcc_required",
-            "provider": provider.as_ref().map(|p| p.display_name()),
-            "project_dir": dir,
-        });
-    }
-
-    serde_json::json!({
-        "project": previous,
-        "error": full_error,
-    })
-}
-
-pub(crate) fn rollback_and_emit_failed(
-    app: &tauri::AppHandle,
-    previous: Option<String>,
-    error: &str,
-    cleanup_error: Option<&str>,
-) -> String {
-    let rollback_err = config::with_config_lock(|| {
-        let mut cfg = config::load_user_config()?;
-        cfg.active_project = previous.clone();
-        config::save_user_config(&cfg)?;
-        Ok(())
-    })
-    .err();
-
-    let mut parts = vec![error.to_string()];
-    if let Some(ce) = cleanup_error {
-        parts.push(ce.to_string());
-    }
-    if let Some(rb) = rollback_err {
-        parts.push(format!("Config rollback failed: {rb}"));
-    }
-    let full_error = parts.join(". ");
-
-    let payload = compute_project_switch_failure_payload(previous.as_deref(), &full_error);
-
-    use tauri::Emitter;
-    let _ = app.emit("project_switch_failed", payload);
-
-    full_error
-}
-
-// ---------------------------------------------------------------------------
-// Health check command
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-async fn get_health(project: String) -> Result<health::HealthReport, String> {
-    tokio::task::spawn_blocking(move || {
-        check_project(&project)?;
-        let user_config = match config::load_user_config() {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("Health check: failed to load config, using defaults: {e}");
-                config::SpeedwaveUserConfig::default()
-            }
-        };
-        let project_dir = user_config
-            .find_project(&project)
-            .map(|p| std::path::PathBuf::from(&p.dir));
-        let any_os_enabled = if cfg!(target_os = "macos") {
-            project_dir
-                .map(|dir| {
-                    let resolved = config::resolve_integrations(&dir, &user_config, &project);
-                    resolved.any_os_enabled()
-                })
-                .unwrap_or(false)
-        } else {
-            false
-        };
-        Ok(HealthMonitor::check_all(&project, any_os_enabled))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-// ---------------------------------------------------------------------------
-// IDE Bridge commands
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct BridgeStatus {
-    port: u16,
-    upstream_ide: Option<String>,
-    upstream_port: Option<u16>,
-}
-
-/// Checks whether the IDE process behind `~/.claude/ide/<port>.lock` is still alive.
-///
-/// Verifies both PID liveness and TCP port reachability (50 ms timeout).
-/// PID alone is insufficient because Cursor/VS Code may restart on a new port
-/// while keeping the same main-process PID, leaving a stale lock file.
-fn is_upstream_alive(port: u16) -> bool {
-    let lock_path = match dirs::home_dir() {
-        Some(h) => h.join(".claude").join("ide").join(format!("{}.lock", port)),
-        None => return false,
-    };
-    health::is_ide_lock_alive(&lock_path)
-}
-
-/// Clears the dead IDE selection from both the live bridge and persisted config.
-///
-/// Called when the upstream IDE is detected as dead (PID gone or port not
-/// listening). Separated from the query command so that `get_bridge_status`
-/// does not have write side-effects.
-fn cleanup_dead_ide(bridge: &ide_bridge::IdeBridge) {
-    log::info!(target: "ide_bridge", "cleanup_dead_ide: upstream IDE died, clearing selection");
-    bridge.clear_upstream();
-    if let Err(e) = config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
-        user_config.selected_ide = None;
-        config::save_user_config(&user_config)
-    }) {
-        log::warn!("cleanup_dead_ide: failed to persist IDE deselection: {e}");
-    }
-}
-
-/// Returns the current IDE Bridge status for the Angular frontend.
-///
-/// When the upstream IDE is detected as dead (PID gone or port not listening),
-/// delegates to `cleanup_dead_ide()` to clear the stale selection. This fires
-/// only once per IDE death — subsequent polls see `upstream_info() -> None`.
-#[tauri::command]
-fn get_bridge_status(state: tauri::State<SharedIdeBridge>) -> Result<Option<BridgeStatus>, String> {
-    let guard = state
-        .lock()
-        .map_err(|e| format!("Bridge mutex poisoned: {e}"))?;
-    match guard.as_ref() {
-        Some(bridge) => {
-            let (upstream_ide, upstream_port) = match bridge.upstream_info() {
-                Some((name, port)) => {
-                    if is_upstream_alive(port) {
-                        (Some(name), Some(port))
-                    } else {
-                        cleanup_dead_ide(bridge);
-                        (None, None)
-                    }
-                }
-                None => (None, None),
-            };
-            Ok(Some(BridgeStatus {
-                port: bridge.port(),
-                upstream_ide,
-                upstream_port,
-            }))
-        }
-        None => Ok(None),
-    }
-}
-
-#[tauri::command]
-fn list_available_ides() -> Result<Vec<health::DetectedIde>, String> {
-    Ok(health::list_available_ides())
-}
-
-#[tauri::command]
-fn select_ide(
-    ide_name: String,
-    port: u16,
-    state: tauri::State<SharedIdeBridge>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    // Validate against the raw live-port list (pre-dedupe): UI may pick
-    // an older-window port that `list_available_ides` collapsed away, but
-    // we still want the user to be able to connect to that specific window.
-    if !health::is_ide_port_alive(port) {
-        log::warn!(
-            target: "ide_bridge",
-            "select_ide: port {port} is not a live IDE lock"
-        );
-        return Err(format!(
-            "IDE on port {} is not in the detected IDEs list",
-            port
-        ));
-    }
-    log::info!(target: "ide_bridge", "select_ide: connecting to {ide_name} on port {port}");
-
-    // Persist the selection to config.json
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
-        user_config.selected_ide = Some(speedwave_runtime::config::SelectedIde {
-            ide_name: ide_name.clone(),
-            port,
-        });
-        config::save_user_config(&user_config)
-    })
-    .map_err(|e| e.to_string())?;
-
-    // Start IDE Bridge on-demand if it wasn't started at startup (e.g. after
-    // factory reset when setup_started was false during the initial launch).
-    ensure_ide_bridge_running(&state, &app);
-
-    // Update the live Bridge so new connections are proxied immediately
-    let guard = state
-        .lock()
-        .map_err(|e| format!("Bridge mutex poisoned: {e}"))?;
-    if let Some(bridge) = guard.as_ref() {
-        bridge
-            .set_upstream(ide_name, port)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn get_selected_ide() -> Result<Option<speedwave_runtime::config::SelectedIde>, String> {
-    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    Ok(user_config.selected_ide)
-}
-
-/// User-initiated disconnect from the upstream IDE. Clears both the live
-/// bridge proxy and the persisted `selected_ide` so a restart will not
-/// auto-reconnect.
-#[tauri::command]
-fn disconnect_ide(state: tauri::State<SharedIdeBridge>) -> Result<(), String> {
-    log::info!(target: "ide_bridge", "disconnect_ide: clearing upstream");
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
-        user_config.selected_ide = None;
-        config::save_user_config(&user_config)
-    })
-    .map_err(|e| e.to_string())?;
-    let guard = state
-        .lock()
-        .map_err(|e| format!("Bridge mutex poisoned: {e}"))?;
-    if let Some(bridge) = guard.as_ref() {
-        bridge.clear_upstream();
-    }
-    Ok(())
-}
+// Chat / history / project / health / IDE-bridge commands now live in their
+// own domain modules: `chat_session_cmd`, `history_cmd`, `project_cmd`,
+// `health_cmd`, `ide_bridge_cmd`. The shared "not authenticated" message stays
+// at crate root because `chat_session_cmd` references it via `crate::`.
+pub(crate) const MSG_NOT_AUTHENTICATED: &str =
+    "Claude is not authenticated. Please authenticate first.";
 
 use diagnostics::export_diagnostics;
 use window::should_debounce;
@@ -926,7 +213,7 @@ fn init_and_start_ide_bridge_inner(app_handle: &tauri::AppHandle) -> Option<ide_
 
 /// Wire-format for the `plugin_bridge_get_credentials` Tauri response. Mirror:
 /// `PluginBridgeCredentials` in `desktop/src/src/app/models/plugin.ts`.
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct PluginBridgeCredentialsResponse {
     slug: String,
     url: String,
@@ -935,7 +222,7 @@ struct PluginBridgeCredentialsResponse {
 
 /// Wire-format for `plugin_bridge_get_status`. Discriminated on `running`.
 /// Mirror: `PluginBridgeStatus` in `desktop/src/src/app/models/plugin.ts`.
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 #[serde(untagged)]
 enum PluginBridgeStatusResponse {
     Running {
@@ -1058,7 +345,10 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
 
 /// Start IDE Bridge if not already running. Holds the mutex for the entire
 /// init+start to prevent races (two callers both seeing None and double-starting).
-fn ensure_ide_bridge_running(ide_bridge: &SharedIdeBridge, app_handle: &tauri::AppHandle) {
+pub(crate) fn ensure_ide_bridge_running(
+    ide_bridge: &SharedIdeBridge,
+    app_handle: &tauri::AppHandle,
+) {
     // Ensure the WSL Hyper-V firewall rule before binding the host listener
     // (ADR-067). No-op off Windows; runs at most once per process.
     firewall::ensure_firewall_rule();
@@ -1470,6 +760,8 @@ fn main() {
         #[cfg(not(debug_assertions))]
         {
             let _ = &default_hook; // suppress unused warning
+                                   // Sanctioned panic-hook last-resort fallback (logging.md): the
+                                   // logger may be dead mid-panic, so write to stderr directly.
             #[allow(clippy::print_stderr)]
             {
                 eprintln!("PANIC: {sanitized}");
@@ -1503,7 +795,6 @@ fn main() {
 
     let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
-    let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
     // Meeting-transcription stores (ADR-056). Active sessions live in memory;
     // both stores walk the disk lazily on first access. `transcript_drivers`
     // maps an in-flight recording to its stop signal.
@@ -1587,8 +878,7 @@ fn main() {
     let exit_cleanup_handle_window = exit_cleanup_handle.clone();
     let exit_cleanup_handle_runevent = exit_cleanup_handle.clone();
 
-    #[allow(unused_mut)] // mut needed when "e2e" feature is enabled
-    let mut builder = tauri::Builder::default();
+    let builder = tauri::Builder::default();
 
     // WebDriver server for E2E tests — only present when the "e2e" feature is
     // enabled. The plugin embeds a W3C WebDriver server on 127.0.0.1:4445 so
@@ -1596,12 +886,9 @@ fn main() {
     // Production releases are built without the feature — the crate is not
     // compiled or linked, so zero attack surface.
     #[cfg(feature = "e2e")]
-    {
-        builder = builder.plugin(tauri_plugin_webdriver::init());
-    }
+    let builder = builder.plugin(tauri_plugin_webdriver::init());
 
-    #[allow(clippy::expect_used)]
-    builder
+    let app = builder
         .plugin({
             use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
             // No timezone_strategy — custom `.format(...)` below uses `log_ts` SSOT.
@@ -1650,7 +937,6 @@ fn main() {
         .manage(host_exec.clone())
         .manage(oauth.clone())
         .manage(queue_service.clone())
-        .manage(msg_store_registry.clone())
         .manage(transcript_store.clone())
         .manage(model_store.clone())
         .manage(transcript_drivers.clone())
@@ -1992,7 +1278,6 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             // Setup wizard
             containers_cmd::check_runtime,
-            containers_cmd::install_runtime,
             containers_cmd::init_vm,
             containers_cmd::create_project,
             containers_cmd::link_cli,
@@ -2002,7 +1287,6 @@ fn main() {
             containers_cmd::is_setup_complete,
             containers_cmd::build_images,
             containers_cmd::start_containers,
-            containers_cmd::check_claude_auth,
             containers_cmd::check_containers_running,
             // Settings
             containers_cmd::factory_reset,
@@ -2023,18 +1307,15 @@ fn main() {
             url_validation::get_platform,
             auth_commands::get_auth_command,
             // Chat
-            start_chat,
-            send_message,
+            chat_session_cmd::start_chat,
+            chat_session_cmd::send_message,
             paste_cmd::save_pasted_image,
-            submit_question_answer,
-            stop_chat,
+            chat_session_cmd::submit_question_answer,
+            chat_session_cmd::stop_chat,
             retry_cmd::retry_last_turn,
             // Queued messages (ADR-045)
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,
-            queue_cmd::peek_queued_message,
-            // JSON-Patch stream protocol (ADR-042/043)
-            subscribe_cmd::subscribe_session,
             // Meeting transcription (ADR-056)
             transcription_cmd::transcription_enabled,
             transcription_cmd::set_transcription_enabled,
@@ -2055,49 +1336,36 @@ fn main() {
             transcription_cmd::download_transcription_model,
             transcription_cmd::delete_transcription_model,
             // Chat history
-            list_conversations,
-            get_conversation,
-            delete_conversation,
-            get_project_memory,
-            resume_conversation,
+            history_cmd::list_conversations,
+            history_cmd::get_conversation,
+            history_cmd::delete_conversation,
+            history_cmd::get_project_memory,
+            chat_session_cmd::resume_conversation,
             // Project management
-            list_projects,
-            switch_project,
+            project_cmd::list_projects,
+            project_cmd::switch_project,
             containers_cmd::add_project,
             containers_cmd::remove_project,
             // Health
-            get_health,
+            health_cmd::get_health,
             // Container logs
-            container_logs_cmd::get_container_logs,
-            container_logs_cmd::get_compose_logs,
-            container_logs_cmd::get_mcp_os_logs,
-            container_logs_cmd::get_host_exec_logs,
-            container_logs_cmd::get_claude_session_logs,
             container_logs_cmd::get_all_logs,
             // IDE Bridge
-            list_available_ides,
-            select_ide,
-            disconnect_ide,
-            get_selected_ide,
-            get_bridge_status,
+            ide_bridge_cmd::list_available_ides,
+            ide_bridge_cmd::select_ide,
+            ide_bridge_cmd::disconnect_ide,
+            ide_bridge_cmd::get_selected_ide,
             // Per-plugin host bridges (manifest-declared)
             plugin_bridge_get_credentials,
             plugin_bridge_get_status,
-            // Container updates
-            update_commands::update_containers,
-            update_commands::rollback_containers,
             // Update
             update_commands::check_for_update,
-            update_commands::install_update,
             update_commands::install_update_and_reconcile,
             update_commands::get_update_settings,
             update_commands::set_update_settings,
             update_commands::get_bundle_reconcile_state,
-            update_commands::retry_bundle_reconcile,
-            update_commands::restart_app,
             // UI preferences (ADR-058)
             ui_prefs_cmd::get_beta_enabled,
-            ui_prefs_cmd::set_beta_enabled,
             // Diagnostics
             export_diagnostics,
             // Integrations
@@ -2125,7 +1393,6 @@ fn main() {
             host_exec_cmd::get_host_exec,
             host_exec_cmd::set_host_exec_enabled,
             host_exec_cmd::host_exec_save_settings,
-            host_exec_cmd::host_exec_load_settings,
             host_exec_cmd::host_exec_resolve_executable,
             // Plugins
             plugin_cmd::get_plugins,
@@ -2178,78 +1445,86 @@ fn main() {
                 _ => {}
             }
         })
-        .build(tauri::generate_context!())
-        .expect("fatal: Tauri application failed to start")
-        .run(move |app_handle, event| match event {
-            // `ExitRequested` covers the paths where `WindowEvent::Destroyed`
-            // does NOT fire on the main window before exit:
-            //   - Tray menu "Quit" (calls `app.exit(0)`)
-            //   - macOS app menu "Quit Speedwave" / Cmd+Q (NSApplication terminate)
-            //   - SIGTERM via the Tauri runtime
-            // In tray mode the main window is hidden (not destroyed), so the
-            // `WindowEvent::Destroyed` branch never runs and the VM would stay
-            // up after the process exits. Spawning cleanup here guarantees it
-            // runs for every exit path. `CLEANUP_ONCE` inside
-            // `run_exit_cleanup` makes this idempotent with respect to the
-            // `WindowEvent::Destroyed` call site.
-            tauri::RunEvent::ExitRequested { .. } => {
-                // Hide the main window immediately so macOS stops waiting for
-                // the window to respond during the cleanup join in
-                // `RunEvent::Exit`. Without this, the user sees a beachball
-                // for ~1s on Cmd+Q because the event loop blocks joining the
-                // limactl stop thread while the window is still visible —
-                // WindowServer then draws the beachball.
-                //
-                // Safe on Windows too: the window is typically already being
-                // destroyed when ExitRequested fires (tray-less setups),
-                // making this a harmless no-op. Do NOT gate this to macOS —
-                // a `#[cfg(target_os = "macos")]` guard would re-introduce
-                // the beachball if macOS ever reorders event delivery, and
-                // removing it costs nothing elsewhere.
+        .build(tauri::generate_context!());
+
+    let app = match app {
+        Ok(app) => app,
+        Err(e) => {
+            log::error!("fatal: Tauri application failed to start: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    app.run(move |app_handle, event| match event {
+        // `ExitRequested` covers the paths where `WindowEvent::Destroyed`
+        // does NOT fire on the main window before exit:
+        //   - Tray menu "Quit" (calls `app.exit(0)`)
+        //   - macOS app menu "Quit Speedwave" / Cmd+Q (NSApplication terminate)
+        //   - SIGTERM via the Tauri runtime
+        // In tray mode the main window is hidden (not destroyed), so the
+        // `WindowEvent::Destroyed` branch never runs and the VM would stay
+        // up after the process exits. Spawning cleanup here guarantees it
+        // runs for every exit path. `CLEANUP_ONCE` inside
+        // `run_exit_cleanup` makes this idempotent with respect to the
+        // `WindowEvent::Destroyed` call site.
+        tauri::RunEvent::ExitRequested { .. } => {
+            // Hide the main window immediately so macOS stops waiting for
+            // the window to respond during the cleanup join in
+            // `RunEvent::Exit`. Without this, the user sees a beachball
+            // for ~1s on Cmd+Q because the event loop blocks joining the
+            // limactl stop thread while the window is still visible —
+            // WindowServer then draws the beachball.
+            //
+            // Safe on Windows too: the window is typically already being
+            // destroyed when ExitRequested fires (tray-less setups),
+            // making this a harmless no-op. Do NOT gate this to macOS —
+            // a `#[cfg(target_os = "macos")]` guard would re-introduce
+            // the beachball if macOS ever reorders event delivery, and
+            // removing it costs nothing elsewhere.
+            hide_main_window(app_handle);
+            if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_runevent) {
+                stash_cleanup_handle(&exit_cleanup_handle_runevent, handle);
+            }
+        }
+        tauri::RunEvent::Exit => {
+            // Drain and join the cleanup thread spawned in
+            // `WindowEvent::Destroyed` or `RunEvent::ExitRequested` so
+            // `limactl stop` finishes before Tauri returns from `.run()`
+            // and the process exits.
+            //
+            // Fallback: on macOS, Cmd+Q / app-menu-Quit delivers
+            // `applicationWillTerminate`, which tao maps to
+            // `Event::LoopDestroyed`, which tauri-runtime-wry maps
+            // directly to `RunEvent::Exit` — bypassing
+            // `RunEvent::ExitRequested` and (for a hidden tray-mode
+            // window) `WindowEvent::Destroyed` entirely. If neither
+            // earlier arm ran, the slot is empty here and the Lima VM
+            // would be orphaned. Spawn cleanup inline as a last resort.
+            // `CLEANUP_ONCE` inside `run_exit_cleanup` makes this
+            // idempotent with the other entry points.
+            //
+            // NOTE: `exit_arm_runs_cleanup_when_handle_slot_is_empty` in
+            // the tests below asserts that this arm contains the literal
+            // strings `run_exit_cleanup(&cleanup_ctx_runevent)` and
+            // `hide_main_window(app_handle)` — if you rename either
+            // identifier, update the test assertions too.
+            let handle = match exit_cleanup_handle_runevent.lock() {
+                Ok(mut slot) => slot.take(),
+                Err(e) => {
+                    log::warn!("exit cleanup handle slot poisoned at exit: {e}");
+                    None
+                }
+            };
+            let handle = handle.or_else(|| {
                 hide_main_window(app_handle);
-                if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_runevent) {
-                    stash_cleanup_handle(&exit_cleanup_handle_runevent, handle);
-                }
+                reconcile::run_exit_cleanup(&cleanup_ctx_runevent)
+            });
+            if let Some(handle) = handle {
+                join_with_exit_watchdog(handle);
             }
-            tauri::RunEvent::Exit => {
-                // Drain and join the cleanup thread spawned in
-                // `WindowEvent::Destroyed` or `RunEvent::ExitRequested` so
-                // `limactl stop` finishes before Tauri returns from `.run()`
-                // and the process exits.
-                //
-                // Fallback: on macOS, Cmd+Q / app-menu-Quit delivers
-                // `applicationWillTerminate`, which tao maps to
-                // `Event::LoopDestroyed`, which tauri-runtime-wry maps
-                // directly to `RunEvent::Exit` — bypassing
-                // `RunEvent::ExitRequested` and (for a hidden tray-mode
-                // window) `WindowEvent::Destroyed` entirely. If neither
-                // earlier arm ran, the slot is empty here and the Lima VM
-                // would be orphaned. Spawn cleanup inline as a last resort.
-                // `CLEANUP_ONCE` inside `run_exit_cleanup` makes this
-                // idempotent with the other entry points.
-                //
-                // NOTE: `exit_arm_runs_cleanup_when_handle_slot_is_empty` in
-                // the tests below asserts that this arm contains the literal
-                // strings `run_exit_cleanup(&cleanup_ctx_runevent)` and
-                // `hide_main_window(app_handle)` — if you rename either
-                // identifier, update the test assertions too.
-                let handle = match exit_cleanup_handle_runevent.lock() {
-                    Ok(mut slot) => slot.take(),
-                    Err(e) => {
-                        log::warn!("exit cleanup handle slot poisoned at exit: {e}");
-                        None
-                    }
-                };
-                let handle = handle.or_else(|| {
-                    hide_main_window(app_handle);
-                    reconcile::run_exit_cleanup(&cleanup_ctx_runevent)
-                });
-                if let Some(handle) = handle {
-                    join_with_exit_watchdog(handle);
-                }
-            }
-            _ => {}
-        });
+        }
+        _ => {}
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2260,7 +1535,6 @@ fn main() {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use config::{ProjectUserEntry, SpeedwaveUserConfig};
 
     #[test]
     fn plugin_bridge_credentials_response_wire_format() {
@@ -2435,408 +1709,6 @@ mod tests {
         assert_eq!(map["dead"].respawn_calls.get(), 1);
     }
 
-    /// Extracts the body of a function from source code by matching `{`/`}`
-    /// counting braces.  Used by structural tests to assert on function contents.
-    ///
-    /// NOTE: uses `split(fn_signature)` which matches the first occurrence of
-    /// the literal string in the entire file.  Signatures must be unique —
-    /// avoid naming test helpers with substrings that collide with real command
-    /// signatures (e.g. don't name a test `fn test_async_fn_start_chat_…`).
-    fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
-        let after_sig = source
-            .split(fn_signature)
-            .nth(1)
-            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
-        let brace_start = after_sig.find('{').expect("opening brace not found");
-        let rest = &after_sig[brace_start..];
-        let mut depth = 0i32;
-        let mut end = 0;
-        for (i, ch) in rest.char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = i;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        assert!(end > 0, "closing brace not found for {fn_signature}");
-        &rest[..end]
-    }
-
-    // -- auth pre-flight structural tests --
-
-    #[test]
-    fn start_chat_delegates_to_start_session_inner() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn start_chat(");
-        assert!(
-            body.contains("start_session_inner"),
-            "start_chat must delegate to start_session_inner"
-        );
-    }
-
-    #[test]
-    fn resume_conversation_delegates_to_start_session_inner() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn resume_conversation(");
-        assert!(
-            body.contains("start_session_inner"),
-            "resume_conversation must delegate to start_session_inner"
-        );
-    }
-
-    #[test]
-    fn start_session_inner_checks_auth_before_session_start() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "fn start_session_inner(");
-
-        let auth_pos = body
-            .find("check_claude_auth")
-            .expect("start_session_inner must call check_claude_auth");
-        let start_pos = body
-            .find(".start(app_handle")
-            .expect("start_session_inner must call session.start(app_handle, ...)");
-
-        assert!(
-            auth_pos < start_pos,
-            "check_claude_auth must come BEFORE session.start()"
-        );
-    }
-
-    #[test]
-    fn start_session_inner_acquires_compose_lock_for_auth() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "fn start_session_inner(");
-
-        let compose_pos = body
-            .find("rt.transaction(")
-            .expect("start_session_inner must call rt.transaction for the per-project lock");
-        let auth_pos = body
-            .find("setup_wizard::check_claude_auth")
-            .expect("start_session_inner must call check_claude_auth");
-
-        assert!(
-            compose_pos < auth_pos,
-            "compose lock must be acquired BEFORE check_claude_auth"
-        );
-    }
-
-    #[test]
-    fn start_session_inner_waits_for_image_readiness_before_compose_paths() {
-        // Race guard: both recreate_project_containers_if_running (fresh
-        // host_exec/oauth branch) and check_claude_auth → ensure_exec_healthy
-        // can call compose_up_recreate. Gate must come BEFORE the if-block
-        // (covers fresh-worker branch) AND BEFORE check_claude_auth (covers
-        // the always-runs path).
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "fn start_session_inner(");
-
-        let ensure_pos = body
-            .find("containers_cmd::ensure_images_ready")
-            .expect("start_session_inner must call ensure_images_ready");
-        let recreate_pos = body
-            .find("recreate_project_containers_if_running")
-            .expect("start_session_inner must reach recreate_project_containers_if_running");
-        let auth_pos = body
-            .find("setup_wizard::check_claude_auth")
-            .expect("start_session_inner must reach check_claude_auth");
-
-        assert!(
-            ensure_pos < recreate_pos,
-            "ensure_images_ready must come BEFORE recreate_project_containers_if_running"
-        );
-        assert!(
-            ensure_pos < auth_pos,
-            "ensure_images_ready must come BEFORE check_claude_auth"
-        );
-    }
-
-    // -- spawn_blocking guard-rail tests --
-    //
-    // Chat commands must never acquire the SharedChatSession Mutex on the main
-    // thread.  These structural tests enforce that every command wrapping the
-    // mutex uses `spawn_blocking` and acquires `.lock()` inside it.
-
-    #[test]
-    fn start_chat_uses_spawn_blocking() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn start_chat(");
-        assert!(
-            body.contains("spawn_blocking"),
-            "start_chat must use spawn_blocking to avoid blocking the main thread"
-        );
-    }
-
-    #[test]
-    fn send_message_uses_spawn_blocking() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn send_message(");
-        assert!(
-            body.contains("spawn_blocking"),
-            "send_message must use spawn_blocking to avoid blocking the main thread"
-        );
-    }
-
-    #[test]
-    fn submit_question_answer_uses_spawn_blocking() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn submit_question_answer(");
-        assert!(
-            body.contains("spawn_blocking"),
-            "submit_question_answer must use spawn_blocking to avoid blocking the main thread"
-        );
-    }
-
-    #[test]
-    fn start_session_inner_acquires_session_lock() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "fn start_session_inner(");
-        assert!(
-            body.contains("session_arc") && body.contains(".lock()"),
-            "start_session_inner must acquire the session lock"
-        );
-    }
-
-    #[test]
-    fn send_message_acquires_lock_inside_spawn_blocking() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn send_message(");
-        let spawn_pos = body
-            .find("spawn_blocking")
-            .expect("send_message must use spawn_blocking");
-        let lock_pos = body
-            .find(".try_lock()")
-            .expect("send_message must acquire the session lock via try_lock");
-        assert!(
-            lock_pos > spawn_pos,
-            "session lock must be acquired INSIDE spawn_blocking, not before it"
-        );
-    }
-
-    #[test]
-    fn submit_question_answer_acquires_lock_inside_spawn_blocking() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn submit_question_answer(");
-        let spawn_pos = body
-            .find("spawn_blocking")
-            .expect("submit_question_answer must use spawn_blocking");
-        let lock_pos = body
-            .find(".try_lock()")
-            .expect("submit_question_answer must acquire the session lock via try_lock");
-        assert!(
-            lock_pos > spawn_pos,
-            "session lock must be acquired INSIDE spawn_blocking, not before it"
-        );
-    }
-
-    // -- validation-before-spawn tests --
-    //
-    // Fast validations (check_project, length checks) must run BEFORE
-    // spawn_blocking so invalid requests fail immediately without entering
-    // the thread pool.
-
-    #[test]
-    fn start_chat_validates_project_before_spawn_blocking() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn start_chat(");
-        let check_pos = body
-            .find("check_project")
-            .expect("start_chat must call check_project");
-        let spawn_pos = body
-            .find("spawn_blocking")
-            .expect("start_chat must use spawn_blocking");
-        assert!(
-            check_pos < spawn_pos,
-            "check_project must come BEFORE spawn_blocking for fail-fast validation"
-        );
-    }
-
-    #[test]
-    fn send_message_validates_length_before_spawn_blocking() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn send_message(");
-        let len_pos = body
-            .find("display_text.len()")
-            .expect("send_message must check display_text length");
-        let spawn_pos = body
-            .find("spawn_blocking")
-            .expect("send_message must use spawn_blocking");
-        assert!(
-            len_pos < spawn_pos,
-            "display_text length check must come BEFORE spawn_blocking for fail-fast validation"
-        );
-    }
-
-    #[test]
-    fn submit_question_answer_validates_length_before_spawn_blocking() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn submit_question_answer(");
-        let len_pos = body
-            .find("answer.len()")
-            .expect("submit_question_answer must check answer length");
-        let spawn_pos = body
-            .find("spawn_blocking")
-            .expect("submit_question_answer must use spawn_blocking");
-        assert!(
-            len_pos < spawn_pos,
-            "answer length check must come BEFORE spawn_blocking for fail-fast validation"
-        );
-    }
-
-    // -- JoinError handling tests --
-    //
-    // spawn_blocking returns JoinHandle which can fail with JoinError (e.g.
-    // if the spawned task panics).  The outer .await.map_err(…) must convert
-    // this to a String for the Tauri IPC error channel.
-
-    #[test]
-    fn start_chat_handles_join_error() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn start_chat(");
-        assert!(
-            body.contains(".await") && body.contains("map_err(|e| e.to_string())"),
-            "start_chat must handle JoinError from spawn_blocking via .await.map_err"
-        );
-    }
-
-    #[test]
-    fn send_message_handles_join_error() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn send_message(");
-        assert!(
-            body.contains(".await")
-                && body.contains("map_err(|e| e.to_string())")
-                && body.matches("map_err").count() >= 2,
-            "send_message must handle JoinError from spawn_blocking via .await.map_err"
-        );
-    }
-
-    #[test]
-    fn submit_question_answer_handles_join_error() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn submit_question_answer(");
-        assert!(
-            body.contains(".await")
-                && body.contains("map_err(|e| e.to_string())")
-                && body.matches("map_err").count() >= 2,
-            "submit_question_answer must handle JoinError from spawn_blocking via .await.map_err"
-        );
-    }
-
-    // -- apply_switch_project tests --
-
-    fn make_config_with_projects() -> SpeedwaveUserConfig {
-        SpeedwaveUserConfig {
-            projects: vec![
-                ProjectUserEntry {
-                    name: "alpha".to_string(),
-                    dir: "/tmp/alpha".to_string(),
-                    claude: None,
-                    integrations: None,
-                    plugin_settings: None,
-                },
-                ProjectUserEntry {
-                    name: "beta".to_string(),
-                    dir: "/tmp/beta".to_string(),
-                    claude: None,
-                    integrations: None,
-                    plugin_settings: None,
-                },
-            ],
-            active_project: Some("alpha".to_string()),
-            selected_ide: None,
-            transcription: None,
-            ui: None,
-        }
-    }
-
-    // -- apply_switch_project tests --
-
-    #[test]
-    fn switch_project_happy_path() {
-        let mut cfg = make_config_with_projects();
-        assert_eq!(cfg.active_project.as_deref(), Some("alpha"));
-
-        let result = apply_switch_project(&mut cfg, "beta");
-        assert!(result.is_ok());
-        assert_eq!(cfg.active_project.as_deref(), Some("beta"));
-    }
-
-    #[test]
-    fn switch_project_to_same_project() {
-        let mut cfg = make_config_with_projects();
-        let result = apply_switch_project(&mut cfg, "alpha");
-        assert!(result.is_ok());
-        assert_eq!(cfg.active_project.as_deref(), Some("alpha"));
-    }
-
-    #[test]
-    fn switch_project_error_not_found() {
-        let mut cfg = make_config_with_projects();
-        let result = apply_switch_project(&mut cfg, "nonexistent");
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("not found"),
-            "expected 'not found' error, got: {err}"
-        );
-        assert!(
-            err.contains("nonexistent"),
-            "error should mention the project name, got: {err}"
-        );
-    }
-
-    #[test]
-    fn switch_project_error_empty_name() {
-        let mut cfg = make_config_with_projects();
-        let result = apply_switch_project(&mut cfg, "");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn switch_project_does_not_modify_projects_list() {
-        let mut cfg = make_config_with_projects();
-        let projects_before: Vec<String> = cfg.projects.iter().map(|p| p.name.clone()).collect();
-
-        apply_switch_project(&mut cfg, "beta").unwrap();
-
-        let projects_after: Vec<String> = cfg.projects.iter().map(|p| p.name.clone()).collect();
-        assert_eq!(projects_before, projects_after);
-    }
-
-    #[test]
-    fn switch_project_from_none_active() {
-        let mut cfg = SpeedwaveUserConfig {
-            projects: vec![ProjectUserEntry {
-                name: "only".to_string(),
-                dir: "/tmp/only".to_string(),
-                claude: None,
-                integrations: None,
-                plugin_settings: None,
-            }],
-            active_project: None,
-            selected_ide: None,
-            transcription: None,
-            ui: None,
-        };
-
-        let result = apply_switch_project(&mut cfg, "only");
-        assert!(result.is_ok());
-        assert_eq!(cfg.active_project.as_deref(), Some("only"));
-    }
-
-    #[test]
-    fn switch_project_empty_projects_list() {
-        let mut cfg = SpeedwaveUserConfig::default();
-        let result = apply_switch_project(&mut cfg, "anything");
-        assert!(result.is_err());
-    }
-
     /// Structural test: all exit paths must use `join_with_exit_watchdog`
     /// instead of inline watchdog patterns.
     #[test]
@@ -2989,108 +1861,5 @@ mod tests {
             "first handle must be stashed into empty slot"
         );
         stashed.unwrap().join().expect("test thread must not panic");
-    }
-
-    // -- stop_chat_inner tests --
-
-    #[test]
-    fn stop_chat_inner_without_active_session_errors() {
-        // interrupt() requires an active stdin (shared_stdin=Some). A freshly
-        // constructed ChatSession has no stdin, so interrupt — and therefore
-        // stop_chat_inner — returns "no active session" instead of panicking.
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("test-project")));
-        let err = stop_chat_inner(session_arc).expect_err("expected error on idle session");
-        assert!(
-            err.contains("no active session"),
-            "expected 'no active session' in error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn stop_chat_inner_poisoned_mutex_returns_lock_poisoned_error() {
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("test-project")));
-        let arc_clone = session_arc.clone();
-        let _ = std::thread::spawn(move || {
-            let _guard = arc_clone.lock().unwrap();
-            panic!("poison the mutex");
-        })
-        .join();
-        let result = stop_chat_inner(session_arc);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Lock poisoned"),
-            "expected 'Lock poisoned' in error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn stop_chat_uses_spawn_blocking() {
-        let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn stop_chat(");
-        assert!(
-            body.contains("spawn_blocking"),
-            "stop_chat must use spawn_blocking to avoid blocking the main thread"
-        );
-    }
-
-    // -- compute_project_switch_failure_payload tests --
-
-    #[test]
-    fn payload_for_generic_error_omits_cloudstorage_fields() {
-        let payload =
-            compute_project_switch_failure_payload(Some("acme"), "Container restore failed");
-        assert_eq!(payload["project"], "acme");
-        assert_eq!(payload["error"], "Container restore failed");
-        assert!(payload.get("error_kind").is_none());
-        assert!(payload.get("provider").is_none());
-        assert!(payload.get("project_dir").is_none());
-    }
-
-    #[test]
-    fn payload_for_cloudstorage_error_includes_structured_fields() {
-        let err = "CloudStorage TCC required: one_drive|/Users/alice/Library/CloudStorage/OneDrive-Personal/p";
-        let payload = compute_project_switch_failure_payload(Some("acme"), err);
-        assert_eq!(payload["error_kind"], "cloudstorage_tcc_required");
-        assert_eq!(payload["provider"], "OneDrive");
-        assert_eq!(
-            payload["project_dir"],
-            "/Users/alice/Library/CloudStorage/OneDrive-Personal/p"
-        );
-        assert_eq!(payload["error"], err);
-        assert_eq!(payload["project"], "acme");
-    }
-
-    #[test]
-    fn payload_for_cloudstorage_error_with_appended_suffix_extracts_dir_only() {
-        let err = "CloudStorage TCC required: dropbox|/Users/alice/Dropbox/p. Config rollback failed: nope";
-        let payload = compute_project_switch_failure_payload(None, err);
-        assert_eq!(payload["error_kind"], "cloudstorage_tcc_required");
-        assert_eq!(payload["provider"], "Dropbox");
-        assert_eq!(payload["project_dir"], "/Users/alice/Dropbox/p");
-    }
-
-    #[test]
-    fn payload_for_cloudstorage_error_unknown_stable_id_emits_null_provider() {
-        let err = "CloudStorage TCC required: future_provider|/some/path";
-        let payload = compute_project_switch_failure_payload(None, err);
-        assert_eq!(payload["error_kind"], "cloudstorage_tcc_required");
-        assert!(payload["provider"].is_null());
-        assert_eq!(payload["project_dir"], "/some/path");
-    }
-
-    #[test]
-    fn payload_with_null_previous_serializes_as_null() {
-        let payload = compute_project_switch_failure_payload(None, "boom");
-        assert!(payload["project"].is_null());
-    }
-
-    #[test]
-    fn payload_for_malformed_prefix_without_pipe_falls_back_to_generic() {
-        let err = "CloudStorage TCC required: just_a_stable_id_without_pipe";
-        let payload = compute_project_switch_failure_payload(None, err);
-        assert!(payload.get("error_kind").is_none());
-        assert!(payload.get("provider").is_none());
-        assert!(payload.get("project_dir").is_none());
     }
 }

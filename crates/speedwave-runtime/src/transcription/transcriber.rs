@@ -4,8 +4,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::transcription::model_catalog::{whisper_model, WhisperModelInfo};
-
 /// Languages this feature transcribes (forced into Whisper).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -168,7 +166,10 @@ impl WhisperCppTranscriber {
     }
 
     /// Loads catalogue model `key` from `whisper_dir`; `ModelMissing` if absent.
+    /// Test-only: production resolves the model path itself and calls `load`.
+    #[cfg(test)]
     pub fn load_catalogue_model(key: &str, whisper_dir: &Path) -> Result<Self, TranscribeError> {
+        use crate::transcription::model_catalog::{whisper_model, WhisperModelInfo};
         let info: &WhisperModelInfo =
             whisper_model(key).ok_or_else(|| TranscribeError::ModelMissing(key.to_string()))?;
         Self::load(&whisper_dir.join(info.file), key)
@@ -272,6 +273,7 @@ pub struct MockTranscriber {
 
 #[cfg(test)]
 impl MockTranscriber {
+    /// Creates a mock transcriber with default segment length and template.
     pub fn new() -> Self {
         Self {
             seg_secs: 5.0,

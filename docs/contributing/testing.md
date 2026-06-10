@@ -40,6 +40,8 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 | MCP Hub                                                   | 100%  | 100%      | 90%      | 100%       |
 | MCP Shared                                                | 99%   | 96%       | 95%      | 99%        |
 | MCP Slack, OS, GitLab, Redmine, GitHub, Atlassian, Office | 100%  | 100%      | 90%      | 100%       |
+| MCP OAuth, Host Exec                                      | 100%  | 100%      | 90%      | 100%       |
+| MCP Context7 (vitest config lands in a follow-up wave)    | 100%  | 100%      | 90%      | 100%       |
 | MCP SharePoint                                            | 98%   | 98%       | 90%      | 98%        |
 | Angular Desktop                                           | —     | —         | —        | —          |
 

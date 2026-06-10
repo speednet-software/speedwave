@@ -21,6 +21,9 @@ set -euo pipefail
 # shellcheck source=e2e-common.sh
 source "$(dirname "$0")/e2e-common.sh"
 
+# Node.js version — read from the repo SSOT so the MSI URL never drifts.
+NODE_VERSION="$(cat "$(dirname "$0")/../.node-version")"
+
 # -- Helper functions ----------------------------------------------------------
 
 # Run a PowerShell script on the Windows host via SSH.
@@ -58,16 +61,18 @@ setup_windows() {
     echo "[windows] Checking PowerShell availability..."
     windows_ssh "powershell.exe -Command 'Write-Host ready'" || { echo "[windows] ERROR: powershell.exe not reachable"; return 1; }
 
-    echo "[windows] Installing Node.js 24..."
-    windows_ps <<'SCRIPT'
-$ErrorActionPreference = 'Stop'
-$arch = $env:PROCESSOR_ARCHITECTURE
-if ($arch -eq 'ARM64') { $msiArch = 'arm64' } else { $msiArch = 'x64' }
-$url = "https://nodejs.org/dist/v24.14.0/node-v24.14.0-$msiArch.msi"
-Write-Host "Downloading $url..."
-Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\node-installer.msi"
-Start-Process -Wait msiexec -ArgumentList '/i',"$env:TEMP\node-installer.msi",'/qn','/norestart'
-Remove-Item "$env:TEMP\node-installer.msi"
+    echo "[windows] Installing Node.js $NODE_VERSION..."
+    local node_version="$NODE_VERSION"
+    windows_ps <<SCRIPT
+\$ErrorActionPreference = 'Stop'
+\$nodeVersion = '${node_version}'
+\$arch = \$env:PROCESSOR_ARCHITECTURE
+if (\$arch -eq 'ARM64') { \$msiArch = 'arm64' } else { \$msiArch = 'x64' }
+\$url = "https://nodejs.org/dist/v\$nodeVersion/node-v\$nodeVersion-\$msiArch.msi"
+Write-Host "Downloading \$url..."
+Invoke-WebRequest -Uri \$url -OutFile "\$env:TEMP\\node-installer.msi"
+Start-Process -Wait msiexec -ArgumentList '/i',"\$env:TEMP\\node-installer.msi",'/qn','/norestart'
+Remove-Item "\$env:TEMP\\node-installer.msi"
 SCRIPT
 
     echo "[windows] Installing Visual Studio Build Tools (MSVC)..."
@@ -267,16 +272,18 @@ fi
 SCRIPT
 
     echo "[macos] Installing Homebrew and Node.js..."
-    macos_ssh bash <<'SCRIPT'
+    # Homebrew uses major-only node formulae (node@24); derive from the SSOT.
+    local node_major="${NODE_VERSION%%.*}"
+    macos_ssh bash <<SCRIPT
 set -euo pipefail
 if command -v brew >/dev/null 2>&1; then
-    echo "Homebrew already installed: $(brew --version | head -1)"
+    echo "Homebrew already installed: \$(brew --version | head -1)"
 else
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    NONINTERACTIVE=1 /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 fi
-eval "$(/opt/homebrew/bin/brew shellenv)"
-brew install node@24
-brew link node@24 --overwrite --force 2>/dev/null || true
+eval "\$(/opt/homebrew/bin/brew shellenv)"
+brew install node@${node_major}
+brew link node@${node_major} --overwrite --force 2>/dev/null || true
 # cmake — required by whisper-rs-sys build script (ADR-056 meeting transcription)
 command -v cmake >/dev/null 2>&1 || brew install cmake
 SCRIPT

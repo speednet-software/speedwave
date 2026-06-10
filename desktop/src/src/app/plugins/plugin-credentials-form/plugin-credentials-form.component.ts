@@ -1,10 +1,11 @@
-import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import {
   MAX_PLUGIN_CREDENTIAL_BYTES,
   PluginAuthField,
   PluginSaveCredentialsEvent,
 } from '../../models/plugin';
+import { LoggerService } from '../../services/logger.service';
 
 /**
  * Renders a form for a plugin's `auth_fields[]`. Emits the filled subset
@@ -182,6 +183,7 @@ import {
   ],
 })
 export class PluginCredentialsFormComponent {
+  private readonly log = inject(LoggerService);
   readonly authFields = input.required<PluginAuthField[]>();
   /**
    * Keys of fields that currently have a value stored on disk (from
@@ -363,9 +365,8 @@ export class PluginCredentialsFormComponent {
       // Pattern compiled in Rust (RE2) but not in JS (e.g. a construct the
       // JS engine rejects). The backend still enforces it on save, so we
       // pass the client check — but log rather than swallow silently.
-      console.warn(
-        `auth_field "${field.key}" pattern not compilable in JS; skipping client check`,
-        err
+      this.log.warn(
+        `auth_field "${field.key}" pattern not compilable in JS; skipping client check: ${String(err)}`
       );
       return null;
     }

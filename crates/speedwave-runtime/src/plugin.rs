@@ -1,3 +1,5 @@
+//! Plugin manifest schema, validation, and install/remove lifecycle.
+
 use crate::compose::container_user;
 use crate::consts;
 use crate::signing;
@@ -15,8 +17,12 @@ pub fn is_valid_slug(slug: &str) -> bool {
     validate_slug(slug).is_ok()
 }
 
+/// Token-readiness verdict for a plugin. Test-only: Desktop computes
+/// readiness with `blocks_plugin_readiness` directly (`plugin_cmd.rs`); the
+/// runtime crate only models the verdict in its own token-layout tests.
+#[cfg(test)]
 #[derive(Debug, PartialEq)]
-pub enum TokenStatus {
+enum TokenStatus {
     /// All required secret fields have token files.
     Configured,
     /// Some or all required secret fields are missing token files.
@@ -33,12 +39,18 @@ impl Drop for TmpDirGuard {
     }
 }
 
+/// One credential field a plugin manifest declares for its config form.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AuthFieldDef {
+    /// Token filename the value is stored under.
     pub key: String,
+    /// Field label shown in the UI.
     pub label: String,
+    /// Input type (`text` | `password` | `textarea`).
     pub field_type: String,
+    /// Placeholder text for the input.
     pub placeholder: String,
+    /// Whether the value is a secret (stored as a token file).
     pub is_secret: bool,
     /// Whether the user must provide a value before the plugin can run.
     /// Defaults to `true` so manifests that omit the field keep the
@@ -137,23 +149,33 @@ pub fn blocks_plugin_readiness(field: &AuthFieldDef) -> bool {
     field.is_secret && field.required
 }
 
+/// Mount mode for a plugin's `/tokens` directory.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum TokenMount {
+    /// Read-only mount (the only mode allowed for plugins).
     #[default]
     ReadOnly,
+    /// Read-write mount (built-in services only).
     ReadWrite {
+        /// Reason the writable mount is required.
         justification: String,
     },
 }
 
+/// Parsed `plugin.json` manifest (contract surface — see CLAUDE.md).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PluginManifest {
+    /// Display name.
     pub name: String,
+    /// Service id for MCP plugins; `None` for resource-only plugins.
     #[serde(default)]
     pub service_id: Option<String>,
+    /// Slug (`^[a-z][a-z0-9-]{0,63}$`).
     pub slug: String,
+    /// Plugin version string.
     pub version: String,
+    /// One-line description / tagline.
     pub description: String,
     /// Optional long-form Markdown shown on the plugin's Dashboard tab in
     /// Desktop — setup/usage guidance (how to obtain a token, post-install
@@ -169,22 +191,31 @@ pub struct PluginManifest {
     /// include it.
     #[serde(default, skip_serializing)]
     pub port: Option<u16>,
+    /// Pre-built image tag, if the plugin ships one.
     #[serde(default)]
     pub image_tag: Option<String>,
+    /// Claude-resources directories shipped by the plugin.
     #[serde(default)]
     pub resources: Vec<String>,
+    /// `/tokens` mount mode (plugins must be read-only).
     #[serde(default)]
     pub token_mount: TokenMount,
+    /// Credential fields shown in the config form.
     #[serde(default)]
     pub auth_fields: Vec<AuthFieldDef>,
+    /// JSON Schema for the plugin's settings form.
     #[serde(default)]
     pub settings_schema: Option<serde_json::Value>,
+    /// Speedwave version compatibility range.
     #[serde(default)]
     pub speedwave_compat: Option<String>,
+    /// Extra env vars injected into the worker (reserved keys rejected).
     #[serde(default)]
     pub extra_env: Option<HashMap<String, String>>,
+    /// Memory limit override (capped by the plugin envelope).
     #[serde(default)]
     pub mem_limit: Option<String>,
+    /// CPU limit override (capped by the plugin envelope).
     #[serde(default)]
     pub cpu_limit: Option<String>,
     /// Core integrations this plugin depends on (e.g. `["sharepoint"]`).
@@ -239,23 +270,35 @@ pub struct HostBridgeManifest {
 #[serde(tag = "scheme", rename_all = "snake_case")]
 pub enum HostBridgeRoleAuth {
     /// HTTP header — clients that can set arbitrary headers on upgrade.
-    Header { name: String },
+    Header {
+        /// Header name carrying the token.
+        name: String,
+    },
     /// `?<name>=<token>` — required for browser-based clients.
-    QueryParam { name: String },
+    QueryParam {
+        /// Query parameter name carrying the token.
+        name: String,
+    },
 }
 
+/// CSRF / Origin policy for a host bridge.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HostBridgeOriginPolicy {
+    /// Reject any upgrade carrying an `Origin` header.
     #[default]
     RejectIfPresent,
+    /// Accept an `Origin` only when auth is via query param.
     AcceptIfAuthIsQueryParam,
 }
 
+/// What to do when a new bridge collides with an existing registration.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostBridgeCollisionPolicy {
+    /// Reject the new registration.
     Reject,
+    /// Evict the older registration.
     #[default]
     EvictOlder,
 }
@@ -269,8 +312,11 @@ pub enum HostBridgeCollisionPolicy {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct PluginInstallProgress {
+    /// Current install phase (see [`ALL_PLUGIN_INSTALL_PHASES`]).
     pub phase: String,
+    /// Human-readable progress message.
     pub message: String,
+    /// Sanitized error message if the phase failed.
     pub error: Option<String>,
 }
 
@@ -280,7 +326,9 @@ pub struct PluginInstallProgress {
 /// deferred to the next launch (`.image_pending` marker remains).
 #[derive(Debug, Clone)]
 pub enum InstallOutcome {
+    /// Fully installed and image built.
     Installed(PluginManifest),
+    /// Installed; image build deferred to the next launch.
     InstalledPendingBuild(PluginManifest),
 }
 
@@ -304,8 +352,11 @@ pub const ALL_PLUGIN_INSTALL_PHASES: &[&str] = &[
 /// signature verification, extraction, or any side-effect.
 #[derive(Serialize, Debug, Clone)]
 pub struct PluginManifestSummary {
+    /// Plugin slug.
     pub slug: String,
+    /// Display name.
     pub name: String,
+    /// Whether the plugin declares a `service_id` (i.e. is an MCP plugin).
     pub has_service_id: bool,
 }
 
@@ -522,21 +573,10 @@ fn token_dir_with_base(home: &Path, project: &str, service_id: &str) -> PathBuf 
         .join(service_id)
 }
 
-/// Writes credential/token files for a plugin to the project's token directory.
-/// Creates `~/.speedwave/tokens/<project>/<service_id>/<key>` for each entry.
-/// Sets file permissions to 0o600 (owner read/write only).
-pub fn configure_plugin_tokens(
-    project: &str,
-    service_id: &str,
-    tokens: &HashMap<String, String>,
-) -> anyhow::Result<()> {
-    let token_dir = consts::data_dir()
-        .join("tokens")
-        .join(project)
-        .join(service_id);
-    write_token_files(&token_dir, tokens)
-}
-
+/// Writes credential/token files for a plugin to a token directory. Creates
+/// `<dir>/<key>` for each entry with 0o600 perms (owner read/write only).
+/// Test-only: Desktop owns the production credential-write path
+/// (`plugin_cmd.rs`); the runtime crate only exercises the layout in tests.
 #[cfg(test)]
 fn configure_plugin_tokens_with_base(
     home: &Path,
@@ -548,6 +588,7 @@ fn configure_plugin_tokens_with_base(
     write_token_files(&token_dir, tokens)
 }
 
+#[cfg(test)]
 fn write_token_files(token_dir: &Path, tokens: &HashMap<String, String>) -> anyhow::Result<()> {
     std::fs::create_dir_all(token_dir)?;
 
@@ -581,11 +622,10 @@ fn write_token_files(token_dir: &Path, tokens: &HashMap<String, String>) -> anyh
     Ok(())
 }
 
-/// Checks whether a plugin's required auth_fields have corresponding token files.
-pub fn get_plugin_token_status(project: &str, manifest: &PluginManifest) -> TokenStatus {
-    get_plugin_token_status_in(consts::data_dir(), project, manifest)
-}
-
+/// Checks whether a plugin's required auth_fields have corresponding token
+/// files. Test-only: Desktop owns the production readiness check (`plugin_cmd`);
+/// the runtime crate only exercises the layout in tests.
+#[cfg(test)]
 fn get_plugin_token_status_in(
     data_dir: &Path,
     project: &str,
@@ -1432,18 +1472,34 @@ fn remove_plugin_with_base(
 /// silently re-routes to a different on-disk tree).
 #[derive(Debug)]
 pub struct VerifiedPlugin {
-    pub manifest: PluginManifest,
-    pub dir: PathBuf,
+    // Private so the ONLY construction path is `new` (called after the full
+    // verification in `verify_one_plugin_dir`) — ADR-051 runtime invariant.
+    // Literal construction elsewhere would let a caller fabricate a
+    // "verified" pair that never passed the signature/dir-slug checks.
+    manifest: PluginManifest,
+    dir: PathBuf,
 }
 
 impl VerifiedPlugin {
     /// Constructs a `VerifiedPlugin`. Only callers that have just run
     /// the full verification (`verify_one_plugin_dir`) — or test code
-    /// — should reach this; prefer it over the literal struct syntax so
-    /// the "this pair has been verified" intent is explicit at the
-    /// construction site.
+    /// — should reach this; the private fields force every other caller
+    /// through the accessors, so the "this pair has been verified" intent
+    /// cannot be bypassed with literal struct syntax.
     pub(crate) fn new(manifest: PluginManifest, dir: PathBuf) -> Self {
         Self { manifest, dir }
+    }
+
+    /// The verified manifest.
+    pub fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    /// The on-disk plugin directory (`dir.file_name() == manifest.slug`,
+    /// enforced at verification). Callers must use this rather than
+    /// reconstructing the path via `plugins_base.join(slug)`.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 }
 
@@ -1478,10 +1534,15 @@ pub enum VerificationStatus {
 /// the invariant can't be silently broken at a new construction site.
 #[derive(Debug)]
 pub struct PluginListEntry {
+    /// Plugin slug.
     pub slug: String,
+    /// Installed plugin directory.
     pub dir: PathBuf,
+    /// Parsed manifest, present iff verification succeeded.
     pub manifest: Option<PluginManifest>,
+    /// Signature verification status.
     pub verification_status: VerificationStatus,
+    /// Verification error message for non-verified entries.
     pub verification_error: Option<String>,
 }
 
@@ -1876,7 +1937,7 @@ fn ensure_plugin_images_from_dir(
     let mut errors: Vec<String> = Vec::new();
 
     for vp in &plugins {
-        let manifest = &vp.manifest;
+        let manifest = vp.manifest();
         let sid = match manifest.service_id.as_deref() {
             Some(s) => s,
             None => continue, // resource-only plugin, no image
@@ -1886,7 +1947,7 @@ fn ensure_plugin_images_from_dir(
             continue; // not enabled for this project
         }
 
-        let plugin_dir = vp.dir.as_path();
+        let plugin_dir = vp.dir();
         if !plugin_dir.join("Containerfile").exists() {
             log::warn!(
                 "Plugin '{}' has service_id but no Containerfile — skipping image check",
@@ -2893,7 +2954,7 @@ mod tests {
         );
     }
 
-    // --- Task 1: configure_plugin_tokens + get_plugin_token_status tests ---
+    // --- token-layout tests (via the _with_base test helpers) ---
 
     #[test]
     fn test_configure_plugin_tokens_creates_files() {
@@ -3567,6 +3628,10 @@ mod tests {
         signing::invalidate_cache(&plugin_dir);
 
         let entries = list_for_ui_from_dir(&plugins);
+        // The fail-closed loader yields a VerifiedPlugin under the bypass;
+        // assert it before clearing the env so the accessors see it.
+        let verified = list_verified_from_dir(&plugins)
+            .expect("bypass must let the fail-closed loader accept the unsigned plugin");
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].slug, "devplugin");
@@ -3575,6 +3640,12 @@ mod tests {
             VerificationStatus::Verified,
             "SPEEDWAVE_ALLOW_UNSIGNED must let an unsigned plugin list as Verified"
         );
+
+        // The only construction path is the verifying `new`; the private
+        // fields are reachable solely via the accessors (ADR-051 invariant).
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].manifest().slug, "devplugin");
+        assert_eq!(verified[0].dir(), plugin_dir.as_path());
     }
 
     /// A plugin dir that *has* a `SIGNATURE` file, but one that was

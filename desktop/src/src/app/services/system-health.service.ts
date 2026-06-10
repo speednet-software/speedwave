@@ -1,6 +1,7 @@
 import { Injectable, OnDestroy, inject, signal } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
+import { LoggerService } from './logger.service';
 import type { HealthReport } from '../models/health';
 
 /** How often the polling loop refreshes the health snapshot. */
@@ -22,6 +23,7 @@ export const HEALTH_REFRESH_INTERVAL_MS = 5000;
 export class SystemHealthService implements OnDestroy {
   private readonly tauri = inject(TauriService);
   private readonly projectState = inject(ProjectStateService);
+  private readonly log = inject(LoggerService);
 
   /** Latest health report; `null` until the first fetch lands. */
   readonly health = signal<HealthReport | null>(null);
@@ -63,8 +65,13 @@ export class SystemHealthService implements OnDestroy {
       if (serialised === this.lastSerialised) return;
       this.lastSerialised = serialised;
       this.health.set(report);
-    } catch {
-      // Health is non-critical; keep the previous snapshot.
+    } catch (err) {
+      // Health is non-critical; keep the previous snapshot. Log at debug so the
+      // failure is visible in a diagnostics ZIP without spamming during the
+      // expected container-startup window (only when actually inside Tauri).
+      if (this.tauri.isRunningInTauri()) {
+        this.log.debug(`[SystemHealth] get_health failed: ${String(err)}`);
+      }
     }
   }
 

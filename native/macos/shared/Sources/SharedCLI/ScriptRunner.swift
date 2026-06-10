@@ -78,6 +78,28 @@ public func escapeAppleScript(_ s: String) -> String {
         .replacingOccurrences(of: "\"", with: "\\\"")
 }
 
+/// Parse a single `||`-delimited email detail row into a dictionary.
+/// Layout: `subject || sender || date || read || to-list(,-joined) || body`.
+/// Body may itself contain `||`, so fields 6+ are re-joined. Throws when fewer
+/// than 6 fields are present. Shared by AppleMailClient/OutlookClient getEmail.
+public func parseEmailDetail(_ output: String, id: String) throws -> [String: Any] {
+    let parts = output.components(separatedBy: "||")
+    guard parts.count >= 6 else {
+        throw ScriptError.scriptFailed("Unexpected email format")
+    }
+    return [
+        "id": id,
+        "subject": parts[0].trimmingCharacters(in: .whitespaces),
+        "sender": parts[1].trimmingCharacters(in: .whitespaces),
+        "date": parts[2].trimmingCharacters(in: .whitespaces),
+        "read": parts[3].trimmingCharacters(in: .whitespaces) == "true",
+        "to": parts[4].trimmingCharacters(in: .whitespaces)
+            .components(separatedBy: ",")
+            .filter { !$0.isEmpty },
+        "body": parts[5...].joined(separator: "||").trimmingCharacters(in: .whitespaces),
+    ]
+}
+
 /// Parse `||`-delimited AppleScript output into array of dictionaries.
 public func parseDelimited(_ output: String, fields: [String]) -> [[String: Any]] {
     output

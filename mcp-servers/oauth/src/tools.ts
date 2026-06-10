@@ -102,6 +102,7 @@ async function handleRefresh(
 ): Promise<ToolsCallResult> {
   const now = deps.now ?? Date.now;
   const rateLimitMs = (deps.rateLimitSeconds ?? DEFAULT_RATE_LIMIT_SECONDS) * 1000;
+  // Deliberate UTC (bare Z): JSON audit-record field, not a human log prefix.
   const ts = new Date().toISOString();
 
   const callerResult = await resolveCaller(deps, ctx);
@@ -231,6 +232,7 @@ async function handleForget(
   deps: ToolDeps,
   ctx: ToolHandlerContext | undefined
 ): Promise<ToolsCallResult> {
+  // Deliberate UTC (bare Z): JSON audit-record field, not a human log prefix.
   const ts = new Date().toISOString();
   const callerResult = await resolveCaller(deps, ctx);
   if (!callerResult.ok) return callerResult.result;

@@ -11,6 +11,7 @@ import { Readable } from 'stream';
 import { Mutex } from 'async-mutex';
 import {
   loadToken,
+  tokensDir as defaultTokensDir,
   TIMEOUTS,
   ts,
   withSetupGuidance,
@@ -393,8 +394,9 @@ export class SharePointClient {
       }
       throw err instanceof Error ? err : new Error(String(err));
     }
-    const tokensDir = process.env.TOKENS_DIR || '/tokens';
-    const fresh = await loadToken(path.join(tokensDir, 'access_token'));
+    // Use the client's own tokens dir (consistent with refreshTokenIfNeeded
+    // above) rather than re-reading the env literal.
+    const fresh = await loadToken(path.join(this.tokensDir, 'access_token'));
     if (!fresh) {
       throw new Error('oauth worker returned success but access_token was not written');
     }
@@ -985,7 +987,7 @@ export type ResolveResult =
  * @param siteId - site id loaded from `/tokens/site_id` (any accepted form)
  * @param accessToken - bearer token used for the lookup
  * @param opts - cold-start refresh tuning
- * @param opts.tokensDir - tokens mount path (default `/tokens`); only read when refreshing
+ * @param opts.tokensDir - tokens mount path (default {@link defaultTokensDir}); only read when refreshing
  * @param opts.refreshOn401 - retry once after `oauthRefreshAccessToken` when the lookup returns 401 (default true). Set false in unit tests that don't mock the refresh worker.
  * @returns the composite id (or untouched value if already composite), or a typed error
  */
@@ -1011,7 +1013,7 @@ export async function resolveCompositeSiteId(
     return { ok: true, compositeId: siteId };
   }
   const refreshOn401 = opts.refreshOn401 !== false;
-  const tokensDir = opts.tokensDir ?? '/tokens';
+  const tokensDir = opts.tokensDir ?? defaultTokensDir();
   // Cold-start hang here blocks initializeSharePointClient indefinitely, which
   // in turn blocks the hub's discovery retry budget. Apply the same per-request
   // timeout the steady-state path uses (callGraphAPI's TIMEOUTS.API_CALL_MS).
@@ -1136,7 +1138,7 @@ export function validateGraphSiteId(siteId: string): string | null {
  */
 export async function initializeSharePointClient(): Promise<SharePointClient | null> {
   try {
-    const tokensDir = process.env.TOKENS_DIR || '/tokens';
+    const tokensDir = defaultTokensDir();
 
     // Load tokens that live in the worker-mounted dir (ADR-060). After PR3,
     // `client_id`, `tenant_id`, and `refresh_token` are NO LONGER mounted into

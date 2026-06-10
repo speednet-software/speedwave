@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { Express } from 'express';
+import type { Express, NextFunction, Request, Response } from 'express';
 import type { Server } from 'http';
 import { JSONRPCHandler } from '@speedwave/mcp-shared';
-import { createHubApp } from './index.js';
+import { createHubApp, createSessionRateLimiter } from './index.js';
 
 /**
  * Helper: start app on a random port, return base URL and server handle.
@@ -168,5 +168,131 @@ describe('createHubApp', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ status: 'ok' });
+  });
+
+  it('POST over the per-session limit returns 429 with Retry-After', async () => {
+    const app = createHubApp(rpcHandler);
+    const { baseUrl, server: s } = await startApp(app);
+    server = s;
+
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const send = () =>
+      fetch(baseUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Mcp-Session-Id': sessionId },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+      });
+
+    // First 100 requests in the window pass.
+    for (let i = 0; i < 100; i++) {
+      const ok = await send();
+      expect(ok.status).toBe(200);
+    }
+
+    // 101st request in the same window is rejected.
+    const limited = await send();
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get('retry-after')).toBe('60');
+    const body = await limited.json();
+    expect(body.error).toBe('Too Many Requests');
+  });
+});
+
+describe('createSessionRateLimiter', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function mockRes(): Response & {
+    statusCode?: number;
+    body?: unknown;
+    headers: Map<string, string>;
+  } {
+    const headers = new Map<string, string>();
+    const res = {
+      headers,
+      setHeader: (k: string, v: string) => headers.set(k.toLowerCase(), v),
+      status(code: number) {
+        (this as { statusCode?: number }).statusCode = code;
+        return this;
+      },
+      json(payload: unknown) {
+        (this as { body?: unknown }).body = payload;
+        return this;
+      },
+    };
+    return res as unknown as Response & {
+      statusCode?: number;
+      body?: unknown;
+      headers: Map<string, string>;
+    };
+  }
+
+  function mockReq(headers: Record<string, string>, ip = '10.0.0.1'): Request {
+    return {
+      method: 'POST',
+      ip,
+      get: (name: string) => headers[name.toLowerCase()],
+    } as unknown as Request;
+  }
+
+  it('passes requests under the limit and increments the bucket', () => {
+    const limiter = createSessionRateLimiter();
+    const req = mockReq({ 'mcp-session-id': '550e8400-e29b-41d4-a716-446655440000' });
+    let calls = 0;
+    const next: NextFunction = () => {
+      calls++;
+    };
+    for (let i = 0; i < 100; i++) {
+      limiter(req, mockRes(), next);
+    }
+    expect(calls).toBe(100);
+  });
+
+  it('rejects the request that exceeds the limit with 429', () => {
+    const limiter = createSessionRateLimiter();
+    const req = mockReq({ 'mcp-session-id': '550e8400-e29b-41d4-a716-446655440000' });
+    const next: NextFunction = vi.fn();
+    for (let i = 0; i < 100; i++) {
+      limiter(req, mockRes(), next);
+    }
+    const res = mockRes();
+    limiter(req, res, next);
+    expect(res.statusCode).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('60');
+    expect(res.body).toEqual({ error: 'Too Many Requests' });
+    expect(next).toHaveBeenCalledTimes(100);
+  });
+
+  it('keys separate sessions into independent buckets', () => {
+    const limiter = createSessionRateLimiter();
+    const a = mockReq({ 'mcp-session-id': '550e8400-e29b-41d4-a716-446655440000' });
+    const b = mockReq({ 'mcp-session-id': '550e8400-e29b-41d4-a716-446655440001' });
+    const next: NextFunction = vi.fn();
+    for (let i = 0; i < 100; i++) limiter(a, mockRes(), next);
+    // Session A is now at the limit; session B still has a fresh bucket.
+    const resB = mockRes();
+    limiter(b, resB, next);
+    expect(resB.statusCode).toBeUndefined();
+    expect(next).toHaveBeenCalledTimes(101);
+  });
+
+  it('falls back to client IP when no session header is present', () => {
+    const limiter = createSessionRateLimiter();
+    const req = mockReq({}, '192.0.2.5');
+    const next: NextFunction = vi.fn();
+    for (let i = 0; i < 100; i++) limiter(req, mockRes(), next);
+    const res = mockRes();
+    limiter(req, res, next);
+    expect(res.statusCode).toBe(429);
+  });
+
+  it('falls back to "unknown" when neither session nor IP is available', () => {
+    const limiter = createSessionRateLimiter();
+    const req = { method: 'POST', ip: undefined, get: () => undefined } as unknown as Request;
+    const next: NextFunction = vi.fn();
+    limiter(req, mockRes(), next);
+    expect(next).toHaveBeenCalledTimes(1);
   });
 });

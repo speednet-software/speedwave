@@ -69,6 +69,9 @@ export {
 // Security
 export {
   loadToken,
+  loadTokenFile,
+  tokensDir,
+  BASE_SAFE_ENV_KEYS,
   validateJSONRPCMessage,
   validateParams,
   validateSessionId,
@@ -77,6 +80,10 @@ export {
   validateOrigin,
   HOST_GATEWAY_ALIAS,
 } from './security.js';
+
+// Tool-handler validation wrappers (SSOT for the two withValidation families)
+export { withResultValidation, withClientValidation } from './tool-validation.js';
+export type { ToolResult, ClientValidationOptions } from './tool-validation.js';
 
 // Transport
 export { handleMCPPost, handleMCPDelete, readSessionId } from './transport.js';
@@ -95,6 +102,10 @@ export { SSEStream, createSSEStream, sendJSONResponse } from './sse.js';
 // Server Factory
 export { createMCPServer, textResult, jsonResult, errorResult } from './server.js';
 export type { MCPServerAuth, MCPServerOptions, MCPServer } from './server.js';
+
+// Declarative worker boot (SSOT for every worker's main())
+export { bootWorker } from './boot.js';
+export type { BootWorkerOptions, NotConfiguredPolicy } from './boot.js';
 
 // Timeouts
 export { TIMEOUTS } from './timeouts.js';

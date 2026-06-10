@@ -7,6 +7,9 @@ import {
   validateToolName,
   validateWorkerUrl,
   loadToken,
+  loadTokenFile,
+  tokensDir,
+  BASE_SAFE_ENV_KEYS,
 } from './security.js';
 
 describe('security', () => {
@@ -595,6 +598,99 @@ describe('security', () => {
       await expect(loadToken('/tokens/raw/token')).rejects.toThrow(
         'Failed to read token file: /tokens/raw/token (raw string error)'
       );
+    });
+  });
+
+  describe('tokensDir', () => {
+    const original = process.env.TOKENS_DIR;
+    afterEach(() => {
+      if (original === undefined) delete process.env.TOKENS_DIR;
+      else process.env.TOKENS_DIR = original;
+    });
+
+    it('defaults to /tokens when TOKENS_DIR is unset', () => {
+      delete process.env.TOKENS_DIR;
+      expect(tokensDir()).toBe('/tokens');
+    });
+
+    it('defaults to /tokens when TOKENS_DIR is empty', () => {
+      process.env.TOKENS_DIR = '';
+      expect(tokensDir()).toBe('/tokens');
+    });
+
+    it('returns TOKENS_DIR when set', () => {
+      process.env.TOKENS_DIR = '/custom/tokens';
+      expect(tokensDir()).toBe('/custom/tokens');
+    });
+  });
+
+  describe('loadTokenFile', () => {
+    const original = process.env.TOKENS_DIR;
+    afterEach(() => {
+      vi.restoreAllMocks();
+      if (original === undefined) delete process.env.TOKENS_DIR;
+      else process.env.TOKENS_DIR = original;
+    });
+
+    it('joins the default tokens dir with the file name and trims', async () => {
+      delete process.env.TOKENS_DIR;
+      const { default: fs } = await import('fs/promises');
+      const spy = vi
+        .spyOn(fs, 'readFile')
+        .mockResolvedValue('  bot-xyz\n' as unknown as Uint8Array);
+
+      const result = await loadTokenFile('bot_token');
+      expect(result).toBe('bot-xyz');
+      expect(spy).toHaveBeenCalledWith('/tokens/bot_token', 'utf-8');
+    });
+
+    it('honours a custom TOKENS_DIR', async () => {
+      process.env.TOKENS_DIR = '/custom';
+      const { default: fs } = await import('fs/promises');
+      const spy = vi.spyOn(fs, 'readFile').mockResolvedValue('k' as unknown as Uint8Array);
+
+      await loadTokenFile('api_key');
+      expect(spy).toHaveBeenCalledWith('/custom/api_key', 'utf-8');
+    });
+
+    it('forwards the errno cause from loadToken on ENOENT', async () => {
+      delete process.env.TOKENS_DIR;
+      const { default: fs } = await import('fs/promises');
+      const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      vi.spyOn(fs, 'readFile').mockRejectedValue(err);
+
+      const caught = await loadTokenFile('missing').catch((e: Error) => e);
+      expect(caught.message).toBe('Token file not found: /tokens/missing');
+      expect((caught.cause as NodeJS.ErrnoException).code).toBe('ENOENT');
+    });
+  });
+
+  describe('BASE_SAFE_ENV_KEYS', () => {
+    it('is the exact 14-key core shared by every worker', () => {
+      expect(BASE_SAFE_ENV_KEYS).toEqual([
+        'PATH',
+        'HOME',
+        'USER',
+        'LOGNAME',
+        'SHELL',
+        'LANG',
+        'LC_ALL',
+        'LC_CTYPE',
+        'TMPDIR',
+        'TMP',
+        'TEMP',
+        'DEVELOPER_DIR',
+        'SDKROOT',
+        '__CF_USER_TEXT_ENCODING',
+      ]);
+    });
+
+    it('carries no secret-bearing keys', () => {
+      for (const key of BASE_SAFE_ENV_KEYS) {
+        expect(key).not.toMatch(/AUTH_TOKEN|API_KEY|SECRET|PASSWORD/i);
+        expect(key.startsWith('HOST_EXEC_')).toBe(false);
+        expect(key.startsWith('MCP_')).toBe(false);
+      }
     });
   });
 });

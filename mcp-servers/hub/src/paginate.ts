@@ -1,31 +1,7 @@
 /**
- * Pagination Helpers for Sandbox
+ * Sandbox pagination helpers — async generators that iterate large datasets
+ * page-by-page to minimize memory and token use. Used by execute_code globals.
  * @module paginate
- *
- * Async generators for efficient iteration over large datasets.
- * Processes data page-by-page to minimize memory usage and token consumption.
- *
- * Usage in execute_code:
- * ```typescript
- * // Iterate page by page (most memory efficient)
- * for await (const page of paginate(
- *   (offset, limit) => redmine.listIssues({ offset, limit, status: "open" })
- * )) {
- *   console.log(`Page ${page.pageNumber}: ${page.items.length} items`);
- * }
- *
- * // Collect all items (use with caution)
- * const all = await collectPages(paginate(
- *   (o, l) => redmine.listIssues({ offset: o, limit: l }),
- *   { maxItems: 100 }
- * ));
- *
- * // Find first match (stops early)
- * const urgent = await findInPages(
- *   paginate((o, l) => redmine.listIssues({ offset: o, limit: l })),
- *   issue => issue.priority?.name === "Urgent"
- * );
- * ```
  */
 
 //═══════════════════════════════════════════════════════════════════════════════

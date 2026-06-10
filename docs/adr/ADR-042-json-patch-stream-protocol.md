@@ -1,6 +1,6 @@
 # ADR-042: JSON Patch (RFC 6902) as the Stream-to-UI Protocol
 
-> **Status:** Accepted
+> **Status:** Retired (2026-06-10) — the JSON-Patch wire transport was removed. It ran as a redundant mirror of the legacy `chat_stream` chunk path: the frontend rebuilt the state-tree from its legacy fields after every chunk, overwriting any applied patches, so the patch path never drove the UI at runtime; and the patch protocol never carried session stats (`session_id`, cost, usage, context window, rate limit), which flow only on `chat_stream`. What survives: the **state-tree shape** — `crates/speedwave-runtime/src/stream/state_tree.rs` remains the SSOT mirrored by `desktop/src/src/app/models/state-tree.ts` and `models/chat.ts::MessageBlock` — and the Angular `state()` signal with its projections, now fed exclusively by `ChatStateService.rebuildStateTree()` (legacy fields → tree). The patch builders, reducer, MsgStore (ADR-043), EntryIndexProvider (ADR-044), `subscribe_session`/`chat_patch::*` bridge, and the frontend `applyPatch` reducer were deleted. The rest of this document records the original design.
 > **Context:** The chat UI needs to render a live conversation (user/assistant text, tool calls, thinking, ask-user prompts, usage/cost, errors) streamed from Claude Code, without a new event type per render feature.
 
 ## Decision

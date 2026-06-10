@@ -209,7 +209,9 @@ impl FileAudioCapture {
     }
 
     /// A `FileAudioCapture` bound to `path` — `start()` ignores its `source`
-    /// argument and replays this file.
+    /// argument and replays this file. Test-only: production passes the path
+    /// per-call via `Microphone { device: Some(path) }`.
+    #[cfg(test)]
     pub fn for_file(path: impl AsRef<Path>) -> Self {
         Self {
             default_path: Some(path.as_ref().to_path_buf()),

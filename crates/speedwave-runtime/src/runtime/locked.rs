@@ -77,48 +77,59 @@ impl LockedRuntime {
 
     // ----- LOCKED: every call goes through with_acquired -----
 
+    /// Starts the project's compose stack (under the per-project lock).
     pub fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || self.inner.compose_up(project))
     }
 
+    /// Stops the project's compose stack (under the per-project lock).
     pub fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || self.inner.compose_down(project))
     }
 
+    /// Recreates the project's compose stack (under the per-project lock).
     pub fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || self.inner.compose_up_recreate(project))
     }
 
+    /// Validates the project's compose file (under the per-project lock).
     pub fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || self.inner.compose_validate(project))
     }
 
     // ----- PASSTHROUGH: no lock, do not touch compose.yml -----
 
+    /// Lists the project's running containers.
     pub fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<serde_json::Value>> {
         self.inner.compose_ps(project)
     }
 
+    /// Fetches the last `tail` lines of the project's compose logs.
     pub fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String> {
         self.inner.compose_logs(project, tail)
     }
 
+    /// `true` if the container engine is running and reachable.
     pub fn is_available(&self) -> bool {
         self.inner.is_available()
     }
 
+    /// `true` if the container engine is installed.
     pub fn is_installed(&self) -> bool {
         self.inner.is_installed()
     }
 
+    /// Ensures the VM/engine is provisioned and started.
     pub fn ensure_ready(&self) -> anyhow::Result<()> {
         self.inner.ensure_ready()
     }
 
+    /// Builds an exec command for a running container.
     pub fn container_exec(&self, container: &str, cmd: &[&str]) -> std::process::Command {
         self.inner.container_exec(container, cmd)
     }
 
+    /// Builds an exec command with piped stdio for a running container.
     pub fn container_exec_piped(
         &self,
         container: &str,
@@ -127,6 +138,7 @@ impl LockedRuntime {
         self.inner.container_exec_piped(container, cmd)
     }
 
+    /// Builds a container image from a Containerfile.
     pub fn build_image(
         &self,
         tag: &str,
@@ -138,6 +150,7 @@ impl LockedRuntime {
             .build_image(tag, context_dir, containerfile, build_args)
     }
 
+    /// Stages the build context into the engine and returns its engine path.
     pub fn prepare_build_context(
         &self,
         build_root: &std::path::Path,
@@ -145,42 +158,52 @@ impl LockedRuntime {
         self.inner.prepare_build_context(build_root)
     }
 
+    /// Fetches the last `tail` lines of a single container's logs.
     pub fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String> {
         self.inner.container_logs(container, tail)
     }
 
+    /// `true` if an image with this tag exists.
     pub fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
         self.inner.image_exists(tag)
     }
 
+    /// Prunes unused engine data (system prune).
     pub fn system_prune(&self) -> anyhow::Result<()> {
         self.inner.system_prune()
     }
 
+    /// Removes the given image tags.
     pub fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
         self.inner.remove_images(tags, force)
     }
 
+    /// Prunes the BuildKit build cache.
     pub fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
         self.inner.prune_buildkit_cache()
     }
 
+    /// Prunes images not referenced by any container.
     pub fn prune_unused_images(&self) -> anyhow::Result<()> {
         self.inner.prune_unused_images()
     }
 
+    /// Restarts the container engine inside the VM.
     pub fn restart_container_engine(&self) -> anyhow::Result<()> {
         self.inner.restart_container_engine()
     }
 
+    /// Stops the backing VM.
     pub fn stop_vm(&self) -> anyhow::Result<()> {
         self.inner.stop_vm()
     }
 
+    /// Resets (deletes and recreates) the backing VM.
     pub fn reset_vm(&self) -> anyhow::Result<()> {
         self.inner.reset_vm()
     }
 
+    /// Runs a command inside the VM with stdin and a timeout.
     pub fn vm_exec(
         &self,
         cmd: &str,

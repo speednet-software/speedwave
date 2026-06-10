@@ -530,9 +530,9 @@ export class ComposerComponent implements AfterViewInit {
   /** Submit gating reason (used in tooltip / aria-disabled state). */
   readonly submitBlockedReason = computed<string>(() => {
     if (this.disabled()) return '';
-    if (this.anyAttachmentPreprocessing()) return 'Trwa przygotowywanie obrazka…';
+    if (this.anyAttachmentPreprocessing()) return 'Preparing image…';
     if (this.attachments().length > 0 && this.streaming()) {
-      return 'Poczekaj na zakończenie odpowiedzi przed wysłaniem obrazka.';
+      return 'Wait for the response to finish before sending an image.';
     }
     return '';
   });

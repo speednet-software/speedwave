@@ -14,11 +14,12 @@
 
 import { Gitlab } from '@gitbeaker/rest';
 import {
-  loadToken,
+  loadTokenFile,
   ts,
   withSetupGuidance,
   ConnectionStatusTracker,
   backgroundConnectionTest,
+  tokensDir,
 } from '@speedwave/mcp-shared';
 import type { ConnectionTestResult, HealthStatus } from '@speedwave/mcp-shared';
 import fs from 'fs/promises';
@@ -1450,10 +1451,8 @@ export class GitLabClient {
 export async function initializeGitLabClient(): Promise<GitLabClient | null> {
   try {
     // Load token from RO mount
-    const tokenPath = process.env.TOKENS_DIR ? `${process.env.TOKENS_DIR}/token` : '/tokens/token';
-
-    console.log(`${ts()} 📖 Loading GitLab token from: ${tokenPath}`);
-    const token = await loadToken(tokenPath);
+    console.log(`${ts()} 📖 Loading GitLab token from: ${tokensDir()}/token`);
+    const token = await loadTokenFile('token');
 
     if (!token) {
       // Graceful degradation: log warning, return null, let server start
@@ -1463,11 +1462,10 @@ export async function initializeGitLabClient(): Promise<GitLabClient | null> {
     }
 
     // Load host URL from /tokens/host_url or env var
-    const tokensDir = process.env.TOKENS_DIR || '/tokens';
     let host = 'https://gitlab.com';
 
     try {
-      const hostUrl = await fs.readFile(`${tokensDir}/host_url`, 'utf-8');
+      const hostUrl = await fs.readFile(`${tokensDir()}/host_url`, 'utf-8');
       const trimmed = hostUrl.trim();
       if (trimmed) {
         host = trimmed;

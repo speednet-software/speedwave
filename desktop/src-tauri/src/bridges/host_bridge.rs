@@ -22,8 +22,6 @@ use tokio_tungstenite::WebSocketStream;
 use speedwave_runtime::consts;
 use speedwave_runtime::fs_perms as runtime_fs_perms;
 
-use crate::fs_perms;
-
 // ---------------------------------------------------------------------------
 // Public types — auth / origin / subprotocol
 // ---------------------------------------------------------------------------
@@ -1311,7 +1309,7 @@ pub(crate) fn write_lock_file_atomic(
     let mut tmp = tempfile::NamedTempFile::with_prefix_in(".lock-", dir)
         .context("creating temp lock file")?;
 
-    fs_perms::set_owner_only(tmp.path())
+    runtime_fs_perms::set_owner_only(tmp.path())
         .map_err(|e| anyhow::anyhow!("set_owner_only on temp lock file: {e}"))?;
 
     tmp.as_file_mut()
@@ -1326,7 +1324,7 @@ pub(crate) fn write_lock_file_atomic(
 
 pub(crate) fn ensure_lock_dir(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))?;
-    fs_perms::set_owner_only_dir(dir)
+    runtime_fs_perms::set_owner_only_dir(dir)
         .map_err(|e| anyhow::anyhow!("set_owner_only_dir on {dir:?}: {e}"))?;
     Ok(())
 }

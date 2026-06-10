@@ -1,6 +1,7 @@
 import { Injectable, OnDestroy, WritableSignal, inject, signal, type Signal } from '@angular/core';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from './tauri.service';
+import { LoggerService } from './logger.service';
 import type { PluginBridgeCredentials, PluginBridgeStatus } from '../models/plugin';
 
 interface BridgeEventPayload {
@@ -22,6 +23,7 @@ interface BridgeEventPayload {
 @Injectable({ providedIn: 'root' })
 export class PluginBridgeService implements OnDestroy {
   private readonly tauri = inject(TauriService);
+  private readonly log = inject(LoggerService);
   private readonly statuses = new Map<string, WritableSignal<PluginBridgeStatus | null>>();
   private unlisten: UnlistenFn | null = null;
   private listening = false;
@@ -83,7 +85,9 @@ export class PluginBridgeService implements OnDestroy {
         this.listening = true;
       })
       .catch((err) => {
-        console.error('PluginBridgeService: failed to subscribe to plugin_bridge_event', err);
+        this.log.error(
+          `PluginBridgeService: failed to subscribe to plugin_bridge_event: ${String(err)}`
+        );
         this.pendingListen = null;
       });
     return this.pendingListen;
@@ -92,7 +96,9 @@ export class PluginBridgeService implements OnDestroy {
   private applyEvent(payload: BridgeEventPayload): void {
     const sig = this.statuses.get(payload.slug);
     if (!sig) {
-      console.warn(`PluginBridgeService: dropped ${payload.kind} for unknown slug ${payload.slug}`);
+      this.log.warn(
+        `PluginBridgeService: dropped ${payload.kind} for unknown slug ${payload.slug}`
+      );
       return;
     }
     const current = sig();
@@ -108,7 +114,7 @@ export class PluginBridgeService implements OnDestroy {
         sig.set({ ...current, paired: false, partner_connected: false });
         return;
       default:
-        console.warn(`PluginBridgeService: bridge ${payload.slug} ${payload.kind}`);
+        this.log.warn(`PluginBridgeService: bridge ${payload.slug} ${payload.kind}`);
         return;
     }
   }

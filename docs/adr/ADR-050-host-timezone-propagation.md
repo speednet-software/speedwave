@@ -33,14 +33,15 @@ The helper is invoked **after** `apply_plugins()` so plugin services injected dy
 
 ### `tzdata` in base images
 
-Setting `TZ=Europe/Warsaw` is a no-op without the zoneinfo database. The decision adds `tzdata` to four base images:
+Setting `TZ=Europe/Warsaw` is a no-op without the zoneinfo database. The decision installs `tzdata` in every container image:
 
 - `containers/Containerfile.claude` (`apt-get install ... tzdata`)
-- `containers/mcp-servers/Containerfile.mcp-base` (`apk add --no-cache tzdata`)
 - `mcp-servers/hub/Containerfile` (`apk add --no-cache curl tzdata`)
+- every `mcp-servers/<service>/Dockerfile` (`apk add --no-cache tzdata` — `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`, `context7`)
 - `mcp-servers/office/Dockerfile` (Debian/bookworm, `apt-get install ... tzdata` — ADR-055)
+- `mcp-servers/playwright/Containerfile` (Ubuntu/jammy, `apt-get install -y tzdata` — explicit, not relying on the base image)
 
-The Playwright worker uses `mcr.microsoft.com/playwright:*-jammy`, which already ships `tzdata` from the Ubuntu base — no change.
+The shared `containers/mcp-servers/Containerfile.mcp-base` was retired; each worker ships its own `Dockerfile`, so `tzdata` is installed per worker.
 
 This pair (detection in `tz.rs` ↔ `tzdata` in these base images) is recorded in CLAUDE.md as a new SSOT-alignment row. Adding another base image is a compile-time invitation to reread that row.
 

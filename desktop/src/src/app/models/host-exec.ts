@@ -63,6 +63,14 @@ export const HOST_EXEC_SHELL_LAUNCHERS: readonly string[] = [
   'sshpass',
   'busybox',
   'toybox',
+  // Windows interpreters — each accepts an inline command / script argument.
+  'powershell',
+  'cmd',
+  'pwsh',
+  'cscript',
+  'wscript',
+  'mshta',
+  'wsl',
 ];
 
 /** Meta runners banned from a bare `{param}` argv; mirrors `HOST_EXEC_META_TOOLS`. */
@@ -107,6 +115,10 @@ export const HOST_EXEC_RESERVED_ENV_KEYS: readonly string[] = [
   'IFS',
   'BASH_ENV',
   'ENV',
+  // host_exec worker-internal env (must never reach a recipe child)
+  'HOST_EXEC_AUTH_TOKEN',
+  'HOST_EXEC_CONFIG_PATH',
+  'HOST_EXEC_LOG_FILE',
 ];
 
 /**

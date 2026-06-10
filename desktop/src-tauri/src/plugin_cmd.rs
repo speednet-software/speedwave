@@ -567,7 +567,7 @@ pub fn save_plugin_credentials(
 
         let file_path = svc_dir.join(key);
         std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
-        crate::fs_perms::set_owner_only(&file_path)?;
+        speedwave_runtime::fs_perms::set_owner_only(&file_path)?;
     }
 
     Ok(())

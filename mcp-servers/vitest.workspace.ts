@@ -12,6 +12,8 @@ const workspaces = [
   'sharepoint',
   'os',
   'host_exec',
+  'oauth',
+  'context7',
 ];
 
 export default defineWorkspace(

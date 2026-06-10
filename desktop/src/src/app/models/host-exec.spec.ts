@@ -24,6 +24,11 @@ describe('host-exec model helpers', () => {
       expect(HOST_EXEC_SHELL_LAUNCHERS).toContain('xargs');
       expect(HOST_EXEC_SHELL_LAUNCHERS).not.toContain('node'); // node is a meta-tool, not a launcher
     });
+    it('lists the Windows interpreters (matches the Rust SSOT)', () => {
+      for (const win of ['powershell', 'cmd', 'pwsh', 'cscript', 'wscript', 'mshta', 'wsl']) {
+        expect(HOST_EXEC_SHELL_LAUNCHERS).toContain(win);
+      }
+    });
     it('lists the meta-tools', () => {
       expect(HOST_EXEC_META_TOOLS).toContain('npm');
       expect(HOST_EXEC_META_TOOLS).toContain('make');
@@ -33,6 +38,15 @@ describe('host-exec model helpers', () => {
       expect(HOST_EXEC_RESERVED_ENV_KEYS).toContain('PATH');
       expect(HOST_EXEC_RESERVED_ENV_KEYS).toContain('LD_PRELOAD');
       expect(HOST_EXEC_RESERVED_ENV_KEYS).toContain('NODE_OPTIONS');
+    });
+    it('reserves the host_exec worker-internal env keys (matches the Rust SSOT)', () => {
+      for (const internal of [
+        'HOST_EXEC_AUTH_TOKEN',
+        'HOST_EXEC_CONFIG_PATH',
+        'HOST_EXEC_LOG_FILE',
+      ]) {
+        expect(HOST_EXEC_RESERVED_ENV_KEYS).toContain(internal);
+      }
     });
   });
 

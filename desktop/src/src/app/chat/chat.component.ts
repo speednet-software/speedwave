@@ -5,6 +5,7 @@ import {
   OnDestroy,
   OnInit,
   ViewChild,
+  computed,
   effect,
   inject,
   signal,
@@ -15,6 +16,7 @@ import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
+import { LoggerService } from '../services/logger.service';
 import type {
   ChatMessage,
   ConversationSummary,
@@ -63,12 +65,17 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   readonly gitBranch = signal<string | null>(null);
   /**
-   * Cached index of the most recent assistant message in `chat.messages`,
-   * recomputed on every state-change notification. Avoids the O(n) scan in
-   * `isLastAssistant` becoming O(n²) when the template iterates every entry.
-   * `-1` when no assistant message exists.
+   * Index of the most recent assistant message in `messagesFromState()`;
+   * `-1` when none. A `computed` so the per-row `isLastAssistant` lookup is
+   * O(1) and recomputes lazily whenever the state-tree projection changes.
    */
-  lastAssistantIndex = -1;
+  readonly lastAssistantIndex = computed(() => {
+    const msgs = this.chat.messagesFromState();
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      if (msgs[i].role === 'assistant') return i;
+    }
+    return -1;
+  });
   private resumeInProgress = false;
 
   /**
@@ -84,7 +91,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private router = inject(Router);
-  private unsubChange: (() => void) | null = null;
+  private log = inject(LoggerService);
   private unsubProjectReady: (() => void) | null = null;
   private unsubAuthWatch: (() => void) | null = null;
 
@@ -113,18 +120,19 @@ export class ChatComponent implements OnInit, OnDestroy {
     return this.chat.sessionStats?.session_id ?? this.optimisticSessionId;
   }
 
-  /** Wires change-detection callbacks and effects that lazy-load data when drawers open. */
+  /** Wires effects driven by the state-tree signal and the drawer toggles. */
   constructor() {
+    // Refresh the branch chip on every streaming -> idle transition so a
+    // turn that ran `git checkout` updates the status strip without a full
+    // page reload. The effect re-runs whenever the state-tree's streaming
+    // projection flips; `markForCheck` keeps OnPush in sync with the signal.
     let wasStreaming = false;
-    this.unsubChange = this.chat.onChange(() => {
-      this.recomputeLastAssistantIndex();
-      // Refresh the branch chip on every streaming -> idle transition so a
-      // turn that ran `git checkout` updates the status strip without a
-      // full page reload.
-      if (wasStreaming && !this.chat.isStreaming) {
+    effect(() => {
+      const streaming = this.chat.isStreamingFromState();
+      if (wasStreaming && !streaming) {
         void this.refreshGitBranch();
       }
-      wasStreaming = this.chat.isStreaming;
+      wasStreaming = streaming;
       this.cdr.markForCheck();
       // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
     });
@@ -138,18 +146,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     effect(() => {
       if (this.ui.memoryOpen()) void this.loadProjectMemory();
     });
-  }
-
-  /** Recomputes the cached `lastAssistantIndex` from the current messages. */
-  private recomputeLastAssistantIndex(): void {
-    const msgs = this.chat.messages;
-    for (let i = msgs.length - 1; i >= 0; i -= 1) {
-      if (msgs[i].role === 'assistant') {
-        this.lastAssistantIndex = i;
-        return;
-      }
-    }
-    this.lastAssistantIndex = -1;
   }
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
@@ -221,9 +217,9 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** True if the current turn is paused on an unanswered AskUserQuestion slot. */
   private hasUnansweredQuestion(): boolean {
-    return this.chat.currentBlocks.some(
-      (b) => b.type === 'ask_user' && b.question.answers.some((a) => a === null)
-    );
+    return this.chat
+      .currentBlocksFromState()
+      .some((b) => b.type === 'ask_user' && b.question.answers.some((a) => a === null));
   }
 
   /**
@@ -296,19 +292,18 @@ export class ChatComponent implements OnInit, OnDestroy {
     try {
       await this.chat.submitAnswer(event.toolId, event.questionIdx, event.value);
     } catch (err) {
-      console.error('[chat] onQuestionAnswered: unexpected error', err);
+      this.log.error(`[chat] onQuestionAnswered: unexpected error: ${String(err)}`);
     }
   }
 
   /**
    * Returns true when the assistant entry at `index` is the most recent
-   * assistant message — used to gate the per-message Retry button. Reads a
-   * precomputed index updated on each state-change notification, so the
-   * per-row template lookup is O(1) instead of O(n).
-   * @param index - Index into `chat.messages` of the entry under test.
+   * assistant message — used to gate the per-message Retry button. Reads the
+   * `lastAssistantIndex` computed, so the per-row template lookup is O(1).
+   * @param index - Index into `messagesFromState()` of the entry under test.
    */
   isLastAssistant(index: number): boolean {
-    return index === this.lastAssistantIndex;
+    return index === this.lastAssistantIndex();
   }
 
   /** Flips the sidebar signal; data load is driven by the constructor effect. */
@@ -332,7 +327,7 @@ export class ChatComponent implements OnInit, OnDestroy {
         project,
       });
     } catch (err) {
-      console.error('loadConversations failed:', err);
+      this.log.error(`[chat] loadConversations failed: ${String(err)}`);
       this.historyError = `Failed to load conversations: ${err}`;
       this.conversations = [];
     } finally {
@@ -374,7 +369,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       const transcriptPromise = this.tauri
         .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
         .catch((err) => {
-          console.error('[chat] get_conversation failed:', err);
+          this.log.error(`[chat] get_conversation failed: ${String(err)}`);
           return null;
         });
       const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
@@ -387,13 +382,13 @@ export class ChatComponent implements OnInit, OnDestroy {
         this.chat.seedResumedSession(sessionId);
       }
     } catch (err) {
-      console.error('[chat] resumeConversation failed:', err);
+      this.log.error(`[chat] resumeConversation failed: ${String(err)}`);
       const msg = String(err);
       if (msg.includes('not authenticated')) {
         await this.projectState.retryAuth();
       } else {
         this.chat.loadMessages([
-          ...this.chat.messages,
+          ...this.chat.messagesFromState(),
           {
             role: 'assistant',
             blocks: [
@@ -432,7 +427,7 @@ export class ChatComponent implements OnInit, OnDestroy {
         await this.chat.init();
       }
     } catch (err) {
-      console.error('[chat] deleteConversation failed:', err);
+      this.log.error(`[chat] deleteConversation failed: ${String(err)}`);
       this.historyError = `Failed to delete conversation: ${err}`;
     } finally {
       this.cdr.markForCheck();
@@ -469,7 +464,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
       this.projectMemory = await this.tauri.invoke<string>('get_project_memory', { project });
     } catch (err) {
-      console.error('loadProjectMemory failed:', err);
+      this.log.error(`[chat] loadProjectMemory failed: ${String(err)}`);
       this.projectMemory = '';
       this.memoryError = `Failed to load memory: ${err}`;
     }
@@ -493,11 +488,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Tears down change subscriptions registered in the constructor and ngOnInit. */
+  /** Tears down project-lifecycle subscriptions registered in ngOnInit. */
   ngOnDestroy(): void {
-    if (this.unsubChange) {
-      this.unsubChange();
-    }
     if (this.unsubProjectReady) {
       this.unsubProjectReady();
       this.unsubProjectReady = null;

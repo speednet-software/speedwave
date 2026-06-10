@@ -8,7 +8,7 @@ Speedwave is a **thin orchestration layer**, not a reimplementation of Lima, ner
 
 - If you're writing more than ~100 lines for something that already exists as a CLI tool — stop and reconsider
 - Avoid clever abstractions; prefer obvious code that a new contributor understands in 5 minutes
-- `speedwave` binary: starts containers, launches Claude, plus `check`/`init`/`login`/`logout`/`update`/`self-update`/`plugin install` subcommands — nothing more
+- `speedwave` binary: starts containers, launches Claude, plus `check`/`init`/`login`/`logout`/`update`/`self-update` and the `plugin` subcommands (`install`/`list`/`remove`/`enable`/`disable`) — nothing more
 
 ## YAGNI — You Aren't Gonna Need It
 

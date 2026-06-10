@@ -98,6 +98,7 @@ impl ResponseAccumulator {
 }
 
 impl Collator {
+    /// Creates an empty collator.
     pub fn new() -> Self {
         Self::default()
     }

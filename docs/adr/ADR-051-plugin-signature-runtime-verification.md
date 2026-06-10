@@ -39,7 +39,7 @@ Stat-only cache keys (mtime + len) were rejected: `utimensat` makes those trivia
 
 ### Trusted-path loaders
 
-The runtime exposes two loaders. `list_verified_plugins` returns `Vec<VerifiedPlugin { manifest, dir }>` — fail-closed, with `dir.file_name() == manifest.slug` enforced. Callers (`apply_plugins`, image builders, Claude wiring) use `vp.dir`; they never reconstruct a path via `plugins_base.join(manifest.slug)`. Without the dir/slug enforcement an attacker dropping `evil/plugin.json` whose `slug: "good"` would silently re-route every caller to a different on-disk tree.
+The runtime exposes two loaders. `list_verified_plugins` returns `Vec<VerifiedPlugin>` — fail-closed, with `dir.file_name() == manifest.slug` enforced. `VerifiedPlugin`'s fields are private; the only constructor is the crate-internal `new`, called after the full verification, so a "verified" pair cannot be fabricated by literal construction. Callers (`apply_plugins`, image builders, Claude wiring) read `vp.dir()`/`vp.manifest()`; they never reconstruct a path via `plugins_base.join(manifest.slug)`. Without the dir/slug enforcement an attacker dropping `evil/plugin.json` whose `slug: "good"` would silently re-route every caller to a different on-disk tree.
 
 `list_for_ui` is the tolerant counterpart. It returns one `PluginListEntry` per directory with a `verification_status` discriminator (`Verified` / `MissingSignature` / `InvalidSignature` / `DirSlugMismatch` / `ManifestInvalid`) and a `verification_error` string. The Desktop UI uses this so users can see _what_ is broken; the green pill becomes red with a short label and a tooltip.
 

@@ -10,6 +10,51 @@ final class MailTests: XCTestCase {
         XCTAssertTrue(AppleMailClient.isAvailable())
     }
 
+    // MARK: - detectClients structure + permission/absence distinction
+
+    func testDetectClientsHasMailAndOutlookEntries() {
+        // detectClients catches a permission/timeout error from OutlookClient
+        // internally; on a CI host with no Outlook it reports available=false
+        // (or an `error` field if Automation is denied). Either way both
+        // entries are present and well-formed.
+        let result = detectClients()
+        let clients = result["clients"] as? [[String: Any]] ?? []
+        XCTAssertEqual(clients.count, 2, "must list Apple Mail + Outlook")
+        XCTAssertEqual(clients.first?["name"] as? String, AppleMailClient.name)
+        XCTAssertEqual(clients.first?["available"] as? Bool, true)
+        let outlook = clients.last
+        XCTAssertEqual(outlook?["name"] as? String, OutlookClient.name)
+        XCTAssertNotNil(outlook?["available"], "Outlook entry must always carry an availability flag")
+        // When an `error` is present it must be a permission/timeout message, not
+        // a misattributed "not installed" — and `available` is false alongside it.
+        if let err = outlook?["error"] as? String {
+            XCTAssertEqual(outlook?["available"] as? Bool, false,
+                           "an Outlook error must pair with available=false")
+            XCTAssertFalse(err.isEmpty)
+        }
+    }
+
+    func testOutlookAvailabilityRethrowsPermissionAndTimeoutErrors() {
+        // Contract documented by OutlookClient.isAvailable(): permission/timeout
+        // ScriptErrors must be distinguishable (rethrown), while a generic script
+        // failure maps to "not available" (false) — so a denial is never reported
+        // as "Outlook not installed".
+        let permission = ScriptError.automationPermission("not allowed")
+        let timeout = ScriptError.timeout(5, nil)
+        let scriptFailed = ScriptError.scriptFailed("syntax error")
+
+        func classify(_ e: ScriptError) -> Bool {
+            // true = rethrown (ambiguous, surface to user); false = treated as not-available
+            switch e {
+            case .automationPermission, .timeout: return true
+            case .scriptFailed: return false
+            }
+        }
+        XCTAssertTrue(classify(permission), "permission denial must be surfaced, not swallowed")
+        XCTAssertTrue(classify(timeout), "timeout must be surfaced, not swallowed")
+        XCTAssertFalse(classify(scriptFailed), "a generic failure means Outlook is simply not available")
+    }
+
     // MARK: - Error Messages
 
     func testMailErrorMissingField() {

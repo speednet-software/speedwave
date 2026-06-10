@@ -99,8 +99,8 @@ pub enum StreamChunk {
 }
 
 /// Redacts secrets in a chunk's free-text fields. Every `chat_stream` emit must
-/// go through [`emit_sanitized_chunk`] (which calls this), so neither the
-/// `chat_stream` channel nor the `chat_patch::*` mirror can leak. Structural
+/// go through [`emit_sanitized_chunk`] (which calls this), so the
+/// `chat_stream` channel cannot leak. Structural
 /// fields (tool ids, model, session ids) and `partial_json` (incremental JSON —
 /// sanitizing could corrupt it) are left untouched.
 pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
@@ -1536,12 +1536,6 @@ impl ChatSession {
         // Background thread: parse Claude's stream-json and emit Tauri events
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
-            // ADR-042/043/044 — mirror every emitted chunk into the
-            // per-session JSON-Patch stream so the frontend's state-tree
-            // signal stays in lockstep with the legacy `chat_stream`
-            // bindings. The emitter buffers patches until the first
-            // `Result` event reveals the session_id, then flushes.
-            let mut patch_emitter = crate::patch_emitter::PatchEmitter::new();
             if let Some(seed) = resume_seed {
                 parser.restore_session_snapshot(
                     TurnUsage {
@@ -1727,18 +1721,9 @@ impl ChatSession {
                     // ToolInputDelta events in the next turn.
                     parser.reset();
                 }
-                let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
                 for chunk in chunks {
-                    // Sanitize before BOTH egress channels: the patch mirror
-                    // (handle_chunk reads the sanitized chunk) and the
-                    // chat_stream emit (via emit_sanitized_chunk).
-                    let chunk = sanitize_chunk(chunk);
-                    patch_emitter.handle_chunk(&chunk, &registry);
                     emit_sanitized_chunk(&app_handle, chunk);
                 }
-                // ADR-042/043 lifecycle patches are emitted automatically
-                // by `patch_emitter.handle_chunk` when it sees `Result` —
-                // no separate hook needed.
                 // ADR-045 drain: after Result chunks have been emitted (so
                 // the frontend already saw `is_streaming=false`), take any
                 // queued message for this session and write it back to
@@ -1763,9 +1748,6 @@ impl ChatSession {
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
                 };
-                let chunk = sanitize_chunk(chunk);
-                let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
-                patch_emitter.handle_chunk(&chunk, &registry);
                 emit_sanitized_chunk(&app_handle, chunk);
             }
         });
@@ -2126,17 +2108,6 @@ fn drain_queued_message(
             text: drained.text,
         },
     );
-    // ADR-042/045 mirror: clear the state-tree's pending_queue slot.
-    use speedwave_runtime::stream::msg_store::LogMsg;
-    use speedwave_runtime::stream::ConversationPatch;
-    let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
-    let store = registry.store_for(session_id);
-    store.push(LogMsg::JsonPatch(ConversationPatch::set_pending_queue(
-        None,
-    )));
-    // The drained message is already in flight; record it as a state-tree
-    // event so subscribers can observe the queue lifecycle without listening
-    // to the legacy `chat_stream` channel.
     log::debug!("queue drained: {} bytes for session", drained_text.len());
 }
 
@@ -2226,8 +2197,8 @@ mod tests {
 
     #[test]
     fn sanitize_chunk_redacts_result_text() {
-        // result_text is dropped from the patch mirror, reaches UI only via
-        // chat_stream — so the single sanitize point must cover it.
+        // result_text reaches the UI only via chat_stream — the single
+        // sanitize point must cover it.
         let chunk = StreamChunk::Result {
             session_id: "s".into(),
             total_cost: None,

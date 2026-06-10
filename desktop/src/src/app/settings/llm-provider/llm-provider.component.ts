@@ -13,6 +13,7 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { AnthropicModelsService } from '../../services/anthropic-models.service';
 import { ChatStateService } from '../../services/chat-state.service';
+import { LoggerService } from '../../services/logger.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import {
   AnthropicModel,
@@ -417,6 +418,7 @@ export class LlmProviderComponent implements OnInit {
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
   private chatState = inject(ChatStateService);
+  private log = inject(LoggerService);
 
   /**
    * Cached SSOT catalog of Anthropic models from the backend
@@ -589,9 +591,17 @@ export class LlmProviderComponent implements OnInit {
     return this.provider === 'anthropic' ? 'https://api.anthropic.com' : '';
   }
 
-  /** Returns a placeholder model name based on the selected LLM provider. */
+  /**
+   * Returns a placeholder model name based on the selected LLM provider. For
+   * Anthropic it derives the hint from the SSOT catalog (latest non-Opus, i.e.
+   * the everyday Sonnet) rather than a hard-coded string, mirroring how
+   * `baseUrlPlaceholder()` defers to the backend — empty while the catalog
+   * loads so we never flash a stale model id.
+   */
   modelPlaceholder(): string {
-    if (this.provider === 'anthropic') return 'claude-sonnet-4-6';
+    if (this.provider === 'anthropic') {
+      return this.anthropicModels.latestNonOpusModelId() ?? '';
+    }
     return 'llama3.3';
   }
 
@@ -890,7 +900,7 @@ export class LlmProviderComponent implements OnInit {
       // Silently ignore the common "not in Tauri" case (browser dev mode).
       // Log anything else so real backend errors aren't hidden.
       if (!msg.toLowerCase().includes('tauri') && !msg.toLowerCase().includes('invoke')) {
-        console.error('loadConfig: unexpected error loading LLM config:', e);
+        this.log.error(`loadConfig: unexpected error loading LLM config: ${msg}`);
       }
     }
     this.cdr.markForCheck();

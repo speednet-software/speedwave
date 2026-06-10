@@ -40,11 +40,14 @@ impl Backend {
 /// The acceleration backends compiled into this binary (not what the host
 /// hardware supports — backends are a build-time choice).
 pub fn compiled_backends() -> Vec<Backend> {
-    #[allow(unused_mut)]
-    let mut v = vec![Backend::Cpu];
     #[cfg(all(feature = "audio-transcription", target_os = "macos"))]
-    v.push(Backend::Metal);
-    v
+    {
+        vec![Backend::Cpu, Backend::Metal]
+    }
+    #[cfg(not(all(feature = "audio-transcription", target_os = "macos")))]
+    {
+        vec![Backend::Cpu]
+    }
 }
 
 /// `true` if any GPU backend was compiled in.
@@ -72,7 +75,9 @@ pub fn recommended_live_model(backends: &[Backend]) -> &'static WhisperModelInfo
         .unwrap_or(&WHISPER_MODELS[0])
 }
 
-/// The live model for this build's compiled backends.
+/// The live model for this build's compiled backends. Test-only — production
+/// passes an explicit backend set to `recommended_live_model`.
+#[cfg(test)]
 pub fn recommended_live_model_for_this_build() -> &'static WhisperModelInfo {
     recommended_live_model(&compiled_backends())
 }

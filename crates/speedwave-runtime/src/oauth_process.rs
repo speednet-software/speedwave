@@ -39,9 +39,11 @@ pub struct OauthSpec {
 }
 
 impl OauthSpec {
+    /// Project this OAuth supervisor serves.
     pub fn project(&self) -> &str {
         &self.project
     }
+    /// Services consuming the OAuth tokens.
     pub fn consumers(&self) -> &[String] {
         &self.consumers
     }
@@ -132,6 +134,7 @@ impl OauthProcess {
         )
     }
 
+    /// Project this OAuth process serves.
     pub fn project(&self) -> &str {
         self.spec().project()
     }

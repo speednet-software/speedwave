@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vite
 import type { GitLabConfig, GitLabClient as GitLabClientType } from './client.js';
 
 // Create mock functions
-const mockLoadToken = vi.fn();
+const mockLoadTokenFile = vi.fn();
 const mockReadFile = vi.fn();
 const mockGitlabConstructor = vi.fn();
 
@@ -32,7 +32,7 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@speedwave/mcp-shared')>();
   return {
     ...actual,
-    loadToken: mockLoadToken,
+    loadTokenFile: mockLoadTokenFile,
     ts: () => '[00:00:00]',
   };
 });
@@ -2347,7 +2347,7 @@ describe('initializeGitLabClient', () => {
   });
 
   it('should load host URL from /tokens/host_url', async () => {
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockImplementation(async (path: string) => {
       if (typeof path === 'string' && path.endsWith('/host_url')) {
         return 'https://gitlab.custom.com';
@@ -2364,7 +2364,7 @@ describe('initializeGitLabClient', () => {
 
     const client = await initializeGitLabClient();
 
-    expect(mockLoadToken).toHaveBeenCalledWith('/tokens/token');
+    expect(mockLoadTokenFile).toHaveBeenCalledWith('token');
     expect(mockReadFile).toHaveBeenCalledWith('/tokens/host_url', 'utf-8');
     expect(client).not.toBeNull();
     expect(mockGitlabConstructor).toHaveBeenCalledWith({
@@ -2376,7 +2376,7 @@ describe('initializeGitLabClient', () => {
   it('should use custom TOKENS_DIR for host_url and token paths', async () => {
     process.env.TOKENS_DIR = '/custom/tokens';
 
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockImplementation(async (path: string) => {
       if (typeof path === 'string' && path === '/custom/tokens/host_url') {
         return 'https://gitlab.example.com';
@@ -2393,14 +2393,14 @@ describe('initializeGitLabClient', () => {
 
     await initializeGitLabClient();
 
-    expect(mockLoadToken).toHaveBeenCalledWith('/custom/tokens/token');
+    expect(mockLoadTokenFile).toHaveBeenCalledWith('token');
     expect(mockReadFile).toHaveBeenCalledWith('/custom/tokens/host_url', 'utf-8');
   });
 
   it('should fall back to GITLAB_URL env var when host_url file missing', async () => {
     process.env.GITLAB_URL = 'https://gitlab-env.example.com';
 
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockImplementation(async (path: string) => {
       if (typeof path === 'string' && path.includes('host_url')) {
         throw new Error('ENOENT');
@@ -2426,7 +2426,7 @@ describe('initializeGitLabClient', () => {
   it('should fall back to https://gitlab.com when no config', async () => {
     delete process.env.GITLAB_URL;
 
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockRejectedValue(new Error('ENOENT'));
 
     const mockGitlabInstance = {
@@ -2445,7 +2445,7 @@ describe('initializeGitLabClient', () => {
   });
 
   it('should return null when token is empty', async () => {
-    mockLoadToken.mockResolvedValue('');
+    mockLoadTokenFile.mockResolvedValue('');
 
     const result = await initializeGitLabClient();
     expect(result).toBeNull();
@@ -2453,7 +2453,7 @@ describe('initializeGitLabClient', () => {
   });
 
   it('should return null when token is null', async () => {
-    mockLoadToken.mockResolvedValue(null);
+    mockLoadTokenFile.mockResolvedValue(null);
 
     const result = await initializeGitLabClient();
     expect(result).toBeNull();
@@ -2464,7 +2464,7 @@ describe('initializeGitLabClient', () => {
     // Init no longer blocks on testConnection — it kicks the check into the
     // background. The client is returned immediately; healthCheck reads the
     // tracker to surface the failure.
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockRejectedValue(new Error('ENOENT'));
 
     const mockGitlabInstance = {
@@ -2483,7 +2483,7 @@ describe('initializeGitLabClient', () => {
 
   it('initializeGitLabClient resolves quickly when testConnection hangs', async () => {
     // Hanging testConnection must not block init — background pattern.
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockRejectedValue(new Error('ENOENT'));
 
     const mockGitlabInstance = {
@@ -2501,7 +2501,7 @@ describe('initializeGitLabClient', () => {
   });
 
   it('should return null when initialization throws error', async () => {
-    mockLoadToken.mockRejectedValue(new Error('Failed to load token'));
+    mockLoadTokenFile.mockRejectedValue(new Error('Failed to load token'));
 
     const result = await initializeGitLabClient();
     expect(result).toBeNull();
@@ -2510,7 +2510,7 @@ describe('initializeGitLabClient', () => {
 
   it('status tracker drives makeStandardHealthCheck — bg failure makes hc throw', async () => {
     const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockRejectedValue(new Error('ENOENT'));
     mockGitlabConstructor.mockImplementation(() => ({
       Users: {
@@ -2528,7 +2528,7 @@ describe('initializeGitLabClient', () => {
 
   it('status tracker drives makeStandardHealthCheck — unknown during warmup is healthy', async () => {
     const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockRejectedValue(new Error('ENOENT'));
     // testConnection hangs — tracker stays 'unknown' during warmup window.
     mockGitlabConstructor.mockImplementation(() => ({
@@ -3658,7 +3658,7 @@ describe('initializeGitLabClient — additional branches', () => {
   it('should log warning and use default when host_url file is empty string', async () => {
     delete process.env.GITLAB_URL;
 
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     // host_url returns empty string (trim results in empty)
     mockReadFile.mockResolvedValue('  \n  ');
 
@@ -3680,7 +3680,7 @@ describe('initializeGitLabClient — additional branches', () => {
   it('should warn and use GITLAB_URL when host_url has non-ENOENT error', async () => {
     process.env.GITLAB_URL = 'https://gitlab-env.example.com';
 
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     // Throw non-ENOENT error
     const permError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
     mockReadFile.mockRejectedValue(permError);
@@ -3705,7 +3705,7 @@ describe('initializeGitLabClient — additional branches', () => {
     process.env.TOKENS_DIR = '/custom/tokens';
     delete process.env.GITLAB_URL;
 
-    mockLoadToken.mockResolvedValue('test-token');
+    mockLoadTokenFile.mockResolvedValue('test-token');
     // Simulate ENOENT with error object that has code property
     const enoentError = Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
     mockReadFile.mockRejectedValue(enoentError);
@@ -3717,7 +3717,7 @@ describe('initializeGitLabClient — additional branches', () => {
 
     await initializeGitLabClient();
 
-    expect(mockLoadToken).toHaveBeenCalledWith('/custom/tokens/token');
+    expect(mockLoadTokenFile).toHaveBeenCalledWith('token');
     expect(mockGitlabConstructor).toHaveBeenCalledWith({
       token: 'test-token',
       host: 'https://gitlab.com',

@@ -6,66 +6,25 @@
  * @module mcp-gitlab
  */
 
-import {
-  createMCPServer,
-  ts,
-  notConfiguredMessage,
-  retryAsync,
-  makeStandardHealthCheck,
-} from '@speedwave/mcp-shared';
-import { initializeGitLabClient } from './client.js';
+import { bootWorker, ts, makeStandardHealthCheck } from '@speedwave/mcp-shared';
+import { initializeGitLabClient, type GitLabClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
-const SERVER_NAME = 'mcp-gitlab';
-const AUTH_TOKEN = process.env.MCP_GITLAB_AUTH_TOKEN;
-
-async function main(): Promise<void> {
-  console.log(`${ts()} 🚀 Starting ${SERVER_NAME}...`);
-
-  if (!AUTH_TOKEN) {
-    console.error(
-      `${ts()} FATAL: MCP_GITLAB_AUTH_TOKEN is required. ` +
-        `${SERVER_NAME} must not run without authentication.`
-    );
-    process.exit(1);
-  }
-
-  const gitlabClient = await retryAsync(initializeGitLabClient, {
-    maxRetries: 3,
-    baseDelayMs: 2000,
-    label: 'GitLab client init',
-  });
-
-  if (!gitlabClient) {
-    console.warn(`${ts()} ⚠️  ${notConfiguredMessage('GitLab')}`);
-    console.warn(`${ts()}    Server will start but tools will return errors until configured.`);
-  } else {
-    console.log(`${ts()} ✅ GitLab client initialized`);
-  }
-
-  const tools = createToolDefinitions(gitlabClient);
-
-  const server = createMCPServer({
-    name: SERVER_NAME,
-    version: '1.0.0',
-    port: PORT,
-    host: '0.0.0.0', // bind all interfaces — must be reachable from the container network
-    tools,
-    auth: { token: AUTH_TOKEN },
-    healthCheck: gitlabClient
-      ? makeStandardHealthCheck(gitlabClient.statusTracker, 'GitLab')
+bootWorker<GitLabClient>({
+  serverName: 'mcp-gitlab',
+  version: '1.0.0',
+  displayName: 'GitLab',
+  authTokenEnv: 'MCP_GITLAB_AUTH_TOKEN',
+  host: '0.0.0.0',
+  initClient: initializeGitLabClient,
+  makeTools: (client) => createToolDefinitions(client),
+  makeHealthCheck: (client) =>
+    client
+      ? makeStandardHealthCheck(client.statusTracker, 'GitLab')
       : async () => {
           throw new Error('GitLab client not configured');
         },
-  });
-
-  const actualPort = await server.start();
-  process.stdout.write(JSON.stringify({ port: actualPort }) + '\n');
-  console.log(`${ts()} ✅ ${SERVER_NAME} started on port ${actualPort} (auth enforced)`);
-}
-
-main().catch((error) => {
+}).catch((error) => {
   console.error(`${ts()} Fatal error:`, error);
   process.exit(1);
 });
