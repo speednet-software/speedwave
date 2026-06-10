@@ -126,12 +126,14 @@ pub(crate) struct IntegrationStatusEntry {
     pub(crate) mappings: Option<std::collections::HashMap<String, serde_json::Value>>,
     pub(crate) badge: Option<String>,
     /// Reason the integration needs the user's attention even though it is
-    /// configured. Currently only SharePoint sets this — when the stored
-    /// `grantedScopes` is a strict subset of the currently-required
-    /// `SHAREPOINT_OAUTH_SCOPES` (typically after migration, ADR-060), the UI
-    /// surfaces a "Re-authorize" banner so the next refresh doesn't quietly
-    /// fail with `scope_mismatch`. `None` = no action required.
+    /// configured (OAuth-refresh services: SharePoint, Slack). Set when the
+    /// stored `grantedScopes` is a strict subset of the currently-required
+    /// scopes, the state is stale, or the Slack refresh token aged out — the
+    /// UI surfaces a "Re-authorize" banner. `None` = no action required.
     pub(crate) oauth_action_required: Option<String>,
+    /// "Connected to <workspace>" hint for OAuth services persisting identity
+    /// in providerData (Slack: teamName · authedUserId). `None` = nothing to show.
+    pub(crate) oauth_identity: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -328,7 +330,8 @@ mod tests {
 
     #[test]
     fn secret_fields_list_covers_sensitive_keys() {
-        assert!(is_secret_field("bot_token"));
+        // Descriptor-derived: keys exist in TOGGLEABLE_MCP_SERVICES with
+        // is_secret=true (bot_token/user_token left with the manual Slack setup).
         assert!(is_secret_field("api_key"));
         assert!(is_secret_field("token"));
         assert!(is_secret_field("access_token"));
@@ -376,11 +379,11 @@ mod tests {
     #[test]
     fn get_auth_fields_classic_form_services_no_oauth_flow() {
         // Services that authenticate with a single user-entered token (PAT,
-        // API key, bot token) — none of their fields should be flagged as
-        // OAuth-flow-driven. SharePoint and GitHub are intentionally NOT in
-        // this list because they use OAuth device flow (the UI renders a
+        // API key) — none of their fields should be flagged as
+        // OAuth-flow-driven. SharePoint, GitHub, and Slack are intentionally
+        // NOT in this list because they use OAuth flows (the UI renders a
         // "Sign in with X" button instead of a text input for the OAuth field).
-        for svc_key in &["slack", "gitlab", "atlassian", "redmine"] {
+        for svc_key in &["gitlab", "atlassian", "redmine"] {
             let fields = get_auth_fields(svc_key);
             for field in &fields {
                 assert!(

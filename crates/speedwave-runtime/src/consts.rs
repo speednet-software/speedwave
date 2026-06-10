@@ -479,6 +479,36 @@ pub const GITHUB_OAUTH_CLIENT_ID: &str = "Ov23lifyXPigAcJ0d4tK";
 /// those endpoints.
 pub const GITHUB_OAUTH_SCOPES: &str = "repo read:user";
 
+/// Slack app client ID (public identifier — not a secret). Registered at
+/// <https://api.slack.com/apps> by Speednet with PKCE (public client) and
+/// token rotation enabled; shared across all Speedwave users. See ADR-071.
+pub const SLACK_OAUTH_CLIENT_ID: &str = "11058760208.11311852745015";
+
+/// Slack user scopes (`user_scope` — never bot scopes: Slack forbids them on
+/// desktop redirects). Derived from the `mcp-slack` worker surface:
+/// chat.postMessage, conversations.list/history, users.lookupByEmail.
+pub const SLACK_OAUTH_USER_SCOPES: &[&str] = &[
+    "chat:write",
+    "channels:read",
+    "groups:read",
+    "channels:history",
+    "groups:history",
+    "users:read",
+    "users:read.email",
+];
+
+/// Slack OAuth authorize endpoint (fixed — slack.com is not instance-specific).
+pub const SLACK_OAUTH_AUTHORIZE_URL: &str = "https://slack.com/oauth/v2/authorize";
+
+/// Slack token endpoint. Mirrored by `SLACK_TOKEN_URL` in
+/// `mcp-servers/oauth/src/providers/slack.ts` (the refresh side).
+pub const SLACK_OAUTH_TOKEN_URL: &str = "https://slack.com/api/oauth.v2.access";
+
+/// Fixed loopback port for the Slack OAuth redirect. Slack matches the
+/// redirect_uri exactly against the app's registered URLs, so the port is
+/// pinned — registered as `http://localhost:41739/callback` on the app.
+pub const SLACK_OAUTH_REDIRECT_PORT: u16 = 41739;
+
 /// Descriptor for a toggleable MCP service.
 pub struct McpServiceDescriptor {
     /// Config key used in integrations config (e.g. "slack").
@@ -531,36 +561,42 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         display_name: "Slack",
         description: "Team messaging and notifications",
         auth_fields: &[
+            // Both fields are OAuth-managed ("Sign in with Slack", ADR-071);
+            // the bundled SLACK_OAUTH_CLIENT_ID means no manual fields at all.
             McpAuthFieldDescriptor {
-                key: "bot_token",
-                label: "Bot Token",
+                key: "access_token",
+                label: "Slack Access Token",
                 field_type: "password",
-                placeholder: "xoxb-...",
+                placeholder: "xoxe.xoxp-...",
                 is_secret: true,
                 stored_in_config_json: false,
-                oauth_flow: false,
+                oauth_flow: true,
                 optional: false,
+                // Mounted into the worker — rotated on every refresh by the
+                // host-side `oauth` worker (ADR-060) and re-read by slackCall.
                 storage: FieldStorage::WorkerMountedToken,
                 hint: None,
             },
             McpAuthFieldDescriptor {
-                key: "user_token",
-                label: "User Token",
+                key: "refresh_token",
+                label: "Refresh Token",
                 field_type: "password",
-                placeholder: "xoxp-...",
+                placeholder: "xoxe-1-...",
                 is_secret: true,
                 stored_in_config_json: false,
-                oauth_flow: false,
+                oauth_flow: true,
                 optional: false,
-                storage: FieldStorage::WorkerMountedToken,
+                // Off-mount (ADR-060 §"Threat model"): a container compromise
+                // cannot exfiltrate the single-use rotating refresh token.
+                storage: FieldStorage::OAuthState,
                 hint: None,
             },
         ],
-        credential_files: &["bot_token", "user_token"],
-        oauth_state_fields: None,
+        credential_files: &["access_token"],
+        oauth_state_fields: Some(&["refresh_token"]),
         badge: None,
         egress_less: false,
-        uses_oauth_refresh: false,
+        uses_oauth_refresh: true,
         resources: STANDARD_WORKER_RESOURCES,
     },
     McpServiceDescriptor {
@@ -1586,6 +1622,7 @@ mod tests {
     #[test]
     fn test_auth_fields_count_per_service() {
         let expected: &[(&str, usize)] = &[
+            // 2 = access_token, refresh_token (both OAuth-managed, ADR-071)
             ("slack", 2),
             // 5 = access_token, refresh_token, client_id, tenant_id, site_id
             // (base_path was dropped — site_id alone scopes the worker)
@@ -1610,6 +1647,47 @@ mod tests {
                 svc.auth_fields.len()
             );
         }
+    }
+
+    #[test]
+    fn test_slack_descriptor_is_oauth_shaped() {
+        // Pins the ADR-071 shape: both fields OAuth-managed, access_token
+        // worker-mounted, refresh_token off-mount, refresh worker enabled.
+        let svc = find_mcp_service("slack").unwrap();
+        assert!(svc.uses_oauth_refresh);
+        assert_eq!(svc.credential_files, &["access_token"]);
+        assert_eq!(svc.oauth_state_fields, Some(&["refresh_token"][..]));
+
+        let access = &svc.auth_fields[0];
+        assert_eq!(access.key, "access_token");
+        assert!(access.oauth_flow);
+        assert!(access.is_secret);
+        assert!(matches!(access.storage, FieldStorage::WorkerMountedToken));
+
+        let refresh = &svc.auth_fields[1];
+        assert_eq!(refresh.key, "refresh_token");
+        assert!(refresh.oauth_flow);
+        assert!(refresh.is_secret);
+        assert!(matches!(refresh.storage, FieldStorage::OAuthState));
+    }
+
+    #[test]
+    fn test_slack_oauth_consts_are_complete() {
+        assert!(!SLACK_OAUTH_CLIENT_ID.is_empty());
+        // client_id format: <app>.<id> — two numeric segments.
+        assert!(SLACK_OAUTH_CLIENT_ID
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())));
+        assert_eq!(SLACK_OAUTH_USER_SCOPES.len(), 7);
+        for scope in SLACK_OAUTH_USER_SCOPES {
+            assert!(
+                !scope.contains(' ') && !scope.contains(','),
+                "scope: {scope}"
+            );
+        }
+        assert!(SLACK_OAUTH_AUTHORIZE_URL.starts_with("https://slack.com/"));
+        assert!(SLACK_OAUTH_TOKEN_URL.starts_with("https://slack.com/api/"));
+        assert!(SLACK_OAUTH_REDIRECT_PORT > 1024);
     }
 
     /// Services that intentionally have no credentials — they access only
@@ -1828,7 +1906,7 @@ mod tests {
         assert_eq!(gh_oauth_fields, vec!["token"]);
 
         let oauth_services: std::collections::HashSet<&str> =
-            ["sharepoint", "github"].into_iter().collect();
+            ["sharepoint", "github", "slack"].into_iter().collect();
         for svc in TOGGLEABLE_MCP_SERVICES {
             if oauth_services.contains(svc.config_key) {
                 continue;

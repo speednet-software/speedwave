@@ -217,7 +217,7 @@ describe('slackProvider.validateRequest', () => {
     expect(slackProvider.validateRequest!(slackReq())).toBeNull();
   });
 
-  it('accepts an absent grantType (legacy state defaults to refresh_token)', () => {
+  it('accepts an absent grantType (optional in the shared state type; treated as refresh_token)', () => {
     expect(slackProvider.validateRequest!(slackReq({ grantType: undefined }))).toBeNull();
   });
 

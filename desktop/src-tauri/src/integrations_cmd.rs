@@ -11,9 +11,45 @@ use speedwave_runtime::config;
 use speedwave_runtime::log_sanitizer;
 use speedwave_runtime::plugin;
 
-/// SharePoint banner trigger. ScopeMismatch and Stale collapse to one UI code.
+/// Re-auth banner trigger (SharePoint, Slack). ScopeMismatch, Stale, and an
+/// expired Slack refresh token all collapse to one UI code.
 fn detect_oauth_action_required(project: &str, service: &str) -> Option<String> {
     detect_oauth_action_required_in(speedwave_runtime::consts::data_dir(), project, service)
+}
+
+/// Required scopes per OAuth-refresh service (lowercase). `None` = service has
+/// no banner logic yet — better no banner than a permanently wrong one.
+fn required_scopes_for(service: &str) -> Option<Vec<String>> {
+    match service {
+        "sharepoint" => Some(sharepoint_required_scopes()),
+        "slack" => Some(
+            speedwave_runtime::consts::SLACK_OAUTH_USER_SCOPES
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Slack PKCE refresh tokens expire after 30 days (ADR-071) — past that, the
+/// stored state cannot refresh and only a new sign-in helps.
+const SLACK_REFRESH_TOKEN_MAX_AGE_DAYS: i64 = 30;
+
+/// True when `lastRefreshAt` is older than the Slack refresh-token lifetime.
+/// Malformed JSON / missing field return false — the Stale path covers those.
+fn slack_refresh_token_expired(oauth_json_raw: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let json: serde_json::Value = match serde_json::from_str(oauth_json_raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let Some(last_raw) = json.get("lastRefreshAt").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let Ok(last) = chrono::DateTime::parse_from_rfc3339(last_raw) else {
+        return false;
+    };
+    now.signed_duration_since(last) > chrono::Duration::days(SLACK_REFRESH_TOKEN_MAX_AGE_DAYS)
 }
 
 /// Parameterised by `data_dir` so unit tests avoid the `consts::data_dir()`
@@ -23,14 +59,13 @@ fn detect_oauth_action_required_in(
     project: &str,
     service: &str,
 ) -> Option<String> {
-    // Gate on the descriptor flag (SSOT) rather than a hardcoded service id, so a
-    // future OAuth-refresh integration surfaces the banner without a code change.
-    // The scope-coverage check below is still Microsoft-shaped; revisit when a
-    // second provider lands (today only SharePoint sets `uses_oauth_refresh`).
+    // Gate on the descriptor flag (SSOT) rather than a hardcoded service id;
+    // required scopes are resolved per service in `required_scopes_for`.
     match speedwave_runtime::consts::find_mcp_service(service) {
         Some(d) if d.uses_oauth_refresh => {}
         _ => return None,
     }
+    let required = required_scopes_for(service)?;
     let oauth_path = plugin::oauth_state_file_in(data_dir, project, service);
     let raw = match std::fs::read_to_string(&oauth_path) {
         Ok(s) => s,
@@ -43,7 +78,9 @@ fn detect_oauth_action_required_in(
             return Some("scope_mismatch".to_string());
         }
     };
-    let required = sharepoint_required_scopes();
+    if service == "slack" && slack_refresh_token_expired(&raw, chrono::Utc::now()) {
+        return Some("scope_mismatch".to_string());
+    }
     match detect_scope_mismatch_or_stale(&raw, &required) {
         ReauthorizeReason::Ok => None,
         ReauthorizeReason::ScopeMismatch | ReauthorizeReason::Stale => {
@@ -112,6 +149,34 @@ fn sharepoint_required_scopes() -> Vec<String> {
         .split_whitespace()
         .map(|s| s.to_lowercase())
         .collect()
+}
+
+/// "Connected to <team> · <user>" for services persisting workspace identity
+/// in providerData (Slack). Best-effort: any read/parse failure yields `None`.
+fn oauth_identity_for(project: &str, service: &str) -> Option<String> {
+    oauth_identity_for_in(speedwave_runtime::consts::data_dir(), project, service)
+}
+
+/// `data_dir`-parameterised variant for tests (cf. `detect_oauth_action_required_in`).
+fn oauth_identity_for_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+) -> Option<String> {
+    if service != "slack" {
+        return None;
+    }
+    let raw =
+        std::fs::read_to_string(plugin::oauth_state_file_in(data_dir, project, service)).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let pd = json.get("providerData")?;
+    let team = pd.get("teamName").and_then(|v| v.as_str());
+    let user = pd.get("authedUserId").and_then(|v| v.as_str());
+    match (team, user) {
+        (Some(t), Some(u)) => Some(format!("{t} · {u}")),
+        (Some(t), None) => Some(t.to_string()),
+        _ => None,
+    }
 }
 
 /// Returns the field keys that Redmine stores in config.json (derived from SSOT in consts).
@@ -365,6 +430,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             mappings,
             badge,
             oauth_action_required,
+            oauth_identity: oauth_identity_for(&project, svc),
         });
     }
 
@@ -1118,6 +1184,7 @@ fn fresh_oauth_skeleton(provider: &str) -> serde_json::Value {
 fn provider_id_for_service(service: &str) -> Option<&'static str> {
     match service {
         "sharepoint" => Some(crate::oauth_providers::MICROSOFT_PROVIDER_ID),
+        "slack" => Some(crate::oauth_providers::SLACK_PROVIDER_ID),
         _ => None,
     }
 }
@@ -1675,12 +1742,141 @@ mod tests {
     }
 
     #[test]
-    fn detect_oauth_action_required_only_acts_on_sharepoint() {
-        // For non-sharepoint services we never even read the oauth.json — the
-        // fact that consts::data_dir() may be unrelated/empty must not matter.
-        assert!(detect_oauth_action_required("any-project", "slack").is_none());
+    fn detect_oauth_action_required_only_acts_on_oauth_refresh_services() {
+        // For non-OAuth-refresh services we never even read the oauth.json —
+        // the fact that consts::data_dir() may be unrelated/empty must not matter.
         assert!(detect_oauth_action_required("any-project", "redmine").is_none());
         assert!(detect_oauth_action_required("any-project", "gitlab").is_none());
+        assert!(detect_oauth_action_required("any-project", "github").is_none());
+    }
+
+    /// Writes a slack oauth.json for detect tests; scopes/lastRefreshAt knobs.
+    fn write_slack_state_for_detect(
+        data_dir: &std::path::Path,
+        granted: &[&str],
+        last_refresh_at: &str,
+    ) {
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, "p", "slack");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "providerData": { "clientId": "1.2" },
+                "grantedScopes": granted,
+                "refreshToken": "xoxe-1-rt",
+                "lastRefreshAt": last_refresh_at,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// All seven slack scopes, as Slack echoes them.
+    fn all_slack_scopes() -> Vec<&'static str> {
+        speedwave_runtime::consts::SLACK_OAUTH_USER_SCOPES.to_vec()
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_none_when_file_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_none_when_scopes_cover_and_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        write_slack_state_for_detect(tmp.path(), &all_slack_scopes(), &now);
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_on_scope_subset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        write_slack_state_for_detect(tmp.path(), &["chat:write"], &now);
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_on_stale_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "p", "slack");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"provider":"slack"}"#).unwrap();
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_when_refresh_token_aged_out() {
+        // 31 days idle > the 30-day PKCE refresh-token lifetime → banner, even
+        // though the granted scopes fully cover the required set.
+        let tmp = tempfile::tempdir().unwrap();
+        let old = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        write_slack_state_for_detect(tmp.path(), &all_slack_scopes(), &old);
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn slack_refresh_token_expired_handles_malformed_inputs() {
+        let now = chrono::Utc::now();
+        assert!(!slack_refresh_token_expired("not json", now));
+        assert!(!slack_refresh_token_expired(r#"{"provider":"slack"}"#, now));
+        assert!(!slack_refresh_token_expired(
+            r#"{"lastRefreshAt":"not-a-date"}"#,
+            now
+        ));
+    }
+
+    #[test]
+    fn oauth_identity_built_from_provider_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "p", "slack");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "providerData": {"clientId": "1.2", "teamName": "Speednet", "authedUserId": "U1"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            oauth_identity_for_in(tmp.path(), "p", "slack").as_deref(),
+            Some("Speednet · U1")
+        );
+        // Team only — no user id.
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "providerData": {"clientId": "1.2", "teamName": "Speednet"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            oauth_identity_for_in(tmp.path(), "p", "slack").as_deref(),
+            Some("Speednet")
+        );
+    }
+
+    #[test]
+    fn oauth_identity_none_for_other_services_and_missing_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(oauth_identity_for_in(tmp.path(), "p", "sharepoint").is_none());
+        assert!(oauth_identity_for_in(tmp.path(), "p", "slack").is_none());
     }
 
     #[test]
@@ -2229,26 +2425,66 @@ mod tests {
         );
     }
 
+    /// Writes a minimal slack oauth.json with the given refreshToken.
+    fn write_slack_oauth_state(home: &std::path::Path, project: &str, refresh_token: &str) {
+        let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
+        let path = speedwave_runtime::plugin::oauth_state_file_in(&data_dir, project, "slack");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "grantType": "refresh_token",
+                "providerData": {"clientId": "1.2"},
+                "grantedScopes": [],
+                "refreshToken": refresh_token,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn is_service_configured_returns_false_for_empty_files() {
-        // Slack: bot_token + user_token exist but are empty → false
+        // Slack (ADR-071): both halves required — a mounted access_token AND a
+        // refreshToken in the off-mount oauth state.
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "slack");
-        std::fs::write(svc_dir.join("bot_token"), "").unwrap();
-        std::fs::write(svc_dir.join("user_token"), "").unwrap();
 
+        // Empty access_token + valid state → false.
+        std::fs::write(svc_dir.join("access_token"), "").unwrap();
+        write_slack_oauth_state(tmp.path(), "proj", "xoxe-1-rt");
         assert!(
             !is_service_configured_with_home(tmp.path(), "proj", "slack"),
-            "should be false when token files are empty (0 bytes)"
+            "should be false when access_token is empty (0 bytes)"
         );
 
-        // Write non-empty content → true
-        std::fs::write(svc_dir.join("bot_token"), "xoxb-123").unwrap();
-        std::fs::write(svc_dir.join("user_token"), "xoxp-456").unwrap();
+        // Non-empty access_token + valid state → true.
+        std::fs::write(svc_dir.join("access_token"), "xoxe.xoxp-123").unwrap();
         assert!(
             is_service_configured_with_home(tmp.path(), "proj", "slack"),
-            "should be true when token files are non-empty"
+            "should be true when access_token and refreshToken are present"
         );
+
+        // Empty refreshToken in state → false despite a mounted access_token.
+        write_slack_oauth_state(tmp.path(), "proj", "");
+        assert!(
+            !is_service_configured_with_home(tmp.path(), "proj", "slack"),
+            "should be false when the oauth state has no refreshToken"
+        );
+    }
+
+    #[test]
+    fn is_service_configured_slack_false_without_oauth_state() {
+        // access_token alone (no oauth/<p>/slack.json at all) → false.
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "slack");
+        std::fs::write(svc_dir.join("access_token"), "xoxe.xoxp-123").unwrap();
+        assert!(!is_service_configured_with_home(
+            tmp.path(),
+            "proj",
+            "slack"
+        ));
     }
 
     #[test]
