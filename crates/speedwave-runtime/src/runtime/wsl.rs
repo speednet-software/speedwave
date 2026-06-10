@@ -1258,7 +1258,11 @@ mod tests {
                 .copied()
                 .chain(args.iter().copied())
                 .collect();
-            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec");
+            crate::runtime::test_support::assert_quoting_roundtrips(
+                &remote_cmd,
+                &expected,
+                "container_exec",
+            );
 
             let cmd = rt
                 .container_exec_piped("speedwave_claude", args)
@@ -1273,24 +1277,12 @@ mod tests {
                 .copied()
                 .chain(args.iter().copied())
                 .collect();
-            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec_piped");
+            crate::runtime::test_support::assert_quoting_roundtrips(
+                &remote_cmd,
+                &expected,
+                "container_exec_piped",
+            );
         }
-    }
-
-    /// Verifies that `remote_cmd` is a valid POSIX shell command by
-    /// round-tripping through `shlex::split`. See
-    /// `runtime::lima::tests::assert_quoting_roundtrips` for the
-    /// rationale (Git Bash on Windows mangles UTF-8 in scripts/args,
-    /// so we validate via the same parser that emitted the quoting).
-    fn assert_quoting_roundtrips(remote_cmd: &str, expected_argv: &[&str], variant: &str) {
-        let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {
-            panic!("shlex::split rejected {variant} remote_cmd built from {expected_argv:?} → {remote_cmd:?}")
-        });
-        assert_eq!(
-            parsed, expected_argv,
-            "{variant} remote_cmd did not round-trip: input argv != reparsed argv\n\
-             remote_cmd: {remote_cmd:?}",
-        );
     }
 
     #[test]

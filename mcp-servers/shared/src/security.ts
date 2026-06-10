@@ -8,6 +8,29 @@
  * 3. Validate Origin headers per MCP Streamable HTTP spec
  */
 import fs from 'fs/promises';
+import path from 'node:path';
+
+/**
+ * Directory the orchestrator mounts service credentials into (read-only).
+ * SSOT for the `TOKENS_DIR`-or-`/tokens` literal repeated across every worker.
+ * @returns `process.env.TOKENS_DIR` when set and non-empty, else `/tokens`.
+ */
+export function tokensDir(): string {
+  const dir = process.env.TOKENS_DIR;
+  return dir && dir.length > 0 ? dir : '/tokens';
+}
+
+/**
+ * Load a credential file by name from {@link tokensDir}. Thin wrapper over
+ * {@link loadToken} so workers stop hand-rolling `path.join(TOKENS_DIR, name)`.
+ * Errors are errno-differentiated by {@link loadToken} (cause forwarded).
+ * @param name - File name under the tokens directory (e.g. `bot_token`).
+ * @returns Trimmed file contents.
+ * @throws {Error} With errno cause forwarded (ENOENT/EACCES/EISDIR/…).
+ */
+export async function loadTokenFile(name: string): Promise<string> {
+  return loadToken(path.join(tokensDir(), name));
+}
 
 /**
  * Load token from file (used for secrets management)
@@ -40,6 +63,31 @@ export async function loadToken(tokenPath: string): Promise<string> {
     }
   }
 }
+
+/**
+ * Core allowlist of env var names safe to pass to child processes — the
+ * identical 14-key set shared by every worker that spawns a child. Workers
+ * with extra needs (host_exec build tooling) spread this and append.
+ * Anything carrying a secret (`MCP_*_AUTH_TOKEN`, API keys) is never here.
+ */
+export const BASE_SAFE_ENV_KEYS: readonly string[] = [
+  // Process / shell environment
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  // macOS: required by Swift runtime / Xcode toolchain
+  'DEVELOPER_DIR',
+  'SDKROOT',
+  '__CF_USER_TEXT_ENCODING',
+];
 
 /**
  * Validate JSON-RPC message structure

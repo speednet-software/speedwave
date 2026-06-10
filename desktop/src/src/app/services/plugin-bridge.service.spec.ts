@@ -1,11 +1,16 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { PluginBridgeService } from './plugin-bridge.service';
 import { TauriService } from './tauri.service';
+import { LoggerService } from './logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import type { PluginBridgeStatus } from '../models/plugin';
 
 const SLUG = 'example-plugin';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
 
 type RunningSnapshot = Extract<PluginBridgeStatus, { running: true }>;
 
@@ -24,6 +29,7 @@ function snapshot(overrides: Partial<RunningSnapshot> = {}): PluginBridgeStatus 
 describe('PluginBridgeService', () => {
   let service: PluginBridgeService;
   let mockTauri: MockTauriService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
   let invokeCount: Record<string, number>;
   let lastSnapshot: PluginBridgeStatus;
 
@@ -31,6 +37,7 @@ describe('PluginBridgeService', () => {
     invokeCount = {};
     lastSnapshot = snapshot();
     mockTauri = new MockTauriService();
+    mockLogger = makeMockLogger();
     mockTauri.invokeHandler = async (cmd: string) => {
       invokeCount[cmd] = (invokeCount[cmd] ?? 0) + 1;
       if (cmd === 'plugin_bridge_get_status') return lastSnapshot;
@@ -41,7 +48,11 @@ describe('PluginBridgeService', () => {
       return undefined;
     };
     TestBed.configureTestingModule({
-      providers: [PluginBridgeService, { provide: TauriService, useValue: mockTauri }],
+      providers: [
+        PluginBridgeService,
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     });
     service = TestBed.inject(PluginBridgeService);
   });
@@ -100,5 +111,13 @@ describe('PluginBridgeService', () => {
     expect(() =>
       mockTauri.dispatchEvent('plugin_bridge_event', { slug: 'other', kind: 'paired' })
     ).not.toThrow();
+  });
+
+  it('logs (via LoggerService, not console) when an event arrives for an unknown slug', async () => {
+    await service.refresh(SLUG);
+    mockTauri.dispatchEvent('plugin_bridge_event', { slug: 'other', kind: 'paired' });
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('dropped paired for unknown slug other')
+    );
   });
 });

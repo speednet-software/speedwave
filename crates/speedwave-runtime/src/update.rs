@@ -1,3 +1,5 @@
+//! Self-update flow: download, verify, swap, and rollback of the app bundle.
+
 use crate::build;
 use crate::bundle;
 use crate::compose::{self, SecurityCheck};
@@ -10,19 +12,28 @@ use std::path::PathBuf;
 // Types
 // ---------------------------------------------------------------------------
 
+/// Pre-update snapshot used to roll back a project on failure.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateSnapshot {
+    /// Project the snapshot belongs to.
     pub project: String,
+    /// The compose file at snapshot time.
     pub compose_yml: String,
+    /// Plugin manifests enabled at snapshot time.
     #[serde(default)]
     pub plugin_manifests: Vec<crate::plugin::PluginManifest>,
 }
 
+/// Outcome of a container update for one project.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContainerUpdateResult {
+    /// Whether the update succeeded.
     pub success: bool,
+    /// Number of images rebuilt.
     pub images_rebuilt: u32,
+    /// Number of containers recreated.
     pub containers_recreated: u32,
+    /// Error message if the update failed.
     pub error: Option<String>,
 }
 
@@ -102,16 +113,9 @@ fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
 
     let path = snapshot_path_in(data_dir, project);
     let json = serde_json::to_string_pretty(&snapshot)?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    std::fs::rename(&tmp_path, &path)?;
+    // Durable atomic write (fsync data + parent dir, 0o600) — bare write+rename
+    // was the torn-write pattern that corrupted compose.yml on APFS/virtiofs.
+    crate::fs_perms::write_restricted_file_atomic(&path, &json)?;
     Ok(())
 }
 
@@ -125,6 +129,7 @@ fn load_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
     Ok(snapshot)
 }
 
+/// Saves a rollback snapshot of the project's compose state.
 pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let compose_path = compose::compose_output_path(project)?;
     let compose_yml = match std::fs::read_to_string(&compose_path) {
@@ -167,18 +172,9 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
 
     let path = snapshot_path(project)?;
     let json = serde_json::to_string_pretty(&snapshot)?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)?;
-
-    // Restrict permissions before rename to avoid TOCTOU window where the file
-    // briefly exists with umask-derived permissions after atomic rename.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    std::fs::rename(&tmp_path, &path)?;
+    // Durable atomic write: fsync data + parent dir, owner-only (0o600) before
+    // rename so no TOCTOU window and no torn write on APFS/virtiofs.
+    crate::fs_perms::write_restricted_file_atomic(&path, &json)?;
 
     Ok(())
 }
@@ -301,6 +297,7 @@ fn apply_rollback_transaction_inner(
     })
 }
 
+/// Rebuilds images and recreates containers for a project.
 pub fn update_containers(
     runtime: &crate::runtime::LockedRuntime,
     project: &str,
@@ -416,6 +413,7 @@ pub fn update_containers(
     })
 }
 
+/// Restores a project from its rollback snapshot.
 pub fn rollback_containers(
     runtime: &crate::runtime::LockedRuntime,
     project: &str,
@@ -847,6 +845,36 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_writers_use_durable_helper() {
+        // Both snapshot writers must route through the durable SSOT helper
+        // (fsync data + parent dir) — bare fs::write+rename is the torn-write
+        // pattern that corrupted compose.yml on APFS/virtiofs.
+        let source = include_str!("update.rs");
+        for func in ["fn save_snapshot(", "fn save_snapshot_in("] {
+            let start = source
+                .find(func)
+                .unwrap_or_else(|| panic!("{func} must exist"));
+            let body = &source[start..];
+            // Slice to the next top-level fn (column-0) — the inner #[cfg(unix)]
+            // blocks must stay inside the body, so don't terminate on attributes.
+            let end = ["\npub fn ", "\nfn "]
+                .iter()
+                .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
+                .min()
+                .unwrap_or(body.len());
+            let body = &body[..end];
+            assert!(
+                body.contains("write_restricted_file_atomic"),
+                "{func} must use the durable write_restricted_file_atomic helper"
+            );
+            assert!(
+                !body.contains("std::fs::rename("),
+                "{func} must not hand-roll write+rename (use the durable helper)"
+            );
+        }
+    }
+
+    #[test]
     fn test_stabilization_delay_is_reasonable() {
         assert!(
             consts::CONTAINER_STABILIZATION_DELAY_SECS >= 1,
@@ -911,11 +939,11 @@ mod tests {
         // free functions (render_compose, build_images_for_bundle, load_user_config) that
         // cannot be mocked without major test infrastructure — the same reasoning
         // documented in test_build_before_compose_down_in_update_containers.
-        let compose_source = include_str!("compose.rs");
+        let compose_source = include_str!("compose/mod.rs");
 
         let fn_start = compose_source
             .find("pub fn render_compose(")
-            .expect("render_compose function must exist in compose.rs");
+            .expect("render_compose function must exist in the compose module");
         let fn_body = &compose_source[fn_start..];
 
         assert!(

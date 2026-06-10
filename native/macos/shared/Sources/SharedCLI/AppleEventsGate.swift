@@ -3,46 +3,10 @@ import CoreServices
 import Foundation
 
 /// Permission gate for AppleEvents-based integrations (Mail, Notes).
-///
-/// Wraps `AEDeterminePermissionToAutomateTarget` for the TCC layer and an optional
-/// AppleScript probe for the data-access layer (preserves the v1 invariant that
-/// Mail/Notes permission checks accessed real data, not just app name).
-///
-/// ## Why two-stage authorization with NSWorkspace + typeKernelProcessID
-///
-/// Earlier revisions of this gate built the AEAddressDesc with
-/// `typeApplicationBundleID` and a UTF-8 bundle identifier string. That has a
-/// known macOS bug: when the Apple Event Manager cannot map the bundle id to a
-/// live ASN (Application Serial Number) in LaunchServices at the moment of the
-/// call, it returns `procNotFound (-600)` *even when the target process is
-/// running and `osascript` can reach it*. We observed this empirically on Mail.app
-/// (pid live, osascript works, our gate gets -600).
-///
-/// The fix is two-stage:
-///
-///  1. **NSWorkspace.shared.runningApplications** is consulted first. Its data
-///     is populated from LaunchServices in a deterministic, well-documented way
-///     (same source `osascript`, Activity Monitor, `open -b` use). If no
-///     `NSRunningApplication` matches the bundle id we treat the target as
-///     truly not running and short-circuit with `.targetNotRunning(bundleId:)`
-///     *without ever calling AE* — that gives the user the correct "open the
-///     app" hint instead of a misleading TCC reset suggestion.
-///
-///  2. If a `pid_t` is available, we build the AEAddressDesc with
-///     **`typeKernelProcessID`** (4-byte pid) instead of the bundle id string.
-///     Kernel-process-id descriptors bypass the LaunchServices bundle-id
-///     resolution path entirely and are what Apple's own legacy AESend
-///     workarounds (Brian Webster, 2012) use to avoid the same family of bugs.
-///
-/// ## macOS quirks (preserved invariants)
-///
-/// With `askUserIfNeeded=true`, `AEDeterminePermissionToAutomateTarget` cannot
-/// distinguish "never prompted" from "previously denied" — both return
-/// `errAEEventNotPermitted`. We always call with `askUserIfNeeded=false` first
-/// to read the actual status, then call with `askUserIfNeeded=true` from
-/// `requestAccess` only when the initial status was `.notDetermined`.
-/// `performCheckPermission` re-queries with `askUserIfNeeded=false` after the
-/// request as the source of truth.
+/// Two-stage authorization (NSWorkspace pid → `typeKernelProcessID` AEAddressDesc)
+/// avoids the `procNotFound (-600)` bundle-id bug; optional AppleScript probe
+/// preserves the v1 real-data-access invariant. Rationale + OSStatus mapping:
+/// see docs/adr/ADR-070-appleevents-kernel-process-id-gate.md.
 public struct AppleEventsGate: PermissionGate {
     public let targetBundleId: String
     public let dataAccessScript: String?

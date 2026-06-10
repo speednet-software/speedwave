@@ -20,7 +20,7 @@ This is a deliberate, scoped weakening of Speedwave's container-isolation model:
 ## Where it lives in code
 
 - Config schema (SSOT) — `HostExecConfig` / `HostExecRecipe` / `HostExecParam` and `ResolvedIntegrationsConfig.host_exec`, with the repo layer explicitly ignoring `hostExec`, in `crates/speedwave-runtime/src/config.rs`.
-- Validation — `validate_host_exec_config` (snake_case names, ban-list `exec`, `{name}`↔`params`, `cwdSub` safety, the parameterised-meta-invocation rule) and `is_container_lifecycle_recipe` in `crates/speedwave-runtime/src/host_exec.rs`.
+- Validation — `validate_host_exec_config` (snake_case names, ban-list `exec`, `{name}`↔`params`, `cwdSub` safety, the parameterised-meta-invocation rule) in `crates/speedwave-runtime/src/host_exec.rs`. The amber container-lifecycle UI warning is computed by `isContainerLifecycleRecipe` in `desktop/src/src/app/models/host-exec.ts` (the heuristic only feeds the Desktop add/edit dialog, so it lives on the TS side that consumes it).
 - Constants (SSOT) — `HOST_EXEC_SHELL_LAUNCHERS`, `HOST_EXEC_META_TOOLS`, the timeout/cap constants, `HOST_EXEC_CONFIG_KEY`, and `host_exec` in `BUILT_IN_SERVICE_IDS`, in `crates/speedwave-runtime/src/consts.rs`.
 - Process manager — `HostExecProcess` (a thin alias over the shared `HostMcpProcess<HostExecSpec>`), `spawn_in`, and `write_host_exec_config_snapshot` in `crates/speedwave-runtime/src/host_exec_process.rs`; the generic host-process mechanics live in `crates/speedwave-runtime/src/host_mcp_process/`.
 - Hub/compose wiring — `apply_host_exec_config_in`, `host_exec_gateway_url`, the `WORKER_HOST_EXEC_URL` env + per-project bearer-token mount, and adding `host_exec` to `ENABLED_SERVICES` when enabled, in `crates/speedwave-runtime/src/compose.rs`.

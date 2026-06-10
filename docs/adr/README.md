@@ -48,9 +48,9 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-039](ADR-039-playwright-shared-browser-service.md)                | Playwright Shared Browser Service                                                        | Accepted              |
 | [ADR-040](ADR-040-remove-litellm-direct-provider-injection.md)         | Remove LiteLLM — Direct Local Provider Injection                                         | Accepted              |
 | [ADR-041](ADR-041-local-llm-model-discovery.md)                        | Local LLM Model Discovery and SSRF Policy                                                | Accepted              |
-| [ADR-042](ADR-042-json-patch-stream-protocol.md)                       | JSON Patch (RFC 6902) as the Stream-to-UI Protocol                                       | Accepted              |
-| [ADR-043](ADR-043-msgstore-history-plus-stream.md)                     | MsgStore — Broadcast Channel Plus Bounded History                                        | Accepted              |
-| [ADR-044](ADR-044-entry-index-provider.md)                             | EntryIndexProvider — Atomic Counter for Stable Keys                                      | Accepted              |
+| [ADR-042](ADR-042-json-patch-stream-protocol.md)                       | JSON Patch (RFC 6902) as the Stream-to-UI Protocol                                       | Retired               |
+| [ADR-043](ADR-043-msgstore-history-plus-stream.md)                     | MsgStore — Broadcast Channel Plus Bounded History                                        | Retired               |
+| [ADR-044](ADR-044-entry-index-provider.md)                             | EntryIndexProvider — Atomic Counter for Stable Keys                                      | Retired               |
 | [ADR-045](ADR-045-one-slot-queued-message.md)                          | One-Slot Queued Message Per Session (Replace, Not FIFO)                                  | Accepted              |
 | [ADR-046](ADR-046-native-session-resume-for-retry.md)                  | Native Session Resume for Assistant-Message Retry                                        | Accepted              |
 | [ADR-047](ADR-047-plugin-install-progress-events.md)                   | Plugin Install Progress Events                                                           | Accepted              |
@@ -76,6 +76,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-067](ADR-067-host-addressing-ssot-windows-wsl2-mirrored.md)       | `HostAddressing` SSOT — host bind / container gateway under WSL2 mirrored networking     | Accepted              |
 | [ADR-068](ADR-068-resource-budget-ssot.md)                             | Resource budget SSOT — container memory/CPU + adaptive VM sizing (fixed 6 GiB Claude)    | Accepted              |
 | [ADR-069](ADR-069-generic-plugin-oauth2.md)                            | Generic plugin OAuth2 via host-side worker — per-human identity, PKCE loopback           | Accepted              |
+| [ADR-070](ADR-070-appleevents-kernel-process-id-gate.md)               | AppleEvents permission gate via `typeKernelProcessID` addressing                         | Accepted              |
 
 ## Creating a New ADR
 

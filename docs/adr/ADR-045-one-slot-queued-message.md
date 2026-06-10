@@ -5,7 +5,7 @@
 
 ## Decision
 
-Each session has exactly one queued-message slot. Sending while a turn is in flight does NOT append to a backlog; it replaces the slot (most recent message wins, the displaced one is returned to the caller for a "replaced" UX hint). On turn completion the runtime drains the slot once and starts the next turn from it. The queue's presence is a field on the conversation state-tree (`pending_queue`), synchronized through the same JSON Patch pipeline as everything else (ADR-042) — no separate channel.
+Each session has exactly one queued-message slot. Sending while a turn is in flight does NOT append to a backlog; it replaces the slot (most recent message wins, the displaced one is returned to the caller for a "replaced" UX hint). On turn completion the runtime drains the slot once and starts the next turn from it. The queue's presence is a field on the conversation state-tree (`pending_queue`): the frontend sets it locally on enqueue/cancel and clears it on the `QueueDrained` `chat_stream` event (the JSON-Patch mirror that originally synchronized it was retired — see the ADR-042 status note).
 
 ## Why
 
@@ -19,16 +19,16 @@ Each session has exactly one queued-message slot. Sending while a turn is in fli
 ## How it works
 
 - While streaming, Send submits to the queue (replace) instead of an immediate turn; the composer input clears. Replacement is debounced by send action, not keystroke — typing does not touch the slot.
-- Drain point is exactly one place: the turn-end handler, immediately after the stream-json `Result` event commits the assistant entry. If `Some(msg)`, a new turn is fed to the same long-lived `claude` process via stdin (never a second concurrent process against the same session JSONL); a patch then clears `pending_queue` to `None`. If `None`, the session is idle and Send resumes immediate semantics.
+- Drain point is exactly one place: the turn-end handler, immediately after the stream-json `Result` event commits the assistant entry. If `Some(msg)`, a new turn is fed to the same long-lived `claude` process via stdin (never a second concurrent process against the same session JSONL); the `QueueDrained` chunk then clears `pending_queue` to `None`. If `None`, the session is idle and Send resumes immediate semantics.
 - Stays out of the queue: client-side slash commands (e.g. `/clear`), cancel requests, and permission/ask-user responses (these have their own reply channel and are not turn starts).
 
 ## Where it lives in code
 
 - Queue service (`queue` / `take` / `cancel` / `peek` / `stats` / `is_empty`) — `crates/speedwave-runtime/src/session/queue.rs`. `QueuedMessageService` wraps `Arc<DashMap<String, QueuedMessage>>`; methods take `session_id: &str`. `queue` returns the displaced `Option<QueuedMessage>`; `cancel` returns `bool` (whether a slot was occupied).
 - `QueuedMessage` type (`text: String` — full content, not a preview; `queued_at: u64` — Unix-ms) — `crates/speedwave-runtime/src/stream/state_tree.rs`.
-- State-tree field `pending_queue: Option<QueuedMessage>` and the `ConversationPatch::set_pending_queue` helper — `crates/speedwave-runtime/src/stream/state_tree.rs` and `crates/speedwave-runtime/src/stream/patch.rs`.
+- State-tree field `pending_queue: Option<QueuedMessage>` — `crates/speedwave-runtime/src/stream/state_tree.rs`.
 - TS mirror `QueuedMessageState` (`text: string`, `queued_at: number`) and `pending_queue` on the state model — `desktop/src/src/app/models/state-tree.ts`. UI derives the preview from the full `text`; the projection lives in `desktop/src/src/app/services/chat-state.service.ts`.
-- Desktop wiring: enqueue/cancel Tauri commands in `desktop/src-tauri/src/queue_cmd.rs`; drain-on-turn-end patch emission in `desktop/src-tauri/src/patch_emitter.rs` and `desktop/src-tauri/src/chat.rs`.
+- Desktop wiring: enqueue/cancel Tauri commands in `desktop/src-tauri/src/queue_cmd.rs`; drain-on-turn-end in `desktop/src-tauri/src/chat.rs::drain_queued_message`, which emits the `QueueDrained` chunk.
 
 ## Rejected alternatives
 

@@ -34,18 +34,18 @@
       }
       <app-chat-message-list
         class="min-h-0 flex-1 overflow-hidden"
-        [messages]="chat.messages"
-        [currentBlocks]="chat.currentBlocks"
-        [isStreaming]="chat.isStreaming"
-        [lastAssistantIndex]="lastAssistantIndex"
+        [messages]="chat.messagesFromState()"
+        [currentBlocks]="chat.currentBlocksFromState()"
+        [isStreaming]="chat.isStreamingFromState()"
+        [lastAssistantIndex]="lastAssistantIndex()"
         (questionAnswered)="onQuestionAnswered($event)"
       />
       <div class="border-t border-[var(--line)] bg-[var(--bg-2)] px-4 pt-3 md:px-6">
         <div class="relative mx-auto max-w-3xl">
           <app-composer
             #composer
-            [streaming]="chat.isStreaming"
-            [queuedText]="chat.pendingQueue?.text ?? ''"
+            [streaming]="chat.isStreamingFromState()"
+            [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStats?.model ?? ''"
             (submitted)="sendMessage($event)"
             (queueRequested)="onQueueRequested($event)"

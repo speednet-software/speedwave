@@ -1,3 +1,5 @@
+//! Ed25519 plugin signature verification (install gate + runtime invariant). See ADR-051.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -300,9 +302,9 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> any
     Ok(())
 }
 
-/// Generates an Ed25519 keypair for development/testing.
-/// Returns (private_key_bytes, public_key_bytes).
-#[cfg(debug_assertions)]
+/// Generates an Ed25519 keypair for testing. Test-only — production
+/// plugins are signed by Speednet's offline infrastructure, never here.
+#[cfg(test)]
 pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
@@ -315,9 +317,9 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
-/// Signs a plugin directory with the given private key (for development/testing).
+/// Signs a plugin directory with the given private key (test-only).
 /// Writes the SIGNATURE file.
-#[cfg(debug_assertions)]
+#[cfg(test)]
 pub fn sign_plugin(plugin_dir: &Path, private_key_bytes: &[u8]) -> anyhow::Result<()> {
     use ed25519_dalek::{Signer, SigningKey};
 

@@ -23,8 +23,11 @@ pub struct OAuthStateParams<'a> {
     pub grant_type: Option<&'a str>,
     /// IdP-specific fields (clientId, tenantId, tokenUrl, …).
     pub provider_data: BTreeMap<String, String>,
+    /// Scopes requested at authorize time.
     pub scopes: Vec<String>,
+    /// Scopes the IdP actually granted.
     pub granted_scopes: Vec<String>,
+    /// Long-lived secret persisted off-mount (empty for `client_credentials`).
     pub refresh_token: &'a str,
     /// Access-token lifetime in seconds.
     pub expires_in: u64,

@@ -14,7 +14,7 @@ The flow is frontend-driven. The frontend (which owns the conversation state-tre
 - **Correctness is Claude Code's job.** Trim-and-continue is internal to its session format; when Anthropic fixes an edge case in `--resume-session-at`, Speedwave inherits the fix with no mirror change.
 - **No file-mutation attack surface.** The session JSONL is a private Claude Code contract. Editing it directly would race Claude Code's own writes, depend on an undocumented lock protocol (the file may be held exclusively on Windows), and break silently on any format change between Claude Code releases.
 - **UUIDs are the only retry address Claude Code accepts.** `--resume-session-at` keys off the UUIDs in the session trace; Speedwave's internal entry indices (ADR-044) are unknown to Claude Code. The two ID systems address different layers — indices for the UI state-tree, UUIDs for the session trace.
-- **Composes with the streaming stack** (ADR-042 patches, ADR-043 MsgStore, ADR-044 indices, ADR-045 queue): the resumed turn flows through the normal stream pipeline and ends with a normal `Result` event.
+- **Composes with the streaming stack** (the `chat_stream` chunk pipeline plus the ADR-045 queue; the ADR-042/043/044 patch transport it originally composed with was later retired): the resumed turn flows through the normal stream pipeline and ends with a normal `Result` event.
 
 ## Scope
 

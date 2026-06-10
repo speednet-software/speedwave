@@ -19,12 +19,16 @@ use crate::fs_perms::write_restricted_file;
 /// files when migrating. Stable string per worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockService {
+    /// The mcp-os host process.
     McpOs,
+    /// The host_exec host process.
     HostExec,
+    /// The OAuth host process.
     Oauth,
 }
 
 impl LockService {
+    /// Stable string tag for this service, written into the lock file.
     pub fn tag(self) -> &'static str {
         match self {
             LockService::McpOs => "mcp-os",
@@ -38,15 +42,21 @@ impl LockService {
 /// — kept as a field for future-proofing and symmetry with bridges.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LockFile {
+    /// Service tag that owns this lock.
     pub service: String,
+    /// PID of the running worker process.
     pub pid: u32,
+    /// TCP port the worker listens on.
     pub port: u16,
+    /// Auth token clients must present.
     #[serde(rename = "authToken")]
     pub auth_token: String,
+    /// Transport protocol (currently always `http`).
     pub transport: String,
 }
 
 impl LockFile {
+    /// Builds a lock-file payload for a worker.
     pub fn new(service: LockService, pid: u32, port: u16, auth_token: String) -> Self {
         Self {
             service: service.tag().to_string(),

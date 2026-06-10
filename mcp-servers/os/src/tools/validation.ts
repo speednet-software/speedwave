@@ -4,60 +4,20 @@
  * Shared validation utilities following the Speedwave MCP pattern.
  */
 
-import { ToolsCallResult } from '@speedwave/mcp-shared';
+import { withResultValidation, type ToolResult, type ToolsCallResult } from '@speedwave/mcp-shared';
 
-/** Standardized result returned by OS tool handlers. */
-export interface ToolResult {
-  /** Whether the tool execution succeeded. */
-  success: boolean;
-  /** Result payload on success. */
-  data?: unknown;
-  /** Error details on failure. */
-  error?: { code: string; message: string };
-}
-
-function validateParams(params: unknown): params is Record<string, unknown> {
-  return params !== null && typeof params === 'object' && !Array.isArray(params);
-}
-
-function formatResult(result: ToolResult): ToolsCallResult {
-  if (result.success) {
-    return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
-  } else {
-    return {
-      content: [{ type: 'text', text: JSON.stringify(result.error, null, 2) }],
-      isError: true,
-    };
-  }
-}
+/** Standardized result returned by OS tool handlers (re-export of the shared type). */
+export type { ToolResult };
 
 /**
- * Wraps a tool handler with parameter validation and error handling.
+ * Wraps a tool handler with parameter validation and error handling
+ * (pretty-printed JSON output via the shared Family-A wrapper).
  * @param handler - Function that executes the tool logic.
  */
 export function withValidation<T>(
   handler: (params: T) => ToolResult | Promise<ToolResult>
 ): (params: Record<string, unknown>) => Promise<ToolsCallResult> {
-  return async (params: Record<string, unknown>) => {
-    if (!validateParams(params)) {
-      return formatResult({
-        success: false,
-        error: { code: 'INVALID_INPUT', message: 'Tool parameters must be a non-null object' },
-      });
-    }
-    try {
-      const result = await handler(params as T);
-      return formatResult(result);
-    } catch (error) {
-      return formatResult({
-        success: false,
-        error: {
-          code: 'HANDLER_ERROR',
-          message: error instanceof Error ? error.message : String(error),
-        },
-      });
-    }
-  };
+  return withResultValidation(handler);
 }
 
 /**

@@ -7,75 +7,38 @@ import SharedCLI
 /// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email
 @main
 struct MailCLI {
+    static let commandList =
+        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email"
+
     static func main() {
-        let args = CommandLine.arguments
-        guard args.count >= 2 else {
-            exitWithError("Usage: mail-cli <command> [json-args]\nCommands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
-        }
-
-        let command = args[1]
-
-        // check_permission: verify macOS Automation access for Apple Mail through the
-        // unified PermissionGate (AppleEventsGate). The TCC layer is determined by
-        // AEDeterminePermissionToAutomateTarget; the data-access layer is verified by
-        // the AppleScript probe (`permissionCheckScript`) running as gate.verifyDataAccess().
-        // Status-aware output (granted/denied/restricted/notDetermined/silentReject/
-        // targetNotRunning) is identical to calendar/reminders for UX consistency.
-        // check_permission validates Apple Mail automation; Outlook availability is checked separately by resolveClient()
-        // NOTE: "to name" does NOT trigger macOS Automation prompt — script must access real data.
-        // Pattern: see also notes/Sources/NotesCLI.swift check_permission
-        if command == "check_permission" {
-            let allowLaunch = args.contains("--launch")
-            let gate = AppleEventsGate(
-                targetBundleId: "com.apple.mail",
-                dataAccessScript: permissionCheckScript,
-                dataAccessTimeout: 15,
-                pidResolver: NSWorkspacePidResolver(),
-                appLauncher: allowLaunch ? NSWorkspaceAppLauncher() : NeverLaunchAppLauncher()
-            )
-            print(performCheckPermission(gate: gate, entity: .mail))
-            return
-        }
-
-        let jsonArgs = args.count >= 3 ? args[2] : "{}"
-
-        guard let argsData = jsonArgs.data(using: .utf8),
-              let params = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any]
-        else {
-            exitWithError("Invalid JSON arguments: \(jsonArgs)")
-        }
-
-        do {
-            let result: Any
-            switch command {
-            case "detect_clients":
-                result = detectClients()
-            case "list_mailboxes":
-                result = try listMailboxes(params: params)
-            case "list_emails":
-                result = try listEmails(params: params)
-            case "get_email":
-                result = try getEmail(params: params)
-            case "search_emails":
-                result = try searchEmails(params: params)
-            case "send_email":
-                result = try sendEmail(params: params)
-            case "reply_to_email":
-                result = try replyToEmail(params: params)
-            default:
-                exitWithError("Unknown command: \(command)\nAvailable: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
-            }
-
-            let data = try JSONSerialization.data(
-                withJSONObject: result,
-                options: [.prettyPrinted, .sortedKeys]
-            )
-            if let json = String(data: data, encoding: .utf8) {
-                print(json)
-            }
-        } catch {
-            exitWithError(error.localizedDescription)
-        }
+        // check_permission validates Apple Mail automation via the unified
+        // AppleEventsGate (Outlook availability is checked separately by
+        // resolveClient). `permissionCheckScript` accesses real data — "to name"
+        // does NOT trigger the macOS Automation prompt. See notes/NotesCLI.swift.
+        runCLI(
+            cliName: "mail-cli",
+            commandList: commandList,
+            entity: .mail,
+            checkPermissionGate: { args in
+                let allowLaunch = args.contains("--launch")
+                return AppleEventsGate(
+                    targetBundleId: "com.apple.mail",
+                    dataAccessScript: permissionCheckScript,
+                    dataAccessTimeout: 15,
+                    pidResolver: NSWorkspacePidResolver(),
+                    appLauncher: allowLaunch ? NSWorkspaceAppLauncher() : NeverLaunchAppLauncher()
+                )
+            },
+            commands: [
+                "detect_clients": { _ in detectClients() },
+                "list_mailboxes": { try listMailboxes(params: $0) },
+                "list_emails": { try listEmails(params: $0) },
+                "get_email": { try getEmail(params: $0) },
+                "search_emails": { try searchEmails(params: $0) },
+                "send_email": { try sendEmail(params: $0) },
+                "reply_to_email": { try replyToEmail(params: $0) },
+            ]
+        )
     }
 }
 
@@ -85,7 +48,9 @@ func resolveClient(preferred: String?) throws -> String {
     if let preferred = preferred {
         switch preferred.lowercased() {
         case "outlook", "microsoft outlook":
-            guard OutlookClient.isAvailable() else {
+            // A thrown ScriptError (permission/timeout) propagates verbatim so the
+            // user sees the real cause, not a misleading "not running" message.
+            guard try OutlookClient.isAvailable() else {
                 throw MailError.clientNotAvailable("Microsoft Outlook")
             }
             return "outlook"
@@ -105,11 +70,16 @@ func detectClients() -> [String: Any] {
     var clients: [[String: Any]] = [
         ["name": AppleMailClient.name, "available": true, "default": true]
     ]
-    clients.append([
-        "name": OutlookClient.name,
-        "available": OutlookClient.isAvailable(),
-        "default": false,
-    ])
+    // A permission/timeout error is NOT "Outlook not installed" — surface it in
+    // an `error` field so the UI distinguishes a denial from a genuine absence.
+    var outlook: [String: Any] = ["name": OutlookClient.name, "default": false]
+    do {
+        outlook["available"] = try OutlookClient.isAvailable()
+    } catch {
+        outlook["available"] = false
+        outlook["error"] = error.localizedDescription
+    }
+    clients.append(outlook)
     return ["clients": clients]
 }
 

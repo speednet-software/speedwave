@@ -76,7 +76,12 @@ pub enum LivenessProbe {
     TcpSingle,
     /// `attempts` TCP connects with `backoff` between them. oauth
     /// uses {3, 100 ms} to absorb transient stalls.
-    TcpRetry { attempts: u32, backoff: Duration },
+    TcpRetry {
+        /// Number of connect attempts.
+        attempts: u32,
+        /// Delay between attempts.
+        backoff: Duration,
+    },
     /// Custom liveness check given the state dir. mcp_os delegates to
     /// `is_mcp_os_alive_in` (reads lock.json itself).
     Custom(fn(&Path) -> bool),
@@ -102,10 +107,15 @@ impl LivenessProbe {
 /// minted auth-token, the state dir paths and the log file location —
 /// everything a hook needs without poking at globals.
 pub struct SpawnContext<'a> {
+    /// Per-worker state directory.
     pub state_dir: &'a Path,
+    /// Path to the worker's lock file.
     pub lock_path: &'a Path,
+    /// Path to the worker's log file.
     pub log_path: &'a Path,
+    /// Freshly minted auth token for this run.
     pub auth_token: &'a str,
+    /// Speedwave data directory.
     pub data_dir: &'a Path,
 }
 
@@ -232,14 +242,17 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
         })
     }
 
+    /// Port the worker is listening on.
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    /// Path to the worker's lock file.
     pub fn lock_path(&self) -> &Path {
         &self.lock_path
     }
 
+    /// The worker spec backing this manager.
     pub fn spec(&self) -> &S {
         &self.spec
     }

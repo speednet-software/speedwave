@@ -92,6 +92,28 @@ describe('resolveLibraryId handler', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('rate limited');
   });
+
+  it('propagates plain Error message from unexpected failures', async () => {
+    const client = makeStubClient();
+    client.searchLibraries.mockRejectedValue(new Error('boom'));
+    const { handler } = createResolveLibraryIdTool(client);
+    const result = await handler({ libraryName: 'react', query: 'q' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('boom');
+  });
+
+  it('defaults versions to empty array when match has none', async () => {
+    const client = makeStubClient();
+    client.searchLibraries.mockResolvedValue({
+      data: [{ id: '/x/y', title: 'X', description: '' }],
+      tier: 'unknown',
+    });
+    const { handler } = createResolveLibraryIdTool(client);
+    const result = await handler({ libraryName: 'x', query: 'q' });
+    expect(result.isError).toBeUndefined();
+    const body = JSON.parse(result.content[0].text);
+    expect(body.matches[0].versions).toEqual([]);
+  });
 });
 
 describe('queryDocs metadata', () => {
@@ -152,5 +174,14 @@ describe('queryDocs handler', () => {
     const result = await handler({ libraryId: '/x/y', query: 'q' });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('library not found');
+  });
+
+  it('propagates plain Error message from unexpected failures', async () => {
+    const client = makeStubClient();
+    client.getContext.mockRejectedValue(new Error('socket closed'));
+    const { handler } = createQueryDocsTool(client);
+    const result = await handler({ libraryId: '/x/y', query: 'q' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('socket closed');
   });
 });

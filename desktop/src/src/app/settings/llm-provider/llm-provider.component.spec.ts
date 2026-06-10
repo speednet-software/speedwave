@@ -5,8 +5,13 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { AnthropicModelsService } from '../../services/anthropic-models.service';
 import { ChatStateService } from '../../services/chat-state.service';
+import { LoggerService } from '../../services/logger.service';
 import { type AnthropicModel } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
   ollama: 'http://host.docker.internal:11434',
@@ -97,14 +102,19 @@ describe('LlmProviderComponent', () => {
   let component: LlmProviderComponent;
   let fixture: ComponentFixture<LlmProviderComponent>;
   let mockTauri: MockTauriService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
+    mockLogger = makeMockLogger();
     setupMockTauri(mockTauri);
 
     await TestBed.configureTestingModule({
       imports: [LlmProviderComponent],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     }).compileComponents();
 
     // AnthropicModelsService is providedIn root and caches the catalog
@@ -165,6 +175,32 @@ describe('LlmProviderComponent', () => {
     expect(spy).toHaveBeenCalledWith('anthropic');
   });
 
+  it('logs a real backend error during loadConfig via the logger', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_llm_config') throw new Error('backend serialization broke');
+      return undefined;
+    };
+
+    component.ngOnInit();
+    await flushMicrotasks();
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.stringContaining('backend serialization broke')
+    );
+  });
+
+  it('stays silent during loadConfig in browser dev mode (not-in-tauri error)', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_llm_config') throw new Error('window.__TAURI__ invoke unavailable');
+      return undefined;
+    };
+
+    component.ngOnInit();
+    await flushMicrotasks();
+
+    expect(mockLogger.error).not.toHaveBeenCalled();
+  });
+
   it('emits providerChange when provider selection changes', async () => {
     const spy = vi.fn();
     component.providerChange.subscribe(spy);
@@ -175,10 +211,22 @@ describe('LlmProviderComponent', () => {
     expect(spy).toHaveBeenCalledWith('ollama');
   });
 
-  it('returns correct model placeholder for each provider', () => {
+  it('returns an empty Anthropic placeholder while the SSOT catalog is loading', () => {
+    // No catalog yet (reset in beforeEach) — must not flash a stale hard-coded
+    // model id; the hint is derived from the backend SSOT, blank until loaded.
+    component.provider = 'anthropic';
+    expect(component.modelPlaceholder()).toBe('');
+  });
+
+  it('derives the Anthropic placeholder from the SSOT catalog (latest non-Opus)', async () => {
+    // Once the catalog loads, the placeholder is the latest non-Opus (Sonnet)
+    // model id, not a hard-coded literal.
+    await TestBed.inject(AnthropicModelsService).list();
     component.provider = 'anthropic';
     expect(component.modelPlaceholder()).toBe('claude-sonnet-4-6');
+  });
 
+  it('returns the local placeholder for non-Anthropic providers', () => {
     component.provider = 'local';
     expect(component.modelPlaceholder()).toBe('llama3.3');
   });

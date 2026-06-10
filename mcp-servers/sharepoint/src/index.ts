@@ -6,81 +6,33 @@
  * @module mcp-sharepoint
  */
 
-import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
-import { initializeSharePointClient } from './client.js';
+import { bootWorker, ts } from '@speedwave/mcp-shared';
+import { initializeSharePointClient, type SharePointClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Configuration
-//═══════════════════════════════════════════════════════════════════════════════
-
-const PORT = parseInt(process.env.PORT || '3000', 10);
-const SERVER_NAME = 'mcp-sharepoint';
-const SERVER_VERSION = '1.0.0';
-const AUTH_TOKEN = process.env.MCP_SHAREPOINT_AUTH_TOKEN;
-
-//═══════════════════════════════════════════════════════════════════════════════
-// Main Server
-//═══════════════════════════════════════════════════════════════════════════════
-
-async function main(): Promise<void> {
-  console.log(`${ts()} 🚀 Starting ${SERVER_NAME}...`);
-
-  if (!AUTH_TOKEN) {
-    console.error(
-      `${ts()} FATAL: MCP_SHAREPOINT_AUTH_TOKEN is required. ` +
-        `${SERVER_NAME} must not run without authentication.`
-    );
-    process.exit(1);
-  }
-
-  // Initialize SharePoint client (with retry for transient failures)
-  const sharepointClient = await retryAsync(initializeSharePointClient, {
-    maxRetries: 3,
-    baseDelayMs: 2000,
-    label: 'SharePoint client init',
-  });
-
-  // SharePoint requires a live client at startup — OAuth token refresh
-  // cannot be deferred, so we fail fast rather than starting misconfigured.
-  // This differs from Slack/GitLab/Redmine which warn and let tools surface errors.
-  if (!sharepointClient) {
-    console.error(`${ts()} ❌ ${notConfiguredMessage('SharePoint')}`);
-    process.exit(1);
-  }
-
-  console.log(`${ts()} ✅ SharePoint client initialized`);
-
-  // Create MCP server with tool definitions from domain-tools
-  const server = createMCPServer({
-    name: SERVER_NAME,
-    version: SERVER_VERSION,
-    port: PORT,
-    host: '0.0.0.0', // bind all interfaces — must be reachable from the container network
-    tools: createToolDefinitions(sharepointClient),
-    auth: { token: AUTH_TOKEN },
-    healthCheck: async () => {
-      const health = sharepointClient.getHealthStatus();
-      if (health.tokenSaveError) {
-        throw new Error('Token refresh failed');
-      }
-      if (health.connection === 'failed') {
-        throw new Error(`SharePoint siteId resolve failed: ${health.connectionError ?? 'unknown'}`);
-      }
-      // `unknown` during warmup → healthy; SharePoint siteId resolve runs in
-      // the background after init and either succeeds (`ok`) or fails
-      // explicitly. We do not bounce on `unknown` because path-form siteId
-      // still works against most Graph endpoints during warm-up.
-    },
-  });
-
-  const actualPort = await server.start();
-  process.stdout.write(JSON.stringify({ port: actualPort }) + '\n');
-  console.log(`${ts()} ✅ ${SERVER_NAME} started on port ${actualPort} (auth enforced)`);
-}
-
-// Start server
-main().catch((error) => {
+// SharePoint fails fast: OAuth token refresh cannot be deferred, so we refuse
+// to start misconfigured (unlike Slack/GitLab/Redmine which warn-and-continue).
+bootWorker<SharePointClient>({
+  serverName: 'mcp-sharepoint',
+  version: '1.0.0',
+  displayName: 'SharePoint',
+  authTokenEnv: 'MCP_SHAREPOINT_AUTH_TOKEN',
+  host: '0.0.0.0',
+  initClient: initializeSharePointClient,
+  onNotConfigured: 'fail',
+  makeTools: (client) => createToolDefinitions(client),
+  makeHealthCheck: (client) => async () => {
+    const health = client!.getHealthStatus();
+    if (health.tokenSaveError) {
+      throw new Error('Token refresh failed');
+    }
+    if (health.connection === 'failed') {
+      throw new Error(`SharePoint siteId resolve failed: ${health.connectionError ?? 'unknown'}`);
+    }
+    // `unknown` during warmup → healthy; SharePoint siteId resolve runs in the
+    // background after init and either succeeds (`ok`) or fails explicitly.
+  },
+}).catch((error) => {
   console.error(`${ts()} Fatal error:`, error);
   process.exit(1);
 });

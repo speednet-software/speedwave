@@ -1,3 +1,5 @@
+//! SSOT for secret redaction — `sanitize()` masks tokens/keys/paths in logs.
+
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -89,17 +91,19 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         .into_iter()
         .filter_map(|(pat, replacement)| {
             match Regex::new(pat) {
-                Ok(pattern) => Some(SanitizeRule { pattern, replacement }),
+                Ok(pattern) => Some(SanitizeRule {
+                    pattern,
+                    replacement,
+                }),
                 Err(e) => {
                     // Safety-critical one-time init warning. The logger may not be
-                    // initialized when LazyLock evaluates, so eprintln! is the only
-                    // reliable channel. A dropped rule means secrets leak unredacted.
-                    #[allow(clippy::print_stderr)]
-                    {
-                        eprintln!(
-                            "[log_sanitizer] CRITICAL: failed to compile sanitizer regex '{pat}': {e}"
-                        );
-                    }
+                    // initialized when LazyLock evaluates, so we write stderr
+                    // directly. A dropped rule means secrets leak unredacted.
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[log_sanitizer] CRITICAL: failed to compile sanitizer regex '{pat}': {e}"
+                    );
                     None
                 }
             }
@@ -1161,11 +1165,10 @@ mod tests {
         // logs and trip the cleartext-logging rule.
         #[derive(Debug)]
         struct SecretCarrier {
-            #[allow(dead_code)]
-            token: String,
+            _token: String,
         }
         let payload: Box<dyn std::any::Any + Send> = Box::new(SecretCarrier {
-            token: "ghp_supersecret".to_string(),
+            _token: "ghp_supersecret".to_string(),
         });
         let out = panic_payload_to_string(&*payload);
         assert_eq!(out, "unknown panic payload");

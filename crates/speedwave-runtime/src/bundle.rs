@@ -1,9 +1,13 @@
+//! Resolution and staging of bundled assets (build context, Node, binaries).
+
 use crate::{build, consts};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+/// Filename of the bundled manifest describing the shipped app version.
 pub const BUNDLE_MANIFEST_FILE: &str = "bundle-manifest.json";
+/// Filename of the persisted bundle reconciliation state.
 pub const BUNDLE_STATE_FILE: &str = "bundle-state.json";
 
 const REQUIRED_CLAUDE_RESOURCES: &[&str] = &[
@@ -13,16 +17,23 @@ const REQUIRED_CLAUDE_RESOURCES: &[&str] = &[
     "output-styles/Speedwave.md",
 ];
 
+/// Kind of a bundled asset, controlling how it is validated/staged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BundledAssetKind {
+    /// A regular file.
     File,
+    /// A directory tree.
     Directory,
+    /// A file that must be executable.
     ExecutableFile,
 }
 
+/// One asset shipped in the app bundle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BundledAssetSpec {
+    /// Path relative to the bundle resources root.
     pub path: &'static str,
+    /// Asset kind.
     pub kind: BundledAssetKind,
 }
 
@@ -171,34 +182,51 @@ const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     },
 ];
 
+/// Manifest of the currently shipped app bundle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleManifest {
+    /// App version string.
     pub app_version: String,
+    /// Bundle identifier used to tag built images.
     pub bundle_id: String,
+    /// Hash of the build-context tree.
     pub build_context_hash: String,
+    /// Hash of the claude-resources tree.
     pub claude_resources_hash: String,
 }
 
+/// Ordered stages of bundle reconciliation after an app upgrade.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BundleReconcilePhase {
+    /// Reconciliation not yet started.
     Pending,
+    /// Claude resources synced to the data dir.
     ResourcesSynced,
+    /// Container images rebuilt.
     ImagesBuilt,
+    /// Previously running projects restarted.
     ProjectsRestored,
+    /// Reconciliation complete.
     #[default]
     Done,
 }
 
+/// Persisted reconciliation state across restarts.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleState {
+    /// Bundle id currently applied, if any.
     pub applied_bundle_id: Option<String>,
+    /// Current reconciliation phase.
     pub phase: BundleReconcilePhase,
+    /// Projects to restart once reconciliation reaches that phase.
     pub pending_running_projects: Vec<String>,
+    /// Last error encountered, if reconciliation failed.
     pub last_error: Option<String>,
 }
 
 impl BundleReconcilePhase {
+    /// `true` if this phase precedes `other` in reconciliation order.
     pub fn is_before(self, other: Self) -> bool {
         self.order() < other.order()
     }
@@ -214,6 +242,7 @@ impl BundleReconcilePhase {
     }
 }
 
+/// Loads the bundle manifest from the resolved build root.
 pub fn load_current_bundle_manifest() -> anyhow::Result<BundleManifest> {
     load_current_bundle_manifest_from(&build::resolve_build_root()?)
 }
@@ -271,6 +300,7 @@ pub fn generate_bundle_manifest(
     })
 }
 
+/// Loads the persisted bundle state, defaulting if absent or unreadable.
 pub fn load_bundle_state() -> BundleState {
     bundle_state_path()
         .ok()
@@ -278,20 +308,13 @@ pub fn load_bundle_state() -> BundleState {
         .unwrap_or_default()
 }
 
-pub fn load_bundle_state_in(data_dir: &Path) -> BundleState {
-    let path = data_dir.join(BUNDLE_STATE_FILE);
-    load_bundle_state_from(&path).unwrap_or_default()
-}
-
+/// Persists the bundle reconciliation state.
 pub fn save_bundle_state(state: &BundleState) -> anyhow::Result<()> {
     let path = bundle_state_path()?;
     save_bundle_state_to(state, &path)
 }
 
-pub fn save_bundle_state_in(state: &BundleState, data_dir: &Path) -> anyhow::Result<()> {
-    save_bundle_state_to(state, &data_dir.join(BUNDLE_STATE_FILE))
-}
-
+/// Atomically syncs claude-resources from the build root into the data dir.
 pub fn sync_claude_resources(build_root: &Path) -> anyhow::Result<()> {
     let source = build_root.join("containers").join("claude-resources");
     validate_claude_resources(&source)?;
@@ -330,6 +353,7 @@ pub fn sync_claude_resources(build_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Bundled assets required for `target_os` (`macos` | `windows`).
 pub fn required_bundled_assets(target_os: &str) -> anyhow::Result<Vec<BundledAssetSpec>> {
     let mut assets = COMMON_BUNDLED_ASSETS.to_vec();
     match target_os {
@@ -340,6 +364,7 @@ pub fn required_bundled_assets(target_os: &str) -> anyhow::Result<Vec<BundledAss
     Ok(assets)
 }
 
+/// Validates every required bundled asset exists at `resources_root`.
 pub fn validate_bundled_runtime_assets(
     resources_root: &Path,
     target_os: &str,

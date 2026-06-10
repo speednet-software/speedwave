@@ -1,6 +1,6 @@
 # ADR-044: EntryIndexProvider — Atomic Counter for Stable Entry Keys
 
-> **Status:** Accepted
+> **Status:** Retired (2026-06-10) — `EntryIndexProvider` was deleted together with the JSON-Patch wire transport (see the [ADR-042](ADR-042-json-patch-stream-protocol.md) status note). The `index` field survives on the state-tree shape; the frontend projection assigns it sequentially during `rebuildStateTree()`. This document records the original design.
 > **Context:** Every conversation entry needs one stable identifier that works both as a JSON-Patch path segment and as a monotonic ordering key.
 
 ## Decision

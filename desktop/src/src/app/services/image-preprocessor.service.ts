@@ -30,9 +30,9 @@ const ACCEPTED_TYPES: ReadonlyArray<string> = [
 ];
 
 export const ERROR_TOO_LARGE =
-  'Obrazek za duży — zmniejsz przed wklejeniem (>3 MB po dwukrotnej redukcji).';
+  'Image too large — shrink it before pasting (>3 MB after double reduction).';
 
-export const ERROR_UNSUPPORTED_TYPE = 'Wspierane formaty obrazków: JPEG, PNG, GIF, WebP.';
+export const ERROR_UNSUPPORTED_TYPE = 'Supported image formats: JPEG, PNG, GIF, WebP.';
 
 /** Result of preprocessing — saved to disk and ready to ship as `ChatAttachment`. */
 export interface PreprocessedImage {

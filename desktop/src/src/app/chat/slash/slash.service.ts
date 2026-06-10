@@ -1,5 +1,6 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
+import { LoggerService } from '../../services/logger.service';
 
 /** Classification of a slash-menu entry, used by the UI to render the badge. */
 export type SlashKind = 'Builtin' | 'Skill' | 'Command' | 'Plugin' | 'Agent';
@@ -33,6 +34,7 @@ export interface SlashDiscovery {
 @Injectable({ providedIn: 'root' })
 export class SlashService {
   private readonly tauri = inject(TauriService);
+  private readonly log = inject(LoggerService);
 
   /** Last discovered list of commands (empty until refresh resolves). */
   readonly commands = signal<readonly SlashCommand[]>([]);
@@ -87,7 +89,7 @@ export class SlashService {
     } catch (err) {
       // Invalidation errors are not user-actionable; log via the logging
       // facade for diagnostics.
-      console.warn('[SlashService] invalidate_slash_cache failed:', err);
+      this.log.warn(`[SlashService] invalidate_slash_cache failed: ${String(err)}`);
     }
   }
 }

@@ -14,8 +14,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Validate conventional commit title
+        env:
+          # Pass the title via env (never interpolated into the run: body) so a
+          # malicious PR title cannot inject shell commands. Mirrors
+          # merge-strategy-check.yml.
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          TITLE="${{ github.event.pull_request.title }}"
+          TITLE="$PR_TITLE"
           PATTERN='^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(\(.+\))?(!)?: .+'
           if [[ ! "$TITLE" =~ $PATTERN ]]; then
             echo "::error::PR title must be a conventional commit: type(scope): description"

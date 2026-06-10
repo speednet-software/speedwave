@@ -1,4 +1,5 @@
-import { Injectable } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
+import { LoggerService } from './logger.service';
 
 /** Effective (resolved) appearance — `auto` has already been collapsed to one of these. */
 export type EffectiveMode = 'light' | 'dark';
@@ -13,6 +14,8 @@ export type EffectiveMode = 'light' | 'dark';
  */
 @Injectable({ providedIn: 'root' })
 export class NativeThemeAdapter {
+  private log = inject(LoggerService);
+
   /**
    * Pushes the effective mode to the native window. Dynamically imports the
    * Tauri window API so test runners without the runtime don't load the module.
@@ -25,7 +28,7 @@ export class NativeThemeAdapter {
       .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(effective))
       .catch((err: unknown) => {
         // Best-effort native chrome sync; log so bundle/IPC failures stay diagnosable.
-        console.warn('NativeThemeAdapter: setTheme failed', err);
+        this.log.warn(`NativeThemeAdapter: setTheme failed: ${String(err)}`);
       });
   }
 }

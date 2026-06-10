@@ -1,8 +1,8 @@
 //! Tauri command — retry the last assistant turn via Claude Code's native
 //! `--resume-session-at` flag (ADR-046).
 //!
-//! The frontend owns the conversation state-tree (until Unit 2's patch-based
-//! backbone lands) and passes the retry anchor explicitly: the current
+//! The frontend owns the conversation state-tree and passes the retry
+//! anchor explicitly: the current
 //! `session_id` and the UUID of the user prompt to rewind to. The backend
 //! does not mutate the session JSONL file — Claude Code's native resume
 //! handles the trim-and-regenerate atomically.

@@ -29,18 +29,23 @@ pub struct HostExecSpec {
 }
 
 impl HostExecSpec {
+    /// Project this host_exec worker serves.
     pub fn project(&self) -> &str {
         &self.project
     }
+    /// Project directory on the host.
     pub fn project_dir(&self) -> &Path {
         &self.project_dir
     }
+    /// Host gateway path the worker binds to.
     pub fn host_path(&self) -> &str {
         &self.host_path
     }
+    /// Path to the host_exec config snapshot.
     pub fn config_path(&self) -> &Path {
         &self.config_path
     }
+    /// Path to the host_exec audit log.
     pub fn log_path(&self) -> &Path {
         &self.log_path
     }
@@ -123,6 +128,7 @@ impl HostExecProcess {
         &self.auth_token
     }
 
+    /// Path to the host_exec config snapshot.
     pub fn config_path(&self) -> &Path {
         self.spec().config_path()
     }
@@ -134,7 +140,9 @@ impl HostExecProcess {
     }
 }
 
-/// Quick TCP liveness probe against the worker's bind address.
+/// Quick TCP liveness probe against the worker's bind address. Test-only:
+/// production liveness goes through `HostMcpProcess`'s generic probe.
+#[cfg(test)]
 pub fn is_host_exec_alive(port: u16) -> bool {
     if port == 0 {
         return false;

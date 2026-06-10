@@ -13,6 +13,7 @@ import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
+import { BASE_SAFE_ENV_KEYS } from '@speedwave/mcp-shared';
 
 import { ALLOWED_COMMANDS } from './tools/index.js';
 
@@ -141,24 +142,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 /**
  * Allowlist of environment variable names safe to pass to CLI child processes.
  * Prevents leaking secrets (MCP_OS_AUTH_TOKEN, API keys, etc.) to subprocesses.
+ * Sourced from the shared 14-key core ({@link BASE_SAFE_ENV_KEYS}).
  */
-export const SAFE_ENV_KEYS: readonly string[] = [
-  'PATH',
-  'HOME',
-  'USER',
-  'LOGNAME',
-  'SHELL',
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
-  // macOS: required by Swift runtime / Xcode toolchain
-  'DEVELOPER_DIR',
-  'SDKROOT',
-  '__CF_USER_TEXT_ENCODING',
-];
+export const SAFE_ENV_KEYS: readonly string[] = BASE_SAFE_ENV_KEYS;
 
 /** Build a filtered environment object containing only safe keys. */
 export function buildChildEnv(): NodeJS.ProcessEnv {

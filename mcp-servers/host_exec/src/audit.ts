@@ -47,6 +47,8 @@ export async function auditRecipeCall(
   const logPath = process.env.HOST_EXEC_LOG_FILE;
   const line =
     JSON.stringify({
+      // Deliberate UTC (bare Z): this is a machine-parsed JSON audit field, not
+      // a human log-line prefix — keep it unambiguous across timezones.
       ts: new Date().toISOString(),
       recipe: recipe.name,
       argv,

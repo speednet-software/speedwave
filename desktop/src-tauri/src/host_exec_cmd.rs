@@ -135,19 +135,6 @@ pub async fn host_exec_save_settings(
     .map_err(|e| e.to_string())?
 }
 
-/// Read the `host_exec` recipe whitelist for a project (from the user config).
-#[tauri::command]
-pub fn host_exec_load_settings(project: String) -> Result<Vec<HostExecRecipe>, String> {
-    check_project(&project)?;
-    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    Ok(user_config
-        .find_project(&project)
-        .and_then(|e| e.integrations.as_ref())
-        .and_then(|i| i.host_exec.as_ref())
-        .map(|h| h.commands.clone())
-        .unwrap_or_default())
-}
-
 /// `which`-style lookup on the recovered host `PATH`. Rejects path-bearing names.
 #[tauri::command]
 pub fn host_exec_resolve_executable(name: String) -> Result<Option<String>, String> {

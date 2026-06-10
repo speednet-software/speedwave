@@ -7,6 +7,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { LoggerService } from '../services/logger.service';
 import { BetaService } from '../services/beta.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import type { IntegrationStatusEntry } from '../models/integration';
 
 /**
  * Mock LoggerService for tests. Real LoggerService calls `@tauri-apps/plugin-log`
@@ -2050,6 +2051,33 @@ describe('IntegrationsComponent', () => {
         svc: sharepointSvc,
         credentials: { client_id: 'stored-client', tenant_id: 'stored-tenant' },
       });
+    });
+  });
+
+  describe('mountFor() — ADR-060 read-only token mount', () => {
+    const entry = (over: Partial<IntegrationStatusEntry>): IntegrationStatusEntry => ({
+      service: 'sharepoint',
+      enabled: true,
+      configured: true,
+      display_name: 'SharePoint',
+      description: '',
+      auth_fields: [],
+      current_values: {},
+      ...over,
+    });
+
+    it('returns :ro for SharePoint (no :rw — OAuth refresh is host-side per ADR-060)', () => {
+      expect(component.mountFor(entry({ service: 'sharepoint' }))).toBe(':ro');
+    });
+
+    it('returns :ro for every other built-in worker', () => {
+      for (const service of ['gitlab', 'redmine', 'github', 'atlassian', 'office', 'slack']) {
+        expect(component.mountFor(entry({ service }))).toBe(':ro');
+      }
+    });
+
+    it('returns the placeholder dash when the service is not configured', () => {
+      expect(component.mountFor(entry({ service: 'sharepoint', configured: false }))).toBe('—');
     });
   });
 });

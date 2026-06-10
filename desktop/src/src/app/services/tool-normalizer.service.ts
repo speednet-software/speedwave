@@ -1,9 +1,12 @@
-import { Injectable } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import type { NormalizedToolInput } from '../models/chat';
+import { LoggerService } from './logger.service';
 
 /** Parses raw tool input JSON into typed display models based on tool name. */
 @Injectable({ providedIn: 'root' })
 export class ToolNormalizerService {
+  private log = inject(LoggerService);
+
   /**
    * Parses raw tool input JSON into a typed discriminated union for display.
    * Recognizes: Bash, Read, Edit, Write, Glob, Grep, TodoWrite, WebSearch, WebFetch, Agent.
@@ -61,7 +64,7 @@ export class ToolNormalizerService {
           return { kind: 'generic', raw_json: inputJson };
       }
     } catch (err) {
-      console.warn(`Failed to parse tool input for "${toolName}":`, inputJson, err);
+      this.log.warn(`Failed to parse tool input for "${toolName}": ${inputJson} (${String(err)})`);
       return { kind: 'generic', raw_json: inputJson };
     }
   }

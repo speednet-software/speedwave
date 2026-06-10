@@ -1,3 +1,5 @@
+//! Resolution of bundled engine binaries (limactl, nerdctl, node) on the host.
+
 use std::path::PathBuf;
 use std::process::Command;
 

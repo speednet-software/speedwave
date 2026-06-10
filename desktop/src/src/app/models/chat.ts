@@ -322,14 +322,6 @@ export interface ChatInput {
 }
 
 /**
- * Whether the input has no image attachments.
- * @param input - Composer input bundle.
- */
-export function chatInputIsTextOnly(input: ChatInput): boolean {
-  return input.attachments.length === 0;
-}
-
-/**
  * Wraps a plain string into a text-only `ChatInput`.
  * @param text - Raw user text.
  */

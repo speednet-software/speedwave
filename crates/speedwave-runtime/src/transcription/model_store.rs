@@ -146,9 +146,10 @@ pub struct ModelStore {
 
 impl ModelStore {
     /// A `ModelStore` rooted at `<data_dir>/models/` — the production location.
+    /// Shares the one path derivation with `super::models_dir()` (SSOT).
     pub fn new() -> Self {
         Self {
-            root: consts::data_dir().join(consts::MODELS_SUBDIR),
+            root: super::models_dir(),
         }
     }
 

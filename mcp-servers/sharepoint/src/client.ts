@@ -10,6 +10,7 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import {
   loadToken,
+  tokensDir as defaultTokensDir,
   TIMEOUTS,
   ts,
   withSetupGuidance,
@@ -880,7 +881,7 @@ export type ResolveResult =
  * @param siteId - site id loaded from `/tokens/site_id` (any accepted form)
  * @param accessToken - bearer token used for the lookup
  * @param opts - cold-start refresh tuning
- * @param opts.tokensDir - tokens mount path (default `/tokens`); only read when refreshing
+ * @param opts.tokensDir - tokens mount path (default {@link defaultTokensDir}); only read when refreshing
  * @param opts.refreshOn401 - on a 401, refresh via `authedRequest` and retry once (default true). Set false in unit tests that don't mock the refresh worker.
  * @returns the composite id (or untouched value if already composite), or a typed error
  */
@@ -906,7 +907,7 @@ export async function resolveCompositeSiteId(
     return { ok: true, compositeId: siteId };
   }
   const refreshOn401 = opts.refreshOn401 !== false;
-  const tokensDir = opts.tokensDir ?? '/tokens';
+  const tokensDir = opts.tokensDir ?? defaultTokensDir();
   // Cold-start hang here blocks initializeSharePointClient indefinitely, which
   // in turn blocks the hub's discovery retry budget. Apply the same per-request
   // timeout the steady-state path uses (callGraphAPI's TIMEOUTS.API_CALL_MS).
@@ -1035,7 +1036,7 @@ export function validateGraphSiteId(siteId: string): string | null {
  */
 export async function initializeSharePointClient(): Promise<SharePointClient | null> {
   try {
-    const tokensDir = process.env.TOKENS_DIR || '/tokens';
+    const tokensDir = defaultTokensDir();
 
     // Load tokens that live in the worker-mounted dir (ADR-060). After PR3,
     // `client_id`, `tenant_id`, and `refresh_token` are NO LONGER mounted into

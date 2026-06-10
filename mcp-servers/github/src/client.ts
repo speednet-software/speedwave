@@ -16,7 +16,8 @@ import { Octokit } from '@octokit/rest';
 import { throttling } from '@octokit/plugin-throttling';
 import { retry } from '@octokit/plugin-retry';
 import {
-  loadToken,
+  loadTokenFile,
+  tokensDir,
   ts,
   withSetupGuidance,
   ConnectionStatusTracker,
@@ -1911,9 +1912,8 @@ export class GitHubClient {
  */
 export async function initializeGitHubClient(): Promise<GitHubClient | null> {
   try {
-    const tokenPath = process.env.TOKENS_DIR ? `${process.env.TOKENS_DIR}/token` : '/tokens/token';
-    console.log(`${ts()} 📖 Loading GitHub token from: ${tokenPath}`);
-    const token = await loadToken(tokenPath);
+    console.log(`${ts()} 📖 Loading GitHub token from: ${tokensDir()}/token`);
+    const token = await loadTokenFile('token');
     if (!token) {
       console.warn(`${ts()} ${withSetupGuidance('GitHub token is empty or not found.')}`);
       return null;

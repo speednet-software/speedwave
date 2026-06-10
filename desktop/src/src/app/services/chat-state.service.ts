@@ -1,17 +1,17 @@
 import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
+import { warn as pluginLogWarn } from '@tauri-apps/plugin-log';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
+import { LoggerService } from './logger.service';
 import { calculateCost } from '../chat/pricing';
 import { DEFAULT_CONTEXT_TOKENS, isLocalProvider, type LlmConfigResponse } from '../models/llm';
-import { applyPatch, type Patch } from './json-patch';
 import {
   DEFAULT_STATE_TREE,
   type ConversationEntryState,
   type ConversationStateTree,
-  type LogMsgEnvelope,
   type MessageBlockState,
 } from '../models/state-tree';
 import {
@@ -133,16 +133,13 @@ export class ChatStateService {
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
   private clipboard = inject(Clipboard);
+  private log = inject(LoggerService);
   private unsubProjectChange: (() => void) | null = null;
 
   /**
-   * ADR-042 / ADR-043 — full state-tree signal driven by JSON Patches.
-   *
-   * Held alongside the legacy `_messages`/`_currentBlocks` shape during
-   * the bridge period. Backend pushes patches into a per-session MsgStore;
-   * `subscribeToSession` wires `chat_patch::<id>` events through
-   * `applyLogMsg`, which routes to `applyPatch` for `JsonPatch` variants
-   * and to a wholesale replace for `Resync`.
+   * ADR-042 — full state-tree signal. Rebuilt from the legacy
+   * `_messages`/`_currentBlocks` fields by `rebuildStateTree()` after
+   * every mutation — the single pipeline feeding the signal projections.
    */
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   /** Public read-only signal exposed to components. */
@@ -194,11 +191,6 @@ export class ChatStateService {
     () => this._state().pending_queue
   );
 
-  /** Per-session unlisten handle for `chat_patch::<id>` subscriptions. */
-  private patchUnlisten: UnlistenFn | null = null;
-  /** Active session id we've subscribed to (avoids re-subscribe loops). */
-  private subscribedSessionId: string | null = null;
-
   /**
    * Test-only setter for private backing fields.
    * @internal
@@ -218,33 +210,15 @@ export class ChatStateService {
     if (state.pendingQueue !== undefined) this._pendingQueue = state.pendingQueue;
   }
 
-  /** Subscribers notified on every state change (components call markForCheck). */
-  private changeListeners: Array<() => void> = [];
-
   /**
-   * Registers a callback invoked on every state mutation.
-   * @param cb - The callback to invoke on change.
+   * Rebuilds the state-tree signal from the post-mutation legacy fields so
+   * the `state()` projections (`messagesFromState`, `currentBlocksFromState`,
+   * `isStreamingFromState`, `pendingQueueFromState`) stay in lockstep with
+   * the legacy mutation methods (ADR-042/043). Components read the signal
+   * projections; OnPush picks up the change automatically.
    */
-  onChange(cb: () => void): () => void {
-    this.changeListeners.push(cb);
-    return () => {
-      this.changeListeners = this.changeListeners.filter((l) => l !== cb);
-    };
-  }
-
-  /** Notifies all registered change listeners. */
   private notifyChange(): void {
-    // ADR-042/043 — keep the state-tree signal in lockstep with the legacy
-    // fields. Every notifyChange call rebuilds the state-tree from the
-    // post-mutation legacy state, so consumers can read either the legacy
-    // gettters (`messages`, `currentBlocks`, `isStreaming`, `sessionStats`,
-    // `pendingQueue`) or the unified `state()` signal and see consistent
-    // values. The backend MsgStore keeps history; this rebuild keeps the
-    // live signal honest without introducing drift.
     this.rebuildStateTree();
-    for (const cb of this.changeListeners) {
-      cb();
-    }
   }
 
   /**
@@ -267,10 +241,8 @@ export class ChatStateService {
 
   /** Ensures the stream listener runs exactly once. Waits for project ready before starting chat. */
   async init(): Promise<void> {
-    console.debug(
-      '[chat-state] init: listenerReady=%s initialized=%s',
-      this.listenerReady,
-      this.initialized
+    this.log.debug(
+      `[chat-state] init: listenerReady=${this.listenerReady} initialized=${this.initialized}`
     );
     if (!this.listenerReady) {
       this.listenerReady = true;
@@ -300,17 +272,23 @@ export class ChatStateService {
     const project = this.projectState.activeProject;
     if (project && !this.startingSession) {
       this.startingSession = true;
-      console.debug('[chat-state] startChatSession: project=%s', project);
+      this.log.debug(`[chat-state] startChatSession: project=${project}`);
       try {
         await this.tauri.invoke('start_chat', { project });
-        console.debug('[chat-state] startChatSession: success');
+        this.log.debug('[chat-state] startChatSession: success');
       } catch (err) {
         const msg = String(err);
         if (msg.includes('not authenticated')) {
           this.projectState.status = 'auth_required';
           this.notifyChange();
         } else {
-          console.error('Failed to start chat session:', err);
+          // Non-auth start failure is fatal for the chat session — surface it
+          // in the project state so the UI shows an error instead of a silently
+          // dead chat (mirrors the stream-listener failure handling below).
+          this.log.error(`[chat-state] Failed to start chat session: ${msg}`);
+          this.projectState.status = 'error';
+          this.projectState.error = `Failed to start chat session: ${msg}`;
+          this.notifyChange();
         }
       } finally {
         this.startingSession = false;
@@ -328,7 +306,7 @@ export class ChatStateService {
     const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
     const hasContent = wireBlocks.length > 0;
     if (!hasContent || this.isStreaming) return;
-    console.debug('[chat-state] sendMessage: isStreaming=%s', this.isStreaming);
+    this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
 
     const displayBlocks: MessageBlock[] = [];
     const surfaceText = displayText ?? chatInput.text;
@@ -521,7 +499,7 @@ export class ChatStateService {
       // deliberately cancelled — a "Broken pipe" / "no active session"
       // surfacing would be confusing noise.
       if (capturedTurn !== this._turnId) {
-        console.debug('[chat-state] submitAnswer: suppressing error after stop', err);
+        this.log.debug(`[chat-state] submitAnswer: suppressing error after stop: ${String(err)}`);
         return;
       }
       this.isStreaming = false;
@@ -601,10 +579,10 @@ export class ChatStateService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('no active session')) {
-        console.debug('[chat-state] stopConversation: backend already idle', err);
+        this.log.debug(`[chat-state] stopConversation: backend already idle: ${msg}`);
         return;
       }
-      console.error('[chat-state] stopConversation: invoke failed', err);
+      this.log.error(`[chat-state] stopConversation: invoke failed: ${msg}`);
       this._messages = [
         ...this._messages,
         {
@@ -740,13 +718,6 @@ export class ChatStateService {
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
         };
-        // ADR-042/043 — once the backend has committed a session id,
-        // attach the patch-stream subscription so future events update
-        // the state-tree signal in lock-step with the legacy chunk path.
-        // Idempotent for the same session id.
-        if (chunk.data.session_id) {
-          void this.subscribeToSession(chunk.data.session_id);
-        }
         break;
       }
 
@@ -814,7 +785,7 @@ export class ChatStateService {
 
   /** Clears all chat state to start a fresh conversation. */
   resetForNewConversation(): void {
-    console.debug('[chat-state] resetForNewConversation');
+    this.log.debug('[chat-state] resetForNewConversation');
     this._messages = [];
     this._currentBlocks = [];
     this.isStreaming = false;
@@ -884,7 +855,7 @@ export class ChatStateService {
       this.notifyChange();
       return prior?.text ?? null;
     } catch (err) {
-      console.warn('[chat-state] queueMessage: backend invoke failed', err);
+      this.log.warn(`[chat-state] queueMessage: backend invoke failed: ${String(err)}`);
       return null;
     }
   }
@@ -906,7 +877,7 @@ export class ChatStateService {
     try {
       await this.tauri.invoke('cancel_queued_message', { sessionId });
     } catch (err) {
-      console.warn('[chat-state] cancelQueuedMessage: backend invoke failed', err);
+      this.log.warn(`[chat-state] cancelQueuedMessage: backend invoke failed: ${String(err)}`);
     }
     this._pendingQueue = null;
     this.notifyChange();
@@ -931,7 +902,7 @@ export class ChatStateService {
     if (!text) return false;
     const ok = this.clipboard.copy(text);
     if (!ok) {
-      console.warn('[chat-state] copyMessage: clipboard write failed');
+      this.log.warn('[chat-state] copyMessage: clipboard write failed');
     }
     return ok;
   }
@@ -999,7 +970,7 @@ export class ChatStateService {
         userUuid,
       });
     } catch (err) {
-      console.error('[chat-state] retryLastAssistant: invoke failed', err);
+      this.log.error(`[chat-state] retryLastAssistant: invoke failed: ${String(err)}`);
       this._messages = [
         ...before,
         {
@@ -1083,7 +1054,7 @@ export class ChatStateService {
       // Browser dev mode or backend unavailable — log so backend renames /
       // serialisation regressions surface during development without
       // disrupting the UI.
-      console.debug('[chat-state] refreshLlmConfigCache failed', err);
+      this.log.debug(`[chat-state] refreshLlmConfigCache failed: ${String(err)}`);
     }
   }
 
@@ -1109,90 +1080,10 @@ export class ChatStateService {
       });
     } catch (err) {
       if (this.tauri.isRunningInTauri()) {
-        console.error('Failed to set up stream listener:', err);
+        this.log.error(`[chat-state] Failed to set up stream listener: ${String(err)}`);
         this.projectState.status = 'error';
         this.projectState.error = `Failed to set up stream listener: ${err}`;
       }
-    }
-  }
-
-  /**
-   * ADR-042/043 — subscribe to a session's JSON-Patch stream.
-   *
-   * Calls the `subscribe_session` Tauri command, listens on the resolved
-   * `chat_patch::<session_id>` event channel, and routes each `LogMsg`
-   * payload through `applyLogMsg`. Idempotent: re-subscribing to the same
-   * session is a no-op; switching to a different session unsubscribes
-   * the previous one first.
-   * @param sessionId The Claude Code session id to subscribe to.
-   */
-  async subscribeToSession(sessionId: string): Promise<void> {
-    if (!sessionId) return;
-    if (this.subscribedSessionId === sessionId) return;
-    await this.unsubscribeFromSession();
-    let ack: { event_name: string };
-    try {
-      ack = await this.tauri.invoke<{ event_name: string }>('subscribe_session', {
-        sessionId,
-      });
-    } catch (err) {
-      console.warn('[chat-state] subscribeToSession: invoke failed', err);
-      return;
-    }
-    try {
-      const unlisten = await this.tauri.listen<LogMsgEnvelope>(ack.event_name, (event) => {
-        this.applyLogMsg(event.payload);
-      });
-      this.patchUnlisten = unlisten;
-      this.subscribedSessionId = sessionId;
-    } catch (err) {
-      console.warn('[chat-state] subscribeToSession: listen failed', err);
-    }
-  }
-
-  /** Drop the active patch subscription, if any. */
-  async unsubscribeFromSession(): Promise<void> {
-    if (this.patchUnlisten) {
-      try {
-        this.patchUnlisten();
-      } catch (err) {
-        console.warn('[chat-state] unsubscribeFromSession failed', err);
-      }
-      this.patchUnlisten = null;
-    }
-    this.subscribedSessionId = null;
-  }
-
-  /**
-   * Apply a single `LogMsg` envelope to the state-tree signal. Pure
-   * router — `JsonPatch` runs through the RFC 6902 reducer, `Resync`
-   * does a wholesale replace, and lifecycle markers update specific
-   * fields. Test-only API: components consume `state` (the read-only
-   * signal) instead of calling this directly.
-   * @internal
-   * @param msg One `LogMsg` envelope from `MsgStore.history_plus_stream()`.
-   */
-  applyLogMsg(msg: LogMsgEnvelope): void {
-    if (msg.type === 'json_patch') {
-      try {
-        const patch = msg.data as Patch;
-        this._state.set(applyPatch(this._state(), patch));
-      } catch (err) {
-        console.warn('[chat-state] applyLogMsg: bad patch dropped', err);
-      }
-      return;
-    }
-    if (msg.type === 'resync') {
-      this._state.set(msg.data);
-      return;
-    }
-    if (msg.type === 'session_started') {
-      this._state.update((s) => ({ ...s, session_id: msg.data.session_id }));
-      return;
-    }
-    if (msg.type === 'session_ended') {
-      this._state.update((s) => ({ ...s, is_streaming: false }));
-      return;
     }
   }
 }
@@ -1361,11 +1252,9 @@ export interface LegacyStateSnapshot {
 /**
  * Project legacy ChatStateService fields onto a `ConversationStateTree`.
  *
- * The patch protocol (ADR-042) defines `state()` as the source of truth.
- * During the bridge period, this projection rebuilds the state-tree from
- * the legacy fields after every mutation so the signal stays consistent
- * without introducing drift. Once a forklift removes the legacy fields,
- * this becomes obsolete.
+ * This projection is the single pipeline feeding the `state()` signal
+ * (ADR-042 status note): it rebuilds the tree from the legacy fields
+ * after every mutation so the projections never drift.
  * @param src - Snapshot of legacy backing fields.
  */
 export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): ConversationStateTree {
@@ -1500,6 +1389,18 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'image':
         out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
         break;
+      default: {
+        // A new Rust MessageBlock variant landed without a TS arm here
+        // (ADR-042 SSOT-alignment drift). Surface a placeholder instead of
+        // silently dropping it, and forward to the log pipeline so the gap
+        // is visible in a diagnostics ZIP.
+        const unknownKind = (b as { kind: string }).kind;
+        pluginLogWarn(
+          `[chat-state] stateBlocksToMessageBlocks: dropping unknown block kind "${unknownKind}"`
+        ).catch(() => {});
+        out.push({ type: 'error', content: `Unsupported message block: ${unknownKind}` });
+        break;
+      }
     }
   }
   return out;

@@ -11,8 +11,11 @@ use crate::consts;
 /// Platforms a source exists on. `lima/serial.log` is macOS-only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Platforms {
+    /// Available on every supported platform.
     All,
+    /// macOS only.
     MacOnly,
+    /// Windows only.
     WindowsOnly,
 }
 
@@ -44,11 +47,15 @@ pub enum SourceKind {
 /// One diagnostic source. `key` is the `/logs` token (frontend `COMPOSE_RE`
 /// `[\w.-]+`); `zip_entry` is its ZIP path (a `logs/` prefix for `DesktopLogDir`).
 pub struct DiagnosticSource {
+    /// `/logs` token identifying the source.
     pub key: &'static str,
+    /// Path of this source inside the diagnostics ZIP.
     pub zip_entry: &'static str,
     /// `false` = ZIP-only (not renderable in the line-oriented `/logs` view).
     pub displayable: bool,
+    /// Platforms the source exists on.
     pub platforms: Platforms,
+    /// How the source's raw text is obtained.
     pub kind: SourceKind,
 }
 

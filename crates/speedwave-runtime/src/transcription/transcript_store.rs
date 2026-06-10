@@ -479,6 +479,7 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
+    /// Marks a session done and returns the emitted event sequence number.
     pub fn finish(&self, id: Uuid) -> Result<u64, StoreError> {
         let mut seq_out = 0;
         self.with_session(id, |s, seq| {
