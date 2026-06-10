@@ -57,11 +57,39 @@ export interface ToolDeps {
   rateLimitSeconds?: number;
 }
 
+/** Serializes `fn` per service key; concurrent callers queue FIFO. */
+type ServiceMutex = <T>(service: string, fn: () => Promise<T>) => Promise<T>;
+
+/**
+ * Per-service promise-chain mutex. Rotating refresh tokens (Slack) are
+ * single-use, so load→refresh→save must never interleave for one service;
+ * forget is serialized through the same chain.
+ */
+function createServiceMutex(): ServiceMutex {
+  const tails = new Map<string, Promise<void>>();
+  return async <T>(service: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = tails.get(service) ?? Promise.resolve();
+    let settle!: () => void;
+    const tail = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    tails.set(service, tail);
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      settle();
+      if (tails.get(service) === tail) tails.delete(service);
+    }
+  };
+}
+
 /**
  * Build the tool list for `createMCPServer`.
  * @param deps - injected paths and overrides
  */
 export function buildTools(deps: ToolDeps): ToolDefinition[] {
+  const withServiceLock = createServiceMutex();
   return [
     {
       tool: {
@@ -71,7 +99,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
         inputSchema: { type: 'object', properties: {} },
       },
       handler: (_params: Record<string, unknown>, ctx?: ToolHandlerContext) =>
-        handleRefresh(deps, ctx),
+        handleRefresh(deps, withServiceLock, ctx),
     },
     {
       tool: {
@@ -81,7 +109,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
         inputSchema: { type: 'object', properties: {} },
       },
       handler: (_params: Record<string, unknown>, ctx?: ToolHandlerContext) =>
-        handleForget(deps, ctx),
+        handleForget(deps, withServiceLock, ctx),
     },
   ];
 }
@@ -119,16 +147,20 @@ async function resolveCaller(
 
 async function handleRefresh(
   deps: ToolDeps,
+  withServiceLock: ServiceMutex,
   ctx: ToolHandlerContext | undefined
 ): Promise<ToolsCallResult> {
+  const callerResult = await resolveCaller(deps, ctx);
+  if (!callerResult.ok) return callerResult.result;
+  const service = callerResult.service;
+  return withServiceLock(service, () => refreshLocked(deps, service));
+}
+
+async function refreshLocked(deps: ToolDeps, service: string): Promise<ToolsCallResult> {
   const now = deps.now ?? Date.now;
   const rateLimitMs = (deps.rateLimitSeconds ?? DEFAULT_RATE_LIMIT_SECONDS) * 1000;
   // Deliberate UTC (bare Z): JSON audit-record field, not a human log prefix.
   const ts = new Date().toISOString();
-
-  const callerResult = await resolveCaller(deps, ctx);
-  if (!callerResult.ok) return callerResult.result;
-  const service = callerResult.service;
 
   let state: OAuthState | null;
   try {
@@ -192,7 +224,10 @@ async function handleRefresh(
   }
 
   // Rate limit: if access token is still valid AND last refresh was within the
-  // window, refuse. (Slows refresh-in-a-loop after RCE; cannot stop it — ADR-060.)
+  // window, skip the IdP round-trip. (Slows refresh-in-a-loop after RCE —
+  // ADR-060.) Returns success-noop, not an error: a caller that lost the
+  // single-flight race re-reads the freshly written token and retries; the
+  // audit log keeps the rate_limited signal.
   const expiresAtMs = Date.parse(state.expiresAt);
   const lastRefreshMs = Date.parse(state.lastRefreshAt);
   const skewMs = 60_000;
@@ -209,9 +244,11 @@ async function handleRefresh(
       action: 'refresh',
       outcome: { error: 'rate_limited' },
     });
-    return errorResult(
-      `rate_limited: last refresh was ${Math.round((now() - lastRefreshMs) / 1000)}s ago; access token still valid`
-    );
+    return jsonResult({
+      expiresIn: Math.floor((expiresAtMs - now()) / 1000),
+      grantedScopes: state.grantedScopes,
+      rateLimited: true,
+    });
   }
 
   const result = await provider.refresh(refreshReq);
@@ -256,13 +293,18 @@ async function handleRefresh(
 
 async function handleForget(
   deps: ToolDeps,
+  withServiceLock: ServiceMutex,
   ctx: ToolHandlerContext | undefined
 ): Promise<ToolsCallResult> {
-  // Deliberate UTC (bare Z): JSON audit-record field, not a human log prefix.
-  const ts = new Date().toISOString();
   const callerResult = await resolveCaller(deps, ctx);
   if (!callerResult.ok) return callerResult.result;
   const service = callerResult.service;
+  return withServiceLock(service, () => forgetLocked(deps, service));
+}
+
+async function forgetLocked(deps: ToolDeps, service: string): Promise<ToolsCallResult> {
+  // Deliberate UTC (bare Z): JSON audit-record field, not a human log prefix.
+  const ts = new Date().toISOString();
 
   const statePath = join(deps.stateDir, `${service}.json`);
   const accessTokenPath = deps.accessTokenPathFor(service);
