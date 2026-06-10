@@ -111,6 +111,18 @@ describe('Context7Client.searchLibraries', () => {
 
     await client.searchLibraries('spring boot', 'jwt');
   });
+
+  it('returns empty list when body has no results array', async () => {
+    const { client, mock } = makeClient();
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(200, JSON.stringify({ unexpected: true }), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const { data } = await client.searchLibraries('react', 'q');
+    expect(data).toEqual([]);
+  });
 });
 
 describe('Context7Client.getContext', () => {
@@ -153,6 +165,16 @@ describe('Context7Client.getContext', () => {
       .reply(200, 'docs');
 
     await client.getContext('/facebook/react', 'q', 1);
+  });
+
+  it('rejects empty libraryId before HTTP', async () => {
+    const { client } = makeClient();
+    await expect(client.getContext('  ', 'q', 5000)).rejects.toThrow('libraryId');
+  });
+
+  it('rejects empty query before HTTP', async () => {
+    const { client } = makeClient();
+    await expect(client.getContext('/facebook/react', '   ', 5000)).rejects.toThrow('query');
   });
 });
 
@@ -240,6 +262,123 @@ describe('Context7Client error mapping', () => {
       });
     await expect(client.searchLibraries('react', 'q')).rejects.toThrow(/Tier: anonymous/);
   });
+
+  it('429 with API key → message suggests plan upgrade', async () => {
+    const { client, mock } = makeClient('ctx7sk_test');
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(429, '', {
+        headers: { 'context7-quota-tier': 'free', 'ratelimit-reset': '1780000000' },
+      });
+    await expect(client.searchLibraries('react', 'q')).rejects.toThrow(/Upgrade your plan/);
+  });
+
+  it('429 without ratelimit-reset header omits reset time', async () => {
+    const { client, mock } = makeClient();
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(429, '', { headers: { 'context7-quota-tier': 'anonymous' } });
+    await expect(client.searchLibraries('react', 'q')).rejects.toThrow(
+      /^(?!.*Resets at).*Add an API key/
+    );
+  });
+
+  it('429 with non-numeric ratelimit-reset omits reset time', async () => {
+    const { client, mock } = makeClient();
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(429, '', {
+        headers: { 'context7-quota-tier': 'anonymous', 'ratelimit-reset': 'not-a-number' },
+      });
+    await expect(client.searchLibraries('react', 'q')).rejects.toThrow(/^(?!.*Resets at)/);
+  });
+
+  it('429 with array header values uses the first element', async () => {
+    const { client, mock } = makeClient();
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(429, '', {
+        headers: {
+          'context7-quota-tier': ['pro', 'free'],
+          'ratelimit-reset': ['1780000000', '99'],
+        },
+      });
+    await expect(client.searchLibraries('react', 'q')).rejects.toThrow(
+      /Tier: pro\. Resets at 2026/
+    );
+  });
+
+  it('unmapped status → generic Context7Error, not retryable', async () => {
+    const { client, mock } = makeClient();
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(418, JSON.stringify({ message: 'teapot' }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    await expect(client.searchLibraries('react', 'q')).rejects.toMatchObject({
+      status: 418,
+      retryable: false,
+      message: expect.stringMatching(/returned status 418: teapot/) as unknown,
+    });
+  });
+
+  it('non-JSON error body is quoted raw in the message', async () => {
+    const { client, mock } = makeClient();
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(400, 'plain text failure', { headers: { 'content-type': 'text/plain' } });
+    await expect(client.searchLibraries('react', 'q')).rejects.toThrow(/plain text failure/);
+  });
+
+  it('oversized error body is truncated to 200 chars with ellipsis', async () => {
+    const { client, mock } = makeClient();
+    const long = 'e'.repeat(250);
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(400, long, { headers: { 'content-type': 'text/plain' } });
+    await expect(client.searchLibraries('react', 'q')).rejects.toThrow(
+      new RegExp(`${'e'.repeat(200)}…`)
+    );
+  });
+
+  it('JSON error body with empty message falls back to raw body', async () => {
+    const { client, mock } = makeClient();
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(400, JSON.stringify({ message: '' }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    await expect(client.searchLibraries('react', 'q')).rejects.toThrow(/\{"message":""\}/);
+  });
+
+  it('network error → retries then succeeds', async () => {
+    const { client, mock } = makeClient();
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .replyWithError(new Error('socket hang up'));
+    mock
+      .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+      .reply(200, JSON.stringify({ results: [{ id: '/x/y', title: 'X' }] }), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const { data } = await client.searchLibraries('react', 'q');
+    expect(data).toHaveLength(1);
+  }, 20_000);
+
+  it('persistent network error across all retries throws status 0', async () => {
+    const { client, mock } = makeClient();
+    for (let i = 0; i < 4; i++) {
+      mock
+        .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })
+        .replyWithError(new Error('connect ECONNREFUSED'));
+    }
+    await expect(client.searchLibraries('react', 'q')).rejects.toMatchObject({
+      status: 0,
+      retryable: true,
+      message: expect.stringMatching(/Context7 request failed: connect ECONNREFUSED/) as unknown,
+    });
+  }, 30_000);
 
   it('500 → retries then succeeds', async () => {
     const { client, mock } = makeClient();
