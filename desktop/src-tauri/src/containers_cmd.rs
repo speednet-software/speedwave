@@ -6,7 +6,7 @@
 
 use speedwave_runtime::config;
 
-use crate::reconcile::{SharedIdeBridge, SharedMcpOs};
+use crate::reconcile::{SharedHostExec, SharedIdeBridge, SharedMcpOs, SharedOauth};
 use crate::setup_wizard;
 use crate::types::{check_project, LlmConfigResponse, LlmConfigUpdate};
 
@@ -403,6 +403,9 @@ pub async fn add_project(
     // Start subsystems on-demand (e.g. after factory reset / fresh install)
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
+    use tauri::Manager;
+    let host_exec_arc = app.state::<SharedHostExec>().inner().clone();
+    let oauth_arc = app.state::<SharedOauth>().inner().clone();
 
     // Pre-flight: detect CloudStorage TCC denial before adding project.
     {
@@ -459,6 +462,10 @@ pub async fn add_project(
         switch_project_core(&prev_clone, &new_clone, &rt, &|proj, _rt| {
             // start_containers calls ensure_ready internally (noop — VM already up)
             check_project(proj)?;
+            // Eager-start host workers before compose render — live WORKER_*_URLs
+            // prevent the first-message container recreate.
+            crate::ensure_host_exec_running(&host_exec_arc, proj);
+            crate::ensure_oauth_running(&oauth_arc, proj);
             log::info!("add_project: starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
                 log::error!("add_project: start_containers failed: {e}");
@@ -562,10 +569,17 @@ pub async fn start_containers(
 ) -> Result<(), String> {
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
+    use tauri::Manager;
+    let host_exec_arc = app.state::<SharedHostExec>().inner().clone();
+    let oauth_arc = app.state::<SharedOauth>().inner().clone();
 
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
+        // Eager-start host workers before compose render — live WORKER_*_URLs
+        // prevent the first-message container recreate.
+        crate::ensure_host_exec_running(&host_exec_arc, &project);
+        crate::ensure_oauth_running(&oauth_arc, &project);
         // Pre-flight: detect CloudStorage TCC denial before attempting container start.
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
             if let Some(p) = cfg.find_project(&project) {
@@ -2059,6 +2073,38 @@ mod tests {
              is_setup_complete() is still false (containers_started is set \
              later by start_containers)"
         );
+    }
+
+    /// Structural test: host workers must eager-start before the compose
+    /// render, or the first chat message recreates containers mid-session.
+    #[test]
+    fn start_containers_eager_starts_host_workers_before_compose() {
+        for cmd in [
+            "pub async fn start_containers(",
+            "pub async fn add_project(",
+        ] {
+            let source = include_str!("containers_cmd.rs");
+            let fn_start = source.find(cmd).expect("command function must exist");
+            let fn_body = &source[fn_start..];
+            let next_fn = fn_body[1..]
+                .find("\npub ")
+                .map(|i| i + 1)
+                .unwrap_or(fn_body.len());
+            let fn_body = &fn_body[..next_fn];
+            let host_exec = fn_body
+                .find("ensure_host_exec_running(")
+                .unwrap_or_else(|| panic!("{cmd} must call ensure_host_exec_running"));
+            let oauth = fn_body
+                .find("ensure_oauth_running(")
+                .unwrap_or_else(|| panic!("{cmd} must call ensure_oauth_running"));
+            let compose_start = fn_body
+                .find("setup_wizard::start_containers(")
+                .unwrap_or_else(|| panic!("{cmd} must call setup_wizard::start_containers"));
+            assert!(
+                host_exec < compose_start && oauth < compose_start,
+                "{cmd}: host workers must start before setup_wizard::start_containers"
+            );
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
