@@ -468,9 +468,7 @@ pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
     "driver must be a string",         // networks.<n>.driver torn
     "cpus must be a number or string", // deploy.resources.limits.cpus torn
     "memory must be a string",         // deploy.resources.limits.memory torn
-    "could not find expected",
-    "did not find expected",
-    "found unexpected end of stream", // file truncated mid-document (yaml-go)
+    "yaml:", // any yaml-go parse error: rendered YAML is always valid, so torn read
 ];
 
 /// Asserts every `services.<svc>.networks: [name]` reference resolves to a
