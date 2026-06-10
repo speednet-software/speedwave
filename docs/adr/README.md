@@ -77,6 +77,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-068](ADR-068-resource-budget-ssot.md)                             | Resource budget SSOT — container memory/CPU + adaptive VM sizing (fixed 6 GiB Claude)    | Accepted              |
 | [ADR-069](ADR-069-generic-plugin-oauth2.md)                            | Generic plugin OAuth2 via host-side worker — per-human identity, PKCE loopback           | Accepted              |
 | [ADR-070](ADR-070-appleevents-kernel-process-id-gate.md)               | AppleEvents permission gate via `typeKernelProcessID` addressing                         | Accepted              |
+| [ADR-071](ADR-071-slack-oauth-pkce-user-tokens.md)                     | Slack OAuth2 PKCE — tokenless sign-in with rotating user tokens                          | Accepted              |
 
 ## Creating a New ADR
 

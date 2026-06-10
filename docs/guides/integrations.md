@@ -88,7 +88,7 @@ Each MCP integration requires specific credentials to function. Fields marked as
 
 | Integration | Required Fields                                    | Optional Fields                                                        |
 | ----------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
-| Slack       | `bot_token`, `user_token`                          | —                                                                      |
+| Slack       | `access_token` (via **Sign in with Slack**)        | —                                                                      |
 | SharePoint  | `client_id`, `tenant_id`, `site_id` + OAuth tokens | —                                                                      |
 | GitLab      | `token`, `host_url`                                | —                                                                      |
 | GitHub      | `token`                                            | —                                                                      |
@@ -103,6 +103,31 @@ Each MCP integration requires specific credentials to function. Fields marked as
 When you toggle an integration on for the first time in a project, Speedwave builds its worker container image on demand (ADR-057). The build is part of the "Restarting containers…" wait. First builds of heavy images (e.g. `playwright`, which pulls Chromium; `office`, which pulls LibreOffice + a Python venv) noticeably extend that wait; subsequent toggles are near-instant because the build is cached.
 
 If the build fails (network, disk), the integration row reverts to disabled — your running containers keep their prior configuration. Disabling an integration drops its worker image; re-enabling rebuilds.
+
+### Slack — Messaging
+
+The Slack integration is a built-in MCP worker that acts **as you** — messages sent by Claude carry your name and avatar, not a bot identity. Authentication is a single **Sign in with Slack** button ([ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)); there is nothing to type and no Slack app to create.
+
+**Signing in:**
+
+1. Open **Integrations → Slack** in Speedwave Desktop and click **Sign in with Slack**.
+2. Your browser opens Slack's consent screen — pick the workspace and click **Allow**. Workspaces with app approval enabled need a one-time admin approval of the Speedwave app.
+3. The browser redirects to `http://localhost:41739/callback` on your machine; Speedwave exchanges the code locally (PKCE — no client secret exists anywhere) and the card shows **Connected to <workspace>**.
+4. Click **Restart** when prompted so the worker picks up the credentials.
+
+**What is stored where:**
+
+- `~/.speedwave/tokens/<project>/slack/access_token` — the short-lived access token (about 12 hours), the only file the worker container can see (`:ro`).
+- `~/.speedwave/oauth/<project>/slack.json` — host-only state: the rotating refresh token plus workspace identity. Never mounted into any container.
+
+The host-side `oauth` worker ([ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)) refreshes the access token on demand; each refresh also rotates the refresh token. Two caveats follow from the token model:
+
+- **Refresh tokens expire after 30 days.** If a project sits idle past that, the card shows a re-authorise banner — sign in again to restore access.
+- **Refresh runs in Speedwave Desktop.** With Desktop closed and only the CLI running, the current access token keeps working until it expires (up to 12 hours), then tool calls ask you to reconnect from Desktop.
+
+**Requested user scopes** (the integration can do exactly this, nothing more): `chat:write` (send messages as you), `channels:read` + `groups:read` (list public/private channels you are in), `channels:history` + `groups:history` (read history of those channels), `users:read` + `users:read.email` (look up users by e-mail). You can only read channels **you are a member of** — the integration never sees anything your account cannot.
+
+Disconnecting (**Remove Credentials**) deletes the local tokens and state. To revoke the grant on Slack's side as well, remove the Speedwave app under your Slack profile's **Settings → Apps**.
 
 ### GitHub — Code Hosting
 
