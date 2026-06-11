@@ -1051,17 +1051,22 @@ pub(crate) fn parallel_stop_project_containers(
         "parallel_stop: stopping {} container(s) for {project}",
         ids.len()
     );
-    std::thread::scope(|scope| {
-        for id in &ids {
-            scope.spawn(move || {
-                let mut stop_args: Vec<&str> = nerdctl_prefix.to_vec();
-                stop_args.extend_from_slice(&["stop", id]);
-                if let Err(e) = runner.run(cmd, &stop_args) {
-                    log::debug!("parallel_stop: stop {id} failed (down will handle): {e}");
-                }
-            });
-        }
-    });
+    // Chunked fan-out: each stop is its own ssh/wsl session; OpenSSH's
+    // default MaxSessions is 10, so cap below it with polling headroom.
+    const MAX_PARALLEL_STOPS: usize = 8;
+    for chunk in ids.chunks(MAX_PARALLEL_STOPS) {
+        std::thread::scope(|scope| {
+            for id in chunk {
+                scope.spawn(move || {
+                    let mut stop_args: Vec<&str> = nerdctl_prefix.to_vec();
+                    stop_args.extend_from_slice(&["stop", id]);
+                    if let Err(e) = runner.run(cmd, &stop_args) {
+                        log::debug!("parallel_stop: stop {id} failed (down will handle): {e}");
+                    }
+                });
+            }
+        });
+    }
 }
 
 /// Runs `compose down` and then best-effort cleanup of any stale container
@@ -1652,7 +1657,8 @@ services:
         impl CommandRunner for ConcurrencyRunner {
             fn run(&self, _cmd: &str, args: &[&str]) -> anyhow::Result<String> {
                 if args.contains(&"ps") {
-                    return Ok("c1\nc2\nc3\n".to_string());
+                    let ids: Vec<String> = (1..=20).map(|i| format!("c{i}")).collect();
+                    return Ok(ids.join("\n"));
                 }
                 let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
                 self.max_seen.fetch_max(now, Ordering::SeqCst);
@@ -1666,9 +1672,14 @@ services:
             max_seen: AtomicUsize::new(0),
         };
         parallel_stop_project_containers(&runner, "nerdctl", "par-conc", &[]);
+        let max = runner.max_seen.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
-            runner.max_seen.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            max > 1,
             "stops must overlap in time (sequential would be 1)"
+        );
+        assert!(
+            max <= 8,
+            "fan-out must stay under sshd MaxSessions (10), got {max}"
         );
     }
 

@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Trap TERM from the very top — a stop during the startup phase (hub wait,
+# runtime Claude install) must exit promptly, not eat the 10s SIGKILL timeout.
+trap 'exit 0' TERM INT
+
 # Disable auto-updater unconditionally — Speedwave pins Claude Code versions
 export DISABLE_AUTOUPDATER=1
 

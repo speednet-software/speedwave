@@ -289,6 +289,11 @@ pub fn render_compose_in(
     // Filter services based on integrations config
     yaml = apply_integrations_filter(&yaml, integrations, &network_name)?;
 
+    // Per-worker credentials digest — a token rotation must change the
+    // worker's config-hash so idempotent `up` recreates it (SEC: bytes
+    // themselves never enter the YAML, only a SHA-256 prefix).
+    yaml = workers::apply_credentials_digests_in(data_dir, &yaml, project_name)?;
+
     // Final hardening: re-quote any `environment:` value carrying a YAML flow
     // indicator (e.g. the `[1m]` 1M-context suffix) that libyaml emits
     // unquoted but nerdctl's Go YAML parser rejects. Must run last — after

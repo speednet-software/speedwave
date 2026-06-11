@@ -1313,6 +1313,26 @@ setup_os_subservice_fixture() {
 # in the container PID1 would otherwise ignore TERM and eat the 10s timeout.
 # ---------------------------------------------------------------------------
 
+@test "SIGTERM during startup phase exits promptly via top trap" {
+    # Block startup on the hub probe (no SPEEDWAVE_SKIP_HUB_WAIT) so TERM
+    # lands mid-startup, before the ready marker exists.
+    unset SPEEDWAVE_SKIP_HUB_WAIT
+    bash "$ENTRYPOINT" &
+    pid=$!
+    sleep 0.4
+    [ ! -f "$CLAUDE_READY_MARKER" ] || skip "startup finished too fast to test the window"
+    kill -TERM "$pid"
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    set +e
+    wait "$pid"
+    status=$?
+    set -e
+    [ "$status" -eq 0 ]
+}
+
 @test "keep-alive exits 0 on SIGTERM via trap" {
     bash "$ENTRYPOINT" &
     pid=$!

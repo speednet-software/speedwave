@@ -1756,6 +1756,19 @@ fn remove_plugin_with_base(
                     tags_for_removal.push(applied);
                 }
             }
+            if let Ok(pending) = std::fs::read_to_string(
+                plugin_state_dir_for(plugins_dir, slug).join(SUPERSEDED_TAGS_FILE),
+            ) {
+                for t in pending.lines().map(str::trim).filter(|t| !t.is_empty()) {
+                    if !tags_for_removal.contains(&t.to_string()) {
+                        tags_for_removal.push(t.to_string());
+                    }
+                }
+            }
+            let legacy = plugin_legacy_image_tag(manifest);
+            if !tags_for_removal.contains(&legacy) {
+                tags_for_removal.push(legacy);
+            }
         }
     }
 
@@ -2010,8 +2023,12 @@ pub(crate) fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<V
         return Ok(vec![]);
     }
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(plugins_dir)? {
-        let entry = entry?;
+    // Sorted: SPEEDWAVE_PLUGINS and service insertion order must be
+    // deterministic or the rendered YAML (and config-hash) flaps per run.
+    let mut entries: Vec<std::fs::DirEntry> =
+        std::fs::read_dir(plugins_dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -2418,6 +2435,19 @@ fn build_single_plugin_image(
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
+    // ADR-071: every image build + tag prune is serialised by build.lock.
+    // Single choke point for install / ensure / pending paths; callers must
+    // not already hold the lock (it is not reentrant).
+    crate::build::with_build_lock(|| {
+        build_single_plugin_image_locked(runtime, manifest, plugin_dir)
+    })
+}
+
+fn build_single_plugin_image_locked(
+    runtime: &crate::runtime::LockedRuntime,
+    manifest: &PluginManifest,
+    plugin_dir: &Path,
+) -> anyhow::Result<()> {
     // Move any legacy in-tree pending marker out FIRST — it is not part of
     // the signed tree and must not perturb the content-addressed tag.
     if let Some(plugins_dir) = plugin_dir.parent() {
@@ -2448,7 +2478,13 @@ fn build_single_plugin_image(
     // location and the legacy in-tree marker, so a plugin installed by an older release
     // stops re-triggering on every launch. `plugin_dir` is always
     // `<plugins_dir>/<slug>/`, so its parent is the plugins base.
-    record_applied_image_tag_and_prune(runtime, plugin_dir, &manifest.slug, &tag);
+    record_applied_image_tag_and_prune(
+        runtime,
+        plugin_dir,
+        &manifest.slug,
+        &tag,
+        &plugin_legacy_image_tag(manifest),
+    );
     if let Some(plugins_dir) = plugin_dir.parent() {
         clear_image_pending_for(plugins_dir, plugin_dir, &manifest.slug);
     } else {
@@ -2490,31 +2526,72 @@ fn plugin_image_tag(manifest: &PluginManifest, digest_hex: &str) -> String {
 /// Marker file under `plugin-state/<slug>/` holding the last-built image tag.
 const APPLIED_IMAGE_TAG_MARKER: &str = "applied_image_tag";
 
-/// Removes the superseded tag (best-effort) and records the new one (ADR-071).
+/// Pending-prune list (one tag per line): superseded tags whose `rmi` failed
+/// (worker still running on them) — retried on every subsequent build.
+const SUPERSEDED_TAGS_FILE: &str = "superseded_image_tags";
+
+/// Queues the superseded tag(s), retries the pending prunes, records the new
+/// tag. First content-addressed build also queues the legacy `slug:version`.
 fn record_applied_image_tag_and_prune(
     runtime: &crate::runtime::LockedRuntime,
     plugin_dir: &Path,
     slug: &str,
     tag: &str,
+    legacy_tag: &str,
 ) {
     let Some(plugins_dir) = plugin_dir.parent() else {
         return;
     };
-    let marker = plugin_state_dir_for(plugins_dir, slug).join(APPLIED_IMAGE_TAG_MARKER);
-    if let Ok(old) = std::fs::read_to_string(&marker) {
-        let old = old.trim();
-        if !old.is_empty() && old != tag {
-            if let Err(e) = runtime.remove_images(std::slice::from_ref(&old.to_string()), false) {
-                log::debug!("superseded plugin image '{old}' not removed (likely in use): {e}");
+    let state_dir = plugin_state_dir_for(plugins_dir, slug);
+    let marker = state_dir.join(APPLIED_IMAGE_TAG_MARKER);
+    let pending_path = state_dir.join(SUPERSEDED_TAGS_FILE);
+
+    let mut pending: Vec<String> = std::fs::read_to_string(&pending_path)
+        .map(|c| c.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    match std::fs::read_to_string(&marker) {
+        Ok(old) if !old.trim().is_empty() => {
+            if old.trim() != tag {
+                pending.push(old.trim().to_string());
+            }
+        }
+        _ => {
+            // Pre-marker install (old tag scheme) — queue the legacy tag once.
+            if legacy_tag != tag {
+                pending.push(legacy_tag.to_string());
             }
         }
     }
-    if let Some(dir) = marker.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    pending.retain(|t| !t.is_empty() && t != tag);
+    pending.sort_unstable();
+    pending.dedup();
+    pending.retain(
+        |old| match runtime.remove_images(std::slice::from_ref(old), false) {
+            Ok(()) => false,
+            Err(e) => {
+                log::debug!(
+                    "superseded plugin image '{old}' not removed yet (retried next build): {e}"
+                );
+                true
+            }
+        },
+    );
+
+    let _ = std::fs::create_dir_all(&state_dir);
+    if pending.is_empty() {
+        let _ = std::fs::remove_file(&pending_path);
+    } else if let Err(e) = std::fs::write(&pending_path, pending.join("\n")) {
+        log::warn!("failed to persist superseded tags for '{slug}': {e}");
     }
     if let Err(e) = std::fs::write(&marker, tag) {
         log::warn!("failed to record applied image tag for '{slug}': {e}");
     }
+}
+
+/// Legacy (pre-content-addressed) tag: `speedwave-mcp-<slug>:<version|image_tag>`.
+fn plugin_legacy_image_tag(manifest: &PluginManifest) -> String {
+    let base = manifest.image_tag.as_deref().unwrap_or(&manifest.version);
+    format!("speedwave-mcp-{}:{base}", manifest.slug)
 }
 
 /// Generates a fully-resolved compose service definition for a plugin.
@@ -4592,7 +4669,14 @@ mod tests {
         // remove_images called once with the expected tag AND force=true
         // (uninstall is an explicit user request — no waiting for prune).
         let calls = handles.remove_images_calls.lock().unwrap().clone();
-        assert_eq!(calls, vec![(vec![expected_tag], true)]);
+        // Current content-addressed tag + the legacy version-only tag.
+        assert_eq!(
+            calls,
+            vec![
+                (vec![expected_tag], true),
+                (vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)
+            ]
+        );
     }
 
     #[test]
@@ -4635,11 +4719,10 @@ mod tests {
         // remove_images was attempted with force=true even on the error path
         // — the uninstall caller never silently downgrades to non-force rmi.
         let calls = handles.remove_images_calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2, "current + legacy tag, both attempted");
         assert!(
-            calls[0].1,
-            "rmi error path should still pass force=true, got force={}",
-            calls[0].1
+            calls.iter().all(|(_, force)| *force),
+            "rmi error path should still pass force=true for every tag"
         );
     }
 
@@ -7580,17 +7663,83 @@ mod tests {
         let plugins_dir = plugins_dir.as_path();
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
 
-        // First build: no marker yet — only records, prunes nothing.
-        record_applied_image_tag_and_prune(&rt, &plugin_dir, "prune-test", "repo:tag-one");
-        assert!(handles.remove_images_calls.lock().unwrap().is_empty());
+        // First build: no marker yet — queues + prunes the LEGACY tag, records.
+        record_applied_image_tag_and_prune(
+            &rt,
+            &plugin_dir,
+            "prune-test",
+            "repo:tag-one",
+            "repo:legacy",
+        );
+        assert_eq!(
+            handles.remove_images_calls.lock().unwrap().clone(),
+            vec![(vec!["repo:legacy".to_string()], false)],
+            "pre-marker install queues the legacy version-only tag"
+        );
 
         // Second build with a new digest: prunes the recorded tag (force=false).
-        record_applied_image_tag_and_prune(&rt, &plugin_dir, "prune-test", "repo:tag-two");
+        record_applied_image_tag_and_prune(
+            &rt,
+            &plugin_dir,
+            "prune-test",
+            "repo:tag-two",
+            "repo:legacy",
+        );
         let calls = handles.remove_images_calls.lock().unwrap().clone();
-        assert_eq!(calls, vec![(vec!["repo:tag-one".to_string()], false)]);
+        assert_eq!(
+            calls.last().unwrap(),
+            &(vec!["repo:tag-one".to_string()], false)
+        );
 
         let marker = plugin_state_dir_for(plugins_dir, "prune-test").join(APPLIED_IMAGE_TAG_MARKER);
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "repo:tag-two");
+        // Everything pruned → no pending file left.
+        assert!(!plugin_state_dir_for(plugins_dir, "prune-test")
+            .join(SUPERSEDED_TAGS_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn record_applied_tag_keeps_failed_prune_pending_and_retries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let plugin_dir = plugins_dir.join("retry-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let state = plugin_state_dir_for(&plugins_dir, "retry-test");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(APPLIED_IMAGE_TAG_MARKER), "repo:old").unwrap();
+
+        // rmi fails (worker still running) → tag must land on the pending list.
+        let (rt_fail, _h) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_remove_images_error("in use")
+            .build();
+        record_applied_image_tag_and_prune(
+            &rt_fail,
+            &plugin_dir,
+            "retry-test",
+            "repo:new",
+            "repo:legacy",
+        );
+        let pending = std::fs::read_to_string(state.join(SUPERSEDED_TAGS_FILE)).unwrap();
+        assert_eq!(pending.trim(), "repo:old");
+        assert_eq!(
+            std::fs::read_to_string(state.join(APPLIED_IMAGE_TAG_MARKER)).unwrap(),
+            "repo:new"
+        );
+
+        // Next build: retry succeeds → pending list drained.
+        let (rt_ok, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        record_applied_image_tag_and_prune(
+            &rt_ok,
+            &plugin_dir,
+            "retry-test",
+            "repo:newer",
+            "repo:legacy",
+        );
+        let calls = handles.remove_images_calls.lock().unwrap().clone();
+        assert!(calls.contains(&(vec!["repo:old".to_string()], false)));
+        assert!(calls.contains(&(vec!["repo:new".to_string()], false)));
+        assert!(!state.join(SUPERSEDED_TAGS_FILE).exists());
     }
 
     #[test]
@@ -7599,9 +7748,9 @@ mod tests {
         let plugin_dir = tmp.path().join("plugins").join("idem-test");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
-        record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same");
-        record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same");
-        // Unchanged tag must not remove the image that is in use.
+        record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same", "repo:same");
+        record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same", "repo:same");
+        // Unchanged tag (legacy == current too) must not remove anything.
         assert!(handles.remove_images_calls.lock().unwrap().is_empty());
     }
 
@@ -7624,8 +7773,25 @@ mod tests {
             calls,
             vec![
                 (vec![current_tag], true),
-                (vec!["repo:stale-old".to_string()], true)
+                (vec!["repo:stale-old".to_string()], true),
+                (vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)
             ]
+        );
+    }
+
+    #[test]
+    fn plugin_build_runs_under_build_lock() {
+        let source = include_str!("plugin.rs");
+        let outer = source
+            .find("fn build_single_plugin_image(")
+            .expect("outer build fn must exist");
+        let body_end = source[outer..]
+            .find("fn build_single_plugin_image_locked(")
+            .map(|i| outer + i)
+            .expect("locked inner fn must exist");
+        assert!(
+            source[outer..body_end].contains("with_build_lock"),
+            "plugin build+prune must be serialised by build.lock (ADR-071)"
         );
     }
 

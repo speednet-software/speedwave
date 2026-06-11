@@ -22,6 +22,88 @@ use crate::plugin;
 /// Workers read tokens from env vars. This asymmetry is enforced by `check_no_tokens_in_hub`.
 /// Creates the per-project secrets dir under an explicit data dir so render
 /// under a tempdir never writes the global `~/.speedwave/secrets`.
+/// Injects `SPW_CREDENTIALS_DIGEST` into every enabled MCP worker so a
+/// credential rotation changes that worker's config-hash and idempotent
+/// `compose up` recreates exactly it (token bytes never enter the YAML).
+pub(crate) fn apply_credentials_digests_in(
+    data_dir: &std::path::Path,
+    yaml: &str,
+    project_name: &str,
+) -> anyhow::Result<String> {
+    let tokens_root = super::resolve_tokens_dir_in(data_dir, project_name);
+    let oauth_root = data_dir.join("oauth").join(project_name);
+    apply_credentials_digests(yaml, &tokens_root, &oauth_root)
+}
+
+/// Testable core of [`apply_credentials_digests_in`] with explicit roots.
+fn apply_credentials_digests(
+    yaml: &str,
+    tokens_root: &std::path::Path,
+    oauth_root: &std::path::Path,
+) -> anyhow::Result<String> {
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+    let service_names: Vec<String> = doc
+        .get("services")
+        .and_then(|s| s.as_mapping())
+        .map(|m| {
+            m.keys()
+                .filter_map(|k| k.as_str())
+                .filter(|n| n.starts_with("mcp-") && *n != "mcp-hub")
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for name in service_names {
+        let key = name.trim_start_matches("mcp-");
+        if let Some(digest) = credentials_digest(
+            &tokens_root.join(key),
+            &oauth_root.join(format!("{key}.json")),
+        ) {
+            add_service_env_var(&mut doc, &name, "SPW_CREDENTIALS_DIGEST", &digest)?;
+        }
+    }
+    Ok(serde_yaml_ng::to_string(&doc)?)
+}
+
+/// SHA-256 over the worker's flat token files (sorted) + its oauth state.
+/// `None` when the worker has no credentials at all — absence vs presence
+/// still flips the env var, so the first save also recreates the worker.
+fn credentials_digest(token_dir: &std::path::Path, oauth_json: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut found = false;
+    if let Ok(entries) = std::fs::read_dir(token_dir) {
+        let mut files: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| !p.is_symlink() && p.is_file())
+            .collect();
+        files.sort();
+        for f in files {
+            if let Ok(bytes) = std::fs::read(&f) {
+                if let Some(name) = f.file_name() {
+                    hasher.update(name.to_string_lossy().as_bytes());
+                    hasher.update([0u8]);
+                    hasher.update(&bytes);
+                    found = true;
+                }
+            }
+        }
+    }
+    if !oauth_json.is_symlink() {
+        if let Ok(bytes) = std::fs::read(oauth_json) {
+            hasher.update(b"oauth\0");
+            hasher.update(&bytes);
+            found = true;
+        }
+    }
+    if !found {
+        return None;
+    }
+    let mut hex = crate::bundle::bytes_to_hex(&hasher.finalize());
+    hex.truncate(16);
+    Some(hex)
+}
+
 pub(crate) fn apply_worker_auth_tokens_in(
     data_dir: &std::path::Path,
     yaml: &str,
@@ -384,4 +466,97 @@ pub(crate) fn mcp_os_gateway_url(port: u16) -> String {
 #[cfg(test)]
 pub(crate) fn host_exec_gateway_url(port: u16) -> String {
     worker_gateway_url(port)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod credentials_digest_tests {
+    use super::*;
+
+    const YAML: &str = "services:\n  mcp-hub:\n    image: hub\n  mcp-slack:\n    image: slack\n  mcp-github:\n    image: gh\n";
+
+    fn env_of<'a>(yaml: &'a str, svc: &str) -> Option<String> {
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let env = doc["services"][svc].get("environment")?;
+        env.as_sequence()?
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("SPW_CREDENTIALS_DIGEST="))
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn injects_digest_only_into_workers_with_credentials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens = tmp.path().join("tokens");
+        std::fs::create_dir_all(tokens.join("slack")).unwrap();
+        std::fs::write(tokens.join("slack").join("bot_token"), "xoxb-1").unwrap();
+        let out = apply_credentials_digests(YAML, &tokens, &tmp.path().join("oauth")).unwrap();
+        assert!(env_of(&out, "mcp-slack").is_some(), "slack has credentials");
+        assert!(env_of(&out, "mcp-github").is_none(), "github has none");
+        assert!(env_of(&out, "mcp-hub").is_none(), "hub must never get one");
+    }
+
+    #[test]
+    fn rotation_changes_digest_for_that_worker_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens = tmp.path().join("tokens");
+        for svc in ["slack", "github"] {
+            std::fs::create_dir_all(tokens.join(svc)).unwrap();
+            std::fs::write(tokens.join(svc).join("token"), "old").unwrap();
+        }
+        let oauth = tmp.path().join("oauth");
+        let before = apply_credentials_digests(YAML, &tokens, &oauth).unwrap();
+        std::fs::write(tokens.join("slack").join("token"), "rotated").unwrap();
+        let after = apply_credentials_digests(YAML, &tokens, &oauth).unwrap();
+        assert_ne!(
+            env_of(&before, "mcp-slack"),
+            env_of(&after, "mcp-slack"),
+            "rotated token must change the digest (config-hash recreate)"
+        );
+        assert_eq!(
+            env_of(&before, "mcp-github"),
+            env_of(&after, "mcp-github"),
+            "untouched worker keeps its digest"
+        );
+    }
+
+    #[test]
+    fn oauth_state_participates_in_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens = tmp.path().join("tokens");
+        std::fs::create_dir_all(tokens.join("slack")).unwrap();
+        std::fs::write(tokens.join("slack").join("token"), "t").unwrap();
+        let oauth = tmp.path().join("oauth");
+        std::fs::create_dir_all(&oauth).unwrap();
+        let before = apply_credentials_digests(YAML, &tokens, &oauth).unwrap();
+        std::fs::write(oauth.join("slack.json"), "{\"refresh\":\"new\"}").unwrap();
+        let after = apply_credentials_digests(YAML, &tokens, &oauth).unwrap();
+        assert_ne!(env_of(&before, "mcp-slack"), env_of(&after, "mcp-slack"));
+    }
+
+    #[test]
+    fn no_credentials_anywhere_yields_unchanged_services() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out =
+            apply_credentials_digests(YAML, &tmp.path().join("tokens"), &tmp.path().join("oauth"))
+                .unwrap();
+        for svc in ["mcp-slack", "mcp-github", "mcp-hub"] {
+            assert!(env_of(&out, svc).is_none());
+        }
+    }
+
+    #[test]
+    fn symlinked_token_file_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens = tmp.path().join("tokens");
+        std::fs::create_dir_all(tokens.join("slack")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::write(&outside, "evil").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, tokens.join("slack").join("token")).unwrap();
+        let out = apply_credentials_digests(YAML, &tokens, &tmp.path().join("oauth")).unwrap();
+        // Error path: symlinks never feed the digest (mirrors signing policy).
+        assert!(env_of(&out, "mcp-slack").is_none());
+    }
 }

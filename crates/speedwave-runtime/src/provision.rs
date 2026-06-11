@@ -1212,7 +1212,7 @@ fi
 command -v systemctl >/dev/null 2>&1 && systemctl stop buildkit containerd 2>/dev/null || true
 pkill -x buildkitd 2>/dev/null || true
 pkill -x containerd 2>/dev/null || true
-tar -C /usr/local -xzf "/tmp/nerdctl-install/${{TARBALL}}"
+tar -C /usr/local --unlink-first --recursive-unlink -xzf "/tmp/nerdctl-install/${{TARBALL}}"
 rm -rf /tmp/nerdctl-install
 # Install iptables — required by CNI bridge plugin for container networking.
 # nerdctl-full bundles CNI plugins but iptables is a system dependency.
@@ -1234,6 +1234,8 @@ ${{requires:+Requires=$requires}}
 [Service]
 ExecStart=$exec
 Restart=always
+KillMode=process
+Delegate=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -1241,7 +1243,9 @@ UNIT
     systemctl daemon-reload
     systemctl enable --now "$name"
   else
-    $exec &
+    # Detach from inherited stdio — daemons holding the caller's pipes would
+    # block the host's wait_with_output() forever (post-upgrade hang).
+    setsid $exec </dev/null >>"/var/log/${{name}}.log" 2>&1 &
   fi
   for i in $(seq 1 15); do
     if $check_cmd >/dev/null 2>&1; then return 0; fi
@@ -1352,8 +1356,8 @@ mod tests {
             .find("pkill -x containerd")
             .expect("install script must pkill bare-background daemons");
         let tar_pos = src
-            .find("tar -C /usr/local -xzf")
-            .expect("install script must untar into /usr/local");
+            .find("tar -C /usr/local --unlink-first --recursive-unlink -xzf")
+            .expect("install script must untar with --unlink-first (ETXTBSY on busy shims)");
         assert!(
             stop_pos < tar_pos && pkill_pos < tar_pos,
             "daemon stop+pkill (at {stop_pos}/{pkill_pos}) must precede tar (at {tar_pos})"
@@ -1368,6 +1372,37 @@ mod tests {
         assert!(
             !stop_line.contains("is-system-running"),
             "the daemon-stop line must not gate on is-system-running: {stop_line}"
+        );
+    }
+
+    #[test]
+    fn nerdctl_install_fallback_detaches_daemon_stdio() {
+        let src = include_str!("provision.rs");
+        let fallback = src
+            .find("setsid $exec </dev/null >>")
+            .expect("non-systemd fallback must detach stdio (inherited pipes hang the host)");
+        let fi = src[fallback..].find("fi").map(|i| fallback + i).unwrap();
+        assert!(
+            src[fallback..fi].contains("2>&1 &"),
+            "fallback must redirect stderr and background the daemon"
+        );
+        // A bare `$exec &` (no redirection) must not exist anywhere.
+        assert!(
+            !src.contains("\n    $exec &\n"),
+            "bare $exec & inherits the Rust pipes and deadlocks wait_with_output"
+        );
+    }
+
+    #[test]
+    fn nerdctl_service_unit_has_killmode_process() {
+        let src = include_str!("provision.rs");
+        let unit = src
+            .find("ExecStart=$exec")
+            .expect("install_service unit heredoc must exist");
+        let tail = &src[unit..unit + 200];
+        assert!(
+            tail.contains("KillMode=process") && tail.contains("Delegate=yes"),
+            "containerd unit needs KillMode=process + Delegate=yes or a stop cgroup-kills every container"
         );
     }
 
