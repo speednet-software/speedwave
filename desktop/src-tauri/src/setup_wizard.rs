@@ -382,7 +382,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         log::info!("starting containers via idempotent compose_up");
         speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
         // Idempotent up, not force-recreate: config-hash convergence plus
-        // content-addressed image tags (ADR-071/072) recreate exactly what
+        // content-addressed image tags (ADR-071) recreate exactly what
         // changed; an unchanged running project starts in seconds.
         rt.compose_up(project)?;
         Ok(())
@@ -2842,7 +2842,7 @@ networks:
 
         assert!(
             !body.contains("compose_up_recreate"),
-            "start must use idempotent compose_up (ADR-071/072), not force-recreate"
+            "start must use idempotent compose_up (ADR-071), not force-recreate"
         );
         let up_pos = body
             .find("rt.compose_up(project)")

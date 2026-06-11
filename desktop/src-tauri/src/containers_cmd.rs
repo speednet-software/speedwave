@@ -129,7 +129,7 @@ pub(crate) enum SwitchResult {
 }
 
 /// Tears down new project without restoring anything.
-/// The previous project is never stopped before the switch succeeds (ADR-072).
+/// The previous project is never stopped before the switch succeeds.
 pub(crate) fn teardown_only(
     new_project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
@@ -140,7 +140,7 @@ pub(crate) fn teardown_only(
     })
 }
 
-/// In-flight background teardowns by project name (ADR-072).
+/// In-flight background teardowns by project name.
 static PENDING_TEARDOWNS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::thread::JoinHandle<()>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -154,7 +154,7 @@ fn pending_teardowns_lock(
     }
 }
 
-/// Stops the previous project on a background thread (best-effort, ADR-072).
+/// Stops the previous project on a background thread (best-effort).
 /// A failure only leaves idle containers; the next compose op converges them.
 pub(crate) fn spawn_background_teardown(prev: String) {
     spawn_background_teardown_with(prev, |p| {
@@ -211,7 +211,7 @@ pub(crate) fn switch_project_core(
     wait_for_pending_teardown(new_project);
 
     // 3. Start new first — previous keeps serving until the caller's
-    //    background teardown after a fully successful switch (ADR-072).
+    //    background teardown after a fully successful switch.
     if let Err(e) = recreate_fn(new_project, rt) {
         return SwitchResult::Failed {
             error: e,
@@ -510,7 +510,7 @@ pub async fn add_project(
         log::warn!("add_project: rebind_chat failed: {e}");
     }
 
-    // Previous project is stopped in the background (ADR-072).
+    // Previous project is stopped in the background.
     if let Some(prev) = pending_teardown {
         spawn_background_teardown(prev);
     }
@@ -1912,7 +1912,7 @@ mod tests {
     // add_project uses switch_project_core with a closure that calls
     // check_project + start_containers. These tests verify that combination:
     // ensure_ready → start_containers(new) → previous handed back for
-    // background teardown (ADR-072).
+    // background teardown.
 
     /// Simulates the add_project closure: check_project (always ok in tests)
     /// + start_containers (delegates to compose_up to simulate container start).

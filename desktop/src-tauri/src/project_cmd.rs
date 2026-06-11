@@ -103,7 +103,7 @@ pub(crate) async fn switch_project(
             crate::ensure_host_exec_running(&host_exec_arc, proj);
             crate::ensure_oauth_running(&oauth_arc, proj);
             // Previous project is stopped in the background after the switch
-            // fully succeeds (ADR-072) — never here.
+            // fully succeeds — never here.
             // Wrap the destination project's render → validate → up sequence in a
             // single transaction so it shares semantics with every other compose
             // callsite (see ADR-066) and benefits from compose_validate_with_retry's
@@ -148,7 +148,7 @@ pub(crate) async fn switch_project(
             .map_err(|e| e.to_string())?;
 
     if let Err(e) = rebind_result {
-        // Previous is still running (teardown deferred, ADR-072) — only tear
+        // Previous is still running (teardown deferred) — only tear
         // down the new project, then rebind chat back to previous.
         let mut cleanup_parts: Vec<String> = Vec::new();
 
