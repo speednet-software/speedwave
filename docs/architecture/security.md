@@ -8,7 +8,7 @@ The following security principles are inherited from Speedwave v1 and are **non-
 
 - **Claude container isolation** — no tokens, no container socket, container user UID 1000:1000 (containerd runs inside a VM on both macOS and Windows, so no user-namespace remapping is needed; see [ADR-059](../adr/ADR-059-drop-linux-support.md))
 - **OWASP container hardening** — `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
-- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. The `sharepoint` and `office` workers additionally mount the project directory at `/workspace:rw` because their tools read/write project files; other workers (slack, gitlab, github, redmine, atlassian, playwright, context7) have no `/workspace` access.
+- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. The `sharepoint`, `office`, and `slack` workers additionally mount the project directory at `/workspace:rw` because their tools read/write project files (slack writes downloaded files there for the office worker and Claude to read — [ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)); other workers (gitlab, github, redmine, atlassian, playwright, context7) have no `/workspace` access.
 - **Hub has zero tokens** — compromise of the hub exposes nothing
 - **Kernel-level isolation** — Lima VM (macOS) / WSL2 (Windows) provides an additional isolation layer on top of container isolation
 - **Resource limits** — CPU + memory caps per container
@@ -263,6 +263,20 @@ Same checks as plugin volumes, applied to the built-in SharePoint service. As of
 | `SHAREPOINT_NO_EXTRA_VOLUMES`        | Allowlisted extras only: `/tokens`, `/workspace`, per-service oauth bearer |
 | `SHAREPOINT_MISSING_TOKENS_MOUNT`    | Token mount present                                                        |
 | `SHAREPOINT_MISSING_WORKSPACE_MOUNT` | Workspace mount present                                                    |
+
+### Slack Volume Rules
+
+Identical profile to SharePoint, applied to the built-in Slack service ([ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)): `/tokens:ro`, `/workspace:rw` (file downloads land in `/workspace/slack-files/`), plus its per-service oauth bearer — nothing else. The token-mount-mode check re-uses the generic `PLUGIN_TOKEN_MOUNT_MODE`.
+
+| Rule                            | What it checks                                                             |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| `SLACK_VOLUME_LONG_FORM`        | Short-form volumes only                                                    |
+| `SLACK_TOKEN_PATH_MISMATCH`     | Token mount path matches expected                                          |
+| `SLACK_WORKSPACE_PATH_MISMATCH` | Workspace mount path matches expected                                      |
+| `SLACK_WORKSPACE_MOUNT_MODE`    | Workspace mount mode is `:rw`                                              |
+| `SLACK_NO_EXTRA_VOLUMES`        | Allowlisted extras only: `/tokens`, `/workspace`, per-service oauth bearer |
+| `SLACK_MISSING_TOKENS_MOUNT`    | Token mount present                                                        |
+| `SLACK_MISSING_WORKSPACE_MOUNT` | Workspace mount present                                                    |
 
 ### Host File Security Rules
 

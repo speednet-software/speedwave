@@ -1089,7 +1089,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 31;
+    const SECURITY_RULE_COUNT: usize = 38;
 
     /// Repo root (workspace dir holding `containers/`, `mcp-servers/`), derived
     /// from this crate's manifest dir — used as the injected bundle build root
@@ -1491,7 +1491,8 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/project:/workspace:rw
     environment:
       - PORT=3000
     networks:
@@ -7614,6 +7615,115 @@ services:
     }
 
     #[test]
+    fn test_security_check_slack_with_workspace_and_bearer_passes() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // ADR-071: slack mounts /tokens:ro + /workspace:rw (file downloads)
+        // + its per-service oauth bearer — the full allowlist must pass.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/.speedwave/oauth/test/bearer-slack:/secrets/oauth-auth-token-slack:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        let slack_violations: Vec<_> = violations.iter().filter(|v| v.rule.is_slack()).collect();
+        assert!(
+            slack_violations.is_empty(),
+            "ADR-071 slack compose must pass: {:?}",
+            slack_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_slack_flags_rw_tokens_and_missing_workspace() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/slack:/tokens:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode
+                    && v.container == "mcp-slack"),
+            "a :rw token mount on slack must be flagged"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SlackMissingWorkspaceMount),
+            "a slack service without /workspace must be flagged (ADR-071)"
+        );
+    }
+
+    #[test]
+    fn test_security_check_slack_flags_unauthorized_extra_volume() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/project:/workspace:rw
+      - /etc/passwd:/stolen:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SlackNoExtraVolumes),
+            "an unauthorized extra volume on slack must be flagged"
+        );
+    }
+
+    #[test]
     fn test_security_check_sharepoint_oauth_bearer_must_be_ro() {
         let data_dir = tempfile::tempdir().unwrap();
         // ADR-060 / extra_allowed_ro_targets logic: oauth bearer mount must be :ro.
@@ -7996,6 +8106,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
+      - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
     networks:
@@ -8976,6 +9087,15 @@ services:
             .filter(|r| r.to_string().starts_with("SHAREPOINT"))
             .count();
         let by_method = SecurityRule::iter().filter(|r| r.is_sharepoint()).count();
+        let slack_by_prefix = SecurityRule::iter()
+            .filter(|r| r.to_string().starts_with("SLACK_"))
+            .count();
+        let slack_by_method = SecurityRule::iter().filter(|r| r.is_slack()).count();
+        assert_eq!(
+            slack_by_method, slack_by_prefix,
+            "is_slack() count ({slack_by_method}) differs from SLACK-prefixed variant count \
+             ({slack_by_prefix}) — update SecurityRule::is_slack() to include the new variant"
+        );
         assert_eq!(
             by_prefix, by_method,
             "is_sharepoint() count ({by_method}) differs from SHAREPOINT-prefixed variant count \

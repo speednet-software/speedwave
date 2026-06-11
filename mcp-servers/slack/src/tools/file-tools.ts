@@ -7,11 +7,16 @@ import {
   ToolDefinition,
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
-import { SlackClients, getFileContent, formatSlackError } from '../client.js';
+import { SlackClients, getFileContent, downloadFile, formatSlackError } from '../client.js';
 
 interface GetFileContentParams {
+  file: string;
+}
+
+interface DownloadFileParams {
   file: string;
 }
 
@@ -55,6 +60,62 @@ const getFileContentTool: Tool = {
   ],
 };
 
+const downloadFileTool: Tool = {
+  name: 'downloadFile',
+  description:
+    'Download ANY file shared on Slack (PDF, images, office docs, large text) into the project workspace at /workspace/slack-files/. Use for binary files getFileContent refuses — then read PDFs/documents via the office integration or the filesystem.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      file: { type: 'string', description: 'File ID (F…) from a message files[] entry' },
+    },
+    required: ['file'],
+  },
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
+  keywords: ['slack', 'file', 'download', 'save', 'pdf', 'binary', 'workspace', 'attachment'],
+  example: 'const saved = await slack.downloadFile({ file: "F0123ABC456" })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      id: { type: 'string', description: 'File ID' },
+      name: { type: 'string', description: 'Original file name' },
+      mimetype: { type: 'string' },
+      size: { type: 'number', description: 'File size in bytes' },
+      path: { type: 'string', description: 'Workspace path the file was written to' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Download a PDF for the office integration to read',
+      input: { file: 'F0123ABC456' },
+    },
+  ],
+};
+
+/**
+ * Tool handler function
+ * @param clients - Slack client instances
+ * @param params - Tool parameters
+ */
+export async function handleDownloadFile(
+  clients: SlackClients,
+  params: DownloadFileParams
+): Promise<ToolResult> {
+  try {
+    const result = await downloadFile(clients, params);
+    return { success: true, data: result };
+  } catch (error) {
+    return {
+      success: false,
+      error: { code: 'DOWNLOAD_FAILED', message: formatSlackError(error) },
+    };
+  }
+}
+
 /**
  * Tool handler function
  * @param clients - Slack client instances
@@ -96,6 +157,10 @@ export function createFileTools(clients: SlackClients): ToolDefinition[] {
     {
       tool: getFileContentTool,
       handler: withValidation<GetFileContentParams>(withClients(handleGetFileContent)),
+    },
+    {
+      tool: downloadFileTool,
+      handler: withValidation<DownloadFileParams>(withClients(handleDownloadFile)),
     },
   ];
 }

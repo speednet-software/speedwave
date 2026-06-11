@@ -125,7 +125,9 @@ The host-side `oauth` worker ([ADR-060](../adr/ADR-060-host-side-oauth-refresh-w
 - **Refresh tokens expire after 30 days.** If a project sits idle past that, the card shows a re-authorise banner — sign in again to restore access.
 - **Refresh runs in Speedwave Desktop.** With Desktop closed and only the CLI running, the current access token keeps working until it expires (up to 12 hours), then tool calls ask you to reconnect from Desktop.
 
-**Requested user scopes** (the integration can do exactly this, nothing more): `chat:write` (send messages as you), `channels:read` + `groups:read` (list public/private channels you are in), `channels:history` + `groups:history` (read history of those channels), `users:read` + `users:read.email` (look up users by e-mail). You can only read channels **you are a member of** — the integration never sees anything your account cannot.
+**Requested user scopes** (the integration can do exactly this, nothing more): `chat:write` (send messages as you), `channels:read` + `groups:read` (list public/private channels you are in), `channels:history` + `groups:history` (read history of those channels), `files:read` (read and download files shared in those channels), `users:read` + `users:read.email` (look up users by e-mail). You can only read channels **you are a member of** — the integration never sees anything your account cannot.
+
+**Files shared in channels.** Text files (markdown, code, logs, JSON) are read inline. Binary files (PDF, Word/Excel, images) are downloaded into the project workspace at `/workspace/slack-files/` — when the **Office** integration is also enabled, Claude can then read PDFs and documents from there. If you connected before `files:read` was added, the card shows a re-authorise banner; sign in again to grant it.
 
 Disconnecting (**Remove Credentials**) deletes the local tokens and state. To revoke the grant on Slack's side as well, remove the Speedwave app under your Slack profile's **Settings → Apps**.
 

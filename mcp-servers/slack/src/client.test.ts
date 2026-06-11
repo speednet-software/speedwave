@@ -11,6 +11,7 @@ import {
   readThread,
   getChannels,
   getFileContent,
+  downloadFile,
   getUsers,
 } from './client.js';
 import { WebClient } from '@slack/web-api';
@@ -53,10 +54,18 @@ vi.mock('@slack/web-api', () => ({
 // Mock fs/promises. The named `readFile` mirrors the default-object one
 // because @speedwave/mcp-shared's oauth-client imports it as a named binding
 // from 'node:fs/promises' (the slackCall refresh path reads the bearer file).
-const { readFileMock } = vi.hoisted(() => ({ readFileMock: vi.fn() }));
+// `mkdir`/`writeFile` back downloadFile's workspace write — both shapes are
+// exported so named (`import { mkdir }`) and default-object access resolve.
+const { readFileMock, mkdirMock, writeFileMock } = vi.hoisted(() => ({
+  readFileMock: vi.fn(),
+  mkdirMock: vi.fn().mockResolvedValue(undefined),
+  writeFileMock: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('fs/promises', () => ({
-  default: { readFile: readFileMock },
+  default: { readFile: readFileMock, mkdir: mkdirMock, writeFile: writeFileMock },
   readFile: readFileMock,
+  mkdir: mkdirMock,
+  writeFile: writeFileMock,
 }));
 
 /** Configured client container whose user mock keeps per-test method stubs. */
@@ -1091,6 +1100,145 @@ describe('slack client', () => {
       const result = await getFileContent(mockClients, { file: 'F5' });
       expect(result.truncated).toBe(true);
       expect(result.content.length).toBe(1024 * 1024);
+    });
+  });
+
+  describe('downloadFile', () => {
+    let mockClients: SlackClients;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      mockClients = presentClients();
+      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+      process.env.WORKSPACE_DIR = '/ws';
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      delete process.env.WORKSPACE_DIR;
+    });
+
+    function stubInfo(file: Record<string, unknown>): void {
+      (mockClients.user.files.info as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        file,
+      });
+    }
+
+    function stubDownload(
+      bytes: Buffer,
+      contentType = 'application/pdf'
+    ): ReturnType<typeof vi.fn> {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: (h: string) => (h === 'content-type' ? contentType : null) },
+        arrayBuffer: async () =>
+          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    it('writes a binary file under /workspace/slack-files with id-prefixed name', async () => {
+      stubInfo({
+        id: 'F1',
+        name: 'analiza_techniczna.pdf',
+        mimetype: 'application/pdf',
+        size: 4,
+        url_private: 'https://files.slack.com/files-pri/T1-F1/analiza.pdf',
+      });
+      const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46]); // %PDF
+      const fetchMock = stubDownload(bytes);
+
+      const result = await downloadFile(mockClients, { file: 'F1' });
+
+      expect(result).toEqual({
+        id: 'F1',
+        name: 'analiza_techniczna.pdf',
+        mimetype: 'application/pdf',
+        size: 4,
+        path: '/ws/slack-files/F1-analiza_techniczna.pdf',
+      });
+      expect(fs.mkdir).toHaveBeenCalledWith('/ws/slack-files', { recursive: true });
+      const [target, payload] = vi.mocked(fs.writeFile).mock.calls[0];
+      expect(target).toBe('/ws/slack-files/F1-analiza_techniczna.pdf');
+      expect(Buffer.from(payload as Buffer)).toEqual(bytes);
+      const [, init] = fetchMock.mock.calls[0];
+      expect((init as RequestInit).headers).toMatchObject({
+        Authorization: 'Bearer xoxe.xoxp-test',
+      });
+    });
+
+    it('sanitizes traversal and separators out of the saved filename', async () => {
+      stubInfo({
+        id: 'F2',
+        name: '../../etc/pa ss?wd*.txt',
+        mimetype: 'text/plain',
+        size: 1,
+        url_private: 'https://files.slack.com/files-pri/T1-F2/x',
+      });
+      stubDownload(Buffer.from([0x41]), 'text/plain');
+
+      const result = await downloadFile(mockClients, { file: 'F2' });
+
+      // No separators survive; leading dots stripped; unsafe chars → underscore.
+      expect(result.path).toBe('/ws/slack-files/F2-pa_ss_wd_.txt');
+      expect(result.path).not.toContain('..');
+    });
+
+    it('rejects oversized downloads before writing anything', async () => {
+      stubInfo({
+        id: 'F3',
+        name: 'huge.bin',
+        mimetype: 'application/octet-stream',
+        size: 60 * 1024 * 1024,
+        url_private: 'https://files.slack.com/files-pri/T1-F3/huge.bin',
+      });
+      stubDownload(Buffer.alloc(50 * 1024 * 1024 + 1), 'application/octet-stream');
+
+      await expect(downloadFile(mockClients, { file: 'F3' })).rejects.toThrow(
+        /over the download cap/
+      );
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('throws on a file without url_private', async () => {
+      stubInfo({ id: 'F4', name: 'gone' });
+      await expect(downloadFile(mockClients, { file: 'F4' })).rejects.toThrow(
+        /no downloadable content/
+      );
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('treats an HTML login page as an auth failure, not file bytes', async () => {
+      stubInfo({
+        id: 'F5',
+        name: 'doc.pdf',
+        mimetype: 'application/pdf',
+        size: 5,
+        url_private: 'https://files.slack.com/files-pri/T1-F5/doc.pdf',
+      });
+      stubDownload(Buffer.from('<html>login</html>'), 'text/html');
+      // No WORKER_OAUTH_URL in tests → the triggered refresh fails loudly
+      // instead of persisting the login page as a "file".
+      await expect(downloadFile(mockClients, { file: 'F5' })).rejects.toThrow();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('falls back to /workspace when WORKSPACE_DIR is unset', async () => {
+      delete process.env.WORKSPACE_DIR;
+      stubInfo({
+        id: 'F6',
+        name: 'note.md',
+        mimetype: 'text/markdown',
+        size: 1,
+        url_private: 'https://files.slack.com/files-pri/T1-F6/note.md',
+      });
+      stubDownload(Buffer.from([0x41]), 'text/markdown');
+
+      const result = await downloadFile(mockClients, { file: 'F6' });
+      expect(result.path).toBe('/workspace/slack-files/F6-note.md');
     });
   });
 

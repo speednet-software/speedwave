@@ -12,6 +12,8 @@
  * - Instance methods throw errors on API failures
  */
 
+import { mkdir, writeFile } from 'fs/promises';
+import path from 'path';
 import {
   WebClient,
   ChatPostMessageResponse,
@@ -284,7 +286,10 @@ export function formatSlackError(error: unknown): string {
   }
 
   if (slackError === 'missing_scope' || slackError === 'restricted_action') {
-    return 'Permission denied. Your Slack sign-in may not have sufficient permissions.';
+    return withSetupGuidance(
+      'Permission denied — the Slack sign-in lacks a newly required permission. ' +
+        'Re-authorise Slack in Speedwave Desktop (Integrations → Slack) and retry.'
+    );
   }
 
   if (slackError === 'channel_not_found') {
@@ -610,9 +615,74 @@ export interface SlackFileContent {
   truncated: boolean;
 }
 
+/** Metadata + bytes of an authenticated url_private download. */
+/** files.info metadata, narrowed to the fields the download path needs. */
+interface SlackFileMetaResolved {
+  id: string;
+  name: string;
+  mimetype: string;
+  size?: number;
+  url_private: string;
+}
+
+/**
+ * Resolve a file's metadata via files.info (requires `files:read`).
+ * Kept separate from the byte download so callers can gate on mimetype
+ * (e.g. getFileContent refusing binaries) without ever fetching the bytes.
+ * @param clients - Slack client container
+ * @param fileId - file ID (`F…`)
+ */
+async function resolveSlackFileMeta(
+  clients: SlackClients,
+  fileId: string
+): Promise<SlackFileMetaResolved> {
+  const info = await slackCall(clients, (c) => c.files.info({ file: fileId }));
+  const file = info.file as
+    | { id?: string; name?: string; mimetype?: string; size?: number; url_private?: string }
+    | undefined;
+  if (!file?.url_private) {
+    throw new Error(`File not found or has no downloadable content: ${fileId}`);
+  }
+  return {
+    id: file.id || fileId,
+    name: file.name || '',
+    mimetype: file.mimetype || 'application/octet-stream',
+    size: file.size,
+    url_private: file.url_private,
+  };
+}
+
+/**
+ * Download a resolved file's bytes from url_private with the bearer header.
+ * With a stale token Slack answers HTTP 200 with an HTML login page —
+ * detected by content-type and routed through the refresh wrapper.
+ * @param clients - Slack client container
+ * @param meta - metadata from resolveSlackFileMeta
+ */
+async function downloadSlackFileBytes(
+  clients: SlackClients,
+  meta: SlackFileMetaResolved
+): Promise<Buffer> {
+  return slackCall(clients, async (c) => {
+    const resp = await fetch(meta.url_private, {
+      headers: { Authorization: `Bearer ${c.token ?? ''}` },
+    });
+    const contentType = resp.headers.get('content-type') || '';
+    const htmlButNotHtmlFile = contentType.includes('text/html') && meta.mimetype !== 'text/html';
+    if (!resp.ok || htmlButNotHtmlFile) {
+      // Mimic the platform-error shape so isSlackAuthExpiredError triggers.
+      throw Object.assign(new Error('file download unauthorized'), {
+        data: { error: 'token_expired' },
+      });
+    }
+    return Buffer.from(await resp.arrayBuffer());
+  });
+}
+
 /**
  * Read the content of a text file shared on Slack (requires `files:read`).
- * Binary files are refused with their metadata in the error message.
+ * Binary files are refused from metadata alone — no bytes are downloaded —
+ * use downloadFile + the office integration for PDFs/documents.
  * @param {SlackClients} clients - Slack client container
  * @param {Object} params - Parameters
  * @param {string} params.file - File ID (`F…`) from a message's `files[].id`
@@ -623,49 +693,89 @@ export async function getFileContent(
   clients: SlackClients,
   params: { file: string }
 ): Promise<SlackFileContent> {
-  const info = await slackCall(clients, (c) => c.files.info({ file: params.file }));
-  const file = info.file as
-    | { id?: string; name?: string; mimetype?: string; size?: number; url_private?: string }
-    | undefined;
-  if (!file?.url_private) {
-    throw new Error(`File not found or has no downloadable content: ${params.file}`);
-  }
-  const mimetype = file.mimetype || 'application/octet-stream';
-  if (!isTextLike(mimetype)) {
+  const meta = await resolveSlackFileMeta(clients, params.file);
+  if (!isTextLike(meta.mimetype)) {
     throw new Error(
-      `File '${file.name}' is ${mimetype} — only text files can be read inline. ` +
-        'Ask the user to share its content another way.'
+      `File '${meta.name}' is ${meta.mimetype} — only text files can be read inline. ` +
+        'Download it into the workspace with downloadFile instead.'
     );
   }
-
-  // url_private needs the bearer; with a stale token Slack answers HTTP 200
-  // with an HTML login page — detect that by content-type, route through the
-  // refresh wrapper, and retry once like any other auth failure.
-  const body = await slackCall(clients, async (c) => {
-    const resp = await fetch(file.url_private as string, {
-      headers: { Authorization: `Bearer ${c.token ?? ''}` },
-    });
-    const contentType = resp.headers.get('content-type') || '';
-    const htmlButNotHtmlFile = contentType.includes('text/html') && mimetype !== 'text/html';
-    if (!resp.ok || htmlButNotHtmlFile) {
-      // Mimic the platform-error shape so isSlackAuthExpiredError triggers.
-      throw Object.assign(new Error('file download unauthorized'), {
-        data: { error: 'token_expired' },
-      });
-    }
-    const buf = Buffer.from(await resp.arrayBuffer());
-    return buf;
-  });
-
+  const body = await downloadSlackFileBytes(clients, meta);
   const truncated = body.length > MAX_FILE_CONTENT_BYTES;
   const content = body.subarray(0, MAX_FILE_CONTENT_BYTES).toString('utf-8');
   return {
-    id: file.id || params.file,
-    name: file.name || '',
-    mimetype,
-    size: file.size ?? body.length,
+    id: meta.id,
+    name: meta.name,
+    mimetype: meta.mimetype,
+    size: meta.size ?? body.length,
     content,
     truncated,
+  };
+}
+
+/** Cap on workspace downloads — guards project disk against huge uploads. */
+const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
+
+/** Workspace subdirectory all Slack downloads land in. */
+const SLACK_FILES_SUBDIR = 'slack-files';
+
+/** Workspace mount root (env override for tests). */
+function workspaceDir(): string {
+  return process.env.WORKSPACE_DIR || '/workspace';
+}
+
+/**
+ * Reduce a filename to a safe basename (no separators, no leading dots).
+ * @param name - raw filename from Slack's files.info
+ */
+function sanitizeFilename(name: string): string {
+  const base = name.split(/[\\/]/).pop() || 'file';
+  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
+  return cleaned || 'file';
+}
+
+/** Result of a workspace download. */
+export interface SlackDownloadedFile {
+  id: string;
+  name: string;
+  mimetype: string;
+  size: number;
+  /** Container path the file was written to (under /workspace). */
+  path: string;
+}
+
+/**
+ * Download any file shared on Slack into the project workspace
+ * (`/workspace/slack-files/<id>-<name>`), where filesystem reads and the
+ * office integration (PDF/Word/Excel) can process it. Requires `files:read`.
+ * @param {SlackClients} clients - Slack client container
+ * @param {Object} params - Parameters
+ * @param {string} params.file - File ID (`F…`) from a message's `files[].id`
+ * @returns {Promise<SlackDownloadedFile>} Metadata + workspace path
+ * @throws {Error} On unknown file, oversized content, or auth problems
+ */
+export async function downloadFile(
+  clients: SlackClients,
+  params: { file: string }
+): Promise<SlackDownloadedFile> {
+  const meta = await resolveSlackFileMeta(clients, params.file);
+  const body = await downloadSlackFileBytes(clients, meta);
+  if (body.length > MAX_DOWNLOAD_BYTES) {
+    throw new Error(
+      `File '${meta.name}' is ${body.length} bytes — over the download cap. ` +
+        'Ask the user to share it another way.'
+    );
+  }
+  const dir = path.join(workspaceDir(), SLACK_FILES_SUBDIR);
+  await mkdir(dir, { recursive: true });
+  const target = path.join(dir, `${meta.id}-${sanitizeFilename(meta.name)}`);
+  await writeFile(target, body);
+  return {
+    id: meta.id,
+    name: meta.name,
+    mimetype: meta.mimetype,
+    size: body.length,
+    path: target,
   };
 }
 

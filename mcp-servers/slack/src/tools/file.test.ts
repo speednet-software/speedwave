@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { RefreshLock } from '@speedwave/mcp-shared';
-import { handleGetFileContent, createFileTools } from './file-tools.js';
+import { handleGetFileContent, handleDownloadFile, createFileTools } from './file-tools.js';
 import type { SlackClients } from '../client.js';
 
 // Mock the client module
@@ -13,6 +13,7 @@ vi.mock('../client.js', async () => {
   return {
     ...actual,
     getFileContent: vi.fn(),
+    downloadFile: vi.fn(),
     formatSlackError: vi.fn((error: unknown) => {
       const e = error as { message?: string };
       return e.message || 'Unknown error';
@@ -76,24 +77,60 @@ describe('file-tools', () => {
     });
   });
 
-  describe('createFileTools', () => {
-    it('registers getFileContent with required metadata', () => {
-      const tools = createFileTools(presentClients());
-      expect(tools.map((t) => t.tool.name)).toEqual(['getFileContent']);
-      const tool = tools[0].tool;
-      expect(tool.inputSchema.required).toEqual(['file']);
-      expect(tool.annotations?.readOnlyHint).toBe(true);
-      expect(tool._meta?.deferLoading).toBe(true);
+  describe('handleDownloadFile', () => {
+    it('returns the workspace path on success', async () => {
+      const saved = {
+        id: 'F1',
+        name: 'analiza.pdf',
+        mimetype: 'application/pdf',
+        size: 4,
+        path: '/workspace/slack-files/F1-analiza.pdf',
+      };
+      vi.mocked(client.downloadFile).mockResolvedValue(saved);
+
+      const result = await handleDownloadFile(presentClients(), { file: 'F1' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(saved);
     });
 
-    it('returns NOT_CONFIGURED when the worker has no token', async () => {
-      const tools = createFileTools(unconfiguredClients());
-      const handler = tools[0].handler;
+    it('returns DOWNLOAD_FAILED on errors', async () => {
+      vi.mocked(client.downloadFile).mockRejectedValue(
+        new Error("File 'huge.bin' is 99 bytes — over the download cap.")
+      );
 
-      const result = await handler({ file: 'F1' });
-      expect(result.isError).toBe(true);
-      const parsed = JSON.parse(result.content[0].text as string);
-      expect(parsed.code).toBe('NOT_CONFIGURED');
+      const result = await handleDownloadFile(presentClients(), { file: 'F2' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('DOWNLOAD_FAILED');
+      expect(result.error?.message).toContain('download cap');
+    });
+  });
+
+  describe('createFileTools', () => {
+    it('registers getFileContent and downloadFile with required metadata', () => {
+      const tools = createFileTools(presentClients());
+      expect(tools.map((t) => t.tool.name)).toEqual(['getFileContent', 'downloadFile']);
+      const read = tools[0].tool;
+      expect(read.inputSchema.required).toEqual(['file']);
+      expect(read.annotations?.readOnlyHint).toBe(true);
+      expect(read._meta?.deferLoading).toBe(true);
+      const download = tools[1].tool;
+      expect(download.inputSchema.required).toEqual(['file']);
+      // A download writes to disk — it must NOT be a read-only hint.
+      expect(download.annotations?.readOnlyHint).not.toBe(true);
+      expect(download._meta?.deferLoading).toBe(true);
+    });
+
+    it('returns NOT_CONFIGURED for both tools when the worker has no token', async () => {
+      const tools = createFileTools(unconfiguredClients());
+
+      for (const { handler } of tools) {
+        const result = await handler({ file: 'F1' });
+        expect(result.isError).toBe(true);
+        const parsed = JSON.parse(result.content[0].text as string);
+        expect(parsed.code).toBe('NOT_CONFIGURED');
+      }
     });
   });
 });
