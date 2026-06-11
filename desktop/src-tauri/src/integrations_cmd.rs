@@ -1773,10 +1773,23 @@ mod tests {
         .unwrap();
     }
 
-    /// All seven slack scopes, as Slack echoes them.
+    /// Every currently-required slack scope, as Slack echoes them (SSOT-derived).
     fn all_slack_scopes() -> Vec<&'static str> {
         speedwave_runtime::consts::SLACK_OAUTH_USER_SCOPES.to_vec()
     }
+
+    /// The pre-DM grant (8 scopes, shipped before im/mpim support). Deliberately
+    /// hardcoded — NOT SSOT-derived — so the upgrade-path test below can fail.
+    const LEGACY_PRE_DM_SLACK_SCOPES: &[&str] = &[
+        "chat:write",
+        "channels:read",
+        "groups:read",
+        "channels:history",
+        "groups:history",
+        "users:read",
+        "users:read.email",
+        "files:read",
+    ];
 
     #[test]
     fn detect_oauth_action_required_slack_none_when_file_absent() {
@@ -1797,6 +1810,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         write_slack_state_for_detect(tmp.path(), &["chat:write"], &now);
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_when_grant_predates_dm_scopes() {
+        // Pins the upgrade path: a sign-in from before the DM feature (8 scopes)
+        // must trip the re-auth banner once the required set widened to 14.
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        write_slack_state_for_detect(tmp.path(), LEGACY_PRE_DM_SLACK_SCOPES, &now);
         assert_eq!(
             detect_oauth_action_required_in(tmp.path(), "p", "slack"),
             Some("scope_mismatch".to_string())
