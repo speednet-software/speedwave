@@ -339,11 +339,16 @@ describe('oauth tools', () => {
       });
       const [r1, r2] = await Promise.all([first, second]);
       expect(r1.isError).toBeFalsy();
-      // ...so the loser hits the rate-limit noop instead of a second IdP call.
       expect(r2.isError).toBeFalsy();
+      // Exactly one IdP call total; the winner is whoever acquired the mutex
+      // first (resolveCaller is async, so order is not positionally pinned —
+      // assert on the SET of outcomes, not which of r1/r2 lost the race).
       expect(refreshCalls).toHaveLength(1);
-      const loserPayload = JSON.parse(getTextResult(r2)) as { rateLimited?: boolean };
-      expect(loserPayload.rateLimited).toBe(true);
+      const payloads = [r1, r2].map(
+        (r) => JSON.parse(getTextResult(r)) as { rateLimited?: boolean }
+      );
+      const rateLimited = payloads.filter((p) => p.rateLimited === true);
+      expect(rateLimited).toHaveLength(1); // the loser hit the rate-limit noop
     });
 
     it('allows refresh when access token expired even within rate-limit window', async () => {
