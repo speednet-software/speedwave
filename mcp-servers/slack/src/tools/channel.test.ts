@@ -29,7 +29,14 @@ vi.mock('../client.js', async () => {
   };
 });
 
+// Mock the user-directory boundary — its machinery has its own test file;
+// here we only verify the handlers route messages through enrichment.
+vi.mock('../user-directory.js', () => ({
+  enrichMessagesWithAuthors: vi.fn(async (_clients: unknown, msgs: unknown[]) => msgs),
+}));
+
 import * as client from '../client.js';
+import { enrichMessagesWithAuthors } from '../user-directory.js';
 import { WebClient } from '@slack/web-api';
 
 /** Helper: clients object representing "tokens missing" — replaces null. */
@@ -161,6 +168,27 @@ describe('channel-tools', () => {
       });
     });
 
+    it('routes messages through author enrichment and returns the author field', async () => {
+      const mockMessages = [
+        { user: 'U123', text: 'Hello', ts: '1.0', type: 'message' },
+        { user: 'UX', text: 'World', ts: '2.0', type: 'message' },
+      ];
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
+      vi.mocked(enrichMessagesWithAuthors).mockImplementationOnce(async (_c, msgs) => {
+        msgs[0].author = 'Paweł Kowalski';
+        return msgs;
+      });
+
+      const result = await handleGetChannelMessages(mockClients, { channel: '#general' });
+
+      expect(enrichMessagesWithAuthors).toHaveBeenCalledWith(mockClients, mockMessages);
+      const data = result.data as { messages: { author?: string; user: string }[] };
+      expect(data.messages[0].author).toBe('Paweł Kowalski');
+      // Unresolvable ID stays raw — the read still succeeds.
+      expect(data.messages[1].author).toBeUndefined();
+      expect(data.messages[1].user).toBe('UX');
+    });
+
     it('gets messages with custom limit', async () => {
       const mockMessages = Array.from({ length: 50 }, (_, i) => ({
         user: `U${i}`,
@@ -265,6 +293,15 @@ describe('channel-tools', () => {
   });
 
   describe('handleGetThreadMessages', () => {
+    it('routes thread messages through author enrichment', async () => {
+      const mockMessages = [{ user: 'U123', text: 'parent', ts: '1.0', type: 'message' }];
+      vi.mocked(client.readThread).mockResolvedValue({ messages: mockMessages, has_more: false });
+
+      await handleGetThreadMessages(mockClients, { channel: 'C1', thread_ts: '1.0' });
+
+      expect(enrichMessagesWithAuthors).toHaveBeenCalledWith(mockClients, mockMessages);
+    });
+
     it('gets thread messages successfully', async () => {
       const mockPage = {
         messages: [

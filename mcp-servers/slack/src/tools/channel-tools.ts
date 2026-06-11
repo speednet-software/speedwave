@@ -9,6 +9,7 @@ import {
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { withValidation, withClients, ToolResult } from './validation.js';
+import { enrichMessagesWithAuthors } from '../user-directory.js';
 import {
   SlackClients,
   sendChannel,
@@ -116,6 +117,11 @@ const getChannelMessagesTool: Tool = {
           properties: {
             ts: { type: 'string', description: 'Message timestamp/ID' },
             user: { type: 'string', description: 'User ID who sent the message' },
+            author: {
+              type: 'string',
+              description:
+                'Human-readable sender name; absent if unresolvable — fall back to the user ID',
+            },
             text: { type: 'string', description: 'Message text content' },
             type: { type: 'string' },
             thread_ts: {
@@ -202,6 +208,11 @@ const getThreadMessagesTool: Tool = {
           properties: {
             ts: { type: 'string', description: 'Message timestamp/ID' },
             user: { type: 'string', description: 'User ID who sent the message' },
+            author: {
+              type: 'string',
+              description:
+                'Human-readable sender name; absent if unresolvable — fall back to the user ID',
+            },
             text: { type: 'string', description: 'Message text content' },
             type: { type: 'string' },
             thread_ts: { type: 'string', description: 'Parent ts of the thread' },
@@ -312,6 +323,7 @@ export async function handleGetChannelMessages(
 ): Promise<ToolResult> {
   try {
     const result = await readChannel(clients, params);
+    await enrichMessagesWithAuthors(clients, result.messages);
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: { code: 'READ_FAILED', message: formatSlackError(error) } };
@@ -329,6 +341,7 @@ export async function handleGetThreadMessages(
 ): Promise<ToolResult> {
   try {
     const result = await readThread(clients, params);
+    await enrichMessagesWithAuthors(clients, result.messages);
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: { code: 'READ_FAILED', message: formatSlackError(error) } };

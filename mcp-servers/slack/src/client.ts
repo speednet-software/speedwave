@@ -13,6 +13,7 @@
  */
 
 import { mkdir, writeFile } from 'fs/promises';
+import type { UserDirectoryCache } from './user-directory.js';
 import path from 'path';
 import {
   WebClient,
@@ -60,6 +61,8 @@ export interface SlackClients {
   statusTracker?: ConnectionStatusTracker;
   /** Whether the access token was loaded — drives "not configured" semantics. */
   _tokensStatus: SlackTokensStatus;
+  /** Lazy users.list cache (see user-directory.ts) — created on first use. */
+  _userDirectory?: UserDirectoryCache;
 }
 
 /**
@@ -76,6 +79,8 @@ export interface SlackMessage {
   text: string;
   ts: string;
   type: string;
+  /** Human-readable sender name resolved from the user directory (absent when unresolvable). */
+  author?: string;
   username?: string;
   /** Present when the message belongs to a thread (equals the parent's ts). */
   thread_ts?: string;
