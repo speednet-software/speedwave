@@ -121,9 +121,12 @@ outside compose locks). The CLI remains a **non-writer** of `bundle-state.json`
   existing disk-full prune ladder.
 - **`nerdctl builder prune --keep-storage <N>`** — not available in nerdctl
   (Docker-only flag)[^2]; revisit if upstream adds it.
-- **Content-addressed plugin image tags** — out of scope here; plugin tags are
-  still `speedwave-mcp-<slug>:<version|image_tag>` (see plugin contract in
-  CLAUDE.md). Follow-up, coordinated with the plugins repository.
+- **Content-addressed plugin image tags** — deferred at first, implemented
+  since: plugin tag = `<version|image_tag>-<digest16>` from the ADR-051
+  signed-tree digest, previous tag recorded in
+  `plugin-state/<slug>/applied_image_tag` and pruned when superseded. No
+  plugins-repository change needed — the tag is produced and consumed
+  entirely by this repo.
 
 ## Consequences
 

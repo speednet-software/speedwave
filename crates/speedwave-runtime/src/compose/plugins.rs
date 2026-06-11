@@ -102,6 +102,7 @@ pub(crate) fn apply_plugins_from_verified(
         if let Some(sid) = service_id {
             let service_value = plugin::generate_plugin_service(
                 manifest,
+                vp.tree_digest_hex(),
                 project_name,
                 network_name,
                 tokens_dir,

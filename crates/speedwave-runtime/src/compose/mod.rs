@@ -2636,6 +2636,7 @@ services:
         let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
         let service = generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "test-project",
             "speedwave_test-project_network",
             tokens_dir,
@@ -7335,6 +7336,7 @@ services:
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
         let service_value = plugin::generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "test",
             "speedwave_test_network",
             &tokens_dir,
@@ -7384,6 +7386,7 @@ services:
         };
         let svc = plugin::generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "proj",
             "net",
             std::path::Path::new("/tokens/proj"),
@@ -7484,6 +7487,7 @@ services:
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
         let service_value = plugin::generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
@@ -10086,7 +10090,11 @@ services:
             instructions: None,
             oauth: None,
         };
-        plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
+        plugin::VerifiedPlugin::new(
+            manifest,
+            plugin_dir.to_path_buf(),
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        )
     }
 
     fn fixture_host_bridge_manifest(url_env: &str, token_env: &str) -> plugin::HostBridgeManifest {
