@@ -181,6 +181,16 @@ fn spawn_background_teardown_with(
     }
 }
 
+/// Joins every in-flight background teardown — exit path only.
+pub(crate) fn drain_pending_teardowns() {
+    let handles: Vec<(String, std::thread::JoinHandle<()>)> =
+        pending_teardowns_lock().drain().collect();
+    for (project, handle) in handles {
+        log::info!("draining background teardown of '{project}' before exit");
+        let _ = handle.join();
+    }
+}
+
 /// Joins a pending background teardown of `project` before it is started
 /// again — otherwise the teardown could kill the freshly started containers.
 pub(crate) fn wait_for_pending_teardown(project: &str) {
@@ -416,6 +426,9 @@ pub async fn add_project(
     mcp_os: tauri::State<'_, SharedMcpOs>,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
 ) -> Result<(), String> {
+    let Ok(_transition_guard) = crate::project_cmd::PROJECT_TRANSITION_LOCK.try_lock() else {
+        return Err("A project switch is already in progress".to_string());
+    };
     // Start subsystems on-demand (e.g. after factory reset / fresh install)
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
@@ -475,9 +488,14 @@ pub async fn add_project(
             };
         }
         let rt = speedwave_runtime::runtime::detect_runtime();
-        switch_project_core(&prev_clone, &new_clone, &rt, &|proj, _rt| {
+        switch_project_core(&prev_clone, &new_clone, &rt, &|proj, rt| {
             // start_containers calls ensure_ready internally (noop — VM already up)
             check_project(proj)?;
+            // Lazy build for the new project (ADR-057) — repo-enabled
+            // integrations need their images before pull_policy:never up.
+            if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(rt, proj) {
+                return Err(format!("Image build failed: {sanitized}"));
+            }
             // Eager-start host workers before compose render — live WORKER_*_URLs
             // prevent the first-message container recreate.
             crate::ensure_host_exec_running(&host_exec_arc, proj);
@@ -1905,6 +1923,27 @@ mod tests {
         spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
         wait_for_pending_teardown("bg-dup-proj");
         assert!(!pending_teardowns_lock().contains_key("bg-dup-proj"));
+    }
+
+    /// Structural: add_project's closure must lazy-build project images before
+    /// start_containers — repo-enabled integrations would otherwise fail up.
+    #[test]
+    fn add_project_builds_missing_images_before_start() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn add_project(")
+            .expect("add_project must exist");
+        let body = &source[fn_start..];
+        let build_pos = body
+            .find("ensure_project_images_built")
+            .expect("add_project closure must build project images");
+        let start_pos = body
+            .find("start_containers(proj)")
+            .expect("add_project closure must call start_containers");
+        assert!(
+            build_pos < start_pos,
+            "image build must precede start_containers (ADR-057/066)"
+        );
     }
 
     // -- add_project flow tests --

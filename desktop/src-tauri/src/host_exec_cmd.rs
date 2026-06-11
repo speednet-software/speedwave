@@ -221,6 +221,18 @@ fn respawn_host_exec_worker(host_exec: &crate::reconcile::SharedHostExec, projec
 /// Re-render compose and recreate running containers so the hub re-discovers.
 /// Best-effort — failures are logged, not fatal. Also used by the watchdog.
 pub(crate) fn recreate_project_containers_if_running(project: &str) {
+    // Only the ACTIVE project may be resurrected — the watchdog fires for a
+    // project the user already switched away from while its background
+    // teardown runs (compose_ps TOCTOU would bring it back from the dead).
+    let active = speedwave_runtime::config::load_user_config()
+        .ok()
+        .and_then(|c| c.active_project);
+    if active.as_deref() != Some(project) {
+        log::debug!(
+            "recreate_project_containers_if_running: '{project}' is not the active project — skipping"
+        );
+        return;
+    }
     // Bundle reconcile may be rebuilding images. compose_up_recreate against a
     // missing image tag emits "image not available" to the user. Wait first.
     if let Err(e) = crate::containers_cmd::ensure_images_ready() {
@@ -273,6 +285,27 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recreate_guard_checks_active_project_before_anything_else() {
+        // The watchdog can fire for a project the user switched away from;
+        // without this first-line guard it resurrects the torn-down project.
+        let source = include_str!("host_exec_cmd.rs");
+        let fn_body = extract_fn_body_braced(
+            source,
+            "pub(crate) fn recreate_project_containers_if_running(",
+        );
+        let active_pos = fn_body
+            .find("active_project")
+            .expect("must read active_project from config");
+        let images_pos = fn_body
+            .find("ensure_images_ready")
+            .expect("readiness gate must exist");
+        assert!(
+            active_pos < images_pos,
+            "active-project guard must come before any side-effecting step"
+        );
+    }
 
     #[test]
     fn recreate_project_containers_if_running_waits_for_image_readiness() {

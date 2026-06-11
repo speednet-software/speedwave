@@ -653,9 +653,14 @@ fn collect_directory_entries(
     children.sort();
 
     for child in children {
-        // Skip symlinks to prevent infinite recursion from circular links
+        // Fail loud: the build-context copier dereferences symlinks, so a
+        // silently-skipped link would change image content WITHOUT changing
+        // the hash — users would keep the stale tag after an update.
         if child.is_symlink() {
-            continue;
+            anyhow::bail!(
+                "symlink not allowed in image hash inputs: {}",
+                child.display()
+            );
         }
         let rel_name = child
             .strip_prefix(dir)
@@ -695,6 +700,21 @@ pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn digest_paths_rejects_symlinked_hash_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("inputs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("link.txt")).unwrap();
+        let mut out = Vec::new();
+        let err = collect_directory_entries(&dir, "p", &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
 
     fn write_resource_tree(root: &Path) {
         std::fs::create_dir_all(root.join("containers/claude-resources/output-styles")).unwrap();

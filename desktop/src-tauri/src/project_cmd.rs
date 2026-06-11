@@ -41,6 +41,11 @@ fn apply_switch_project(
     Ok(())
 }
 
+/// Serialises project transitions — concurrent switches race each other's
+/// config commits, teardowns and rollbacks (double-click, add during switch).
+pub(crate) static PROJECT_TRANSITION_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 #[tauri::command]
 pub(crate) async fn switch_project(
     name: String,
@@ -50,6 +55,10 @@ pub(crate) async fn switch_project(
 ) -> Result<(), String> {
     use containers_cmd::{
         spawn_background_teardown, switch_project_core, teardown_only, SwitchResult,
+    };
+
+    let Ok(_transition_guard) = PROJECT_TRANSITION_LOCK.try_lock() else {
+        return Err("A project switch is already in progress".to_string());
     };
 
     // Config is committed first to keep the config lock brief — holding it
@@ -65,13 +74,6 @@ pub(crate) async fn switch_project(
     })
     .map_err(|e| e.to_string())?;
 
-    // Tear down the previous project's `host_exec` worker (best-effort).
-    if let Some(ref prev) = previous {
-        if prev != &name {
-            reconcile::teardown_host_exec_for_project(host_exec.inner(), prev);
-        }
-    }
-
     use tauri::Emitter;
     let _ = app.emit(
         "project_switch_started",
@@ -84,6 +86,7 @@ pub(crate) async fn switch_project(
     use tauri::Manager;
     let host_exec_arc = host_exec.inner().clone();
     let oauth_arc = app.state::<reconcile::SharedOauth>().inner().clone();
+    let oauth_for_teardown = oauth_arc.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = containers_cmd::ensure_images_ready() {
             return SwitchResult::Failed {
@@ -189,8 +192,12 @@ pub(crate) async fn switch_project(
         return Err(full_error);
     }
 
-    // Switch fully succeeded — stop the previous project in the background.
+    // Switch fully succeeded — stop the previous project in the background
+    // and retire its host workers. Doing this only AFTER success keeps a
+    // failed switch's previous project fully functional (host_exec included).
     if let Some(prev) = pending_teardown {
+        reconcile::teardown_host_exec_for_project(host_exec.inner(), &prev);
+        reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
         spawn_background_teardown(prev);
     }
 
@@ -375,6 +382,40 @@ mod tests {
         assert!(
             host_exec_pos < render_pos && oauth_pos < render_pos,
             "host workers must start before compose render"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_switch_is_rejected_while_lock_held() {
+        let guard = PROJECT_TRANSITION_LOCK.lock().await;
+        // A second transition must fail fast instead of racing the first.
+        assert!(PROJECT_TRANSITION_LOCK.try_lock().is_err());
+        drop(guard);
+        assert!(PROJECT_TRANSITION_LOCK.try_lock().is_ok());
+    }
+
+    /// Structural: previous project's host workers are retired only AFTER the
+    /// switch fully succeeds — a failed switch must leave them functional.
+    #[test]
+    fn switch_retires_previous_host_workers_only_after_success() {
+        let source = include_str!("project_cmd.rs");
+        let switch_fn = source
+            .split("pub(crate) async fn switch_project(")
+            .nth(1)
+            .expect("switch_project must exist");
+        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
+        let success_marker = body
+            .find("pending_teardown {")
+            .expect("success-path teardown block must exist");
+        let host_exec_pos = body
+            .find("teardown_host_exec_for_project")
+            .expect("host_exec teardown must exist");
+        let oauth_pos = body
+            .find("teardown_oauth_for_project")
+            .expect("oauth teardown must exist");
+        assert!(
+            host_exec_pos > success_marker && oauth_pos > success_marker,
+            "host worker teardown must live in the success path, not pre-switch"
         );
     }
 

@@ -1375,7 +1375,15 @@ fn rollback_integration_to_disabled(project: &str, service: &str) {
             enabled: Some(false),
         };
         if !integrations.set_service(service, cfg) {
-            return Err(anyhow::anyhow!("unknown service: {service}"));
+            // Not a built-in key — plugins toggle through their own map.
+            let is_installed_plugin = speedwave_runtime::plugin::list_installed_plugins()
+                .unwrap_or_default()
+                .iter()
+                .any(|m| m.service_id.as_deref() == Some(service) || m.slug == service);
+            if !is_installed_plugin {
+                return Err(anyhow::anyhow!("unknown service: {service}"));
+            }
+            integrations.set_plugin_enabled(service, false);
         }
         config::save_user_config(&user_config)
     });
@@ -1448,6 +1456,11 @@ pub async fn restart_integration_containers(
                 log::error!(
                     "restart_integration_containers: up failed: {e}, attempting rollback"
                 );
+                // Containers roll back below — the config toggle must follow,
+                // or the UI shows an enabled integration with no worker.
+                if let Some(svc) = just_enabled.as_deref() {
+                    rollback_integration_to_disabled(&project, svc);
+                }
                 // Nested transaction: rollback acquires its own — reentrant via HELD_LOCKS.
                 if let Err(rb_err) = speedwave_runtime::update::rollback_containers(rt, &project) {
                     log::error!("restart_integration_containers: rollback also failed: {rb_err}");
@@ -2273,6 +2286,38 @@ mod tests {
         assert!(
             oauth_pos < render_pos,
             "ensure_oauth_running (offset {oauth_pos}) must run before render_and_save_compose (offset {render_pos})"
+        );
+    }
+
+    #[test]
+    fn restart_rolls_back_just_enabled_on_up_failure_too() {
+        // Both failure arms must converge config with containers — otherwise
+        // the UI shows an enabled integration whose worker does not exist.
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers must exist");
+        let body = &source[fn_start..];
+        let up_err = body
+            .find("up failed: {e}, attempting rollback")
+            .expect("up-failure arm must exist");
+        let window = &body[up_err..up_err + 600];
+        assert!(
+            window.contains("rollback_integration_to_disabled"),
+            "up-failure arm must roll the just-enabled toggle back"
+        );
+    }
+
+    #[test]
+    fn rollback_helper_handles_plugin_keys() {
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn rollback_integration_to_disabled(")
+            .expect("rollback helper must exist");
+        let body = &source[fn_start..fn_start + 1600];
+        assert!(
+            body.contains("set_plugin_enabled"),
+            "plugin enable failure must be rollback-able (set_service has no plugin arm)"
         );
     }
 

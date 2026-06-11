@@ -961,6 +961,23 @@ pub(crate) fn validate_manifest(
         }
     }
 
+    // Version feeds the image tag — same charset as image_tag or the tag is
+    // invalid (and String::truncate could even panic on multibyte input).
+    {
+        static VERSION_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+            std::sync::OnceLock::new();
+        let re = VERSION_RE
+            .get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"))
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("invalid version regex: {e}"))?;
+        if !re.is_match(&manifest.version) {
+            anyhow::bail!(
+                "Invalid version '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
+                manifest.version
+            );
+        }
+    }
+
     // Validate auth_fields keys are safe filesystem names and field_type is known
     for field in &manifest.auth_fields {
         if field.key.contains('/')
@@ -2518,7 +2535,12 @@ fn plugin_image_tag(manifest: &PluginManifest, digest_hex: &str) -> String {
         .as_deref()
         .unwrap_or(&manifest.version)
         .to_string();
-    base.truncate(100); // OCI tag cap is 128 chars
+    // OCI tag cap is 128 chars; cut on a char boundary (truncate panics mid-char).
+    let mut cut = 100.min(base.len());
+    while !base.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    base.truncate(cut);
     let short = &digest_hex[..16.min(digest_hex.len())];
     format!("speedwave-mcp-{}:{base}-{short}", manifest.slug)
 }
@@ -7617,6 +7639,53 @@ mod tests {
         let after = expected_tag_for(tmp.path(), "example-plugin");
         assert_ne!(before, after, "tree change must retag (ADR-071)");
         assert!(after.starts_with("speedwave-mcp-example-plugin:1.0.0-"));
+    }
+
+    #[test]
+    fn plugin_image_tag_truncate_survives_multibyte_boundary() {
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test".to_string()),
+            slug: "test".to_string(),
+            // 99 ASCII chars then a multibyte char straddling index 100.
+            version: format!("{}{}", "v".repeat(99), "łłł"),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        // Must not panic; result stays within the OCI cap.
+        let tag = plugin_image_tag(&manifest, "0123456789abcdef");
+        assert!(tag.split(':').nth(1).unwrap().len() <= 128);
+    }
+
+    #[test]
+    fn validate_manifest_rejects_version_outside_tag_charset() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("badver");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{"name":"x","slug":"badver","version":"1.0:evil","description":"d"}"#,
+        )
+        .unwrap();
+        let manifest: PluginManifest =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("plugin.json")).unwrap())
+                .unwrap();
+        let err = validate_manifest(&manifest, &dir).unwrap_err().to_string();
+        assert!(err.contains("Invalid version"), "got: {err}");
     }
 
     #[test]

@@ -804,6 +804,11 @@ fn main() -> anyhow::Result<()> {
         runtime_not_available();
     }
 
+    // Align the in-distro nerdctl to the pin (Windows; no-op elsewhere) —
+    // CLI-only users must not stay on a version with divergent compose-up
+    // semantics. Warn-only and Once-guarded inside.
+    speedwave_runtime::provision::ensure_nerdctl_version();
+
     // Load config once — used for both project resolution and compose rendering
     let user_config = config::load_user_config().unwrap_or_else(|e| {
         err!("Failed to load config: {err}", err = redact_err(&e));
@@ -1075,6 +1080,24 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_aligns_nerdctl_before_compose_work() {
+        let source = include_str!("main.rs");
+        let avail = source
+            .find("runtime_not_available();")
+            .expect("availability gate must exist");
+        let align = source
+            .find("ensure_nerdctl_version();")
+            .expect("CLI must align in-distro nerdctl (Windows pin)");
+        let txn = source
+            .find("runtime.transaction(")
+            .expect("compose transaction must exist");
+        assert!(
+            avail < align && align < txn,
+            "nerdctl alignment must run after availability, before compose work"
+        );
+    }
 
     /// Structural (ADR-071): the run path must build missing images BEFORE the
     /// compose transaction — pull_policy:never fails a CLI-first-after-update.

@@ -108,6 +108,25 @@ pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project
     }
 }
 
+/// Stops and removes the per-project `oauth` worker (best-effort) —
+/// mirror of [`teardown_host_exec_for_project`] for the ADR-060 worker.
+pub(crate) fn teardown_oauth_for_project(oauth: &SharedOauth, project: &str) {
+    let proc = match oauth.lock() {
+        Ok(mut map) => map.remove(project),
+        Err(e) => {
+            log::warn!("teardown_oauth_for_project: map mutex poisoned: {e}");
+            return;
+        }
+    };
+    if let Some(mut proc) = proc {
+        log::info!("oauth[{project}]: tearing down worker");
+        if let Err(e) = proc.stop() {
+            log::warn!("oauth[{project}]: stop error during teardown: {e}");
+        }
+        proc.cleanup_files();
+    }
+}
+
 /// Reconcile phase: nothing running.
 const RECONCILE_IDLE: u8 = 0;
 /// Reconcile phase: background thread is checking whether a rebuild is needed.
@@ -265,6 +284,9 @@ fn restore_one_project(
     project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<(), String> {
+    // A background teardown of this project (mid-session switch) must finish
+    // before the restore, or it would kill the freshly restored containers.
+    crate::containers_cmd::wait_for_pending_teardown(project);
     // Build OUTSIDE the lock (ADR-066): bundle + plugin images.
     crate::integrations_cmd::ensure_project_images_built(rt, project)?;
 
@@ -452,6 +474,24 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         set_image_readiness(ImageReadiness::Ready);
         emit_bundle_status(app_handle);
 
+        // Converge orphans: a crash during a background teardown leaves a
+        // half-stopped non-active project that nothing else ever revisits.
+        if rt.is_available() {
+            let active = config::load_user_config()
+                .ok()
+                .and_then(|c| c.active_project);
+            if let Ok(cfg) = config::load_user_config() {
+                if let Ok(running) = list_running_projects(&rt, &cfg) {
+                    for project in running {
+                        if Some(&project) != active.as_ref() {
+                            log::info!("reconcile_bundle: converging orphaned project '{project}'");
+                            crate::containers_cmd::spawn_background_teardown(project);
+                        }
+                    }
+                }
+            }
+        }
+
         // Repair: images may be gone after containerd reinstall/VM recreation;
         // needs a running VM, so it runs after the gate opened (#781).
         match rt.ensure_ready() {
@@ -594,6 +634,10 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .phase
         .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
     {
+        // Persist the merged set FIRST: a failed restore must not drop an
+        // already-downed project from the next attempt's list.
+        state.pending_running_projects = projects.clone();
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         log::info!("reconcile_bundle: restoring {} project(s)", projects.len());
         restore_projects(&projects, &rt).map_err(|e| {
             let msg = format!("Project restore failed: {e}");
@@ -882,6 +926,9 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::HOST_EXEC_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    // A graceful exit must not race an in-flight background teardown —
+    // join them all before the container cleanup below.
+    crate::containers_cmd::drain_pending_teardowns();
 
     let ide_bridge = ctx.ide_bridge.clone();
     let plugin_bridges = ctx.plugin_bridges.clone();
@@ -1014,6 +1061,64 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_one_project_joins_pending_teardown_first() {
+        let source = include_str!("reconcile.rs");
+        let fn_start = source
+            .find("fn restore_one_project(")
+            .expect("restore_one_project must exist");
+        let body = &source[fn_start..fn_start + 1200];
+        let wait_pos = body
+            .find("wait_for_pending_teardown")
+            .expect("restore must join an in-flight teardown of the project");
+        let build_pos = body
+            .find("ensure_project_images_built")
+            .expect("restore must build images");
+        assert!(
+            wait_pos < build_pos,
+            "teardown join must precede any restore work"
+        );
+    }
+
+    #[test]
+    fn restore_set_is_persisted_before_restore_projects() {
+        let source = include_str!("reconcile.rs");
+        let anchor = source
+            .find("Persist the merged set FIRST")
+            .expect("restore-set persist must exist");
+        let window = &source[anchor..anchor + 700];
+        let save_pos = window.find("save_bundle_state").expect("must save state");
+        let restore_pos = window
+            .find("restore_projects(&projects")
+            .expect("must restore");
+        assert!(
+            save_pos < restore_pos,
+            "a failed restore must not drop already-downed projects from the retry list"
+        );
+    }
+
+    #[test]
+    fn exit_cleanup_drains_background_teardowns() {
+        let source = include_str!("reconcile.rs");
+        let fn_start = source
+            .find("pub(crate) fn run_exit_cleanup(")
+            .expect("run_exit_cleanup must exist");
+        let body = &source[fn_start..fn_start + 1500];
+        assert!(
+            body.contains("drain_pending_teardowns"),
+            "graceful exit must join in-flight teardowns before container cleanup"
+        );
+    }
+
+    #[test]
+    fn no_change_branch_converges_orphaned_projects() {
+        let source = include_str!("reconcile.rs");
+        assert!(
+            source.contains("converging orphaned project"),
+            "crash-orphaned non-active projects must be torn down at startup"
+        );
+    }
     use serial_test::serial;
 
     #[test]

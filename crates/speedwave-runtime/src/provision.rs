@@ -1154,6 +1154,25 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
             consts::NERDCTL_FULL_VERSION,
             version_line.trim()
         );
+    } else {
+        // Probe failed: distinguish "nerdctl genuinely absent" (exit 127 /
+        // not-found) from a transient wsl.exe transport error — a transient
+        // failure must NOT trigger a daemon-stopping reinstall.
+        let stderr = String::from_utf8_lossy(&nerdctl_check.stderr);
+        let absent = nerdctl_check.status.code() == Some(127)
+            || stderr.contains("not found")
+            || stderr.contains("No such file");
+        if !absent {
+            anyhow::bail!(
+                "nerdctl version probe failed transiently (status {:?}: {}); skipping reinstall",
+                nerdctl_check.status.code(),
+                stderr.trim()
+            );
+        }
+        log::info!(
+            "in-distro nerdctl absent; installing {}",
+            consts::NERDCTL_FULL_VERSION
+        );
     }
 
     // Try bundled nerdctl-full tarball first (offline install from NSIS bundle).
@@ -1205,6 +1224,15 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
   echo "SHA256 MISMATCH: expected $EXPECTED, got $ACTUAL"
   rm -rf /tmp/nerdctl-install
   exit 1
+fi
+# Pre-existing installs carry a unit WITHOUT KillMode=process — stopping it
+# would cgroup-kill every running container. Patch via override BEFORE stop
+# so user containers survive the upgrade (shims keep them; the new daemon
+# re-attaches). No-op on fresh install.
+if [ -f /etc/systemd/system/containerd.service ]; then
+  mkdir -p /etc/systemd/system/containerd.service.d
+  printf '[Service]\nKillMode=process\nDelegate=yes\n' > /etc/systemd/system/containerd.service.d/10-speedwave-killmode.conf
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
 fi
 # Stop daemons before unpacking — tar over live binaries fails ETXTBSY on a
 # reinstall (ADR-071). No is-system-running gate (skips on `degraded`); pkill
@@ -1352,6 +1380,14 @@ mod tests {
         let stop_pos = src
             .find("systemctl stop buildkit containerd")
             .expect("install script must stop daemons before unpacking");
+        let killmode_pos = src
+            .find("10-speedwave-killmode.conf")
+            .expect("old-unit KillMode override must exist");
+        assert!(
+            killmode_pos < stop_pos,
+            "KillMode override must be written BEFORE the stop, or the first \
+             migration cgroup-kills every running container"
+        );
         let pkill_pos = src
             .find("pkill -x containerd")
             .expect("install script must pkill bare-background daemons");
@@ -1372,6 +1408,20 @@ mod tests {
         assert!(
             !stop_line.contains("is-system-running"),
             "the daemon-stop line must not gate on is-system-running: {stop_line}"
+        );
+    }
+
+    #[test]
+    fn version_probe_failure_discriminates_absent_from_transient() {
+        let source = include_str!("provision.rs");
+        let anchor = source
+            .find("probe failed transiently")
+            .expect("transient-probe bail must exist");
+        let window_start = anchor.saturating_sub(900);
+        let window = &source[window_start..anchor];
+        assert!(
+            window.contains("Some(127)") && window.contains("not found"),
+            "absent-discriminator must check exit 127 / not-found before reinstalling"
         );
     }
 
