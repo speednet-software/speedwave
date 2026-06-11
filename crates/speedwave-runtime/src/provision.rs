@@ -1133,6 +1133,13 @@ fn nerdctl_version_matches_pin(version_line: &str) -> bool {
 /// Checks for a bundled tarball first (offline install), falling back to
 /// download if not found. Re-installs when the in-distro version differs from
 /// `NERDCTL_FULL_VERSION` so an upgrade actually upgrades the guest (ADR-071).
+/// `true` when a failed version probe means nerdctl is genuinely absent
+/// (vs a transient wsl.exe transport error that must not trigger reinstall).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn probe_indicates_absent(code: Option<i32>, stderr: &str) -> bool {
+    code == Some(127) || stderr.contains("not found") || stderr.contains("No such file")
+}
+
 #[cfg(target_os = "windows")]
 fn install_nerdctl_full() -> anyhow::Result<()> {
     let nerdctl_check = crate::binary::system_command("wsl.exe")
@@ -1159,9 +1166,7 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
         // not-found) from a transient wsl.exe transport error — a transient
         // failure must NOT trigger a daemon-stopping reinstall.
         let stderr = String::from_utf8_lossy(&nerdctl_check.stderr);
-        let absent = nerdctl_check.status.code() == Some(127)
-            || stderr.contains("not found")
-            || stderr.contains("No such file");
+        let absent = probe_indicates_absent(nerdctl_check.status.code(), &stderr);
         if !absent {
             anyhow::bail!(
                 "nerdctl version probe failed transiently (status {:?}: {}); skipping reinstall",
@@ -1361,7 +1366,7 @@ mod tests {
 
     #[test]
     fn nerdctl_version_rejects_other_version() {
-        // An older guest (e.g. upgraded from a prior release) must NOT match.
+        // A non-exact version (older, or longer like 2.2.20) must NOT match.
         assert!(!nerdctl_version_matches_pin("nerdctl version 2.1.2"));
         assert!(!nerdctl_version_matches_pin("nerdctl version 2.2.20"));
         assert!(!nerdctl_version_matches_pin(""));
@@ -1412,6 +1417,24 @@ mod tests {
     }
 
     #[test]
+    fn probe_absent_on_exit_127_or_not_found() {
+        assert!(probe_indicates_absent(Some(127), ""));
+        assert!(probe_indicates_absent(Some(1), "nerdctl: not found"));
+        assert!(probe_indicates_absent(Some(2), "No such file or directory"));
+    }
+
+    #[test]
+    fn probe_transient_errors_do_not_mean_absent() {
+        // wsl.exe transport failures: no daemon-stopping reinstall.
+        assert!(!probe_indicates_absent(
+            Some(1),
+            "The system cannot find the distro"
+        ));
+        assert!(!probe_indicates_absent(None, "killed by signal"));
+        assert!(!probe_indicates_absent(Some(-1), ""));
+    }
+
+    #[test]
     fn version_probe_failure_discriminates_absent_from_transient() {
         let source = include_str!("provision.rs");
         let anchor = source
@@ -1420,8 +1443,8 @@ mod tests {
         let window_start = anchor.saturating_sub(900);
         let window = &source[window_start..anchor];
         assert!(
-            window.contains("Some(127)") && window.contains("not found"),
-            "absent-discriminator must check exit 127 / not-found before reinstalling"
+            window.contains("probe_indicates_absent"),
+            "the bail path must gate on the pure discriminator"
         );
     }
 

@@ -945,37 +945,28 @@ pub(crate) fn validate_manifest(
         }
     }
 
-    // Validate image_tag format (alphanumeric, dots, hyphens, underscores)
-    if let Some(ref tag) = manifest.image_tag {
-        static TAG_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+    // One charset gate for every tag-feeding field (image_tag AND version) —
+    // an out-of-charset value would corrupt the OCI tag (or panic truncate).
+    fn tag_charset_re() -> anyhow::Result<&'static regex::Regex> {
+        static RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
             std::sync::OnceLock::new();
-        let re = TAG_RE
-            .get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"))
+        RE.get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"))
             .as_ref()
-            .map_err(|e| anyhow::anyhow!("invalid image_tag regex: {e}"))?;
-        if !re.is_match(tag) {
+            .map_err(|e| anyhow::anyhow!("invalid tag charset regex: {e}"))
+    }
+    if let Some(ref tag) = manifest.image_tag {
+        if !tag_charset_re()?.is_match(tag) {
             anyhow::bail!(
                 "Invalid image_tag '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
                 tag
             );
         }
     }
-
-    // Version feeds the image tag — same charset as image_tag or the tag is
-    // invalid (and String::truncate could even panic on multibyte input).
-    {
-        static VERSION_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
-            std::sync::OnceLock::new();
-        let re = VERSION_RE
-            .get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"))
-            .as_ref()
-            .map_err(|e| anyhow::anyhow!("invalid version regex: {e}"))?;
-        if !re.is_match(&manifest.version) {
-            anyhow::bail!(
-                "Invalid version '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
-                manifest.version
-            );
-        }
+    if !tag_charset_re()?.is_match(&manifest.version) {
+        anyhow::bail!(
+            "Invalid version '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
+            manifest.version
+        );
     }
 
     // Validate auth_fields keys are safe filesystem names and field_type is known
@@ -2571,6 +2562,13 @@ fn record_applied_image_tag_and_prune(
     let mut pending: Vec<String> = std::fs::read_to_string(&pending_path)
         .map(|c| c.lines().map(str::to_string).collect())
         .unwrap_or_default();
+    if let Err(e) = std::fs::read_to_string(&marker) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!(
+                "applied-tag marker unreadable for '{slug}' ({e}) — treating as first build"
+            );
+        }
+    }
     match std::fs::read_to_string(&marker) {
         Ok(old) if !old.trim().is_empty() => {
             if old.trim() != tag {

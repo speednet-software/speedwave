@@ -72,6 +72,17 @@ fn credentials_digest(token_dir: &std::path::Path, oauth_json: &std::path::Path)
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     let mut found = false;
+    match std::fs::read_dir(token_dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            // Transient unreadability must not flip the digest to "absent"
+            // silently — that alone would recreate the worker.
+            log::debug!(
+                "credentials_digest: cannot read {}: {e}",
+                token_dir.display()
+            );
+        }
+        _ => {}
+    }
     if let Ok(entries) = std::fs::read_dir(token_dir) {
         let mut files: Vec<std::path::PathBuf> = entries
             .filter_map(|e| e.ok().map(|e| e.path()))

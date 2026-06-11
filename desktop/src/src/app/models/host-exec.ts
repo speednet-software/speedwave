@@ -96,6 +96,7 @@ export const HOST_EXEC_META_TOOLS: readonly string[] = [
 export const HOST_EXEC_RESERVED_ENV_KEYS: readonly string[] = [
   // Reserved by Speedwave — auto-injected
   'PORT',
+  'SPW_CREDENTIALS_DIGEST',
   // Dynamic linker hijacks (Linux)
   'LD_PRELOAD',
   'LD_LIBRARY_PATH',

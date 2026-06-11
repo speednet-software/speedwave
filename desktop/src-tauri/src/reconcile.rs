@@ -91,40 +91,36 @@ pub(crate) struct ExitCleanupContext {
 }
 
 /// Stop + remove a project's worker; cleans token/port/pid/config (keeps audit log).
-pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project: &str) {
-    let proc = match host_exec.lock() {
+/// Generic per-project host-worker teardown (best-effort) — one body for
+/// every `HashMap<project, HostMcpProcess<S>>` registry.
+fn teardown_worker_for_project<S: speedwave_runtime::host_mcp_process::WorkerSpec>(
+    map: &Arc<Mutex<HashMap<String, speedwave_runtime::host_mcp_process::HostMcpProcess<S>>>>,
+    project: &str,
+    label: &str,
+) {
+    let proc = match map.lock() {
         Ok(mut map) => map.remove(project),
         Err(e) => {
-            log::warn!("teardown_host_exec_for_project: map mutex poisoned: {e}");
+            log::warn!("teardown {label}[{project}]: map mutex poisoned: {e}");
             return;
         }
     };
     if let Some(mut proc) = proc {
-        log::info!("host_exec[{project}]: tearing down worker");
+        log::info!("{label}[{project}]: tearing down worker");
         if let Err(e) = proc.stop() {
-            log::warn!("host_exec[{project}]: stop error during teardown: {e}");
+            log::warn!("{label}[{project}]: stop error during teardown: {e}");
         }
         proc.cleanup_files();
     }
 }
 
-/// Stops and removes the per-project `oauth` worker (best-effort) —
-/// mirror of [`teardown_host_exec_for_project`] for the ADR-060 worker.
+pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project: &str) {
+    teardown_worker_for_project(host_exec, project, "host_exec");
+}
+
+/// ADR-060 oauth worker variant of [`teardown_host_exec_for_project`].
 pub(crate) fn teardown_oauth_for_project(oauth: &SharedOauth, project: &str) {
-    let proc = match oauth.lock() {
-        Ok(mut map) => map.remove(project),
-        Err(e) => {
-            log::warn!("teardown_oauth_for_project: map mutex poisoned: {e}");
-            return;
-        }
-    };
-    if let Some(mut proc) = proc {
-        log::info!("oauth[{project}]: tearing down worker");
-        if let Err(e) = proc.stop() {
-            log::warn!("oauth[{project}]: stop error during teardown: {e}");
-        }
-        proc.cleanup_files();
-    }
+    teardown_worker_for_project(oauth, project, "oauth");
 }
 
 /// Reconcile phase: nothing running.
@@ -477,10 +473,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // Converge orphans: a crash during a background teardown leaves a
         // half-stopped non-active project that nothing else ever revisits.
         if rt.is_available() {
-            let active = config::load_user_config()
-                .ok()
-                .and_then(|c| c.active_project);
             if let Ok(cfg) = config::load_user_config() {
+                let active = cfg.active_project.clone();
                 if let Ok(running) = list_running_projects(&rt, &cfg) {
                     for project in running {
                         if Some(&project) != active.as_ref() {
