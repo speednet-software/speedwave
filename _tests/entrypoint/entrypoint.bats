@@ -1307,3 +1307,28 @@ setup_os_subservice_fixture() {
     # `os` itself must NOT be linked as a skill — only its sub-services exist as skills.
     [ ! -e "${TEST_HOME}/.claude/skills/os" ]
 }
+
+# ---------------------------------------------------------------------------
+# Keep-alive PID1 must exit 0 on SIGTERM (trap), not die killed (143) —
+# in the container PID1 would otherwise ignore TERM and eat the 10s timeout.
+# ---------------------------------------------------------------------------
+
+@test "keep-alive exits 0 on SIGTERM via trap" {
+    bash "$ENTRYPOINT" &
+    pid=$!
+    for _ in $(seq 1 50); do
+        [ -f "$CLAUDE_READY_MARKER" ] && break
+        sleep 0.1
+    done
+    [ -f "$CLAUDE_READY_MARKER" ]
+    kill -TERM "$pid"
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    set +e
+    wait "$pid"
+    status=$?
+    set -e
+    [ "$status" -eq 0 ]
+}

@@ -356,6 +356,19 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
       await options.onStart();
     }
 
+    // PID1 ignores default signal dispositions — without a handler, compose
+    // down waits the full 10s kill timeout per container (ADR-071).
+    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+      process.on(signal, () => {
+        const force = setTimeout(() => process.exit(0), 1000);
+        force.unref();
+        server?.close(() => {
+          clearTimeout(force);
+          process.exit(0);
+        });
+      });
+    }
+
     return new Promise((resolve, reject) => {
       server = app.listen(port, host, () => {
         const addr = server!.address();
