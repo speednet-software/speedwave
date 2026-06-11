@@ -2533,7 +2533,8 @@ mod tests {
     fn control_request_with_unknown_shape_returns_none() {
         // A future subtype without tool_name/tool_use_id must not parse into a
         // ControlRequest (the reader loop logs it instead of auto-approving).
-        let line = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback"}}"#;
+        let line =
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback"}}"#;
         assert!(try_parse_control_request_str(line).is_none());
     }
 
@@ -2951,7 +2952,8 @@ mod tests {
     #[test]
     fn parse_user_no_tool_results_emits_nothing() {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{}}]}}"#;
+        let line =
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{}}]}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
         let (chunks, log) = parser.parse_line(&parsed);
         assert!(chunks.is_empty());
