@@ -132,6 +132,8 @@ export interface SlackUser {
   id: string;
   name: string;
   real_name?: string;
+  /** Profile display name — what the workspace actually shows. */
+  display_name?: string;
   email?: string;
 }
 
@@ -860,6 +862,7 @@ export async function getUsers(
         id: result.user.id || '',
         name: result.user.name || '',
         real_name: result.user.real_name,
+        display_name: result.user.profile?.display_name || undefined,
         email: result.user.profile?.email,
       },
     };
