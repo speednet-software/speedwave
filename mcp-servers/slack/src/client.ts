@@ -624,7 +624,6 @@ export interface SlackFileContent {
   truncated: boolean;
 }
 
-/** Metadata + bytes of an authenticated url_private download. */
 /** files.info metadata, narrowed to the fields the download path needs. */
 interface SlackFileMetaResolved {
   id: string;
@@ -661,20 +660,26 @@ async function resolveSlackFileMeta(
   };
 }
 
+/** Slack CDN downloads normally finish in seconds; a minute covers slow links. */
+const FILE_DOWNLOAD_TIMEOUT_MS = 60_000;
+
 /**
  * Download a resolved file's bytes from url_private with the bearer header.
  * With a stale token Slack answers HTTP 200 with an HTML login page —
  * detected by content-type and routed through the refresh wrapper.
  * @param clients - Slack client container
  * @param meta - metadata from resolveSlackFileMeta
+ * @param maxBytes - when set, a Content-Length above it rejects before buffering
  */
 async function downloadSlackFileBytes(
   clients: SlackClients,
-  meta: SlackFileMetaResolved
+  meta: SlackFileMetaResolved,
+  maxBytes?: number
 ): Promise<Buffer> {
   return slackCall(clients, async (c) => {
     const resp = await fetch(meta.url_private, {
       headers: { Authorization: `Bearer ${c.token ?? ''}` },
+      signal: AbortSignal.timeout(FILE_DOWNLOAD_TIMEOUT_MS),
     });
     const contentType = resp.headers.get('content-type') || '';
     const htmlButNotHtmlFile = contentType.includes('text/html') && meta.mimetype !== 'text/html';
@@ -683,6 +688,13 @@ async function downloadSlackFileBytes(
       throw Object.assign(new Error('file download unauthorized'), {
         data: { error: 'token_expired' },
       });
+    }
+    const declared = Number(resp.headers.get('content-length') || 0);
+    if (maxBytes !== undefined && declared > maxBytes) {
+      throw new Error(
+        `File '${meta.name}' is ${declared} bytes — over the download cap. ` +
+          'Ask the user to share it another way.'
+      );
     }
     return Buffer.from(await resp.arrayBuffer());
   });
@@ -768,7 +780,7 @@ export async function downloadFile(
   params: { file: string }
 ): Promise<SlackDownloadedFile> {
   const meta = await resolveSlackFileMeta(clients, params.file);
-  const body = await downloadSlackFileBytes(clients, meta);
+  const body = await downloadSlackFileBytes(clients, meta, MAX_DOWNLOAD_BYTES);
   if (body.length > MAX_DOWNLOAD_BYTES) {
     throw new Error(
       `File '${meta.name}' is ${body.length} bytes — over the download cap. ` +
@@ -777,7 +789,8 @@ export async function downloadFile(
   }
   const dir = path.join(workspaceDir(), SLACK_DOWNLOAD_SUBPATH);
   await mkdir(dir, { recursive: true });
-  const target = path.join(dir, `${meta.id}-${sanitizeFilename(meta.name)}`);
+  // meta.id can fall back to the caller-provided file ID — sanitize it too.
+  const target = path.join(dir, `${sanitizeFilename(meta.id)}-${sanitizeFilename(meta.name)}`);
   await writeFile(target, body);
   return {
     id: meta.id,

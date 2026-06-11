@@ -81,6 +81,18 @@ describe('user-directory', () => {
       expect(usersList).toHaveBeenCalledWith({ limit: 200, cursor: undefined });
     });
 
+    it('skips members without an id', async () => {
+      const usersList = vi
+        .fn()
+        .mockResolvedValue(pageResponse([{ name: 'ghost' }, member('U1', 'a')]));
+      const clients = clientsWith(usersList);
+
+      const dir = await ensureUserDirectory(clients);
+
+      expect(dir.size).toBe(1);
+      expect(dir.has('U1')).toBe(true);
+    });
+
     it('merges cursor-paginated pages and stops at the empty cursor', async () => {
       const usersList = vi
         .fn()
@@ -198,6 +210,24 @@ describe('user-directory', () => {
       await vi.waitFor(async () => {
         expect(await peekUserDirectory(clients, 10)).not.toBeNull();
       });
+    });
+
+    it('swallows a failing background rebuild and keeps serving stale data', async () => {
+      vi.useFakeTimers();
+      const usersList = vi
+        .fn()
+        .mockResolvedValueOnce(pageResponse([member('U1', 'a')]))
+        .mockRejectedValueOnce(new Error('slack down'));
+      const clients = clientsWith(usersList);
+
+      await ensureUserDirectory(clients);
+      vi.advanceTimersByTime(USER_DIRECTORY_TTL_MS + 1);
+
+      const stale = await peekUserDirectory(clients);
+      expect(stale?.size).toBe(1);
+      // Let the failed background rebuild settle — it must not reject unhandled.
+      await vi.runAllTimersAsync();
+      expect((await peekUserDirectory(clients))?.size).toBe(1);
     });
 
     it('returns stale data immediately and kicks a background rebuild', async () => {

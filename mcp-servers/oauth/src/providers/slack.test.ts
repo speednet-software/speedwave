@@ -212,6 +212,81 @@ describe('refreshSlackToken', () => {
   });
 });
 
+describe('refreshSlackToken edge shapes', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('aborts a hung token endpoint and maps the non-Error rejection to network', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            // Reject with a plain string: exercises the String(err) arm.
+            init.signal?.addEventListener('abort', () => reject('aborted by timeout'));
+          })
+      )
+    );
+
+    const pending = refreshSlackToken(slackReq());
+    await vi.advanceTimersByTimeAsync(600_000);
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('network');
+      expect(result.error.message).toContain('aborted by timeout');
+    }
+  });
+
+  it('accepts a nested shape without refresh_token and scope', async () => {
+    mockJson({
+      body: {
+        ok: true,
+        authed_user: { access_token: 'xoxe.xoxp-min', expires_in: 43200, token_type: 'user' },
+      },
+    });
+
+    const result = await refreshSlackToken(slackReq());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.accessToken).toBe('xoxe.xoxp-min');
+      expect(result.value.refreshToken).toBeUndefined();
+      expect(result.value.grantedScopes).toEqual(['chat:write', 'channels:history']);
+    }
+  });
+
+  it('accepts a flat shape without refresh_token', async () => {
+    mockJson({
+      body: { ok: true, access_token: 'xoxe.xoxp-flat', expires_in: 43200, token_type: 'user' },
+    });
+
+    const result = await refreshSlackToken(slackReq());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.refreshToken).toBeUndefined();
+    }
+  });
+});
+
+describe('slackProvider.refresh', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('delegates to refreshSlackToken (provider-object entry point)', async () => {
+    mockJson({ body: FLAT_OK });
+    const result = await slackProvider.refresh(slackReq());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.accessToken).toBe('xoxe.xoxp-new');
+    }
+  });
+});
+
 describe('slackProvider.validateRequest', () => {
   it('accepts a well-formed refresh request', () => {
     expect(slackProvider.validateRequest!(slackReq())).toBeNull();

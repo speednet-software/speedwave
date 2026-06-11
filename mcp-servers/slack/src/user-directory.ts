@@ -181,12 +181,8 @@ export async function enrichMessagesWithAuthors(
   clients: SlackClients,
   messages: SlackMessage[]
 ): Promise<SlackMessage[]> {
-  let directory: Map<string, SlackDirectoryUser> | null = null;
-  try {
-    directory = await peekUserDirectory(clients);
-  } catch {
-    directory = null;
-  }
+  // peekUserDirectory never throws by contract — no defensive catch needed.
+  const directory = await peekUserDirectory(clients);
   for (const msg of messages) {
     const entry = directory?.get(msg.user);
     const author = entry ? displayNameOf(entry) : msg.username;

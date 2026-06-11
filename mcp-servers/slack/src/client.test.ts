@@ -1230,6 +1230,65 @@ describe('slack client', () => {
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
+    it('sanitizes a hostile file ID falling back from files.info', async () => {
+      // files.info without an id → meta.id falls back to the caller's argument.
+      stubInfo({
+        name: 'x.pdf',
+        mimetype: 'application/pdf',
+        size: 1,
+        url_private: 'https://files.slack.com/files-pri/T1-X/x.pdf',
+      });
+      stubDownload(Buffer.from([0x41]));
+
+      const result = await downloadFile(mockClients, { file: '../../etc/passwd' });
+
+      // sanitizeFilename keeps only the basename — traversal segments drop out.
+      expect(result.path).toBe('/ws/.speedwave/slack/passwd-x.pdf');
+      expect(result.path).not.toContain('..');
+    });
+
+    it('rejects via Content-Length before buffering the body', async () => {
+      stubInfo({
+        id: 'F7',
+        name: 'huge.bin',
+        mimetype: 'application/octet-stream',
+        size: 60 * 1024 * 1024,
+        url_private: 'https://files.slack.com/files-pri/T1-F7/huge.bin',
+      });
+      const arrayBuffer = vi.fn();
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (h: string) =>
+            h === 'content-length' ? String(60 * 1024 * 1024) : 'application/octet-stream',
+        },
+        arrayBuffer,
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(downloadFile(mockClients, { file: 'F7' })).rejects.toThrow(
+        /over the download cap/
+      );
+      expect(arrayBuffer).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('passes an abort signal to the CDN fetch', async () => {
+      stubInfo({
+        id: 'F8',
+        name: 'a.pdf',
+        mimetype: 'application/pdf',
+        size: 1,
+        url_private: 'https://files.slack.com/files-pri/T1-F8/a.pdf',
+      });
+      const fetchMock = stubDownload(Buffer.from([0x41]));
+
+      await downloadFile(mockClients, { file: 'F8' });
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    });
+
     it('falls back to /workspace when WORKSPACE_DIR is unset', async () => {
       delete process.env.WORKSPACE_DIR;
       stubInfo({
@@ -1523,6 +1582,23 @@ describe('slack client', () => {
       expect(dms.map((d) => d.id)).toEqual(['D1', 'D2']);
       expect(list).toHaveBeenCalledTimes(2);
       expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'CUR2' }));
+    });
+
+    it('skips malformed entries without an id', async () => {
+      stubList([
+        {
+          ok: true,
+          channels: [
+            { is_im: true, user: 'U1' },
+            { id: 'D2', is_im: true, user: 'U2' },
+          ],
+          response_metadata: { next_cursor: '' },
+        },
+      ]);
+
+      const { dms } = await listDms(mockClients);
+
+      expect(dms.map((d) => d.id)).toEqual(['D2']);
     });
 
     it('returns an empty list for a user with no DMs', async () => {
