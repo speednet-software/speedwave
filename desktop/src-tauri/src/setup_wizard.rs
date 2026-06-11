@@ -312,10 +312,12 @@ pub fn build_images() -> anyhow::Result<()> {
 
     // Record that the current bundle's images are now built so that
     // reconcile_bundle_update (on next startup) sees bundle_changed=false
-    // and skips the unnecessary rebuild.
+    // and skips the unnecessary rebuild. The per-image map must be persisted
+    // too, else the first reconcile would re-prune/rebuild (ADR-071).
     let manifest = bundle::load_current_bundle_manifest()?;
     let mut bundle_state = bundle::load_bundle_state();
     bundle_state.applied_bundle_id = Some(manifest.bundle_id);
+    bundle_state.applied_image_hashes = manifest.image_hashes;
     bundle_state.phase = bundle::BundleReconcilePhase::Done;
     bundle_state.pending_running_projects.clear();
     bundle_state.last_error = None;
@@ -2814,6 +2816,11 @@ networks:
             body.contains("bundle::save_bundle_state"),
             "build_images() must persist BundleState (applied_bundle_id) after building images \
              so that reconcile_bundle_update sees bundle_changed=false on next startup"
+        );
+        assert!(
+            body.contains("applied_image_hashes = manifest.image_hashes"),
+            "build_images() must persist the per-image hash map (ADR-071) — without it the \
+             first reconcile after setup would treat every image as replaced"
         );
         assert!(
             body.contains("bundle::load_current_bundle_manifest"),

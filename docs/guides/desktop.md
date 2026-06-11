@@ -24,25 +24,25 @@ The desktop app now uses a single backend flow for update installation:
 3. Running project containers are stopped before the app update is installed.
 4. The app installs the approved version and restarts immediately.
 
-After restart, the desktop backend compares the installed bundle against `~/.speedwave/bundle-state.json`. If the `bundle_id` changed, it runs a startup reconcile:
+After restart, the desktop backend compares the installed bundle against `~/.speedwave/bundle-state.json`. If the reconcile id (`bundle_id`) changed, it runs a startup reconcile:
 
 1. Sync bundled `claude-resources` into `~/.speedwave/claude-resources`
-2. Rebuild images tagged for the current `bundle_id`
+2. Build only the images whose per-image build-input hash tag is missing ([ADR-071](../adr/ADR-071-per-image-build-input-hash-tags.md)) — a release with no container changes builds zero images
 3. Recreate only the projects that were running before the update
 4. Emit `bundle_reconcile_status` so the UI can show progress or retry
 
-The same startup reconcile also runs after a manual app upgrade outside the desktop UI.
+If the reconcile id is unchanged but projects were stopped by a no-op update (e.g. a same-version reinstall), the reconcile restores them instead of stranding them stopped. The same startup reconcile also runs after a manual app upgrade outside the desktop UI.
 
 ## Bundle Identity
 
 Desktop builds generate `build-context/bundle-manifest.json` with:
 
 - `app_version`
-- `bundle_id`
-- `build_context_hash`
+- `bundle_id` — the reconcile id (app_version + per-image hashes + resources hash)
+- `image_hashes` — per-image build-input hash map (image name → 16-char hex)
 - `claude_resources_hash`
 
-The runtime uses `bundle_id` as the compatibility contract between the installed app bundle and local images. Built-in images are no longer addressed as `speedwave-*:latest`; they are rendered as `speedwave-*:<bundle_id>`.
+The runtime uses `bundle_id` as the reconcile trigger (resources sync + project restore) and `image_hashes` to tag and rebuild images. Built-in images are rendered as `speedwave-*:<per-image-hash>`, so an update rebuilds only the images whose own build inputs changed (see [ADR-071](../adr/ADR-071-per-image-build-input-hash-tags.md)).
 
 ## Bundle Asset Validation
 

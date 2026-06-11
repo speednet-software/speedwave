@@ -187,36 +187,37 @@ fn load_snapshot(project: &str) -> anyhow::Result<UpdateSnapshot> {
     Ok(snapshot)
 }
 
-/// Prunes previous-bundle images iff bundle ID changed. Callers MUST
-/// invoke only after new containers are confirmed running (atomicity).
+/// Prunes superseded per-image tags (+ legacy single-id tags on migration).
+/// Callers MUST invoke only after new containers are confirmed running (atomicity).
 #[cfg(any(test, feature = "test-support"))]
 pub fn maybe_prune_previous_bundle(
     runtime: &crate::runtime::LockedRuntime,
-    applied_bundle_id: Option<&str>,
-    new_bundle_id: &str,
+    state: &bundle::BundleState,
+    manifest: &bundle::BundleManifest,
 ) {
-    maybe_prune_previous_bundle_inner(runtime, applied_bundle_id, new_bundle_id);
+    maybe_prune_previous_bundle_inner(runtime, state, manifest);
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
 fn maybe_prune_previous_bundle(
     runtime: &crate::runtime::LockedRuntime,
-    applied_bundle_id: Option<&str>,
-    new_bundle_id: &str,
+    state: &bundle::BundleState,
+    manifest: &bundle::BundleManifest,
 ) {
-    maybe_prune_previous_bundle_inner(runtime, applied_bundle_id, new_bundle_id);
+    maybe_prune_previous_bundle_inner(runtime, state, manifest);
 }
 
 fn maybe_prune_previous_bundle_inner(
     runtime: &crate::runtime::LockedRuntime,
-    applied_bundle_id: Option<&str>,
-    new_bundle_id: &str,
+    state: &bundle::BundleState,
+    manifest: &bundle::BundleManifest,
 ) {
-    if let Some(old_id) = build::should_prune_bundle(applied_bundle_id, new_bundle_id) {
-        if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
-            log::warn!("Failed to prune old bundle images: {e}");
-        }
-    }
+    build::prune_superseded_images(
+        runtime,
+        &state.applied_image_hashes,
+        state.applied_bundle_id.as_deref(),
+        manifest,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -358,12 +359,12 @@ pub fn update_containers(
     let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
 
-    // Build OUTSIDE the compose lock — see ADR-066. If build fails, no
-    // snapshot is written and running containers are untouched.
-    let images_rebuilt = build::build_images_for_bundle(
+    // Build OUTSIDE the compose lock (ADR-066), missing-only per image
+    // (ADR-071). On failure no snapshot is written, containers untouched.
+    let images_rebuilt = build::build_missing_images_locked(
         runtime,
         &build::enabled_images(&integrations),
-        &new_manifest.bundle_id,
+        &new_manifest,
     )
     .map_err(|e| {
         anyhow::anyhow!(
@@ -399,11 +400,7 @@ pub fn update_containers(
         );
     }
 
-    maybe_prune_previous_bundle(
-        runtime,
-        bundle_state.applied_bundle_id.as_deref(),
-        &new_manifest.bundle_id,
-    );
+    maybe_prune_previous_bundle(runtime, &bundle_state, &new_manifest);
 
     Ok(ContainerUpdateResult {
         success: true,
@@ -954,27 +951,45 @@ mod tests {
     }
 
     #[test]
-    fn test_buildkit_prune_in_prune_old_bundle_images() {
-        // Structural test: prune_buildkit_cache must be called inside
-        // prune_old_bundle_images — this ensures BuildKit cache is cleaned
-        // alongside old tagged images during bundle updates.
+    fn test_no_buildkit_prune_in_routine_prune_paths() {
+        // Structural test (ADR-071): prune_buildkit_cache must NOT be called in
+        // the routine prune paths — apt/npm cache layers are reused across
+        // updates. The sole cache-prune site is the disk-full recovery ladder
+        // in build_images_for_bundle_in (pinned by test_retry_on_disk_full_error in build.rs).
         let source = include_str!("build.rs");
 
-        let fn_start = source
-            .find("fn prune_old_bundle_images(")
-            .expect("prune_old_bundle_images function must exist in build.rs");
-        let fn_body = &source[fn_start..];
+        for fn_name in [
+            "fn prune_old_bundle_images(",
+            "fn prune_replaced_images(",
+            "fn prune_orphan_current_bundle_images(",
+        ] {
+            let fn_start = source
+                .find(fn_name)
+                .unwrap_or_else(|| panic!("{fn_name} must exist in build.rs"));
+            let fn_body = &source[fn_start..];
+            let fn_end = fn_body[1..]
+                .find("\npub fn ")
+                .or_else(|| fn_body[1..].find("\nfn "))
+                .unwrap_or(fn_body.len());
+            let fn_body = &fn_body[..fn_end];
 
-        // Find the end of the function (next `pub fn` or `fn ` at top level)
-        let fn_end = fn_body[1..]
-            .find("\npub fn ")
-            .or_else(|| fn_body[1..].find("\nfn "))
-            .unwrap_or(fn_body.len());
-        let fn_body = &fn_body[..fn_end];
+            assert!(
+                !fn_body.contains("prune_buildkit_cache"),
+                "{fn_name} must not prune the BuildKit cache (routine prune path)"
+            );
+        }
+    }
 
+    #[test]
+    fn update_containers_never_writes_bundle_state() {
+        // ADR-071 single-writer rule: only Desktop (reconcile / setup wizard /
+        // update commands) persists bundle state; the CLI only reads it.
+        let source = include_str!("update.rs");
+        // Split literal so this assertion line isn't itself a match.
+        let needle = format!("{}{}", "save_", "bundle_state");
         assert!(
-            fn_body.contains("prune_buildkit_cache"),
-            "prune_old_bundle_images must call prune_buildkit_cache to clear BuildKit cache"
+            !source.contains(&needle),
+            "update.rs must not persist bundle state (CLI is a non-writer)"
         );
     }
 }

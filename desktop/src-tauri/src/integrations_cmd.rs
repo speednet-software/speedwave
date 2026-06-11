@@ -1315,7 +1315,7 @@ pub fn ensure_project_images_built(
     let manifest = speedwave_runtime::bundle::load_current_bundle_manifest()
         .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
     let enabled = speedwave_runtime::build::enabled_images(&integrations);
-    speedwave_runtime::build::build_missing_images(rt, &enabled, &manifest.bundle_id)
+    speedwave_runtime::build::build_missing_images_locked(rt, &enabled, &manifest)
         .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
 
     // Plugin images must also be built outside the compose lock (ADR-066).
@@ -1357,7 +1357,7 @@ fn prune_unused_worker_images(rt: &speedwave_runtime::runtime::LockedRuntime, pr
         }
     };
     if let Err(e) =
-        speedwave_runtime::build::prune_orphan_current_bundle_images(rt, &manifest.bundle_id, &keep)
+        speedwave_runtime::build::prune_orphan_current_bundle_images_locked(rt, &manifest, &keep)
     {
         log::warn!("prune_unused_worker_images failed: {e}");
     }

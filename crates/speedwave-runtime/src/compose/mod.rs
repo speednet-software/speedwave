@@ -101,6 +101,22 @@ fn resolve_bundle_manifest() -> anyhow::Result<bundle::BundleManifest> {
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
 const COMPOSE_TEMPLATE: &str = include_str!("../../../../containers/compose.template.yml");
 
+/// Template `${IMAGE_*}` placeholder ↔ catalogue image name. Alignment with
+/// `build::IMAGES` and the template is pinned by `image_placeholders_align_*`.
+const IMAGE_PLACEHOLDERS: &[(&str, &str)] = &[
+    ("${IMAGE_CLAUDE}", build::IMAGE_CLAUDE),
+    ("${IMAGE_MCP_HUB}", build::IMAGE_MCP_HUB),
+    ("${IMAGE_MCP_SLACK}", build::IMAGE_MCP_SLACK),
+    ("${IMAGE_MCP_SHAREPOINT}", build::IMAGE_MCP_SHAREPOINT),
+    ("${IMAGE_MCP_REDMINE}", build::IMAGE_MCP_REDMINE),
+    ("${IMAGE_MCP_GITLAB}", build::IMAGE_MCP_GITLAB),
+    ("${IMAGE_MCP_GITHUB}", build::IMAGE_MCP_GITHUB),
+    ("${IMAGE_MCP_ATLASSIAN}", build::IMAGE_MCP_ATLASSIAN),
+    ("${IMAGE_MCP_OFFICE}", build::IMAGE_MCP_OFFICE),
+    ("${IMAGE_MCP_PLAYWRIGHT}", build::IMAGE_MCP_PLAYWRIGHT),
+    ("${IMAGE_MCP_CONTEXT7}", build::IMAGE_MCP_CONTEXT7),
+];
+
 /// One live host-side bridge that compose can advertise to a container
 /// worker. The plugin manifest's `host_bridge` declaration drives both
 /// `slug` (which plugin to match) and the env-var names; the Desktop
@@ -187,50 +203,10 @@ pub fn render_compose_in(
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
     yaml = yaml.replace("${PORT_HUB}", &port_hub.to_string());
     yaml = yaml.replace("${PORT_WORKER}", &port_worker.to_string());
-    yaml = yaml.replace(
-        "${IMAGE_CLAUDE}",
-        &build::image_ref(build::IMAGE_CLAUDE, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_HUB}",
-        &build::image_ref(build::IMAGE_MCP_HUB, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_SLACK}",
-        &build::image_ref(build::IMAGE_MCP_SLACK, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_SHAREPOINT}",
-        &build::image_ref(build::IMAGE_MCP_SHAREPOINT, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_REDMINE}",
-        &build::image_ref(build::IMAGE_MCP_REDMINE, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_GITLAB}",
-        &build::image_ref(build::IMAGE_MCP_GITLAB, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_GITHUB}",
-        &build::image_ref(build::IMAGE_MCP_GITHUB, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_ATLASSIAN}",
-        &build::image_ref(build::IMAGE_MCP_ATLASSIAN, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_OFFICE}",
-        &build::image_ref(build::IMAGE_MCP_OFFICE, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_PLAYWRIGHT}",
-        &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_CONTEXT7}",
-        &build::image_ref(build::IMAGE_MCP_CONTEXT7, &bundle_manifest.bundle_id),
-    );
+    // Per-image build-input hash tags (ADR-071) — one placeholder per service.
+    for (placeholder, image_name) in IMAGE_PLACEHOLDERS {
+        yaml = yaml.replace(placeholder, &bundle_manifest.image_tag(image_name)?);
+    }
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
@@ -1919,6 +1895,44 @@ services:
         assert!(parsed.get("services").is_some());
     }
 
+    /// SSOT alignment (ADR-071): every `${IMAGE_*}` placeholder in the template
+    /// has a substitution entry, every entry exists in the template, and every
+    /// catalogue image is covered — a new worker can't render unsubstituted.
+    #[test]
+    fn image_placeholders_align_with_catalogue_and_template() {
+        assert_eq!(
+            IMAGE_PLACEHOLDERS.len(),
+            build::IMAGES.len(),
+            "one placeholder entry per catalogue image"
+        );
+        for img in build::IMAGES {
+            assert!(
+                IMAGE_PLACEHOLDERS.iter().any(|(_, name)| *name == img.name),
+                "catalogue image '{}' has no placeholder entry",
+                img.name
+            );
+        }
+        for (placeholder, _) in IMAGE_PLACEHOLDERS {
+            assert!(
+                COMPOSE_TEMPLATE.contains(placeholder),
+                "placeholder {placeholder} missing from compose.template.yml"
+            );
+        }
+        for line in COMPOSE_TEMPLATE.lines() {
+            let mut rest = line;
+            while let Some(pos) = rest.find("${IMAGE_") {
+                let tail = &rest[pos..];
+                let end = tail.find('}').expect("unterminated ${IMAGE_ placeholder") + 1;
+                let placeholder = &tail[..end];
+                assert!(
+                    IMAGE_PLACEHOLDERS.iter().any(|(p, _)| *p == placeholder),
+                    "template placeholder {placeholder} has no substitution entry"
+                );
+                rest = &tail[end..];
+            }
+        }
+    }
+
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_uses_bundle_scoped_image_refs() {
@@ -1941,36 +1955,21 @@ services:
         )
         .unwrap();
 
-        assert!(yaml.contains(&build::image_ref(build::IMAGE_CLAUDE, &manifest.bundle_id)));
-        assert!(yaml.contains(&build::image_ref(build::IMAGE_MCP_HUB, &manifest.bundle_id)));
-        assert!(yaml.contains(&build::image_ref(
+        // Each service carries its own per-image build-input hash tag (ADR-071).
+        for image_name in [
+            build::IMAGE_CLAUDE,
+            build::IMAGE_MCP_HUB,
             build::IMAGE_MCP_SLACK,
-            &manifest.bundle_id
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_SHAREPOINT,
-            &manifest.bundle_id,
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_REDMINE,
-            &manifest.bundle_id,
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_GITLAB,
-            &manifest.bundle_id
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_GITHUB,
-            &manifest.bundle_id
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_ATLASSIAN,
-            &manifest.bundle_id
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_CONTEXT7,
-            &manifest.bundle_id
-        )));
+        ] {
+            let tag = manifest.image_tag(image_name).unwrap();
+            assert!(yaml.contains(&tag), "rendered YAML must contain {tag}");
+        }
 
         assert!(!yaml.contains("image: speedwave-claude:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-hub:latest"));

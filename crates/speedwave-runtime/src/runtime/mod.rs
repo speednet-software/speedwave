@@ -149,28 +149,17 @@ pub(crate) trait ContainerRuntime: Send + Sync {
         Ok(())
     }
 
-    /// Removes BuildKit build cache.
-    ///
-    /// BuildKit cache mounts (`--mount=type=cache`) are stored separately
-    /// from container images and are not affected by `remove_images()` or
-    /// `system_prune()`. This method runs `nerdctl builder prune --all --force`
-    /// to reclaim that space.
-    ///
-    /// Called by `prune_old_bundle_images()` after removing old tagged images,
-    /// before building new ones for the updated bundle.
+    /// Removes BuildKit build cache (`nerdctl builder prune --all --force`).
+    /// Called ONLY from the disk-full recovery ladder — routine prunes keep
+    /// the cache (ADR-071).
     fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
         log::debug!("prune_buildkit_cache: not implemented for this runtime, skipping");
         Ok(())
     }
 
-    /// Aggressive prune: removes ALL tagged images not used by a running
-    /// container, plus BuildKit cache. Recovery path for disk-full build
-    /// failures — frees images left behind by other worktrees / older bundles
-    /// that `prune_old_bundle_images` cannot see (it only knows this worktree's
-    /// last `applied_bundle_id`).
-    ///
-    /// Safe because containerd refuses to remove images backing live
-    /// containers. Running Speedwave projects survive.
+    /// Aggressive disk-full recovery: removes ALL tagged images not backing a
+    /// running container (`nerdctl system prune` — does NOT clear BuildKit
+    /// cache mounts; the ladder calls `prune_buildkit_cache` separately).
     fn prune_unused_images(&self) -> anyhow::Result<()> {
         log::debug!("prune_unused_images: not implemented for this runtime, skipping");
         Ok(())

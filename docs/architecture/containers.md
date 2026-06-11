@@ -101,25 +101,26 @@ Builds are scoped to what the user actually runs:
 - **Project switch runs the same lazy build for the destination project** before `compose_up`, so switching to a project whose integrations weren't yet built never fails with `no such image`. The build is part of the "Switching project…" wait.
 - `images_exist(rt, integrations)` checks only images that should exist for the given set, so disabled integrations don't force a phantom rebuild at reconcile time.
 - After each reconcile and every successful `restart_integration_containers`, `prune_orphan_current_bundle_images` force-removes worker tags that the **active project** no longer enables (`enabled_images(active)`). Per-project scope: switching to another project that needs the pruned image triggers a lazy build during the switch.
-- Pruning is unchanged: `prune_old_bundle_images` still `rmi`s every catalogue tag for the old bundle id; `rmi` of an absent tag is a no-op.
+
+### Per-image build-input hash tags (ADR-071)
+
+Each image is tagged `name:<hash16>` where the hash covers that image's declared `ImageDef.hash_inputs` (its Containerfile + every COPY/ADD source; workers also `mcp-servers/shared` + `tsconfig.base.json`) plus its build args (`CLAUDE_VERSION` affects only `speedwave-claude`). The aggregate `bundle_id` (app_version + per-image hashes + claude-resources hash) is the **reconcile trigger** — it decides resources sync + project restore, never which images rebuild. Consequences:
+
+- A release with no container changes runs sync + restore but builds **zero** images; a one-worker change rebuilds one image (`build_missing_images` — a present tag is already the exact build the manifest needs).
+- A `mcp-servers/shared` change rebuilds every worker (it is baked into each via multi-stage COPY); a `claude-resources/` change rebuilds nothing but still reconciles (the claude container is recreated at restore, re-running the entrypoint symlinks).
+- The `hash_inputs` declarations are test-enforced (`hash_inputs_cover_copy_sources` parses every COPY/ADD); an undeclared source fails the build.
+- Builds and tag prunes are serialised across processes by `<data_dir>/build.lock` (`build::with_build_lock`) — Desktop reconcile, CLI update and project-switch lazy builds no longer race. Builds stay outside compose locks (ADR-066).
 
 ### Image pruning on update
 
-When the bundle ID changes (app version bump or build-context change), disk space is reclaimed in two steps **after** the new image set has been built (atomicity: the previous bundle's images stay on disk until the new build succeeds, so a partial failure leaves a known-good set to fall back to):
+Disk space is reclaimed **after** the full restore succeeds (atomicity: the previous images stay on disk until the new set is running, so a partial failure leaves a known-good fallback). `build::prune_superseded_images` performs, warn-only:
 
-1. The previous bundle's tagged images (one per `build.rs::IMAGES` entry) are removed via `nerdctl rmi`, reclaiming several GiB.
-2. BuildKit build cache is pruned via `nerdctl builder prune --all --force`, reclaiming an additional ~5–15 GiB of transient layers from `--mount=type=cache` steps.
+1. **Per-image diff prune** (`prune_replaced_images`): for every image whose applied hash differs from the manifest's, removes `name:old_hash`. Unchanged images keep their tag — nothing to reclaim.
+2. **One-time legacy prune** on migration from the pre-ADR-071 single-id format (state without a per-image map): removes every catalogue tag for the old `bundle_id`.
 
-This two-step cleanup frees the Lima VM diffdisk (50 GiB cap) once the new build has succeeded, removing the now-superseded previous bundle.
+BuildKit cache is **no longer pruned on update** — apt/npm `--mount=type=cache` layers survive and are reused by the next rebuild. The sole cache-prune site is the disk-full recovery ladder in `build_images_for_bundle_in` (`nerdctl system prune` does not clear cache mounts, so the ladder calls `builder prune` explicitly).
 
-Both update paths perform this pruning:
-
-- **Desktop** (`reconcile_bundle_update_inner` in `desktop/src-tauri/src/reconcile.rs`) — calls `build::build_images_for_bundle` for the active project's enabled set first, restores projects, then prunes (`should_prune_bundle` → `prune_old_bundle_images`) after `ProjectsRestored`
-- **CLI** (`update_containers` in `crates/speedwave-runtime/src/update.rs`) — builds via `build::build_images_for_bundle` for the current project's enabled set first, then prunes via `maybe_prune_previous_bundle`
-
-The guard condition is: `applied_bundle_id` exists **and** differs from the new bundle ID. Fresh installs (no `applied_bundle_id`) and rebuilds without a version change produce no prune call.
-
-Failure to prune is warn-only and never blocks the update — the build proceeds regardless.
+Both update paths share this pruning: **Desktop** (`reconcile_bundle_update_inner`) after `ProjectsRestored`, **CLI** (`update_containers` → `maybe_prune_previous_bundle`) after containers are confirmed running. The CLI never writes `bundle-state.json` (single-writer rule, test-pinned); Desktop reconcile and the setup wizard are the only writers of `applied_image_hashes`/`applied_bundle_id`.
 
 ## Dynamic Port Reconciliation (mcp-os)
 
@@ -217,7 +218,7 @@ The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/
 
 ### Missing images (reconcile-time detection)
 
-At startup, `reconcile_bundle_update` verifies that the expected container images exist for the active project even when the bundle ID has not changed. If any of those images are missing (e.g. containerd was reinstalled), the reconcile forces a rebuild of the active project's enabled set before setting `IMAGES_READY = Ready`. Disabled-integration images are intentionally absent under lazy builds (ADR-057) and don't trigger a rebuild.
+At startup, `reconcile_bundle_update` verifies that the expected container images exist for the active project even when the reconcile id has not changed. If any of those images are missing (e.g. containerd was reinstalled), the reconcile rebuilds the missing tags of the active project's enabled set (`build_missing_images`, per-image — ADR-071) before setting `IMAGES_READY = Ready`. Disabled-integration images are intentionally absent under lazy builds (ADR-057) and don't trigger a rebuild. When the id matches and images are present but `pending_running_projects` is non-empty (projects stopped by an update that turned out to be a no-op), those projects are restored before the state is cleaned.
 
 ## VM Lifecycle on Exit
 
