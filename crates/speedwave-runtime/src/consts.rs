@@ -2518,6 +2518,21 @@ mod tests {
     }
 
     #[test]
+    fn slack_token_url_matches_oauth_worker_provider_ts() {
+        // SSOT pair: consts::SLACK_OAUTH_TOKEN_URL (exchange side) mirrors
+        // SLACK_TOKEN_URL in mcp-servers/oauth providers/slack.ts (refresh side).
+        let src = include_str!("../../../mcp-servers/oauth/src/providers/slack.ts");
+        let re = regex::Regex::new(r#"const\s+SLACK_TOKEN_URL\s*=\s*['"]([^'"]+)['"]"#).unwrap();
+        let cap = re.captures(src).expect(
+            "mcp-servers/oauth/src/providers/slack.ts must declare `const SLACK_TOKEN_URL`",
+        );
+        assert_eq!(
+            &cap[1], SLACK_OAUTH_TOKEN_URL,
+            "TS SLACK_TOKEN_URL must match Rust consts::SLACK_OAUTH_TOKEN_URL"
+        );
+    }
+
+    #[test]
     fn host_gateway_alias_appears_in_compose_template() {
         let src = include_str!("../../../containers/compose.template.yml");
         let expected = format!(r#"- "{HOST_GATEWAY_ALIAS}:${{HOST_GATEWAY}}""#);
