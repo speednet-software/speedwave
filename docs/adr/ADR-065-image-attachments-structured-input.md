@@ -40,7 +40,7 @@ Pasted and dropped images are **never inlined as base64 on the wire**. The compo
 ## CLI parity
 
 - `speedwave run` spawns the host-side `PasteWatcher` (`crates/speedwave-cli/src/paste_watcher.rs`): it polls `arboard` every `POLL_MS = 250` ms and, on an image change, writes `<project>/.speedwave/pastes/clip.png` (chmod 0600 on Unix). `arboard` is cross-platform and short-circuits when the clipboard is unchanged; the watcher exits with `speedwave run`.
-- Inside the container, `containers/osc52-copy.sh` (ADR-052) is symlinked as exactly five names — `pbcopy`, `xclip`, `xsel`, `wl-copy`, `clip.exe` (`containers/Containerfile.claude`) — and serves `clip.png` on read so the TUI's own paste path gets the bytes without changing Claude Code. `SPEEDWAVE_CLIP_FILE` overrides the read path (default `/workspace/.speedwave/pastes/clip.png`), used by the bats suite and as a debug escape hatch.
+- Inside the container, `containers/osc52-copy.sh` (ADR-052) is symlinked as exactly six names — `pbcopy`, `xclip`, `xsel`, `wl-copy`, `clip.exe`, `powershell.exe` (`containers/Containerfile.claude`) — and serves `clip.png` on read so the TUI's own paste path gets the bytes without changing Claude Code. The `powershell.exe` name catches the platform-`wsl` interop Claude Code ≥ 2.1.160 uses on Windows hosts: `Set-Clipboard` routes to the copy path, `Get-Clipboard`/`ContainsImage` exit 1 so the `xclip` read path stays authoritative for images. `SPEEDWAVE_CLIP_FILE` overrides the read path (default `/workspace/.speedwave/pastes/clip.png`), used by the bats suite and as a debug escape hatch.
 
 ## Rejected alternatives
 

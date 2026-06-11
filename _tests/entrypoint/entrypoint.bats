@@ -73,6 +73,39 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
+# Version skew between baked binary and pinned CLAUDE_VERSION
+# ---------------------------------------------------------------------------
+
+@test "warns when installed claude version differs from pinned CLAUDE_VERSION" {
+    cat > "$STUBS_DIR/claude" << 'EOF'
+#!/bin/bash
+echo "0.0.1 (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: image has Claude Code 0.0.1"* ]]
+    [[ "$output" == *"$PINNED_VERSION"* ]]
+}
+
+@test "no version-skew warning when installed version matches the pin" {
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING: image has Claude Code"* ]]
+}
+
+@test "no version-skew warning when claude --version output is unparseable" {
+    cat > "$STUBS_DIR/claude" << 'EOF'
+#!/bin/bash
+echo "garbage output"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING: image has Claude Code"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # CLAUDE_VERSION env var forwarded to install-claude.sh
 # ---------------------------------------------------------------------------
 

@@ -98,17 +98,19 @@ export class AnthropicModelsService {
 
   /**
    * The model id the Settings free-text placeholder should hint at for the
-   * Anthropic provider: the latest non-Opus entry (a Sonnet, the everyday
-   * balanced default) so we don't nudge users toward the costly Opus tier.
-   * Falls back to the first `latest` entry, then the first entry. Returns
-   * `null` while the catalog is loading (or empty) so the caller renders a
-   * blank placeholder rather than a stale hard-coded string.
+   * Anthropic provider: the latest non-premium entry (a Sonnet, the everyday
+   * balanced default) so we don't nudge users toward the costly Opus/Fable
+   * tiers. Falls back to the first `latest` entry, then the first entry.
+   * Returns `null` while the catalog is loading (or empty) so the caller
+   * renders a blank placeholder rather than a stale hard-coded string.
    */
   latestNonOpusModelId(): string | null {
     if (!this.cache || this.cache.length === 0) return null;
     const latest = this.cache.filter((m) => m.latest);
-    const nonOpus = latest.find((m) => !m.id.startsWith('claude-opus-'));
-    return (nonOpus ?? latest[0] ?? this.cache[0]).id;
+    const everyday = latest.find(
+      (m) => !m.id.startsWith('claude-opus-') && !m.id.startsWith('claude-fable-')
+    );
+    return (everyday ?? latest[0] ?? this.cache[0]).id;
   }
 
   /** Test-only hook to reset cached state between specs. */

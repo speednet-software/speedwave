@@ -18,6 +18,12 @@ import type { TurnUsage } from '../models/chat';
  */
 const CATALOG: PricedAnthropicModel[] = [
   {
+    id: 'claude-fable-5',
+    context_tokens: 1_000_000,
+    pricing: { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 },
+    pricing_1m: { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 },
+  },
+  {
     id: 'claude-opus-4-8',
     context_tokens: 1_000_000,
     pricing: { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
@@ -78,6 +84,17 @@ describe('calculateCost', () => {
 
   afterEach(() => {
     delete (window as unknown as Record<string, unknown>)['__TAURI_INTERNALS__'];
+  });
+
+  it('computes Fable 5 cost from input + output tokens (no cache)', () => {
+    // 1M in + 1M out @ $10/$50 = $60
+    const usage: TurnUsage = {
+      input_tokens: 1_000_000,
+      output_tokens: 1_000_000,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    };
+    expect(calculateCost('claude-fable-5', usage)).toBeCloseTo(60, 6);
   });
 
   it('computes Opus 4.8 cost from input + output tokens (no cache)', () => {
@@ -300,15 +317,18 @@ describe('setPricingCatalog (Rust SSOT override)', () => {
     expect(calculateCost('claude-opus-4-8', usage)).toBeCloseTo(7, 6);
   });
 
+  // Index-independent lookup so catalog additions don't shift this fixture.
+  const HAIKU = CATALOG.find((m) => m.id === 'claude-haiku-4-5')!;
+
   it('clears stale ids when reseeded with a smaller catalog', () => {
-    setPricingCatalog([CATALOG[2]]); // haiku only, no [1m]
+    setPricingCatalog([HAIKU]); // haiku only, no [1m]
     expect(_pricingEntryCountForTest()).toBe(1);
   });
 
   it('skips entries with a missing/malformed pricing block', () => {
     setPricingCatalog([
       { id: 'bad', context_tokens: 1_000_000 } as unknown as PricedAnthropicModel,
-      CATALOG[2],
+      HAIKU,
     ]);
     // Only the well-formed haiku entry survives.
     expect(_pricingEntryCountForTest()).toBe(1);

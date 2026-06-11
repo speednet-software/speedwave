@@ -195,6 +195,20 @@ describe('AnthropicModelsService', () => {
       await service.list();
       expect(service.latestNonOpusModelId()).toBe('claude-opus-4-8');
     });
+
+    it('skips Fable (premium tier) when picking the everyday placeholder', async () => {
+      // Fable 5 leads the catalog but costs 2x Opus — the placeholder must
+      // keep nudging users toward the balanced Sonnet tier.
+      const withFable = [
+        { id: 'claude-fable-5', family: 'Fable 5', context_tokens: 1_000_000, latest: true },
+        { id: 'claude-opus-4-8', family: 'Opus 4.8', context_tokens: 1_000_000, latest: true },
+        { id: 'claude-sonnet-4-6', family: 'Sonnet 4.6', context_tokens: 1_000_000, latest: true },
+      ] as unknown as AnthropicModel[];
+      mockTauri.invokeHandler = async () => withFable;
+      service.resetForTesting();
+      await service.list();
+      expect(service.latestNonOpusModelId()).toBe('claude-sonnet-4-6');
+    });
   });
 
   describe('contextTokensFor()', () => {

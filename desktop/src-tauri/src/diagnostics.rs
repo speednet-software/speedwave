@@ -103,11 +103,14 @@ pub(crate) fn build_diagnostics_zip(
     }
 
     // System info: compile-time constants, no secrets — the one raw entry.
+    // claude_pinned is what the image SHOULD run; runtime skew surfaces as
+    // the entrypoint WARNING inside this ZIP's compose-logs entry.
     let sys_info = format!(
-        "os: {}\narch: {}\nversion: {}\n",
+        "os: {}\narch: {}\nversion: {}\nclaude_pinned: {}\n",
         std::env::consts::OS,
         std::env::consts::ARCH,
         env!("CARGO_PKG_VERSION"),
+        speedwave_runtime::defaults::CLAUDE_VERSION,
     );
     zip.start_file("system-info.txt", options)?;
     zip.write_all(sys_info.as_bytes())?;
@@ -291,6 +294,13 @@ mod tests {
         assert!(
             sys_info.contains("version:"),
             "system info should contain version"
+        );
+        assert!(
+            sys_info.contains(&format!(
+                "claude_pinned: {}",
+                speedwave_runtime::defaults::CLAUDE_VERSION
+            )),
+            "system info should carry the pinned Claude Code version"
         );
     }
 

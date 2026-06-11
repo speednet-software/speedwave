@@ -362,7 +362,13 @@ pub struct StreamParser {
     previous_session_cost: Option<f64>,
     /// Last model seen (from `SystemInit` or `modelUsage` in a result).
     last_model: Option<String>,
+    /// Unhandled top-level stream-json `type` values, each logged once per
+    /// session. Bounded by `MAX_TRACKED_UNKNOWN_TYPES`.
+    seen_unknown_types: std::collections::HashSet<String>,
 }
+
+/// Cap on distinct unknown types tracked for once-per-type logging.
+const MAX_TRACKED_UNKNOWN_TYPES: usize = 32;
 
 impl StreamParser {
     /// Create a new parser with empty state.
@@ -375,6 +381,7 @@ impl StreamParser {
             previous_session_usage: TurnUsage::default(),
             previous_session_cost: None,
             last_model: None,
+            seen_unknown_types: std::collections::HashSet::new(),
         }
     }
 
@@ -423,7 +430,26 @@ impl StreamParser {
             }
             "system" => option_to_vec(self.parse_system_message(parsed)),
             "rate_limit_event" => option_to_vec(Self::parse_rate_limit_event(parsed)),
-            _ => (Vec::new(), None),
+            other => {
+                // Unknown types are dropped by design; log each once so a
+                // wire-format change is diagnosable from the session log.
+                let label = if other.is_empty() { "<none>" } else { other };
+                if self.seen_unknown_types.len() < MAX_TRACKED_UNKNOWN_TYPES
+                    && self.seen_unknown_types.insert(label.to_string())
+                {
+                    log::debug!("parse_line: unknown stream-json type '{label}' — ignored");
+                    return (
+                        Vec::new(),
+                        Some(LogEntry {
+                            prefix: "STREAM",
+                            message: format!(
+                                "unknown stream-json type '{label}' ignored (logged once per session)"
+                            ),
+                        }),
+                    );
+                }
+                (Vec::new(), None)
+            }
         }
     }
 
@@ -462,6 +488,7 @@ impl StreamParser {
         self.previous_session_usage = TurnUsage::default();
         self.previous_session_cost = None;
         self.last_model = None;
+        self.seen_unknown_types.clear();
     }
 
     /// Check if a parsed JSON value is a control_request. Returns parsed data if so.
@@ -775,52 +802,54 @@ impl StreamParser {
             }
         }
 
+        // One user line can carry several tool_result blocks (parallel tool
+        // batches) — each must emit a chunk or its UI block stays "running".
+        let mut chunks = Vec::new();
+        let mut log_lines = Vec::new();
         for block in blocks {
             let block_type = block["type"].as_str().unwrap_or("");
-            if block_type == "tool_result" {
-                let tool_use_id = match block["tool_use_id"].as_str() {
-                    Some(s) if !s.is_empty() => s.to_string(),
-                    _ => {
-                        log::warn!("parse_user_message: tool_result block missing 'tool_use_id'");
-                        return (Vec::new(), None);
-                    }
-                };
-                let is_error = block["is_error"].as_bool().unwrap_or(false);
-
-                // content can be a string or an array of content blocks
-                let result_content = if let Some(s) = block["content"].as_str() {
-                    s.to_string()
-                } else if let Some(arr) = block["content"].as_array() {
-                    arr.iter()
-                        .filter_map(|b| {
-                            if b["type"].as_str() == Some("text") {
-                                b["text"].as_str().map(String::from)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else {
-                    String::new()
-                };
-
-                let log_entry = Some(LogEntry {
-                    prefix: "TOOL",
-                    message: format!("result: {} error={}", tool_use_id, is_error),
-                });
-
-                return (
-                    vec![StreamChunk::ToolResult {
-                        tool_id: tool_use_id,
-                        content: result_content,
-                        is_error,
-                    }],
-                    log_entry,
-                );
+            if block_type != "tool_result" {
+                continue;
             }
+            let tool_use_id = match block["tool_use_id"].as_str() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => {
+                    log::warn!("parse_user_message: tool_result block missing 'tool_use_id'");
+                    continue;
+                }
+            };
+            let is_error = block["is_error"].as_bool().unwrap_or(false);
+
+            // content can be a string or an array of content blocks
+            let result_content = if let Some(s) = block["content"].as_str() {
+                s.to_string()
+            } else if let Some(arr) = block["content"].as_array() {
+                arr.iter()
+                    .filter_map(|b| {
+                        if b["type"].as_str() == Some("text") {
+                            b["text"].as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+
+            log_lines.push(format!("result: {} error={}", tool_use_id, is_error));
+            chunks.push(StreamChunk::ToolResult {
+                tool_id: tool_use_id,
+                content: result_content,
+                is_error,
+            });
         }
-        (Vec::new(), None)
+        let log_entry = (!log_lines.is_empty()).then(|| LogEntry {
+            prefix: "TOOL",
+            message: log_lines.join("; "),
+        });
+        (chunks, log_entry)
     }
 
     fn parse_result(
@@ -1675,6 +1704,20 @@ impl ChatSession {
                     continue;
                 }
 
+                // Undecodable control_request: don't invent a wire response,
+                // but surface the likely stall instead of dropping it silently.
+                if msg_type == "control_request" {
+                    log::warn!(
+                        "unrecognized control_request shape; not auto-responding (turn may stall)"
+                    );
+                    speedwave_runtime::log_file::write_log_line(
+                        &mut log_file,
+                        "CONTROL",
+                        "unrecognized control_request shape (missing request_id/tool_name/tool_use_id); not auto-responding",
+                    );
+                    continue;
+                }
+
                 // 2. Normal stream events
                 let (chunks, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
@@ -2435,6 +2478,61 @@ mod tests {
         StreamParser::try_parse_control_request(&parsed)
     }
 
+    // ── Unknown stream-json types ────────────────────────────────────
+
+    #[test]
+    fn parse_line_logs_unknown_type_once_per_session() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"compaction_event","data":{}}"#;
+        let (chunks, log) = parse_line_full(&mut parser, line);
+        assert!(chunks.is_none(), "unknown type must emit no chunk");
+        let log = log.expect("first occurrence must produce a log entry");
+        assert_eq!(log.prefix, "STREAM");
+        assert!(log.message.contains("compaction_event"));
+        // Second occurrence: silent (dedup), still no chunk.
+        let (chunks2, log2) = parse_line_full(&mut parser, line);
+        assert!(chunks2.is_none());
+        assert!(log2.is_none(), "repeat occurrences must not spam the log");
+    }
+
+    #[test]
+    fn parse_line_logs_each_distinct_unknown_type() {
+        let mut parser = StreamParser::new();
+        let (_, log_a) = parse_line_full(&mut parser, r#"{"type":"future_a"}"#);
+        let (_, log_b) = parse_line_full(&mut parser, r#"{"type":"future_b"}"#);
+        assert!(log_a.is_some());
+        assert!(log_b.is_some(), "a different unknown type logs separately");
+    }
+
+    #[test]
+    fn parse_line_missing_type_logged_as_none_label() {
+        let mut parser = StreamParser::new();
+        let (chunks, log) = parse_line_full(&mut parser, r#"{"foo":"bar"}"#);
+        assert!(chunks.is_none());
+        assert!(log.expect("must log").message.contains("<none>"));
+    }
+
+    #[test]
+    fn parse_line_unknown_type_tracking_is_capped() {
+        let mut parser = StreamParser::new();
+        for i in 0..MAX_TRACKED_UNKNOWN_TYPES {
+            let line = format!(r#"{{"type":"future_{i}"}}"#);
+            let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert!(parser.parse_line(&parsed).1.is_some());
+        }
+        // Past the cap: dropped without logging (and without growing the set).
+        let parsed: serde_json::Value = serde_json::from_str(r#"{"type":"overflow"}"#).unwrap();
+        assert!(parser.parse_line(&parsed).1.is_none());
+    }
+
+    #[test]
+    fn control_request_with_unknown_shape_returns_none() {
+        // A future subtype without tool_name/tool_use_id must not parse into a
+        // ControlRequest (the reader loop logs it instead of auto-approving).
+        let line = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback"}}"#;
+        assert!(try_parse_control_request_str(line).is_none());
+    }
+
     // ── StreamChunk serialization ────────────────────────────────────
 
     #[test]
@@ -2780,6 +2878,80 @@ mod tests {
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_user_multiple_tool_results_emit_one_chunk_each() {
+        // Parallel tool batches pack several tool_result blocks into one user
+        // line; an early return would leave later tools stuck as "running".
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"ok"},
+            {"type":"tool_result","tool_use_id":"t2","content":"boom","is_error":true}
+        ]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert_eq!(chunks.len(), 2, "each tool_result block must emit a chunk");
+        match (&chunks[0], &chunks[1]) {
+            (
+                StreamChunk::ToolResult {
+                    tool_id: id1,
+                    is_error: e1,
+                    ..
+                },
+                StreamChunk::ToolResult {
+                    tool_id: id2,
+                    is_error: e2,
+                    ..
+                },
+            ) => {
+                assert_eq!(id1, "t1");
+                assert!(!e1);
+                assert_eq!(id2, "t2");
+                assert!(*e2);
+            }
+            other => panic!("expected two ToolResults, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_user_multiple_tool_results_log_entry_covers_all() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"a"},
+            {"type":"tool_result","tool_use_id":"t2","content":"b"}
+        ]}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        let (chunks, log) = parser.parse_line(&parsed);
+        assert_eq!(chunks.len(), 2);
+        let log = log.expect("tool results must produce a log entry");
+        assert_eq!(log.prefix, "TOOL");
+        assert!(log.message.contains("t1") && log.message.contains("t2"));
+    }
+
+    #[test]
+    fn parse_user_malformed_tool_result_skips_block_not_siblings() {
+        // A block without tool_use_id is dropped; the valid sibling still emits.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[
+            {"type":"tool_result","content":"orphan"},
+            {"type":"tool_result","tool_use_id":"t2","content":"ok"}
+        ]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert_eq!(chunks.len(), 1);
+        match &chunks[0] {
+            StreamChunk::ToolResult { tool_id, .. } => assert_eq!(tool_id, "t2"),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_user_no_tool_results_emits_nothing() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{}}]}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        let (chunks, log) = parser.parse_line(&parsed);
+        assert!(chunks.is_empty());
+        assert!(log.is_none(), "no tool_result → no TOOL log entry");
     }
 
     #[test]
