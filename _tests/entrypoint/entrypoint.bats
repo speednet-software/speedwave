@@ -1063,6 +1063,21 @@ setup_integrations_fixture() {
     done
 }
 
+@test "ENABLED_SERVICES=slack links and unlinks the slack skill (ADR-071)" {
+    mkdir -p "$RESOURCES_DIR/skills/integrations/slack"
+    echo "# Slack" > "$RESOURCES_DIR/skills/integrations/slack/SKILL.md"
+
+    ENABLED_SERVICES="slack" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/slack" ]
+    [ "$(readlink "${TEST_HOME}/.claude/skills/slack")" = "$RESOURCES_DIR/skills/integrations/slack" ]
+
+    # Toggle off — the link must disappear (managed-links cleanup).
+    ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -e "${TEST_HOME}/.claude/skills/slack" ]
+}
+
 # Regression guard for the toggle-off path: ~/.claude is persistent across
 # container restarts, so a once-linked integration skill must disappear when
 # the user toggles the integration off. Without state-file cleanup the link

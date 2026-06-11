@@ -634,7 +634,7 @@ containers/claude-resources/
 │       ├── office/               # MCP — linked when `office` ∈ ENABLED_SERVICES
 │       ├── playwright/           # MCP — linked when `playwright` ∈ ENABLED_SERVICES
 │       ├── context7/             # MCP — linked when `context7` ∈ ENABLED_SERVICES
-│       ├── sharepoint/redmine/gitlab/github/atlassian/  # MCP — same pattern (slack ships no skill)
+│       ├── slack/sharepoint/redmine/gitlab/github/atlassian/  # MCP — same pattern
 │       └── reminders/calendar/mail/notes/                     # OS sub-services (see Runtime behavior)
 ├── commands/
 │   └── integrations/<config_key>/    # same convention for commands
