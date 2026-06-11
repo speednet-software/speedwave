@@ -62,16 +62,16 @@ RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
     rm -f /home/speedwave/.local/bin/claude && \
     ln -sf /usr/local/bin/claude /home/speedwave/.local/bin/claude
 
-# OSC 52 clipboard wrappers — five symlinks redirect to one script emitting
-# the OSC 52 escape sequence. Claude Code's "press c to copy URL" probes for
-# pbcopy/xclip/xsel/wl-copy/clip.exe and pipes the URL through whichever it
-# finds. See ADR-052.
+# OSC 52 clipboard wrappers — six symlinks redirect to one script. Claude Code
+# copies via wl-copy/xclip/xsel (probe gated on WAYLAND_DISPLAY, injected by
+# defaults.rs::base_env) or powershell.exe on Windows hosts. See ADR-052.
 COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh
 RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \
     ln -s osc52-copy.sh /usr/local/bin/xclip && \
     ln -s osc52-copy.sh /usr/local/bin/xsel && \
     ln -s osc52-copy.sh /usr/local/bin/wl-copy && \
-    ln -s osc52-copy.sh /usr/local/bin/clip.exe
+    ln -s osc52-copy.sh /usr/local/bin/clip.exe && \
+    ln -s osc52-copy.sh /usr/local/bin/powershell.exe
 
 # Copy entrypoint late to avoid busting the ~210MB Claude Code layer cache
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh

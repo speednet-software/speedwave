@@ -600,7 +600,7 @@ export class LlmProviderComponent implements OnInit {
    */
   modelPlaceholder(): string {
     if (this.provider === 'anthropic') {
-      return this.anthropicModels.latestNonOpusModelId() ?? '';
+      return this.anthropicModels.latestEverydayModelId() ?? '';
     }
     return 'llama3.3';
   }
