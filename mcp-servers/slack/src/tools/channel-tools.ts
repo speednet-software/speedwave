@@ -14,6 +14,7 @@ import {
   SlackClients,
   sendChannel,
   readChannel,
+  readThread,
   getChannels,
   formatSlackError,
 } from '../client.js';
@@ -32,6 +33,13 @@ interface GetChannelMessagesParams {
   limit?: number;
   oldest?: string;
   latest?: string;
+  cursor?: string;
+}
+
+interface GetThreadMessagesParams {
+  channel: string;
+  thread_ts: string;
+  limit?: number;
   cursor?: string;
 }
 
@@ -111,6 +119,14 @@ const getChannelMessagesTool: Tool = {
             user: { type: 'string', description: 'User ID who sent the message' },
             text: { type: 'string', description: 'Message text content' },
             type: { type: 'string' },
+            thread_ts: {
+              type: 'string',
+              description: 'Present when the message belongs to a thread (parent ts)',
+            },
+            reply_count: {
+              type: 'number',
+              description: 'On a thread parent: reply count — expand via getThreadMessages',
+            },
           },
         },
       },
@@ -135,6 +151,69 @@ const getChannelMessagesTool: Tool = {
     {
       description: 'Full: next page by cursor',
       input: { channel: 'C0123ABC456', limit: 100, cursor: 'dXNlcjpVMDYxTkZUVDI=' },
+    },
+  ],
+};
+
+const getThreadMessagesTool: Tool = {
+  name: 'getThreadMessages',
+  description:
+    "Get one page of a thread's messages (parent first, then replies oldest-first). Find threads via getChannelMessages entries with reply_count > 0; iterate with `cursor`.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      channel: { type: 'string', description: 'Channel ID or name' },
+      thread_ts: { type: 'string', description: '`ts` of the thread parent message' },
+      limit: { type: 'number', description: 'Max messages per page, 1-100 (default 50)' },
+      cursor: { type: 'string', description: 'Pagination cursor from a previous next_cursor' },
+    },
+    required: ['channel', 'thread_ts'],
+  },
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
+  keywords: ['slack', 'thread', 'replies', 'read', 'message', 'history'],
+  example:
+    'const thread = await slack.getThreadMessages({ channel: "#general", thread_ts: "1717000000.000100" })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      messages: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            ts: { type: 'string', description: 'Message timestamp/ID' },
+            user: { type: 'string', description: 'User ID who sent the message' },
+            text: { type: 'string', description: 'Message text content' },
+            type: { type: 'string' },
+            thread_ts: { type: 'string', description: 'Parent ts of the thread' },
+            reply_count: { type: 'number', description: 'Reply count (on the parent item)' },
+          },
+        },
+      },
+      next_cursor: {
+        type: 'string',
+        description: 'Pass as `cursor` to fetch the next page; absent on the last page',
+      },
+      has_more: { type: 'boolean', description: 'True when another page exists' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: read a thread',
+      input: { channel: '#general', thread_ts: '1717000000.000100' },
+    },
+    {
+      description: 'Full: next page by cursor',
+      input: {
+        channel: 'C0123ABC456',
+        thread_ts: '1717000000.000100',
+        limit: 100,
+        cursor: 'dXNlcjpVMDYxTkZUVDI=',
+      },
     },
   ],
 };
@@ -226,6 +305,23 @@ export async function handleGetChannelMessages(
  * Tool handler function
  * @param clients - Slack client instances
  * @param params - Tool parameters
+ */
+export async function handleGetThreadMessages(
+  clients: SlackClients,
+  params: GetThreadMessagesParams
+): Promise<ToolResult> {
+  try {
+    const result = await readThread(clients, params);
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, error: { code: 'READ_FAILED', message: formatSlackError(error) } };
+  }
+}
+
+/**
+ * Tool handler function
+ * @param clients - Slack client instances
+ * @param params - Tool parameters
  * @param params.types - Channel types to include (default: public_channel,private_channel)
  */
 export async function handleListChannelIds(
@@ -280,6 +376,10 @@ export function createChannelTools(clients: SlackClients): ToolDefinition[] {
     {
       tool: getChannelMessagesTool,
       handler: withValidation<GetChannelMessagesParams>(withClients(handleGetChannelMessages)),
+    },
+    {
+      tool: getThreadMessagesTool,
+      handler: withValidation<GetThreadMessagesParams>(withClients(handleGetThreadMessages)),
     },
     {
       tool: listChannelIdsTool,

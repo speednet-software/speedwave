@@ -7,6 +7,7 @@ import { withSetupGuidance, RefreshLock } from '@speedwave/mcp-shared';
 import {
   handleSendChannel,
   handleGetChannelMessages,
+  handleGetThreadMessages,
   handleListChannelIds,
   createChannelTools,
 } from './channel-tools.js';
@@ -19,6 +20,7 @@ vi.mock('../client.js', async () => {
     ...actual,
     sendChannel: vi.fn(),
     readChannel: vi.fn(),
+    readThread: vi.fn(),
     getChannels: vi.fn(),
     formatSlackError: vi.fn((error: unknown) => {
       const e = error as { message?: string };
@@ -262,6 +264,61 @@ describe('channel-tools', () => {
     });
   });
 
+  describe('handleGetThreadMessages', () => {
+    it('gets thread messages successfully', async () => {
+      const mockPage = {
+        messages: [
+          { user: 'U1', text: 'parent', ts: '1.0', type: 'message', reply_count: 2 },
+          { user: 'U2', text: 'reply', ts: '1.1', type: 'message', thread_ts: '1.0' },
+        ],
+        has_more: false,
+      };
+      vi.mocked(client.readThread).mockResolvedValue(mockPage);
+
+      const result = await handleGetThreadMessages(mockClients, {
+        channel: '#general',
+        thread_ts: '1.0',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockPage);
+      expect(client.readThread).toHaveBeenCalledWith(mockClients, {
+        channel: '#general',
+        thread_ts: '1.0',
+      });
+    });
+
+    it('forwards cursor and limit', async () => {
+      vi.mocked(client.readThread).mockResolvedValue({ messages: [], has_more: false });
+
+      await handleGetThreadMessages(mockClients, {
+        channel: 'C1',
+        thread_ts: '1.0',
+        limit: 10,
+        cursor: 'cur-2',
+      });
+
+      expect(client.readThread).toHaveBeenCalledWith(mockClients, {
+        channel: 'C1',
+        thread_ts: '1.0',
+        limit: 10,
+        cursor: 'cur-2',
+      });
+    });
+
+    it('returns READ_FAILED on errors', async () => {
+      vi.mocked(client.readThread).mockRejectedValue(new Error('thread_not_found'));
+
+      const result = await handleGetThreadMessages(mockClients, {
+        channel: '#general',
+        thread_ts: '9.9',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('READ_FAILED');
+    });
+  });
+
   describe('handleListChannelIds', () => {
     it('lists all channels successfully', async () => {
       const mockChannels = [
@@ -378,14 +435,25 @@ describe('channel-tools', () => {
 });
 
 describe('createChannelTools (null clients — not configured)', () => {
-  it('returns three tool definitions when clients are null', () => {
+  it('returns four tool definitions when clients are null', () => {
     const tools = createChannelTools(unconfiguredClients());
-    expect(tools).toHaveLength(3);
+    expect(tools).toHaveLength(4);
     expect(tools.map((t) => t.tool.name)).toEqual([
       'sendChannel',
       'getChannelMessages',
+      'getThreadMessages',
       'listChannelIds',
     ]);
+  });
+
+  it('getThreadMessages handler returns NOT_CONFIGURED error when clients are null', async () => {
+    const tools = createChannelTools(unconfiguredClients());
+    const threadHandler = tools.find((t) => t.tool.name === 'getThreadMessages')!.handler;
+
+    const result = await threadHandler({ channel: '#general', thread_ts: '1.0' });
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('NOT_CONFIGURED');
   });
 
   it('sendChannel handler returns NOT_CONFIGURED error when clients are null', async () => {

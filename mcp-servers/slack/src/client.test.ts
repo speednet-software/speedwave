@@ -8,6 +8,7 @@ import {
   initializeSlackClients,
   sendChannel,
   readChannel,
+  readThread,
   getChannels,
   getUsers,
 } from './client.js';
@@ -63,7 +64,7 @@ function presentClients(): SlackClients {
     user: {
       token: 'xoxe.xoxp-test',
       chat: { postMessage: vi.fn() },
-      conversations: { list: vi.fn(), history: vi.fn() },
+      conversations: { list: vi.fn(), history: vi.fn(), replies: vi.fn() },
       users: { lookupByEmail: vi.fn() },
     } as unknown as WebClient,
     tokenState: { accessToken: 'xoxe.xoxp-test' },
@@ -655,6 +656,21 @@ describe('slack client', () => {
       });
     });
 
+    it('surfaces thread markers (thread_ts/reply_count) from history', async () => {
+      const mockHistory = vi.fn().mockResolvedValue({
+        messages: [
+          { user: 'U1', text: 'parent', ts: '1.0', type: 'message', reply_count: 3 },
+          { user: 'U2', text: 'broadcast reply', ts: '1.2', type: 'message', thread_ts: '1.0' },
+        ],
+      });
+      mockClients.user.conversations.history = mockHistory;
+
+      const result = await readChannel(mockClients, { channel: 'C12345678' });
+
+      expect(result.messages[0].reply_count).toBe(3);
+      expect(result.messages[1].thread_ts).toBe('1.0');
+    });
+
     it('reads messages from channel by name', async () => {
       const mockList = vi.fn().mockResolvedValue({
         channels: [{ id: 'C12345678', name: 'general' }],
@@ -844,6 +860,80 @@ describe('slack client', () => {
       });
 
       expect(result.messages).toEqual([]);
+    });
+  });
+
+  describe('readThread', () => {
+    let mockClients: SlackClients;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      mockClients = presentClients();
+    });
+
+    it('reads a thread by channel ID with default limit', async () => {
+      const mockReplies = vi.fn().mockResolvedValue({
+        messages: [
+          { user: 'U1', text: 'parent', ts: '1.0', type: 'message', reply_count: 1 },
+          { user: 'U2', text: 'reply', ts: '1.1', type: 'message', thread_ts: '1.0' },
+        ],
+        has_more: false,
+      });
+      mockClients.user.conversations.replies = mockReplies;
+
+      const result = await readThread(mockClients, { channel: 'C12345678', thread_ts: '1.0' });
+
+      expect(mockReplies).toHaveBeenCalledWith({ channel: 'C12345678', ts: '1.0', limit: 50 });
+      expect(result.messages).toHaveLength(2);
+      expect(result.messages[0].reply_count).toBe(1);
+      expect(result.messages[1].thread_ts).toBe('1.0');
+      expect(result.has_more).toBe(false);
+    });
+
+    it('resolves channel names and forwards cursor', async () => {
+      const mockList = vi.fn().mockResolvedValue({
+        channels: [{ id: 'C77', name: 'general' }],
+      });
+      const mockReplies = vi.fn().mockResolvedValue({
+        messages: [],
+        has_more: true,
+        response_metadata: { next_cursor: 'cur-next' },
+      });
+      mockClients.user.conversations.list = mockList;
+      mockClients.user.conversations.replies = mockReplies;
+
+      const result = await readThread(mockClients, {
+        channel: '#general',
+        thread_ts: '1.0',
+        cursor: 'cur-1',
+        limit: 7,
+      });
+
+      expect(mockReplies).toHaveBeenCalledWith({
+        channel: 'C77',
+        ts: '1.0',
+        limit: 7,
+        cursor: 'cur-1',
+      });
+      expect(result.next_cursor).toBe('cur-next');
+      expect(result.has_more).toBe(true);
+    });
+
+    it('clamps limit to 1-100', async () => {
+      const mockReplies = vi.fn().mockResolvedValue({ messages: [] });
+      mockClients.user.conversations.replies = mockReplies;
+
+      await readThread(mockClients, { channel: 'C1', thread_ts: '1.0', limit: 500 });
+      expect(mockReplies).toHaveBeenCalledWith({ channel: 'C1', ts: '1.0', limit: 100 });
+    });
+
+    it('propagates API errors (e.g. thread_not_found)', async () => {
+      const mockReplies = vi.fn().mockRejectedValue({ data: { error: 'thread_not_found' } });
+      mockClients.user.conversations.replies = mockReplies;
+
+      await expect(readThread(mockClients, { channel: 'C1', thread_ts: '9.9' })).rejects.toEqual({
+        data: { error: 'thread_not_found' },
+      });
     });
   });
 

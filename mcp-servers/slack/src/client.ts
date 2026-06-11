@@ -17,6 +17,7 @@ import {
   ChatPostMessageResponse,
   ConversationsListResponse,
   ConversationsHistoryResponse,
+  ConversationsRepliesResponse,
   UsersLookupByEmailResponse,
 } from '@slack/web-api';
 import {
@@ -74,6 +75,10 @@ export interface SlackMessage {
   ts: string;
   type: string;
   username?: string;
+  /** Present when the message belongs to a thread (equals the parent's ts). */
+  thread_ts?: string;
+  /** On a thread parent: number of replies — fetch them via readThread. */
+  reply_count?: number;
 }
 
 /**
@@ -435,20 +440,33 @@ export async function readChannel(
     })
   )) as ConversationsHistoryResponse;
 
-  interface RawMessage {
-    user?: string;
-    text?: string;
-    ts?: string;
-    type?: string;
-    username?: string;
-  }
+  return toHistoryPage(result);
+}
 
+interface RawMessage {
+  user?: string;
+  text?: string;
+  ts?: string;
+  type?: string;
+  username?: string;
+  thread_ts?: string;
+  reply_count?: number;
+}
+
+/** Maps a history/replies response onto the shared page shape. */
+function toHistoryPage(result: {
+  messages?: RawMessage[];
+  has_more?: boolean;
+  response_metadata?: { next_cursor?: string };
+}): SlackHistoryPage {
   const messages: SlackMessage[] = (result.messages || []).map((msg: RawMessage) => ({
     user: msg.user || 'unknown',
     text: msg.text || '',
     ts: msg.ts || '',
     type: msg.type || 'message',
     username: msg.username,
+    thread_ts: msg.thread_ts,
+    reply_count: msg.reply_count,
   }));
 
   const nextCursor = result.response_metadata?.next_cursor || undefined;
@@ -457,6 +475,37 @@ export async function readChannel(
     next_cursor: nextCursor,
     has_more: result.has_more ?? Boolean(nextCursor),
   };
+}
+
+/**
+ * Read one page of a thread (`conversations.replies`) — the first item on the
+ * first page is the thread parent, the rest are replies (oldest first).
+ * @param {SlackClients} clients - Slack client container
+ * @param {Object} params - Parameters
+ * @param {string} params.channel - Channel name or ID
+ * @param {string} params.thread_ts - `ts` of the thread parent message
+ * @param {number} [params.limit=50] - Maximum messages per page (1-100)
+ * @param {string} [params.cursor] - Cursor from a previous page
+ * @returns {Promise<SlackHistoryPage>} One page of thread messages
+ * @throws {Error} If reading fails
+ */
+export async function readThread(
+  clients: SlackClients,
+  params: { channel: string; thread_ts: string; limit?: number; cursor?: string }
+): Promise<SlackHistoryPage> {
+  const channelId = await resolveChannelId(clients, params.channel);
+  const limit = Math.min(Math.max(params.limit || 50, 1), 100);
+
+  const result = (await slackCall(clients, (c) =>
+    c.conversations.replies({
+      channel: channelId,
+      ts: params.thread_ts,
+      limit,
+      ...(params.cursor ? { cursor: params.cursor } : {}),
+    })
+  )) as ConversationsRepliesResponse;
+
+  return toHistoryPage(result);
 }
 
 /**

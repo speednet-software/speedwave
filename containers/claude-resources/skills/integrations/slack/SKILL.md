@@ -37,7 +37,7 @@ Always do steps 1–2 before calling a tool for the first time in a conversation
 
 **Channel references** — tools accept `#name`, bare `name`, or a channel ID (`C…`/`G…`/`D…`). Name resolution scans the (paginated) channel list each time — when you will touch a channel repeatedly, resolve once via `listChannelIds` and reuse the ID.
 
-**Threads are flattened** — history returns top-level messages only; there is no replies tool. If the user asks about a thread's contents beyond its parent message, say that thread replies are not accessible.
+**Threads need explicit expansion** — channel history returns top-level messages; a thread parent carries `reply_count > 0` and `thread_ts`. Fetch the full thread with `getThreadMessages({ channel, thread_ts })` (parent first, then replies oldest-first; paginate with `cursor`). For a complete channel export, expand every message with `reply_count > 0` — without that step the discussion inside threads is invisible.
 
 **DMs are out of scope** — the OAuth grant covers channels only (`channels:*`, `groups:*`). Listing or reading IMs/MPIMs fails with `missing_scope`; tell the user instead of retrying.
 
