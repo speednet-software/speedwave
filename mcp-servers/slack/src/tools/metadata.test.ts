@@ -4,6 +4,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { createChannelTools } from './channel-tools.js';
+import { createDmTools } from './dm-tools.js';
+import { createFileTools } from './file-tools.js';
 import { createUserTools } from './user-tools.js';
 import { ToolDefinition, RefreshLock } from '@speedwave/mcp-shared';
 import type { SlackClients } from '../client.js';
@@ -18,6 +20,8 @@ const stubClients: SlackClients = {
 
 const allTools: ToolDefinition[] = [
   ...createChannelTools(stubClients),
+  ...createDmTools(stubClients),
+  ...createFileTools(stubClients),
   ...createUserTools(stubClients),
 ];
 

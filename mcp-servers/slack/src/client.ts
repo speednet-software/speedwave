@@ -407,7 +407,9 @@ async function resolveChannelId(clients: SlackClients, channel: string): Promise
     }
   }
 
-  throw new Error(`Channel not found: ${channel}`);
+  throw new Error(
+    `Channel not found: ${channel}. To message a person, use findUsers to get their user ID, then openDirectMessage.`
+  );
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -873,4 +875,101 @@ export async function getUsers(
     }
     throw error;
   }
+}
+
+/** One direct-message conversation as returned by listDms. */
+export interface SlackDmSummary {
+  /** Conversation ID — pass to getChannelMessages/sendChannel. */
+  id: string;
+  type: 'im' | 'mpim';
+  /** 1:1 only: the other party's user ID. */
+  user?: string;
+  /** mpim only: the synthetic mpdm-… name. */
+  name?: string;
+  /** 1:1 only: the other party's account is deactivated. */
+  is_user_deleted?: boolean;
+}
+
+/**
+ * List the signed-in user's open DM conversations (1:1 and group).
+ * Requires `im:read` + `mpim:read`. No `is_member` filter — im objects
+ * do not carry it (that filter is why getChannels cannot serve DMs).
+ * @param {SlackClients} clients - Slack client container
+ * @returns {Promise<Object>} Object containing the DM summaries
+ * @throws {Error} On missing scopes or API failure
+ */
+export async function listDms(clients: SlackClients): Promise<{ dms: SlackDmSummary[] }> {
+  interface RawDm {
+    id?: string;
+    is_im?: boolean;
+    is_mpim?: boolean;
+    user?: string;
+    name?: string;
+    is_user_deleted?: boolean;
+  }
+
+  const dms: SlackDmSummary[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < CHANNEL_LIST_MAX_PAGES; page += 1) {
+    const result = await listChannelsPage(clients, 'im,mpim', true, cursor);
+    for (const ch of (result.channels ?? []) as RawDm[]) {
+      if (!ch.id) {
+        continue;
+      }
+      if (ch.is_im) {
+        dms.push({ id: ch.id, type: 'im', user: ch.user, is_user_deleted: ch.is_user_deleted });
+      } else {
+        dms.push({ id: ch.id, type: 'mpim', name: ch.name });
+      }
+    }
+    cursor = result.response_metadata?.next_cursor || undefined;
+    if (!cursor) {
+      break;
+    }
+  }
+  return { dms };
+}
+
+/** User-ID shape accepted by conversations.open (U… or enterprise W…). */
+const USER_ID_RE = /^[UW][A-Z0-9]+$/;
+
+/**
+ * Open (or return the existing) DM conversation with one or more users.
+ * Entries may be user IDs (`U…`/`W…`) or exact e-mail addresses; plain
+ * names are rejected with findUsers guidance. One user opens a 1:1 DM,
+ * 2-8 a group DM. Requires `im:write`/`mpim:write`. Opening is silent —
+ * the other side sees nothing until a message is sent.
+ * @param {SlackClients} clients - Slack client container
+ * @param {Object} params - Parameters
+ * @param {string[]} params.users - User IDs or e-mail addresses
+ * @returns {Promise<{id: string}>} The conversation ID
+ * @throws {Error} On unknown users, bad input shape, or missing scopes
+ */
+export async function openDm(
+  clients: SlackClients,
+  params: { users: string[] }
+): Promise<{ id: string }> {
+  const ids: string[] = [];
+  for (const entry of params.users) {
+    if (USER_ID_RE.test(entry)) {
+      ids.push(entry);
+    } else if (entry.includes('@')) {
+      const found = await getUsers(clients, { email: entry });
+      if (!found.user) {
+        throw new Error(`User not found for email: ${entry}`);
+      }
+      ids.push(found.user.id);
+    } else {
+      throw new Error(
+        `'${entry}' is not a user ID or email. Find the person with findUsers first.`
+      );
+    }
+  }
+
+  const result = await slackCall(clients, (c) => c.conversations.open({ users: ids.join(',') }));
+  const channel = result.channel as { id?: string } | undefined;
+  if (!channel?.id) {
+    throw new Error('Slack did not return a conversation ID from conversations.open.');
+  }
+  return { id: channel.id };
 }

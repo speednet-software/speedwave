@@ -13,6 +13,8 @@ import {
   getFileContent,
   downloadFile,
   getUsers,
+  listDms,
+  openDm,
 } from './client.js';
 import { WebClient } from '@slack/web-api';
 import fs from 'fs/promises';
@@ -74,7 +76,7 @@ function presentClients(): SlackClients {
     user: {
       token: 'xoxe.xoxp-test',
       chat: { postMessage: vi.fn() },
-      conversations: { list: vi.fn(), history: vi.fn(), replies: vi.fn() },
+      conversations: { list: vi.fn(), history: vi.fn(), replies: vi.fn(), open: vi.fn() },
       users: { lookupByEmail: vi.fn() },
       files: { info: vi.fn() },
     } as unknown as WebClient,
@@ -532,7 +534,9 @@ describe('slack client', () => {
           channel: 'nonexistent',
           message: 'Hello!',
         })
-      ).rejects.toThrow('Channel not found: nonexistent');
+      ).rejects.toThrow(
+        'Channel not found: nonexistent. To message a person, use findUsers to get their user ID, then openDirectMessage.'
+      );
     });
 
     it('resolves channel by normalized name', async () => {
@@ -1457,6 +1461,141 @@ describe('slack client', () => {
       const result = await getChannels(mockClients);
 
       expect(result.channels).toEqual([]);
+    });
+  });
+
+  describe('listDms', () => {
+    let mockClients: SlackClients;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      mockClients = presentClients();
+    });
+
+    function stubList(pages: Record<string, unknown>[]): ReturnType<typeof vi.fn> {
+      const fn = mockClients.user.conversations.list as ReturnType<typeof vi.fn>;
+      for (const page of pages) {
+        fn.mockResolvedValueOnce(page);
+      }
+      return fn;
+    }
+
+    it('maps im and mpim entries and requests both types', async () => {
+      const list = stubList([
+        {
+          ok: true,
+          channels: [
+            { id: 'D1', is_im: true, user: 'U1' },
+            { id: 'D2', is_im: true, user: 'U2', is_user_deleted: true },
+            { id: 'G1', is_mpim: true, name: 'mpdm-anna--marek--user-1' },
+          ],
+          response_metadata: { next_cursor: '' },
+        },
+      ]);
+
+      const { dms } = await listDms(mockClients);
+
+      expect(dms).toEqual([
+        { id: 'D1', type: 'im', user: 'U1', is_user_deleted: undefined },
+        { id: 'D2', type: 'im', user: 'U2', is_user_deleted: true },
+        { id: 'G1', type: 'mpim', name: 'mpdm-anna--marek--user-1' },
+      ]);
+      expect(list).toHaveBeenCalledWith(expect.objectContaining({ types: 'im,mpim' }));
+    });
+
+    it('paginates with the cursor and does not require is_member', async () => {
+      const list = stubList([
+        {
+          ok: true,
+          // No is_member field anywhere — im objects do not carry it.
+          channels: [{ id: 'D1', is_im: true, user: 'U1' }],
+          response_metadata: { next_cursor: 'CUR2' },
+        },
+        {
+          ok: true,
+          channels: [{ id: 'D2', is_im: true, user: 'U2' }],
+          response_metadata: { next_cursor: '' },
+        },
+      ]);
+
+      const { dms } = await listDms(mockClients);
+
+      expect(dms.map((d) => d.id)).toEqual(['D1', 'D2']);
+      expect(list).toHaveBeenCalledTimes(2);
+      expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'CUR2' }));
+    });
+
+    it('returns an empty list for a user with no DMs', async () => {
+      stubList([{ ok: true, channels: [], response_metadata: { next_cursor: '' } }]);
+      const { dms } = await listDms(mockClients);
+      expect(dms).toEqual([]);
+    });
+  });
+
+  describe('openDm', () => {
+    let mockClients: SlackClients;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      mockClients = presentClients();
+    });
+
+    function stubOpen(channelId: string): ReturnType<typeof vi.fn> {
+      const fn = mockClients.user.conversations.open as ReturnType<typeof vi.fn>;
+      fn.mockResolvedValue({ ok: true, channel: { id: channelId } });
+      return fn;
+    }
+
+    it('passes user IDs straight through (U… and enterprise W…)', async () => {
+      const open = stubOpen('D9');
+
+      const result = await openDm(mockClients, { users: ['U0123ABC', 'W0456DEF'] });
+
+      expect(result).toEqual({ id: 'D9' });
+      expect(open).toHaveBeenCalledWith({ users: 'U0123ABC,W0456DEF' });
+    });
+
+    it('resolves email entries via users.lookupByEmail', async () => {
+      const open = stubOpen('D10');
+      (mockClients.user.users.lookupByEmail as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        user: { id: 'U77', name: 'pawel' },
+      });
+
+      const result = await openDm(mockClients, { users: ['pawel@example.pl'] });
+
+      expect(result).toEqual({ id: 'D10' });
+      expect(open).toHaveBeenCalledWith({ users: 'U77' });
+    });
+
+    it('throws on an unknown email and on a plain name', async () => {
+      (mockClients.user.users.lookupByEmail as ReturnType<typeof vi.fn>).mockRejectedValue(
+        Object.assign(new Error('users_not_found'), { data: { error: 'users_not_found' } })
+      );
+      await expect(openDm(mockClients, { users: ['ghost@example.pl'] })).rejects.toThrow(
+        /User not found for email/
+      );
+
+      await expect(openDm(mockClients, { users: ['Pawel'] })).rejects.toThrow(/findUsers first/);
+      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
+    });
+
+    it('throws when Slack returns no conversation ID', async () => {
+      (mockClients.user.conversations.open as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+      });
+      await expect(openDm(mockClients, { users: ['U1'] })).rejects.toThrow(
+        /did not return a conversation ID/
+      );
+    });
+
+    it('propagates missing_scope so formatSlackError can guide re-auth', async () => {
+      (mockClients.user.conversations.open as ReturnType<typeof vi.fn>).mockRejectedValue(
+        Object.assign(new Error('missing_scope'), { data: { error: 'missing_scope' } })
+      );
+      await expect(openDm(mockClients, { users: ['U1'] })).rejects.toMatchObject({
+        data: { error: 'missing_scope' },
+      });
     });
   });
 

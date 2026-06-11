@@ -49,13 +49,15 @@ interface GetThreadMessagesParams {
 
 const sendChannelTool: Tool = {
   name: 'sendChannel',
-  description: 'Send a message to a Slack channel as the signed-in user (their name and avatar).',
+  description:
+    "Send a message to a Slack channel or DM conversation as the signed-in user (their name and avatar). Irreversible and instantly visible — requires the user's explicit confirmation of the exact recipient and verbatim text, in the current conversation, before calling.",
   inputSchema: {
     type: 'object',
     properties: {
       channel: {
         type: 'string',
-        description: 'Channel name (e.g., #general) or ID (e.g., C01234567)',
+        description:
+          'Channel name (e.g., #general), channel ID (C…), or DM conversation ID (D…/G…)',
       },
       message: { type: 'string', description: 'Message text to send' },
     },
@@ -90,7 +92,7 @@ const sendChannelTool: Tool = {
 const getChannelMessagesTool: Tool = {
   name: 'getChannelMessages',
   description:
-    'Get one page of messages from a channel (newest first). Iterate with `cursor` (from `next_cursor`) to read the full history.',
+    'Get one page of messages from a channel or DM conversation (newest first; accepts #name, C…, or D…/G… IDs). Iterate with `cursor` (from `next_cursor`) to read the full history.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -181,7 +183,7 @@ const getChannelMessagesTool: Tool = {
 const getThreadMessagesTool: Tool = {
   name: 'getThreadMessages',
   description:
-    "Get one page of a thread's messages (parent first, then replies oldest-first). Find threads via getChannelMessages entries with reply_count > 0; iterate with `cursor`.",
+    "Get one page of a thread's messages in a channel or DM (parent first, then replies oldest-first). Find threads via getChannelMessages entries with reply_count > 0; iterate with `cursor`.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -249,7 +251,7 @@ const getThreadMessagesTool: Tool = {
 const listChannelIdsTool: Tool = {
   name: 'listChannelIds',
   description:
-    'List ALL channels the signed-in user is a member of (paginated under the hood). Speedwave acts as the user — there is no bot to invite; a channel missing here means the user is not a member of it.',
+    'List ALL channels the signed-in user is a member of (paginated under the hood). Speedwave acts as the user — there is no bot to invite; a channel missing here means the user is not a member of it. For DMs use listDirectMessages.',
   inputSchema: {
     type: 'object',
     properties: {
