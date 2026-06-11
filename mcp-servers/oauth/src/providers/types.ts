@@ -9,7 +9,7 @@
  */
 
 /** SSOT — widen this union when adding an IdP. */
-export type ProviderId = 'microsoft' | 'generic';
+export type ProviderId = 'microsoft' | 'generic' | 'slack';
 
 /** OAuth grant the stored state was minted with; drives generic refresh. */
 export type GrantType = 'refresh_token' | 'client_credentials';

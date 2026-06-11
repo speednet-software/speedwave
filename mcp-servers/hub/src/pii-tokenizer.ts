@@ -205,12 +205,24 @@ function generateToken(type: PIIType): string {
 }
 
 /**
+ * `author`/`authors` as a complete word segment is prose metadata (message
+ * author, document author), not authentication — without this carve-out the
+ * partial `auth` match redacts every sender name. `authorization` stays
+ * caught: its `author` is followed by a letter, so the regex does not match.
+ */
+const AUTHOR_SEGMENT = /(^|[^a-z])authors?(?=[^a-z]|$)/g;
+
+/**
  * Check if a key name indicates a sensitive field
  * @param key - Object key name to check
  * @returns True if the key indicates sensitive data
  */
 function isSensitiveKey(key: string): boolean {
-  const lowerKey = key.toLowerCase();
+  // camelCase → snake_case first, so the segment carve-out sees `co_author`.
+  const lowerKey = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .replace(AUTHOR_SEGMENT, '$1');
   return SENSITIVE_KEYS.some((s) => lowerKey.includes(s));
 }
 

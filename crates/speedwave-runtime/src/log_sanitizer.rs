@@ -41,6 +41,9 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
             r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
             "***REDACTED_JWT***",
         ),
+        // Slack rotating tokens first (xoxe.xoxp-…, xoxe-1-…) so the whole
+        // token is consumed before the xox[bpars]- rule matches its substring.
+        (r"xoxe[.-][A-Za-z0-9.-]+", "***REDACTED_SLACK_TOKEN***"),
         // Slack tokens: xoxb-, xoxp-, xoxa-, xoxr-, xoxs-
         (r"xox[bpars]-[A-Za-z0-9-]+", "***REDACTED_SLACK_TOKEN***"),
         // GitHub tokens: ghp_, ghs_, gho_, ghu_, github_pat_ prefixed (36+ chars after prefix)
@@ -164,7 +167,7 @@ mod tests {
     /// The definitions vec contains exactly this many rules. If a new rule is
     /// added to the vec but fails to compile, RULES.len() will be less than
     /// this constant and the test will fail, catching the silent drop.
-    const EXPECTED_RULE_COUNT: usize = 21;
+    const EXPECTED_RULE_COUNT: usize = 22;
 
     #[test]
     fn test_rules_count() {
@@ -192,6 +195,7 @@ mod tests {
             r"(?i)(Bearer\s+)\S+",
             r"(?i)(Authorization:\s*)\S+(\s+\S+)?",
             r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+            r"xoxe[.-][A-Za-z0-9.-]+",
             r"xox[bpars]-[A-Za-z0-9-]+",
             r"ghp_[A-Za-z0-9]{36,}",
             r"ghs_[A-Za-z0-9]{36,}",
@@ -318,6 +322,44 @@ mod tests {
         assert!(
             output.contains("***REDACTED_SLACK_TOKEN***"),
             "Slack xoxp token not redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_slack_xoxe_refresh_token_redaction() {
+        let input = "refresh with xoxe-1-A1B2C3D4E5";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED_SLACK_TOKEN***"),
+            "Slack xoxe refresh token not redacted: {output}"
+        );
+        assert!(
+            !output.contains("xoxe-1-"),
+            "Slack xoxe prefix should not appear: {output}"
+        );
+    }
+
+    #[test]
+    fn test_slack_xoxe_rotated_access_token_redacted_in_full() {
+        let input = "rotated access xoxe.xoxp-FAKE-TOKEN-VALUE done";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED_SLACK_TOKEN***"),
+            "rotated access token not redacted: {output}"
+        );
+        // The whole token must be consumed — no bare `xoxe.` prefix left over.
+        assert!(
+            !output.contains("xoxe."),
+            "xoxe. prefix should be consumed by the rotating-token rule: {output}"
+        );
+    }
+
+    #[test]
+    fn test_slack_bare_xoxe_word_not_redacted() {
+        let output = sanitize("the xoxe prefix marks rotating tokens");
+        assert!(
+            output.contains("xoxe prefix"),
+            "bare xoxe word must not be redacted: {output}"
         );
     }
 

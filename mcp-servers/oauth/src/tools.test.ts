@@ -274,7 +274,7 @@ describe('oauth tools', () => {
       expect(newState.refreshToken).toBe('old-refresh');
     });
 
-    it('refuses when access token still valid AND within rate-limit window', async () => {
+    it('rate-limit with valid token: success-noop, no IdP call, audited', async () => {
       await seedBearerMap({ 'bearer-sp': 'sharepoint' });
       // last refresh 10 minutes ago, access valid for 50 more minutes → rate-limit
       await seedState({
@@ -286,10 +286,69 @@ describe('oauth tools', () => {
       const refresh = tools.find((t) => t.tool.name === 'refresh')!;
 
       const result = await refresh.handler({}, ctxFor('sharepoint'));
-      expect(result.isError).toBe(true);
-      expect(getTextResult(result)).toContain('rate_limited');
+      // Success-noop: a caller that lost the single-flight race re-reads the
+      // fresh token and retries instead of failing for the whole window.
+      expect(result.isError).toBeFalsy();
+      const payload = JSON.parse(getTextResult(result)) as {
+        expiresIn: number;
+        grantedScopes: string[];
+        rateLimited?: boolean;
+      };
+      expect(payload.rateLimited).toBe(true);
+      expect(payload.expiresIn).toBe(50 * 60);
+      expect(payload.grantedScopes).toEqual(sharepointState.grantedScopes);
       expect(refreshCalls).toHaveLength(0);
       expect(await readAuditLog()).toContain('outcome=error:rate_limited');
+    });
+
+    it('serializes concurrent refreshes per service (one IdP call)', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState); // expired → first caller refreshes
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+
+      let resolveRefresh!: (r: RefreshResult) => void;
+      const gate = new Promise<RefreshResult>((r) => {
+        resolveRefresh = r;
+      });
+      deps.providers = {
+        microsoft: {
+          ...microsoftSpy,
+          refresh: async (req) => {
+            refreshCalls.push({ ...req, providerData: { ...req.providerData } });
+            return gate;
+          },
+        },
+      };
+
+      const first = refresh.handler({}, ctxFor('sharepoint'));
+      const second = refresh.handler({}, ctxFor('sharepoint'));
+      // Let the first caller reach the provider before releasing it.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(refreshCalls).toHaveLength(1);
+      // Winner persists a fresh expiresAt/lastRefreshAt at `now`...
+      now = Date.parse('2026-05-15T12:00:05Z');
+      resolveRefresh({
+        ok: true,
+        value: {
+          accessToken: 'race-token',
+          refreshToken: 'race-refresh',
+          expiresIn: 3600,
+          grantedScopes: ['s'],
+        },
+      });
+      const [r1, r2] = await Promise.all([first, second]);
+      expect(r1.isError).toBeFalsy();
+      expect(r2.isError).toBeFalsy();
+      // Exactly one IdP call total; the winner is whoever acquired the mutex
+      // first (resolveCaller is async, so order is not positionally pinned —
+      // assert on the SET of outcomes, not which of r1/r2 lost the race).
+      expect(refreshCalls).toHaveLength(1);
+      const payloads = [r1, r2].map(
+        (r) => JSON.parse(getTextResult(r)) as { rateLimited?: boolean }
+      );
+      const rateLimited = payloads.filter((p) => p.rateLimited === true);
+      expect(rateLimited).toHaveLength(1); // the loser hit the rate-limit noop
     });
 
     it('allows refresh when access token expired even within rate-limit window', async () => {

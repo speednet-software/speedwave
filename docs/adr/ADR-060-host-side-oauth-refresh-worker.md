@@ -5,7 +5,7 @@
 
 ## Decision
 
-Move OAuth token refresh out of the SharePoint container into a new **`oauth`** worker: a per-project host-side MCP process (Node.js, no container) that holds each OAuth service's `refresh_token` + IdP application identity and exposes two tools, `refresh` and `forget`. The worker is never enumerated to Claude and never appears in the hub's tool registry — its only callers are other workers in the same project (today: SharePoint), which reach it directly, bypassing the zero-token hub. With refresh moved out, the SharePoint `/tokens` mount becomes `:ro` like every other worker and now contains only `access_token` and `site_id`.
+Move OAuth token refresh out of the SharePoint container into a new **`oauth`** worker: a per-project host-side MCP process (Node.js, no container) that holds each OAuth service's `refresh_token` + IdP application identity and exposes two tools, `refresh` and `forget`. The worker is never enumerated to Claude and never appears in the hub's tool registry — its only callers are other workers in the same project (SharePoint; Slack joined with [ADR-071](ADR-071-slack-oauth-pkce-user-tokens.md), plugins with [ADR-069](ADR-069-generic-plugin-oauth2.md)), which reach it directly, bypassing the zero-token hub. With refresh moved out, the SharePoint `/tokens` mount becomes `:ro` like every other worker and now contains only `access_token` and `site_id`.
 
 ## Why
 

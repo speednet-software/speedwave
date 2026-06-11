@@ -15,6 +15,9 @@ const RULES: ReadonlyArray<readonly [RegExp, string]> = [
   [/(Bearer\s+)\S+/gi, '$1***REDACTED***'],
   [/(Authorization:\s*)\S+(\s+\S+)?/gi, '$1***REDACTED***'],
   [/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '***REDACTED_JWT***'],
+  // Rotating-token formats first (xoxe.xoxp-… / xoxe-1-…) so the whole token
+  // is consumed before the xox[bpars]- rule matches its inner substring.
+  [/xoxe[.-][A-Za-z0-9.-]+/g, '***REDACTED_SLACK_TOKEN***'],
   [/xox[bpars]-[A-Za-z0-9-]+/g, '***REDACTED_SLACK_TOKEN***'],
   [/ghp_[A-Za-z0-9]{36,}/g, '***REDACTED_GITHUB_TOKEN***'],
   [/ghs_[A-Za-z0-9]{36,}/g, '***REDACTED_GITHUB_TOKEN***'],

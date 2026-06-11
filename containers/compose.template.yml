@@ -90,6 +90,9 @@ services:
       - /tmp:noexec,nosuid,size=${MCP_SLACK_TMPFS}
     volumes:
       - ${TOKENS_DIR}/slack:/tokens:ro
+      # Slack file downloads land in /workspace/slack-files so the office
+      # worker and Claude can read them (ADR-071; same rationale as sharepoint).
+      - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
     networks:

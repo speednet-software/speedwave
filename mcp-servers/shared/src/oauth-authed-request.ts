@@ -47,41 +47,65 @@ export interface AuthedTokenState {
   accessToken: string;
 }
 
-/** Options for {@link authedRequest}. */
-export interface AuthedRequestOptions {
-  /** Service id for the oauth worker (e.g. `sharepoint`, `glpi`). */
+/** Common refresh context shared by {@link authedRequest} and {@link authedSdkCall}. */
+export interface AuthedRefreshContext {
+  /** Service id for the oauth worker (e.g. `sharepoint`, `slack`). */
   readonly service: string;
   /** Mutable token holder; `accessToken` is updated after a refresh. */
   readonly state: AuthedTokenState;
   /** Per-service refresh serializer (one per client instance). */
   readonly lock: RefreshLock;
+  /** `/tokens` dir override (defaults to `TOKENS_DIR` env or `/tokens`). */
+  readonly tokensDir?: string;
+}
+
+/** Options for {@link authedRequest}. */
+export interface AuthedRequestOptions extends AuthedRefreshContext {
   /**
    * Issues the request with the given bearer. Called up to twice (initial +
    * post-refresh retry). MUST apply the passed token as the request's bearer;
    * `authedRequest` does not set the Authorization header itself.
    */
   readonly send: (accessToken: string) => Promise<Response>;
-  /** `/tokens` dir override (defaults to `TOKENS_DIR` env or `/tokens`). */
-  readonly tokensDir?: string;
   /** Proactively refresh when the token expires within this window (seconds). */
   readonly proactiveWithinSeconds?: number;
   /** Statuses (≥400) that trigger refresh+retry (default `[401]`; GLPI adds 400). */
   readonly authFailureStatuses?: readonly number[];
 }
 
+/** Brief re-poll for the rewritten token; covers documented virtiofs lag. */
+const STALE_READ_POLL_ATTEMPTS = 5;
+const STALE_READ_POLL_DELAY_MS = 100;
+
 /**
  * Refresh the caller's token via the oauth worker, then re-read the fresh value
  * the worker wrote into `/tokens/access_token`. Mutates `state.accessToken`.
- * @param opts - the authed-request options
+ * @param ctx - the refresh context
  */
-async function refreshInto(opts: AuthedRequestOptions): Promise<void> {
-  await refreshAccessToken({ service: opts.service });
-  const dir = opts.tokensDir ?? process.env.TOKENS_DIR ?? '/tokens';
-  const fresh = await loadToken(join(dir, 'access_token'));
+async function refreshInto(ctx: AuthedRefreshContext): Promise<void> {
+  const before = ctx.state.accessToken;
+  const outcome = await refreshAccessToken({ service: ctx.service });
+  const dir = ctx.tokensDir ?? process.env.TOKENS_DIR ?? '/tokens';
+  let fresh = await loadToken(join(dir, 'access_token'));
+  // A real refresh rewrites the file with a new value; a rate-limited noop
+  // does not. If the worker says it refreshed but we still read the old token,
+  // poll briefly — host-write → guest-read lag through the mount is a
+  // documented phenomenon (ADR-066) — then proceed with whatever is there.
+  if (!outcome.rateLimited) {
+    for (let i = 0; i < STALE_READ_POLL_ATTEMPTS && fresh === before; i += 1) {
+      await new Promise((r) => setTimeout(r, STALE_READ_POLL_DELAY_MS));
+      fresh = await loadToken(join(dir, 'access_token'));
+    }
+    if (fresh === before) {
+      console.warn(
+        `${ts()} ${ctx.service}: access_token unchanged after refresh — possible stale mount read`
+      );
+    }
+  }
   if (!fresh) {
     throw new Error('oauth worker reported success but access_token was not written');
   }
-  opts.state.accessToken = fresh;
+  ctx.state.accessToken = fresh;
 }
 
 /**
@@ -123,13 +147,41 @@ export async function authedRequest(opts: AuthedRequestOptions): Promise<Respons
 
 /**
  * Refresh under the lock, unless another caller refreshed while we waited.
- * @param opts - the authed-request options
+ * @param ctx - the refresh context
  */
-async function refreshOnce(opts: AuthedRequestOptions): Promise<void> {
-  const before = opts.lock.generation;
-  await opts.lock.run(async () => {
-    if (opts.lock.generation !== before) return; // another caller already refreshed
-    await refreshInto(opts);
-    opts.lock.generation += 1;
+async function refreshOnce(ctx: AuthedRefreshContext): Promise<void> {
+  const before = ctx.lock.generation;
+  await ctx.lock.run(async () => {
+    if (ctx.lock.generation !== before) return; // another caller already refreshed
+    await refreshInto(ctx);
+    ctx.lock.generation += 1;
   });
+}
+
+/** Options for {@link authedSdkCall}. */
+export interface AuthedSdkCallOptions<T> extends AuthedRefreshContext {
+  /**
+   * Issues the SDK call with the given token. Called up to twice (initial +
+   * post-refresh retry). MUST apply the passed token to the call.
+   */
+  readonly send: (accessToken: string) => Promise<T>;
+  /** True when the thrown error means "token stale" → refresh + retry once. */
+  readonly isAuthError: (err: unknown) => boolean;
+}
+
+/**
+ * SDK-shaped sibling of {@link authedRequest} for clients that throw typed
+ * errors instead of returning a `Response` (e.g. `@slack/web-api`): on an
+ * auth error, refresh once via the oauth worker and retry once.
+ * @param opts - refresh context plus `send` and the auth-error predicate
+ * @throws {OAuthScopeMismatchError} when the IdP needs re-consent
+ */
+export async function authedSdkCall<T>(opts: AuthedSdkCallOptions<T>): Promise<T> {
+  try {
+    return await opts.send(opts.state.accessToken);
+  } catch (err) {
+    if (!opts.isAuthError(err)) throw err;
+    await refreshOnce(opts);
+    return opts.send(opts.state.accessToken);
+  }
 }

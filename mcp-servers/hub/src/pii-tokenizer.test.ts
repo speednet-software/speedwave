@@ -575,6 +575,37 @@ describe('pii-tokenizer', () => {
       expect(result.credential).toMatch(/\[SENSITIVE_FIELD:TOKEN_[A-F0-9]+\]/);
     });
 
+    it('does NOT tokenize author fields — prose metadata, not authentication', () => {
+      const data = {
+        author: 'Paweł Kowalski',
+        authors: 'Anna, Marek',
+        author_name: 'Sławek Jakubowski',
+        message_author: 'Ania Nowak',
+        coAuthor: 'Jan',
+      };
+      const result = tokenizePII(data, context) as Record<string, string>;
+
+      expect(result.author).toBe('Paweł Kowalski');
+      expect(result.authors).toBe('Anna, Marek');
+      expect(result.author_name).toBe('Sławek Jakubowski');
+      expect(result.message_author).toBe('Ania Nowak');
+      expect(result.coAuthor).toBe('Jan');
+    });
+
+    it('still tokenizes authorization, oauth and author_token (real auth keys)', () => {
+      const data = {
+        authorization: 'Bearer xyz',
+        oauth: 'grant',
+        author_token: 'tok-123',
+      };
+      const result = tokenizePII(data, context) as Record<string, string>;
+
+      expect(result.authorization).toMatch(/\[SENSITIVE_FIELD:TOKEN_[A-F0-9]+\]/);
+      expect(result.oauth).toMatch(/\[SENSITIVE_FIELD:TOKEN_[A-F0-9]+\]/);
+      // 'author' segment is stripped but the remaining '_token' still matches.
+      expect(result.author_token).toMatch(/\[SENSITIVE_FIELD:TOKEN_[A-F0-9]+\]/);
+    });
+
     it('is case-insensitive for key names', () => {
       const data = {
         PASSWORD: 'secret1',

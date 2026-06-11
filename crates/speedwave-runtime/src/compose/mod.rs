@@ -1089,7 +1089,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 31;
+    const SECURITY_RULE_COUNT: usize = 38;
 
     /// Repo root (workspace dir holding `containers/`, `mcp-servers/`), derived
     /// from this crate's manifest dir — used as the injected bundle build root
@@ -1491,7 +1491,8 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/project:/workspace:rw
     environment:
       - PORT=3000
     networks:
@@ -5192,6 +5193,7 @@ services:
     fn oauth_consumer_service_ids_includes_builtins_and_enabled_oauth_plugins() {
         let mut resolved = crate::config::ResolvedIntegrationsConfig {
             sharepoint: true,
+            slack: true,
             ..Default::default()
         };
         resolved.plugins.insert("glpi".to_string(), true);
@@ -5203,6 +5205,17 @@ services:
         ];
         let ids = oauth_consumer_service_ids(&resolved, &plugins);
         assert!(ids.contains(&"sharepoint".to_string()), "built-in included");
+        assert!(
+            ids.contains(&"slack".to_string()),
+            "slack included when enabled (ADR-071)"
+        );
+
+        // State transition: toggling slack off removes it from the consumer set.
+        let mut resolved_off = resolved.clone();
+        resolved_off.slack = false;
+        let ids_off = oauth_consumer_service_ids(&resolved_off, &plugins);
+        assert!(!ids_off.contains(&"slack".to_string()));
+        assert!(ids_off.contains(&"sharepoint".to_string()));
         assert!(
             ids.contains(&"glpi".to_string()),
             "enabled oauth plugin included"
@@ -5268,7 +5281,61 @@ services:
     /// happy-path test only proves "hub is untouched" — a regression that
     /// blanket-injects WORKER_OAUTH_URL into every worker would still pass.
     #[test]
-    fn test_oauth_config_does_not_inject_into_slack_or_redmine() {
+    fn test_oauth_config_injects_url_and_bearer_into_slack_consumer() {
+        // ADR-071: slack consumes the host oauth worker exactly like sharepoint.
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        write_live_oauth_lock(&lock_path, 49302);
+        let bearer_map_path = tmp.path().join(".bearer-map.json");
+        std::fs::write(
+            &bearer_map_path,
+            r#"{"bearer-sl-uuid": "slack", "bearer-sp-uuid": "sharepoint"}"#,
+        )
+        .unwrap();
+
+        let result = apply_oauth_config_with_paths(
+            VALID_COMPOSE_WITH_MULTIPLE_WORKERS,
+            tmp.path(),
+            &lock_path,
+            &bearer_map_path,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let services = doc.get("services").unwrap();
+
+        let slack_env = service_env(&doc, "mcp-slack");
+        let oauth_url = find_env_value(&slack_env, "WORKER_OAUTH_URL=")
+            .expect("WORKER_OAUTH_URL must be injected into mcp-slack");
+        assert!(
+            oauth_url.ends_with(":49302"),
+            "URL must use port: {oauth_url}"
+        );
+
+        let slack_vols: Vec<String> = services
+            .get("mcp-slack")
+            .and_then(|s| s.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            slack_vols
+                .iter()
+                .any(|v| v.contains(":/secrets/oauth-auth-token-slack:ro")),
+            "per-service oauth bearer must be mounted into mcp-slack, got: {slack_vols:?}"
+        );
+
+        // Redmine (never-OAuth) stays untouched even with consumers present.
+        let rm_env = service_env(&doc, "mcp-redmine");
+        assert!(find_env_value(&rm_env, "WORKER_OAUTH_URL=").is_none());
+    }
+
+    #[test]
+    fn test_oauth_config_does_not_inject_into_unprovisioned_services() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
         write_live_oauth_lock(&lock_path, 49301);
@@ -5292,7 +5359,9 @@ services:
             "WORKER_OAUTH_URL must be injected into mcp-sharepoint"
         );
 
-        // Non-OAuth workers MUST be untouched — neither env nor mount.
+        // Services absent from the bearer map MUST be untouched — neither env
+        // nor mount. mcp-slack IS an OAuth consumer (ADR-071) but is not
+        // provisioned in this fixture; mcp-redmine never uses OAuth.
         for non_oauth_service in &["mcp-slack", "mcp-redmine", "mcp-hub"] {
             let env = service_env(&doc, non_oauth_service);
             assert!(
@@ -7546,6 +7615,115 @@ services:
     }
 
     #[test]
+    fn test_security_check_slack_with_workspace_and_bearer_passes() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // ADR-071: slack mounts /tokens:ro + /workspace:rw (file downloads)
+        // + its per-service oauth bearer — the full allowlist must pass.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/project:/workspace:rw
+      - /test/.speedwave/oauth/test/bearer-slack:/secrets/oauth-auth-token-slack:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        let slack_violations: Vec<_> = violations.iter().filter(|v| v.rule.is_slack()).collect();
+        assert!(
+            slack_violations.is_empty(),
+            "ADR-071 slack compose must pass: {:?}",
+            slack_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_slack_flags_rw_tokens_and_missing_workspace() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/slack:/tokens:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode
+                    && v.container == "mcp-slack"),
+            "a :rw token mount on slack must be flagged"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SlackMissingWorkspaceMount),
+            "a slack service without /workspace must be flagged (ADR-071)"
+        );
+    }
+
+    #[test]
+    fn test_security_check_slack_flags_unauthorized_extra_volume() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /test/project:/workspace:rw
+      - /etc/passwd:/stolen:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SlackNoExtraVolumes),
+            "an unauthorized extra volume on slack must be flagged"
+        );
+    }
+
+    #[test]
     fn test_security_check_sharepoint_oauth_bearer_must_be_ro() {
         let data_dir = tempfile::tempdir().unwrap();
         // ADR-060 / extra_allowed_ro_targets logic: oauth bearer mount must be :ro.
@@ -7928,6 +8106,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
+      - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
     networks:
@@ -8908,6 +9087,15 @@ services:
             .filter(|r| r.to_string().starts_with("SHAREPOINT"))
             .count();
         let by_method = SecurityRule::iter().filter(|r| r.is_sharepoint()).count();
+        let slack_by_prefix = SecurityRule::iter()
+            .filter(|r| r.to_string().starts_with("SLACK_"))
+            .count();
+        let slack_by_method = SecurityRule::iter().filter(|r| r.is_slack()).count();
+        assert_eq!(
+            slack_by_method, slack_by_prefix,
+            "is_slack() count ({slack_by_method}) differs from SLACK-prefixed variant count \
+             ({slack_by_prefix}) — update SecurityRule::is_slack() to include the new variant"
+        );
         assert_eq!(
             by_prefix, by_method,
             "is_sharepoint() count ({by_method}) differs from SHAREPOINT-prefixed variant count \
