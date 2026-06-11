@@ -700,6 +700,9 @@ async function downloadSlackFileBytes(
   });
 }
 
+/** Buffering cap for both file paths — the worker container has 128 MiB total. */
+const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
+
 /**
  * Read the content of a text file shared on Slack (requires `files:read`).
  * Binary files are refused from metadata alone — no bytes are downloaded —
@@ -721,7 +724,15 @@ export async function getFileContent(
         'Download it into the workspace with downloadFile instead.'
     );
   }
-  const body = await downloadSlackFileBytes(clients, meta);
+  // Buffering is bounded — the worker container has 128 MiB total, so a huge
+  // text file must be rejected from metadata, not buffered then truncated.
+  if (meta.size !== undefined && meta.size > MAX_DOWNLOAD_BYTES) {
+    throw new Error(
+      `File '${meta.name}' is ${meta.size} bytes — too large to read. ` +
+        'Ask the user to share an excerpt.'
+    );
+  }
+  const body = await downloadSlackFileBytes(clients, meta, MAX_DOWNLOAD_BYTES);
   const truncated = body.length > MAX_FILE_CONTENT_BYTES;
   const content = body.subarray(0, MAX_FILE_CONTENT_BYTES).toString('utf-8');
   return {
@@ -733,9 +744,6 @@ export async function getFileContent(
     truncated,
   };
 }
-
-/** Cap on workspace downloads — guards project disk against huge uploads. */
-const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 
 /** Hidden workspace subpath for downloads — keeps the project root clean (same convention as office's `.speedwave/office`). */
 const SLACK_DOWNLOAD_SUBPATH = path.join('.speedwave', 'slack');

@@ -1090,6 +1090,48 @@ describe('slack client', () => {
       await expect(getFileContent(mockClients, { file: 'F4' })).rejects.toThrow();
     });
 
+    it('rejects a huge text file from metadata without fetching', async () => {
+      stubInfo({
+        id: 'F9',
+        name: 'giant.log',
+        mimetype: 'text/plain',
+        size: 100 * 1024 * 1024,
+        url_private: 'https://files.slack.com/files-pri/T1-F9/giant.log',
+      });
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(getFileContent(mockClients, { file: 'F9' })).rejects.toThrow(
+        /too large to read/
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects via Content-Length when files.info omitted the size', async () => {
+      stubInfo({
+        id: 'F10',
+        name: 'nosize.log',
+        mimetype: 'text/plain',
+        url_private: 'https://files.slack.com/files-pri/T1-F10/nosize.log',
+      });
+      const arrayBuffer = vi.fn();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          headers: {
+            get: (h: string) => (h === 'content-length' ? String(100 * 1024 * 1024) : 'text/plain'),
+          },
+          arrayBuffer,
+        })
+      );
+
+      await expect(getFileContent(mockClients, { file: 'F10' })).rejects.toThrow(
+        /over the download cap/
+      );
+      expect(arrayBuffer).not.toHaveBeenCalled();
+    });
+
     it('truncates oversized files and flags it', async () => {
       const big = 'a'.repeat(1024 * 1024 + 10);
       stubInfo({
