@@ -66,6 +66,26 @@ succeeds. Consequences of the reorder:
   them. Quitting the app mid-teardown leaves the previous project running
   in the VM until the next operation — accepted.
 
+### Parallel container stop inside every `compose down`
+
+`compose_down_and_cleanup` (shared) and the Lima retry variant first list the
+project's running containers and stop them **in parallel** (one `nerdctl
+stop` per container, host-side threads), then run `compose down` — which now
+only removes already-exited containers and networks. Wall-clock cost drops
+from the sum of sequential stops to the slowest single stop. This speeds up
+every down consumer: switch teardown, update, integration toggles, project
+removal and quit.
+
+### Idempotent `compose_up` on app start
+
+`setup_wizard::start_containers` used `compose_up_recreate` on every app
+launch, churning all containers of the active project. With content-addressed
+image tags (ADR-071) plus nerdctl config-hash convergence, plain `compose up`
+recreates exactly what changed — an unchanged project starts in seconds.
+Force-recreate remains in exactly two places: bundle-reconcile restore
+(ADR-071 — crosses image-tag changes) and the `ensure_exec_healthy` stale
+container recovery path.
+
 ## Alternatives considered
 
 - **Parallel stop in nerdctl** — `compose down` exposes no parallelism

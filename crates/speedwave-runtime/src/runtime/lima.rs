@@ -228,6 +228,7 @@ fn compose_down_and_cleanup_with_retry(
     compose_down_args: &[&str],
     nerdctl_prefix: &[&str],
 ) -> anyhow::Result<()> {
+    super::parallel_stop_project_containers(runner, cmd, project, nerdctl_prefix);
     let down_result = retry_on_eof("compose_down", || {
         runner.run(cmd, compose_down_args).map(|_| ())
     });
@@ -1614,51 +1615,56 @@ mod tests {
         rt.compose_down("testproject").unwrap();
 
         let commands = recorded.lock().unwrap();
-        // down + ps + rm-container + network-ls (no rm because make_recording_runner's
-        // network-ls response is empty by default).
+        // prestop-ps + down + ps + rm-container + network-ls (no rm because
+        // make_recording_runner's network-ls response is empty by default).
         assert_eq!(
             commands.len(),
-            4,
-            "compose_down should issue 4 commands (down + ps + rm + network-ls), got: {:?}",
+            5,
+            "compose_down should issue 5 commands (prestop-ps + down + ps + rm + network-ls), got: {:?}",
             *commands
         );
 
         assert!(
-            commands[0].contains("nerdctl compose"),
+            commands[0].contains("ps -q --filter label=com.docker.compose.project=testproject"),
+            "first command is the parallel pre-stop ps, got: {}",
+            commands[0]
+        );
+        assert!(
+            commands[1].contains("nerdctl compose"),
             "command should be nerdctl compose, got: {}",
-            commands[0]
+            commands[1]
         );
         assert!(
-            commands[0].contains("down"),
+            commands[1].contains("down"),
             "command should include 'down', got: {}",
-            commands[0]
+            commands[1]
         );
         assert!(
-            commands[0].contains("-p testproject"),
+            commands[1].contains("-p testproject"),
             "command should include project name, got: {}",
-            commands[0]
+            commands[1]
         );
         assert!(
-            commands[0].contains("--remove-orphans"),
+            commands[1].contains("--remove-orphans"),
             "command should include --remove-orphans, got: {}",
-            commands[0]
+            commands[1]
         );
 
-        // Second command: ps -a to find ghost containers
+        // After down: ps -a to find ghost containers
         assert!(
-            commands[1].contains("ps -a"),
-            "second command should be ps -a, got: {}",
-            commands[1]
-        );
-        assert!(
-            commands[1].contains("com.docker.compose.project=testproject"),
-            "second command should filter by project label, got: {}",
-            commands[1]
-        );
-        assert!(
-            commands[2].contains("rm -f stale-id"),
-            "third command should remove stale container id, got: {}",
+            commands[2].contains("ps -a"),
+            "third command should be ps -a, got: {}",
             commands[2]
+        );
+        assert!(
+            commands[2].contains("com.docker.compose.project=testproject"),
+            "third command should filter by project label, got: {}",
+            commands[2]
+        );
+        assert!(
+            commands[3].contains("rm -f stale-id"),
+            "fourth command should remove stale container id, got: {}",
+            commands[3]
         );
     }
 

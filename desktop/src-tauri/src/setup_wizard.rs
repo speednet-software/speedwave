@@ -379,9 +379,12 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 
     rt.transaction(project, |rt| -> anyhow::Result<()> {
         compose::save_compose(project, &yaml)?;
-        log::info!("starting containers via compose_up_recreate");
+        log::info!("starting containers via idempotent compose_up");
         speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
-        rt.compose_up_recreate(project)?;
+        // Idempotent up, not force-recreate: config-hash convergence plus
+        // content-addressed image tags (ADR-071/072) recreate exactly what
+        // changed; an unchanged running project starts in seconds.
+        rt.compose_up(project)?;
         Ok(())
     })?;
     log::info!("containers started, verifying health");
@@ -2829,17 +2832,21 @@ networks:
     }
 
     /// Structural test: verifies that `start_containers()` calls
-    /// `ensure_exec_healthy` between `compose_up_recreate` and `SetupState`
-    /// save. Without this, `containers_started = true` could be persisted
-    /// while containers are broken or missing.
+    /// `ensure_exec_healthy` between the idempotent `compose_up` and the
+    /// `SetupState` save. Without this, `containers_started = true` could be
+    /// persisted while containers are broken or missing.
     #[test]
     fn start_containers_probes_exec_after_compose_up() {
         let source = include_str!("setup_wizard.rs");
         let body = extract_fn_body(source, "pub fn start_containers(");
 
-        let recreate_pos = body
-            .find("compose_up_recreate")
-            .expect("start_containers must call compose_up_recreate");
+        assert!(
+            !body.contains("compose_up_recreate"),
+            "start must use idempotent compose_up (ADR-071/072), not force-recreate"
+        );
+        let up_pos = body
+            .find("rt.compose_up(project)")
+            .expect("start_containers must call compose_up");
         let probe_pos = body
             .find("ensure_exec_healthy")
             .expect("start_containers must call ensure_exec_healthy");
@@ -2848,8 +2855,8 @@ networks:
             .expect("start_containers must set containers_started = true");
 
         assert!(
-            recreate_pos < probe_pos,
-            "ensure_exec_healthy must come AFTER compose_up_recreate"
+            up_pos < probe_pos,
+            "ensure_exec_healthy must come AFTER compose_up"
         );
         assert!(
             probe_pos < state_pos,

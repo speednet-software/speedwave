@@ -1025,6 +1025,45 @@ pub(crate) fn force_remove_project_networks(
     });
 }
 
+/// Stops all running project containers in parallel before `compose down` —
+/// nerdctl stops sequentially (seconds per container), so a large project
+/// pays the sum serially but only the slowest container in parallel.
+pub(crate) fn parallel_stop_project_containers(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+) {
+    let filter = format!("label=com.docker.compose.project={project}");
+    let mut ps_args: Vec<&str> = nerdctl_prefix.to_vec();
+    ps_args.extend_from_slice(&["ps", "-q", "--filter", &filter]);
+    let ids = match runner.run(cmd, &ps_args) {
+        Ok(output) => cleanup_targets_from_ps_output(&output),
+        Err(e) => {
+            log::debug!("parallel_stop: ps failed for {project} (down will handle): {e}");
+            return;
+        }
+    };
+    if ids.is_empty() {
+        return;
+    }
+    log::info!(
+        "parallel_stop: stopping {} container(s) for {project}",
+        ids.len()
+    );
+    std::thread::scope(|scope| {
+        for id in &ids {
+            scope.spawn(move || {
+                let mut stop_args: Vec<&str> = nerdctl_prefix.to_vec();
+                stop_args.extend_from_slice(&["stop", id]);
+                if let Err(e) = runner.run(cmd, &stop_args) {
+                    log::debug!("parallel_stop: stop {id} failed (down will handle): {e}");
+                }
+            });
+        }
+    });
+}
+
 /// Runs `compose down` and then best-effort cleanup of any stale container
 /// and network entries for the project, even if `compose down` itself fails.
 #[cfg(any(target_os = "windows", test))]
@@ -1035,6 +1074,7 @@ pub(crate) fn compose_down_and_cleanup(
     compose_down_args: &[&str],
     nerdctl_prefix: &[&str],
 ) -> anyhow::Result<()> {
+    parallel_stop_project_containers(runner, cmd, project, nerdctl_prefix);
     let down_result = runner.run(cmd, compose_down_args);
     if let Err(ref e) = down_result {
         log::warn!("compose_down_and_cleanup: compose down failed for {project}: {e}");
@@ -1524,6 +1564,10 @@ services:
             "nerdctl network ls --filter label=com.docker.compose.project={} -q",
             project
         );
+        let prestop_ps_key = format!(
+            "nerdctl ps -q --filter label=com.docker.compose.project={}",
+            project
+        );
 
         let runner = RecordingRunner {
             commands: Arc::clone(&commands),
@@ -1535,6 +1579,7 @@ services:
                 (ps_key.clone(), Ok("stale-id\n".to_string())),
                 (rm_key.clone(), Ok(String::new())),
                 (net_ls_key.clone(), Ok(String::new())),
+                (prestop_ps_key.clone(), Ok(String::new())),
             ]),
         };
 
@@ -1561,8 +1606,124 @@ services:
         // — nerdctl refuses network rm with attached containers.
         assert_eq!(
             commands.lock().unwrap().as_slice(),
-            &[down_key, ps_key, rm_key, net_ls_key]
+            &[prestop_ps_key, down_key, ps_key, rm_key, net_ls_key]
         );
+    }
+
+    #[test]
+    fn parallel_stop_stops_every_running_container() {
+        struct StopRunner {
+            commands: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for StopRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.commands.lock().unwrap().push(key.clone());
+                if args.contains(&"ps") {
+                    Ok("id-a\nid-b\nid-c\n".to_string())
+                } else {
+                    Ok(String::new())
+                }
+            }
+        }
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let runner = StopRunner {
+            commands: Arc::clone(&commands),
+        };
+        parallel_stop_project_containers(&runner, "nerdctl", "par-stop", &[]);
+        let recorded = commands.lock().unwrap();
+        // Stops run concurrently — assert as a set, not a sequence.
+        for id in ["id-a", "id-b", "id-c"] {
+            assert!(
+                recorded.contains(&format!("nerdctl stop {id}")),
+                "missing stop for {id}: {recorded:?}"
+            );
+        }
+        assert_eq!(recorded.len(), 4, "ps + 3 stops: {recorded:?}");
+    }
+
+    #[test]
+    fn parallel_stop_runs_stops_concurrently() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct ConcurrencyRunner {
+            current: AtomicUsize,
+            max_seen: AtomicUsize,
+        }
+        impl CommandRunner for ConcurrencyRunner {
+            fn run(&self, _cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                if args.contains(&"ps") {
+                    return Ok("c1\nc2\nc3\n".to_string());
+                }
+                let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_seen.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                self.current.fetch_sub(1, Ordering::SeqCst);
+                Ok(String::new())
+            }
+        }
+        let runner = ConcurrencyRunner {
+            current: AtomicUsize::new(0),
+            max_seen: AtomicUsize::new(0),
+        };
+        parallel_stop_project_containers(&runner, "nerdctl", "par-conc", &[]);
+        assert!(
+            runner.max_seen.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            "stops must overlap in time (sequential would be 1)"
+        );
+    }
+
+    #[test]
+    fn parallel_stop_tolerates_ps_failure() {
+        struct FailingPsRunner {
+            stops: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for FailingPsRunner {
+            fn run(&self, _cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                if args.contains(&"ps") {
+                    anyhow::bail!("ps exploded");
+                }
+                self.stops.lock().unwrap().push(args.join(" "));
+                Ok(String::new())
+            }
+        }
+        let stops = Arc::new(Mutex::new(Vec::new()));
+        let runner = FailingPsRunner {
+            stops: Arc::clone(&stops),
+        };
+        parallel_stop_project_containers(&runner, "nerdctl", "par-psfail", &[]);
+        assert!(
+            stops.lock().unwrap().is_empty(),
+            "no stops after ps failure"
+        );
+    }
+
+    #[test]
+    fn parallel_stop_tolerates_individual_stop_failure() {
+        struct PartialFailRunner {
+            commands: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for PartialFailRunner {
+            fn run(&self, _cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = args.join(" ");
+                self.commands.lock().unwrap().push(key.clone());
+                if args.contains(&"ps") {
+                    return Ok("good-id\nbad-id\n".to_string());
+                }
+                if key.contains("bad-id") {
+                    anyhow::bail!("stop failed");
+                }
+                Ok(String::new())
+            }
+        }
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let runner = PartialFailRunner {
+            commands: Arc::clone(&commands),
+        };
+        // Must not panic or propagate — down/rm -f converge failed stops later.
+        parallel_stop_project_containers(&runner, "nerdctl", "par-partial", &[]);
+        let recorded = commands.lock().unwrap();
+        assert!(recorded.contains(&"stop good-id".to_string()));
+        assert!(recorded.contains(&"stop bad-id".to_string()));
     }
 
     #[test]
