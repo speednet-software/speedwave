@@ -298,8 +298,41 @@ export function formatSlackError(error: unknown): string {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * `conversations.list` pages may carry FAR fewer entries than `limit`
+ * (Slack returns ~200 even with limit=1000), so a single call silently
+ * drops channels — iterate `next_cursor` until exhausted.
+ */
+const CHANNEL_LIST_PAGE_LIMIT = 1000;
+
+/** Hard cap on pagination (20k channels) — runaway-cursor backstop. */
+const CHANNEL_LIST_MAX_PAGES = 20;
+
+/** One `conversations.list` page request. */
+function listChannelsPage(
+  clients: SlackClients,
+  types: string,
+  excludeArchived: boolean,
+  cursor: string | undefined
+): Promise<ConversationsListResponse> {
+  return slackCall(clients, (c) =>
+    c.conversations.list({
+      types,
+      limit: CHANNEL_LIST_PAGE_LIMIT,
+      ...(excludeArchived ? { exclude_archived: true } : {}),
+      ...(cursor ? { cursor } : {}),
+    })
+  );
+}
+
+/** Cursor from a list response, or undefined on the last page. */
+function nextCursorOf(result: ConversationsListResponse): string | undefined {
+  return result.response_metadata?.next_cursor || undefined;
+}
+
+/**
  * Resolve channel name/id to channel ID
  * Supports: #channel-name, channel-name, or C123ABC (ID)
+ * Paginates the channel list; returns as soon as the name matches.
  * @param {SlackClients} clients - Slack client container
  * @param {string} channel - Channel name or ID
  * @returns {Promise<string>} Channel ID
@@ -314,29 +347,28 @@ async function resolveChannelId(clients: SlackClients, channel: string): Promise
   // Remove # prefix if present
   const channelName = channel.replace(/^#/, '');
 
-  // List channels to find by name
-  const result = await slackCall(clients, (c) =>
-    c.conversations.list({
-      types: 'public_channel,private_channel',
-      limit: 1000,
-    })
-  );
-
   interface Channel {
     id?: string;
     name?: string;
     name_normalized?: string;
   }
 
-  const found = result.channels?.find(
-    (ch: Channel) => ch.name === channelName || ch.name_normalized === channelName
-  );
-
-  if (!found || !found.id) {
-    throw new Error(`Channel not found: ${channel}`);
+  let cursor: string | undefined;
+  for (let page = 0; page < CHANNEL_LIST_MAX_PAGES; page += 1) {
+    const result = await listChannelsPage(clients, 'public_channel,private_channel', false, cursor);
+    const found = result.channels?.find(
+      (ch: Channel) => ch.name === channelName || ch.name_normalized === channelName
+    );
+    if (found?.id) {
+      return found.id;
+    }
+    cursor = nextCursorOf(result);
+    if (!cursor) {
+      break;
+    }
   }
 
-  return found.id;
+  throw new Error(`Channel not found: ${channel}`);
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -440,13 +472,6 @@ export async function getChannels(
   options?: { types?: string }
 ): Promise<{ channels: SlackChannel[] }> {
   const types = options?.types || 'public_channel,private_channel';
-  const result = (await slackCall(clients, (c) =>
-    c.conversations.list({
-      types,
-      exclude_archived: true,
-      limit: 1000,
-    })
-  )) as ConversationsListResponse;
 
   interface RawChannel {
     id?: string;
@@ -457,7 +482,18 @@ export async function getChannels(
     num_members?: number;
   }
 
-  const channels: SlackChannel[] = (result.channels || [])
+  const raw: RawChannel[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < CHANNEL_LIST_MAX_PAGES; page += 1) {
+    const result = await listChannelsPage(clients, types, true, cursor);
+    raw.push(...((result.channels as RawChannel[] | undefined) || []));
+    cursor = nextCursorOf(result);
+    if (!cursor) {
+      break;
+    }
+  }
+
+  const channels: SlackChannel[] = raw
     .filter((ch: RawChannel) => ch.is_member)
     .map((ch: RawChannel) => ({
       id: ch.id || '',

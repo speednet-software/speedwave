@@ -41,7 +41,7 @@ interface GetChannelMessagesParams {
 
 const sendChannelTool: Tool = {
   name: 'sendChannel',
-  description: 'Send a message to a Slack channel (as user, not bot)',
+  description: 'Send a message to a Slack channel as the signed-in user (their name and avatar).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -141,7 +141,8 @@ const getChannelMessagesTool: Tool = {
 
 const listChannelIdsTool: Tool = {
   name: 'listChannelIds',
-  description: 'List channel IDs and names.',
+  description:
+    'List ALL channels the signed-in user is a member of (paginated under the hood). Speedwave acts as the user — there is no bot to invite; a channel missing here means the user is not a member of it.',
   inputSchema: {
     type: 'object',
     properties: {

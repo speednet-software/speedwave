@@ -442,6 +442,48 @@ describe('slack client', () => {
       });
     });
 
+    it('resolves a channel that lives on a later list page', async () => {
+      // Slack pages can carry far fewer entries than `limit` — a channel on
+      // page 2+ must still resolve (the original single-page read missed it).
+      const mockList = vi
+        .fn()
+        .mockResolvedValueOnce({
+          channels: [{ id: 'C1', name: 'general' }],
+          response_metadata: { next_cursor: 'cur-2' },
+        })
+        .mockResolvedValueOnce({
+          channels: [{ id: 'C9', name: 'speedwave-devs-log' }],
+          response_metadata: { next_cursor: '' },
+        });
+      const mockPostMessage = vi.fn().mockResolvedValue({ ok: true, channel: 'C9' });
+      mockClients.user.conversations.list = mockList;
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, { channel: 'speedwave-devs-log', message: 'Hi' });
+
+      expect(mockList).toHaveBeenCalledTimes(2);
+      expect(mockList).toHaveBeenNthCalledWith(2, {
+        types: 'public_channel,private_channel',
+        limit: 1000,
+        cursor: 'cur-2',
+      });
+      expect(mockPostMessage).toHaveBeenCalledWith({ channel: 'C9', text: 'Hi' });
+    });
+
+    it('stops resolving on a found name without fetching further pages', async () => {
+      const mockList = vi.fn().mockResolvedValue({
+        channels: [{ id: 'C1', name: 'general' }],
+        response_metadata: { next_cursor: 'cur-2' },
+      });
+      const mockPostMessage = vi.fn().mockResolvedValue({ ok: true });
+      mockClients.user.conversations.list = mockList;
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, { channel: 'general', message: 'Hi' });
+
+      expect(mockList).toHaveBeenCalledTimes(1);
+    });
+
     it('sends message to channel with # prefix', async () => {
       const mockList = vi.fn().mockResolvedValue({
         channels: [{ id: 'C12345678', name: 'general', name_normalized: 'general' }],
@@ -869,6 +911,47 @@ describe('slack client', () => {
         exclude_archived: true,
         limit: 1000,
       });
+    });
+
+    it('merges member channels across all list pages', async () => {
+      const mockList = vi
+        .fn()
+        .mockResolvedValueOnce({
+          channels: [{ id: 'C1', name: 'page1', is_channel: true, is_member: true }],
+          response_metadata: { next_cursor: 'cur-2' },
+        })
+        .mockResolvedValueOnce({
+          channels: [
+            { id: 'C2', name: 'page2-skip', is_channel: true, is_member: false },
+            { id: 'C3', name: 'page2-take', is_channel: true, is_member: true },
+          ],
+        });
+      mockClients.user.conversations.list = mockList;
+
+      const result = await getChannels(mockClients);
+
+      expect(result.channels.map((c) => c.id)).toEqual(['C1', 'C3']);
+      expect(mockList).toHaveBeenCalledTimes(2);
+      expect(mockList).toHaveBeenNthCalledWith(2, {
+        types: 'public_channel,private_channel',
+        exclude_archived: true,
+        limit: 1000,
+        cursor: 'cur-2',
+      });
+    });
+
+    it('caps pagination at the runaway-cursor backstop', async () => {
+      // A cursor that never empties must not loop forever.
+      const mockList = vi.fn().mockResolvedValue({
+        channels: [{ id: 'CX', name: 'x', is_member: true }],
+        response_metadata: { next_cursor: 'cur-again' },
+      });
+      mockClients.user.conversations.list = mockList;
+
+      const result = await getChannels(mockClients);
+
+      expect(mockList).toHaveBeenCalledTimes(20);
+      expect(result.channels).toHaveLength(20);
     });
 
     it('filters out channels user is not member of', async () => {
