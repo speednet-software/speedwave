@@ -135,11 +135,14 @@ outside compose locks). The CLI remains a **non-writer** of `bundle-state.json`
   (legacy state has no per-image map).
 - A hash that changes twice across a _failed_ reconcile can leave one orphan
   tag until the disk-full ladder reclaims it — accepted (bounded, rare).
-- `nerdctl compose up` without `--force-recreate` would still NOT recreate a
-  container whose image was rebuilt under an unchanged tag — irrelevant today
-  (restore uses `--force-recreate`), but per-image content-addressed tags are
-  the prerequisite for ever dropping it (config-hash diffing exists in nerdctl
-  ≥ 2.2.0[^3]).
+- `nerdctl compose up` without `--force-recreate` will NOT recreate a container
+  whose image was rebuilt under an unchanged tag. Per-image content-addressed
+  tags remove that hazard: a changed image always gets a new tag, so plain
+  config-hash convergence (nerdctl ≥ 2.2.0[^3]) recreates exactly what changed.
+  Combined with the nerdctl 2.2.2 parity bump, this let the project-switch path
+  drop `--force-recreate` (idempotent `compose_up`) — unchanged containers are
+  left in place on switch. Bundle reconcile restore still uses `--force-recreate`
+  (it crosses image-tag changes and must guarantee a fresh entrypoint).
 
 [^1]:
     BuildKit `RUN --mount=type=cache` documentation — cache mounts persist

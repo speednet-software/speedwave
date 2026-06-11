@@ -1705,6 +1705,38 @@ mod tests {
         assert_eq!(handles.down_projects(), vec!["prev"]);
     }
 
+    /// Behavioral: the switch closure brings the destination up via idempotent
+    /// `compose_up`, NOT `compose_up_recreate`. Mirrors the production closure
+    /// in `project_cmd::switch_project` (render/validate omitted — this exercises
+    /// the up-vs-recreate decision the perf change rests on, ADR-071).
+    #[test]
+    fn switch_core_brings_destination_up_without_recreate() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let prev = Some("prev".to_string());
+        let up_closure =
+            |proj: &str, rt: &speedwave_runtime::runtime::LockedRuntime| -> Result<(), String> {
+                rt.compose_up(proj).map_err(|e| e.to_string())
+            };
+
+        let result = switch_project_core(&prev, "new", &rt, &up_closure);
+
+        assert!(matches!(result, SwitchResult::Succeeded));
+        assert_eq!(
+            handles.down_projects(),
+            vec!["prev"],
+            "step 2 downs previous"
+        );
+        assert_eq!(
+            handles.up_projects(),
+            vec!["new"],
+            "destination brought up via compose_up"
+        );
+        assert!(
+            !handles.was_recreated(),
+            "switch must not force-recreate (config-hash handles changes)"
+        );
+    }
+
     #[test]
     fn switch_core_happy_path_no_previous() {
         let (rt, handles) = MockRuntimeBuilder::new().build();

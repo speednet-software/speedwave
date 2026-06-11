@@ -102,7 +102,13 @@ pub(crate) async fn switch_project(
             rt.transaction(proj, |rt| -> anyhow::Result<()> {
                 containers_cmd::render_and_save_compose(proj).into_anyhow()?;
                 speedwave_runtime::runtime::compose_validate_with_retry(rt, proj)?;
-                rt.compose_up_recreate(proj)?;
+                // Idempotent up, not force-recreate: step 2 downed the
+                // *previous* project, and nerdctl ≥ 2.2.0 config-hash
+                // convergence recreates only containers whose config (or
+                // content-addressed image tag) actually changed — so a changed
+                // image or integration re-runs the entrypoint, while an
+                // unchanged destination is left in place instead of churned.
+                rt.compose_up(proj)?;
                 Ok(())
             })
             .map_err(|e| e.to_string())
@@ -318,6 +324,29 @@ mod tests {
             transcription: None,
             ui: None,
         }
+    }
+
+    /// Structural: project switch must use idempotent `compose_up`, not
+    /// `compose_up_recreate`. nerdctl ≥ 2.2.0 config-hash convergence recreates
+    /// only what changed (config or content-addressed image tag); an unchanged
+    /// destination is left in place. See the nerdctl SSOT pin.
+    #[test]
+    fn switch_uses_idempotent_compose_up() {
+        let source = include_str!("project_cmd.rs");
+        let switch_fn = source
+            .split("pub(crate) async fn switch_project(")
+            .nth(1)
+            .expect("switch_project must exist");
+        // Stop at the test module so we only inspect the production body.
+        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
+        assert!(
+            body.contains("rt.compose_up(proj)"),
+            "switch must call idempotent compose_up"
+        );
+        assert!(
+            !body.contains("compose_up_recreate"),
+            "switch must NOT force-recreate (nerdctl config-hash handles it)"
+        );
     }
 
     // -- apply_switch_project tests --
