@@ -955,6 +955,24 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Save compose file and start containers.
+    // Build missing images first (outside the compose lock, ADR-066) —
+    // pull_policy:never would fail a CLI run made after an app update but
+    // before Desktop reconciles (ADR-071).
+    let bundle_manifest = speedwave_runtime::bundle::load_current_bundle_manifest()?;
+    let enabled_imgs = speedwave_runtime::build::enabled_images(&integrations);
+    let built = speedwave_runtime::build::build_missing_images_locked(
+        &runtime,
+        &enabled_imgs,
+        &bundle_manifest,
+    )
+    .map_err(|e| anyhow::anyhow!("container image build failed: {}", redact_err(&e)))?;
+    if built > 0 {
+        out!("Built {built} container image(s) for this app version");
+    }
+    let enabled_plugin_ids: Vec<&str> = integrations.enabled_plugin_service_ids();
+    plugin::ensure_plugin_images(&runtime, &enabled_plugin_ids)
+        .map_err(|e| anyhow::anyhow!("plugin image build failed: {}", redact_err(&e)))?;
+
     // compose_up is idempotent (no --force-recreate) — nerdctl
     // recreates containers whose config changed. Skip the expensive compose_ps
     // call over SSH; just call compose_up unconditionally and let the engine
@@ -1057,6 +1075,24 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Structural (ADR-071): the run path must build missing images BEFORE the
+    /// compose transaction — pull_policy:never fails a CLI-first-after-update.
+    #[test]
+    fn run_builds_missing_images_before_compose_transaction() {
+        let src = include_str!("main.rs");
+        let build_pos = src
+            .find("build_missing_images_locked")
+            .expect("run path must build missing images");
+        let tx_pos = src
+            .find("runtime.transaction(&project_name")
+            .expect("run path must use the compose transaction");
+        assert!(
+            build_pos < tx_pos,
+            "missing-image build (at {build_pos}) must precede the compose \
+             transaction (at {tx_pos}) — builds stay outside compose locks"
+        );
+    }
 
     #[test]
     fn parse_action_no_args_returns_run() {
