@@ -867,13 +867,18 @@ fn main() -> anyhow::Result<()> {
     // VM lingers, the oauth worker (a Desktop child) is dead and nothing
     // respawns it, so SharePoint OAuth refresh silently stops for this session.
     // A clean Desktop quit stops the VM, so the gate then correctly refuses.
+    // Reconstruct host-bridge registrations from disk (ADR-074) so a
+    // terminal-launched worker reaches the Desktop-hosted bridge; without a
+    // minted token the worker degrades to BRIDGE_NOT_CONFIGURED.
+    let host_bridges = compose::host_bridges_from_disk();
+
     let compose_yml = compose::render_compose(
         &project_name,
         &project_dir.to_string_lossy(),
         &resolved,
         &integrations,
         Some(&runtime),
-        &compose::HostBridgesInfo::default(),
+        &host_bridges,
     )?;
 
     let manifests = plugin::list_installed_plugins().unwrap_or_else(|e| {
@@ -2097,6 +2102,28 @@ mod tests {
             .map(|i| i + 1)
             .unwrap_or(after_start.len());
         &after_start[..fn_end]
+    }
+
+    #[test]
+    fn host_bridges_are_reconstructed_and_passed_to_render_compose() {
+        // Structural guard (ADR-074): the CLI must feed disk-reconstructed
+        // host bridges into render_compose, not an empty list.
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn main(");
+        let build_pos = fn_body.find("compose::host_bridges_from_disk()");
+        let render_pos = fn_body
+            .find("compose::render_compose(")
+            .expect("main() must call render_compose");
+        assert!(
+            build_pos.is_some_and(|b| b < render_pos),
+            "main() must build host_bridges_from_disk() before render_compose"
+        );
+        // Split needle so this assertion does not match its own source text.
+        let empty_default = format!("HostBridgesInfo::{}()", "default");
+        assert!(
+            !fn_body[..render_pos].contains(&empty_default),
+            "main() must not pass an empty HostBridgesInfo to render_compose"
+        );
     }
 
     #[test]

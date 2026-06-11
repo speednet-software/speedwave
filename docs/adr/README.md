@@ -80,6 +80,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-071](ADR-071-slack-oauth-pkce-user-tokens.md)                     | Slack OAuth2 PKCE — tokenless sign-in with rotating user tokens                          | Accepted                      |
 | [ADR-072](ADR-072-per-image-build-input-hash-tags.md)                  | Per-image build-input hash tags + BuildKit cache retention — rebuild only changed images | Accepted                      |
 | [ADR-073](ADR-073-embedded-per-project-litellm-proxy.md)               | Embedded per-project LiteLLM proxy — multi-provider routing + usage accounting           | Accepted                      |
+| [ADR-074](ADR-074-cli-host-bridge-reconstruction.md)                   | Reconstruct host-bridge env from disk for off-Desktop compose renders                    | Accepted                      |
 
 ## Creating a New ADR
 
