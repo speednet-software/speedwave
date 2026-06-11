@@ -35,9 +35,11 @@ mod logging_cmd;
 mod oauth_cmd;
 mod oauth_flow;
 mod oauth_login_cmd;
+mod oauth_loopback;
 mod oauth_providers;
 mod paste_cmd;
 mod plugin_oauth_cmd;
+mod slack_oauth_cmd;
 // `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
 // which is Windows-only (gnome-terminal / xterm spawning was removed with the
 // Linux backend in ADR-059). Gating the module declaration keeps clippy quiet
@@ -1438,6 +1440,8 @@ fn main() {
             github_oauth_cmd::cancel_github_oauth,
             plugin_oauth_cmd::start_plugin_oauth,
             plugin_oauth_cmd::cancel_plugin_oauth,
+            slack_oauth_cmd::start_slack_oauth,
+            slack_oauth_cmd::cancel_slack_oauth,
             plugin_oauth_cmd::forget_plugin_oauth,
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,

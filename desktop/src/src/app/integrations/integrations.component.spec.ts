@@ -228,7 +228,8 @@ describe('IntegrationsComponent', () => {
     expect(component.osIntegrations).toHaveLength(1);
   });
 
-  it('should filter out hidden services (slack) but show sharepoint', async () => {
+  // Slack is beta-gated for its first OAuth release (ADR-071).
+  function setupWithSlack(): void {
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'list_projects':
@@ -242,13 +243,29 @@ describe('IntegrationsComponent', () => {
               ...cloneMockIntegrations().services,
               {
                 service: 'slack',
-                enabled: true,
-                configured: true,
+                enabled: false,
+                configured: false,
                 display_name: 'Slack',
                 description: 'Team messaging',
-                auth_fields: [],
+                auth_fields: [
+                  {
+                    key: 'access_token',
+                    label: 'Slack Access Token',
+                    field_type: 'password',
+                    placeholder: 'xoxe.xoxp-...',
+                    oauth_flow: true,
+                  },
+                  {
+                    key: 'refresh_token',
+                    label: 'Refresh Token',
+                    field_type: 'password',
+                    placeholder: 'xoxe-1-...',
+                    oauth_flow: true,
+                  },
+                ],
                 current_values: {},
                 mappings: undefined,
+                oauth_provider_label: 'Slack',
               },
             ],
             os: [],
@@ -261,12 +278,22 @@ describe('IntegrationsComponent', () => {
           return undefined;
       }
     };
+  }
+
+  it('hides slack when beta is off (first-release gate, ADR-071)', async () => {
+    setupWithSlack();
+    betaEnabled.set(false);
     await component.ngOnInit();
     const serviceNames = component.services.map((s) => s.service);
     expect(serviceNames).not.toContain('slack');
     expect(serviceNames).toContain('sharepoint');
-    expect(serviceNames).toContain('gitlab');
-    expect(serviceNames).toContain('redmine');
+  });
+
+  it('shows slack when beta is on', async () => {
+    setupWithSlack();
+    betaEnabled.set(true);
+    await component.ngOnInit();
+    expect(component.services.map((s) => s.service)).toContain('slack');
   });
 
   describe('beta gating (ADR-058)', () => {
@@ -1113,6 +1140,139 @@ describe('IntegrationsComponent', () => {
 
       // oauthProjectAtStart is private, but we can verify the behavior via project_switched test
       expect(component.activeOAuthRequestId).toBe('rid');
+    });
+  });
+
+  describe('Slack OAuth flow (ADR-071)', () => {
+    // Slack is beta-gated; flip beta on so the row would be present. The
+    // flow itself only needs the service id + active project.
+    beforeEach(() => {
+      betaEnabled.set(true);
+    });
+
+    function slackSvc(): IntegrationStatusEntry {
+      return {
+        service: 'slack',
+        enabled: false,
+        configured: false,
+        display_name: 'Slack',
+        description: 'Team messaging',
+        auth_fields: [
+          {
+            key: 'access_token',
+            label: 'Slack Access Token',
+            field_type: 'password',
+            placeholder: 'xoxe.xoxp-...',
+            oauth_flow: true,
+            optional: false,
+          },
+        ],
+        current_values: {},
+        oauth_provider_label: 'Slack',
+      } as IntegrationStatusEntry;
+    }
+
+    it('invokes start_slack_oauth with project only and renders no device code', async () => {
+      await component.ngOnInit();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_slack_oauth') {
+          // Loopback flow: request_id only, no user_code.
+          return { request_id: 'sl-rid-1' };
+        }
+        if (cmd === 'list_projects') {
+          return { projects: [], active_project: 'test-project' };
+        }
+        if (cmd === 'get_integrations') {
+          return cloneMockIntegrations();
+        }
+        return undefined;
+      };
+
+      await component.handleStartOAuth({ svc: slackSvc(), credentials: {} });
+
+      // Slack uses the bundled client_id (consts.rs::SLACK_OAUTH_CLIENT_ID).
+      expect(invokeSpy).toHaveBeenCalledWith('start_slack_oauth', {
+        project: 'test-project',
+      });
+      expect(invokeSpy).not.toHaveBeenCalledWith('start_sharepoint_oauth', expect.anything());
+      expect(component.oauthStatus).toBe('polling');
+      expect(component.oauthService).toBe('slack');
+      // No device-code box for a loopback flow.
+      expect(component.deviceCodeInfo).toBeNull();
+      expect(component.activeOAuthRequestId).toBe('sl-rid-1');
+    });
+
+    it('awaiting_redirect event exposes the redirect URI, terminal events clear it', async () => {
+      await component.ngOnInit();
+      component.activeOAuthRequestId = 'sl-rid-2';
+      component.oauthService = 'slack';
+
+      mockTauri.dispatchEvent('slack_oauth_progress', {
+        status: 'awaiting_redirect',
+        message: 'http://localhost:41739/callback',
+        request_id: 'sl-rid-2',
+      });
+      expect(component.oauthRedirectUri).toBe('http://localhost:41739/callback');
+      expect(component.oauthStatus).toBe('awaiting_redirect');
+
+      mockTauri.dispatchEvent('slack_oauth_progress', {
+        status: 'error',
+        message: 'token exchange failed: invalid_code',
+        request_id: 'sl-rid-2',
+      });
+      expect(component.oauthRedirectUri).toBeNull();
+      expect(component.deviceCodeInfo).toBeNull();
+      expect(component.activeOAuthRequestId).toBeNull();
+    });
+
+    it('ignores slack progress events with a foreign request_id', async () => {
+      await component.ngOnInit();
+      component.activeOAuthRequestId = 'sl-rid-3';
+      component.oauthService = 'slack';
+
+      mockTauri.dispatchEvent('slack_oauth_progress', {
+        status: 'awaiting_redirect',
+        message: 'http://localhost:41739/callback',
+        request_id: 'someone-else',
+      });
+      expect(component.oauthRedirectUri).toBeNull();
+    });
+
+    it('handleCancelOAuth dispatches cancel_slack_oauth for an active slack flow', async () => {
+      await component.ngOnInit();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      component.oauthService = 'slack';
+      component.oauthRedirectUri = 'http://localhost:41739/callback';
+
+      await component.handleCancelOAuth();
+
+      expect(invokeSpy).toHaveBeenCalledWith('cancel_slack_oauth');
+      expect(component.oauthService).toBeNull();
+      expect(component.oauthStatus).toBeNull();
+    });
+
+    it('success event reloads integrations, auto-enables slack, and requests restart', async () => {
+      setupWithSlack();
+      betaEnabled.set(true);
+      await component.ngOnInit();
+      component.activeOAuthRequestId = 'sl-rid-4';
+      component.oauthService = 'slack';
+      (component as unknown as { oauthProjectAtStart: string | null }).oauthProjectAtStart =
+        'test-project';
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+
+      mockTauri.dispatchEvent('slack_oauth_progress', {
+        status: 'success',
+        message: '',
+        request_id: 'sl-rid-4',
+      });
+      await vi.waitFor(() => expect(restartSpy).toHaveBeenCalled());
+      expect(invokeSpy).toHaveBeenCalledWith('get_integrations', expect.anything());
+      expect(component.oauthRedirectUri).toBeNull();
+      expect(component.activeOAuthRequestId).toBeNull();
     });
   });
 
@@ -2008,11 +2168,12 @@ describe('IntegrationsComponent', () => {
       ).toBeFalsy();
     });
 
-    it('does NOT render the banner for non-sharepoint services even with the flag set', async () => {
+    it('renders the banner for ANY service the backend flags (gate is flag-driven)', async () => {
+      // The backend only sets oauth_action_required for uses_oauth_refresh
+      // services (descriptor-gated); the template renders whatever is flagged
+      // so a new OAuth service (Slack, ADR-071) needs no template change.
       const gitlabSvc = component.services.find((s) => s.service === 'gitlab')!;
       gitlabSvc.configured = true;
-      // Defense in depth — backend never sets this for non-sharepoint, but the
-      // template gate must enforce it independently.
       (gitlabSvc as { oauth_action_required?: string }).oauth_action_required = 'scope_mismatch';
 
       component.toggleExpand('gitlab');
@@ -2020,9 +2181,11 @@ describe('IntegrationsComponent', () => {
       fixture.detectChanges();
       await fixture.whenStable();
 
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="integrations-oauth-reauth-banner"]')
-      ).toBeFalsy();
+      const banner = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-oauth-reauth-banner"]'
+      );
+      expect(banner).toBeTruthy();
+      expect(banner.textContent).toContain('GitLab');
     });
 
     it('clicking the re-authorise button invokes handleStartOAuth with the stored current_values', async () => {

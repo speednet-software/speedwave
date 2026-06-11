@@ -217,6 +217,35 @@ pub enum SecurityRule {
     #[strum(props(description = "SharePoint has /workspace mount"))]
     SharepointMissingWorkspaceMount,
 
+    /// Slack volumes use short-form only.
+    #[strum(to_string = "SLACK_VOLUME_LONG_FORM")]
+    #[strum(props(description = "Slack volumes use short-form only"))]
+    SlackVolumeLongForm,
+    /// Slack token path matches expected.
+    #[strum(to_string = "SLACK_TOKEN_PATH_MISMATCH")]
+    #[strum(props(description = "Slack token path matches expected"))]
+    SlackTokenPathMismatch,
+    /// Slack workspace path matches expected.
+    #[strum(to_string = "SLACK_WORKSPACE_PATH_MISMATCH")]
+    #[strum(props(description = "Slack workspace path matches expected"))]
+    SlackWorkspacePathMismatch,
+    /// Slack workspace mount mode is `:rw`.
+    #[strum(to_string = "SLACK_WORKSPACE_MOUNT_MODE")]
+    #[strum(props(description = "Slack workspace mount mode is :rw"))]
+    SlackWorkspaceMountMode,
+    /// Slack has no extra volumes.
+    #[strum(to_string = "SLACK_NO_EXTRA_VOLUMES")]
+    #[strum(props(description = "Slack has no extra volumes"))]
+    SlackNoExtraVolumes,
+    /// Slack has a `/tokens` mount.
+    #[strum(to_string = "SLACK_MISSING_TOKENS_MOUNT")]
+    #[strum(props(description = "Slack has /tokens mount"))]
+    SlackMissingTokensMount,
+    /// Slack has a `/workspace` mount.
+    #[strum(to_string = "SLACK_MISSING_WORKSPACE_MOUNT")]
+    #[strum(props(description = "Slack has /workspace mount"))]
+    SlackMissingWorkspaceMount,
+
     // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
@@ -243,6 +272,21 @@ impl SecurityRule {
                 | Self::SharepointNoExtraVolumes
                 | Self::SharepointMissingTokensMount
                 | Self::SharepointMissingWorkspaceMount
+        )
+    }
+
+    /// Returns `true` for Slack-specific rules (ADR-071 — same volume
+    /// profile as SharePoint: /tokens:ro + /workspace:rw + oauth bearer).
+    pub fn is_slack(self) -> bool {
+        matches!(
+            self,
+            Self::SlackVolumeLongForm
+                | Self::SlackTokenPathMismatch
+                | Self::SlackWorkspacePathMismatch
+                | Self::SlackWorkspaceMountMode
+                | Self::SlackNoExtraVolumes
+                | Self::SlackMissingTokensMount
+                | Self::SlackMissingWorkspaceMount
         )
     }
 
@@ -361,6 +405,7 @@ impl SecurityCheck {
             Self::check_plugin_volumes(&doc, expected_paths, plugin_manifests),
             // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
+            Self::check_builtin_slack_volumes(&doc, expected_paths),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -892,28 +937,56 @@ impl SecurityCheck {
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
     ) -> Vec<SecurityViolation> {
+        Self::check_builtin_workspace_worker_volumes(
+            doc,
+            expected_paths,
+            "sharepoint",
+            VolumeCheckRules::SHAREPOINT,
+        )
+    }
+
+    /// Validates volumes for built-in mcp-slack service (ADR-071: same
+    /// /tokens:ro + /workspace:rw + oauth-bearer profile as SharePoint).
+    fn check_builtin_slack_volumes(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+    ) -> Vec<SecurityViolation> {
+        Self::check_builtin_workspace_worker_volumes(
+            doc,
+            expected_paths,
+            "slack",
+            VolumeCheckRules::SLACK,
+        )
+    }
+
+    /// Shared check for built-in workers that mount the project workspace and
+    /// consume the host-side oauth worker (ADR-060): /tokens:ro, /workspace:rw,
+    /// per-service bearer allowed, nothing else.
+    fn check_builtin_workspace_worker_volumes(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+        service_id: &str,
+        rules: VolumeCheckRules,
+    ) -> Vec<SecurityViolation> {
         let services = match get_services(doc) {
             Some(s) => s,
             None => return Vec::new(),
         };
 
-        let (name, service) = match services.iter().find(|(n, _)| n == "mcp-sharepoint") {
+        let compose_name = format!("mcp-{service_id}");
+        let (name, service) = match services.iter().find(|(n, _)| n == &compose_name) {
             Some(pair) => pair,
-            None => return Vec::new(), // SharePoint not in compose (disabled)
+            None => return Vec::new(), // worker not in compose (disabled)
         };
 
-        // ADR-060: SharePoint may additionally mount its per-service oauth bearer.
-        // After PR3 this list will expand and `expected_token_mode` will drop to "ro".
-        let extra_allowed = vec!["/secrets/oauth-auth-token-sharepoint".to_string()];
+        let extra_allowed = vec![format!("/secrets/oauth-auth-token-{service_id}")];
         let params = VolumeCheckParams {
             container_name: name,
-            expected_tokens_path: format!("{}/sharepoint", expected_paths.tokens_engine_dir()),
+            expected_tokens_path: format!("{}/{service_id}", expected_paths.tokens_engine_dir()),
             expected_workspace_path: expected_paths.project_engine_path(),
-            // ADR-060 / PR3: SharePoint is now :ro like every other worker.
-            // OAuth token refresh moved to the host-side `oauth` worker.
             expected_token_mode: "ro",
             extra_allowed_ro_targets: &extra_allowed,
-            rules: VolumeCheckRules::SHAREPOINT,
+            rules,
         };
         let (violations, _) = validate_service_volume_mounts(service, &params);
         violations
@@ -1179,6 +1252,33 @@ impl VolumeCheckRules {
         missing_workspace: SecurityRule::SharepointMissingWorkspaceMount,
         missing_workspace_msg: "SharePoint service is missing required /workspace mount",
         missing_workspace_rem: "SharePoint must mount /workspace:rw.",
+    };
+
+    const SLACK: Self = Self {
+        volume_long_form: SecurityRule::SlackVolumeLongForm,
+        volume_long_form_msg: "Slack volume uses long-form YAML mapping",
+        volume_long_form_rem: "Use short-form volume strings.",
+        token_path_mismatch: SecurityRule::SlackTokenPathMismatch,
+        token_path_mismatch_rem:
+            "Slack token mount must use the project-specific tokens directory.",
+        // `/tokens:ro` is the universal rule — reuse the generic mode variant
+        // (same convention as SHAREPOINT above).
+        token_mount_mode: SecurityRule::PluginTokenMountMode,
+        token_mount_mode_msg: "Slack token mount must be :ro (ADR-071)",
+        token_mount_mode_rem: "Slack refresh runs in the host-side `oauth` worker;              /tokens must be :ro like every other worker.",
+        workspace_path_mismatch: SecurityRule::SlackWorkspacePathMismatch,
+        workspace_mount_mode: SecurityRule::SlackWorkspaceMountMode,
+        workspace_mount_mode_msg: "Slack workspace mount must be :rw",
+        no_extra_volumes: SecurityRule::SlackNoExtraVolumes,
+        no_extra_volumes_msg_prefix: "Slack service has unauthorized volume mount:",
+        no_extra_volumes_rem:
+            "Slack may mount /tokens, /workspace, and the per-service oauth bearer.",
+        missing_tokens: SecurityRule::SlackMissingTokensMount,
+        missing_tokens_msg: "Slack service is missing required /tokens mount",
+        missing_tokens_rem: "Slack must mount /tokens:ro.",
+        missing_workspace: SecurityRule::SlackMissingWorkspaceMount,
+        missing_workspace_msg: "Slack service is missing required /workspace mount",
+        missing_workspace_rem: "Slack must mount /workspace:rw (ADR-071 file downloads).",
     };
 }
 

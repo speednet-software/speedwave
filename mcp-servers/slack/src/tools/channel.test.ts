@@ -3,10 +3,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { withSetupGuidance } from '@speedwave/mcp-shared';
+import { withSetupGuidance, RefreshLock } from '@speedwave/mcp-shared';
 import {
   handleSendChannel,
   handleGetChannelMessages,
+  handleGetThreadMessages,
   handleListChannelIds,
   createChannelTools,
 } from './channel-tools.js';
@@ -19,6 +20,7 @@ vi.mock('../client.js', async () => {
     ...actual,
     sendChannel: vi.fn(),
     readChannel: vi.fn(),
+    readThread: vi.fn(),
     getChannels: vi.fn(),
     formatSlackError: vi.fn((error: unknown) => {
       const e = error as { message?: string };
@@ -27,14 +29,22 @@ vi.mock('../client.js', async () => {
   };
 });
 
+// Mock the user-directory boundary — its machinery has its own test file;
+// here we only verify the handlers route messages through enrichment.
+vi.mock('../user-directory.js', () => ({
+  enrichMessagesWithAuthors: vi.fn(async (_clients: unknown, msgs: unknown[]) => msgs),
+}));
+
 import * as client from '../client.js';
+import { enrichMessagesWithAuthors } from '../user-directory.js';
 import { WebClient } from '@slack/web-api';
 
 /** Helper: clients object representing "tokens missing" — replaces null. */
 function unconfiguredClients(): SlackClients {
   return {
-    bot: new WebClient('xoxb-not-configured'),
     user: new WebClient('xoxp-not-configured'),
+    tokenState: { accessToken: '' },
+    lock: new RefreshLock(),
     _tokensStatus: 'missing',
   };
 }
@@ -45,8 +55,9 @@ describe('channel-tools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClients = {
-      bot: {} as any,
       user: {} as any,
+      tokenState: { accessToken: 'xoxp-test' },
+      lock: new RefreshLock(),
       _tokensStatus: 'present',
     };
   });
@@ -144,17 +155,38 @@ describe('channel-tools', () => {
         { user: 'U123', text: 'Hello', ts: '1234567890.123456', type: 'message' },
         { user: 'U456', text: 'World', ts: '1234567891.123456', type: 'message' },
       ];
-      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages });
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
 
       const result = await handleGetChannelMessages(mockClients, {
         channel: '#general',
       });
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual({ messages: mockMessages });
+      expect(result.data).toEqual({ messages: mockMessages, has_more: false });
       expect(client.readChannel).toHaveBeenCalledWith(mockClients, {
         channel: '#general',
       });
+    });
+
+    it('routes messages through author enrichment and returns the author field', async () => {
+      const mockMessages = [
+        { user: 'U123', text: 'Hello', ts: '1.0', type: 'message' },
+        { user: 'UX', text: 'World', ts: '2.0', type: 'message' },
+      ];
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
+      vi.mocked(enrichMessagesWithAuthors).mockImplementationOnce(async (_c, msgs) => {
+        msgs[0].author = 'Paweł Kowalski';
+        return msgs;
+      });
+
+      const result = await handleGetChannelMessages(mockClients, { channel: '#general' });
+
+      expect(enrichMessagesWithAuthors).toHaveBeenCalledWith(mockClients, mockMessages);
+      const data = result.data as { messages: { author?: string; user: string }[] };
+      expect(data.messages[0].author).toBe('Paweł Kowalski');
+      // Unresolvable ID stays raw — the read still succeeds.
+      expect(data.messages[1].author).toBeUndefined();
+      expect(data.messages[1].user).toBe('UX');
     });
 
     it('gets messages with custom limit', async () => {
@@ -164,7 +196,7 @@ describe('channel-tools', () => {
         ts: `${1234567890 + i}.123456`,
         type: 'message',
       }));
-      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages });
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
 
       const result = await handleGetChannelMessages(mockClients, {
         channel: '#general',
@@ -183,7 +215,7 @@ describe('channel-tools', () => {
       const mockMessages = [
         { user: 'U123', text: 'Recent', ts: '1234567890.123456', type: 'message' },
       ];
-      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages });
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
 
       const result = await handleGetChannelMessages(mockClients, {
         channel: '#general',
@@ -192,7 +224,7 @@ describe('channel-tools', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual({ messages: mockMessages });
+      expect(result.data).toEqual({ messages: mockMessages, has_more: false });
       expect(client.readChannel).toHaveBeenCalledWith(mockClients, {
         channel: '#general',
         oldest: '1234567880.000000',
@@ -201,7 +233,7 @@ describe('channel-tools', () => {
     });
 
     it('returns empty array when no messages found', async () => {
-      vi.mocked(client.readChannel).mockResolvedValue({ messages: [] });
+      vi.mocked(client.readChannel).mockResolvedValue({ messages: [], has_more: false });
 
       const result = await handleGetChannelMessages(mockClients, {
         channel: '#general',
@@ -257,6 +289,70 @@ describe('channel-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('READ_FAILED');
       expect(result.error?.message).toContain('Rate limit exceeded');
+    });
+  });
+
+  describe('handleGetThreadMessages', () => {
+    it('routes thread messages through author enrichment', async () => {
+      const mockMessages = [{ user: 'U123', text: 'parent', ts: '1.0', type: 'message' }];
+      vi.mocked(client.readThread).mockResolvedValue({ messages: mockMessages, has_more: false });
+
+      await handleGetThreadMessages(mockClients, { channel: 'C1', thread_ts: '1.0' });
+
+      expect(enrichMessagesWithAuthors).toHaveBeenCalledWith(mockClients, mockMessages);
+    });
+
+    it('gets thread messages successfully', async () => {
+      const mockPage = {
+        messages: [
+          { user: 'U1', text: 'parent', ts: '1.0', type: 'message', reply_count: 2 },
+          { user: 'U2', text: 'reply', ts: '1.1', type: 'message', thread_ts: '1.0' },
+        ],
+        has_more: false,
+      };
+      vi.mocked(client.readThread).mockResolvedValue(mockPage);
+
+      const result = await handleGetThreadMessages(mockClients, {
+        channel: '#general',
+        thread_ts: '1.0',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockPage);
+      expect(client.readThread).toHaveBeenCalledWith(mockClients, {
+        channel: '#general',
+        thread_ts: '1.0',
+      });
+    });
+
+    it('forwards cursor and limit', async () => {
+      vi.mocked(client.readThread).mockResolvedValue({ messages: [], has_more: false });
+
+      await handleGetThreadMessages(mockClients, {
+        channel: 'C1',
+        thread_ts: '1.0',
+        limit: 10,
+        cursor: 'cur-2',
+      });
+
+      expect(client.readThread).toHaveBeenCalledWith(mockClients, {
+        channel: 'C1',
+        thread_ts: '1.0',
+        limit: 10,
+        cursor: 'cur-2',
+      });
+    });
+
+    it('returns READ_FAILED on errors', async () => {
+      vi.mocked(client.readThread).mockRejectedValue(new Error('thread_not_found'));
+
+      const result = await handleGetThreadMessages(mockClients, {
+        channel: '#general',
+        thread_ts: '9.9',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('READ_FAILED');
     });
   });
 
@@ -376,14 +472,25 @@ describe('channel-tools', () => {
 });
 
 describe('createChannelTools (null clients — not configured)', () => {
-  it('returns three tool definitions when clients are null', () => {
+  it('returns four tool definitions when clients are null', () => {
     const tools = createChannelTools(unconfiguredClients());
-    expect(tools).toHaveLength(3);
+    expect(tools).toHaveLength(4);
     expect(tools.map((t) => t.tool.name)).toEqual([
       'sendChannel',
       'getChannelMessages',
+      'getThreadMessages',
       'listChannelIds',
     ]);
+  });
+
+  it('getThreadMessages handler returns NOT_CONFIGURED error when clients are null', async () => {
+    const tools = createChannelTools(unconfiguredClients());
+    const threadHandler = tools.find((t) => t.tool.name === 'getThreadMessages')!.handler;
+
+    const result = await threadHandler({ channel: '#general', thread_ts: '1.0' });
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('NOT_CONFIGURED');
   });
 
   it('sendChannel handler returns NOT_CONFIGURED error when clients are null', async () => {
@@ -427,8 +534,9 @@ describe('createChannelTools (with clients — configured path)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClients = {
-      bot: {} as any,
       user: {} as any,
+      tokenState: { accessToken: 'xoxp-test' },
+      lock: new RefreshLock(),
       _tokensStatus: 'present',
     };
   });
@@ -449,7 +557,7 @@ describe('createChannelTools (with clients — configured path)', () => {
 
   it('getChannelMessages handler routes to handler when clients are configured', async () => {
     const mockMessages = [{ user: 'U123', text: 'Hi', ts: '12345.67890', type: 'message' }];
-    vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages });
+    vi.mocked(client.readChannel).mockResolvedValue({ messages: mockMessages, has_more: false });
 
     const tools = createChannelTools(mockClients);
     const readHandler = tools.find((t) => t.tool.name === 'getChannelMessages')!.handler;

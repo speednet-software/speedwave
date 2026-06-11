@@ -87,6 +87,32 @@ describe('refreshAccessToken', () => {
     expect(body.params.arguments).toEqual({});
   });
 
+  it('surfaces rateLimited=true from a worker noop and defaults it to false', async () => {
+    const mk = (payload: unknown) =>
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => mcpJsonResult(payload),
+      });
+    const noop = await refreshAccessToken({
+      service: 'sharepoint',
+      bearerPath,
+      fetchImpl: mk({
+        expiresIn: 600,
+        grantedScopes: [],
+        rateLimited: true,
+      }) as unknown as typeof fetch,
+    });
+    expect(noop.rateLimited).toBe(true);
+    const real = await refreshAccessToken({
+      service: 'sharepoint',
+      bearerPath,
+      fetchImpl: mk({ expiresIn: 3600, grantedScopes: [] }) as unknown as typeof fetch,
+    });
+    expect(real.rateLimited).toBe(false);
+  });
+
   it('throws OAuthScopeMismatchError on scope_mismatch tool error', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,

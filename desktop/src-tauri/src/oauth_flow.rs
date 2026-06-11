@@ -145,6 +145,28 @@ pub(crate) fn emit_progress(
     }
 }
 
+/// Emit a terminal progress event and clear the flow slot.
+pub(crate) fn emit_terminal(
+    app: &tauri::AppHandle,
+    registry: &FlowRegistry,
+    status: ProgressStatus,
+    message: &str,
+    request_id: &str,
+) {
+    emit_progress(app, registry, status, message, request_id);
+    registry.clear_if_current(request_id);
+}
+
+/// True when this flow was superseded by a newer one; clears its slot.
+pub(crate) fn superseded(registry: &FlowRegistry, my_generation: u64, request_id: &str) -> bool {
+    if registry.current_generation() != my_generation {
+        registry.clear_if_current(request_id);
+        true
+    } else {
+        false
+    }
+}
+
 /// Canonical "device code expired" message — one wording across providers.
 pub(crate) const DEVICE_CODE_EXPIRED_MSG: &str = "Device code expired — please try again.";
 

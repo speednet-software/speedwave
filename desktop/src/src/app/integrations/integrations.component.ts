@@ -13,6 +13,7 @@ import { LoggerService } from '../services/logger.service';
 import { BetaService } from '../services/beta.service';
 import {
   DeviceCodeInfo,
+  LoopbackFlowStart,
   IntegrationsResponse,
   IntegrationStatusEntry,
   OAuthFlowStatus,
@@ -257,16 +258,14 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     (deleteCredentials)="deleteCredentials($event)"
                   />
                 } @else {
-                  @if (
-                    svc.service === 'sharepoint' && svc.oauth_action_required === 'scope_mismatch'
-                  ) {
+                  @if (svc.oauth_action_required === 'scope_mismatch') {
                     <div
                       class="m-3 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
                       data-testid="integrations-oauth-reauth-banner"
                     >
                       <p class="text-[var(--ink)]">
-                        SharePoint authorisation is incomplete. Re-authorise to grant the scopes
-                        required by the current Speedwave release.
+                        {{ svc.display_name }} authorisation is incomplete or expired. Sign in again
+                        to restore access.
                       </p>
                       <button
                         type="button"
@@ -274,7 +273,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                         data-testid="integrations-oauth-reauth-button"
                         (click)="handleStartOAuth({ svc: svc, credentials: svc.current_values })"
                       >
-                        Re-authorise SharePoint
+                        Re-authorise {{ svc.display_name }}
                       </button>
                     </div>
                   }
@@ -284,6 +283,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     [oauthStatus]="oauthService === svc.service ? oauthStatus : null"
                     [deviceCodeInfo]="oauthService === svc.service ? deviceCodeInfo : null"
                     [oauthStatusMessage]="oauthService === svc.service ? oauthStatusMessage : ''"
+                    [redirectUri]="oauthService === svc.service ? oauthRedirectUri : null"
                     (toggleExpand)="toggleExpand($event)"
                     (toggleService)="handleToggleService($event)"
                     (saveCredentials)="handleSaveCredentials($event)"
@@ -347,8 +347,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
   },
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
-  private static readonly HIDDEN_SERVICES = new Set(['slack']);
-  private static readonly BETA_ONLY_SERVICES = new Set(['office', 'github', 'atlassian']);
+  private static readonly BETA_ONLY_SERVICES = new Set(['office', 'github', 'atlassian', 'slack']);
 
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
@@ -382,6 +381,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   /** OAuth state */
   oauthStatus: OAuthFlowStatus | null = null;
   deviceCodeInfo: DeviceCodeInfo | null = null;
+  /** Redirect URI shown while a loopback flow awaits the browser callback. */
+  oauthRedirectUri: string | null = null;
   oauthStatusMessage = '';
   activeOAuthRequestId: string | null = null;
   /** Which service the currently-running OAuth flow belongs to (`sharepoint` | `github`). */
@@ -390,6 +391,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private oauthStartNonce = 0;
   private unlistenOAuth: (() => void) | null = null;
   private unlistenGithubOAuth: (() => void) | null = null;
+  private unlistenSlackOAuth: (() => void) | null = null;
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
@@ -442,6 +444,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       'sharepoint'
     );
     this.unlistenGithubOAuth = await this.subscribeOAuthProgress('github_oauth_progress', 'github');
+    this.unlistenSlackOAuth = await this.subscribeOAuthProgress('slack_oauth_progress', 'slack');
   }
 
   /**
@@ -453,8 +456,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
    * @param service - the integration the events belong to
    */
   private subscribeOAuthProgress(
-    eventName: 'sharepoint_oauth_progress' | 'github_oauth_progress',
-    service: 'sharepoint' | 'github'
+    eventName: 'sharepoint_oauth_progress' | 'github_oauth_progress' | 'slack_oauth_progress',
+    service: 'sharepoint' | 'github' | 'slack'
   ): Promise<() => void> {
     return this.tauri
       .listen<OAuthProgressEvent>(eventName, async (event) => {
@@ -464,9 +467,15 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
           this.oauthStatus = payload.status;
           this.oauthStatusMessage = payload.message;
+          // Loopback flows carry the redirect URI in the awaiting_redirect
+          // message (same contract as the plugin flow).
+          if (payload.status === 'awaiting_redirect') {
+            this.oauthRedirectUri = payload.message;
+          }
           if (payload.status === 'success') {
             const flowProject = this.oauthProjectAtStart;
             this.deviceCodeInfo = null;
+            this.oauthRedirectUri = null;
             this.activeOAuthRequestId = null;
             this.oauthProjectAtStart = null;
             this.oauthService = null;
@@ -478,6 +487,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
           }
           if (['error', 'expired', 'cancelled'].includes(payload.status)) {
             this.deviceCodeInfo = null;
+            this.oauthRedirectUri = null;
             this.activeOAuthRequestId = null;
             this.oauthService = null;
           }
@@ -510,6 +520,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     if (this.unlistenGithubOAuth) {
       this.unlistenGithubOAuth();
       this.unlistenGithubOAuth = null;
+    }
+    if (this.unlistenSlackOAuth) {
+      this.unlistenSlackOAuth();
+      this.unlistenSlackOAuth = null;
     }
   }
 
@@ -602,12 +616,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // Slack hidden always (#91); BETA_ONLY_SERVICES hidden unless beta is on (ADR-058).
+      // BETA_ONLY_SERVICES hidden unless beta is on (ADR-058); Slack is
+      // beta-gated for its first OAuth release (ADR-071).
       const betaOn = this.betaEnabled();
       this.services = response.services.filter(
-        (s) =>
-          !IntegrationsComponent.HIDDEN_SERVICES.has(s.service) &&
-          (betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service))
+        (s) => betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service)
       );
       this.osIntegrations = response.os;
     } catch (e: unknown) {
@@ -783,7 +796,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     try {
       const result = await this.invokeOAuthStart(payload.svc.service, payload.credentials);
       if (myNonce !== this.oauthStartNonce) return;
-      this.deviceCodeInfo = result;
+      // Loopback flows (slack) return only request_id — no device code to render.
+      this.deviceCodeInfo = 'user_code' in result ? result : null;
       this.activeOAuthRequestId = result.request_id;
       this.oauthService = payload.svc.service;
       this.oauthStatus = 'polling';
@@ -805,9 +819,16 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private invokeOAuthStart(
     service: string,
     credentials: Record<string, string>
-  ): Promise<DeviceCodeInfo> {
+  ): Promise<DeviceCodeInfo | LoopbackFlowStart> {
     if (service === 'github') {
       return this.tauri.invoke<DeviceCodeInfo>('start_github_oauth', {
+        project: this.activeProject,
+      });
+    }
+    if (service === 'slack') {
+      // Loopback PKCE flow with a bundled client_id (ADR-071) — no typed
+      // prerequisites, no device code.
+      return this.tauri.invoke<LoopbackFlowStart>('start_slack_oauth', {
         project: this.activeProject,
       });
     }
@@ -828,7 +849,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   async handleCancelOAuth(): Promise<void> {
     ++this.oauthStartNonce;
     const cancelCommand =
-      this.oauthService === 'github' ? 'cancel_github_oauth' : 'cancel_sharepoint_oauth';
+      this.oauthService === 'github'
+        ? 'cancel_github_oauth'
+        : this.oauthService === 'slack'
+          ? 'cancel_slack_oauth'
+          : 'cancel_sharepoint_oauth';
     try {
       await this.tauri.invoke(cancelCommand);
     } catch {

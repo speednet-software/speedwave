@@ -8,7 +8,7 @@ The following security principles are inherited from Speedwave v1 and are **non-
 
 - **Claude container isolation** — no tokens, no container socket, container user UID 1000:1000 (containerd runs inside a VM on both macOS and Windows, so no user-namespace remapping is needed; see [ADR-059](../adr/ADR-059-drop-linux-support.md))
 - **OWASP container hardening** — `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
-- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. The `sharepoint` and `office` workers additionally mount the project directory at `/workspace:rw` because their tools read/write project files; other workers (slack, gitlab, github, redmine, atlassian, playwright, context7) have no `/workspace` access.
+- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. The `sharepoint`, `office`, and `slack` workers additionally mount the project directory at `/workspace:rw` because their tools read/write project files (slack writes downloaded files there for the office worker and Claude to read — [ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)); other workers (gitlab, github, redmine, atlassian, playwright, context7) have no `/workspace` access.
 - **Hub has zero tokens** — compromise of the hub exposes nothing
 - **Kernel-level isolation** — Lima VM (macOS) / WSL2 (Windows) provides an additional isolation layer on top of container isolation
 - **Resource limits** — CPU + memory caps per container
@@ -213,7 +213,7 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 | `NO_EXTERNAL_LLM_KEYS_CLAUDE` | claude                    | No external-LLM-provider env vars — blocks 9 prefixes: `OPENAI_`, `AZURE_OPENAI_`, `GEMINI_`, `DEEPSEEK_`, `OPENROUTER_`, `COHERE_`, `MISTRAL_`, `TOGETHER_`, `GROQ_` |
 | `NO_PORTS_WORKERS`            | Built-in MCP workers      | Built-in services must not expose ports at all — inter-container communication uses Docker DNS                                                                        |
 
-**Host-gateway alias distribution.** `host.docker.internal` is statically present in `extra_hosts` for `claude` and `mcp-playwright` (see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)), and dynamically injected for `mcp-hub` and OAuth-consumer services by `ensure_host_gateway_extra_host()`. Other built-in workers (slack, github, gitlab, atlassian, redmine, context7, office) have no host-side dependency and therefore no `extra_hosts` entry. The underlying IP routing to the VM gateway exists for every container regardless — the alias only adds DNS convenience.
+**Host-gateway alias distribution.** `host.docker.internal` is statically present in `extra_hosts` for `claude` and `mcp-playwright` (see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)), and dynamically injected for `mcp-hub` and OAuth-consumer services (sharepoint, slack — ADR-071) by `ensure_host_gateway_extra_host()`. Other built-in workers (github, gitlab, atlassian, redmine, context7, office) have no host-side dependency and therefore no `extra_hosts` entry. The underlying IP routing to the VM gateway exists for every container regardless — the alias only adds DNS convenience.
 
 ### Container User Rule
 
@@ -263,6 +263,20 @@ Same checks as plugin volumes, applied to the built-in SharePoint service. As of
 | `SHAREPOINT_NO_EXTRA_VOLUMES`        | Allowlisted extras only: `/tokens`, `/workspace`, per-service oauth bearer |
 | `SHAREPOINT_MISSING_TOKENS_MOUNT`    | Token mount present                                                        |
 | `SHAREPOINT_MISSING_WORKSPACE_MOUNT` | Workspace mount present                                                    |
+
+### Slack Volume Rules
+
+Identical profile to SharePoint, applied to the built-in Slack service ([ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)): `/tokens:ro`, `/workspace:rw` (file downloads land in `/workspace/.speedwave/slack/`), plus its per-service oauth bearer — nothing else. The token-mount-mode check re-uses the generic `PLUGIN_TOKEN_MOUNT_MODE`.
+
+| Rule                            | What it checks                                                             |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| `SLACK_VOLUME_LONG_FORM`        | Short-form volumes only                                                    |
+| `SLACK_TOKEN_PATH_MISMATCH`     | Token mount path matches expected                                          |
+| `SLACK_WORKSPACE_PATH_MISMATCH` | Workspace mount path matches expected                                      |
+| `SLACK_WORKSPACE_MOUNT_MODE`    | Workspace mount mode is `:rw`                                              |
+| `SLACK_NO_EXTRA_VOLUMES`        | Allowlisted extras only: `/tokens`, `/workspace`, per-service oauth bearer |
+| `SLACK_MISSING_TOKENS_MOUNT`    | Token mount present                                                        |
+| `SLACK_MISSING_WORKSPACE_MOUNT` | Workspace mount present                                                    |
 
 ### Host File Security Rules
 

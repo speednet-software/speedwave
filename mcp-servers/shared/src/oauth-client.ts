@@ -142,7 +142,7 @@ interface MCPToolsCallResponse {
  */
 export async function refreshAccessToken(
   options: OAuthRefreshOptions
-): Promise<{ expiresIn: number; grantedScopes: string[] }> {
+): Promise<{ expiresIn: number; grantedScopes: string[]; rateLimited?: boolean }> {
   const workerUrl = process.env[options.workerUrl ?? 'WORKER_OAUTH_URL'];
   if (!workerUrl) {
     throw new OAuthRefreshError(
@@ -243,7 +243,7 @@ export async function refreshAccessToken(
   }
 
   // jsonResult shape: { content: [{type:'text', text: JSON.stringify(data)}] }
-  let payload: { expiresIn?: unknown; grantedScopes?: unknown };
+  let payload: { expiresIn?: unknown; grantedScopes?: unknown; rateLimited?: unknown };
   try {
     payload = JSON.parse(text) as { expiresIn?: unknown; grantedScopes?: unknown };
   } catch {
@@ -257,5 +257,8 @@ export async function refreshAccessToken(
   return {
     expiresIn,
     grantedScopes: grantedScopes.map((s) => String(s)),
+    // True when the worker skipped the IdP round-trip (token still valid) —
+    // the on-disk access token was deliberately NOT rewritten.
+    rateLimited: payload.rateLimited === true,
   };
 }

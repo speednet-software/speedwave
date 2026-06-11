@@ -23,7 +23,7 @@ vi.mock('./security.js', () => ({
   loadToken: (...a: unknown[]) => loadToken(...a),
 }));
 
-const { authedRequest, RefreshLock } = await import('./oauth-authed-request.js');
+const { authedRequest, authedSdkCall, RefreshLock } = await import('./oauth-authed-request.js');
 
 function resp(status: number): Response {
   return { status, ok: status >= 200 && status < 300 } as Response;
@@ -227,5 +227,114 @@ describe('authedRequest', () => {
     loadToken.mockResolvedValue('');
     const send = vi.fn().mockResolvedValue(resp(401));
     await expect(authedRequest(baseOpts(send))).rejects.toThrow(/access_token was not written/);
+  });
+
+  // --- Stale-mount mitigation: rate-limited noop must NOT poll ---
+  it('skips the stale-read poll when the worker reports a rate-limited noop', async () => {
+    refreshAccessToken.mockResolvedValue({ expiresIn: 600, grantedScopes: [], rateLimited: true });
+    loadToken.mockResolvedValue('old-token'); // file untouched by the noop
+    const send = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
+    const out = await authedRequest(baseOpts(send));
+    expect(out.status).toBe(200);
+    expect(loadToken).toHaveBeenCalledTimes(1); // one read, zero poll iterations
+  });
+
+  // --- Stale-mount mitigation: a lagging mount read is re-polled ---
+  it('re-polls a stale read after a real refresh until the new token appears', async () => {
+    loadToken
+      .mockResolvedValueOnce('old-token') // first read still stale
+      .mockResolvedValueOnce('old-token') // first poll iteration still stale
+      .mockResolvedValue('fresh-token'); // then the write propagates
+    const send = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
+    const opts = baseOpts(send);
+    const out = await authedRequest(opts);
+    expect(out.status).toBe(200);
+    expect(opts.state.accessToken).toBe('fresh-token');
+    expect(loadToken).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('authedSdkCall', () => {
+  beforeEach(() => {
+    refreshAccessToken.mockReset();
+    loadToken.mockReset();
+    refreshAccessToken.mockResolvedValue({ expiresIn: 3600, grantedScopes: [] });
+    loadToken.mockResolvedValue('fresh-token');
+  });
+
+  const authError = () => Object.assign(new Error('platform error'), { auth: true });
+  const isAuthError = (err: unknown): boolean => Boolean((err as { auth?: boolean }).auth);
+
+  function sdkOpts<T>(send: (t: string) => Promise<T>) {
+    return {
+      service: 'slack',
+      state: { accessToken: 'old-token' },
+      lock: new RefreshLock(),
+      send,
+      isAuthError,
+    };
+  }
+
+  // --- Happy path: a successful call never refreshes ---
+  it('returns the result without refreshing on success', async () => {
+    const send = vi.fn().mockResolvedValue({ ok: true });
+    const out = await authedSdkCall(sdkOpts(send));
+    expect(out).toEqual({ ok: true });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(refreshAccessToken).not.toHaveBeenCalled();
+  });
+
+  // --- Auth error: refresh + retry once with the fresh token ---
+  it('refreshes and retries once on an auth error', async () => {
+    const send = vi.fn().mockRejectedValueOnce(authError()).mockResolvedValueOnce('retried');
+    const opts = sdkOpts(send);
+    const out = await authedSdkCall(opts);
+    expect(out).toBe('retried');
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenNthCalledWith(1, 'old-token');
+    expect(send).toHaveBeenNthCalledWith(2, 'fresh-token');
+    expect(opts.state.accessToken).toBe('fresh-token');
+  });
+
+  // --- Non-auth errors pass through untouched ---
+  it('rethrows non-auth errors without refreshing', async () => {
+    const send = vi.fn().mockRejectedValue(new Error('channel_not_found'));
+    await expect(authedSdkCall(sdkOpts(send))).rejects.toThrow('channel_not_found');
+    expect(refreshAccessToken).not.toHaveBeenCalled();
+  });
+
+  // --- Retry exactly once: a persistent auth error propagates, no loop ---
+  it('propagates a persistent auth error after one refresh', async () => {
+    const send = vi.fn().mockRejectedValue(authError());
+    await expect(authedSdkCall(sdkOpts(send))).rejects.toThrow('platform error');
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  // --- Refresh failure propagates (e.g. invalid_grant from the worker) ---
+  it('propagates a refresh failure', async () => {
+    refreshAccessToken.mockRejectedValue(new Error('invalid_grant: token_revoked'));
+    const send = vi.fn().mockRejectedValue(authError());
+    await expect(authedSdkCall(sdkOpts(send))).rejects.toThrow('invalid_grant');
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Single-flight: concurrent auth failures trigger ONE refresh ---
+  it('serializes concurrent refreshes — two parallel auth failures refresh once', async () => {
+    const lock = new RefreshLock();
+    const state = { accessToken: 'old-token' };
+    let refreshes = 0;
+    refreshAccessToken.mockImplementation(async () => {
+      refreshes += 1;
+      return { expiresIn: 3600, grantedScopes: [] };
+    });
+    const mkSend = () => vi.fn().mockRejectedValueOnce(authError()).mockResolvedValueOnce('ok');
+    const [a, b] = await Promise.all([
+      authedSdkCall({ service: 'slack', state, lock, send: mkSend(), isAuthError }),
+      authedSdkCall({ service: 'slack', state, lock, send: mkSend(), isAuthError }),
+    ]);
+    expect(a).toBe('ok');
+    expect(b).toBe('ok');
+    expect(refreshes).toBe(1);
   });
 });

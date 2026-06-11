@@ -3,8 +3,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { withSetupGuidance } from '@speedwave/mcp-shared';
-import { handleGetUsers, createUserTools } from './user-tools.js';
+import { withSetupGuidance, RefreshLock } from '@speedwave/mcp-shared';
+import { handleGetUsers, handleFindUsers, createUserTools } from './user-tools.js';
 import type { SlackClients } from '../client.js';
 
 // Mock the client module
@@ -20,13 +20,20 @@ vi.mock('../client.js', async () => {
   };
 });
 
+// Mock the user-directory boundary — its machinery has its own test file.
+vi.mock('../user-directory.js', () => ({
+  searchUsers: vi.fn(),
+}));
+
 import * as client from '../client.js';
+import { searchUsers } from '../user-directory.js';
 
 /** Helper: clients object representing "tokens missing" — replaces null. */
 function unconfiguredClients(): SlackClients {
   return {
-    bot: {} as any,
     user: {} as any,
+    tokenState: { accessToken: '' },
+    lock: new RefreshLock(),
     _tokensStatus: 'missing',
   };
 }
@@ -37,8 +44,9 @@ describe('user-tools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClients = {
-      bot: {} as any,
       user: {} as any,
+      tokenState: { accessToken: '' },
+      lock: new RefreshLock(),
       _tokensStatus: 'present',
     };
   });
@@ -233,13 +241,68 @@ describe('user-tools', () => {
       });
     });
   });
+
+  describe('handleFindUsers', () => {
+    let mockClients: SlackClients;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      mockClients = {
+        user: {} as never,
+        tokenState: { accessToken: 'xoxp-test' },
+        lock: new RefreshLock(),
+        _tokensStatus: 'present',
+      };
+    });
+
+    it('returns matching users with a count', async () => {
+      const hits = [
+        { id: 'U1', name: 'pkowalski', real_name: 'Paweł Kowalski' },
+        { id: 'U2', name: 'pnowak', real_name: 'Paweł Nowak' },
+      ];
+      vi.mocked(searchUsers).mockResolvedValue(hits);
+
+      const result = await handleFindUsers(mockClients, { query: 'pawel' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ users: hits, count: 2 });
+      expect(searchUsers).toHaveBeenCalledWith(mockClients, { query: 'pawel' });
+    });
+
+    it('returns an empty list for no match', async () => {
+      vi.mocked(searchUsers).mockResolvedValue([]);
+
+      const result = await handleFindUsers(mockClients, { query: 'zzz' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ users: [], count: 0 });
+    });
+
+    it('maps directory failures to SEARCH_FAILED', async () => {
+      vi.mocked(searchUsers).mockRejectedValue(new Error('slack down'));
+      vi.mocked(client.formatSlackError).mockReturnValue('slack down');
+
+      const result = await handleFindUsers(mockClients, { query: 'pawel' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('SEARCH_FAILED');
+    });
+  });
 });
 
 describe('createUserTools (null clients — not configured)', () => {
-  it('returns one tool definition when clients are null', () => {
+  it('returns both tool definitions when clients are null', () => {
     const tools = createUserTools(unconfiguredClients());
-    expect(tools).toHaveLength(1);
-    expect(tools[0].tool.name).toBe('getUsers');
+    expect(tools.map((t) => t.tool.name)).toEqual(['getUsers', 'findUsers']);
+  });
+
+  it('findUsers handler returns NOT_CONFIGURED error when clients are null', async () => {
+    const tools = createUserTools(unconfiguredClients());
+    const result = await tools[1].handler({ query: 'pawel' });
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('NOT_CONFIGURED');
   });
 
   it('getUsers handler returns NOT_CONFIGURED error when clients are null', async () => {
@@ -261,8 +324,9 @@ describe('createUserTools (with clients — configured path)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClients = {
-      bot: {} as any,
       user: {} as any,
+      tokenState: { accessToken: '' },
+      lock: new RefreshLock(),
       _tokensStatus: 'present',
     };
   });

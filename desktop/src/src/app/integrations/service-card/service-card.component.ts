@@ -135,6 +135,7 @@ export interface SaveCredentialsEvent {
                 [configured]="svc().configured"
                 [status]="oauthStatus()"
                 [deviceCode]="deviceCodeInfo()"
+                [redirectUri]="redirectUri()"
                 [statusMessage]="oauthStatusMessage()"
                 [prerequisitesMet]="oauthPrerequisitesMet()"
                 [prerequisitesMissingMessage]="oauthPrerequisitesMissingMessage()"
@@ -142,6 +143,11 @@ export interface SaveCredentialsEvent {
                 (cancelFlow)="cancelOAuth.emit()"
                 (openUrl)="openVerificationUrl.emit($event)"
               />
+              @if (svc().oauth_identity; as identity) {
+                <p class="mono mt-2 text-[11px] text-[var(--ink-dim)]" data-testid="oauth-identity">
+                  Connected to {{ identity }}
+                </p>
+              }
             }
 
             <div class="flex gap-3 mt-4">
@@ -184,6 +190,7 @@ export class ServiceCardComponent {
   readonly oauthStatus = input<OAuthFlowStatus | null>(null);
   readonly deviceCodeInfo = input<DeviceCodeInfo | null>(null);
   readonly oauthStatusMessage = input('');
+  readonly redirectUri = input<string | null>(null);
 
   readonly toggleExpand = output<string>();
   readonly toggleService = output<{ svc: IntegrationStatusEntry; event: Event }>();
@@ -199,20 +206,13 @@ export class ServiceCardComponent {
   editedValues: Record<string, string> = {};
 
   /**
-   * Provider label used in OAuth button copy. Hardcoded per service id —
-   * the worker descriptor in `consts.rs` does not (yet) carry an `oauth_provider_label`
-   * field; adding one for two services is over-engineering today (Rule of Three).
-   * @returns the IdP brand name shown to users (e.g. "Microsoft", "GitHub")
+   * Provider label used in OAuth button copy — from the descriptor SSOT
+   * (`consts.rs::oauth_provider_label`; extracted when Slack became the
+   * third OAuth service, per the Rule of Three).
+   * @returns the IdP brand name shown to users (e.g. "Microsoft", "Slack")
    */
   oauthProviderLabel(): string {
-    switch (this.svc().service) {
-      case 'sharepoint':
-        return 'Microsoft';
-      case 'github':
-        return 'GitHub';
-      default:
-        return 'provider';
-    }
+    return this.svc().oauth_provider_label ?? 'provider';
   }
 
   /**

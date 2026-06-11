@@ -207,8 +207,8 @@ fn save_tokens_in(
     tenant_id: &str,
     tokens: &MsTokenResponse,
 ) -> Result<(), String> {
-    let svc_dir = speedwave_runtime::plugin::token_dir_in(data_dir, project, "sharepoint");
-    save_credential_file(&svc_dir, "access_token", &tokens.access_token)?;
+    // State first, mounted token second: a crash in between leaves
+    // recoverable state, never a mounted token without refresh state.
     save_oauth_state_in(
         data_dir,
         project,
@@ -221,6 +221,8 @@ fn save_tokens_in(
             expires_in: tokens.expires_in(),
         },
     )?;
+    let svc_dir = speedwave_runtime::plugin::token_dir_in(data_dir, project, "sharepoint");
+    save_credential_file(&svc_dir, "access_token", &tokens.access_token)?;
     Ok(())
 }
 
