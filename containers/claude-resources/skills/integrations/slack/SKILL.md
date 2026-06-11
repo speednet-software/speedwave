@@ -2,10 +2,11 @@
 name: slack
 description: >
   Use Slack integration to read and send Slack messages as the signed-in user — listing the
-  channels they belong to, reading or exporting channel history (with pagination), posting
-  messages, and looking up workspace users by e-mail. Use whenever the user asks about Slack —
-  "what's new on #channel", "summarise this week's discussion", "post an update to the team",
-  "find the message where…", etc. Use even when you think you know the answer — channel content
+  channels they belong to, reading or exporting channel history and threads (with pagination),
+  reading text files shared in channels (markdown, code, logs), posting messages, and looking
+  up workspace users by e-mail. Use whenever the user asks about Slack — "what's new on
+  #channel", "summarise this week's discussion including threads", "read the file Paweł
+  shared", "post an update to the team", "find the message where…", etc. Use even when you think you know the answer — channel content
   is dynamic; only the live API reflects current messages.
   Do not use for: direct messages and group DMs (not in scope), Slack administration (creating
   channels, inviting members, workspace settings), or messaging platforms other than Slack.
