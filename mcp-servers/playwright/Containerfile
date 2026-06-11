@@ -23,10 +23,10 @@
 FROM mcr.microsoft.com/playwright:v1.59.1-jammy@sha256:8a0360d39d1973be506dd59002904a774f6d697d4946c94063b3fd006461c8ff
 
 # tzdata for the TZ env injected by compose — keep aligned with tz.rs (CLAUDE.md
-# SSOT). The jammy base image (apt) usually ships it, but install explicitly so a
-# numeric TZ offset never leaks (no-op when already present).
+# SSOT). noninteractive is mandatory: an upgrade re-runs tzdata's debconf
+# prompt, which hangs buildkit forever (no TTY).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # @playwright/mcp is Microsoft's official MCP server for Playwright.

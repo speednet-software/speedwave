@@ -8,6 +8,27 @@ import type {
   ProjectSwitchFailedPayload,
 } from '../models/update';
 import { CLOUDSTORAGE_TCC_PREFIX, cloudstorageProviderDisplayName } from './cloudstorage-prefix';
+import { HealthStoreService } from './health-store.service';
+import type { HealthReport } from '../models/health';
+
+/** Poll cadence for the post-start health gate. */
+export const HEALTH_GATE_POLL_MS = 1500;
+/** Give up on the health gate after this long and surface an error. */
+export const HEALTH_GATE_TIMEOUT_MS = 120_000;
+
+/**
+ * Human-readable reason for a failed health gate.
+ * @param report - Last health snapshot, or null if none arrived.
+ */
+export function unhealthySummary(report: HealthReport | null): string {
+  if (!report) return 'System did not become healthy: health status unavailable.';
+  const reasons: string[] = [];
+  if (!report.vm.running) reasons.push('VM not running');
+  if (!report.mcp_os.running) reasons.push('mcp-os worker stopped');
+  const unhealthy = report.containers.filter((c) => !c.healthy).map((c) => c.name);
+  if (unhealthy.length > 0) reasons.push(`unhealthy containers: ${unhealthy.join(', ')}`);
+  return `System did not become healthy: ${reasons.join('; ') || 'unknown reason'}.`;
+}
 
 /** Lifecycle status of the project + container lifecycle. */
 export type ProjectStatus =
@@ -70,6 +91,7 @@ export class ProjectStateService {
   private initialized = false;
   private tauri = inject(TauriService);
   private log = inject(LoggerService);
+  private healthStore = inject(HealthStoreService);
   /**
    * Set of integration status re-fetchers registered by the integrations component;
    * called after a failed restart so the toggled-on row reverts to reality.
@@ -224,6 +246,8 @@ export class ProjectStateService {
         project: this.activeProject,
       });
       if (auth.api_key_configured || auth.oauth_authenticated) {
+        // Phase 4: hold the overlay until the system is actually healthy.
+        await this.waitForSystemHealthy();
         this.status = 'ready';
       } else {
         this.status = 'auth_required';
@@ -263,6 +287,35 @@ export class ProjectStateService {
     }
   }
 
+  /** Overridable in tests; production values come from the module constants. */
+  healthGatePollMs = HEALTH_GATE_POLL_MS;
+  healthGateTimeoutMs = HEALTH_GATE_TIMEOUT_MS;
+
+  /** Polls `get_health` until `overall_healthy`; throws on timeout. */
+  private async waitForSystemHealthy(): Promise<void> {
+    const deadline = Date.now() + this.healthGateTimeoutMs;
+    let last: HealthReport | null = null;
+    for (;;) {
+      try {
+        const report = await this.tauri.invoke<HealthReport | undefined>('get_health', {
+          project: this.activeProject,
+        });
+        // No report = health unverifiable (non-Tauri/test harness) — pass through.
+        if (!report) return;
+        // Seed the shared snapshot so views render real data the moment the overlay lifts.
+        this.healthStore.health.set(report);
+        if (report.overall_healthy) return;
+        last = report;
+      } catch {
+        // Transient probe failure — keep polling until the deadline.
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(unhealthySummary(last));
+      }
+      await new Promise((resolve) => setTimeout(resolve, this.healthGatePollMs));
+    }
+  }
+
   /** Re-checks Claude auth status after user completes authentication. */
   async retryAuth(): Promise<void> {
     if (!this.activeProject) return;
@@ -271,6 +324,7 @@ export class ProjectStateService {
         project: this.activeProject,
       });
       if (auth.api_key_configured || auth.oauth_authenticated) {
+        await this.waitForSystemHealthy();
         this.status = 'ready';
         this.notifyChange();
         this.notifyReady();

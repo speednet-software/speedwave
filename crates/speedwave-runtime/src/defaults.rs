@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.154";
+pub const CLAUDE_VERSION: &str = "2.1.173";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -62,11 +62,18 @@ pub struct AnthropicModelInfo {
     pub pricing_1m: Option<ModelPricing>,
 }
 
-// Published per-MTok rates (platform.claude.com/docs/en/pricing). Opus 4.5+
-// is $5/$25; the full 1M window is standard-priced, so the `[1m]` rate equals
-// the base. Sonnet 4.6 is $3/$15 base with a 1M-context premium ($6/$22.5).
-// Haiku 4.5 is $1/$5 and has no 1M variant. Cache-read = 10% of input,
-// cache-write = 125% of input across the 4.x generation.
+// Published per-MTok rates (platform.claude.com/docs/en/pricing). Fable 5 is
+// $10/$50 (1M window is the default, standard-priced). Opus 4.5+ is $5/$25;
+// the full 1M window is standard-priced, so the `[1m]` rate equals the base.
+// Sonnet 4.6 is $3/$15 base with a 1M-context premium ($6/$22.5). Haiku 4.5
+// is $1/$5 and has no 1M variant. Cache-read = 10% of input, cache-write =
+// 125% of input across the 4.x/5 generation.
+const FABLE_PRICING: ModelPricing = ModelPricing {
+    input: 10.0,
+    cached_input: 1.0,
+    cache_write: 12.5,
+    output: 50.0,
+};
 const OPUS_PRICING: ModelPricing = ModelPricing {
     input: 5.0,
     cached_input: 0.5,
@@ -101,6 +108,14 @@ const HAIKU_PRICING: ModelPricing = ModelPricing {
 /// alias), but we don't pre-populate the dropdown with them — encouraging
 /// their use was the opposite of what the `latest` flag intended.
 pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
+    AnthropicModelInfo {
+        id: "claude-fable-5",
+        family: "Fable 5",
+        context_tokens: 1_000_000,
+        latest: true,
+        pricing: FABLE_PRICING,
+        pricing_1m: Some(FABLE_PRICING),
+    },
     AnthropicModelInfo {
         id: "claude-opus-4-8",
         family: "Opus 4.8",
@@ -213,6 +228,9 @@ pub fn base_env() -> HashMap<String, String> {
     // See issue #451. Users can override via claude.env.CLAUDE_CODE_NO_FLICKER in
     // .speedwave.json if they prefer the legacy renderer.
     env.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
+    // Claude Code ≥2.1.161 probes wl-copy only when WAYLAND_DISPLAY is set;
+    // any non-empty value routes copies through the osc52-copy.sh shim (ADR-052).
+    env.insert("WAYLAND_DISPLAY".into(), "speedwave-clipboard".into());
     env
 }
 
@@ -228,7 +246,8 @@ pub fn base_env() -> HashMap<String, String> {
 /// Future model bumps (e.g. Opus 4.9) only require editing `ANTHROPIC_MODELS`
 /// in this file: the env vars track the SSOT automatically. Families with no
 /// `latest: true` entry are skipped (no env var emitted) so a partial catalog
-/// never produces a malformed model id.
+/// never produces a malformed model id. Fable 5 deliberately gets no alias —
+/// Claude Code has no such env var and Fable ships 1M context by default.
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
     for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
@@ -308,6 +327,18 @@ mod tests {
             Some("1"),
             "CLAUDE_CODE_NO_FLICKER=1 mitigates PTY backpressure by emitting smaller \
              ANSI updates via Claude Code's alt-screen renderer. See issue #451."
+        );
+    }
+
+    #[test]
+    fn base_env_sets_wayland_display_for_clipboard_probe() {
+        // Claude Code ≥2.1.161 gates the clipboard-tool probe on this var;
+        // unset = copies never reach the osc52-copy.sh shim (ADR-052).
+        let env = base_env();
+        let val = env.get("WAYLAND_DISPLAY").map(|s| s.as_str());
+        assert!(
+            val.is_some_and(|v| !v.is_empty()),
+            "WAYLAND_DISPLAY must be set non-empty so the clipboard probe finds the wl-copy shim"
         );
     }
 
@@ -417,6 +448,30 @@ mod tests {
                 "{var} presence must mirror SSOT having a `latest: true` {prefix} entry"
             );
         }
+    }
+
+    #[test]
+    fn fable_family_emits_no_default_alias() {
+        // Claude Code has no ANTHROPIC_DEFAULT_FABLE_MODEL — guard against a
+        // future "coverage fix" inventing a nonexistent var.
+        let env = anthropic_default_models_env();
+        assert!(
+            !env.keys().any(|k| k.contains("FABLE")),
+            "no ANTHROPIC_DEFAULT_*_MODEL var may be emitted for the Fable family"
+        );
+    }
+
+    #[test]
+    fn fable_entry_present_with_million_context() {
+        // Settings dropdown + cost meter need the Fable 5 entry ($10/$50).
+        let fable = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-fable-5")
+            .expect("claude-fable-5 must be in the catalog");
+        assert!(fable.latest, "Fable 5 must be in the Latest group");
+        assert_eq!(fable.context_tokens, 1_000_000);
+        assert_eq!(fable.pricing.input, 10.0);
+        assert_eq!(fable.pricing.output, 50.0);
     }
 
     #[test]

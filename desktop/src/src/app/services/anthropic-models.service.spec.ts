@@ -175,17 +175,17 @@ describe('AnthropicModelsService', () => {
     });
   });
 
-  describe('latestNonOpusModelId()', () => {
+  describe('latestEverydayModelId()', () => {
     it('returns null before the catalog has loaded', () => {
-      expect(service.latestNonOpusModelId()).toBeNull();
+      expect(service.latestEverydayModelId()).toBeNull();
     });
 
-    it('returns the latest non-Opus (Sonnet) model id once loaded', async () => {
+    it('returns the latest non-premium (Sonnet) model id once loaded', async () => {
       await service.list();
-      expect(service.latestNonOpusModelId()).toBe('claude-sonnet-4-6');
+      expect(service.latestEverydayModelId()).toBe('claude-sonnet-4-6');
     });
 
-    it('falls back to the first latest entry when every latest model is Opus', async () => {
+    it('falls back to the first latest entry when every latest model is premium', async () => {
       const opusOnly = [
         { id: 'claude-opus-4-8', family: 'Opus 4.8', context_tokens: 1_000_000, latest: true },
         { id: 'claude-opus-4-7', family: 'Opus 4.7', context_tokens: 1_000_000, latest: false },
@@ -193,7 +193,21 @@ describe('AnthropicModelsService', () => {
       mockTauri.invokeHandler = async () => opusOnly;
       service.resetForTesting();
       await service.list();
-      expect(service.latestNonOpusModelId()).toBe('claude-opus-4-8');
+      expect(service.latestEverydayModelId()).toBe('claude-opus-4-8');
+    });
+
+    it('skips Fable (premium tier) when picking the everyday placeholder', async () => {
+      // Fable 5 leads the catalog but costs 2x Opus — the placeholder must
+      // keep nudging users toward the balanced Sonnet tier.
+      const withFable = [
+        { id: 'claude-fable-5', family: 'Fable 5', context_tokens: 1_000_000, latest: true },
+        { id: 'claude-opus-4-8', family: 'Opus 4.8', context_tokens: 1_000_000, latest: true },
+        { id: 'claude-sonnet-4-6', family: 'Sonnet 4.6', context_tokens: 1_000_000, latest: true },
+      ] as unknown as AnthropicModel[];
+      mockTauri.invokeHandler = async () => withFable;
+      service.resetForTesting();
+      await service.list();
+      expect(service.latestEverydayModelId()).toBe('claude-sonnet-4-6');
     });
   });
 

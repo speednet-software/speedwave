@@ -1,12 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { ProjectStateService } from './project-state.service';
+import { ProjectStateService, unhealthySummary } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
+import { HealthStoreService } from './health-store.service';
+import type { HealthReport } from '../models/health';
 
 function makeMockLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
+
+function makeHealth(overrides: Partial<HealthReport>): HealthReport {
+  return {
+    containers: [{ name: 'claude', status: 'running', healthy: true }],
+    vm: { running: true, vm_type: 'lima' },
+    mcp_os: { running: true },
+    ide_bridge: { running: true, port: null, ws_url: null, detected_ides: [], selected_ide: null },
+    overall_healthy: true,
+    ...overrides,
+  };
 }
 
 describe('ProjectStateService', () => {
@@ -177,6 +190,131 @@ describe('ProjectStateService', () => {
 
       expect(service.status).toBe('error');
       expect(service.error).toContain('No active project');
+    });
+
+    it('holds the overlay until get_health reports overall_healthy', async () => {
+      let healthCalls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: true };
+          case 'get_health':
+            healthCalls += 1;
+            return healthCalls < 3 ? makeHealth({ overall_healthy: false }) : makeHealth({});
+          default:
+            return undefined;
+        }
+      };
+      service.healthGatePollMs = 1;
+      await service.init();
+
+      expect(service.status).toBe('ready');
+      expect(healthCalls).toBe(3);
+    });
+
+    it('sets error with an unhealthy summary when the health gate times out', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: true };
+          case 'get_health':
+            return makeHealth({
+              overall_healthy: false,
+              vm: { running: false, vm_type: 'lima' },
+            });
+          default:
+            return undefined;
+        }
+      };
+      service.healthGatePollMs = 1;
+      service.healthGateTimeoutMs = 5;
+      await service.init();
+
+      expect(service.status).toBe('error');
+      expect(service.error).toContain('System did not become healthy');
+      expect(service.error).toContain('VM not running');
+    });
+
+    it('passes the health gate when get_health returns no report', async () => {
+      // Default handler returns undefined for get_health — gate must not block.
+      await service.init();
+
+      expect(service.status).toBe('ready');
+    });
+
+    it('seeds the shared health store with the gate snapshot', async () => {
+      const healthy = makeHealth({});
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: true };
+          case 'get_health':
+            return healthy;
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      expect(service.status).toBe('ready');
+      expect(TestBed.inject(HealthStoreService).health()).toEqual(healthy);
+    });
+
+    it('keeps polling through transient get_health failures', async () => {
+      let healthCalls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: true };
+          case 'get_health':
+            healthCalls += 1;
+            if (healthCalls === 1) throw new Error('probe boom');
+            return makeHealth({});
+          default:
+            return undefined;
+        }
+      };
+      service.healthGatePollMs = 1;
+      await service.init();
+
+      expect(service.status).toBe('ready');
+      expect(healthCalls).toBe(2);
     });
 
     it('sets system_check status during prereq phase', async () => {
@@ -1042,6 +1180,35 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(false);
       expect(service.restarting).toBe(false);
       expect(service.restartError).toBe('');
+    });
+  });
+
+  describe('unhealthySummary', () => {
+    it('reports unavailable status for a null report', () => {
+      expect(unhealthySummary(null)).toContain('health status unavailable');
+    });
+
+    it('lists every failing subsystem', () => {
+      const msg = unhealthySummary(
+        makeHealth({
+          overall_healthy: false,
+          vm: { running: false, vm_type: 'lima' },
+          mcp_os: { running: false },
+          containers: [
+            { name: 'claude', status: 'exited', healthy: false },
+            { name: 'mcp-hub', status: 'running', healthy: true },
+          ],
+        })
+      );
+
+      expect(msg).toContain('VM not running');
+      expect(msg).toContain('mcp-os worker stopped');
+      expect(msg).toContain('unhealthy containers: claude');
+      expect(msg).not.toContain('mcp-hub');
+    });
+
+    it('falls back to unknown reason when subsystems look fine', () => {
+      expect(unhealthySummary(makeHealth({ overall_healthy: false }))).toContain('unknown reason');
     });
   });
 });

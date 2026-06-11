@@ -220,7 +220,7 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
 /// Sources merged (in this fixed order, per-source-block):
 ///   1. compose   — `nerdctl compose logs --timestamps --tail <N>`
 ///   2. desktop   — tauri-plugin-log file (Rust + Angular `LoggerService` +
-///                  Swift CLI stderr forwarded by `check_os_permission`)
+///      Swift CLI stderr forwarded by `check_os_permission`)
 ///   3. mcp-os    — `~/.speedwave/mcp-os.log`
 ///   4. host-exec — `~/.speedwave/host-exec/<project>/log` (if host_exec enabled)
 ///   5. claude    — `~/.speedwave/logs/<project>/claude-session.log` (if exists)
@@ -232,22 +232,72 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
 ///
 /// Compose-only output (e.g. diagnostics export) reads `rt.compose_logs`
 /// directly; this is the only log command the webview invokes.
+/// Give up on the (normally sub-second) compose-logs fetch after this long —
+/// a busy container engine must not blank the file-based sources.
+const COMPOSE_LOGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Single-flight marker: a compose-logs fetch survives its timeout as a
+/// detached task; polls must not stack more nerdctl processes behind it.
+static COMPOSE_LOGS_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Synthetic `compose | …` WARN line shown while container logs are unreachable.
+fn compose_busy_marker() -> String {
+    format!(
+        "compose | {} WARN  container logs unavailable while the container engine is busy — retrying on the next refresh\n",
+        speedwave_runtime::log_ts::log_timestamp(),
+    )
+}
+
+/// Fetches compose logs with a timeout and single-flight guard; falls back to
+/// `compose_busy_marker()` instead of blocking the merged view.
+async fn fetch_compose_logs_bounded(project: String, tail: u32) -> String {
+    use std::sync::atomic::Ordering;
+    if COMPOSE_LOGS_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return compose_busy_marker();
+    }
+    struct InFlightGuard;
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            COMPOSE_LOGS_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let handle = tokio::task::spawn_blocking(move || {
+        let _guard = InFlightGuard;
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        // best-effort; missing runtime should not blank the whole view
+        if rt.is_available() {
+            rt.compose_logs(&project, tail).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    });
+    match tokio::time::timeout(COMPOSE_LOGS_TIMEOUT, handle).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            log::warn!("get_all_logs: compose logs task failed: {e}");
+            String::new()
+        }
+        // The detached task clears the in-flight flag when it eventually ends.
+        Err(_) => {
+            log::warn!("get_all_logs: compose logs timed out — container engine busy");
+            compose_busy_marker()
+        }
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<String, String> {
     check_project(&project)?;
     let tail_u32 = tail.unwrap_or(200).min(10_000);
     let tail_us = tail_u32 as usize;
 
+    let compose = fetch_compose_logs_bounded(project.clone(), tail_u32).await;
+
     tokio::task::spawn_blocking(move || -> Result<String, String> {
-        let rt = speedwave_runtime::runtime::detect_runtime();
-
-        // compose (best-effort; missing runtime should not blank the whole view)
-        let compose = if rt.is_available() {
-            rt.compose_logs(&project, tail_u32).unwrap_or_default()
-        } else {
-            String::new()
-        };
-
         let desktop = match desktop_log_dir() {
             Some(dir) => read_tail_desktop_logs(&dir, tail_us),
             None => String::new(),
@@ -816,5 +866,28 @@ mod tests {
         let out = read_tail_desktop_logs(tmp.path(), 10);
         assert!(!out.contains("sk-ant-api03-secret"), "got: {out}");
         assert!(out.contains("***REDACTED"), "got: {out}");
+    }
+
+    /// The marker must match the `<source> | <ISO> LEVEL msg` shape the
+    /// frontend's `parseLogLine` recognises.
+    #[test]
+    fn compose_busy_marker_has_parseable_shape() {
+        let marker = compose_busy_marker();
+        assert!(marker.starts_with("compose | 2"), "got: {marker}");
+        assert!(marker.contains(" WARN  "), "got: {marker}");
+        assert!(marker.ends_with('\n'), "got: {marker}");
+    }
+
+    #[test]
+    fn fetch_compose_logs_skips_when_another_fetch_is_in_flight() {
+        use std::sync::atomic::Ordering;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        COMPOSE_LOGS_IN_FLIGHT.store(true, Ordering::SeqCst);
+        let out = rt.block_on(fetch_compose_logs_bounded("p".to_string(), 10));
+        COMPOSE_LOGS_IN_FLIGHT.store(false, Ordering::SeqCst);
+        assert!(out.contains("container logs unavailable"), "got: {out}");
     }
 }

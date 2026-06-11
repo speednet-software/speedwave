@@ -76,18 +76,100 @@ teardown() {
     [ "$(cat "$BRIDGE")" = "second" ]
 }
 
+# ── Claude Code ≥2.1.161 write argv shapes (each must hit the write path) ───
+
+@test "wl-copy --primary writes stdin to the bridge" {
+    run bash -c "printf 'primary-sel' | HOME='$TMP_HOME' bash '$OSC52' --primary"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "primary-sel" ]
+}
+
+@test "xclip -selection clipboard (no -o) writes stdin to the bridge" {
+    run bash -c "printf 'clip-sel' | HOME='$TMP_HOME' bash '$OSC52' -selection clipboard"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "clip-sel" ]
+}
+
+@test "xclip -selection primary (no -o) writes stdin to the bridge" {
+    run bash -c "printf 'xprim' | HOME='$TMP_HOME' bash '$OSC52' -selection primary"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "xprim" ]
+}
+
+@test "xsel --primary --input writes stdin to the bridge" {
+    run bash -c "printf 'xsel-prim' | HOME='$TMP_HOME' bash '$OSC52' --primary --input"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "xsel-prim" ]
+}
+
+@test "xsel --clipboard --input writes stdin to the bridge" {
+    run bash -c "printf 'xsel-clip' | HOME='$TMP_HOME' bash '$OSC52' --clipboard --input"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "xsel-clip" ]
+}
+
+# ── powershell.exe interop (Claude Code platform "wsl" on Windows hosts) ────
+
+@test "powershell.exe Set-Clipboard command writes stdin to the bridge" {
+    local ps='[Console]::InputEncoding = [Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())'
+    run bash -c "printf 'ps-copy' | HOME='$TMP_HOME' bash '$OSC52' -NoProfile -NonInteractive -Command \"\$0\"" "$ps"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "ps-copy" ]
+}
+
+@test "powershell.exe Get-Clipboard command exits 1 without touching the bridge" {
+    printf 'before' > "$BRIDGE"
+    local ps='[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-Clipboard -Raw'
+    run bash -c "HOME='$TMP_HOME' bash '$OSC52' -NoProfile -NonInteractive -Command \"\$0\" </dev/null" "$ps"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [ "$(cat "$BRIDGE")" = "before" ]
+}
+
+@test "powershell.exe ContainsImage probe exits 1 (no false-positive image)" {
+    # The WSL image-check chain falls back to powershell after xclip; a 0 exit
+    # with no payload would make Claude treat an empty clipboard as an image.
+    run bash -c "HOME='$TMP_HOME' bash '$OSC52' -NoProfile -Command 'ContainsImage check' </dev/null"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
+@test "command mentioning BOTH Set-Clipboard and Get-Clipboard takes the write path" {
+    # case patterns are tested per-arg in order: Set-Clipboard precedes the
+    # Get-Clipboard arm, so a single -Command token containing both resolves
+    # deterministically to a write (a copy command that also names the reader).
+    local ps='Set-Clipboard -Value ([Console]::In.ReadToEnd()); Get-Clipboard'
+    run bash -c "printf 'both' | HOME='$TMP_HOME' bash '$OSC52' -NoProfile -Command \"\$0\"" "$ps"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "both" ]
+}
+
+@test "invoking via the powershell.exe symlink name routes Set-Clipboard to write" {
+    # Claude Code reaches the shim by name (powershell.exe), not by calling
+    # osc52-copy.sh directly — exercise that resolution path, not just the
+    # script. A symlink mirrors the image-time `ln -s` in Containerfile.claude.
+    local bindir="$TMP_HOME/bin"
+    mkdir -p "$bindir"
+    ln -s "$OSC52" "$bindir/powershell.exe"
+    local ps='Set-Clipboard -Value ([Console]::In.ReadToEnd())'
+    run bash -c "printf 'via-symlink' | HOME='$TMP_HOME' '$bindir/powershell.exe' -NoProfile -Command \"\$0\"" "$ps"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "via-symlink" ]
+}
+
 # ── Containerfile integration ───────────────────────────────────────────────
 
 @test "Containerfile.claude COPYs osc52-copy.sh to /usr/local/bin" {
     grep -q 'COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh' "$CONTAINERFILE"
 }
 
-@test "Containerfile.claude creates symlinks for all five clipboard names" {
+@test "Containerfile.claude creates symlinks for all six clipboard names" {
     grep -q 'ln -s osc52-copy.sh /usr/local/bin/pbcopy' "$CONTAINERFILE"
     grep -q 'ln -s osc52-copy.sh /usr/local/bin/xclip' "$CONTAINERFILE"
     grep -q 'ln -s osc52-copy.sh /usr/local/bin/xsel' "$CONTAINERFILE"
     grep -q 'ln -s osc52-copy.sh /usr/local/bin/wl-copy' "$CONTAINERFILE"
     grep -q 'ln -s osc52-copy.sh /usr/local/bin/clip.exe' "$CONTAINERFILE"
+    grep -q 'ln -s osc52-copy.sh /usr/local/bin/powershell.exe' "$CONTAINERFILE"
 }
 
 @test "osc52-copy.sh is installed AFTER the heavy claude COPY layer" {

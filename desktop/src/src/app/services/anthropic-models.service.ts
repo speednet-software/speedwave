@@ -5,6 +5,13 @@ import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 import { setPricingCatalog, type PricedAnthropicModel } from '../chat/pricing';
 
 /**
+ * Model-id prefixes for the premium tiers the everyday-placeholder hint skips
+ * (Opus and Fable cost noticeably more than the balanced Sonnet tier). Add a
+ * prefix here when a new premium family ships.
+ */
+const PREMIUM_MODEL_ID_PREFIXES = ['claude-opus-', 'claude-fable-'] as const;
+
+/**
  * Frontend cache of the SSOT Anthropic model catalog served by the Rust
  * backend (`list_anthropic_models` Tauri command, sourced from
  * `speedwave_runtime::defaults::ANTHROPIC_MODELS`).
@@ -98,17 +105,20 @@ export class AnthropicModelsService {
 
   /**
    * The model id the Settings free-text placeholder should hint at for the
-   * Anthropic provider: the latest non-Opus entry (a Sonnet, the everyday
-   * balanced default) so we don't nudge users toward the costly Opus tier.
-   * Falls back to the first `latest` entry, then the first entry. Returns
-   * `null` while the catalog is loading (or empty) so the caller renders a
-   * blank placeholder rather than a stale hard-coded string.
+   * Anthropic provider: the latest non-premium entry (a Sonnet, the everyday
+   * balanced default) so we don't nudge users toward the costly premium tiers
+   * (`PREMIUM_MODEL_ID_PREFIXES`). Falls back to the first `latest` entry,
+   * then the first entry. Returns `null` while the catalog is loading (or
+   * empty) so the caller renders a blank placeholder rather than a stale
+   * hard-coded string.
    */
-  latestNonOpusModelId(): string | null {
+  latestEverydayModelId(): string | null {
     if (!this.cache || this.cache.length === 0) return null;
     const latest = this.cache.filter((m) => m.latest);
-    const nonOpus = latest.find((m) => !m.id.startsWith('claude-opus-'));
-    return (nonOpus ?? latest[0] ?? this.cache[0]).id;
+    const everyday = latest.find(
+      (m) => !PREMIUM_MODEL_ID_PREFIXES.some((prefix) => m.id.startsWith(prefix))
+    );
+    return (everyday ?? latest[0] ?? this.cache[0]).id;
   }
 
   /** Test-only hook to reset cached state between specs. */

@@ -92,12 +92,22 @@ Render the login flow as an in-app pseudo-terminal panel. **Rejected** — adds 
 
 ### Addendum: clipboard bridge for the "press `c` to copy URL" hint
 
-Claude Code's TUI prints "press `c` to copy URL" and, on `c`, probes for
-`pbcopy` / `xclip` / `xsel` / `wl-copy` / `clip.exe` (OSC 52 as a last resort).
-Our hardened container has none of those binaries and no path to the host
-clipboard. The `claude` image therefore bakes five symlinks at
-`/usr/local/bin/` (all the names above), all pointing at one `osc52-copy.sh`
-which sends the URL down **two write-only channels**:
+Claude Code's TUI prints "press `c` to copy URL" and, on `c`, routes the copy
+by detected platform (Claude Code ≥ 2.1.161[^4]): on `linux` it probes for
+`wl-copy` — only when `WAYLAND_DISPLAY` is set — then `xclip`/`xsel` (only when
+`DISPLAY` is set), with OSC 52 as a last resort; on Windows hosts the container
+self-identifies as platform `wsl` (via `/proc/version`) and execs
+`powershell.exe … Set-Clipboard` instead. Our hardened container has none of
+those binaries and no path to the host clipboard. The `claude` image therefore
+bakes six symlinks at `/usr/local/bin/` (`pbcopy` / `xclip` / `xsel` /
+`wl-copy` / `clip.exe` / `powershell.exe`), all pointing at one
+`osc52-copy.sh`, and `defaults.rs::base_env()` injects a dummy
+`WAYLAND_DISPLAY` so the probe finds the `wl-copy` shim (no Wayland socket
+exists or is needed — the shim never talks to a display server). The shim
+treats a `Set-Clipboard` PowerShell command as a copy and fails read-style
+commands (`Get-Clipboard`, `ContainsImage`) with exit 1 so paste keeps using
+the `xclip` image path below. The copy sends the URL down **two write-only
+channels**:
 
 1. **File bridge (primary).** Atomically writes the URL to
    `~/.clipboard-bridge` inside the container (i.e. on the host at
@@ -151,3 +161,5 @@ Implementation: `containers/osc52-copy.sh`, `containers/Containerfile.claude`
 [^2]: GitHub issue tfvchow/field-notes-public#10 — both `.credentials.json` and `.claude.json` are required for Claude Code to skip onboarding in a devcontainer. <https://github.com/tfvchow/field-notes-public/issues/10>
 
 [^3]: OSC 52 terminal-emulator support data — survey of which terminals honor the sequence by default and which require an opt-in setting. <https://github.com/ojroques/vim-oscyank#which-terminals-support-osc-52>
+
+[^4]: Claude Code CHANGELOG 2.1.160/2.1.161 — copy-on-select moved to PowerShell interop on WSL and the fullscreen clipboard probe gained `wl-copy`/`xclip`/`xsel` with PRIMARY-selection writes; verified against the published 2.1.154 vs 2.1.173 `linux-x64` binaries (the linux probe is gated on `WAYLAND_DISPLAY`/`DISPLAY`; platform `wsl` execs `powershell.exe … Set-Clipboard`). <https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md>

@@ -44,12 +44,17 @@ export interface PricedAnthropicModel {
  * (and its `[1m]` variant where the context window is 1M), so a model bump in
  * `defaults.rs` cannot silently leave a price-less entry here.
  *
- * Conventions across the Claude 4.x generation: cache-read = 10% of input,
- * cache-write = 125% of input. Opus 4.5+ is $5/$25 with the 1M window at the
- * base rate; Sonnet 4.6 is $3/$15 base with a 1M-context premium ($6/$22.5);
- * Haiku 4.5 is $1/$5 with no 1M variant.
+ * Conventions across the Claude 4.x/5 generation: cache-read = 10% of input,
+ * cache-write = 125% of input. Fable 5 is $10/$50 (1M window is the default,
+ * standard-priced); Opus 4.5+ is $5/$25 with the 1M window at the base rate;
+ * Sonnet 4.6 is $3/$15 base with a 1M-context premium ($6/$22.5); Haiku 4.5
+ * is $1/$5 with no 1M variant.
  */
 const SEED_PRICING: Readonly<Record<string, ModelPricing>> = {
+  // Fable family — $10 / $50 per 1M; 1M context is the default ([1m] == base)
+  'claude-fable-5': { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 },
+  'claude-fable-5[1m]': { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 },
+
   // Opus family — $5 / $25 per 1M (1M window standard-priced → [1m] == base)
   'claude-opus-4-6': { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
   'claude-opus-4-7': { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },

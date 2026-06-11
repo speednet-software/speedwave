@@ -117,10 +117,13 @@ const RECONCILE_REBUILDING: u8 = 2;
 
 static BUNDLE_RECONCILE_PHASE: AtomicU8 = AtomicU8::new(RECONCILE_IDLE);
 
-/// Tri-state tracking whether container images are ready for use.
+/// Tracks whether container images are ready for use. `Checking` covers the
+/// short bundle-manifest comparison at reconcile start; waiters treat it like
+/// `Building` so container starts cannot race a rebuild decision.
 #[derive(Clone, Debug)]
 enum ImageReadiness {
     Ready,
+    Checking,
     Building,
     Failed(String),
 }
@@ -131,7 +134,7 @@ static IMAGES_READY: std::sync::LazyLock<(Mutex<ImageReadiness>, Condvar)> =
 /// Blocks the calling thread until container images are ready (or timeout).
 ///
 /// - `Ready` → returns `Ok(())` immediately
-/// - `Building` → waits on Condvar until signaled, then re-checks
+/// - `Checking`/`Building` → waits on Condvar until signaled, then re-checks
 /// - `Failed(msg)` → returns `Err(msg)` immediately
 pub(crate) fn wait_for_images_ready(timeout: Duration) -> Result<(), String> {
     let (lock, cvar) = &*IMAGES_READY;
@@ -142,7 +145,7 @@ pub(crate) fn wait_for_images_ready(timeout: Duration) -> Result<(), String> {
         match &*state {
             ImageReadiness::Ready => return Ok(()),
             ImageReadiness::Failed(msg) => return Err(msg.clone()),
-            ImageReadiness::Building => {
+            ImageReadiness::Checking | ImageReadiness::Building => {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
                     return Err("Timed out waiting for container images to build".to_string());
@@ -158,7 +161,7 @@ pub(crate) fn wait_for_images_ready(timeout: Duration) -> Result<(), String> {
                     match &*state {
                         ImageReadiness::Ready => return Ok(()),
                         ImageReadiness::Failed(msg) => return Err(msg.clone()),
-                        ImageReadiness::Building => {
+                        ImageReadiness::Checking | ImageReadiness::Building => {
                             return Err(
                                 "Timed out waiting for container images to build".to_string()
                             );
@@ -185,11 +188,11 @@ struct ImageReadinessGuard;
 impl Drop for ImageReadinessGuard {
     fn drop(&mut self) {
         // Scope guard: if this thread exits without explicitly signaling Ready or Failed,
-        // the guard transitions Building->Failed and wakes all waiters. This covers
-        // early returns and panics not caught by catch_unwind.
+        // the guard transitions Checking/Building->Failed and wakes all waiters. This
+        // covers early returns and panics not caught by catch_unwind.
         let (lock, cvar) = &*IMAGES_READY;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if matches!(&*state, ImageReadiness::Building) {
+        if matches!(&*state, ImageReadiness::Checking | ImageReadiness::Building) {
             *state = ImageReadiness::Failed("reconcile thread exited unexpectedly".to_string());
             cvar.notify_all();
         }
@@ -318,6 +321,30 @@ fn set_bundle_error(state: &mut bundle::BundleState, message: String) -> String 
     message
 }
 
+/// Resets the bundle phase and closes the readiness gate for a rebuild.
+/// Must run before any slow work (VM start, image build).
+fn prepare_rebuild(
+    state: &mut bundle::BundleState,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    log::info!(
+        "reconcile_bundle: rebuild needed, starting reconcile (phase={:?})",
+        state.phase,
+    );
+    // New bundle = full reconciliation from scratch. Reset phase so all
+    // is_before() gates evaluate to true and every step executes.
+    if state.phase != bundle::BundleReconcilePhase::Pending {
+        log::info!("reconcile_bundle: resetting phase to Pending for new bundle");
+        state.phase = bundle::BundleReconcilePhase::Pending;
+        bundle::save_bundle_state(state).map_err(|e| e.to_string())?;
+    }
+    // Signal Building so start_containers/switch_project callers block until done.
+    BUNDLE_RECONCILE_PHASE.store(RECONCILE_REBUILDING, Ordering::Relaxed);
+    set_image_readiness(ImageReadiness::Building);
+    emit_bundle_status(app_handle);
+    Ok(())
+}
+
 /// INVARIANT: `ensure_ready()` must NOT be gated behind `is_available()`.
 /// A stopped Lima VM returns `is_available() == false` but `ensure_ready()`
 /// can start it; gating one behind the other silently skips VM auto-start.
@@ -331,8 +358,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     })?;
 
     let mut state = bundle::load_bundle_state();
-    let mut bundle_changed =
-        state.applied_bundle_id.as_deref() != Some(manifest.bundle_id.as_str());
+    let bundle_changed = state.applied_bundle_id.as_deref() != Some(manifest.bundle_id.as_str());
 
     log::info!(
         "reconcile_bundle: current={} applied={} changed={}",
@@ -360,22 +386,17 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
 
     let rt = speedwave_runtime::runtime::detect_runtime();
 
-    // Call ensure_ready() once and track whether it succeeded. This avoids a
-    // double limactl probe (once for image-existence check, once before rebuild).
-    let mut runtime_ready = false;
-    match rt.ensure_ready() {
-        Ok(()) => runtime_ready = true,
-        Err(e) => log::warn!("reconcile: runtime not ready: {e}"),
-    }
-
-    // Even when bundle_id matches, verify images actually exist.
-    // They may have been lost after containerd reinstall or VM recreation.
-    if !bundle_changed && runtime_ready && !build::images_exist(&rt, &active_integrations) {
-        log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
-        bundle_changed = true;
-    }
-
-    if !bundle_changed {
+    if bundle_changed {
+        // Gate first, then the slow ensure_ready (VM start) — closes the
+        // start_containers vs rebuild race ("image not available").
+        prepare_rebuild(&mut state, app_handle)?;
+        rt.ensure_ready().map_err(|e| {
+            set_bundle_error(
+                &mut state,
+                format!("Runtime is not ready while applying the new bundle: {e}"),
+            )
+        })?;
+    } else {
         if state.phase != bundle::BundleReconcilePhase::Done
             || state.last_error.is_some()
             || !state.pending_running_projects.is_empty()
@@ -386,40 +407,27 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             state.pending_running_projects.clear();
             bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         }
+        // Open the gate immediately: nothing needs rebuilding, and auth/chat
+        // callers must not wait behind a VM start.
         log::info!("reconcile_bundle: no changes needed, setting Ready");
         set_image_readiness(ImageReadiness::Ready);
         emit_bundle_status(app_handle);
-        return Ok(());
-    }
 
-    log::info!(
-        "reconcile_bundle: bundle changed, starting reconcile (phase={:?})",
-        state.phase,
-    );
-
-    // New bundle = full reconciliation from scratch. Reset phase so all
-    // is_before() gates evaluate to true and every step executes.
-    if state.phase != bundle::BundleReconcilePhase::Pending {
-        log::info!("reconcile_bundle: resetting phase to Pending for new bundle");
-        state.phase = bundle::BundleReconcilePhase::Pending;
-        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
-    }
-
-    // Now that we know images need rebuilding, signal Building so that
-    // start_containers/switch_project callers block until done.
-    BUNDLE_RECONCILE_PHASE.store(RECONCILE_REBUILDING, Ordering::Relaxed);
-    set_image_readiness(ImageReadiness::Building);
-    emit_bundle_status(app_handle);
-
-    // If the first ensure_ready() failed, retry now — runtime may have
-    // recovered (e.g. VM was starting). If it fails again, report the error.
-    if !runtime_ready {
-        rt.ensure_ready().map_err(|e| {
-            set_bundle_error(
-                &mut state,
-                format!("Runtime is not ready while applying the new bundle: {e}"),
-            )
-        })?;
+        // Repair: images may be gone after containerd reinstall/VM recreation;
+        // needs a running VM, so it runs after the gate opened (as before).
+        match rt.ensure_ready() {
+            Ok(()) => {
+                if build::images_exist(&rt, &active_integrations) {
+                    return Ok(());
+                }
+                log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
+                prepare_rebuild(&mut state, app_handle)?;
+            }
+            Err(e) => {
+                log::warn!("reconcile: runtime not ready: {e}");
+                return Ok(());
+            }
+        }
     }
 
     let build_root = build::resolve_build_root().map_err(|e| {
@@ -594,9 +602,9 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
 
     log::info!("reconcile_bundle: starting");
 
-    // NOTE: we do NOT set ImageReadiness::Building here or emit status yet.
-    // The inner function sets Building only after confirming bundle_changed==true,
-    // so the frontend never shows "Rebuilding..." when nothing needs rebuilding.
+    // Close the gate before the spawn so start_containers cannot race the
+    // rebuild decision; no status emit — UI shows overlay only for Building.
+    set_image_readiness(ImageReadiness::Checking);
 
     let handle = app_handle.clone();
     std::thread::spawn(move || {
@@ -1398,6 +1406,92 @@ mod tests {
             // Cleanup
             set_readiness(ImageReadiness::Ready);
         }
+
+        #[test]
+        #[serial]
+        fn blocks_during_checking_until_ready() {
+            set_readiness(ImageReadiness::Checking);
+
+            let handle = std::thread::spawn(|| wait_for_images_ready(Duration::from_secs(5)));
+
+            // Give the waiter time to block
+            std::thread::sleep(Duration::from_millis(50));
+
+            set_readiness(ImageReadiness::Ready);
+
+            let result = handle.join().unwrap();
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        #[serial]
+        fn checking_times_out_like_building() {
+            set_readiness(ImageReadiness::Checking);
+
+            let result = wait_for_images_ready(Duration::from_millis(50));
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("Timed out"));
+
+            // Cleanup
+            set_readiness(ImageReadiness::Ready);
+        }
+
+        #[test]
+        #[serial]
+        fn guard_fails_waiters_when_dropped_during_checking() {
+            set_readiness(ImageReadiness::Checking);
+
+            drop(ImageReadinessGuard);
+
+            let result = wait_for_images_ready(Duration::from_millis(50));
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("exited unexpectedly"));
+
+            // Cleanup
+            set_readiness(ImageReadiness::Ready);
+        }
+
+        /// Structural: Checking must be set before the spawn, or a concurrent
+        /// start_containers slips through the Ready-initialized gate.
+        #[test]
+        fn checking_is_set_before_thread_spawn() {
+            let src = include_str!("reconcile.rs");
+            let fn_start = src
+                .find("pub(crate) fn reconcile_bundle_update(")
+                .expect("reconcile_bundle_update must exist");
+            let body = &src[fn_start..];
+            let set_checking = body
+                .find("set_image_readiness(ImageReadiness::Checking)")
+                .expect("reconcile_bundle_update must set Checking");
+            let spawn = body
+                .find("std::thread::spawn")
+                .expect("reconcile_bundle_update must spawn the worker thread");
+            assert!(
+                set_checking < spawn,
+                "Checking must be set before the thread spawn, not inside it"
+            );
+        }
+
+        /// Structural: in the bundle-changed path the gate must close
+        /// (prepare_rebuild) before the slow ensure_ready VM start.
+        #[test]
+        fn rebuild_gate_closes_before_ensure_ready() {
+            let src = include_str!("reconcile.rs");
+            let fn_start = src
+                .find("fn reconcile_bundle_update_inner(")
+                .expect("reconcile_bundle_update_inner must exist");
+            let body = &src[fn_start..];
+            let gate = body
+                .find("prepare_rebuild(&mut state, app_handle)?")
+                .expect("inner must call prepare_rebuild");
+            let ensure = body
+                .find("rt.ensure_ready()")
+                .expect("inner must call ensure_ready");
+            assert!(
+                gate < ensure,
+                "prepare_rebuild must precede the first ensure_ready call"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1633,10 +1727,8 @@ mod tests {
         );
     }
 
-    /// Structural test: verifies that `reconcile_bundle_update_inner` checks
-    /// `images_exist` when `bundle_changed` is false. Without this, a
-    /// containerd restart that wipes images would leave the app believing
-    /// everything is fine while containers cannot start.
+    /// Structural test: missing images with an unchanged bundle must force a
+    /// rebuild via prepare_rebuild (gate opens before this check by design).
     #[test]
     fn reconcile_forces_rebuild_when_images_missing() {
         let source = include_str!("reconcile.rs");
@@ -1645,21 +1737,15 @@ mod tests {
             .nth(1)
             .expect("reconcile_bundle_update_inner function should exist");
 
-        assert!(
-            inner_fn.contains("images_exist"),
-            "reconcile must check images_exist when bundle unchanged"
-        );
-
-        // images_exist check must appear BEFORE set_image_readiness(Ready)
         let images_pos = inner_fn
             .find("images_exist")
-            .expect("images_exist call not found");
-        let ready_pos = inner_fn
-            .find("set_image_readiness(ImageReadiness::Ready)")
-            .expect("set_image_readiness(Ready) not found");
+            .expect("reconcile must check images_exist when bundle unchanged");
+
+        // prepare_rebuild must follow the images_exist check (repair path).
+        let repair = &inner_fn[images_pos..];
         assert!(
-            images_pos < ready_pos,
-            "images_exist check must come before set_image_readiness(Ready)"
+            repair.contains("prepare_rebuild(&mut state, app_handle)?"),
+            "missing images must force a rebuild via prepare_rebuild"
         );
     }
 

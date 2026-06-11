@@ -1,6 +1,6 @@
 #!/bin/bash
-# Clipboard wrapper (ADR-052). Five symlinks (pbcopy/xclip/xsel/wl-copy/clip.exe)
-# point here; routes by -o/--out/--paste flag presence.
+# Clipboard wrapper (ADR-052). Six symlinks (pbcopy/xclip/xsel/wl-copy/clip.exe/
+# powershell.exe) point here; routes by flag / -Command content.
 #
 # Write: stdin → ~/.clipboard-bridge (Tauri watcher relays to host) + OSC 52 on /dev/tty.
 # Read:  serve /workspace/.speedwave/pastes/clip.png to xclip -t TARGETS/-t image/png -o.
@@ -11,6 +11,10 @@ is_read=0
 for arg in "$@"; do
     case "$arg" in
         -o|--out|-out|--output|--paste) is_read=1; break ;;
+        # powershell.exe interop (platform "wsl"): Set-Clipboard = stdin write;
+        # read-style commands must exit 1 or they'd clobber the bridge (ADR-052).
+        *Set-Clipboard*) break ;;
+        *Get-Clipboard*|*ContainsImage*) exit 1 ;;
     esac
 done
 

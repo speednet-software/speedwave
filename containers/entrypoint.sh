@@ -19,6 +19,14 @@ SPEEDWAVE_RESOURCES="${SPEEDWAVE_RESOURCES:-/speedwave/resources}"
 if ! command -v claude &> /dev/null; then
     echo "Claude Code not found — installing via install-claude.sh (${CLAUDE_VERSION})..."
     /usr/local/bin/install-claude.sh "${CLAUDE_VERSION}"
+else
+    # Surface image/env version skew (stale image after an interrupted update).
+    # Not auto-repaired: launchers exec the absolute /usr/local/bin/claude on
+    # the read-only image layer, so only an image rebuild can fix it.
+    installed_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+    if [ -n "$installed_version" ] && [ "$installed_version" != "$CLAUDE_VERSION" ]; then
+        echo "WARNING: image has Claude Code ${installed_version} but the pinned version is ${CLAUDE_VERSION} — run 'speedwave update' to rebuild the image" >&2
+    fi
 fi
 
 # Ensure ~/.local/bin is in PATH for interactive shells (nerdctl exec runs bash).

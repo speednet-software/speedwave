@@ -1,5 +1,83 @@
 # Troubleshooting
 
+## Chat session ends immediately ("ended unexpectedly") on a managed enterprise account
+
+**Symptom:** Every Desktop chat turn or CLI session exits right after start with
+a generic "session ended unexpectedly" error. Personal accounts on the same
+machine work fine.
+
+**Cause:** Claude Code 2.1.163+ honors the `requiredMinimumVersion` /
+`requiredMaximumVersion` managed (organization) settings: if the pinned Claude
+Code version inside the Speedwave container falls outside your organization's
+allowed range, the binary refuses to start. Speedwave pins the version per
+release (`defaults.rs::CLAUDE_VERSION`) and disables the auto-updater, so the
+in-container version can only change with a Speedwave update.
+
+**Recovery:** Check the version your organization allows (ask your admin) and
+update Speedwave to a release whose pinned Claude Code version falls inside the
+range. The pinned version is listed in the diagnostics ZIP
+(`system-info.txt` → `claude_pinned`).
+
+---
+
+## "WARNING: image has Claude Code X but the pinned version is Y" in container logs
+
+**Symptom:** The claude container log shows a version-skew warning at start.
+
+**Cause:** The container image was built for a different Claude Code version
+than the one this Speedwave release pins — typically an interrupted or skipped
+image rebuild after an update.
+
+**Recovery:** Run `speedwave update` (or restart the project from Desktop,
+which reconciles images) so the claude image is rebuilt for the pinned version.
+
+---
+
+## Git worktrees created inside the chat session look broken on the host
+
+**Symptom:** A worktree created by Claude inside the container (e.g. under
+`.claude/worktrees/`) shows up on the host, but `git worktree list` or `git
+status` on the host reports broken paths.
+
+**Cause:** The container mounts the project at `/workspace`, so worktree
+metadata records absolute `/workspace/...` paths that do not exist on the
+host. Additionally, Claude Code manages its own worktrees under
+`.claude/worktrees/` (locking, periodic sweeps) — the same directory
+convention used for host-side worktrees.
+
+**Recovery:** Treat container-created worktrees as container-only. On the
+host, `git worktree prune` removes the stale registrations; keep host-side
+worktrees and container-side worktrees separate.
+
+---
+
+## Repository `.claude/settings.json` permission rules affect Speedwave sessions
+
+Claude Code applies `deny` permission rules from a repository's committed
+`.claude/settings.json` even in bypass-permissions mode (which Speedwave uses
+inside the hardened container). Since Claude Code 2.1.162/2.1.166 these rules
+are matched more strictly (wildcards, `$HOME` references, `WebFetch` domain
+rules). If a tool call is unexpectedly blocked, check the project's committed
+`.claude/settings.json` for `deny` rules before suspecting Speedwave.
+
+---
+
+## Claude container exits with code 137 during multi-agent runs
+
+**Symptom:** The claude container is killed (exit 137) while running many
+background agents or sub-agents (`claude agents`, nested sub-agent fan-out).
+
+**Cause:** All agents inside the container share one fixed resource envelope
+(6 GiB memory / 2 CPUs — see `resources.rs::CLAUDE_RESOURCES`); a wide agent
+fan-out can exhaust it. 137 here means the whole container hit its memory cap,
+not that a single conversation leaked.
+
+**Recovery:** Reduce parallel agent fan-out inside chat sessions. The limits
+are deliberate (ADR-068); they are ceilings shared by everything running in
+the claude container.
+
+---
+
 ## After upgrading: OS integration is disabled and a banner appears
 
 **Symptom:** After installing a new Speedwave version, the Integrations view

@@ -39,6 +39,12 @@ async function flushMicrotasks(cycles = 10): Promise<void> {
  */
 const TEST_ANTHROPIC_MODELS = [
   {
+    id: 'claude-fable-5',
+    family: 'Fable 5',
+    context_tokens: 1_000_000,
+    latest: true,
+  },
+  {
     id: 'claude-opus-4-8',
     family: 'Opus 4.8',
     context_tokens: 1_000_000,
@@ -490,6 +496,7 @@ describe('LlmProviderComponent', () => {
     // legacy after.
     expect(options).toEqual([
       '',
+      'claude-fable-5',
       'claude-opus-4-8',
       'claude-sonnet-4-6',
       'claude-haiku-4-5',
@@ -511,7 +518,12 @@ describe('LlmProviderComponent', () => {
     const latestIds = Array.from(latestGroup.querySelectorAll('option')).map(
       (o) => (o as HTMLOptionElement).value
     );
-    expect(latestIds).toEqual(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
+    expect(latestIds).toEqual([
+      'claude-fable-5',
+      'claude-opus-4-8',
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5',
+    ]);
 
     // Legacy entries are visible but quarantined to the "Legacy" optgroup.
     const legacyGroup = modelEl.querySelector('optgroup[label="Legacy"]') as HTMLOptGroupElement;
