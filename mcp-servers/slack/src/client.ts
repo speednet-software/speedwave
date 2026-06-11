@@ -716,8 +716,8 @@ export async function getFileContent(
 /** Cap on workspace downloads — guards project disk against huge uploads. */
 const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 
-/** Workspace subdirectory all Slack downloads land in. */
-const SLACK_FILES_SUBDIR = 'slack-files';
+/** Hidden workspace subpath for downloads — keeps the project root clean (same convention as office's `.speedwave/office`). */
+const SLACK_DOWNLOAD_SUBPATH = path.join('.speedwave', 'slack');
 
 /** Workspace mount root (env override for tests). */
 function workspaceDir(): string {
@@ -746,7 +746,7 @@ export interface SlackDownloadedFile {
 
 /**
  * Download any file shared on Slack into the project workspace
- * (`/workspace/slack-files/<id>-<name>`), where filesystem reads and the
+ * (`/workspace/.speedwave/slack/<id>-<name>`), where filesystem reads and the
  * office integration (PDF/Word/Excel) can process it. Requires `files:read`.
  * @param {SlackClients} clients - Slack client container
  * @param {Object} params - Parameters
@@ -766,7 +766,7 @@ export async function downloadFile(
         'Ask the user to share it another way.'
     );
   }
-  const dir = path.join(workspaceDir(), SLACK_FILES_SUBDIR);
+  const dir = path.join(workspaceDir(), SLACK_DOWNLOAD_SUBPATH);
   await mkdir(dir, { recursive: true });
   const target = path.join(dir, `${meta.id}-${sanitizeFilename(meta.name)}`);
   await writeFile(target, body);

@@ -266,7 +266,7 @@ Same checks as plugin volumes, applied to the built-in SharePoint service. As of
 
 ### Slack Volume Rules
 
-Identical profile to SharePoint, applied to the built-in Slack service ([ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)): `/tokens:ro`, `/workspace:rw` (file downloads land in `/workspace/slack-files/`), plus its per-service oauth bearer — nothing else. The token-mount-mode check re-uses the generic `PLUGIN_TOKEN_MOUNT_MODE`.
+Identical profile to SharePoint, applied to the built-in Slack service ([ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)): `/tokens:ro`, `/workspace:rw` (file downloads land in `/workspace/.speedwave/slack/`), plus its per-service oauth bearer — nothing else. The token-mount-mode check re-uses the generic `PLUGIN_TOKEN_MOUNT_MODE`.
 
 | Rule                            | What it checks                                                             |
 | ------------------------------- | -------------------------------------------------------------------------- |

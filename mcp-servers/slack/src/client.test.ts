@@ -1158,11 +1158,11 @@ describe('slack client', () => {
         name: 'analiza_techniczna.pdf',
         mimetype: 'application/pdf',
         size: 4,
-        path: '/ws/slack-files/F1-analiza_techniczna.pdf',
+        path: '/ws/.speedwave/slack/F1-analiza_techniczna.pdf',
       });
-      expect(fs.mkdir).toHaveBeenCalledWith('/ws/slack-files', { recursive: true });
+      expect(fs.mkdir).toHaveBeenCalledWith('/ws/.speedwave/slack', { recursive: true });
       const [target, payload] = vi.mocked(fs.writeFile).mock.calls[0];
-      expect(target).toBe('/ws/slack-files/F1-analiza_techniczna.pdf');
+      expect(target).toBe('/ws/.speedwave/slack/F1-analiza_techniczna.pdf');
       expect(Buffer.from(payload as Buffer)).toEqual(bytes);
       const [, init] = fetchMock.mock.calls[0];
       expect((init as RequestInit).headers).toMatchObject({
@@ -1183,7 +1183,7 @@ describe('slack client', () => {
       const result = await downloadFile(mockClients, { file: 'F2' });
 
       // No separators survive; leading dots stripped; unsafe chars → underscore.
-      expect(result.path).toBe('/ws/slack-files/F2-pa_ss_wd_.txt');
+      expect(result.path).toBe('/ws/.speedwave/slack/F2-pa_ss_wd_.txt');
       expect(result.path).not.toContain('..');
     });
 
@@ -1238,7 +1238,7 @@ describe('slack client', () => {
       stubDownload(Buffer.from([0x41]), 'text/markdown');
 
       const result = await downloadFile(mockClients, { file: 'F6' });
-      expect(result.path).toBe('/workspace/slack-files/F6-note.md');
+      expect(result.path).toBe('/workspace/.speedwave/slack/F6-note.md');
     });
   });
 

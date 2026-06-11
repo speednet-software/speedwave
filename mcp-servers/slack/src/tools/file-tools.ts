@@ -63,7 +63,7 @@ const getFileContentTool: Tool = {
 const downloadFileTool: Tool = {
   name: 'downloadFile',
   description:
-    'Download ANY file shared on Slack (PDF, images, office docs, large text) into the project workspace at /workspace/slack-files/. Use for binary files getFileContent refuses — then read PDFs/documents via the office integration or the filesystem.',
+    'Download ANY file shared on Slack (PDF, images, office docs, large text) into the project workspace at /workspace/.speedwave/slack/. Use for binary files getFileContent refuses — then read PDFs/documents via the office integration or the filesystem.',
   inputSchema: {
     type: 'object',
     properties: {

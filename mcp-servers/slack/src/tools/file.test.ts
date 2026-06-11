@@ -84,7 +84,7 @@ describe('file-tools', () => {
         name: 'analiza.pdf',
         mimetype: 'application/pdf',
         size: 4,
-        path: '/workspace/slack-files/F1-analiza.pdf',
+        path: '/workspace/.speedwave/slack/F1-analiza.pdf',
       };
       vi.mocked(client.downloadFile).mockResolvedValue(saved);
 
