@@ -76,15 +76,19 @@ from the sum of sequential stops to the slowest single stop. This speeds up
 every down consumer: switch teardown, update, integration toggles, project
 removal and quit.
 
-### Idempotent `compose_up` on app start
+### Idempotent `compose_up` on app start and integration toggle
 
 `setup_wizard::start_containers` used `compose_up_recreate` on every app
-launch, churning all containers of the active project. With content-addressed
-image tags (ADR-071) plus nerdctl config-hash convergence, plain `compose up`
-recreates exactly what changed — an unchanged project starts in seconds.
-Force-recreate remains in exactly two places: bundle-reconcile restore
-(ADR-071 — crosses image-tag changes) and the `ensure_exec_healthy` stale
-container recovery path.
+launch, churning all containers of the active project, and
+`restart_integration_containers` did a full `compose_down` +
+`compose_up_recreate` for a single integration toggle. With
+content-addressed image tags (ADR-071) plus nerdctl config-hash convergence,
+plain `compose up --remove-orphans` recreates exactly what changed — an
+unchanged project starts in seconds, and a toggle touches only the toggled
+worker (created/removed) plus `claude` and `mcp-hub` (their
+`ENABLED_SERVICES` env changed). Force-recreate remains in exactly two
+places: bundle-reconcile restore (ADR-071 — crosses image-tag changes) and
+the `ensure_exec_healthy` stale container recovery path.
 
 ## Alternatives considered
 

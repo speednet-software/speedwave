@@ -1429,11 +1429,6 @@ pub async fn restart_integration_containers(
                 )
             })?;
 
-            rt.compose_down(&project).map_err(|e| {
-                log::error!("restart_integration_containers: compose_down error: {e}");
-                anyhow::anyhow!("{e}")
-            })?;
-
             // Respawn the oauth worker before compose render so the bearer-map
             // is current after a plugin OAuth toggle (ADR-069). Best-effort.
             crate::ensure_oauth_running(&oauth_arc, &project);
@@ -1441,22 +1436,23 @@ pub async fn restart_integration_containers(
             use crate::types::IntoAnyhow;
             crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
 
-            // Both validate and up_recreate are post-compose_down; either failing
-            // leaves containers stopped, so both require rollback.
-            let recreate_result = speedwave_runtime::runtime::compose_validate_with_retry(
-                rt, &project,
-            )
-            .and_then(|()| rt.compose_up_recreate(&project));
+            // Idempotent up with NO prior down (ADR-072): config-hash
+            // convergence creates/removes the toggled worker (--remove-orphans)
+            // and recreates only claude + hub, whose ENABLED_SERVICES changed —
+            // the remaining containers keep running untouched.
+            let up_result =
+                speedwave_runtime::runtime::compose_validate_with_retry(rt, &project)
+                    .and_then(|()| rt.compose_up(&project));
 
-            if let Err(e) = recreate_result {
+            if let Err(e) = up_result {
                 log::error!(
-                    "restart_integration_containers: recreate failed: {e}, attempting rollback"
+                    "restart_integration_containers: up failed: {e}, attempting rollback"
                 );
                 // Nested transaction: rollback acquires its own — reentrant via HELD_LOCKS.
                 if let Err(rb_err) = speedwave_runtime::update::rollback_containers(rt, &project) {
                     log::error!("restart_integration_containers: rollback also failed: {rb_err}");
                     anyhow::bail!(
-                        "Restart failed: {e}. Rollback also failed: {rb_err}. Containers are stopped. Run speedwave to restart manually."
+                        "Restart failed: {e}. Rollback also failed: {rb_err}. Containers may be in an inconsistent state. Run speedwave to restart manually."
                     );
                 }
                 anyhow::bail!("Restart failed: {e}. Rolled back to previous configuration.");
@@ -2239,7 +2235,7 @@ mod tests {
     // -- restart_integration_containers structural tests --
 
     #[test]
-    fn restart_rebuilds_images_before_compose_down() {
+    fn restart_rebuilds_images_before_compose_up() {
         let source = include_str!("integrations_cmd.rs");
         let fn_start = source
             .find("fn restart_integration_containers(")
@@ -2249,15 +2245,12 @@ mod tests {
         let build_pos = fn_body.find("ensure_project_images_built").expect(
             "ensure_project_images_built call must exist in restart_integration_containers",
         );
-        let down_pos = fn_body
-            .find("compose_down")
-            .expect("compose_down call must exist in restart_integration_containers");
-
+        let render_pos = fn_body
+            .find("render_and_save_compose")
+            .expect("render_and_save_compose call must exist");
         assert!(
-            build_pos < down_pos,
-            "ensure_project_images_built (offset {}) must appear before compose_down (offset {}) in restart_integration_containers",
-            build_pos,
-            down_pos
+            build_pos < render_pos,
+            "ensure_project_images_built (offset {build_pos}) must appear before render (offset {render_pos}) — builds stay outside the compose lock (ADR-066)"
         );
     }
 
@@ -2304,16 +2297,28 @@ mod tests {
     }
 
     #[test]
-    fn restart_uses_compose_up_recreate() {
+    fn restart_uses_idempotent_up_without_down() {
         let source = include_str!("integrations_cmd.rs");
         let fn_start = source
             .find("fn restart_integration_containers(")
             .expect("restart_integration_containers function must exist");
-        let fn_body = &source[fn_start..];
+        let fn_end = source[fn_start..]
+            .find("\n    // -- restart_integration_containers structural tests --")
+            .map(|e| fn_start + e)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
 
         assert!(
-            fn_body.contains("compose_up_recreate"),
-            "restart_integration_containers must use compose_up_recreate, not compose_up"
+            !fn_body.contains("compose_up_recreate"),
+            "toggle must use idempotent compose_up (ADR-072), not force-recreate"
+        );
+        assert!(
+            !fn_body.contains("compose_down"),
+            "toggle must not down the project — config-hash convergence touches only changed containers"
+        );
+        assert!(
+            fn_body.contains("rt.compose_up(&project)"),
+            "toggle must call idempotent compose_up"
         );
     }
 
@@ -2332,11 +2337,11 @@ mod tests {
             .find("ensure_images_ready")
             .expect("restart_integration_containers must call ensure_images_ready");
         let up_pos = fn_body
-            .find("compose_up_recreate")
-            .expect("compose_up_recreate must exist in restart_integration_containers");
+            .find("rt.compose_up(&project)")
+            .expect("compose_up must exist in restart_integration_containers");
         assert!(
             ensure_pos < up_pos,
-            "ensure_images_ready must come BEFORE compose_up_recreate"
+            "ensure_images_ready must come BEFORE compose_up"
         );
     }
 
