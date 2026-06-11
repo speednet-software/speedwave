@@ -520,6 +520,33 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .phase
         .is_before(bundle::BundleReconcilePhase::ResourcesSynced)
     {
+        // The sync atomically REPLACES the resources dir that running
+        // containers bind-mount — their mounted tree would vanish for the
+        // whole build window (forever, on build failure). Stop them first;
+        // the restore phase brings them back from pending_running_projects.
+        if rt.is_available() {
+            if let Ok(cfg) = config::load_user_config() {
+                if let Ok(running) = list_running_projects(&rt, &cfg) {
+                    if !running.is_empty() {
+                        for p in &running {
+                            if !state.pending_running_projects.contains(p) {
+                                state.pending_running_projects.push(p.clone());
+                            }
+                        }
+                        state.pending_running_projects.sort();
+                        state.pending_running_projects.dedup();
+                        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+                        log::info!(
+                            "reconcile_bundle: stopping {} running project(s) before resources sync",
+                            running.len()
+                        );
+                        if let Err(e) = stop_projects(&running, &rt) {
+                            log::warn!("reconcile_bundle: pre-sync stop incomplete: {e}");
+                        }
+                    }
+                }
+            }
+        }
         log::info!("reconcile_bundle: syncing claude-resources");
         bundle::sync_claude_resources(&build_root).map_err(|e| {
             set_bundle_error(&mut state, format!("Claude resources sync failed: {e}"))
@@ -1061,6 +1088,21 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_projects_are_stopped_before_resources_sync() {
+        let source = include_str!("reconcile.rs");
+        let stop_pos = source
+            .find("stopping {} running project(s) before resources sync")
+            .expect("pre-sync stop must exist");
+        let sync_pos = source
+            .find("reconcile_bundle: syncing claude-resources")
+            .expect("sync log must exist");
+        assert!(
+            stop_pos < sync_pos,
+            "sync replaces live bind-mounted dirs — projects must stop first"
+        );
+    }
 
     #[test]
     fn restore_one_project_joins_pending_teardown_first() {

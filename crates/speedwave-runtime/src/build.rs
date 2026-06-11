@@ -1254,6 +1254,38 @@ mod tests {
     /// Containerfile must be covered by that image's `hash_inputs`, else a
     /// source change would not change the image hash and ship stale code.
     #[test]
+    fn every_base_image_is_digest_pinned() {
+        // Retained BuildKit cache (ADR-071) freezes whatever base was first
+        // pulled; a floating tag would silently diverge between users and
+        // never receive upstream security patches. Every external FROM must
+        // carry an @sha256 digest; bumping a base is a deliberate edit.
+        let root = repo_root();
+        let mut violations = Vec::new();
+        for img in IMAGES {
+            let containerfile = root.join(img.containerfile);
+            let content = std::fs::read_to_string(&containerfile)
+                .unwrap_or_else(|e| panic!("read {}: {e}", containerfile.display()));
+            for line in content.lines() {
+                let line = line.trim();
+                let Some(rest) = line.strip_prefix("FROM ") else {
+                    continue;
+                };
+                let image_ref = rest.split_whitespace().next().unwrap_or("");
+                // Internal stage references (FROM builder) carry no registry path.
+                let external = image_ref.contains('/') || image_ref.contains(':');
+                if external && !image_ref.contains("@sha256:") {
+                    violations.push(format!("{}: {line}", img.containerfile));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "unpinned base images:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    #[test]
     fn hash_inputs_cover_copy_sources() {
         for img in IMAGES {
             let content = std::fs::read_to_string(repo_root().join(img.containerfile))

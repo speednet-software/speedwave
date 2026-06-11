@@ -124,6 +124,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
+            // Durable before the guest reads it over virtiofs — a stale read
+            // here would bake wrong bytes under a content-addressed tag and
+            // never be rebuilt (the tag already exists).
+            if let Ok(f) = std::fs::File::open(&dst_path) {
+                let _ = crate::fs_perms::fsync_file_durable(&f);
+            }
         }
     }
     Ok(())

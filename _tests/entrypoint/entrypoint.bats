@@ -393,11 +393,11 @@ EOF
 # Default command keeps container alive (sleep infinity)
 # ---------------------------------------------------------------------------
 
-@test "default command is sleep infinity (not interactive shell)" {
-    # Verify that entrypoint execs 'sleep infinity' when no args given.
-    # We can't run it on macOS (sleep infinity is Linux-only), so we
-    # check the script source directly.
-    grep -q 'exec sleep infinity' "$ENTRYPOINT"
+@test "default command is a TERM-trappable keep-alive loop (not interactive shell)" {
+    # No-args branch must keep PID1 alive AND responsive to SIGTERM —
+    # bare `exec sleep infinity` ignored TERM and ate the 10s kill timeout.
+    grep -q "while :; do sleep 86400 & wait" "$ENTRYPOINT"
+    ! grep -q 'exec sleep infinity' "$ENTRYPOINT"
 }
 
 # ---------------------------------------------------------------------------

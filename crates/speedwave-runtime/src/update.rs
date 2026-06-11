@@ -372,6 +372,14 @@ pub fn update_containers(
         )
     })?;
 
+    // CLI-only users get fresh claude-resources — synced AFTER the build
+    // (live bind mounts would watch the dir swap for the whole build window)
+    // and right before the recreate that picks it up. Resources-dir is data,
+    // not bundle-state: the single-writer rule holds.
+    let build_root = build::resolve_build_root()?;
+    bundle::sync_claude_resources(&build_root)
+        .map_err(|e| anyhow::anyhow!("claude-resources sync failed: {e}"))?;
+
     apply_update_transaction(runtime, project, &compose_yml)?;
 
     // 9. Wait for containers to stabilize before health check.
@@ -469,6 +477,24 @@ pub fn rollback_containers(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_update_syncs_resources_after_build_before_recreate() {
+        let source = include_str!("update.rs");
+        let build_pos = source
+            .find("build_missing_images_locked(")
+            .expect("update must build images");
+        let sync_pos = source
+            .find("sync_claude_resources(&build_root)")
+            .expect("CLI update must sync claude-resources");
+        let txn_pos = source
+            .find("apply_update_transaction(runtime, project, &compose_yml)")
+            .expect("update transaction must exist");
+        assert!(
+            build_pos < sync_pos && sync_pos < txn_pos,
+            "sync must land after the build and before the recreate"
+        );
+    }
 
     #[test]
     fn test_snapshot_save_and_load_roundtrip() {

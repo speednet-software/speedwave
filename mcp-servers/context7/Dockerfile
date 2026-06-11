@@ -7,7 +7,7 @@
 # - Per-IP rate limit when anonymous (~200/day) — see docs/architecture/security.md
 
 # Build stage
-FROM node:24-alpine AS builder
+FROM node:24-alpine@sha256:fb71d01345f11b708a3553c66e7c74074f2d506400ea81973343d915cb64eef0 AS builder
 
 WORKDIR /build
 
@@ -36,7 +36,7 @@ RUN cd context7 && npm run build
 RUN cd context7 && npm prune --omit=dev
 
 # Production stage
-FROM node:24-alpine
+FROM node:24-alpine@sha256:fb71d01345f11b708a3553c66e7c74074f2d506400ea81973343d915cb64eef0
 
 # curl for healthcheck; tzdata for TZ env — keep aligned with tz.rs (see CLAUDE.md SSOT).
 RUN apk add --no-cache curl tzdata
