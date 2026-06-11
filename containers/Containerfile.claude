@@ -19,7 +19,7 @@ RUN mkdir -p /home/speedwave && chown 1000:1000 /home/speedwave
 # (layers are disposable) and eliminates the fsync bottleneck in nested virtualization
 # environments (WSL2/Hyper-V inside VMware). Installed files are byte-identical.
 RUN apt-get update -o Acquire::Retries=3 && \
-    apt-get install -y --no-install-recommends \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         -o Dpkg::Options::="--force-unsafe-io" \
         bash \
         ca-certificates \
