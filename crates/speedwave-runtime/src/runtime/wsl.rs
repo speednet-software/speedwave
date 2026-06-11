@@ -879,6 +879,10 @@ impl WslRuntime {
             );
         }
 
+        // Align in-distro nerdctl to the pin if drifted (ADR-071); runs before
+        // the readiness probes because a reinstall stops the daemons.
+        crate::provision::ensure_nerdctl_version();
+
         // Verify containerd and buildkitd are running inside the WSL distro.
         // After a WSL session closes, the VM may restart and systemd services
         // need time to come up. check_service() attempts `systemctl start` on
