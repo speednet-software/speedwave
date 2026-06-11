@@ -144,15 +144,23 @@ describe('dm-tools', () => {
       }
     });
 
-    it('rejects an empty users array at the validation layer', async () => {
+    it('forwards the users array to openDm verbatim (cap enforced in client)', async () => {
+      // The minItems/maxItems schema is a hint to the model; the runtime cap
+      // lives in openDm (client.ts), so the handler forwards as-is and surfaces
+      // a client-thrown cap violation as OPEN_FAILED.
       const tools = createDmTools(presentClients());
-      vi.mocked(client.openDm).mockResolvedValue({ id: 'D9' });
+      vi.mocked(client.openDm).mockRejectedValue(
+        new Error('A Slack DM holds at most 8 people; got 9.')
+      );
 
-      // minItems:1 is enforced by the input schema; the handler itself
-      // simply produces an empty join — verify openDm receives [] verbatim
-      // so schema-level rejection (hub-side) stays the single gate.
-      await tools[1].handler({ users: [] });
-      expect(client.openDm).toHaveBeenCalledWith(expect.anything(), { users: [] });
+      const nine = Array.from({ length: 9 }, (_, i) => `U${i}`);
+      const result = await tools[1].handler({ users: nine });
+
+      expect(client.openDm).toHaveBeenCalledWith(expect.anything(), { users: nine });
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('OPEN_FAILED');
+      expect(parsed.message).toContain('at most 8');
     });
   });
 });

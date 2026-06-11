@@ -954,6 +954,9 @@ export async function listDms(clients: SlackClients): Promise<{ dms: SlackDmSumm
 /** User-ID shape accepted by conversations.open (U… or enterprise W…). */
 const USER_ID_RE = /^[UW][A-Z0-9]+$/;
 
+/** Slack caps a single conversation at 8 participants (conversations.open). */
+const MAX_DM_PARTICIPANTS = 8;
+
 /**
  * Open (or return the existing) DM conversation with one or more users.
  * Entries may be user IDs (`U…`/`W…`) or exact e-mail addresses; plain
@@ -970,6 +973,14 @@ export async function openDm(
   clients: SlackClients,
   params: { users: string[] }
 ): Promise<{ id: string }> {
+  if (params.users.length === 0) {
+    throw new Error('openDirectMessage needs at least one user.');
+  }
+  if (params.users.length > MAX_DM_PARTICIPANTS) {
+    throw new Error(
+      `A Slack DM holds at most ${MAX_DM_PARTICIPANTS} people; got ${params.users.length}.`
+    );
+  }
   const ids: string[] = [];
   for (const entry of params.users) {
     if (USER_ID_RE.test(entry)) {

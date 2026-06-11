@@ -1698,6 +1698,30 @@ describe('slack client', () => {
       expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
     });
 
+    it('rejects more than 8 participants before any API call', async () => {
+      const open = mockClients.user.conversations.open as ReturnType<typeof vi.fn>;
+      const nine = Array.from({ length: 9 }, (_, i) => `U${i}`);
+
+      await expect(openDm(mockClients, { users: nine })).rejects.toThrow(/at most 8 people/);
+      expect(open).not.toHaveBeenCalled();
+    });
+
+    it('rejects an empty users list', async () => {
+      const open = mockClients.user.conversations.open as ReturnType<typeof vi.fn>;
+      await expect(openDm(mockClients, { users: [] })).rejects.toThrow(/at least one user/);
+      expect(open).not.toHaveBeenCalled();
+    });
+
+    it('accepts exactly 8 participants (the boundary)', async () => {
+      const open = stubOpen('G8');
+      const eight = Array.from({ length: 8 }, (_, i) => `U${i}`);
+
+      const result = await openDm(mockClients, { users: eight });
+
+      expect(result).toEqual({ id: 'G8' });
+      expect(open).toHaveBeenCalledWith({ users: eight.join(',') });
+    });
+
     it('throws when Slack returns no conversation ID', async () => {
       (mockClients.user.conversations.open as ReturnType<typeof vi.fn>).mockResolvedValue({
         ok: true,
