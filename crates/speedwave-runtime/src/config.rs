@@ -1005,10 +1005,12 @@ mod tests {
                 name: "test-project".to_string(),
                 dir: tmp.path().to_string_lossy().to_string(),
                 claude: Some(ClaudeOverrides {
-                    env: Some(HashMap::from([(
-                        "CLAUDE_CODE_ENABLE_TELEMETRY".to_string(),
-                        "0".to_string(),
-                    )])),
+                    env: Some(HashMap::from([
+                        ("CLAUDE_CODE_ENABLE_TELEMETRY".to_string(), "0".to_string()),
+                        // A user who prefers the legacy renderer (or no clipboard
+                        // shim) must be able to override the base_env default.
+                        ("WAYLAND_DISPLAY".to_string(), "".to_string()),
+                    ])),
                     settings: None,
                     llm: None,
                 }),
@@ -1022,10 +1024,15 @@ mod tests {
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        // User override wins
+        // User override wins over both repo (.speedwave.json) and base_env.
         assert_eq!(
             resolved.env.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
             Some(&"0".to_string())
+        );
+        assert_eq!(
+            resolved.env.get("WAYLAND_DISPLAY"),
+            Some(&"".to_string()),
+            "user config must be able to override the base_env WAYLAND_DISPLAY default"
         );
     }
 

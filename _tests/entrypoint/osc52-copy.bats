@@ -134,6 +134,29 @@ teardown() {
     [ -z "$output" ]
 }
 
+@test "command mentioning BOTH Set-Clipboard and Get-Clipboard takes the write path" {
+    # case patterns are tested per-arg in order: Set-Clipboard precedes the
+    # Get-Clipboard arm, so a single -Command token containing both resolves
+    # deterministically to a write (a copy command that also names the reader).
+    local ps='Set-Clipboard -Value ([Console]::In.ReadToEnd()); Get-Clipboard'
+    run bash -c "printf 'both' | HOME='$TMP_HOME' bash '$OSC52' -NoProfile -Command \"\$0\"" "$ps"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "both" ]
+}
+
+@test "invoking via the powershell.exe symlink name routes Set-Clipboard to write" {
+    # Claude Code reaches the shim by name (powershell.exe), not by calling
+    # osc52-copy.sh directly — exercise that resolution path, not just the
+    # script. A symlink mirrors the image-time `ln -s` in Containerfile.claude.
+    local bindir="$TMP_HOME/bin"
+    mkdir -p "$bindir"
+    ln -s "$OSC52" "$bindir/powershell.exe"
+    local ps='Set-Clipboard -Value ([Console]::In.ReadToEnd())'
+    run bash -c "printf 'via-symlink' | HOME='$TMP_HOME' '$bindir/powershell.exe' -NoProfile -Command \"\$0\"" "$ps"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BRIDGE")" = "via-symlink" ]
+}
+
 # ── Containerfile integration ───────────────────────────────────────────────
 
 @test "Containerfile.claude COPYs osc52-copy.sh to /usr/local/bin" {
