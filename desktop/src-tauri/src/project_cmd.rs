@@ -48,7 +48,9 @@ pub(crate) async fn switch_project(
     chat_state: tauri::State<'_, SharedChatSession>,
     host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
-    use containers_cmd::{switch_project_core, teardown_and_restore, teardown_only, SwitchResult};
+    use containers_cmd::{
+        spawn_background_teardown, switch_project_core, teardown_only, SwitchResult,
+    };
 
     // Config is committed first to keep the config lock brief — holding it
     // across the blocking container transition would starve other config
@@ -76,9 +78,12 @@ pub(crate) async fn switch_project(
         serde_json::json!({ "project": name }),
     );
 
-    // Container transaction: wait for images → stop previous → recreate new
+    // Container transaction: wait for images → start new → teardown in background
     let prev_clone = previous.clone();
     let new_clone = name.clone();
+    use tauri::Manager;
+    let host_exec_arc = host_exec.inner().clone();
+    let oauth_arc = app.state::<reconcile::SharedOauth>().inner().clone();
     let switch_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = containers_cmd::ensure_images_ready() {
             return SwitchResult::Failed {
@@ -93,7 +98,12 @@ pub(crate) async fn switch_project(
             if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
-            // compose_down(prev) already handled by switch_project_core step 2.
+            // Eager-start host workers before compose render — live WORKER_*_URLs
+            // prevent the first-message container recreate.
+            crate::ensure_host_exec_running(&host_exec_arc, proj);
+            crate::ensure_oauth_running(&oauth_arc, proj);
+            // Previous project is stopped in the background after the switch
+            // fully succeeds (ADR-072) — never here.
             // Wrap the destination project's render → validate → up sequence in a
             // single transaction so it shares semantics with every other compose
             // callsite (see ADR-066) and benefits from compose_validate_with_retry's
@@ -102,8 +112,7 @@ pub(crate) async fn switch_project(
             rt.transaction(proj, |rt| -> anyhow::Result<()> {
                 containers_cmd::render_and_save_compose(proj).into_anyhow()?;
                 speedwave_runtime::runtime::compose_validate_with_retry(rt, proj)?;
-                // Idempotent up, not force-recreate: step 2 downed the
-                // *previous* project, and nerdctl ≥ 2.2.0 config-hash
+                // Idempotent up, not force-recreate: nerdctl ≥ 2.2.0 config-hash
                 // convergence recreates only containers whose config (or
                 // content-addressed image tag) actually changed — so a changed
                 // image or integration re-runs the entrypoint, while an
@@ -117,14 +126,17 @@ pub(crate) async fn switch_project(
     .await
     .map_err(|e| e.to_string())?;
 
-    if let SwitchResult::Failed {
-        error,
-        cleanup_error,
-    } = switch_result
-    {
-        let full_error = rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
-        return Err(full_error);
-    }
+    let pending_teardown = match switch_result {
+        SwitchResult::Failed {
+            error,
+            cleanup_error,
+        } => {
+            let full_error =
+                rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
+            return Err(full_error);
+        }
+        SwitchResult::Succeeded { teardown } => teardown,
+    };
 
     // Rebind chat session (spawn_blocking: rebind_chat acquires Mutex and calls session.start)
     let rebind_name = name.clone();
@@ -136,47 +148,33 @@ pub(crate) async fn switch_project(
             .map_err(|e| e.to_string())?;
 
     if let Err(e) = rebind_result {
-        // Restore previous project containers + chat
+        // Previous is still running (teardown deferred, ADR-072) — only tear
+        // down the new project, then rebind chat back to previous.
         let mut cleanup_parts: Vec<String> = Vec::new();
 
-        let prev_for_restore = previous.clone();
         let new_for_teardown = name.clone();
-        let restore_result: Result<(), String> = tokio::task::spawn_blocking(move || {
+        let teardown_err: Option<String> = tokio::task::spawn_blocking(move || {
             let rt = speedwave_runtime::runtime::detect_runtime();
-            match &prev_for_restore {
-                Some(prev) => teardown_and_restore(&new_for_teardown, prev, &rt),
-                None => teardown_only(&new_for_teardown, &rt).map_or(Ok(()), Err),
-            }
+            teardown_only(&new_for_teardown, &rt)
         })
         .await
-        .unwrap_or_else(|je| Err(format!("join error: {je}")));
+        .unwrap_or_else(|je| Some(format!("join error: {je}")));
 
-        if let Err(ref re) = restore_result {
-            if previous.is_some() {
-                cleanup_parts.push(format!(
-                    "Container restore failed: {re}. \
-                     System may be without running containers — run speedwave to restart."
-                ));
-            } else {
-                cleanup_parts.push(format!("Teardown of new project incomplete: {re}"));
-            }
+        if let Some(te) = teardown_err {
+            cleanup_parts.push(format!("Teardown of new project incomplete: {te}"));
         }
 
         if let Some(ref prev) = previous {
-            if restore_result.is_ok() {
-                let rb_prev = prev.clone();
-                let rb_app = app.clone();
-                let rb_state = chat_state.inner().clone();
-                let rb_result: Result<(), String> =
-                    tokio::task::spawn_blocking(move || rebind_chat(&rb_prev, &rb_app, &rb_state))
-                        .await
-                        .unwrap_or_else(|je| Err(format!("join error: {je}")));
+            let rb_prev = prev.clone();
+            let rb_app = app.clone();
+            let rb_state = chat_state.inner().clone();
+            let rb_result: Result<(), String> =
+                tokio::task::spawn_blocking(move || rebind_chat(&rb_prev, &rb_app, &rb_state))
+                    .await
+                    .unwrap_or_else(|je| Err(format!("join error: {je}")));
 
-                if let Err(re) = rb_result {
-                    cleanup_parts.push(format!(
-                        "Containers restored but chat rebind to '{prev}' failed: {re}"
-                    ));
-                }
+            if let Err(re) = rb_result {
+                cleanup_parts.push(format!("Chat rebind back to '{prev}' failed: {re}"));
             }
         }
 
@@ -189,6 +187,11 @@ pub(crate) async fn switch_project(
         let full_error =
             rollback_and_emit_failed(&app, previous, &e.to_string(), cleanup_error.as_deref());
         return Err(full_error);
+    }
+
+    // Switch fully succeeded — stop the previous project in the background.
+    if let Some(prev) = pending_teardown {
+        spawn_background_teardown(prev);
     }
 
     let _ = app.emit(
@@ -346,6 +349,32 @@ mod tests {
         assert!(
             !body.contains("compose_up_recreate"),
             "switch must NOT force-recreate (nerdctl config-hash handles it)"
+        );
+    }
+
+    /// Structural: host workers must eager-start BEFORE compose render, or the
+    /// rendered WORKER_*_URLs are dead and host_exec_cmd later force-recreates
+    /// every container (killing the fresh chat session). Mirrors add_project.
+    #[test]
+    fn switch_eager_starts_host_workers_before_render() {
+        let source = include_str!("project_cmd.rs");
+        let switch_fn = source
+            .split("pub(crate) async fn switch_project(")
+            .nth(1)
+            .expect("switch_project must exist");
+        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
+        let host_exec_pos = body
+            .find("ensure_host_exec_running")
+            .expect("switch must eager-start host_exec");
+        let oauth_pos = body
+            .find("ensure_oauth_running")
+            .expect("switch must eager-start oauth");
+        let render_pos = body
+            .find("render_and_save_compose")
+            .expect("switch must render compose");
+        assert!(
+            host_exec_pos < render_pos && oauth_pos < render_pos,
+            "host workers must start before compose render"
         );
     }
 

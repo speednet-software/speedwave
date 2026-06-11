@@ -118,7 +118,9 @@ pub(crate) fn ensure_images_ready() -> Result<(), String> {
 
 /// Result of the container-switching transaction.
 pub(crate) enum SwitchResult {
-    Succeeded,
+    /// New project is up. `teardown` is the previous project the caller must
+    /// stop via `spawn_background_teardown` (None when nothing to stop).
+    Succeeded { teardown: Option<String> },
     /// Primary error + optional cleanup error. Caller handles config rollback + UI.
     Failed {
         error: String,
@@ -126,29 +128,8 @@ pub(crate) enum SwitchResult {
     },
 }
 
-/// Tears down (partially-started) new project, then restores previous.
-/// Each project takes its own per-project lock — intentional, not a bug:
-/// `new` and `previous` are different projects, no cross-project transaction.
-pub(crate) fn teardown_and_restore(
-    new_project: &str,
-    previous: &str,
-    rt: &speedwave_runtime::runtime::LockedRuntime,
-) -> Result<(), String> {
-    let down_err = rt.compose_down(new_project).err();
-    if let Some(ref e) = down_err {
-        log::warn!("teardown new '{new_project}' failed: {e}");
-    }
-    rt.compose_up(previous).map_err(|e| {
-        let base = format!("restore '{previous}' failed: {e}");
-        match down_err {
-            Some(de) => format!("{base}. Teardown of '{new_project}' also failed: {de}"),
-            None => base,
-        }
-    })
-}
-
 /// Tears down new project without restoring anything.
-/// Used when previous is None — no project to restore.
+/// The previous project is never stopped before the switch succeeds (ADR-072).
 pub(crate) fn teardown_only(
     new_project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
@@ -159,8 +140,59 @@ pub(crate) fn teardown_only(
     })
 }
 
-/// Core sync logic: ensure_ready → stop previous → recreate new.
-/// Does NOT touch config or chat — caller handles those.
+/// In-flight background teardowns by project name (ADR-072).
+static PENDING_TEARDOWNS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::thread::JoinHandle<()>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn pending_teardowns_lock(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::thread::JoinHandle<()>>>
+{
+    match PENDING_TEARDOWNS.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Stops the previous project on a background thread (best-effort, ADR-072).
+/// A failure only leaves idle containers; the next compose op converges them.
+pub(crate) fn spawn_background_teardown(prev: String) {
+    spawn_background_teardown_with(prev, |p| {
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        rt.compose_down(p).map_err(|e| e.to_string())
+    });
+}
+
+fn spawn_background_teardown_with(
+    prev: String,
+    down: impl FnOnce(&str) -> Result<(), String> + Send + 'static,
+) {
+    let project = prev.clone();
+    let handle = std::thread::spawn(move || {
+        log::info!("background teardown: stopping previous project '{project}'");
+        match down(&project) {
+            Ok(()) => log::info!("background teardown: '{project}' stopped"),
+            Err(e) => log::warn!("background teardown: compose_down('{project}') failed: {e}"),
+        }
+    });
+    if let Some(old) = pending_teardowns_lock().insert(prev, handle) {
+        // Stale finished handle from an earlier switch away from this project.
+        let _ = old.join();
+    }
+}
+
+/// Joins a pending background teardown of `project` before it is started
+/// again — otherwise the teardown could kill the freshly started containers.
+pub(crate) fn wait_for_pending_teardown(project: &str) {
+    let handle = pending_teardowns_lock().remove(project);
+    if let Some(h) = handle {
+        log::info!("waiting for background teardown of '{project}' before starting it");
+        let _ = h.join();
+    }
+}
+
+/// Core sync logic: ensure_ready → start new project FIRST → hand previous
+/// back for background teardown. A failed start leaves previous untouched.
 pub(crate) fn switch_project_core(
     previous: &Option<String>,
     new_project: &str,
@@ -175,40 +207,24 @@ pub(crate) fn switch_project_core(
         };
     }
 
-    // 2. Stop previous (if different)
-    if let Some(prev) = previous {
-        if prev != new_project {
-            if let Err(e) = rt.compose_down(prev) {
-                // Idempotent re-up: if compose_down left the previous project
-                // in a partial state, compose_up ensures it is fully running.
-                // On an already-running project this is a harmless no-op.
-                let restore_err = rt.compose_up(prev).err();
-                return SwitchResult::Failed {
-                    error: format!("compose_down('{prev}') failed: {e}"),
-                    cleanup_error: restore_err.map(|re| {
-                        format!(
-                            "restore '{prev}' also failed: {re}. \
-                             System may be without running containers."
-                        )
-                    }),
-                };
-            }
-        }
-    }
+    // 2. A still-running teardown of the destination must finish first.
+    wait_for_pending_teardown(new_project);
 
-    // 3. Recreate new
+    // 3. Start new first — previous keeps serving until the caller's
+    //    background teardown after a fully successful switch (ADR-072).
     if let Err(e) = recreate_fn(new_project, rt) {
-        let cleanup_error = match previous {
-            Some(prev) if prev != new_project => teardown_and_restore(new_project, prev, rt).err(),
-            _ => teardown_only(new_project, rt),
-        };
         return SwitchResult::Failed {
             error: e,
-            cleanup_error,
+            cleanup_error: teardown_only(new_project, rt),
         };
     }
 
-    SwitchResult::Succeeded
+    SwitchResult::Succeeded {
+        teardown: previous
+            .as_ref()
+            .filter(|p| p.as_str() != new_project)
+            .cloned(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -476,20 +492,27 @@ pub async fn add_project(
     .await
     .map_err(|e| e.to_string())?;
 
-    if let SwitchResult::Failed {
-        error,
-        cleanup_error,
-    } = switch_result
-    {
-        let full_error =
-            crate::rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
-        return Err(full_error);
-    }
+    let pending_teardown = match switch_result {
+        SwitchResult::Failed {
+            error,
+            cleanup_error,
+        } => {
+            let full_error =
+                crate::rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
+            return Err(full_error);
+        }
+        SwitchResult::Succeeded { teardown } => teardown,
+    };
 
     // Rebind chat session
     if let Err(e) = crate::rebind_chat(&name, &app, &chat_state) {
         // Containers running but chat failed — transient, still emit succeeded
         log::warn!("add_project: rebind_chat failed: {e}");
+    }
+
+    // Previous project is stopped in the background (ADR-072).
+    if let Some(prev) = pending_teardown {
+        spawn_background_teardown(prev);
     }
 
     let _ = app.emit(
@@ -1610,52 +1633,6 @@ mod tests {
 
     use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 
-    // -- teardown_and_restore tests --
-
-    #[test]
-    fn teardown_and_restore_ok() {
-        let (rt, handles) = MockRuntimeBuilder::new().build();
-        let result = teardown_and_restore("new_proj", "prev_proj", &rt);
-        assert!(result.is_ok());
-        assert_eq!(handles.down_projects(), vec!["new_proj"]);
-        assert_eq!(handles.up_projects(), vec!["prev_proj"]);
-    }
-
-    #[test]
-    fn teardown_and_restore_up_fails() {
-        let (rt, handles) = MockRuntimeBuilder::new()
-            .with_fail_on_up(&["prev_proj"])
-            .build();
-        let result = teardown_and_restore("new_proj", "prev_proj", &rt);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("restore 'prev_proj' failed"),
-            "expected restore error, got: {err}"
-        );
-        assert_eq!(handles.down_projects(), vec!["new_proj"]);
-        assert_eq!(handles.up_projects(), vec!["prev_proj"]);
-    }
-
-    #[test]
-    fn teardown_and_restore_both_fail() {
-        let (rt, _handles) = MockRuntimeBuilder::new()
-            .with_fail_on_down(&["new_proj"])
-            .with_fail_on_up(&["prev_proj"])
-            .build();
-        let result = teardown_and_restore("new_proj", "prev_proj", &rt);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("restore 'prev_proj' failed"),
-            "expected restore error, got: {err}"
-        );
-        assert!(
-            err.contains("Teardown of 'new_proj' also failed"),
-            "expected teardown error, got: {err}"
-        );
-    }
-
     // -- teardown_only tests --
 
     #[test]
@@ -1701,8 +1678,12 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
-        assert_eq!(handles.down_projects(), vec!["prev"]);
+        // Previous is handed back for background teardown, never downed here.
+        match result {
+            SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
+        assert!(handles.down_projects().is_empty());
     }
 
     /// Behavioral: the switch closure brings the destination up via idempotent
@@ -1720,11 +1701,13 @@ mod tests {
 
         let result = switch_project_core(&prev, "new", &rt, &up_closure);
 
-        assert!(matches!(result, SwitchResult::Succeeded));
-        assert_eq!(
-            handles.down_projects(),
-            vec!["prev"],
-            "step 2 downs previous"
+        match result {
+            SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
+        assert!(
+            handles.down_projects().is_empty(),
+            "previous is torn down in the background, not in core"
         );
         assert_eq!(
             handles.up_projects(),
@@ -1741,7 +1724,10 @@ mod tests {
     fn switch_core_happy_path_no_previous() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = switch_project_core(&None, "new", &rt, &ok_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
+        match result {
+            SwitchResult::Succeeded { teardown } => assert!(teardown.is_none()),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
         assert!(handles.down_projects().is_empty());
     }
 
@@ -1750,8 +1736,11 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("same".to_string());
         let result = switch_project_core(&prev, "same", &rt, &ok_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
-        // No down call when prev == new
+        // No teardown when prev == new
+        match result {
+            SwitchResult::Succeeded { teardown } => assert!(teardown.is_none()),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
         assert!(handles.down_projects().is_empty());
     }
 
@@ -1770,60 +1759,11 @@ mod tests {
                 assert!(error.contains("Runtime not ready"), "got: {error}");
                 assert!(cleanup_error.is_none());
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
         // No compose calls when ensure_ready fails
         assert!(handles.down_projects().is_empty());
         assert!(handles.up_projects().is_empty());
-    }
-
-    #[test]
-    fn switch_core_down_prev_fails_up_prev_ok() {
-        let (rt, handles) = MockRuntimeBuilder::new()
-            .with_fail_on_down(&["prev"])
-            .build();
-        let prev = Some("prev".to_string());
-        let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
-        match result {
-            SwitchResult::Failed {
-                ref error,
-                ref cleanup_error,
-            } => {
-                assert!(
-                    error.contains("compose_down('prev') failed"),
-                    "got: {error}"
-                );
-                // Restore succeeded → no cleanup_error
-                assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
-            }
-            SwitchResult::Succeeded => panic!("expected Failed"),
-        }
-        assert_eq!(handles.down_projects(), vec!["prev"]);
-        assert_eq!(handles.up_projects(), vec!["prev"]);
-    }
-
-    #[test]
-    fn switch_core_down_prev_fails_up_prev_fails() {
-        let (rt, _handles) = MockRuntimeBuilder::new()
-            .with_fail_on_down(&["prev"])
-            .with_fail_on_up(&["prev"])
-            .build();
-        let prev = Some("prev".to_string());
-        let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
-        match result {
-            SwitchResult::Failed {
-                ref error,
-                ref cleanup_error,
-            } => {
-                assert!(
-                    error.contains("compose_down('prev') failed"),
-                    "got: {error}"
-                );
-                let ce = cleanup_error.as_ref().expect("should have cleanup_error");
-                assert!(ce.contains("restore 'prev' also failed"), "got: {ce}");
-            }
-            SwitchResult::Succeeded => panic!("expected Failed"),
-        }
     }
 
     #[test]
@@ -1837,15 +1777,37 @@ mod tests {
                 ref cleanup_error,
             } => {
                 assert!(error.contains("recreate failed"), "got: {error}");
-                // teardown_and_restore: down(new) + up(prev) both succeed → no cleanup_error
+                // teardown_only(new) succeeded → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // down(prev) for stop + down(new) for teardown
-        assert_eq!(handles.down_projects(), vec!["prev", "new"]);
-        // up(prev) for restore
-        assert_eq!(handles.up_projects(), vec!["prev"]);
+        // Failed start tears down only the partial new project — previous
+        // was never stopped, so no restore is needed or performed.
+        assert_eq!(handles.down_projects(), vec!["new"]);
+        assert!(handles.up_projects().is_empty());
+    }
+
+    #[test]
+    fn switch_core_recreate_fails_teardown_fails() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_fail_on_down(&["new"])
+            .build();
+        let prev = Some("prev".to_string());
+        let result = switch_project_core(&prev, "new", &rt, &fail_recreate);
+        match result {
+            SwitchResult::Failed {
+                ref error,
+                ref cleanup_error,
+            } => {
+                assert!(error.contains("recreate failed"), "got: {error}");
+                let ce = cleanup_error.as_ref().expect("should have cleanup_error");
+                assert!(ce.contains("teardown of 'new' failed"), "got: {ce}");
+            }
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
+        }
+        // Previous untouched even when the cleanup itself fails.
+        assert!(handles.up_projects().is_empty());
     }
 
     #[test]
@@ -1861,28 +1823,10 @@ mod tests {
                 // teardown_only succeeded → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
         assert_eq!(handles.down_projects(), vec!["new"]);
         assert!(handles.up_projects().is_empty());
-    }
-
-    #[test]
-    fn switch_core_recreate_fails_restore_fails() {
-        let (rt, _handles) = MockRuntimeBuilder::new().with_fail_on_up(&["prev"]).build();
-        let prev = Some("prev".to_string());
-        let result = switch_project_core(&prev, "new", &rt, &fail_recreate);
-        match result {
-            SwitchResult::Failed {
-                ref error,
-                ref cleanup_error,
-            } => {
-                assert!(error.contains("recreate failed"), "got: {error}");
-                let ce = cleanup_error.as_ref().expect("should have cleanup_error");
-                assert!(ce.contains("restore 'prev' failed"), "got: {ce}");
-            }
-            SwitchResult::Succeeded => panic!("expected Failed"),
-        }
     }
 
     #[test]
@@ -1896,11 +1840,11 @@ mod tests {
             SwitchResult::Failed { ref error, .. } => {
                 assert!(error.contains("render error"), "got: {error}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // down(prev) for stop + down(new) for teardown (noop)
-        assert_eq!(handles.down_projects(), vec!["prev", "new"]);
-        assert_eq!(handles.up_projects(), vec!["prev"]);
+        // down(new) for teardown only — previous untouched
+        assert_eq!(handles.down_projects(), vec!["new"]);
+        assert!(handles.up_projects().is_empty());
     }
 
     #[test]
@@ -1913,19 +1857,62 @@ mod tests {
             SwitchResult::Failed { ref error, .. } => {
                 assert!(error.contains("render error"), "got: {error}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
         // down(new) for teardown only
         assert_eq!(handles.down_projects(), vec!["new"]);
         assert!(handles.up_projects().is_empty());
     }
 
+    // -- background teardown registry tests --
+
+    #[test]
+    fn background_teardown_runs_down_and_wait_joins_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        spawn_background_teardown_with("bg-test-proj".to_string(), move |p| {
+            assert_eq!(p, "bg-test-proj");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            done_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        // State transition: wait joins the in-flight teardown before returning.
+        wait_for_pending_teardown("bg-test-proj");
+        assert!(done.load(Ordering::SeqCst));
+        assert!(!pending_teardowns_lock().contains_key("bg-test-proj"));
+    }
+
+    #[test]
+    fn background_teardown_failure_does_not_panic_wait() {
+        spawn_background_teardown_with("bg-fail-proj".to_string(), |_p| {
+            Err("compose down failed".to_string())
+        });
+        // Error path: failed teardown is logged, wait still joins cleanly.
+        wait_for_pending_teardown("bg-fail-proj");
+        assert!(!pending_teardowns_lock().contains_key("bg-fail-proj"));
+    }
+
+    #[test]
+    fn wait_for_pending_teardown_is_noop_without_entry() {
+        wait_for_pending_teardown("bg-absent-proj");
+    }
+
+    #[test]
+    fn background_teardown_replaces_stale_entry_for_same_project() {
+        spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
+        spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
+        wait_for_pending_teardown("bg-dup-proj");
+        assert!(!pending_teardowns_lock().contains_key("bg-dup-proj"));
+    }
+
     // -- add_project flow tests --
     //
     // add_project uses switch_project_core with a closure that calls
-    // check_project + start_containers. These tests verify that specific
-    // combination: ensure_ready → stop prev → start_containers(new),
-    // distinct from switch_project which uses compose_down+render+up_recreate.
+    // check_project + start_containers. These tests verify that combination:
+    // ensure_ready → start_containers(new) → previous handed back for
+    // background teardown (ADR-072).
 
     /// Simulates the add_project closure: check_project (always ok in tests)
     /// + start_containers (delegates to compose_up to simulate container start).
@@ -1960,7 +1947,7 @@ mod tests {
                 assert!(error.contains("Runtime not ready"), "got: {error}");
                 assert!(cleanup_error.is_none());
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
         assert!(
             handles.down_projects().is_empty(),
@@ -1974,40 +1961,17 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
-        // ensure_ready → down(prev) → up(new) via start_containers
-        assert_eq!(handles.down_projects(), vec!["prev"]);
+        // ensure_ready → up(new); previous handed back for background teardown
+        match result {
+            SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
+        assert!(handles.down_projects().is_empty());
         assert_eq!(handles.up_projects(), vec!["new"]);
     }
 
     #[test]
-    fn add_project_down_prev_fails_restore_ok() {
-        let (rt, handles) = MockRuntimeBuilder::new()
-            .with_fail_on_down(&["prev"])
-            .build();
-        let prev = Some("prev".to_string());
-        let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
-        match result {
-            SwitchResult::Failed {
-                ref error,
-                ref cleanup_error,
-            } => {
-                assert!(
-                    error.contains("compose_down('prev') failed"),
-                    "got: {error}"
-                );
-                // up(prev) restore succeeded → no cleanup_error
-                assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
-            }
-            SwitchResult::Succeeded => panic!("expected Failed"),
-        }
-        assert_eq!(handles.down_projects(), vec!["prev"]);
-        assert_eq!(handles.up_projects(), vec!["prev"]);
-    }
-
-    #[test]
-    fn add_project_start_containers_fails_restore_prev() {
-        // start_containers fails → teardown_and_restore(new, prev)
+    fn add_project_start_containers_fails_previous_untouched() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate_fail);
@@ -2017,22 +1981,24 @@ mod tests {
                 ref cleanup_error,
             } => {
                 assert!(error.contains("start_containers failed"), "got: {error}");
-                // teardown(new) + restore(prev) both ok → no cleanup_error
+                // teardown_only(new) ok → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // down(prev) for stop + down(new) for teardown
-        assert_eq!(handles.down_projects(), vec!["prev", "new"]);
-        // up(prev) for restore
-        assert_eq!(handles.up_projects(), vec!["prev"]);
+        // down(new) for teardown only; previous keeps running — no restore
+        assert_eq!(handles.down_projects(), vec!["new"]);
+        assert!(handles.up_projects().is_empty());
     }
 
     #[test]
     fn add_project_happy_path_no_previous() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = switch_project_core(&None, "new", &rt, &add_project_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
+        match result {
+            SwitchResult::Succeeded { teardown } => assert!(teardown.is_none()),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
         // No previous → no down, only up(new)
         assert!(handles.down_projects().is_empty());
         assert_eq!(handles.up_projects(), vec!["new"]);
