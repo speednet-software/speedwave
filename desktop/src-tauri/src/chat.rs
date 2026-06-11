@@ -1011,7 +1011,11 @@ impl StreamParser {
         let info = &parsed["rate_limit_info"];
         let status = info["status"].as_str().unwrap_or("unknown").to_string();
         let utilization = info["utilization"].as_f64();
-        let resets_at = info["resets_at"].as_u64();
+        // Claude Code emits the reset timestamp as camelCase `resetsAt`; older
+        // builds (and our legacy fixtures) used snake_case. Read both.
+        let resets_at = info["resetsAt"]
+            .as_u64()
+            .or_else(|| info["resets_at"].as_u64());
 
         let log_entry = Some(LogEntry {
             prefix: "RATE_LIMIT",
@@ -3485,8 +3489,11 @@ mod tests {
 
     #[test]
     fn parse_rate_limit_event_extracts_fields() {
+        // Real 2.1.173 wire shape: the reset timestamp is camelCase `resetsAt`
+        // (rate_limit_info schema in the binary). status/utilization are
+        // case-identical. resetsAt is what drives the footer reset countdown.
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resets_at":1738425600}}"#;
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resetsAt":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
         let (chunks, log_entry) = parser.parse_line(&parsed);
         let chunk = chunks.into_iter().next();
@@ -3505,6 +3512,23 @@ mod tests {
         let entry = log_entry.unwrap();
         assert_eq!(entry.prefix, "RATE_LIMIT");
         assert!(entry.message.contains("73.5"));
+    }
+
+    #[test]
+    fn parse_rate_limit_event_accepts_legacy_snake_case_resets_at() {
+        // Older Claude Code builds emitted snake_case `resets_at`; the parser
+        // keeps a fallback so a downgrade or a replayed legacy line still
+        // surfaces the reset time.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resets_at":1738425600}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        let (chunks, _) = parser.parse_line(&parsed);
+        match chunks.into_iter().next() {
+            Some(StreamChunk::RateLimit { resets_at, .. }) => {
+                assert_eq!(resets_at, Some(1738425600));
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3531,7 +3555,7 @@ mod tests {
     #[test]
     fn parse_rate_limit_event_rejected() {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":100.0,"resets_at":1738430000}}"#;
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":100.0,"resetsAt":1738430000}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
         let (chunks, _) = parser.parse_line(&parsed);
         let chunk = chunks.into_iter().next();
