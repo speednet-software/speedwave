@@ -5,11 +5,10 @@
 import {
   Tool,
   ToolDefinition,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
-import { withValidation, ToolResult } from './validation.js';
+import { withValidation, withClients, ToolResult } from './validation.js';
 import {
   SlackClients,
   sendChannel,
@@ -371,37 +370,24 @@ export async function handleListChannelIds(
  *   `_tokensStatus === 'missing'` to surface the configuration error).
  */
 export function createChannelTools(clients: SlackClients): ToolDefinition[] {
-  const withClients =
-    <T>(handler: (c: SlackClients, p: T) => Promise<ToolResult>) =>
-    async (params: T): Promise<ToolResult> => {
-      if (clients._tokensStatus === 'missing') {
-        return {
-          success: false,
-          error: {
-            code: 'NOT_CONFIGURED',
-            message: notConfiguredMessage('Slack'),
-          },
-        };
-      }
-      return handler(clients, params);
-    };
+  const gate = withClients(clients);
 
   return [
     {
       tool: sendChannelTool,
-      handler: withValidation<SendChannelParams>(withClients(handleSendChannel)),
+      handler: withValidation<SendChannelParams>(gate(handleSendChannel)),
     },
     {
       tool: getChannelMessagesTool,
-      handler: withValidation<GetChannelMessagesParams>(withClients(handleGetChannelMessages)),
+      handler: withValidation<GetChannelMessagesParams>(gate(handleGetChannelMessages)),
     },
     {
       tool: getThreadMessagesTool,
-      handler: withValidation<GetThreadMessagesParams>(withClients(handleGetThreadMessages)),
+      handler: withValidation<GetThreadMessagesParams>(gate(handleGetThreadMessages)),
     },
     {
       tool: listChannelIdsTool,
-      handler: withValidation<{ types?: string }>(withClients(handleListChannelIds)),
+      handler: withValidation<{ types?: string }>(gate(handleListChannelIds)),
     },
   ];
 }

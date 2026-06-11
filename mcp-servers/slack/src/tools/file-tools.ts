@@ -5,11 +5,10 @@
 import {
   Tool,
   ToolDefinition,
-  notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
-import { withValidation, ToolResult } from './validation.js';
+import { withValidation, withClients, ToolResult } from './validation.js';
 import { SlackClients, getFileContent, downloadFile, formatSlackError } from '../client.js';
 
 interface GetFileContentParams {
@@ -138,29 +137,16 @@ export async function handleGetFileContent(
  * @param clients - Slack client instances
  */
 export function createFileTools(clients: SlackClients): ToolDefinition[] {
-  const withClients =
-    <T>(handler: (c: SlackClients, p: T) => Promise<ToolResult>) =>
-    async (params: T): Promise<ToolResult> => {
-      if (clients._tokensStatus === 'missing') {
-        return {
-          success: false,
-          error: {
-            code: 'NOT_CONFIGURED',
-            message: notConfiguredMessage('Slack'),
-          },
-        };
-      }
-      return handler(clients, params);
-    };
+  const gate = withClients(clients);
 
   return [
     {
       tool: getFileContentTool,
-      handler: withValidation<GetFileContentParams>(withClients(handleGetFileContent)),
+      handler: withValidation<GetFileContentParams>(gate(handleGetFileContent)),
     },
     {
       tool: downloadFileTool,
-      handler: withValidation<DownloadFileParams>(withClients(handleDownloadFile)),
+      handler: withValidation<DownloadFileParams>(gate(handleDownloadFile)),
     },
   ];
 }

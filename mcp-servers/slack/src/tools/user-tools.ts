@@ -2,13 +2,8 @@
  * User Tools - Tools for Slack user operations
  */
 
-import {
-  Tool,
-  ToolDefinition,
-  notConfiguredMessage,
-  READ_ONLY_ANNOTATIONS,
-} from '@speedwave/mcp-shared';
-import { withValidation, ToolResult } from './validation.js';
+import { Tool, ToolDefinition, READ_ONLY_ANNOTATIONS } from '@speedwave/mcp-shared';
+import { withValidation, withClients, ToolResult } from './validation.js';
 import { SlackClients, getUsers, formatSlackError } from '../client.js';
 
 interface GetUsersParams {
@@ -77,22 +72,7 @@ export async function handleGetUsers(
  *   `_tokensStatus === 'missing'` to surface the configuration error).
  */
 export function createUserTools(clients: SlackClients): ToolDefinition[] {
-  const withClients =
-    <T>(handler: (c: SlackClients, p: T) => Promise<ToolResult>) =>
-    async (params: T): Promise<ToolResult> => {
-      if (clients._tokensStatus === 'missing') {
-        return {
-          success: false,
-          error: {
-            code: 'NOT_CONFIGURED',
-            message: notConfiguredMessage('Slack'),
-          },
-        };
-      }
-      return handler(clients, params);
-    };
+  const gate = withClients(clients);
 
-  return [
-    { tool: getUsersTool, handler: withValidation<GetUsersParams>(withClients(handleGetUsers)) },
-  ];
+  return [{ tool: getUsersTool, handler: withValidation<GetUsersParams>(gate(handleGetUsers)) }];
 }
