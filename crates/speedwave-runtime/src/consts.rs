@@ -486,13 +486,25 @@ pub const SLACK_OAUTH_CLIENT_ID: &str = "11058760208.11311852745015";
 
 /// Slack user scopes (`user_scope` — never bot scopes: Slack forbids them on
 /// desktop redirects). Derived from the `mcp-slack` worker surface:
-/// chat.postMessage, conversations.list/history, users.lookupByEmail.
+/// chat.postMessage (channels and DMs), conversations.list/history/replies/open,
+/// users.list/lookupByEmail, files.info.
+///
+/// Adding a scope here requires adding it to the app's **User Token Scopes**
+/// at api.slack.com first — otherwise authorize fails with `invalid_scope`.
+/// Existing grants become a strict subset and the Desktop re-auth banner
+/// fires (`required_scopes_for` in `integrations_cmd.rs`).
 pub const SLACK_OAUTH_USER_SCOPES: &[&str] = &[
     "chat:write",
     "channels:read",
     "groups:read",
     "channels:history",
     "groups:history",
+    "im:read",
+    "im:history",
+    "im:write",
+    "mpim:read",
+    "mpim:history",
+    "mpim:write",
     "users:read",
     "users:read.email",
     "files:read",
@@ -1691,7 +1703,21 @@ mod tests {
         assert!(SLACK_OAUTH_CLIENT_ID
             .split('.')
             .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())));
-        assert_eq!(SLACK_OAUTH_USER_SCOPES.len(), 8);
+        assert_eq!(SLACK_OAUTH_USER_SCOPES.len(), 14);
+        // DM support (ADR-071 point 10) — the six im/mpim scopes must stay present.
+        for dm_scope in [
+            "im:read",
+            "im:history",
+            "im:write",
+            "mpim:read",
+            "mpim:history",
+            "mpim:write",
+        ] {
+            assert!(
+                SLACK_OAUTH_USER_SCOPES.contains(&dm_scope),
+                "missing DM scope: {dm_scope}"
+            );
+        }
         for scope in SLACK_OAUTH_USER_SCOPES {
             assert!(
                 !scope.contains(' ') && !scope.contains(','),
