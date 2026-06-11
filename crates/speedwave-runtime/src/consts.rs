@@ -495,6 +495,7 @@ pub const SLACK_OAUTH_USER_SCOPES: &[&str] = &[
     "groups:history",
     "users:read",
     "users:read.email",
+    "files:read",
 ];
 
 /// Slack OAuth authorize endpoint (fixed — slack.com is not instance-specific).
@@ -1690,7 +1691,7 @@ mod tests {
         assert!(SLACK_OAUTH_CLIENT_ID
             .split('.')
             .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())));
-        assert_eq!(SLACK_OAUTH_USER_SCOPES.len(), 7);
+        assert_eq!(SLACK_OAUTH_USER_SCOPES.len(), 8);
         for scope in SLACK_OAUTH_USER_SCOPES {
             assert!(
                 !scope.contains(' ') && !scope.contains(','),

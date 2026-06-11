@@ -10,6 +10,7 @@ import { SlackClients } from '../client.js';
 export { withValidation, ToolResult } from './validation.js';
 
 import { createChannelTools } from './channel-tools.js';
+import { createFileTools } from './file-tools.js';
 import { createUserTools } from './user-tools.js';
 
 /**
@@ -18,5 +19,5 @@ import { createUserTools } from './user-tools.js';
  *   `_tokensStatus === 'missing'` indicates an unconfigured worker).
  */
 export function createToolDefinitions(clients: SlackClients): ToolDefinition[] {
-  return [...createChannelTools(clients), ...createUserTools(clients)];
+  return [...createChannelTools(clients), ...createFileTools(clients), ...createUserTools(clients)];
 }

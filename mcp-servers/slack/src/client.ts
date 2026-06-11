@@ -79,6 +79,19 @@ export interface SlackMessage {
   thread_ts?: string;
   /** On a thread parent: number of replies — fetch them via readThread. */
   reply_count?: number;
+  /** Files uploaded with this message (metadata only — content via getFileContent). */
+  files?: SlackFileMeta[];
+  /** Flattened text of legacy attachments (Jira/app messages often have empty `text`). */
+  attachments_text?: string;
+}
+
+/** Metadata of a file shared in a message. */
+export interface SlackFileMeta {
+  id: string;
+  name: string;
+  title?: string;
+  mimetype?: string;
+  size?: number;
 }
 
 /**
@@ -312,7 +325,13 @@ const CHANNEL_LIST_PAGE_LIMIT = 1000;
 /** Hard cap on pagination (20k channels) — runaway-cursor backstop. */
 const CHANNEL_LIST_MAX_PAGES = 20;
 
-/** One `conversations.list` page request. */
+/**
+ * One `conversations.list` page request.
+ * @param clients - Slack client container
+ * @param types - channel types filter
+ * @param excludeArchived - drop archived channels
+ * @param cursor - page cursor (undefined = first page)
+ */
 function listChannelsPage(
   clients: SlackClients,
   types: string,
@@ -329,7 +348,10 @@ function listChannelsPage(
   );
 }
 
-/** Cursor from a list response, or undefined on the last page. */
+/**
+ * Cursor from a list response, or undefined on the last page.
+ * @param result - a conversations.list response
+ */
 function nextCursorOf(result: ConversationsListResponse): string | undefined {
   return result.response_metadata?.next_cursor || undefined;
 }
@@ -443,6 +465,20 @@ export async function readChannel(
   return toHistoryPage(result);
 }
 
+interface RawFile {
+  id?: string;
+  name?: string;
+  title?: string;
+  mimetype?: string;
+  size?: number;
+}
+
+interface RawAttachment {
+  title?: string;
+  text?: string;
+  fallback?: string;
+}
+
 interface RawMessage {
   user?: string;
   text?: string;
@@ -451,9 +487,45 @@ interface RawMessage {
   username?: string;
   thread_ts?: string;
   reply_count?: number;
+  files?: RawFile[];
+  attachments?: RawAttachment[];
 }
 
-/** Maps a history/replies response onto the shared page shape. */
+/**
+ * Compact, model-readable rendering of legacy attachments.
+ * @param attachments - raw attachments from a message
+ */
+function flattenAttachments(attachments: RawAttachment[] | undefined): string | undefined {
+  if (!attachments?.length) return undefined;
+  const parts = attachments
+    .map((a) => [a.title, a.text].filter(Boolean).join(': ') || a.fallback || '')
+    .filter(Boolean);
+  return parts.length ? parts.join('\n') : undefined;
+}
+
+/**
+ * File metadata subset surfaced to the model.
+ * @param files - raw files from a message
+ */
+function mapFiles(files: RawFile[] | undefined): SlackFileMeta[] | undefined {
+  if (!files?.length) return undefined;
+  return files.map((f) => ({
+    id: f.id || '',
+    name: f.name || '',
+    title: f.title,
+    mimetype: f.mimetype,
+    size: f.size,
+  }));
+}
+
+/**
+ * Maps a history/replies response onto the shared page shape.
+ * @param result - response subset shared by history and replies
+ * @param result.messages - raw messages
+ * @param result.has_more - more pages available
+ * @param result.response_metadata - pagination metadata
+ * @param result.response_metadata.next_cursor - next page cursor
+ */
 function toHistoryPage(result: {
   messages?: RawMessage[];
   has_more?: boolean;
@@ -467,6 +539,8 @@ function toHistoryPage(result: {
     username: msg.username,
     thread_ts: msg.thread_ts,
     reply_count: msg.reply_count,
+    files: mapFiles(msg.files),
+    attachments_text: flattenAttachments(msg.attachments),
   }));
 
   const nextCursor = result.response_metadata?.next_cursor || undefined;
@@ -506,6 +580,93 @@ export async function readThread(
   )) as ConversationsRepliesResponse;
 
   return toHistoryPage(result);
+}
+
+/** Max file bytes returned to the model — guards context and worker memory. */
+const MAX_FILE_CONTENT_BYTES = 1024 * 1024;
+
+/**
+ * Mimetypes whose content is returned as text.
+ * @param mimetype - file mimetype from files.info
+ */
+function isTextLike(mimetype: string): boolean {
+  return (
+    mimetype.startsWith('text/') ||
+    mimetype === 'application/json' ||
+    mimetype === 'application/xml' ||
+    mimetype.endsWith('+json') ||
+    mimetype.endsWith('+xml')
+  );
+}
+
+/** Result of a file-content read. */
+export interface SlackFileContent {
+  id: string;
+  name: string;
+  mimetype: string;
+  size: number;
+  content: string;
+  /** True when the file was larger than the byte cap and got cut. */
+  truncated: boolean;
+}
+
+/**
+ * Read the content of a text file shared on Slack (requires `files:read`).
+ * Binary files are refused with their metadata in the error message.
+ * @param {SlackClients} clients - Slack client container
+ * @param {Object} params - Parameters
+ * @param {string} params.file - File ID (`F…`) from a message's `files[].id`
+ * @returns {Promise<SlackFileContent>} File metadata + UTF-8 content
+ * @throws {Error} On unknown file, binary content, or auth problems
+ */
+export async function getFileContent(
+  clients: SlackClients,
+  params: { file: string }
+): Promise<SlackFileContent> {
+  const info = await slackCall(clients, (c) => c.files.info({ file: params.file }));
+  const file = info.file as
+    | { id?: string; name?: string; mimetype?: string; size?: number; url_private?: string }
+    | undefined;
+  if (!file?.url_private) {
+    throw new Error(`File not found or has no downloadable content: ${params.file}`);
+  }
+  const mimetype = file.mimetype || 'application/octet-stream';
+  if (!isTextLike(mimetype)) {
+    throw new Error(
+      `File '${file.name}' is ${mimetype} — only text files can be read inline. ` +
+        'Ask the user to share its content another way.'
+    );
+  }
+
+  // url_private needs the bearer; with a stale token Slack answers HTTP 200
+  // with an HTML login page — detect that by content-type, route through the
+  // refresh wrapper, and retry once like any other auth failure.
+  const body = await slackCall(clients, async (c) => {
+    const resp = await fetch(file.url_private as string, {
+      headers: { Authorization: `Bearer ${c.token ?? ''}` },
+    });
+    const contentType = resp.headers.get('content-type') || '';
+    const htmlButNotHtmlFile = contentType.includes('text/html') && mimetype !== 'text/html';
+    if (!resp.ok || htmlButNotHtmlFile) {
+      // Mimic the platform-error shape so isSlackAuthExpiredError triggers.
+      throw Object.assign(new Error('file download unauthorized'), {
+        data: { error: 'token_expired' },
+      });
+    }
+    const buf = Buffer.from(await resp.arrayBuffer());
+    return buf;
+  });
+
+  const truncated = body.length > MAX_FILE_CONTENT_BYTES;
+  const content = body.subarray(0, MAX_FILE_CONTENT_BYTES).toString('utf-8');
+  return {
+    id: file.id || params.file,
+    name: file.name || '',
+    mimetype,
+    size: file.size ?? body.length,
+    content,
+    truncated,
+  };
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   readChannel,
   readThread,
   getChannels,
+  getFileContent,
   getUsers,
 } from './client.js';
 import { WebClient } from '@slack/web-api';
@@ -66,6 +67,7 @@ function presentClients(): SlackClients {
       chat: { postMessage: vi.fn() },
       conversations: { list: vi.fn(), history: vi.fn(), replies: vi.fn() },
       users: { lookupByEmail: vi.fn() },
+      files: { info: vi.fn() },
     } as unknown as WebClient,
     tokenState: { accessToken: 'xoxe.xoxp-test' },
     lock: new RefreshLock(),
@@ -656,6 +658,48 @@ describe('slack client', () => {
       });
     });
 
+    it('surfaces files metadata and attachment text from history', async () => {
+      const mockHistory = vi.fn().mockResolvedValue({
+        messages: [
+          {
+            user: 'U1',
+            text: '',
+            ts: '1.0',
+            type: 'message',
+            files: [{ id: 'F1', name: 'podsumowanie.md', mimetype: 'text/markdown', size: 1234 }],
+          },
+          {
+            user: 'U2',
+            text: '',
+            ts: '2.0',
+            type: 'message',
+            attachments: [
+              { title: 'SPW-208', text: 'spike: wybrac backend' },
+              { fallback: 'Jira created a Task' },
+            ],
+          },
+        ],
+      });
+      mockClients.user.conversations.history = mockHistory;
+
+      const result = await readChannel(mockClients, { channel: 'C12345678' });
+
+      expect(result.messages[0].files).toEqual([
+        {
+          id: 'F1',
+          name: 'podsumowanie.md',
+          title: undefined,
+          mimetype: 'text/markdown',
+          size: 1234,
+        },
+      ]);
+      expect(result.messages[1].attachments_text).toBe(
+        'SPW-208: spike: wybrac backend\nJira created a Task'
+      );
+      // Plain messages carry neither key.
+      expect(result.messages[0].attachments_text).toBeUndefined();
+    });
+
     it('surfaces thread markers (thread_ts/reply_count) from history', async () => {
       const mockHistory = vi.fn().mockResolvedValue({
         messages: [
@@ -934,6 +978,119 @@ describe('slack client', () => {
       await expect(readThread(mockClients, { channel: 'C1', thread_ts: '9.9' })).rejects.toEqual({
         data: { error: 'thread_not_found' },
       });
+    });
+  });
+
+  describe('getFileContent', () => {
+    let mockClients: SlackClients;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      mockClients = presentClients();
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    function stubInfo(file: Record<string, unknown>): void {
+      (mockClients.user.files.info as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        file,
+      });
+    }
+
+    function stubDownload(body: string, contentType = 'text/markdown'): ReturnType<typeof vi.fn> {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: (h: string) => (h === 'content-type' ? contentType : null) },
+        arrayBuffer: async () => {
+          const b = Buffer.from(body, 'utf-8');
+          return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+        },
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    it('reads a text file with the bearer header', async () => {
+      stubInfo({
+        id: 'F1',
+        name: 'podsumowanie.md',
+        mimetype: 'text/markdown',
+        size: 11,
+        url_private: 'https://files.slack.com/files-pri/T1-F1/podsumowanie.md',
+      });
+      const fetchMock = stubDownload('# Heading\nx');
+
+      const result = await getFileContent(mockClients, { file: 'F1' });
+
+      expect(result).toEqual({
+        id: 'F1',
+        name: 'podsumowanie.md',
+        mimetype: 'text/markdown',
+        size: 11,
+        content: '# Heading\nx',
+        truncated: false,
+      });
+      const [, init] = fetchMock.mock.calls[0];
+      expect((init as RequestInit).headers).toMatchObject({
+        Authorization: 'Bearer xoxe.xoxp-test',
+      });
+    });
+
+    it('refuses binary files with actionable metadata', async () => {
+      stubInfo({
+        id: 'F2',
+        name: 'screen.png',
+        mimetype: 'image/png',
+        size: 999,
+        url_private: 'https://files.slack.com/files-pri/T1-F2/screen.png',
+      });
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(getFileContent(mockClients, { file: 'F2' })).rejects.toThrow(
+        /image\/png — only text files/
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('throws on a file without url_private', async () => {
+      stubInfo({ id: 'F3', name: 'gone' });
+      await expect(getFileContent(mockClients, { file: 'F3' })).rejects.toThrow(
+        /no downloadable content/
+      );
+    });
+
+    it('treats an HTML login page as an auth failure (not file content)', async () => {
+      stubInfo({
+        id: 'F4',
+        name: 'notes.md',
+        mimetype: 'text/markdown',
+        size: 5,
+        url_private: 'https://files.slack.com/files-pri/T1-F4/notes.md',
+      });
+      stubDownload('<html>login</html>', 'text/html');
+      // No WORKER_OAUTH_URL in tests → the triggered refresh fails loudly
+      // instead of returning the login page as content.
+      await expect(getFileContent(mockClients, { file: 'F4' })).rejects.toThrow();
+    });
+
+    it('truncates oversized files and flags it', async () => {
+      const big = 'a'.repeat(1024 * 1024 + 10);
+      stubInfo({
+        id: 'F5',
+        name: 'big.log',
+        mimetype: 'text/plain',
+        size: big.length,
+        url_private: 'https://files.slack.com/files-pri/T1-F5/big.log',
+      });
+      stubDownload(big, 'text/plain');
+
+      const result = await getFileContent(mockClients, { file: 'F5' });
+      expect(result.truncated).toBe(true);
+      expect(result.content.length).toBe(1024 * 1024);
     });
   });
 

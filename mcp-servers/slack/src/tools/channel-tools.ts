@@ -127,6 +127,24 @@ const getChannelMessagesTool: Tool = {
               type: 'number',
               description: 'On a thread parent: reply count — expand via getThreadMessages',
             },
+            files: {
+              type: 'array',
+              description: 'Files uploaded with the message — read text ones via getFileContent',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  name: { type: 'string' },
+                  title: { type: 'string' },
+                  mimetype: { type: 'string' },
+                  size: { type: 'number' },
+                },
+              },
+            },
+            attachments_text: {
+              type: 'string',
+              description: 'Flattened legacy-attachment text (app messages often have empty text)',
+            },
           },
         },
       },

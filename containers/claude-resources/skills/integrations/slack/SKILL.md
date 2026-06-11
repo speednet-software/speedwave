@@ -39,6 +39,8 @@ Always do steps 1–2 before calling a tool for the first time in a conversation
 
 **Threads need explicit expansion** — channel history returns top-level messages; a thread parent carries `reply_count > 0` and `thread_ts`. Fetch the full thread with `getThreadMessages({ channel, thread_ts })` (parent first, then replies oldest-first; paginate with `cursor`). For a complete channel export, expand every message with `reply_count > 0` — without that step the discussion inside threads is invisible.
 
+**Files and app messages** — uploads arrive as `files[]` metadata on the message (often with empty `text`); read text files (markdown, code, logs, JSON) inline via `getFileContent({ file: files[0].id })` — binary files (images, PDFs, office docs) are refused with their metadata, tell the user instead of retrying. Messages from apps (Jira, CI bots) frequently carry their content in `attachments_text`, not `text` — check it before declaring a message empty.
+
 **DMs are out of scope** — the OAuth grant covers channels only (`channels:*`, `groups:*`). Listing or reading IMs/MPIMs fails with `missing_scope`; tell the user instead of retrying.
 
 **Rate limits** — Slack throttles per method. On a `ratelimited` error, stop and tell the user; do not retry in a loop. For multi-page exports, sequential calls (no parallel bursts) stay comfortably under the limit.
