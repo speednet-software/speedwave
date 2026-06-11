@@ -171,7 +171,11 @@ fn oauth_identity_for_in(
     let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let pd = json.get("providerData")?;
     let team = pd.get("teamName").and_then(|v| v.as_str());
-    let user = pd.get("authedUserId").and_then(|v| v.as_str());
+    // Prefer the human-readable name persisted at sign-in; fall back to the ID.
+    let user = pd
+        .get("authedUserName")
+        .and_then(|v| v.as_str())
+        .or_else(|| pd.get("authedUserId").and_then(|v| v.as_str()));
     match (team, user) {
         (Some(t), Some(u)) => Some(format!("{t} · {u}")),
         (Some(t), None) => Some(t.to_string()),
@@ -1879,9 +1883,29 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        // Pre-name grants (no authedUserName) fall back to the ID.
         assert_eq!(
             oauth_identity_for_in(tmp.path(), "p", "slack").as_deref(),
             Some("Speednet · U1")
+        );
+        // When a display name was persisted at sign-in, it wins over the ID.
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "providerData": {
+                    "clientId": "1.2",
+                    "teamName": "Speednet",
+                    "authedUserId": "U1",
+                    "authedUserName": "Jan Kowalski"
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            oauth_identity_for_in(tmp.path(), "p", "slack").as_deref(),
+            Some("Speednet · Jan Kowalski")
         );
         // Team only — no user id.
         std::fs::write(

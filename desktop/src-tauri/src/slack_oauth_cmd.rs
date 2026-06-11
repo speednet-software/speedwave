@@ -64,6 +64,7 @@ struct SlackUserToken {
     team_id: Option<String>,
     team_name: Option<String>,
     authed_user_id: Option<String>,
+    authed_user_name: Option<String>,
 }
 
 /// Returned immediately when the flow starts; the outcome arrives via
@@ -230,6 +231,77 @@ fn friendly_callback_error(raw: &str) -> String {
     raw.to_string()
 }
 
+/// `users.info` profile — only the display fields we persist for the UI.
+#[derive(Deserialize)]
+struct SlackUserInfoProfile {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    real_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SlackUserInfoUser {
+    #[serde(default)]
+    real_name: Option<String>,
+    #[serde(default)]
+    profile: Option<SlackUserInfoProfile>,
+}
+
+#[derive(Deserialize)]
+struct SlackUserInfoResponse {
+    ok: bool,
+    #[serde(default)]
+    user: Option<SlackUserInfoUser>,
+}
+
+/// Best human-readable name from a users.info payload (display > real).
+fn pick_display_name(user: SlackUserInfoUser) -> Option<String> {
+    let from_profile = user.profile.and_then(|p| {
+        p.display_name
+            .filter(|s| !s.is_empty())
+            .or(p.real_name.filter(|s| !s.is_empty()))
+    });
+    from_profile.or(user.real_name.filter(|s| !s.is_empty()))
+}
+
+/// Best-effort display-name lookup via `users.info` on the freshly-issued user
+/// token. Returns None on any failure — sign-in must never fail because the
+/// cosmetic name lookup did (the card falls back to the user ID).
+/// `users_info_url` is derived from the token URL so there is no second SSOT.
+async fn fetch_slack_display_name(
+    users_info_url: &str,
+    access_token: &str,
+    user_id: &str,
+) -> Option<String> {
+    let client = crate::http_util::build_hardened_client(None).ok()?;
+    let resp = client
+        .get(users_info_url)
+        .query(&[("user", user_id)])
+        .bearer_auth(access_token)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?;
+    let bytes = crate::http_util::read_body_limited(resp, "users.info")
+        .await
+        .ok()?;
+    let body = serde_json::from_slice::<SlackUserInfoResponse>(&bytes).ok()?;
+    if !body.ok {
+        return None;
+    }
+    body.user.and_then(pick_display_name)
+}
+
+/// `users.info` endpoint derived from the token URL (`…/oauth.v2.access` →
+/// `…/users.info`) — keeps a single SSOT for the Slack API base.
+fn users_info_url_from(token_url: &str) -> String {
+    match token_url.rsplit_once('/') {
+        Some((base, _)) => format!("{base}/users.info"),
+        None => token_url.to_string(),
+    }
+}
+
 /// Exchanges the authorization code for a user token at `oauth.v2.access`.
 /// PKCE public client: `code_verifier` + `client_id`, never a client_secret.
 async fn exchange_slack_code(
@@ -298,6 +370,14 @@ async fn exchange_slack_code(
         })
         .unwrap_or_default();
 
+    let authed_user_id = user.id;
+    let authed_user_name = match &authed_user_id {
+        Some(uid) => {
+            fetch_slack_display_name(&users_info_url_from(token_url), &access_token, uid).await
+        }
+        None => None,
+    };
+
     Ok(SlackUserToken {
         access_token,
         refresh_token,
@@ -305,7 +385,8 @@ async fn exchange_slack_code(
         granted_scopes,
         team_id: body.team.as_ref().and_then(|t| t.id.clone()),
         team_name: body.team.as_ref().and_then(|t| t.name.clone()),
-        authed_user_id: user.id,
+        authed_user_id,
+        authed_user_name,
     })
 }
 
@@ -336,6 +417,9 @@ fn persist_slack_tokens_in(
     }
     if let Some(user_id) = &token.authed_user_id {
         provider_data.insert("authedUserId".to_string(), user_id.clone());
+    }
+    if let Some(user_name) = &token.authed_user_name {
+        provider_data.insert("authedUserName".to_string(), user_name.clone());
     }
 
     let state_path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, "slack");
@@ -580,6 +664,7 @@ mod tests {
             team_id: Some("T123".to_string()),
             team_name: Some("Speednet".to_string()),
             authed_user_id: Some("U123".to_string()),
+            authed_user_name: Some("Jan Kowalski".to_string()),
         }
     }
 
@@ -604,6 +689,7 @@ mod tests {
         );
         assert_eq!(state["providerData"]["teamName"], "Speednet");
         assert_eq!(state["providerData"]["authedUserId"], "U123");
+        assert_eq!(state["providerData"]["authedUserName"], "Jan Kowalski");
         assert_eq!(state["grantedScopes"][0], "chat:write");
 
         let access = std::fs::read_to_string(
@@ -612,6 +698,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(access, "xoxe.xoxp-at");
+    }
+
+    #[test]
+    fn pick_display_name_prefers_profile_display_then_real() {
+        let with_display = SlackUserInfoUser {
+            real_name: Some("Top Real".into()),
+            profile: Some(SlackUserInfoProfile {
+                display_name: Some("Janek".into()),
+                real_name: Some("Jan Kowalski".into()),
+            }),
+        };
+        assert_eq!(pick_display_name(with_display).as_deref(), Some("Janek"));
+
+        let display_empty = SlackUserInfoUser {
+            real_name: Some("Top Real".into()),
+            profile: Some(SlackUserInfoProfile {
+                display_name: Some(String::new()),
+                real_name: Some("Profile Real".into()),
+            }),
+        };
+        assert_eq!(
+            pick_display_name(display_empty).as_deref(),
+            Some("Profile Real")
+        );
+
+        let no_profile = SlackUserInfoUser {
+            real_name: Some("Top Real".into()),
+            profile: None,
+        };
+        assert_eq!(pick_display_name(no_profile).as_deref(), Some("Top Real"));
+
+        let nothing = SlackUserInfoUser {
+            real_name: None,
+            profile: Some(SlackUserInfoProfile {
+                display_name: None,
+                real_name: None,
+            }),
+        };
+        assert_eq!(pick_display_name(nothing), None);
+    }
+
+    #[test]
+    fn users_info_url_is_derived_from_token_url() {
+        assert_eq!(
+            users_info_url_from("https://slack.com/api/oauth.v2.access"),
+            "https://slack.com/api/users.info"
+        );
+        // Degenerate input without a slash → returned unchanged (no panic).
+        assert_eq!(users_info_url_from("noslash"), "noslash");
+    }
+
+    #[tokio::test]
+    async fn fetch_display_name_returns_none_on_unreachable_endpoint() {
+        // Nothing is listening — best-effort lookup must yield None, not error.
+        let name =
+            fetch_slack_display_name("http://127.0.0.1:1/api/users.info", "xoxe.xoxp-at", "U123")
+                .await;
+        assert_eq!(name, None);
     }
 
     #[test]
