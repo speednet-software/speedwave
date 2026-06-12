@@ -3413,6 +3413,209 @@ services:
         );
     }
 
+    /// Builds a resolved (v2) LlmConfig the way production resolve does —
+    /// proxy-path tests must exercise the migrated shape.
+    fn v2_llm(provider: &str, model: Option<&str>, base_url: Option<&str>) -> LlmConfig {
+        let mut llm = LlmConfig {
+            provider: Some(provider.to_string()),
+            model: model.map(str::to_string),
+            base_url: base_url.map(str::to_string),
+            ..Default::default()
+        };
+        crate::config::migrate_llm_to_v2(&mut llm, false);
+        llm
+    }
+
+    /// ADR-072: subscription (oauth) sessions route through the litellm
+    /// /anthropic passthrough and must NOT carry any Bearer/API key env —
+    /// either would disable Claude Code's OAuth.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_proxy_injection_anthropic_oauth() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: v2_llm("anthropic", None, None),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://litellm:4000/anthropic"),
+            "oauth sessions must use the passthrough route, got: {env:?}"
+        );
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_AUTH_TOKEN=")
+                    || e.starts_with("ANTHROPIC_API_KEY=")),
+            "oauth sessions must carry no auth env (it disables OAuth): {env:?}"
+        );
+        // 1M alias pins survive the proxy (passthrough is transparent).
+        assert!(
+            env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")),
+            "alias pins must be present: {env:?}"
+        );
+    }
+
+    /// ADR-072: local sessions route through the litellm root with an
+    /// id-prefixed model matching the rendered wildcard route.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_proxy_injection_local_provider() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: v2_llm(
+                "llamacpp",
+                Some("qwen3"),
+                Some("http://host.docker.internal:9000"),
+            ),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://litellm:4000"),
+            "local sessions use the unified root: {env:?}"
+        );
+        assert!(
+            env.iter().any(|e| e == "ANTHROPIC_MODEL=local/qwen3"),
+            "model must be provider-id-prefixed: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_SMALL_FAST_MODEL=local/qwen3"),
+            "subagent model must be pinned: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
+            "dummy bearer expected: {env:?}"
+        );
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")),
+            "alias remap is forbidden for non-Anthropic providers: {env:?}"
+        );
+        // The rendered litellm config must carry the matching route.
+        let litellm_cfg = std::fs::read_to_string(
+            data_dir
+                .path()
+                .join("litellm")
+                .join("test-project")
+                .join("config.yaml"),
+        )
+        .unwrap();
+        assert!(
+            litellm_cfg.contains("model_name: \"local/*\""),
+            "wildcard route must exist for the provider: {litellm_cfg}"
+        );
+    }
+
+    /// ADR-072 kill-switch: proxy_enabled=false falls back to the direct
+    /// injection path (legacy behaviour).
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_proxy_kill_switch_uses_direct_path() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut llm = v2_llm(
+            "llamacpp",
+            Some("qwen3"),
+            Some("http://host.docker.internal:9000"),
+        );
+        llm.proxy_enabled = Some(false);
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:9000"),
+            "kill-switch must restore direct injection: {env:?}"
+        );
+        assert!(
+            !env.iter().any(|e| e.contains("litellm")),
+            "no litellm reference on the direct path: {env:?}"
+        );
+    }
+
+    /// Local providers with custom headers stay on the direct path — the
+    /// proxy would consume headers addressed to the LLM server.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_proxy_local_custom_headers_falls_back_to_direct() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let tokens_dir = ensure_token_dir_in(data_dir.path(), "test-project", "local-llm").unwrap();
+        std::fs::write(tokens_dir.join("custom_headers"), "X-Test: 1\n").unwrap();
+        let mut llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("qwen3".to_string()),
+            base_url: Some("http://host.docker.internal:9000".to_string()),
+            has_custom_headers: true,
+            ..Default::default()
+        };
+        crate::config::migrate_llm_to_v2(&mut llm, false);
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:9000"),
+            "custom-header setups must use the direct path: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_CUSTOM_HEADERS=")),
+            "custom headers must be injected on the direct path: {env:?}"
+        );
+    }
+
     fn get_claude_env(yaml: &str) -> Vec<String> {
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
         doc.get("services")

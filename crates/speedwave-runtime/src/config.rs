@@ -101,6 +101,11 @@ pub struct LlmConfig {
     /// LLM schema version; `None` = legacy v1 (see [`LLM_SCHEMA_VERSION`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_version: Option<u32>,
+    /// Kill-switch (ADR-072): `false` routes Claude Code directly at the
+    /// provider (pre-proxy behaviour). Default `true`. User-only — the repo
+    /// layer cannot set it (merge_llm_repo ignores it). Removal in N+2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_enabled: Option<bool>,
     /// Configured providers (v2). Entries with invalid slugs are dropped on
     /// resolve with a warning — the id reaches file paths and env names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -940,6 +945,9 @@ fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
     // v2 (ADR-072): the user layer carries the provider list wholesale.
     if overlay.schema_version.is_some() {
         base.schema_version = overlay.schema_version;
+    }
+    if overlay.proxy_enabled.is_some() {
+        base.proxy_enabled = overlay.proxy_enabled;
     }
     if !overlay.providers.is_empty() {
         base.providers.clone_from(&overlay.providers);
