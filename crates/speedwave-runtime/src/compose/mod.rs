@@ -1196,6 +1196,7 @@ mod tests {
                 context_tokens: None,
                 has_api_key: true,
                 has_custom_headers: true,
+                ..Default::default()
             },
         };
         let integrations = ResolvedIntegrationsConfig::default();
@@ -1279,6 +1280,7 @@ mod tests {
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
 
@@ -1365,6 +1367,7 @@ mod tests {
                 context_tokens: None,
                 has_api_key: true,
                 has_custom_headers: true,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -3290,6 +3293,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -3324,6 +3328,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let result = render_compose_isolated(
@@ -3517,6 +3522,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -3601,6 +3607,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -3638,6 +3645,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -3675,6 +3683,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let result = render_compose_isolated(
@@ -3712,6 +3721,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let result = render_compose_isolated(
@@ -3759,6 +3769,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let result1 =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -4324,6 +4335,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -4352,6 +4364,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -4370,6 +4383,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered_blank = apply_llm_config_in(
             data_dir.path(),
@@ -4401,6 +4415,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -4430,6 +4445,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let llm_anthropic = LlmConfig::default();
 
@@ -4494,6 +4510,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -4528,6 +4545,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -10772,6 +10790,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -10837,6 +10856,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -11009,6 +11029,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
@@ -11065,6 +11086,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: true,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
