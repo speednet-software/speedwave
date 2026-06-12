@@ -956,6 +956,25 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
 }
 
 // ---------------------------------------------------------------------------
+// Usage dashboard (ADR-072)
+// ---------------------------------------------------------------------------
+
+/// Aggregated LLM usage for the project's dashboard. The single source is
+/// the litellm callback JSONL (see `speedwave_runtime::usage`); chat-stream
+/// session stats are deliberately NOT mixed in (double counting).
+#[tauri::command]
+pub async fn get_llm_usage(
+    project: String,
+) -> Result<speedwave_runtime::usage::UsageSummary, String> {
+    let data_dir = speedwave_runtime::consts::data_dir();
+    speedwave_runtime::usage::rotate_usage_if_large_in(data_dir.as_path(), &project);
+    Ok(speedwave_runtime::usage::read_usage_summary_in(
+        data_dir.as_path(),
+        &project,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
