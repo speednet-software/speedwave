@@ -187,6 +187,20 @@ fn load_snapshot(project: &str) -> anyhow::Result<UpdateSnapshot> {
     Ok(snapshot)
 }
 
+/// `true` when any configured project OTHER than `target` has running
+/// containers — their live resource mounts forbid the dir swap.
+fn other_projects_running(runtime: &crate::runtime::LockedRuntime, target: &str) -> bool {
+    let Ok(cfg) = crate::config::load_user_config() else {
+        return false;
+    };
+    cfg.projects.iter().filter(|p| p.name != target).any(|p| {
+        runtime
+            .compose_ps(&p.name)
+            .map(|c| !c.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// Prunes superseded per-image tags (+ legacy single-id tags on migration).
 /// Callers MUST invoke only after new containers are confirmed running (atomicity).
 #[cfg(any(test, feature = "test-support"))]
@@ -372,13 +386,20 @@ pub fn update_containers(
         )
     })?;
 
-    // CLI-only users get fresh claude-resources — synced AFTER the build
-    // (live bind mounts would watch the dir swap for the whole build window)
-    // and right before the recreate that picks it up. Resources-dir is data,
-    // not bundle-state: the single-writer rule holds.
-    let build_root = build::resolve_build_root()?;
-    bundle::sync_claude_resources(&build_root)
-        .map_err(|e| anyhow::anyhow!("claude-resources sync failed: {e}"))?;
+    // CLI-only users get fresh claude-resources — synced AFTER the build and
+    // right before the recreate that picks it up. The swap is skipped when
+    // any OTHER project is running: it would yank that project's live bind
+    // mount (only Desktop reconcile stops-and-restores across projects).
+    if other_projects_running(runtime, project) {
+        log::warn!(
+            "claude-resources sync skipped: another project is running; \
+             open Speedwave Desktop to finish applying the update"
+        );
+    } else {
+        let build_root = build::resolve_build_root()?;
+        bundle::sync_claude_resources(&build_root)
+            .map_err(|e| anyhow::anyhow!("claude-resources sync failed: {e}"))?;
+    }
 
     apply_update_transaction(runtime, project, &compose_yml)?;
 
@@ -487,6 +508,13 @@ mod tests {
         let sync_pos = source
             .find("sync_claude_resources(&build_root)")
             .expect("CLI update must sync claude-resources");
+        let guard_pos = source
+            .find("other_projects_running(runtime, project)")
+            .expect("sync must be guarded against other running projects");
+        assert!(
+            guard_pos < sync_pos,
+            "live-mount guard must precede the resources swap"
+        );
         let txn_pos = source
             .find("apply_update_transaction(runtime, project, &compose_yml)")
             .expect("update transaction must exist");

@@ -470,20 +470,20 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         set_image_readiness(ImageReadiness::Ready);
         emit_bundle_status(app_handle);
 
-        // Converge orphans: a crash during a background teardown leaves a
-        // half-stopped non-active project that nothing else ever revisits.
-        if rt.is_available() {
-            if let Ok(cfg) = config::load_user_config() {
-                let active = cfg.active_project.clone();
-                if let Ok(running) = list_running_projects(&rt, &cfg) {
-                    for project in running {
-                        if Some(&project) != active.as_ref() {
-                            log::info!("reconcile_bundle: converging orphaned project '{project}'");
-                            crate::containers_cmd::spawn_background_teardown(project);
-                        }
-                    }
-                }
+        // Converge crash-orphans: ONLY projects whose background teardown a
+        // previous process recorded but never finished. Never ps-diff against
+        // active_project — non-active projects run legitimately (CLI).
+        for project in crate::containers_cmd::crashed_teardown_intents() {
+            let active = config::load_user_config()
+                .ok()
+                .and_then(|c| c.active_project);
+            if Some(&project) == active.as_ref() {
+                // The active project is (re)started right after reconcile —
+                // an interrupted teardown converges via that idempotent up.
+                continue;
             }
+            log::info!("reconcile_bundle: converging crash-interrupted teardown of '{project}'");
+            crate::containers_cmd::spawn_background_teardown(project);
         }
 
         // Repair: images may be gone after containerd reinstall/VM recreation;
@@ -1148,11 +1148,18 @@ mod tests {
     }
 
     #[test]
-    fn no_change_branch_converges_orphaned_projects() {
+    fn no_change_branch_converges_only_recorded_teardown_intents() {
         let source = include_str!("reconcile.rs");
         assert!(
-            source.contains("converging orphaned project"),
-            "crash-orphaned non-active projects must be torn down at startup"
+            source.contains("crashed_teardown_intents()"),
+            "convergence must use persisted intents, never ps-vs-active diffing \
+             (which killed legitimate CLI-run projects)"
+        );
+        // Split literal: include_str! sees this test too.
+        let removed_marker = format!("converging {} project", "orphaned");
+        assert!(
+            !source.contains(&removed_marker),
+            "the ps-diff orphan sweep must stay removed"
         );
     }
     use serial_test::serial;

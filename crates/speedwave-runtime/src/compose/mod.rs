@@ -10032,6 +10032,52 @@ services:
 
     // ── apply_plugins_from_verified — render-time invariants ─────────
 
+    #[test]
+    fn plugin_digests_env_reflects_tree_digest_and_keeps_slug_list_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("digplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin("digplug", Some("digplug"), &plugin_dir, None);
+        let mut integrations = crate::config::ResolvedIntegrationsConfig::default();
+        integrations.plugins.insert("digplug".to_string(), true);
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&out).unwrap();
+        let env = get_service_env_seq(&doc, "claude");
+        // Slug list stays digest-free (entrypoint contract)...
+        assert!(env.iter().any(|v| v == "SPEEDWAVE_PLUGINS=digplug"));
+        // ...while the digest var changes claude's config-hash on plugin
+        // upgrade, so the entrypoint re-runs and relinks plugin resources.
+        assert!(env
+            .iter()
+            .any(|v| v == "SPW_PLUGIN_DIGESTS=digplug:f00ddeadbeefcafe"));
+    }
+
+    #[test]
+    fn credentials_digest_pass_sits_between_filter_and_env_hardening() {
+        let source = include_str!("mod.rs");
+        let filter_pos = source
+            .find("yaml = apply_integrations_filter(")
+            .expect("filter pass must exist");
+        let creds_pos = source
+            .find("apply_credentials_digests_in(data_dir")
+            .expect("credentials pass must be wired into render");
+        let harden_pos = source
+            .find("yaml = harden_env_scalar_quoting(")
+            .expect("hardening pass must exist");
+        assert!(
+            filter_pos < creds_pos && creds_pos < harden_pos,
+            "credentials digest must run on filtered services, before quoting"
+        );
+    }
+
     /// Builds a minimal valid YAML doc for `apply_plugins_from_verified`
     /// to mutate. The shape mirrors `compose.template.yml` enough that
     /// the renderer can find `services.claude` and `services.mcp-hub`.

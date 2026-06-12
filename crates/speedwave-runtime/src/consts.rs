@@ -1165,6 +1165,7 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
     // Reserved by Speedwave — auto-injected
     "PORT",
     "SPW_CREDENTIALS_DIGEST",
+    "SPW_PLUGIN_DIGESTS",
     // Dynamic linker hijacks (Linux)
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
@@ -1423,7 +1424,7 @@ mod tests {
         // A change here is deliberate — bumping this count signals a new
         // hijack vector was added (and the matching test in plugin.rs
         // should grow too). Catches accidental deletions.
-        assert_eq!(RESERVED_ENV_KEYS.len(), 20);
+        assert_eq!(RESERVED_ENV_KEYS.len(), 21);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
                 k,
@@ -1435,6 +1436,7 @@ mod tests {
         for required in [
             "PORT",
             "SPW_CREDENTIALS_DIGEST",
+            "SPW_PLUGIN_DIGESTS",
             "LD_PRELOAD",
             "DYLD_INSERT_LIBRARIES",
             "NODE_OPTIONS",

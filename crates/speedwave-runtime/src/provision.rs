@@ -1272,9 +1272,12 @@ Delegate=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
-  if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
-    systemctl daemon-reload
-    systemctl enable --now "$name"
+  # Try systemd unconditionally — gating on overall system state skips unit
+  # installation forever on the common WSL2 `degraded` state.
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl daemon-reload >/dev/null 2>&1 \
+     && systemctl enable --now "$name" >/dev/null 2>&1; then
+    :
   else
     # Detach from inherited stdio — daemons holding the caller's pipes would
     # block the host's wait_with_output() forever (post-upgrade hang).
@@ -1463,6 +1466,17 @@ mod tests {
         assert!(
             !src.contains("\n    $exec &\n"),
             "bare $exec & inherits the Rust pipes and deadlocks wait_with_output"
+        );
+    }
+
+    #[test]
+    fn install_service_does_not_gate_systemd_on_is_system_running() {
+        let src = include_str!("provision.rs");
+        let unit = src.find("ExecStart=$exec").expect("unit heredoc");
+        let window = &src[unit..unit + 1200];
+        assert!(
+            window.contains("systemctl enable --now") && !window.contains("is-system-running"),
+            "systemd path must be attempted unconditionally (degraded state is common on WSL2)"
         );
     }
 

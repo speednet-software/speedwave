@@ -163,15 +163,64 @@ pub(crate) fn spawn_background_teardown(prev: String) {
     });
 }
 
+/// On-disk teardown intents — lets the NEXT launch converge exactly the
+/// projects whose background teardown a crash interrupted (never CLI-run
+/// projects, which were a false positive of ps-vs-active diffing).
+fn teardown_intents_path() -> std::path::PathBuf {
+    speedwave_runtime::consts::data_dir().join("pending-teardowns")
+}
+
+fn record_teardown_intent(project: &str) {
+    let _guard = pending_teardowns_lock();
+    let path = teardown_intents_path();
+    let mut entries: Vec<String> = std::fs::read_to_string(&path)
+        .map(|c| c.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    if !entries.iter().any(|e| e == project) {
+        entries.push(project.to_string());
+        if let Err(e) = std::fs::write(&path, entries.join("\n")) {
+            log::warn!("could not record teardown intent for '{project}': {e}");
+        }
+    }
+}
+
+fn clear_teardown_intent(project: &str) {
+    let _guard = pending_teardowns_lock();
+    let path = teardown_intents_path();
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let entries: Vec<&str> = content.lines().filter(|l| *l != project).collect();
+    let result = if entries.is_empty() {
+        std::fs::remove_file(&path)
+    } else {
+        std::fs::write(&path, entries.join("\n"))
+    };
+    if let Err(e) = result {
+        log::warn!("could not clear teardown intent for '{project}': {e}");
+    }
+}
+
+/// Projects whose background teardown a previous process never finished.
+pub(crate) fn crashed_teardown_intents() -> Vec<String> {
+    std::fs::read_to_string(teardown_intents_path())
+        .map(|c| c.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 fn spawn_background_teardown_with(
     prev: String,
     down: impl FnOnce(&str) -> Result<(), String> + Send + 'static,
 ) {
+    record_teardown_intent(&prev);
     let project = prev.clone();
     let handle = std::thread::spawn(move || {
         log::info!("background teardown: stopping previous project '{project}'");
         match down(&project) {
-            Ok(()) => log::info!("background teardown: '{project}' stopped"),
+            Ok(()) => {
+                log::info!("background teardown: '{project}' stopped");
+                clear_teardown_intent(&project);
+            }
             Err(e) => log::warn!("background teardown: compose_down('{project}') failed: {e}"),
         }
     });
@@ -1910,6 +1959,26 @@ mod tests {
         // Error path: failed teardown is logged, wait still joins cleanly.
         wait_for_pending_teardown("bg-fail-proj");
         assert!(!pending_teardowns_lock().contains_key("bg-fail-proj"));
+    }
+
+    #[test]
+    fn teardown_intent_recorded_and_cleared_on_success() {
+        let project = format!("intent-ok-{}", std::process::id());
+        spawn_background_teardown_with(project.clone(), |_p| Ok(()));
+        wait_for_pending_teardown(&project);
+        // Success path: intent must not survive the completed teardown.
+        assert!(!crashed_teardown_intents().contains(&project));
+    }
+
+    #[test]
+    fn teardown_intent_survives_failed_teardown_for_next_launch() {
+        let project = format!("intent-fail-{}", std::process::id());
+        spawn_background_teardown_with(project.clone(), |_p| Err("down failed".to_string()));
+        wait_for_pending_teardown(&project);
+        // Failure path: the intent stays so the next launch converges it.
+        assert!(crashed_teardown_intents().contains(&project));
+        clear_teardown_intent(&project);
+        assert!(!crashed_teardown_intents().contains(&project));
     }
 
     #[test]

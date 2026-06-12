@@ -85,6 +85,7 @@ pub(crate) async fn switch_project(
     let new_clone = name.clone();
     use tauri::Manager;
     let host_exec_arc = host_exec.inner().clone();
+    let host_exec_for_teardown = host_exec_arc.clone();
     let oauth_arc = app.state::<reconcile::SharedOauth>().inner().clone();
     let oauth_for_teardown = oauth_arc.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
@@ -153,6 +154,10 @@ pub(crate) async fn switch_project(
     if let Err(e) = rebind_result {
         // Previous is still running (teardown deferred) — only tear
         // down the new project, then rebind chat back to previous.
+        // The eagerly-started host workers for the destination must be
+        // retired too, or they linger pointing at downed containers.
+        reconcile::teardown_host_exec_for_project(&host_exec_for_teardown, &name);
+        reconcile::teardown_oauth_for_project(&oauth_for_teardown, &name);
         let mut cleanup_parts: Vec<String> = Vec::new();
 
         let new_for_teardown = name.clone();
@@ -407,15 +412,28 @@ mod tests {
         let success_marker = body
             .find("pending_teardown {")
             .expect("success-path teardown block must exist");
-        let host_exec_pos = body
-            .find("teardown_host_exec_for_project")
+        // The PREVIOUS project's workers retire only in the success block...
+        let prev_teardown = body
+            .rfind("teardown_host_exec_for_project")
             .expect("host_exec teardown must exist");
-        let oauth_pos = body
-            .find("teardown_oauth_for_project")
+        let prev_oauth = body
+            .rfind("teardown_oauth_for_project")
             .expect("oauth teardown must exist");
         assert!(
-            host_exec_pos > success_marker && oauth_pos > success_marker,
-            "host worker teardown must live in the success path, not pre-switch"
+            prev_teardown > success_marker && prev_oauth > success_marker,
+            "previous-project worker teardown must live in the success path"
+        );
+        // ...while the rebind-failure block retires the DESTINATION's
+        // eagerly-started workers (they would otherwise point at downed
+        // containers for the rest of the session).
+        let rebind_fail = body
+            .find("rebind_result {")
+            .expect("rebind-failure block must exist");
+        let fail_window = &body[rebind_fail..success_marker];
+        assert!(
+            fail_window.contains("teardown_host_exec_for_project")
+                && fail_window.contains("teardown_oauth_for_project"),
+            "rebind failure must retire the destination's host workers"
         );
     }
 

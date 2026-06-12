@@ -96,7 +96,10 @@ pub(crate) fn apply_plugins_from_verified(
             continue;
         }
 
-        plugin_slugs.push(slug.clone());
+        plugin_slugs.push(format!(
+            "{slug}:{}",
+            &vp.tree_digest_hex()[..16.min(vp.tree_digest_hex().len())]
+        ));
 
         // MCP service generation (follows apply_llm_config pattern)
         if let Some(sid) = service_id {
@@ -189,9 +192,17 @@ pub(crate) fn apply_plugins_from_verified(
         }
     }
 
-    // SPEEDWAVE_PLUGINS env var in claude (slugs of enabled plugins)
+    // SPEEDWAVE_PLUGINS in claude: slug per enabled plugin; the digest goes
+    // into a SEPARATE var so a plugin upgrade changes claude's config-hash
+    // (recreate -> entrypoint relinks resources) without altering the slug
+    // list the entrypoint iterates (plugin contract, CLAUDE.md).
     if !plugin_slugs.is_empty() {
-        add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", &plugin_slugs.join(","));
+        let slugs: Vec<&str> = plugin_slugs
+            .iter()
+            .map(|s| s.split(':').next().unwrap_or(s))
+            .collect();
+        add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", &slugs.join(","));
+        add_claude_env_var(&mut doc, "SPW_PLUGIN_DIGESTS", &plugin_slugs.join(","));
     }
 
     Ok(serde_yaml_ng::to_string(&doc)?)
