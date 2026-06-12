@@ -432,6 +432,36 @@ pub(crate) fn lookup_project_provider<'a>(
         .and_then(|l| l.provider.as_deref())
 }
 
+/// True when the project's sessions authenticate to Anthropic (the only
+/// case where the in-container `claude auth status` check is meaningful).
+///
+/// v2 configs (ADR-072) decide by the active provider kind: only
+/// `AnthropicOauth` needs the OAuth check (`AnthropicApiKey` injects a key
+/// — no interactive login). Legacy configs fall back to the v1 rule:
+/// anything non-local is Anthropic.
+pub(crate) fn project_needs_anthropic_auth(
+    user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
+    project: &str,
+) -> bool {
+    use speedwave_runtime::config::LlmProviderKind;
+    let llm = user_config
+        .find_project(project)
+        .and_then(|p| p.claude.as_ref())
+        .and_then(|c| c.llm.as_ref());
+    if let Some(llm) = llm {
+        if !llm.providers.is_empty() {
+            return match llm.active_provider().map(|e| e.kind) {
+                Some(LlmProviderKind::AnthropicOauth) => true,
+                Some(_) => false,
+                // active points nowhere — be conservative, check auth.
+                None => true,
+            };
+        }
+    }
+    // Legacy v1 shape.
+    !speedwave_runtime::config::is_local_provider(lookup_project_provider(user_config, project))
+}
+
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let user_config = speedwave_runtime::config::load_user_config().unwrap_or_else(|e| {
         log::warn!(
@@ -439,9 +469,8 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
         );
         speedwave_runtime::config::SpeedwaveUserConfig::default()
     });
-    let provider = lookup_project_provider(&user_config, project);
-    if speedwave_runtime::config::is_local_provider(provider) {
-        log::info!("check_claude_auth: local provider — skipping Anthropic OAuth check");
+    if !project_needs_anthropic_auth(&user_config, project) {
+        log::info!("check_claude_auth: non-OAuth provider — skipping Anthropic OAuth check");
         return Ok(true);
     }
     let rt = runtime::detect_runtime();
@@ -1063,11 +1092,7 @@ mod tests {
                 settings: None,
                 llm: Some(LlmConfig {
                     provider: provider.map(str::to_string),
-                    model: None,
-                    base_url: None,
-                    context_tokens: None,
-                    has_api_key: false,
-                    has_custom_headers: false,
+                    ..Default::default()
                 }),
             }),
             integrations: None,
@@ -1167,6 +1192,117 @@ mod tests {
         assert!(is_local_provider(Some("llamacpp")));
         assert!(!is_local_provider(Some("anthropic")));
         assert!(!is_local_provider(None));
+    }
+
+    /// Builds a project entry carrying a v2 (ADR-072) provider list with one
+    /// active entry of the given kind.
+    fn project_with_v2_kind(
+        name: &str,
+        kind: speedwave_runtime::config::LlmProviderKind,
+    ) -> ProjectUserEntry {
+        use speedwave_runtime::config::{LlmActive, LlmProviderEntry};
+        ProjectUserEntry {
+            name: name.to_string(),
+            dir: String::new(),
+            claude: Some(ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(LlmConfig {
+                    schema_version: Some(speedwave_runtime::config::LLM_SCHEMA_VERSION),
+                    providers: vec![LlmProviderEntry {
+                        id: "p1".to_string(),
+                        kind,
+                        base_url: None,
+                        has_api_key: false,
+                        context_tokens: None,
+                        has_custom_headers: false,
+                    }],
+                    active: Some(LlmActive {
+                        provider_id: "p1".to_string(),
+                        model: None,
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            integrations: None,
+            plugin_settings: None,
+        }
+    }
+
+    /// ADR-072: only AnthropicOauth sessions need the in-container OAuth
+    /// check; every other kind (api key, local, openrouter, …) must skip it
+    /// or offline/key-based users get blocked on a claude.ai login.
+    #[test]
+    fn needs_anthropic_auth_by_v2_kind() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        for (kind, expected) in [
+            (K::AnthropicOauth, true),
+            (K::AnthropicApiKey, false),
+            (K::Local, false),
+            (K::OpenRouter, false),
+            (K::OpenAiCompat, false),
+            (K::Custom, false),
+        ] {
+            let cfg = SpeedwaveUserConfig {
+                projects: vec![project_with_v2_kind("proj", kind)],
+                ..Default::default()
+            };
+            assert_eq!(
+                project_needs_anthropic_auth(&cfg, "proj"),
+                expected,
+                "kind {kind:?}"
+            );
+        }
+    }
+
+    /// Legacy v1 configs keep the old rule: local skips, anthropic checks,
+    /// and a missing project defaults to checking.
+    #[test]
+    fn needs_anthropic_auth_legacy_fallback() {
+        for (provider, expected) in [
+            (Some("ollama"), false),
+            (Some("local"), false),
+            (Some("anthropic"), true),
+            (None, true),
+        ] {
+            let cfg = SpeedwaveUserConfig {
+                projects: vec![project_with_provider("proj", provider)],
+                ..Default::default()
+            };
+            assert_eq!(
+                project_needs_anthropic_auth(&cfg, "proj"),
+                expected,
+                "legacy provider {provider:?}"
+            );
+        }
+        assert!(project_needs_anthropic_auth(
+            &SpeedwaveUserConfig::default(),
+            "missing"
+        ));
+    }
+
+    /// A v2 config whose active id points at no entry is conservative:
+    /// the auth check runs.
+    #[test]
+    fn needs_anthropic_auth_dangling_active_checks() {
+        use speedwave_runtime::config::LlmActive;
+        let mut entry = project_with_v2_kind(
+            "proj",
+            speedwave_runtime::config::LlmProviderKind::OpenRouter,
+        );
+        if let Some(c) = entry.claude.as_mut() {
+            if let Some(l) = c.llm.as_mut() {
+                l.active = Some(LlmActive {
+                    provider_id: "ghost".to_string(),
+                    model: None,
+                });
+            }
+        }
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![entry],
+            ..Default::default()
+        };
+        assert!(project_needs_anthropic_auth(&cfg, "proj"));
     }
 
     /// Validates that a path component does not contain traversal or unsafe characters.

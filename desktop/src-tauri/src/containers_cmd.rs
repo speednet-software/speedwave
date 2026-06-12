@@ -939,6 +939,7 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
             context_tokens: update.context_tokens,
             has_api_key: new_has_api_key,
             has_custom_headers: new_has_custom_headers,
+            ..Default::default()
         };
         apply_llm_config(&mut user_config, merged)?;
         config::save_user_config(&user_config)?;
@@ -1060,6 +1061,7 @@ mod tests {
                             context_tokens: None,
                             has_api_key: false,
                             has_custom_headers: false,
+                            ..Default::default()
                         }),
                     }),
                     integrations: None,
@@ -1086,9 +1088,7 @@ mod tests {
             provider: Some(provider.to_string()),
             model: model.map(str::to_string),
             base_url: base_url.map(str::to_string),
-            context_tokens: None,
-            has_api_key: false,
-            has_custom_headers: false,
+            ..Default::default()
         }
     }
 
@@ -1156,6 +1156,7 @@ mod tests {
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         );
         assert!(result.is_ok());
@@ -1287,6 +1288,7 @@ mod tests {
                 context_tokens: Some(0),
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         )
         .unwrap_err();

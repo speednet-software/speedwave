@@ -468,6 +468,7 @@ mod tests {
                 context_tokens: Some(32_768),
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
             default_base_url: Some("http://host.docker.internal:11434".to_string()),
         };
