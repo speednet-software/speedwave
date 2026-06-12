@@ -188,10 +188,10 @@ pub struct BundleManifest {
     /// App version string.
     pub app_version: String,
     /// Reconcile id (app_version + image hashes + resources hash). Triggers
-    /// resources sync + project restore; image rebuilds are per-image (ADR-071).
+    /// resources sync + project restore; image rebuilds are per-image (ADR-072).
     pub bundle_id: String,
     /// Per-image build-input hash (image name → 16-char hex) used to tag images.
-    /// One entry per `build::IMAGES`; empty ⇒ legacy pre-ADR-071, regenerated.
+    /// One entry per `build::IMAGES`; empty ⇒ legacy pre-ADR-072, regenerated.
     #[serde(default)]
     pub image_hashes: std::collections::BTreeMap<String, String>,
     /// Hash of the claude-resources tree.
@@ -293,7 +293,7 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
     if manifest_path.exists() {
         let data = std::fs::read_to_string(&manifest_path)?;
         let manifest: BundleManifest = serde_json::from_str(&data)?;
-        // Pre-ADR-071 manifest (no per-image hashes) — regenerate from the tree.
+        // Pre-ADR-072 manifest (no per-image hashes) — regenerate from the tree.
         if !manifest.image_hashes.is_empty() {
             return Ok(manifest);
         }
@@ -307,7 +307,7 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
 
 /// Per-image hashes cover each image's declared `hash_inputs` + build args;
 /// `claude_version` overrides the `CLAUDE_VERSION` build-arg value so callers
-/// (desktop build.rs, CLI fallback, tests) control the pin. See ADR-071.
+/// (desktop build.rs, CLI fallback, tests) control the pin. See ADR-072.
 pub fn generate_bundle_manifest(
     app_version: &str,
     claude_version: &str,
@@ -390,7 +390,7 @@ pub(crate) fn image_content_hash(
 }
 
 /// Reconcile id: app_version + sorted per-image hashes + resources hash.
-/// app_version deliberately included — rationale in ADR-071.
+/// app_version deliberately included — rationale in ADR-072.
 fn reconcile_id(
     app_version: &str,
     image_hashes: &std::collections::BTreeMap<String, String>,
@@ -641,7 +641,7 @@ fn collect_directory_entries(
     if !dir.exists() {
         anyhow::bail!("Missing path for bundle digest: {}", dir.display());
     }
-    // Single-file hash input (e.g. containers/entrypoint.sh) — see ADR-071.
+    // Single-file hash input (e.g. containers/entrypoint.sh) — see ADR-072.
     if dir.is_file() {
         out.push((prefix.to_string(), std::fs::read(dir)?));
         return Ok(());
@@ -1065,7 +1065,7 @@ mod tests {
     fn legacy_state_file_parses_preserving_existing_fields() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("bundle-state.json");
-        // Pre-ADR-071 shape: no applied_image_hashes field.
+        // Pre-ADR-072 shape: no applied_image_hashes field.
         std::fs::write(
             &path,
             r#"{
@@ -1120,7 +1120,7 @@ mod tests {
     fn legacy_manifest_json_is_regenerated() {
         let temp = tempfile::tempdir().unwrap();
         write_build_tree(temp.path());
-        // Pre-ADR-071 manifest: no image_hashes field.
+        // Pre-ADR-072 manifest: no image_hashes field.
         std::fs::write(
             temp.path().join(BUNDLE_MANIFEST_FILE),
             r#"{

@@ -112,7 +112,7 @@ fn apply_update_transaction_aborts_recreate_on_compose_down_failure() {
     );
 }
 
-/// Pre-ADR-071 state: legacy single-id applied, no per-image map.
+/// Pre-ADR-072 state: legacy single-id applied, no per-image map.
 fn legacy_state(applied: Option<&str>) -> speedwave_runtime::bundle::BundleState {
     speedwave_runtime::bundle::BundleState {
         applied_bundle_id: applied.map(str::to_string),

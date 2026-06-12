@@ -1132,7 +1132,7 @@ fn nerdctl_version_matches_pin(version_line: &str) -> bool {
 /// Speedwave WSL2 distribution if the pinned version is not already present.
 /// Checks for a bundled tarball first (offline install), falling back to
 /// download if not found. Re-installs when the in-distro version differs from
-/// `NERDCTL_FULL_VERSION` so an upgrade actually upgrades the guest (ADR-071).
+/// `NERDCTL_FULL_VERSION` so an upgrade actually upgrades the guest (ADR-072).
 /// `true` when a failed version probe means nerdctl is genuinely absent
 /// (vs a transient wsl.exe transport error that must not trigger reinstall).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -1240,7 +1240,7 @@ if [ -f /etc/systemd/system/containerd.service ]; then
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
 fi
 # Stop daemons before unpacking — tar over live binaries fails ETXTBSY on a
-# reinstall (ADR-071). No is-system-running gate (skips on `degraded`); pkill
+# reinstall (ADR-072). No is-system-running gate (skips on `degraded`); pkill
 # covers the `$exec &` non-systemd fallback. No-op on fresh install.
 command -v systemctl >/dev/null 2>&1 && systemctl stop buildkit containerd 2>/dev/null || true
 pkill -x buildkitd 2>/dev/null || true
@@ -1336,7 +1336,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
     Ok(())
 }
 
-/// Reinstalls the in-distro nerdctl if it drifted from the pin (ADR-071).
+/// Reinstalls the in-distro nerdctl if it drifted from the pin (ADR-072).
 /// Warn-only, once-per-process: a failed reinstall must not churn on retry.
 #[cfg(target_os = "windows")]
 pub fn ensure_nerdctl_version() {

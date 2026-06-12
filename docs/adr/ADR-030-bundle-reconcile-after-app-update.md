@@ -1,6 +1,6 @@
 # ADR-030: Bundle Reconcile After App Update
 
-> **Status:** Accepted — superseded in part by [ADR-071](ADR-071-per-image-build-input-hash-tags.md): images are now tagged per-image (`speedwave-*:<build-input-hash>`), `bundle_id` remains only the reconcile trigger, and `build_context_hash` was replaced by the per-image `image_hashes` map. The phase machine, atomicity, and resume semantics described here are unchanged.
+> **Status:** Accepted — superseded in part by [ADR-072](ADR-072-per-image-build-input-hash-tags.md): images are now tagged per-image (`speedwave-*:<build-input-hash>`), `bundle_id` remains only the reconcile trigger, and `build_context_hash` was replaced by the per-image `image_hashes` map. The phase machine, atomicity, and resume semantics described here are unchanged.
 > **Context:** After a desktop app upgrade the bundled resources, built-in images, and previously-running projects must be brought back into a known-good state deterministically.
 
 ## Decision

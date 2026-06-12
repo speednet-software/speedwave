@@ -27,7 +27,7 @@ The desktop app now uses a single backend flow for update installation:
 After restart, the desktop backend compares the installed bundle against `~/.speedwave/bundle-state.json`. If the reconcile id (`bundle_id`) changed, it runs a startup reconcile:
 
 1. Sync bundled `claude-resources` into `~/.speedwave/claude-resources`
-2. Build only the images whose per-image build-input hash tag is missing ([ADR-071](../adr/ADR-071-per-image-build-input-hash-tags.md)) — a release with no container changes builds zero images
+2. Build only the images whose per-image build-input hash tag is missing ([ADR-072](../adr/ADR-072-per-image-build-input-hash-tags.md)) — a release with no container changes builds zero images
 3. Recreate only the projects that were running before the update
 4. Emit `bundle_reconcile_status` so the UI can show progress or retry
 
@@ -42,7 +42,7 @@ Desktop builds generate `build-context/bundle-manifest.json` with:
 - `image_hashes` — per-image build-input hash map (image name → 16-char hex)
 - `claude_resources_hash`
 
-The runtime uses `bundle_id` as the reconcile trigger (resources sync + project restore) and `image_hashes` to tag and rebuild images. Built-in images are rendered as `speedwave-*:<per-image-hash>`, so an update rebuilds only the images whose own build inputs changed (see [ADR-071](../adr/ADR-071-per-image-build-input-hash-tags.md)).
+The runtime uses `bundle_id` as the reconcile trigger (resources sync + project restore) and `image_hashes` to tag and rebuild images. Built-in images are rendered as `speedwave-*:<per-image-hash>`, so an update rebuilds only the images whose own build inputs changed (see [ADR-072](../adr/ADR-072-per-image-build-input-hash-tags.md)).
 
 ## Bundle Asset Validation
 

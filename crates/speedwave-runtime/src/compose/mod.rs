@@ -203,7 +203,7 @@ pub fn render_compose_in(
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
     yaml = yaml.replace("${PORT_HUB}", &port_hub.to_string());
     yaml = yaml.replace("${PORT_WORKER}", &port_worker.to_string());
-    // Per-image build-input hash tags (ADR-071) — one placeholder per service.
+    // Per-image build-input hash tags (ADR-072) — one placeholder per service.
     for (placeholder, image_name) in IMAGE_PLACEHOLDERS {
         yaml = yaml.replace(placeholder, &bundle_manifest.image_tag(image_name)?);
     }
@@ -1900,7 +1900,7 @@ services:
         assert!(parsed.get("services").is_some());
     }
 
-    /// SSOT alignment (ADR-071): every `${IMAGE_*}` placeholder in the template
+    /// SSOT alignment (ADR-072): every `${IMAGE_*}` placeholder in the template
     /// has a substitution entry, every entry exists in the template, and every
     /// catalogue image is covered — a new worker can't render unsubstituted.
     #[test]
@@ -1960,7 +1960,7 @@ services:
         )
         .unwrap();
 
-        // Each service carries its own per-image build-input hash tag (ADR-071).
+        // Each service carries its own per-image build-input hash tag (ADR-072).
         for image_name in [
             build::IMAGE_CLAUDE,
             build::IMAGE_MCP_HUB,

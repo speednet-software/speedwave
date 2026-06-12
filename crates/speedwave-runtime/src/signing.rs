@@ -216,7 +216,7 @@ pub fn verify_plugin_signature_with_key(
 }
 
 /// Hex digest of the plugin tree — the same bytes the Ed25519 signature
-/// covers. Content-addressed plugin image tags derive from it (ADR-071).
+/// covers. Content-addressed plugin image tags derive from it (ADR-072).
 pub(crate) fn plugin_tree_digest_hex(plugin_dir: &Path) -> anyhow::Result<String> {
     Ok(crate::bundle::bytes_to_hex(&compute_plugin_digest(
         plugin_dir,

@@ -424,7 +424,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         })?;
     } else {
         // Id matches. Restore any projects a no-op update left stopped, open
-        // the gate, then repair missing images (needs a running VM, ADR-071).
+        // the gate, then repair missing images (needs a running VM, ADR-072).
         if !state.pending_running_projects.is_empty() {
             match rt.ensure_ready() {
                 Ok(()) => {
@@ -570,7 +570,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // trait docs for restart_container_engine).
         let enabled = build::enabled_images(&active_integrations);
         // Missing-only under the build lock — a present per-image tag is
-        // already the exact build this manifest needs (ADR-071).
+        // already the exact build this manifest needs (ADR-072).
         match build::build_missing_images_locked(&rt, &enabled, &manifest) {
             Ok(built) => {
                 let skipped = enabled.len() as u32 - built;
@@ -674,7 +674,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     }
 
     // Atomicity: only prune superseded images now that every earlier phase
-    // succeeded (per-image replaced tags + one-time legacy prune, ADR-071).
+    // succeeded (per-image replaced tags + one-time legacy prune, ADR-072).
     // If reconcile failed earlier (image build, project restore, ensure_ready),
     // the previous images stay on disk so a restart resumes known-good.
     build::prune_superseded_images(
@@ -1424,7 +1424,7 @@ mod tests {
         #[test]
         fn unchanged_id_is_not_a_reconcile() {
             // Reinstall of the same version: id matches → no rebuild; the
-            // unchanged branch restores any stopped projects (ADR-071).
+            // unchanged branch restores any stopped projects (ADR-072).
             let manifest = bundle::BundleManifest::for_tests("same-id");
             let state = bundle::BundleState {
                 applied_bundle_id: Some(manifest.bundle_id.clone()),
@@ -1445,7 +1445,7 @@ mod tests {
 
         /// Structural: the bundle-unchanged branch must restore pending projects
         /// BEFORE clearing them from state — clearing first would strand them
-        /// stopped after a no-op update (ADR-071).
+        /// stopped after a no-op update (ADR-072).
         #[test]
         fn unchanged_bundle_branch_restores_before_clearing_pending() {
             let source = include_str!("reconcile.rs");
@@ -1474,7 +1474,7 @@ mod tests {
         /// Structural: when the runtime isn't ready in the unchanged-id restore
         /// branch, the code must return early (keeping pending for next launch)
         /// BEFORE the dirty-state cleanup that would clear pending — otherwise a
-        /// transiently-down VM silently strands the stopped projects (ADR-071).
+        /// transiently-down VM silently strands the stopped projects (ADR-072).
         #[test]
         fn unchanged_branch_not_ready_keeps_pending() {
             let source = include_str!("reconcile.rs");

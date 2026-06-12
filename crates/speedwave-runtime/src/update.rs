@@ -374,7 +374,7 @@ pub fn update_containers(
     let bundle_state = bundle::load_bundle_state();
 
     // Build OUTSIDE the compose lock (ADR-066), missing-only per image
-    // (ADR-071). On failure no snapshot is written, containers untouched.
+    // (ADR-072). On failure no snapshot is written, containers untouched.
     let images_rebuilt = build::build_missing_images_locked(
         runtime,
         &build::enabled_images(&integrations),
@@ -1006,7 +1006,7 @@ mod tests {
 
     #[test]
     fn test_no_buildkit_prune_in_routine_prune_paths() {
-        // Structural test (ADR-071): prune_buildkit_cache must NOT be called in
+        // Structural test (ADR-072): prune_buildkit_cache must NOT be called in
         // the routine prune paths — apt/npm cache layers are reused across
         // updates. The sole cache-prune site is the disk-full recovery ladder
         // in build_images_for_bundle_in (pinned by test_retry_on_disk_full_error in build.rs).
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[test]
     fn update_containers_never_writes_bundle_state() {
-        // ADR-071 single-writer rule: only Desktop (reconcile / setup wizard /
+        // ADR-072 single-writer rule: only Desktop (reconcile / setup wizard /
         // update commands) persists bundle state; the CLI only reads it.
         let source = include_str!("update.rs");
         // Split literal so this assertion line isn't itself a match.

@@ -16,7 +16,7 @@ pub struct ImageDef {
     pub build_args: &'static [(&'static str, &'static str)],
     /// Paths (relative to build root; file or dir) feeding this image's
     /// build-input hash. Must cover the containerfile and every COPY/ADD
-    /// source — enforced by `hash_inputs_cover_copy_sources` (ADR-071).
+    /// source — enforced by `hash_inputs_cover_copy_sources` (ADR-072).
     pub hash_inputs: &'static [&'static str],
 }
 
@@ -231,7 +231,7 @@ static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Serialises image builds + tag prunes across processes (Desktop reconcile,
 /// CLI update, project switch). Outside compose locks per ADR-066; hold around
-/// a build+prune sequence, never around `compose up`. Not reentrant (ADR-071).
+/// a build+prune sequence, never around `compose up`. Not reentrant (ADR-072).
 pub fn with_build_lock<F, T>(f: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T>,
@@ -626,7 +626,7 @@ pub fn build_enabled_images(
 }
 
 /// [`build_missing_images`] under [`with_build_lock`] — the form host call
-/// sites use, so the serialisation invariant can't be forgotten (ADR-071).
+/// sites use, so the serialisation invariant can't be forgotten (ADR-072).
 pub fn build_missing_images_locked(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
@@ -710,7 +710,7 @@ pub fn prune_orphan_current_bundle_images(
 
 /// Force-removes superseded per-image tags: for every image whose applied hash
 /// differs from the manifest's, removes `name:old_hash`. Only touches tags from
-/// this install's own applied history — never sweeps by repo name (ADR-071).
+/// this install's own applied history — never sweeps by repo name (ADR-072).
 pub(crate) fn prune_replaced_images(
     runtime: &crate::runtime::LockedRuntime,
     applied_image_hashes: &std::collections::BTreeMap<String, String>,
@@ -734,7 +734,7 @@ pub(crate) fn prune_replaced_images(
 }
 
 /// Warn-only post-restore prune under the build lock: per-image replaced tags,
-/// plus one-time legacy single-id tags (pre-ADR-071 state without a map).
+/// plus one-time legacy single-id tags (pre-ADR-072 state without a map).
 /// Callers MUST invoke only after new containers are confirmed running —
 /// ordering pinned by `reconcile_prunes_old_images_after_full_restore`.
 pub fn prune_superseded_images(
@@ -747,7 +747,7 @@ pub fn prune_superseded_images(
         if let Err(e) = prune_replaced_images(runtime, applied_image_hashes, manifest) {
             log::warn!("Failed to prune replaced image tags: {e}");
         }
-        // Legacy pre-ADR-071 state (no per-image map): the old tags share one
+        // Legacy pre-ADR-072 state (no per-image map): the old tags share one
         // `name:<old_bundle_id>` suffix — prune them once on migration.
         if applied_image_hashes.is_empty() {
             if let Some(old_id) = should_prune_bundle(applied_bundle_id, &manifest.bundle_id) {
@@ -763,7 +763,7 @@ pub fn prune_superseded_images(
     }
 }
 
-/// Force-removes a pre-ADR-071 bundle's image tags (`name:<old_bundle_id>` for
+/// Force-removes a pre-ADR-072 bundle's image tags (`name:<old_bundle_id>` for
 /// every catalogue image) — one-time migration prune. `--force` is required
 /// because stopped containers from the previous session block plain `rmi`.
 pub fn prune_old_bundle_images(
@@ -817,7 +817,7 @@ pub fn build_images_for_bundle_in(
                 log::warn!("prune_unused_images failed: {prune_err}");
             }
             // `nerdctl system prune` does not clear BuildKit cache-mounts; under
-            // disk pressure the cache must go too (ADR-071 — sole cache-prune site).
+            // disk pressure the cache must go too (ADR-072 — sole cache-prune site).
             if let Err(prune_err) = runtime.prune_buildkit_cache() {
                 log::warn!("prune_buildkit_cache failed: {prune_err}");
             }
@@ -1250,12 +1250,12 @@ mod tests {
         }
     }
 
-    /// Anti-under-rebuild guard (ADR-071): every COPY/ADD source in every
+    /// Anti-under-rebuild guard (ADR-072): every COPY/ADD source in every
     /// Containerfile must be covered by that image's `hash_inputs`, else a
     /// source change would not change the image hash and ship stale code.
     #[test]
     fn every_base_image_is_digest_pinned() {
-        // Retained BuildKit cache (ADR-071) freezes whatever base was first
+        // Retained BuildKit cache (ADR-072) freezes whatever base was first
         // pulled; a floating tag would silently diverge between users and
         // never receive upstream security patches. Every external FROM must
         // carry an @sha256 digest; bumping a base is a deliberate edit.
@@ -1330,7 +1330,7 @@ mod tests {
         }
     }
 
-    /// Structural pin (ADR-071): every host-facing build/prune entry point
+    /// Structural pin (ADR-072): every host-facing build/prune entry point
     /// must hold the build lock — a forgotten wrapper reintroduces the race.
     #[test]
     fn build_entry_points_hold_build_lock() {
@@ -2434,7 +2434,7 @@ mod tests {
         assert_eq!(
             count_buildkit_prunes(&handles),
             1,
-            "disk-full recovery is the sole BuildKit cache-prune site (ADR-071) — \
+            "disk-full recovery is the sole BuildKit cache-prune site (ADR-072) — \
              `nerdctl system prune` does not clear cache-mounts"
         );
         assert_eq!(
@@ -3159,7 +3159,7 @@ mod tests {
 
     #[test]
     fn test_prune_old_bundle_images_keeps_buildkit_cache() {
-        // ADR-071: routine pruning must NOT clear the BuildKit cache — apt/npm
+        // ADR-072: routine pruning must NOT clear the BuildKit cache — apt/npm
         // layers are reused across updates. Cache is pruned only under disk
         // pressure (see test_retry_on_disk_full_error).
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();

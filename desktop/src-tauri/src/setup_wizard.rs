@@ -313,7 +313,7 @@ pub fn build_images() -> anyhow::Result<()> {
     // Record that the current bundle's images are now built so that
     // reconcile_bundle_update (on next startup) sees bundle_changed=false
     // and skips the unnecessary rebuild. The per-image map must be persisted
-    // too, else the first reconcile would re-prune/rebuild (ADR-071).
+    // too, else the first reconcile would re-prune/rebuild (ADR-072).
     let manifest = bundle::load_current_bundle_manifest()?;
     let mut bundle_state = bundle::load_bundle_state();
     bundle_state.applied_bundle_id = Some(manifest.bundle_id);
@@ -382,7 +382,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         log::info!("starting containers via idempotent compose_up");
         speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
         // Idempotent up, not force-recreate: config-hash convergence plus
-        // content-addressed image tags (ADR-071) recreate exactly what
+        // content-addressed image tags (ADR-072) recreate exactly what
         // changed; an unchanged running project starts in seconds.
         rt.compose_up(project)?;
         Ok(())
@@ -2822,7 +2822,7 @@ networks:
         );
         assert!(
             body.contains("applied_image_hashes = manifest.image_hashes"),
-            "build_images() must persist the per-image hash map (ADR-071) — without it the \
+            "build_images() must persist the per-image hash map (ADR-072) — without it the \
              first reconcile after setup would treat every image as replaced"
         );
         assert!(
@@ -2842,7 +2842,7 @@ networks:
 
         assert!(
             !body.contains("compose_up_recreate"),
-            "start must use idempotent compose_up (ADR-071), not force-recreate"
+            "start must use idempotent compose_up (ADR-072), not force-recreate"
         );
         let up_pos = body
             .find("rt.compose_up(project)")

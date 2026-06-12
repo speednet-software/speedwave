@@ -1756,7 +1756,7 @@ mod tests {
     /// Behavioral: the switch closure brings the destination up via idempotent
     /// `compose_up`, NOT `compose_up_recreate`. Mirrors the production closure
     /// in `project_cmd::switch_project` (render/validate omitted — this exercises
-    /// the up-vs-recreate decision the perf change rests on, ADR-071).
+    /// the up-vs-recreate decision the perf change rests on, ADR-072).
     #[test]
     fn switch_core_brings_destination_up_without_recreate() {
         let (rt, handles) = MockRuntimeBuilder::new().build();

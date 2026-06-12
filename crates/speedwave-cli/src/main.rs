@@ -962,7 +962,7 @@ fn main() -> anyhow::Result<()> {
     // Save compose file and start containers.
     // Build missing images first (outside the compose lock, ADR-066) —
     // pull_policy:never would fail a CLI run made after an app update but
-    // before Desktop reconciles (ADR-071).
+    // before Desktop reconciles (ADR-072).
     let bundle_manifest = speedwave_runtime::bundle::load_current_bundle_manifest()?;
     let enabled_imgs = speedwave_runtime::build::enabled_images(&integrations);
     let built = speedwave_runtime::build::build_missing_images_locked(
@@ -1099,7 +1099,7 @@ mod tests {
         );
     }
 
-    /// Structural (ADR-071): the run path must build missing images BEFORE the
+    /// Structural (ADR-072): the run path must build missing images BEFORE the
     /// compose transaction — pull_policy:never fails a CLI-first-after-update.
     #[test]
     fn run_builds_missing_images_before_compose_transaction() {

@@ -879,7 +879,7 @@ impl WslRuntime {
             );
         }
 
-        // Align in-distro nerdctl to the pin if drifted (ADR-071); runs before
+        // Align in-distro nerdctl to the pin if drifted (ADR-072); runs before
         // the readiness probes because a reinstall stops the daemons.
         crate::provision::ensure_nerdctl_version();
 

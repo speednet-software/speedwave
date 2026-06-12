@@ -1,4 +1,4 @@
-# ADR-071: Per-image build-input hash tags + BuildKit cache retention
+# ADR-072: Per-image build-input hash tags + BuildKit cache retention
 
 ## Status
 

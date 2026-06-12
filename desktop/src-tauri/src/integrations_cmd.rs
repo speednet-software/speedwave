@@ -1444,7 +1444,7 @@ pub async fn restart_integration_containers(
             use crate::types::IntoAnyhow;
             crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
 
-            // Idempotent up with NO prior down (ADR-071 tags + config-hash
+            // Idempotent up with NO prior down (ADR-072 tags + config-hash
             // convergence): creates/removes the toggled worker (--remove-orphans)
             // and recreates only claude + hub, whose ENABLED_SERVICES changed —
             // the remaining containers keep running untouched.
@@ -2355,7 +2355,7 @@ mod tests {
 
         assert!(
             !fn_body.contains("compose_up_recreate"),
-            "toggle must use idempotent compose_up (ADR-071 convergence), not force-recreate"
+            "toggle must use idempotent compose_up (ADR-072 convergence), not force-recreate"
         );
         assert!(
             !fn_body.contains("compose_down"),

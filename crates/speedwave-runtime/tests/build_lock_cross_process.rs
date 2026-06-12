@@ -1,4 +1,4 @@
-//! Cross-process build-lock test (ADR-071) — re-execs the test binary as
+//! Cross-process build-lock test (ADR-072) — re-execs the test binary as
 //! parent+child per `tests/compose_lock_cross_process.rs` pattern, asserts the
 //! second process blocks on `<data_dir>/build.lock` until the first releases.
 

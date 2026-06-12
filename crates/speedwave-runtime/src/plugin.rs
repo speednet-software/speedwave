@@ -1709,7 +1709,7 @@ fn install_plugin_with_base(
 ///
 /// When `runtime` is provided AND the plugin has a `service_id` (i.e. an
 /// MCP plugin with a built container image), also removes the cached
-/// container images (content-addressed tags, ADR-071). Image cleanup is
+/// container images (content-addressed tags, ADR-072). Image cleanup is
 /// best-effort — a failure is logged at warn level but does not fail the
 /// removal, since at that point the plugin directory is already gone and
 /// the surviving image is at worst a few hundred MB of leaked disk.
@@ -1747,7 +1747,7 @@ fn remove_plugin_with_base(
     } else {
         None
     };
-    // Content-addressed tags (ADR-071): collect BOTH the tag derived from the
+    // Content-addressed tags (ADR-072): collect BOTH the tag derived from the
     // current tree and the last-built tag recorded in plugin-state — they can
     // differ when a reinstall happened without a rebuild.
     let mut tags_for_removal: Vec<String> = Vec::new();
@@ -2443,7 +2443,7 @@ fn build_single_plugin_image(
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
-    // ADR-071: every image build + tag prune is serialised by build.lock.
+    // ADR-072: every image build + tag prune is serialised by build.lock.
     // Single choke point for install / ensure / pending paths; callers must
     // not already hold the lock (it is not reentrant).
     crate::build::with_build_lock(|| {
@@ -2518,7 +2518,7 @@ fn build_single_plugin_image_locked(
     Ok(())
 }
 
-/// Content-addressed plugin image tag (ADR-071): `<version|image_tag>-<digest16>`.
+/// Content-addressed plugin image tag (ADR-072): `<version|image_tag>-<digest16>`.
 /// Any tree change retags, so idempotent `compose up` recreates the container.
 fn plugin_image_tag(manifest: &PluginManifest, digest_hex: &str) -> String {
     let mut base = manifest
@@ -7635,7 +7635,7 @@ mod tests {
         )
         .unwrap();
         let after = expected_tag_for(tmp.path(), "example-plugin");
-        assert_ne!(before, after, "tree change must retag (ADR-071)");
+        assert_ne!(before, after, "tree change must retag (ADR-072)");
         assert!(after.starts_with("speedwave-mcp-example-plugin:1.0.0-"));
     }
 
@@ -7858,7 +7858,7 @@ mod tests {
             .expect("locked inner fn must exist");
         assert!(
             source[outer..body_end].contains("with_build_lock"),
-            "plugin build+prune must be serialised by build.lock (ADR-071)"
+            "plugin build+prune must be serialised by build.lock (ADR-072)"
         );
     }
 
