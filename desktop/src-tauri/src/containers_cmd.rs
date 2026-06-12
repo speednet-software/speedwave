@@ -1994,6 +1994,18 @@ mod tests {
         assert!(!pending_teardowns_lock().contains_key("bg-dup-proj"));
     }
 
+    /// Structural: the build script must gate the build-context hash root on
+    /// COMPLETENESS of declared hash inputs — CI stubs create the dirs only.
+    #[test]
+    fn build_script_requires_complete_context_for_hash_root() {
+        let source = include_str!("../build.rs");
+        assert!(
+            source.contains("flat_map(|img| img.hash_inputs.iter())")
+                && source.contains("all(|input| build_context.join(input).exists())"),
+            "partial/stubbed build-context must fall back to the repo root"
+        );
+    }
+
     /// Structural: add_project's closure must lazy-build project images before
     /// start_containers — repo-enabled integrations would otherwise fail up.
     #[test]
