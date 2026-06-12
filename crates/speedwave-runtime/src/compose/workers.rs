@@ -58,11 +58,7 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
             }
             Ok(None) => {}
             Err(e) => {
-                // Permission error or transient OS fault on one worker's token dir —
-                // log and skip rather than aborting the entire compose render, so all
-                // other services can still start. The affected worker runs without a
-                // SPW_CREDENTIALS_DIGEST until the user restarts; that's safer than a
-                // total outage.
+                // One unreadable token dir must not abort the whole render — other services still start.
                 log::warn!("credentials_digest for '{name}' failed, skipping: {e}");
             }
         }
@@ -70,25 +66,16 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Machine-managed artifacts that change on every routine OAuth refresh —
-/// the worker reads them live, so they must NOT retrigger a recreate.
-/// Contract (ADR-060/071): `access_token` is the ONLY machine-written mount
-/// artifact; a provider adding another rotating file must list it here.
+/// Machine-managed OAuth artifacts — change on every refresh, must NOT trigger recreate.
+/// Contract (ADR-060/071): add here any new machine-written file in the token mount.
 const VOLATILE_CREDENTIAL_FILES: &[&str] = &["access_token"];
 
-/// Returns true for files that are transient write-in-progress artifacts and
-/// must be excluded from the digest. `writeRestrictedSecret` in
-/// `mcp-servers/shared` uses the pattern `<name>.tmp.<pid>.<rand>` — a
-/// digest walk that catches such a file mid-rename would flip the digest
-/// spuriously on every routine OAuth refresh.
+/// `writeRestrictedSecret` pattern: `<name>.tmp.<pid>.<rand>` — exclude mid-rename files.
 fn is_write_in_progress(name: &std::ffi::OsStr) -> bool {
     name.to_string_lossy().contains(".tmp.")
 }
 
-/// SHA-256 over the worker's user-entered token files (sorted).
-/// `Ok(None)` when the worker has no credentials at all — absence vs presence
-/// still flips the env var, so the first save also recreates the worker.
-/// Transient read errors propagate: a silent flip would churn the worker.
+/// SHA-256 over sorted user-entered token files. `Ok(None)` = no credentials.
 fn credentials_digest(token_dir: &std::path::Path) -> anyhow::Result<Option<String>> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();

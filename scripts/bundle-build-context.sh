@@ -78,9 +78,7 @@ for svc in $MCP_SERVICES; do
   # Some services (e.g. playwright) have no own src/ — they wrap an upstream npm package.
   [ -d "$svc_src/src" ] && cp -r "$svc_src/src" "$svc_dest/"
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
-  # office ships Python support-scripts + a pinned requirements.txt that its
-  # Dockerfile COPYs. test_*.py are excluded — pytest is not in the runtime
-  # image and they add unnecessary bundle weight. Must match bundle-build-context.ps1.
+  # office: exclude test_*.py — not in runtime image; must match bundle-build-context.ps1.
   if [ -d "$svc_src/scripts" ]; then
     mkdir -p "$svc_dest/scripts"
     find "$svc_src/scripts" -maxdepth 1 -type f ! -name 'test_*.py' -exec cp {} "$svc_dest/scripts/" \;

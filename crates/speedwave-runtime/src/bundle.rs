@@ -510,17 +510,13 @@ fn save_bundle_state_to(state: &BundleState, path: &Path) -> anyhow::Result<()> 
             .create(true)
             .truncate(true)
             .open(&tmp)?;
-        // Restrict permissions before fsync — rename preserves the inode on
-        // Unix, so the final file inherits the mode written here.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
         file.write_all(json.as_bytes())?;
-        // fsync data before rename — without this, APFS/virtiofs can persist
-        // the rename before the data blocks, leaving a zero-length state file
-        // after a crash (same class of bug as compose.yml torn writes).
+        // fsync before rename — APFS/virtiofs can persist the rename before data blocks (torn write).
         crate::fs_perms::fsync_file_durable(&file)
             .map_err(|e| anyhow::anyhow!("fsync bundle-state before rename: {e}"))?;
     }
@@ -708,11 +704,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
-            // fsync each file so a crash mid-copy leaves the staging directory in
-            // a detectable incomplete state rather than silently partially-written.
-            // Without this, APFS/virtiofs can persist the rename of staging→target
-            // before file data blocks are durable — the same bug class as the
-            // compose.yml torn-write (project_compose_yml_torn_write_fsync.md).
+            // fsync each file — staging→target rename must not outlive the data (torn-write).
             let file = std::fs::File::open(&dst_path)
                 .map_err(|e| anyhow::anyhow!("open {} for fsync: {e}", dst_path.display()))?;
             crate::fs_perms::fsync_file_durable(&file)

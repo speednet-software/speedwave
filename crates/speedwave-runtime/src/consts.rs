@@ -2080,10 +2080,7 @@ mod tests {
 
     #[test]
     fn test_built_in_service_ids_covers_all_toggleable_services() {
-        // SSOT tie: every TOGGLEABLE_MCP_SERVICES config_key must be in BUILT_IN_SERVICE_IDS
-        // so plugins cannot shadow a built-in service with the same slug. Adding a service
-        // to TOGGLEABLE_MCP_SERVICES without adding it here lets a plugin install with a
-        // matching slug, which collides on the compose network and the hub worker-env.
+        // SSOT: every TOGGLEABLE_MCP_SERVICES config_key must be in BUILT_IN_SERVICE_IDS (plugin blocklist).
         for svc in TOGGLEABLE_MCP_SERVICES {
             assert!(
                 BUILT_IN_SERVICE_IDS.contains(&svc.config_key),

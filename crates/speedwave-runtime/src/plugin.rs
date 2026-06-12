@@ -1988,9 +1988,7 @@ pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginM
 
     let mut entries: Vec<std::fs::DirEntry> =
         std::fs::read_dir(plugins_dir)?.collect::<Result<_, _>>()?;
-    // Sort by slug (directory name) for deterministic compose output.
-    // Non-deterministic order changes SPW_PLUGIN_DIGESTS and volume sequences
-    // on every call, which would trigger spurious container recreates.
+    // Sort by slug — non-deterministic readdir order flips SPW_PLUGIN_DIGESTS across renders.
     entries.sort_by_key(|e| e.file_name());
 
     let mut plugins = Vec::new();

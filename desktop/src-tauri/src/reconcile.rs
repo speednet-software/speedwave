@@ -650,6 +650,21 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             config::SpeedwaveUserConfig::default()
         }
     };
+
+    // Converge crash-interrupted teardowns before restoring projects (id-changed path).
+    for project in crate::containers_cmd::crashed_teardown_intents() {
+        if user_config.active_project.as_deref() == Some(project.as_str()) {
+            continue; // active project is re-started right after — idempotent up converges it
+        }
+        if state.pending_running_projects.contains(&project) {
+            continue; // about to restore it — teardown would race the restore
+        }
+        log::info!(
+            "reconcile_bundle: converging crash-interrupted teardown of '{project}' (id-changed path)"
+        );
+        crate::containers_cmd::spawn_background_teardown(project);
+    }
+
     let mut projects = state.pending_running_projects.clone();
     let running_projects = list_running_projects(&rt, &user_config)?;
     for project in running_projects {
@@ -1196,6 +1211,34 @@ mod tests {
         assert!(
             window.contains("skipping teardown convergence"),
             "the Err arm must skip convergence instead of tearing down blindly"
+        );
+    }
+
+    #[test]
+    fn id_changed_branch_also_converges_teardown_intents() {
+        // Crash-interrupted teardowns must be converged in BOTH reconcile paths:
+        // the no-change path (else branch) AND the id-changed path. Without the
+        // id-changed path, orphaned containers accumulate whenever a crash and a
+        // bundle update happen in the same window.
+        let source = include_str!("reconcile.rs");
+
+        // Find the id-changed convergence block — it uses the same call but the
+        // comment says "id-changed path".
+        let anchor = source
+            .find("Converge crash-interrupted teardowns before restoring projects")
+            .expect("id-changed convergence block must exist");
+        let window = &source[anchor..anchor + 1500];
+        assert!(
+            window.contains("crashed_teardown_intents()"),
+            "id-changed path must read persisted teardown intents"
+        );
+        assert!(
+            window.contains("id-changed path"),
+            "id-changed convergence block must be labelled so it is distinguishable from the no-change block"
+        );
+        assert!(
+            window.contains("pending_running_projects.contains"),
+            "id-changed convergence must skip projects about to be restored (teardown vs restore race)"
         );
     }
     use serial_test::serial;

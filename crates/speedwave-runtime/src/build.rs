@@ -2577,9 +2577,7 @@ mod tests {
 
     #[test]
     fn bundle_build_context_sh_covers_all_worker_images() {
-        // SSOT tie: every IMAGES entry with the `speedwave-mcp-` prefix (except hub) must
-        // appear in MCP_SERVICES in bundle-build-context.sh.  Without this test the .sh list
-        // can silently lag behind IMAGES, shipping an app that never builds the new image.
+        // SSOT: every IMAGES mcp- entry (except hub) must be in MCP_SERVICES in bundle-build-context.sh.
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()

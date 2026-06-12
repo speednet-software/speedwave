@@ -2863,21 +2863,16 @@ services:
 
     #[test]
     fn compose_template_worker_url_env_vars_match_toggleable_services() {
-        // SSOT tie: every WORKER_<X>_URL= line in compose.template.yml under the `claude`
-        // service must match a `worker_env` from TOGGLEABLE_MCP_SERVICES, and vice versa.
-        // Prevents a new service being added in consts.rs but forgotten in the template,
-        // or a renamed env var drifting silently.
+        // SSOT: WORKER_*_URL lines in compose.template.yml must match TOGGLEABLE_MCP_SERVICES.worker_env.
         let expected: std::collections::BTreeSet<&str> = crate::consts::TOGGLEABLE_MCP_SERVICES
             .iter()
             .map(|s| s.worker_env)
             .collect();
 
-        // Parse WORKER_*_URL= lines from compose.template.yml under the claude service env block.
         let found: std::collections::BTreeSet<&str> = COMPOSE_TEMPLATE
             .lines()
             .filter_map(|l| {
                 let trimmed = l.trim_start();
-                // Match `- WORKER_FOO_URL=...`
                 let after_dash = trimmed.strip_prefix("- ")?;
                 let var_name = after_dash.split('=').next()?;
                 if var_name.starts_with("WORKER_") && var_name.ends_with("_URL") {
