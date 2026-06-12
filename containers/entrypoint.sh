@@ -300,7 +300,9 @@ touch "${CLAUDE_READY_MARKER:-/tmp/claude-ready}"
 if [ $# -gt 0 ]; then
     exec "$@"
 else
-    # PID1 must trap TERM — bare `sleep` ignores it and compose down waits 10s.
-    trap 'exit 0' TERM INT
+    # PID1 must trap TERM — bare `sleep` ignores it and compose down waits
+    # 10s. Kill the background sleep too: an orphan would outlive the shell
+    # (and wedge the bats harness waiting on its output pipe).
+    trap 'kill "$!" 2>/dev/null; exit 0' TERM INT
     while :; do sleep 86400 & wait $!; done
 fi
