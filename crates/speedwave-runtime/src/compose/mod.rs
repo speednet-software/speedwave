@@ -62,7 +62,8 @@ pub(crate) use plugins::{apply_plugins, ApplyPluginsCtx};
 
 // Token / secrets directory paths.
 pub use tokens::{
-    ensure_token_dir, ensure_token_dir_in, init_secrets_dir, tokens_path, tokens_path_in,
+    ensure_token_dir, ensure_token_dir_in, init_secrets_dir, llm_provider_key_path_in, tokens_path,
+    tokens_path_in, LLM_TOKEN_FILE_SUFFIX, LLM_TOKEN_SERVICE,
 };
 pub(crate) use tokens::{init_secrets_dir_in, resolve_tokens_dir_in};
 
@@ -1116,7 +1117,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 38;
+    const SECURITY_RULE_COUNT: usize = 39;
 
     /// Repo root (workspace dir holding `containers/`, `mcp-servers/`), derived
     /// from this crate's manifest dir — used as the injected bundle build root
@@ -2905,11 +2906,18 @@ services:
         )
         .unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // Expected paths must derive from the SAME data_dir the render used —
+        // `compute()` reads the production singleton, which diverges from the
+        // tempdir-rooted tokens mount (litellm always mounts tokens/<p>/llm).
+        let tokens_dir = data_dir.path().join("tokens").join("test-project");
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::compute("test-project", "/home/user/projects/test").unwrap(),
+            &SecurityExpectedPaths::from_raw(
+                "/home/user/projects/test",
+                &tokens_dir.to_string_lossy(),
+            ),
             tmp.path(),
         );
         assert!(
@@ -7052,6 +7060,161 @@ services:
         SecurityExpectedPaths::from_raw("/test/project", "/test/.speedwave/tokens/test")
     }
 
+    /// Litellm service YAML with parameterised volumes (ADR-072 tests).
+    fn litellm_yaml(volumes: &str, extra: &str) -> String {
+        format!(
+            r#"
+version: "3"
+services:
+  litellm:
+    image: speedwave-litellm:1.0.0
+    user: "{user}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+{volumes}
+{extra}
+"#,
+            user = container_user(),
+        )
+    }
+
+    #[test]
+    fn test_security_litellm_canonical_mounts_pass() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = litellm_yaml(
+            "      - /test/.speedwave/litellm/test:/config:ro\n      \
+             - /test/.speedwave/tokens/test/llm:/tokens:ro\n      \
+             - /test/.speedwave/usage/test/litellm:/usage:rw",
+            "",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::LitellmVolumes),
+            "canonical litellm mounts must pass, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_litellm_rejects_writable_tokens_and_extra_mounts() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // tokens :rw + an extra workspace mount → both flagged.
+        let yaml = litellm_yaml(
+            "      - /test/.speedwave/litellm/test:/config:ro\n      \
+             - /test/.speedwave/tokens/test/llm:/tokens:rw\n      \
+             - /test/.speedwave/usage/test/litellm:/usage:rw\n      \
+             - /test/project:/workspace:rw",
+            "",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        let litellm: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule == SecurityRule::LitellmVolumes)
+            .collect();
+        assert!(
+            litellm.iter().any(|v| v.message.contains("/tokens")),
+            "rw tokens mount must be flagged: {litellm:?}"
+        );
+        assert!(
+            litellm.iter().any(|v| v.message.contains("unexpected")),
+            "extra workspace mount must be flagged: {litellm:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_litellm_rejects_foreign_tokens_namespace_and_host_network() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // Whole tokens dir (all services!) instead of the llm namespace +
+        // host networking → both flagged.
+        let yaml = litellm_yaml(
+            "      - /test/.speedwave/litellm/test:/config:ro\n      \
+             - /test/.speedwave/tokens/test:/tokens:ro\n      \
+             - /test/.speedwave/usage/test/litellm:/usage:rw",
+            "    network_mode: host",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        let litellm: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule == SecurityRule::LitellmVolumes)
+            .collect();
+        assert!(
+            litellm.iter().any(|v| v.message.contains("llm namespace")),
+            "whole-tokens-dir mount must be flagged: {litellm:?}"
+        );
+        assert!(
+            litellm.iter().any(|v| v.message.contains("network_mode")),
+            "host network must be flagged: {litellm:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_security_litellm_full_render_passes() {
+        // The real rendered compose must satisfy the litellm profile checks
+        // (read_only/tmpfs/no-ports come from the shared core rules).
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let expected = SecurityExpectedPaths::from_raw(
+            "/home/user/projects/test",
+            &tokens_dir.to_string_lossy(),
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test-project",
+            &[],
+            &expected,
+            data_dir.path(),
+        );
+        let litellm: Vec<_> = violations
+            .iter()
+            .filter(|v| v.container == "litellm" || v.rule == SecurityRule::LitellmVolumes)
+            .collect();
+        assert!(
+            litellm.is_empty(),
+            "rendered litellm service must pass all checks: {litellm:?}"
+        );
+    }
+
     /// Standard valid plugin YAML fragment with correct token + workspace mounts.
     fn valid_plugin_yaml(token_mode: &str) -> String {
         format!(
@@ -10495,6 +10658,62 @@ services:
     fn tokens_path_rejects_invalid_project_name() {
         let dir = tempfile::tempdir().unwrap();
         assert!(super::tokens_path_in(dir.path(), "../etc", "local-llm", "api_key").is_err());
+    }
+
+    // ── LiteLLM `llm` token namespace (ADR-072) ──────────────────────────
+
+    #[test]
+    fn llm_provider_key_path_resolves_for_valid_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        let p =
+            super::tokens::llm_provider_key_path_in(dir.path(), "myproj", "openrouter").unwrap();
+        let expected = dir
+            .path()
+            .join("tokens")
+            .join("myproj")
+            .join("llm")
+            .join("openrouter_api_key");
+        assert_eq!(p, expected);
+        // Hyphenated ids are valid slugs.
+        assert!(
+            super::tokens::llm_provider_key_path_in(dir.path(), "myproj", "my-anthropic").is_ok()
+        );
+    }
+
+    #[test]
+    fn llm_provider_key_path_rejects_traversal_and_bad_slugs() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in [
+            "../passwd",
+            "a/b",
+            "a\\b",
+            "UPPER",
+            "Bad.Provider",
+            "under_score",
+            "",
+            "1starts-with-digit",
+        ] {
+            assert!(
+                super::tokens::llm_provider_key_path_in(dir.path(), "myproj", bad).is_err(),
+                "provider id '{bad}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn llm_tokens_path_requires_api_key_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::tokens_path_in(dir.path(), "myproj", "llm", "openrouter_api_key").is_ok());
+        assert!(super::tokens_path_in(dir.path(), "myproj", "llm", "openrouter").is_err());
+        assert!(super::tokens_path_in(dir.path(), "myproj", "llm", "../escape_api_key").is_err());
+    }
+
+    #[test]
+    fn ensure_token_dir_supports_llm_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let service_dir = super::ensure_token_dir_in(dir.path(), "myproj", "llm").unwrap();
+        assert!(service_dir.is_dir());
+        assert!(service_dir.ends_with("tokens/myproj/llm"));
     }
 
     #[test]

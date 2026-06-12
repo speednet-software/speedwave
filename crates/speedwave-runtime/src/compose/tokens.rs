@@ -51,17 +51,70 @@ pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Res
 /// Services with token files under `~/.speedwave/tokens/<project>/<service>/`.
 /// Whitelist enforced by `tokens_path`. Plugins use a separate path discipline
 /// (validated by `plugin::validate_manifest`).
-const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm"];
+const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm", LLM_TOKEN_SERVICE];
+
+/// LiteLLM per-provider key namespace (ADR-072). Mounted `:ro` at `/tokens`
+/// in the litellm container; its entrypoint exports each file as
+/// `SPW_KEY_<PROVIDER_ID>`. The namespace is reserved against plugin slugs
+/// in `consts::BUILT_IN_SERVICE_IDS`.
+pub const LLM_TOKEN_SERVICE: &str = "llm";
+
+/// Suffix every LiteLLM provider key file carries: `<provider_id>_api_key`.
+pub const LLM_TOKEN_FILE_SUFFIX: &str = "_api_key";
 
 /// Per-service whitelist of file names allowed under
 /// `tokens/<project>/<service>/`. Adding a new file = edit this map.
 const ALLOWED_TOKEN_FILES_LOCAL_LLM: &[&str] = &["api_key", "custom_headers"];
 
-fn allowed_files_for(service: &str) -> Option<&'static [&'static str]> {
+/// Validates a file name for the given token service. `local-llm` uses a
+/// static whitelist; `llm` file names embed a user-defined provider id, so
+/// the id segment is validated against the plugin-grade slug shape instead
+/// (`^[a-z][a-z0-9-]{0,63}$` — no dots, no slashes, no traversal).
+fn validate_token_file(service: &str, file: &str) -> anyhow::Result<()> {
     match service {
-        "local-llm" => Some(ALLOWED_TOKEN_FILES_LOCAL_LLM),
-        _ => None,
+        "local-llm" => {
+            if !ALLOWED_TOKEN_FILES_LOCAL_LLM.contains(&file) {
+                anyhow::bail!(
+                    "tokens_path: file '{}' not allowed for service '{}'",
+                    file,
+                    service
+                );
+            }
+            Ok(())
+        }
+        LLM_TOKEN_SERVICE => {
+            let provider_id = file.strip_suffix(LLM_TOKEN_FILE_SUFFIX).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "tokens_path: file '{}' must end with '{}'",
+                    file,
+                    LLM_TOKEN_FILE_SUFFIX
+                )
+            })?;
+            if !crate::plugin::is_valid_slug(provider_id) {
+                anyhow::bail!(
+                    "tokens_path: provider id '{}' is not a valid slug",
+                    provider_id
+                );
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("tokens_path: no file allow-list for service '{}'", service),
     }
+}
+
+/// Resolves the key-file path for one LiteLLM provider:
+/// `tokens/<project>/llm/<provider_id>_api_key`. Slug-validates the id.
+pub fn llm_provider_key_path_in(
+    data_dir: &Path,
+    project: &str,
+    provider_id: &str,
+) -> anyhow::Result<PathBuf> {
+    tokens_path_in(
+        data_dir,
+        project,
+        LLM_TOKEN_SERVICE,
+        &format!("{provider_id}{LLM_TOKEN_FILE_SUFFIX}"),
+    )
 }
 
 /// Resolves the on-disk path for a per-project local-LLM token file.
@@ -81,16 +134,7 @@ pub fn tokens_path_in(
     if !ALLOWED_TOKEN_SERVICES.contains(&service) {
         anyhow::bail!("tokens_path: service '{}' not in allow-list", service);
     }
-    let files = allowed_files_for(service).ok_or_else(|| {
-        anyhow::anyhow!("tokens_path: no file allow-list for service '{}'", service)
-    })?;
-    if !files.contains(&file) {
-        anyhow::bail!(
-            "tokens_path: file '{}' not allowed for service '{}'",
-            file,
-            service
-        );
-    }
+    validate_token_file(service, file)?;
     Ok(data_dir
         .join("tokens")
         .join(project)

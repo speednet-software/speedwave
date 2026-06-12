@@ -64,6 +64,9 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         ),
         // Anthropic API keys: sk-ant- prefixed
         (r"sk-ant-[A-Za-z0-9_-]+", "***REDACTED_ANTHROPIC_KEY***"),
+        // Google API keys (Gemini via LiteLLM, ADR-072): AIza + exactly 35
+        // base64url chars per Google's documented key shape.
+        (r"\bAIza[0-9A-Za-z_-]{35}\b", "***REDACTED_GOOGLE_KEY***"),
         // Bare sk-prefixed keys: sk-proj-*, sk-test-*, sk-or-* (OpenRouter),
         // vLLM/LiteLLM/LM Studio user-configured keys. ≥16 trailing chars to
         // avoid false positives on short identifiers like "sk-short" or words
@@ -167,7 +170,7 @@ mod tests {
     /// The definitions vec contains exactly this many rules. If a new rule is
     /// added to the vec but fails to compile, RULES.len() will be less than
     /// this constant and the test will fail, catching the silent drop.
-    const EXPECTED_RULE_COUNT: usize = 22;
+    const EXPECTED_RULE_COUNT: usize = 23;
 
     #[test]
     fn test_rules_count() {
@@ -205,6 +208,7 @@ mod tests {
             r"glpat-[A-Za-z0-9\-]{20,}",
             r"ATATT[A-Za-z0-9_\-]{20,}",
             r"sk-ant-[A-Za-z0-9_-]+",
+            r"\bAIza[0-9A-Za-z_-]{35}\b",
             r"\bsk-[A-Za-z0-9_-]{16,}",
             r"(://[^:/@\s]+:)[^@\s]+(@)",
             r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token|[a-z0-9_]*_token)=)[^&\s]+",
@@ -226,6 +230,26 @@ mod tests {
                 "Static sanitizer pattern failed to compile: '{pat}'"
             );
         }
+    }
+
+    #[test]
+    fn test_google_api_key_redacted() {
+        // 35 chars after AIza per Google's documented key shape.
+        let input = "Gemini key: AIzaSyA1234567890abcdefghijklmnopqrstu7 in use";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("AIzaSy"),
+            "Google API key should be redacted: {output}"
+        );
+        assert!(output.contains("***REDACTED_GOOGLE_KEY***"));
+    }
+
+    #[test]
+    fn test_google_key_lookalike_not_redacted() {
+        // Too short (10 chars after AIza) — a normal identifier, not a key.
+        let input = "symbol AIzaShortName is fine";
+        let output = sanitize(input);
+        assert_eq!(output, input, "short AIza-prefixed words must pass through");
     }
 
     #[test]

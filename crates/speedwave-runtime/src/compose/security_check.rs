@@ -246,6 +246,12 @@ pub enum SecurityRule {
     #[strum(props(description = "Slack has /workspace mount"))]
     SlackMissingWorkspaceMount,
 
+    /// LiteLLM proxy mounts exactly config:ro + tokens:ro + usage:rw and no
+    /// host network (ADR-072 — it is a worker-class token holder).
+    #[strum(to_string = "LITELLM_VOLUMES")]
+    #[strum(props(description = "LiteLLM mounts are config:ro, tokens:ro, usage:rw only"))]
+    LitellmVolumes,
+
     // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
@@ -406,6 +412,8 @@ impl SecurityCheck {
             // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
             Self::check_builtin_slack_volumes(&doc, expected_paths),
+            // LiteLLM proxy mount profile (ADR-072)
+            Self::check_litellm_volumes(&doc, expected_paths),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -483,7 +491,7 @@ impl SecurityCheck {
             None => return violations,
         };
 
-        let read_only_required = ["claude", "mcp-hub"];
+        let read_only_required = ["claude", "mcp-hub", "litellm"];
         for required in &read_only_required {
             if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
                 let is_read_only = service
@@ -512,7 +520,7 @@ impl SecurityCheck {
             None => return violations,
         };
 
-        let tmpfs_required = ["claude", "mcp-hub"];
+        let tmpfs_required = ["claude", "mcp-hub", "litellm"];
         for required in &tmpfs_required {
             if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
                 let has_tmpfs_noexec = service
@@ -928,6 +936,110 @@ impl SecurityCheck {
             };
             let (base_violations, _) = validate_service_volume_mounts(service, &params);
             violations.extend(base_violations);
+        }
+        violations
+    }
+
+    /// ADR-072: the litellm proxy is a worker-class token holder. Its mounts
+    /// must be exactly: `/config:ro`, `<tokens>/llm:/tokens:ro`, `/usage:rw` —
+    /// nothing else (no workspace, no claude-home, no sockets) — and it must
+    /// not use host networking.
+    fn check_litellm_volumes(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let services = match get_services(doc) {
+            Some(s) => s,
+            None => return violations,
+        };
+        let (name, service) = match services.iter().find(|(n, _)| n == "litellm") {
+            Some(pair) => pair,
+            None => return violations, // not rendered (legacy path) — nothing to check
+        };
+
+        if service.get("network_mode").is_some() {
+            violations.push(SecurityViolation {
+                container: name.clone(),
+                rule: SecurityRule::LitellmVolumes,
+                message: "litellm must not set network_mode".into(),
+                remediation: "Remove 'network_mode' — litellm joins only the per-project network.",
+            });
+        }
+
+        let volumes: Vec<String> = service
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let expected_tokens = format!("{}/llm", expected_paths.tokens_engine_dir());
+        let mut matched = 0usize;
+        for vol in &volumes {
+            if let Some((host, mode)) = extract_volume_for_target(vol, "/config") {
+                let _ = host;
+                if mode.as_deref() != Some("ro") {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::LitellmVolumes,
+                        message: format!("litellm /config mount must be ro: {vol}"),
+                        remediation: "Mount the rendered config directory ':ro'.",
+                    });
+                }
+                matched += 1;
+            } else if let Some((host, mode)) = extract_volume_for_target(vol, "/tokens") {
+                if mode.as_deref() != Some("ro") {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::LitellmVolumes,
+                        message: format!("litellm /tokens mount must be ro: {vol}"),
+                        remediation: "Mount the llm token directory ':ro'.",
+                    });
+                }
+                if host != expected_tokens {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::LitellmVolumes,
+                        message: format!(
+                            "litellm /tokens host path must be the llm namespace \
+                             ('{expected_tokens}'), got: {vol}"
+                        ),
+                        remediation: "Mount '<data_dir>/tokens/<project>/llm' at /tokens.",
+                    });
+                }
+                matched += 1;
+            } else if let Some((_, mode)) = extract_volume_for_target(vol, "/usage") {
+                if mode.as_deref() != Some("rw") {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::LitellmVolumes,
+                        message: format!("litellm /usage mount must be rw: {vol}"),
+                        remediation: "Mount the usage sink ':rw' — it is the only writable mount.",
+                    });
+                }
+                matched += 1;
+            } else {
+                violations.push(SecurityViolation {
+                    container: name.clone(),
+                    rule: SecurityRule::LitellmVolumes,
+                    message: format!("litellm has an unexpected volume: {vol}"),
+                    remediation: "litellm mounts exactly /config:ro, /tokens:ro and /usage:rw.",
+                });
+            }
+        }
+        if matched != 3 {
+            violations.push(SecurityViolation {
+                container: name.clone(),
+                rule: SecurityRule::LitellmVolumes,
+                message: format!(
+                    "litellm must mount exactly /config, /tokens and /usage (found {matched})"
+                ),
+                remediation: "Restore the three canonical mounts in compose.template.yml.",
+            });
         }
         violations
     }
