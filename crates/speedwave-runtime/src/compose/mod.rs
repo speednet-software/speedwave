@@ -192,6 +192,10 @@ pub fn render_compose_in(
         &build::image_ref(build::IMAGE_CLAUDE, &bundle_manifest.bundle_id),
     );
     yaml = yaml.replace(
+        "${IMAGE_LITELLM}",
+        &build::image_ref(build::IMAGE_LITELLM, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
         "${IMAGE_MCP_HUB}",
         &build::image_ref(build::IMAGE_MCP_HUB, &bundle_manifest.bundle_id),
     );
@@ -242,6 +246,26 @@ pub fn render_compose_in(
         std::fs::set_permissions(&ide_lock_dir, std::fs::Permissions::from_mode(0o700))?;
     }
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
+
+    // LiteLLM proxy mounts (ADR-072): rendered config (ro) + usage sink (rw).
+    // Both per-project; the config file itself is written by
+    // litellm::write_litellm_config_in inside the same render transaction.
+    let litellm_config_dir = data_dir.join("litellm").join(project_name);
+    std::fs::create_dir_all(&litellm_config_dir)?;
+    let litellm_usage_dir = data_dir.join("usage").join(project_name).join("litellm");
+    std::fs::create_dir_all(&litellm_usage_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&litellm_config_dir, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&litellm_usage_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    yaml = yaml.replace(
+        "${LITELLM_CONFIG_DIR}",
+        &to_engine_path(&litellm_config_dir)?,
+    );
+    yaml = yaml.replace("${LITELLM_USAGE_DIR}", &to_engine_path(&litellm_usage_dir)?);
+
     yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
@@ -338,7 +362,9 @@ fn format_cpus(cpus: f32) -> String {
 /// MiB (`Nm`) for one canonical format; CPU as one-decimal (`2.0`). The
 /// resource-drift test asserts the template carries exactly these placeholders.
 fn apply_container_resources(yaml: &str) -> String {
-    use crate::resources::{ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES};
+    use crate::resources::{
+        ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES, LITELLM_RESOURCES,
+    };
 
     // Substitute the ${PREFIX_*} placeholders for one container into `out`.
     fn apply(out: &mut String, prefix: &str, r: &ContainerResources) {
@@ -359,6 +385,7 @@ fn apply_container_resources(yaml: &str) -> String {
     out = out.replace("${CLAUDE_MEMORY}", &format_mib(CLAUDE_RESOURCES.mem_mib));
     apply(&mut out, "CLAUDE", &CLAUDE_RESOURCES);
     apply(&mut out, "MCP_HUB", &HUB_RESOURCES);
+    apply(&mut out, "LITELLM", &LITELLM_RESOURCES);
 
     for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
         // compose_name "mcp-slack" → placeholder prefix "MCP_SLACK".
@@ -2541,8 +2568,10 @@ services:
         let worker_port_line = format!("PORT={}", crate::consts::PORT_WORKER);
         for (name_value, svc) in services {
             let name = name_value.as_str().unwrap_or("");
-            // Only workers have PORT=; claude does not define PORT.
-            if name == "claude" || name == "mcp-hub" {
+            // Only workers have PORT=; claude does not define PORT, and
+            // litellm listens on a fixed port baked into its entrypoint
+            // (ADR-072) — it is not an MCP worker.
+            if name == "claude" || name == "mcp-hub" || name == "litellm" {
                 continue;
             }
             let env = svc
@@ -3329,18 +3358,20 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        // Default anthropic: no proxy, no ANTHROPIC_BASE_URL override
+        // Default anthropic (legacy direct path): the litellm SERVICE exists in
+        // every rendered compose (ADR-072) but the claude container's env must
+        // not be redirected at it until the proxy injection path is active.
         assert!(
             !yaml.contains("llm-proxy"),
             "Default anthropic provider should not add llm-proxy"
         );
         assert!(
-            !yaml.contains("litellm"),
-            "Default anthropic provider should not reference litellm"
+            !get_claude_env(&yaml).iter().any(|e| e.contains("litellm")),
+            "Default anthropic (direct path) must not point claude env at litellm"
         );
         assert!(
             !yaml.contains("ghcr.io/berriai"),
-            "Default anthropic provider should not reference litellm image"
+            "litellm image must be the locally built one, never pulled from ghcr"
         );
         // Should not contain base_url override (unless explicitly configured)
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -3370,6 +3401,98 @@ services:
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
+    }
+
+    /// ADR-072: the litellm service renders in every compose with the locally
+    /// built image, hardened mounts (config ro, tokens ro, usage rw), no host
+    /// ports, and the per-project network — and its host-side mount dirs are
+    /// created by the renderer.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_litellm_service_rendered() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let svc = doc
+            .get("services")
+            .and_then(|s| s.get("litellm"))
+            .expect("litellm service must render");
+
+        let image = svc.get("image").and_then(|i| i.as_str()).unwrap();
+        assert!(
+            image.starts_with(build::IMAGE_LITELLM),
+            "litellm must use the locally built image, got {image}"
+        );
+        assert_eq!(
+            svc.get("pull_policy").and_then(|p| p.as_str()),
+            Some("never"),
+            "litellm image must never be pulled"
+        );
+        assert!(
+            svc.get("ports").is_none(),
+            "litellm must not expose host ports"
+        );
+        assert_eq!(
+            svc.get("read_only").and_then(|r| r.as_bool()),
+            Some(true),
+            "litellm must be read_only"
+        );
+
+        let volumes: Vec<&str> = svc
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            volumes.iter().any(|v| v.ends_with(":/config:ro")),
+            "config mount must be ro, got {volumes:?}"
+        );
+        assert!(
+            volumes
+                .iter()
+                .any(|v| v.contains("/llm:/tokens") && v.ends_with(":ro")),
+            "tokens mount must be the llm namespace, ro, got {volumes:?}"
+        );
+        assert!(
+            volumes.iter().any(|v| v.ends_with(":/usage:rw")),
+            "usage mount must be rw, got {volumes:?}"
+        );
+
+        // Renderer must create the host-side mount sources.
+        assert!(
+            data_dir
+                .path()
+                .join("litellm")
+                .join("test-project")
+                .is_dir(),
+            "litellm config dir must be created"
+        );
+        assert!(
+            data_dir
+                .path()
+                .join("usage")
+                .join("test-project")
+                .join("litellm")
+                .is_dir(),
+            "usage dir must be created"
+        );
     }
 
     #[test]
@@ -3451,8 +3574,8 @@ services:
         );
         assert!(!yaml.contains("llm-proxy"), "Ollama must not add llm-proxy");
         assert!(
-            !yaml.contains("litellm"),
-            "Ollama must not reference litellm"
+            !env.iter().any(|e| e.contains("litellm")),
+            "Ollama (direct path) must not point claude env at litellm"
         );
     }
 
@@ -3854,6 +3977,7 @@ services:
         // Every container's resources come from the SSOT.
         assert_resources_from_ssot(&doc, "claude", &crate::resources::CLAUDE_RESOURCES);
         assert_resources_from_ssot(&doc, "mcp-hub", &crate::resources::HUB_RESOURCES);
+        assert_resources_from_ssot(&doc, "litellm", &crate::resources::LITELLM_RESOURCES);
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
         }
@@ -3913,6 +4037,9 @@ services:
             "${MCP_HUB_MEM}",
             "${MCP_HUB_CPUS}",
             "${MCP_HUB_TMPFS}",
+            "${LITELLM_MEM}",
+            "${LITELLM_CPUS}",
+            "${LITELLM_TMPFS}",
         ] {
             assert!(
                 COMPOSE_TEMPLATE.contains(placeholder),

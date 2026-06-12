@@ -1100,6 +1100,7 @@ pub fn mcp_os_log_path() -> std::path::PathBuf {
 /// Used by security checks and image build lists.
 pub const BUILT_IN_SERVICES: &[&str] = &[
     "claude",
+    "litellm",
     "mcp-hub",
     "mcp-slack",
     "mcp-sharepoint",
@@ -1147,6 +1148,11 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     // collide on that directory (`PluginHostBridge::new(slug, ...)` uses the
     // slug verbatim as the bridge name). No compose service — pure reservation.
     "ide",
+    // Reserves the `llm` token-dir namespace (`tokens/<project>/llm/`,
+    // per-provider LiteLLM API keys — ADR-072) against plugin slug collisions.
+    // The `litellm` compose service itself needs no entry here: plugin compose
+    // names are `mcp-<slug>`-prefixed, so they can never collide with it.
+    "llm",
 ];
 
 /// Environment variable names that plugins are forbidden from setting via

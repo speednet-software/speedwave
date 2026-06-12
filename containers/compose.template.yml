@@ -43,6 +43,39 @@ services:
           cpus: '${CLAUDE_CPUS}'
           memory: ${CLAUDE_MEMORY}
 
+  # LiteLLM proxy (ADR-072): Claude Code's single LLM endpoint. Routes to the
+  # configured providers; subscription OAuth passes through /anthropic
+  # untouched. Worker-class token holder: per-provider API keys mount at
+  # /tokens:ro, never enter the claude container. No host port — reachable
+  # only on the per-project network. extra_hosts: local LLM backends on the
+  # host (Ollama/LM Studio/llama.cpp) are reached via host.docker.internal
+  # (ADR-062).
+  litellm:
+    image: ${IMAGE_LITELLM}
+    pull_policy: never
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_litellm
+    read_only: true
+    user: "${CONTAINER_USER}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    extra_hosts:
+      - "host.docker.internal:${HOST_GATEWAY}"
+    tmpfs:
+      - /tmp:noexec,nosuid,size=${LITELLM_TMPFS}
+    volumes:
+      - ${LITELLM_CONFIG_DIR}:/config:ro
+      - ${TOKENS_DIR}/llm:/tokens:ro
+      - ${LITELLM_USAGE_DIR}:/usage:rw
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '${LITELLM_CPUS}'
+          memory: ${LITELLM_MEM}
+
   mcp-hub:
     image: ${IMAGE_MCP_HUB}
     pull_policy: never

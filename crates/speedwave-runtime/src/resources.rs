@@ -46,6 +46,17 @@ pub const HUB_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
+/// LiteLLM proxy (ADR-072): on every inference request's path, but the work is
+/// I/O-bound forwarding/translation — 1 core is plenty. 512 MiB covers the
+/// Python runtime + litellm with headroom for concurrent streams (a bare proxy
+/// idles at ~200-300 MiB; no DB, no Admin UI).
+pub const LITELLM_RESOURCES: ContainerResources = ContainerResources {
+    mem_mib: 512,
+    cpus: 1.0,
+    tmpfs_mib: 64,
+    shm_mib: None,
+};
+
 /// Default envelope for a lightweight API worker (slack, sharepoint, redmine,
 /// gitlab, atlassian, context7). Workers needing more override inline (github
 /// 256m, office, playwright). Shared so the default lives in one place.
