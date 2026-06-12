@@ -722,15 +722,14 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn prune_unused_images(&self) -> anyhow::Result<()> {
+        // `image prune` (no --all) removes only dangling images; `system prune --all`
+        // would remove tagged images of stopped projects, which must survive GC.
         // No `require_running` gate — WSL2 distros auto-start on `wsl.exe -d`
-        // invocation (consistent with `system_prune` / `prune_buildkit_cache`
-        // above; LimaRuntime gates explicitly because Lima needs a manual start).
+        // (consistent with `system_prune` / `prune_buildkit_cache`).
         let distro = self.distro();
         self.runner.run(
             "wsl.exe",
-            &[
-                "-d", distro, "--", "nerdctl", "system", "prune", "--all", "--force",
-            ],
+            &["-d", distro, "--", "nerdctl", "image", "prune", "--force"],
         )?;
         Ok(())
     }
@@ -1963,6 +1962,20 @@ mod tests {
         let result = rt.system_prune();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("prune failed"));
+    }
+
+    #[test]
+    fn test_prune_unused_images_uses_image_prune_not_system_prune_all() {
+        let distro = consts::wsl_distro_name();
+        let runner = MockRunner::new().with_response(
+            &format!("wsl.exe -d {distro} -- nerdctl image prune --force"),
+            "",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.prune_unused_images().is_ok(),
+            "WslRuntime::prune_unused_images should succeed"
+        );
     }
 
     #[test]

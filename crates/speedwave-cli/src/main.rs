@@ -965,6 +965,7 @@ fn main() -> anyhow::Result<()> {
     // before Desktop reconciles (ADR-072).
     let bundle_manifest = speedwave_runtime::bundle::load_current_bundle_manifest()?;
     let enabled_imgs = speedwave_runtime::build::enabled_images(&integrations);
+    let prior_state = speedwave_runtime::bundle::load_bundle_state();
     let built = speedwave_runtime::build::build_missing_images_locked(
         &runtime,
         &enabled_imgs,
@@ -973,6 +974,14 @@ fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("container image build failed: {}", redact_err(&e)))?;
     if built > 0 {
         out!("Built {built} container image(s) for this app version");
+        // Prune superseded tags — warn-only, Desktop reconcile is the authoritative GC
+        // path but CLI-only users would otherwise leak one tag generation per update.
+        speedwave_runtime::build::prune_superseded_images(
+            &runtime,
+            &prior_state.applied_image_hashes,
+            prior_state.applied_bundle_id.as_deref(),
+            &bundle_manifest,
+        );
     }
     let enabled_plugin_ids: Vec<&str> = integrations.enabled_plugin_service_ids();
     plugin::ensure_plugin_images(&runtime, &enabled_plugin_ids)
@@ -1114,6 +1123,34 @@ mod tests {
             build_pos < tx_pos,
             "missing-image build (at {build_pos}) must precede the compose \
              transaction (at {tx_pos}) — builds stay outside compose locks"
+        );
+    }
+
+    /// Structural (ADR-072 GC): when the CLI builds images it must prune superseded
+    /// tags immediately after — CLI-only users never see Desktop reconcile, so
+    /// without this they leak one tag generation per update.
+    #[test]
+    fn cli_prunes_superseded_images_after_build() {
+        let src = include_str!("main.rs");
+        let build_pos = src
+            .find("build_missing_images_locked")
+            .expect("run path must call build_missing_images_locked");
+        let prune_pos = src
+            .find("prune_superseded_images")
+            .expect("run path must prune superseded images after build");
+        assert!(
+            build_pos < prune_pos,
+            "prune_superseded_images (at {prune_pos}) must follow build_missing_images_locked \
+             (at {build_pos}) — prune needs the previous state captured before the build"
+        );
+        // The prune must use the state captured BEFORE the build.
+        let state_pos = src
+            .find("load_bundle_state()")
+            .expect("run path must load prior bundle state for GC");
+        assert!(
+            state_pos < build_pos,
+            "load_bundle_state (at {state_pos}) must precede build_missing_images_locked \
+             (at {build_pos}) — prune compares applied hashes vs new manifest"
         );
     }
 

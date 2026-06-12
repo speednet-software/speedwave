@@ -776,6 +776,8 @@ impl ContainerRuntime for LimaRuntime {
     }
 
     fn prune_unused_images(&self) -> anyhow::Result<()> {
+        // `image prune` (no --all) removes only dangling images; `system prune --all`
+        // would remove tagged images of stopped projects, which must survive GC.
         self.require_running()?;
         self.runner.run(
             "limactl",
@@ -785,9 +787,8 @@ impl ContainerRuntime for LimaRuntime {
                 "--",
                 "sudo",
                 "nerdctl",
-                "system",
+                "image",
                 "prune",
-                "--all",
                 "--force",
             ],
         )?;
@@ -2145,6 +2146,26 @@ mod tests {
         assert!(
             commands[0].contains("nerdctl system prune --force"),
             "system_prune should run nerdctl system prune --force, got: {}",
+            commands[0]
+        );
+    }
+
+    #[test]
+    fn test_prune_unused_images_uses_image_prune_not_system_prune_all() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        rt.prune_unused_images().unwrap();
+        let commands = recorded.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            commands[0].contains("nerdctl image prune --force"),
+            "prune_unused_images must use `image prune` (keeps tagged images of stopped projects), \
+             not `system prune --all` (which removes them); got: {}",
+            commands[0]
+        );
+        assert!(
+            !commands[0].contains("--all"),
+            "prune_unused_images must NOT pass --all: got: {}",
             commands[0]
         );
     }
