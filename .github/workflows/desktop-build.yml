@@ -100,17 +100,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           MATRIX_ARGS: ${{ matrix.args }}
-          # Dependabot PR runs do not receive repo secrets, so the updater
-          # signing key is empty. Disable updater artifacts for those runs to
-          # build an unsigned bundle (proves compilation) instead of failing on
-          # the missing key.
-          IS_DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
           # Split MATRIX_ARGS into an array so intentional multi-token values
           # (e.g. `--target x`) still split, but no glob/metacharacter is
           # interpreted by the shell (hardening — see PR #766 review).
           read -ra ARGS <<< "$MATRIX_ARGS"
-          if [ "$IS_DEPENDABOT" = "true" ]; then
+          # No signing key (fork PR / Dependabot) → unsigned bundle.
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
             npx --prefix ../src tauri build "${ARGS[@]}" --config '{"bundle":{"createUpdaterArtifacts":false}}'
           else
             npx --prefix ../src tauri build "${ARGS[@]}"
