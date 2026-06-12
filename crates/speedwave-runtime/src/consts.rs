@@ -2566,6 +2566,50 @@ mod tests {
         );
     }
 
+    /// Lima version → bundled nerdctl-full version (macOS SSOT alignment guard).
+    /// If you bump `.lima-version` to a version not in this table the test fails —
+    /// look up the bundled nerdctl in Lima's `pkg/limayaml/containerd.yaml` at that
+    /// tag, then add the entry AND update `NERDCTL_FULL_VERSION` in the same commit.
+    #[test]
+    fn lima_version_and_nerdctl_full_version_are_aligned() {
+        // Known Lima release → nerdctl-full version it bundles.
+        // Source: https://github.com/lima-vm/lima/blob/vX.Y.Z/pkg/limayaml/containerd.yaml
+        let known: &[(&str, &str)] = &[
+            ("2.1.2", "2.2.2"), // Lima 2.1.2 bundles nerdctl-full 2.2.2 (verified in acc2c691)
+            ("2.2.0", "2.2.2"),
+            ("2.2.1", "2.2.2"),
+            ("2.2.2", "2.2.2"),
+            ("2.3.0", "2.3.0"),
+        ];
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let lima_ver = std::fs::read_to_string(repo_root.join(".lima-version"))
+            .expect(".lima-version must exist")
+            .trim()
+            .to_owned();
+        let expected_nerdctl = known
+            .iter()
+            .find(|(lima, _)| *lima == lima_ver)
+            .map(|(_, nerdctl)| *nerdctl)
+            .unwrap_or_else(|| {
+                panic!(
+                    ".lima-version is '{lima_ver}' which is not in the known alignment table; \
+                 look up what nerdctl-full Lima {lima_ver} bundles \
+                 (pkg/limayaml/containerd.yaml at that tag), add the entry to this table, \
+                 and set NERDCTL_FULL_VERSION to match"
+                )
+            });
+        assert_eq!(
+            NERDCTL_FULL_VERSION, expected_nerdctl,
+            "Lima {lima_ver} bundles nerdctl-full {expected_nerdctl} but \
+             NERDCTL_FULL_VERSION is '{NERDCTL_FULL_VERSION}'; \
+             update NERDCTL_FULL_VERSION (and SHA256s) to match"
+        );
+    }
+
     // Cross-language SSOT for the single host-gateway alias. The TypeScript
     // MCP-shared module mirrors `HOST_GATEWAY_ALIAS` as `export const`; the
     // compose template references it as a literal in `extra_hosts`. These

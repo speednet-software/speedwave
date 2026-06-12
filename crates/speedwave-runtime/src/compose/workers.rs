@@ -525,7 +525,6 @@ mod credentials_digest_tests {
             std::fs::create_dir_all(tokens.join(svc)).unwrap();
             std::fs::write(tokens.join(svc).join("token"), "old").unwrap();
         }
-        let oauth = tmp.path().join("oauth");
         let before = apply_credentials_digests(YAML, &tokens).unwrap();
         std::fs::write(tokens.join("slack").join("token"), "rotated").unwrap();
         let after = apply_credentials_digests(YAML, &tokens).unwrap();

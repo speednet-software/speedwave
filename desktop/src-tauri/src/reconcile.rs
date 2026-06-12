@@ -422,9 +422,27 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 format!("Runtime is not ready while applying the new bundle: {e}"),
             )
         })?;
+    } else if state.phase.is_before(bundle::BundleReconcilePhase::Done) {
+        // Id matches but a previous reconcile was interrupted before completion.
+        // Resources or images on disk may reflect a different app version
+        // (e.g. a downgrade after a partially-applied upgrade). Force a full
+        // re-reconcile from scratch to guarantee consistency.
+        log::warn!(
+            "reconcile_bundle: bundle id unchanged but phase={:?} — \
+             previous reconcile was interrupted, forcing re-reconcile",
+            state.phase,
+        );
+        prepare_rebuild(&mut state, app_handle)?;
+        rt.ensure_ready().map_err(|e| {
+            set_bundle_error(
+                &mut state,
+                format!("Runtime is not ready while re-reconciling after interrupted update: {e}"),
+            )
+        })?;
     } else {
-        // Id matches. Restore any projects a no-op update left stopped, open
-        // the gate, then repair missing images (needs a running VM, ADR-072).
+        // Id matches and previous reconcile completed (phase=Done).
+        // Restore any projects a no-op update left stopped, open the gate,
+        // then repair missing images (needs a running VM, ADR-072).
         if !state.pending_running_projects.is_empty() {
             match rt.ensure_ready() {
                 Ok(()) => {
@@ -454,12 +472,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         }
         // Pending projects (if any) were restored just above; this clears and
         // persists them along with any stale phase/error left by a prior run.
-        if state.phase != bundle::BundleReconcilePhase::Done
-            || state.last_error.is_some()
-            || !state.pending_running_projects.is_empty()
-        {
+        if state.last_error.is_some() || !state.pending_running_projects.is_empty() {
             log::info!("reconcile_bundle: bundle matches but state dirty, cleaning up");
-            state.phase = bundle::BundleReconcilePhase::Done;
             state.last_error = None;
             state.pending_running_projects.clear();
             bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
@@ -1575,6 +1589,68 @@ mod tests {
             assert!(
                 return_pos < clear_pos,
                 "not-ready arm must return (keeping pending) before the clear"
+            );
+        }
+
+        /// Structural: `prepare_rebuild` must reset phase to Pending WITHOUT
+        /// clearing `pending_running_projects`. A new bundle may arrive while
+        /// a previous interrupted reconcile left projects in pending — they must
+        /// survive into the new reconcile so they get restored at the end.
+        /// The CAS guard ensures there is no concurrent reconcile to race this.
+        #[test]
+        fn prepare_rebuild_resets_phase_preserves_pending_projects() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("fn prepare_rebuild(")
+                .expect("prepare_rebuild must exist");
+            // Find the closing brace of prepare_rebuild by taking the next top-level fn.
+            let after_fn = &source[fn_start..];
+            let fn_end = after_fn
+                .find("\nfn ")
+                .or_else(|| after_fn.find("\npub(crate) fn "))
+                .or_else(|| after_fn.find("\npub fn "))
+                .unwrap_or(after_fn.len());
+            let body = &after_fn[..fn_end];
+
+            assert!(
+                body.contains("BundleReconcilePhase::Pending"),
+                "prepare_rebuild must reset phase to Pending"
+            );
+            assert!(
+                !body.contains("pending_running_projects.clear()"),
+                "prepare_rebuild must NOT clear pending_running_projects — \
+                 projects stopped by a prior interrupted reconcile must survive \
+                 into the new run so they are restored at the end"
+            );
+        }
+
+        /// Structural: when the bundle id matches but the previous reconcile was
+        /// interrupted (phase != Done), the code must force a full re-reconcile
+        /// via `prepare_rebuild`. This covers the downgrade-after-interrupted-update
+        /// scenario: v2 sync completed (phase=ResourcesSynced) but app rolled back to
+        /// v1 — the bundle id matches the pre-v2 applied id, but resources on disk
+        /// may reflect v2 content. Without the re-reconcile, v1 images run against
+        /// v2 claude-resources.
+        #[test]
+        fn interrupted_reconcile_with_matching_id_forces_rebuild() {
+            let source = include_str!("reconcile.rs");
+            let inner_fn = source
+                .split("fn reconcile_bundle_update_inner(")
+                .nth(1)
+                .expect("reconcile_bundle_update_inner function should exist");
+
+            // The matching-id + interrupted-phase branch must exist and call prepare_rebuild.
+            let interrupted_branch = inner_fn
+                .find("previous reconcile was interrupted")
+                .expect("interrupted-reconcile branch must exist in reconcile_bundle_update_inner");
+            let branch = &inner_fn[interrupted_branch..];
+            assert!(
+                branch.contains("prepare_rebuild"),
+                "interrupted-reconcile branch must call prepare_rebuild to force re-reconcile"
+            );
+            assert!(
+                branch.contains("ensure_ready"),
+                "interrupted-reconcile branch must call ensure_ready after prepare_rebuild"
             );
         }
     }
