@@ -99,6 +99,12 @@ export interface LlmConfigResponse {
   has_api_key?: boolean;
   /** True when a custom_headers file exists for this project. */
   has_custom_headers?: boolean;
+  /** v2 provider list (ADR-072); absent on never-migrated legacy configs. */
+  providers?: LlmProviderEntry[];
+  /** v2 active provider+model selection (ADR-072). */
+  active?: LlmActive | null;
+  /** ADR-072 kill-switch; absent = enabled. */
+  proxy_enabled?: boolean | null;
 }
 
 /**

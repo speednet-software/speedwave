@@ -1203,4 +1203,101 @@ describe('LlmProviderComponent', () => {
 
     expect(invokeCalled).toBe(true);
   });
+
+  // ── Remote providers (ADR-072) ──────────────────────────────────────────
+
+  it('adds and removes remote providers with unique slug ids', () => {
+    component.addExtraProvider('open_router');
+    component.addExtraProvider('open_router');
+    component.addExtraProvider('open_ai_compat');
+    expect(component.extraProviders.map((p) => p.id)).toEqual([
+      'openrouter',
+      'openrouter-2',
+      'compat',
+    ]);
+    // Adding selects the new row as the active target.
+    expect(component.selectedTarget).toBe('compat');
+
+    component.removeExtraProvider('compat');
+    expect(component.extraProviders.map((p) => p.id)).toEqual(['openrouter', 'openrouter-2']);
+    // Removing the active row falls back to the card selection.
+    expect(component.selectedTarget).toBe(component.provider);
+  });
+
+  it('save sends the full v2 provider set and active selection', async () => {
+    let captured: Record<string, unknown> | null = null;
+    const keyCalls: Array<Record<string, unknown>> = [];
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
+      if (cmd === 'set_llm_provider_key') keyCalls.push(args ?? {});
+      if (cmd === 'get_auth_status') return { api_key_configured: false };
+      return undefined;
+    };
+
+    component.addExtraProvider('open_router');
+    const extra = component.extraProviders[0];
+    extra.model = 'qwen/qwen3-coder';
+    component.onExtraKeyInput(extra, 'sk-or-v1-test');
+
+    await component.saveConfig();
+
+    expect(captured).not.toBeNull();
+    const update = captured!;
+    const providers = update['providers'] as Array<Record<string, unknown>>;
+    expect(providers.map((p) => p['id'])).toContain('anthropic');
+    expect(providers.map((p) => p['id'])).toContain('openrouter');
+    const or = providers.find((p) => p['id'] === 'openrouter')!;
+    expect(or['kind']).toBe('open_router');
+    expect(or['has_api_key']).toBe(true);
+    const active = update['active'] as Record<string, unknown>;
+    expect(active['provider_id']).toBe('openrouter');
+    expect(active['model']).toBe('qwen/qwen3-coder');
+    // The key value went through set_llm_provider_key, not the config DTO.
+    expect(JSON.stringify(update)).not.toContain('sk-or-v1-test');
+    expect(keyCalls).toEqual([{ providerId: 'openrouter', key: 'sk-or-v1-test' }]);
+  });
+
+  it('save rejects an active remote provider without a model', async () => {
+    let invoked = false;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'update_llm_config') invoked = true;
+      return undefined;
+    };
+    let emitted = '';
+    component.errorOccurred.subscribe((msg: string) => (emitted = msg));
+
+    component.addExtraProvider('open_router');
+    await component.saveConfig();
+
+    expect(invoked).toBe(false);
+    expect(emitted).toContain('requires a model name');
+  });
+
+  it('save hot-reloads the proxy when the active selection is unchanged', async () => {
+    const calls: string[] = [];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'get_auth_status') return { api_key_configured: false };
+      return undefined;
+    };
+    const projectState = TestBed.inject(ProjectStateService);
+    const restartSpy = vi.spyOn(projectState, 'requestRestart');
+    projectState.activeProject = 'proj';
+
+    // Anthropic card active, default model — same as the loaded snapshot.
+    component.provider = 'anthropic';
+    component.selectedTarget = 'anthropic';
+    component['loadedActiveKey'] = 'anthropic|';
+    await component.saveConfig();
+
+    expect(calls).toContain('restart_llm_proxy');
+    expect(restartSpy).not.toHaveBeenCalled();
+
+    // Changing the model flips to the full restart.
+    calls.length = 0;
+    component.model = 'claude-opus-4-8';
+    await component.saveConfig();
+    expect(calls).not.toContain('restart_llm_proxy');
+    expect(restartSpy).toHaveBeenCalled();
+  });
 });

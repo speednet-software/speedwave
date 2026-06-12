@@ -14,6 +14,7 @@ import { UiStateService } from '../services/ui-state.service';
 import { BetaService } from '../services/beta.service';
 import { AuthSectionComponent } from './auth-section/auth-section.component';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
+import { LlmUsageComponent } from './llm-usage/llm-usage.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
 import { TranscriptionSectionComponent } from './transcription-section/transcription-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
@@ -69,6 +70,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
   imports: [
     RouterLink,
     LlmProviderComponent,
+    LlmUsageComponent,
     AuthSectionComponent,
     AdvancedSectionComponent,
     TranscriptionSectionComponent,
@@ -119,6 +121,15 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           (providerChange)="llmProvider = $event"
           (errorOccurred)="error = $event"
         />
+
+        <!-- LLM usage dashboard (ADR-072): per-day/per-model aggregate from
+             the proxy's usage log. -->
+        @if (activeProject; as project) {
+          <section id="section-llm-usage" class="mt-6">
+            <h2 class="view-title view-title-section text-[var(--ink)]">LLM usage</h2>
+            <app-llm-usage [project]="project" />
+          </section>
+        }
 
         <app-auth-section
           [activeProject]="activeProject"
