@@ -102,6 +102,67 @@ export interface LlmConfigResponse {
 }
 
 /**
+ * Provider kind discriminator (ADR-072). Mirror of the Rust
+ * `speedwave_runtime::config::LlmProviderKind` serde representation
+ * (snake_case strings).
+ */
+export type LlmProviderKind =
+  | 'anthropic_oauth'
+  | 'anthropic_api_key'
+  | 'local'
+  | 'open_router'
+  | 'open_ai_compat'
+  | 'custom';
+
+/**
+ * One configured LLM provider (ADR-072 schema v2). Mirror of the Rust
+ * `LlmProviderEntry`. Key VALUES never reach the frontend — only the
+ * `has_api_key` presence flag.
+ */
+export interface LlmProviderEntry {
+  /** Slug id (`^[a-z][a-z0-9-]{0,63}$`); becomes file/env names backend-side. */
+  id: string;
+  kind: LlmProviderKind;
+  base_url?: string | null;
+  has_api_key?: boolean;
+  context_tokens?: number | null;
+  has_custom_headers?: boolean;
+}
+
+/** Active provider+model selection (ADR-072). Mirror of Rust `LlmActive`. */
+export interface LlmActive {
+  provider_id: string;
+  model?: string | null;
+}
+
+/**
+ * One aggregate bucket of the usage dashboard. Mirror of the Rust
+ * `speedwave_runtime::usage::UsageBucket` returned by `get_llm_usage`.
+ */
+export interface UsageBucket {
+  requests: number;
+  failures: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  cost_usd: number;
+}
+
+/**
+ * Usage dashboard payload from `get_llm_usage` (ADR-072). The single
+ * source is the litellm callback JSONL; per-session chat statistics come
+ * from the stream and are deliberately NOT part of this payload.
+ */
+export interface UsageSummary {
+  /** `YYYY-MM-DD` → model → bucket (sorted by the backend's BTreeMap). */
+  days: Record<string, Record<string, UsageBucket>>;
+  totals: UsageBucket;
+  /** Unparseable JSONL lines skipped by the aggregator (crash-truncated tails). */
+  skipped_lines: number;
+}
+
+/**
  * Format a context-token count as a short human label (`200k`, `1M`).
  * @param tokens - Token count from `AnthropicModel.context_tokens`.
  */
