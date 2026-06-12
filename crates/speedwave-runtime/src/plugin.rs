@@ -1986,9 +1986,15 @@ pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginM
         return Ok(vec![]);
     }
 
+    let mut entries: Vec<std::fs::DirEntry> =
+        std::fs::read_dir(plugins_dir)?.collect::<Result<_, _>>()?;
+    // Sort by slug (directory name) for deterministic compose output.
+    // Non-deterministic order changes SPW_PLUGIN_DIGESTS and volume sequences
+    // on every call, which would trigger spurious container recreates.
+    entries.sort_by_key(|e| e.file_name());
+
     let mut plugins = Vec::new();
-    for entry in std::fs::read_dir(plugins_dir)? {
-        let entry = entry?;
+    for entry in entries {
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -3335,6 +3341,32 @@ mod tests {
             "should skip bad manifest and return only the valid one"
         );
         assert_eq!(plugins[0].slug, "good-plugin");
+    }
+
+    #[test]
+    fn test_list_installed_from_dir_sorted_by_slug() {
+        // Non-deterministic readdir order causes compose volumes and SPW_PLUGIN_DIGESTS
+        // to change between renders, triggering spurious container recreates. The list
+        // must always come back in ascending slug order regardless of filesystem order.
+        let tmp = tempfile::tempdir().unwrap();
+        for slug in ["zebra-plugin", "alpha-plugin", "middle-plugin"] {
+            let dir = tmp.path().join(slug);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("plugin.json"),
+                format!(
+                    r#"{{"name":"{slug}","slug":"{slug}","version":"1.0.0","description":"ok","port":4010}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let plugins = list_installed_from_dir(tmp.path()).unwrap();
+        let slugs: Vec<&str> = plugins.iter().map(|p| p.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            ["alpha-plugin", "middle-plugin", "zebra-plugin"],
+            "plugins must be returned in ascending slug order for deterministic compose output"
+        );
     }
 
     #[test]

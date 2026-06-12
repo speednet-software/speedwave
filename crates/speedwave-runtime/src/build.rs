@@ -2576,6 +2576,45 @@ mod tests {
     }
 
     #[test]
+    fn bundle_build_context_sh_covers_all_worker_images() {
+        // SSOT tie: every IMAGES entry with the `speedwave-mcp-` prefix (except hub) must
+        // appear in MCP_SERVICES in bundle-build-context.sh.  Without this test the .sh list
+        // can silently lag behind IMAGES, shipping an app that never builds the new image.
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        let sh_content = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
+            .expect("bundle-build-context.sh should exist");
+
+        let sh_services: std::collections::HashSet<&str> = sh_content
+            .lines()
+            .find(|l| l.starts_with("MCP_SERVICES="))
+            .expect("MCP_SERVICES= line should exist in bundle-build-context.sh")
+            .trim_start_matches("MCP_SERVICES=")
+            .trim_matches('"')
+            .split_whitespace()
+            .collect();
+
+        for img in IMAGES {
+            let Some(suffix) = img.name.strip_prefix(MCP_IMAGE_PREFIX) else {
+                continue; // speedwave-claude has no MCP prefix
+            };
+            if suffix == "hub" {
+                continue; // hub is in MCP_SERVICES but has no Containerfile per worker
+            }
+            assert!(
+                sh_services.contains(suffix),
+                "IMAGES entry '{}' (suffix '{suffix}') is missing from MCP_SERVICES in \
+                 scripts/bundle-build-context.sh — add it or the image will never be bundled",
+                img.name
+            );
+        }
+    }
+
+    #[test]
     fn test_retry_fails_returns_retry_error() {
         let failing_tag = image_ref(IMAGE_MCP_REDMINE, "test-bundle");
 

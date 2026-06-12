@@ -52,8 +52,19 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
         // strip_prefix once — trim_start_matches would over-strip a plugin
         // service_id that itself starts with "mcp-" (compose name mcp-mcp-x).
         let key = name.strip_prefix("mcp-").unwrap_or(&name);
-        if let Some(digest) = credentials_digest(&tokens_root.join(key))? {
-            add_service_env_var(&mut doc, &name, "SPW_CREDENTIALS_DIGEST", &digest)?;
+        match credentials_digest(&tokens_root.join(key)) {
+            Ok(Some(digest)) => {
+                add_service_env_var(&mut doc, &name, "SPW_CREDENTIALS_DIGEST", &digest)?;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // Permission error or transient OS fault on one worker's token dir —
+                // log and skip rather than aborting the entire compose render, so all
+                // other services can still start. The affected worker runs without a
+                // SPW_CREDENTIALS_DIGEST until the user restarts; that's safer than a
+                // total outage.
+                log::warn!("credentials_digest for '{name}' failed, skipping: {e}");
+            }
         }
     }
     Ok(serde_yaml_ng::to_string(&doc)?)
@@ -64,6 +75,15 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
 /// Contract (ADR-060/071): `access_token` is the ONLY machine-written mount
 /// artifact; a provider adding another rotating file must list it here.
 const VOLATILE_CREDENTIAL_FILES: &[&str] = &["access_token"];
+
+/// Returns true for files that are transient write-in-progress artifacts and
+/// must be excluded from the digest. `writeRestrictedSecret` in
+/// `mcp-servers/shared` uses the pattern `<name>.tmp.<pid>.<rand>` — a
+/// digest walk that catches such a file mid-rename would flip the digest
+/// spuriously on every routine OAuth refresh.
+fn is_write_in_progress(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().contains(".tmp.")
+}
 
 /// SHA-256 over the worker's user-entered token files (sorted).
 /// `Ok(None)` when the worker has no credentials at all — absence vs presence
@@ -89,9 +109,10 @@ fn credentials_digest(token_dir: &std::path::Path) -> anyhow::Result<Option<Stri
             .filter(|p| {
                 p.file_name()
                     .map(|n| {
-                        !VOLATILE_CREDENTIAL_FILES
-                            .iter()
-                            .any(|v| n == std::ffi::OsStr::new(v))
+                        !is_write_in_progress(n)
+                            && !VOLATILE_CREDENTIAL_FILES
+                                .iter()
+                                .any(|v| n == std::ffi::OsStr::new(v))
                     })
                     .unwrap_or(false)
             })
@@ -560,19 +581,33 @@ mod credentials_digest_tests {
 
     #[test]
     #[cfg(unix)]
-    fn transient_unreadable_dir_is_an_error_not_a_silent_flip() {
+    fn transient_unreadable_dir_skips_worker_not_whole_render() {
+        // A permission error on one worker's token dir must not abort the entire
+        // compose render — other services must still start. The affected worker
+        // runs without SPW_CREDENTIALS_DIGEST for this session.
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let tokens = tmp.path().join("tokens");
-        let dir = tokens.join("slack");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("token"), "t").unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let slack_dir = tokens.join("slack");
+        std::fs::create_dir_all(&slack_dir).unwrap();
+        std::fs::write(slack_dir.join("token"), "t").unwrap();
+        // github has readable credentials so we can verify the render still succeeds
+        let github_dir = tokens.join("github");
+        std::fs::create_dir_all(&github_dir).unwrap();
+        std::fs::write(github_dir.join("token"), "gh-token").unwrap();
+        std::fs::set_permissions(&slack_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
         let result = apply_credentials_digests(YAML, &tokens);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&slack_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let out = result.expect("render must succeed despite one unreadable token dir");
+        // Unreadable worker gets no digest — not silently wrong, just absent for this session.
         assert!(
-            result.is_err(),
-            "unreadable creds must fail the render, not silently drop the env var"
+            env_of(&out, "mcp-slack").is_none(),
+            "unreadable slack dir must produce no digest (warn+skip, not fail)"
+        );
+        // Readable worker's digest is still injected.
+        assert!(
+            env_of(&out, "mcp-github").is_some(),
+            "github with valid credentials must still get a digest"
         );
     }
 
@@ -597,5 +632,41 @@ mod credentials_digest_tests {
         let out = apply_credentials_digests(YAML, &tokens).unwrap();
         // Error path: symlinks never feed the digest (mirrors signing policy).
         assert!(env_of(&out, "mcp-slack").is_none());
+    }
+
+    #[test]
+    fn write_in_progress_tmp_file_does_not_change_digest() {
+        // writeRestrictedSecret (mcp-servers/shared) writes access_token.tmp.<pid>.<rand>
+        // then renames to access_token. A digest walk that catches the tmp file mid-rename
+        // would spuriously flip SPW_CREDENTIALS_DIGEST and force a worker recreate on every
+        // routine OAuth refresh. Verify that .tmp. files are excluded from the digest.
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens = tmp.path().join("tokens");
+        let slack_dir = tokens.join("slack");
+        std::fs::create_dir_all(&slack_dir).unwrap();
+        std::fs::write(slack_dir.join("bot_token"), "xoxb-stable").unwrap();
+
+        let before = apply_credentials_digests(YAML, &tokens).unwrap();
+
+        // Simulate write-in-progress: a tmp file appears mid-rename.
+        std::fs::write(slack_dir.join("access_token.tmp.1234.abcdef"), "ephemeral").unwrap();
+
+        let during = apply_credentials_digests(YAML, &tokens).unwrap();
+        assert_eq!(
+            env_of(&before, "mcp-slack"),
+            env_of(&during, "mcp-slack"),
+            ".tmp. in-progress file must not change the digest"
+        );
+
+        // After rename: the tmp file is gone, access_token appears (volatile → still excluded).
+        std::fs::remove_file(slack_dir.join("access_token.tmp.1234.abcdef")).unwrap();
+        std::fs::write(slack_dir.join("access_token"), "tok-A").unwrap();
+
+        let after = apply_credentials_digests(YAML, &tokens).unwrap();
+        assert_eq!(
+            env_of(&before, "mcp-slack"),
+            env_of(&after, "mcp-slack"),
+            "access_token (volatile) must not change the digest either"
+        );
     }
 }
