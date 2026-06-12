@@ -503,13 +503,26 @@ fn save_bundle_state_to(state: &BundleState, path: &Path) -> anyhow::Result<()> 
 
     let json = serde_json::to_string_pretty(state)?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    // Restrict permissions before rename — rename preserves the inode (and
-    // thus the mode bits) on Unix, so the final file inherits 0o600.
-    #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        // Restrict permissions before fsync — rename preserves the inode on
+        // Unix, so the final file inherits the mode written here.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(json.as_bytes())?;
+        // fsync data before rename — without this, APFS/virtiofs can persist
+        // the rename before the data blocks, leaving a zero-length state file
+        // after a crash (same class of bug as compose.yml torn writes).
+        crate::fs_perms::fsync_file_durable(&file)
+            .map_err(|e| anyhow::anyhow!("fsync bundle-state before rename: {e}"))?;
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -695,6 +708,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
+            // fsync each file so a crash mid-copy leaves the staging directory in
+            // a detectable incomplete state rather than silently partially-written.
+            // Without this, APFS/virtiofs can persist the rename of staging→target
+            // before file data blocks are durable — the same bug class as the
+            // compose.yml torn-write (project_compose_yml_torn_write_fsync.md).
+            let file = std::fs::File::open(&dst_path)
+                .map_err(|e| anyhow::anyhow!("open {} for fsync: {e}", dst_path.display()))?;
+            crate::fs_perms::fsync_file_durable(&file)
+                .map_err(|e| anyhow::anyhow!("fsync {}: {e}", dst_path.display()))?;
         }
     }
     Ok(())

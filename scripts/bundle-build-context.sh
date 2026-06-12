@@ -79,9 +79,12 @@ for svc in $MCP_SERVICES; do
   [ -d "$svc_src/src" ] && cp -r "$svc_src/src" "$svc_dest/"
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
   # office ships Python support-scripts + a pinned requirements.txt that its
-  # Dockerfile COPYs. Copied 1:1 — the per-image hash covers the repo tree,
-  # so the staged tree must match byte-for-byte (tag == content).
-  [ -d "$svc_src/scripts" ] && cp -r "$svc_src/scripts" "$svc_dest/"
+  # Dockerfile COPYs. test_*.py are excluded — pytest is not in the runtime
+  # image and they add unnecessary bundle weight. Must match bundle-build-context.ps1.
+  if [ -d "$svc_src/scripts" ]; then
+    mkdir -p "$svc_dest/scripts"
+    find "$svc_src/scripts" -maxdepth 1 -type f ! -name 'test_*.py' -exec cp {} "$svc_dest/scripts/" \;
+  fi
   [ -f "$svc_src/requirements.txt" ] && cp "$svc_src/requirements.txt" "$svc_dest/"
   for f in Dockerfile Containerfile; do
     [ -f "$svc_src/$f" ] && cp "$svc_src/$f" "$svc_dest/"
