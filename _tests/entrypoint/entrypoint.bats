@@ -599,6 +599,18 @@ EOF
     [[ "$output" == "NOT_JSON" ]]
 }
 
+@test "merge leaves no stale .tmp file after successful settings.json merge" {
+    printf '{"effortLevel":"high","newKey":1}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # Atomic write: .tmp must be renamed away, not left behind.
+    [ ! -e "${TEST_HOME}/.claude/settings.json.tmp" ]
+    # Destination must be valid JSON (not truncated).
+    run node -e "JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8'))"
+    [ "$status" -eq 0 ]
+}
+
 # ---------------------------------------------------------------------------
 # SPEEDWAVE_PLUGINS: symlink plugin resources
 # ---------------------------------------------------------------------------

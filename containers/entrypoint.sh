@@ -188,12 +188,15 @@ if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ]; then
         cp "${_tmpl}" "${_dest}"
     else
         # Add template keys absent from the current file; existing keys are kept.
+        # Atomic write: crash mid-write leaves .tmp, not a truncated destination.
         node -e "
 const fs = require('fs');
 const tmpl = JSON.parse(fs.readFileSync('${_tmpl}', 'utf8'));
 const cur  = JSON.parse(fs.readFileSync('${_dest}', 'utf8'));
 const merged = Object.assign({}, tmpl, cur);
-fs.writeFileSync('${_dest}', JSON.stringify(merged, null, 2) + '\n');
+const tmp = '${_dest}' + '.tmp';
+fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + '\n');
+fs.renameSync(tmp, '${_dest}');
 " 2>/dev/null || true
     fi
     unset _tmpl _dest

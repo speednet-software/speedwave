@@ -212,7 +212,11 @@ fn clear_teardown_intent(project: &str) {
 
 /// Projects whose background teardown a previous process never finished.
 pub(crate) fn crashed_teardown_intents() -> Vec<String> {
-    std::fs::read_to_string(teardown_intents_path())
+    let path = teardown_intents_path();
+    // write_intents_atomic writes to .tmp then renames; a crash between those
+    // two steps leaves the .tmp behind permanently — clean it up now.
+    let _ = std::fs::remove_file(path.with_extension("tmp"));
+    std::fs::read_to_string(&path)
         .map(|c| c.lines().map(str::to_string).collect())
         .unwrap_or_default()
 }
@@ -1996,6 +2000,17 @@ mod tests {
     #[test]
     fn wait_for_pending_teardown_is_noop_without_entry() {
         wait_for_pending_teardown("bg-absent-proj");
+    }
+
+    #[test]
+    fn crashed_teardown_intents_removes_stale_tmp_file() {
+        let path = teardown_intents_path();
+        let tmp = path.with_extension("tmp");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&tmp, "stale").unwrap();
+        assert!(tmp.exists());
+        let _ = crashed_teardown_intents();
+        assert!(!tmp.exists(), "stale .tmp file should be removed");
     }
 
     #[test]
