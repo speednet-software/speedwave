@@ -473,17 +473,27 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // Converge crash-orphans: ONLY projects whose background teardown a
         // previous process recorded but never finished. Never ps-diff against
         // active_project — non-active projects run legitimately (CLI).
-        for project in crate::containers_cmd::crashed_teardown_intents() {
-            let active = config::load_user_config()
-                .ok()
-                .and_then(|c| c.active_project);
-            if Some(&project) == active.as_ref() {
-                // The active project is (re)started right after reconcile —
-                // an interrupted teardown converges via that idempotent up.
-                continue;
+        match config::load_user_config() {
+            Ok(cfg) => {
+                for project in crate::containers_cmd::crashed_teardown_intents() {
+                    if cfg.active_project.as_deref() == Some(project.as_str()) {
+                        // The active project is (re)started right after reconcile —
+                        // an interrupted teardown converges via that idempotent up.
+                        continue;
+                    }
+                    log::info!(
+                        "reconcile_bundle: converging crash-interrupted teardown of '{project}'"
+                    );
+                    crate::containers_cmd::spawn_background_teardown(project);
+                }
             }
-            log::info!("reconcile_bundle: converging crash-interrupted teardown of '{project}'");
-            crate::containers_cmd::spawn_background_teardown(project);
+            // Unknown active project — a teardown could race the post-reconcile
+            // start. Intents persist, so the next launch retries convergence.
+            Err(e) => {
+                log::warn!(
+                    "reconcile_bundle: skipping teardown convergence, config unreadable: {e}"
+                );
+            }
         }
 
         // Repair: images may be gone after containerd reinstall/VM recreation;
@@ -1160,6 +1170,32 @@ mod tests {
         assert!(
             !source.contains(&removed_marker),
             "the ps-diff orphan sweep must stay removed"
+        );
+    }
+
+    #[test]
+    fn teardown_convergence_skips_when_config_unreadable() {
+        // An unreadable config must skip convergence entirely (fail closed):
+        // with the active project unknown, a teardown could race the
+        // post-reconcile start of that very project.
+        let source = include_str!("reconcile.rs");
+        let anchor = source
+            .find("Converge crash-orphans")
+            .expect("convergence block must exist");
+        let window = &source[anchor..anchor + 1400];
+        let load_pos = window
+            .find("match config::load_user_config()")
+            .expect("convergence must branch on the config load result");
+        let intents_pos = window
+            .find("crashed_teardown_intents()")
+            .expect("convergence must read persisted intents");
+        assert!(
+            load_pos < intents_pos,
+            "config must be resolved once, before iterating intents"
+        );
+        assert!(
+            window.contains("skipping teardown convergence"),
+            "the Err arm must skip convergence instead of tearing down blindly"
         );
     }
     use serial_test::serial;

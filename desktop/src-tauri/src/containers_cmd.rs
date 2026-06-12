@@ -178,10 +178,18 @@ fn record_teardown_intent(project: &str) {
         .unwrap_or_default();
     if !entries.iter().any(|e| e == project) {
         entries.push(project.to_string());
-        if let Err(e) = std::fs::write(&path, entries.join("\n")) {
+        if let Err(e) = write_intents_atomic(&path, &entries) {
             log::warn!("could not record teardown intent for '{project}': {e}");
         }
     }
+}
+
+/// tmp + rename: this file exists ONLY for crash recovery, so a torn write
+/// (fs::write truncates first on Windows) would defeat its purpose.
+fn write_intents_atomic(path: &std::path::Path, entries: &[String]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, entries.join("\n"))?;
+    std::fs::rename(&tmp, path)
 }
 
 fn clear_teardown_intent(project: &str) {
@@ -191,10 +199,11 @@ fn clear_teardown_intent(project: &str) {
         return;
     };
     let entries: Vec<&str> = content.lines().filter(|l| *l != project).collect();
+    let entries: Vec<String> = entries.into_iter().map(str::to_string).collect();
     let result = if entries.is_empty() {
         std::fs::remove_file(&path)
     } else {
-        std::fs::write(&path, entries.join("\n"))
+        write_intents_atomic(&path, &entries)
     };
     if let Err(e) = result {
         log::warn!("could not clear teardown intent for '{project}': {e}");
@@ -225,7 +234,10 @@ fn spawn_background_teardown_with(
         }
     });
     if let Some(old) = pending_teardowns_lock().insert(prev, handle) {
-        // Stale finished handle from an earlier switch away from this project.
+        // Finished by construction: PROJECT_TRANSITION_LOCK serialises
+        // switches and wait_for_pending_teardown precedes every restart of
+        // this project — so an entry can only be replaced after its thread
+        // ran to completion. join() is then a no-op cleanup.
         let _ = old.join();
     }
 }

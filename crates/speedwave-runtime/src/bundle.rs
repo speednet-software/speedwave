@@ -642,6 +642,14 @@ fn collect_directory_entries(
         anyhow::bail!("Missing path for bundle digest: {}", dir.display());
     }
     // Single-file hash input (e.g. containers/entrypoint.sh) — see ADR-072.
+    // is_file()/is_dir() follow symlinks — the copier dereferences them, so
+    // a symlinked input could change image content without changing the hash.
+    if dir.is_symlink() {
+        anyhow::bail!(
+            "symlink not allowed in image hash inputs: {}",
+            dir.display()
+        );
+    }
     if dir.is_file() {
         out.push((prefix.to_string(), std::fs::read(dir)?));
         return Ok(());
@@ -700,6 +708,21 @@ pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn digest_paths_rejects_top_level_symlinked_file_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real.sh");
+        std::fs::write(&real, "x").unwrap();
+        let link = tmp.path().join("link.sh");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut out = Vec::new();
+        let err = collect_directory_entries(&link, "p", &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
 
     #[test]
     #[cfg(unix)]

@@ -60,8 +60,9 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
 }
 
 /// Machine-managed artifacts that change on every routine OAuth refresh —
-/// the worker reads them live from its mount, so they must NOT retrigger a
-/// recreate (only USER-entered credential rotations should).
+/// the worker reads them live, so they must NOT retrigger a recreate.
+/// Contract (ADR-060/071): `access_token` is the ONLY machine-written mount
+/// artifact; a provider adding another rotating file must list it here.
 const VOLATILE_CREDENTIAL_FILES: &[&str] = &["access_token"];
 
 /// SHA-256 over the worker's user-entered token files (sorted).
