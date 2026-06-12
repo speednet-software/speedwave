@@ -561,13 +561,42 @@ EOF
     echo '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    grep -q '"effortLevel":"low"' "${TEST_HOME}/.claude/settings.json"
+    # Use node for assertion — merge output is pretty-printed JSON (spaces after colons).
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
 }
 
 @test "skips settings.json when not in resources" {
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/settings.json" ]
+}
+
+@test "merges new template keys into existing settings.json without overwriting user values" {
+    # Template ships with effortLevel=high and a new key newKey=42.
+    printf '{"effortLevel":"high","newKey":42}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # User already has settings.json with effortLevel set to low.
+    printf '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # User's effortLevel choice is preserved.
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
+    # New template key is added.
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.newKey===42?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "merge degrades gracefully when node fails (corrupt settings.json)" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # On-disk file is not valid JSON; node parse fails → silent continue.
+    printf 'NOT_JSON' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    # Entrypoint must still exit 0 — the merge failure is best-effort.
+    [ "$status" -eq 0 ]
+    # On-disk file is unchanged (node exited non-zero, || true swallowed it).
+    run cat "${TEST_HOME}/.claude/settings.json"
+    [[ "$output" == "NOT_JSON" ]]
 }
 
 # ---------------------------------------------------------------------------
