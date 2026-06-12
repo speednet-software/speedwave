@@ -1,7 +1,7 @@
 # OCI Containerfile for Speedwave Claude container
 # Base: node:24-bookworm-slim (Debian)
 # Multi-arch: linux/amd64 + linux/arm64 (Apple Silicon)
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
 
 # Security: container user is set via compose `user:` field to "1000:1000"
 # (unprivileged; containerd runs as root inside the VM on both supported

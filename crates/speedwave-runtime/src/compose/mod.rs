@@ -101,6 +101,22 @@ fn resolve_bundle_manifest() -> anyhow::Result<bundle::BundleManifest> {
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
 const COMPOSE_TEMPLATE: &str = include_str!("../../../../containers/compose.template.yml");
 
+/// Template `${IMAGE_*}` placeholder ↔ catalogue image name. Alignment with
+/// `build::IMAGES` and the template is pinned by `image_placeholders_align_*`.
+const IMAGE_PLACEHOLDERS: &[(&str, &str)] = &[
+    ("${IMAGE_CLAUDE}", build::IMAGE_CLAUDE),
+    ("${IMAGE_MCP_HUB}", build::IMAGE_MCP_HUB),
+    ("${IMAGE_MCP_SLACK}", build::IMAGE_MCP_SLACK),
+    ("${IMAGE_MCP_SHAREPOINT}", build::IMAGE_MCP_SHAREPOINT),
+    ("${IMAGE_MCP_REDMINE}", build::IMAGE_MCP_REDMINE),
+    ("${IMAGE_MCP_GITLAB}", build::IMAGE_MCP_GITLAB),
+    ("${IMAGE_MCP_GITHUB}", build::IMAGE_MCP_GITHUB),
+    ("${IMAGE_MCP_ATLASSIAN}", build::IMAGE_MCP_ATLASSIAN),
+    ("${IMAGE_MCP_OFFICE}", build::IMAGE_MCP_OFFICE),
+    ("${IMAGE_MCP_PLAYWRIGHT}", build::IMAGE_MCP_PLAYWRIGHT),
+    ("${IMAGE_MCP_CONTEXT7}", build::IMAGE_MCP_CONTEXT7),
+];
+
 /// One live host-side bridge that compose can advertise to a container
 /// worker. The plugin manifest's `host_bridge` declaration drives both
 /// `slug` (which plugin to match) and the env-var names; the Desktop
@@ -187,50 +203,10 @@ pub fn render_compose_in(
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
     yaml = yaml.replace("${PORT_HUB}", &port_hub.to_string());
     yaml = yaml.replace("${PORT_WORKER}", &port_worker.to_string());
-    yaml = yaml.replace(
-        "${IMAGE_CLAUDE}",
-        &build::image_ref(build::IMAGE_CLAUDE, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_HUB}",
-        &build::image_ref(build::IMAGE_MCP_HUB, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_SLACK}",
-        &build::image_ref(build::IMAGE_MCP_SLACK, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_SHAREPOINT}",
-        &build::image_ref(build::IMAGE_MCP_SHAREPOINT, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_REDMINE}",
-        &build::image_ref(build::IMAGE_MCP_REDMINE, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_GITLAB}",
-        &build::image_ref(build::IMAGE_MCP_GITLAB, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_GITHUB}",
-        &build::image_ref(build::IMAGE_MCP_GITHUB, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_ATLASSIAN}",
-        &build::image_ref(build::IMAGE_MCP_ATLASSIAN, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_OFFICE}",
-        &build::image_ref(build::IMAGE_MCP_OFFICE, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_PLAYWRIGHT}",
-        &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
-    );
-    yaml = yaml.replace(
-        "${IMAGE_MCP_CONTEXT7}",
-        &build::image_ref(build::IMAGE_MCP_CONTEXT7, &bundle_manifest.bundle_id),
-    );
+    // Per-image build-input hash tags (ADR-072) — one placeholder per service.
+    for (placeholder, image_name) in IMAGE_PLACEHOLDERS {
+        yaml = yaml.replace(placeholder, &bundle_manifest.image_tag(image_name)?);
+    }
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
@@ -312,6 +288,11 @@ pub fn render_compose_in(
 
     // Filter services based on integrations config
     yaml = apply_integrations_filter(&yaml, integrations, &network_name)?;
+
+    // Per-worker credentials digest — a token rotation must change the
+    // worker's config-hash so idempotent `up` recreates it (SEC: bytes
+    // themselves never enter the YAML, only a SHA-256 prefix).
+    yaml = workers::apply_credentials_digests_in(data_dir, &yaml, project_name)?;
 
     // Final hardening: re-quote any `environment:` value carrying a YAML flow
     // indicator (e.g. the `[1m]` 1M-context suffix) that libyaml emits
@@ -1919,6 +1900,44 @@ services:
         assert!(parsed.get("services").is_some());
     }
 
+    /// SSOT alignment (ADR-072): every `${IMAGE_*}` placeholder in the template
+    /// has a substitution entry, every entry exists in the template, and every
+    /// catalogue image is covered — a new worker can't render unsubstituted.
+    #[test]
+    fn image_placeholders_align_with_catalogue_and_template() {
+        assert_eq!(
+            IMAGE_PLACEHOLDERS.len(),
+            build::IMAGES.len(),
+            "one placeholder entry per catalogue image"
+        );
+        for img in build::IMAGES {
+            assert!(
+                IMAGE_PLACEHOLDERS.iter().any(|(_, name)| *name == img.name),
+                "catalogue image '{}' has no placeholder entry",
+                img.name
+            );
+        }
+        for (placeholder, _) in IMAGE_PLACEHOLDERS {
+            assert!(
+                COMPOSE_TEMPLATE.contains(placeholder),
+                "placeholder {placeholder} missing from compose.template.yml"
+            );
+        }
+        for line in COMPOSE_TEMPLATE.lines() {
+            let mut rest = line;
+            while let Some(pos) = rest.find("${IMAGE_") {
+                let tail = &rest[pos..];
+                let end = tail.find('}').expect("unterminated ${IMAGE_ placeholder") + 1;
+                let placeholder = &tail[..end];
+                assert!(
+                    IMAGE_PLACEHOLDERS.iter().any(|(p, _)| *p == placeholder),
+                    "template placeholder {placeholder} has no substitution entry"
+                );
+                rest = &tail[end..];
+            }
+        }
+    }
+
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_uses_bundle_scoped_image_refs() {
@@ -1941,36 +1960,21 @@ services:
         )
         .unwrap();
 
-        assert!(yaml.contains(&build::image_ref(build::IMAGE_CLAUDE, &manifest.bundle_id)));
-        assert!(yaml.contains(&build::image_ref(build::IMAGE_MCP_HUB, &manifest.bundle_id)));
-        assert!(yaml.contains(&build::image_ref(
+        // Each service carries its own per-image build-input hash tag (ADR-072).
+        for image_name in [
+            build::IMAGE_CLAUDE,
+            build::IMAGE_MCP_HUB,
             build::IMAGE_MCP_SLACK,
-            &manifest.bundle_id
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_SHAREPOINT,
-            &manifest.bundle_id,
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_REDMINE,
-            &manifest.bundle_id,
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_GITLAB,
-            &manifest.bundle_id
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_GITHUB,
-            &manifest.bundle_id
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_ATLASSIAN,
-            &manifest.bundle_id
-        )));
-        assert!(yaml.contains(&build::image_ref(
             build::IMAGE_MCP_CONTEXT7,
-            &manifest.bundle_id
-        )));
+        ] {
+            let tag = manifest.image_tag(image_name).unwrap();
+            assert!(yaml.contains(&tag), "rendered YAML must contain {tag}");
+        }
 
         assert!(!yaml.contains("image: speedwave-claude:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-hub:latest"));
@@ -2637,6 +2641,7 @@ services:
         let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
         let service = generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "test-project",
             "speedwave_test-project_network",
             tokens_dir,
@@ -2854,6 +2859,38 @@ services:
                 name
             );
         }
+    }
+
+    #[test]
+    fn compose_template_worker_url_env_vars_match_toggleable_services() {
+        // SSOT: WORKER_*_URL lines in compose.template.yml must match TOGGLEABLE_MCP_SERVICES.worker_env.
+        let expected: std::collections::BTreeSet<&str> = crate::consts::TOGGLEABLE_MCP_SERVICES
+            .iter()
+            .map(|s| s.worker_env)
+            .collect();
+
+        let found: std::collections::BTreeSet<&str> = COMPOSE_TEMPLATE
+            .lines()
+            .filter_map(|l| {
+                let trimmed = l.trim_start();
+                let after_dash = trimmed.strip_prefix("- ")?;
+                let var_name = after_dash.split('=').next()?;
+                if var_name.starts_with("WORKER_") && var_name.ends_with("_URL") {
+                    Some(var_name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            found, expected,
+            "WORKER_*_URL entries in compose.template.yml must match TOGGLEABLE_MCP_SERVICES worker_env.\n\
+             In template but not in TOGGLEABLE_MCP_SERVICES: {:?}\n\
+             In TOGGLEABLE_MCP_SERVICES but not in template: {:?}",
+            found.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&found).collect::<Vec<_>>(),
+        );
     }
 
     #[test]
@@ -7336,6 +7373,7 @@ services:
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
         let service_value = plugin::generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "test",
             "speedwave_test_network",
             &tokens_dir,
@@ -7385,6 +7423,7 @@ services:
         };
         let svc = plugin::generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "proj",
             "net",
             std::path::Path::new("/tokens/proj"),
@@ -7485,6 +7524,7 @@ services:
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
         let service_value = plugin::generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
@@ -10024,6 +10064,52 @@ services:
 
     // ── apply_plugins_from_verified — render-time invariants ─────────
 
+    #[test]
+    fn plugin_digests_env_reflects_tree_digest_and_keeps_slug_list_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("digplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin("digplug", Some("digplug"), &plugin_dir, None);
+        let mut integrations = crate::config::ResolvedIntegrationsConfig::default();
+        integrations.plugins.insert("digplug".to_string(), true);
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&out).unwrap();
+        let env = get_service_env_seq(&doc, "claude");
+        // Slug list stays digest-free (entrypoint contract)...
+        assert!(env.iter().any(|v| v == "SPEEDWAVE_PLUGINS=digplug"));
+        // ...while the digest var changes claude's config-hash on plugin
+        // upgrade, so the entrypoint re-runs and relinks plugin resources.
+        assert!(env
+            .iter()
+            .any(|v| v == "SPW_PLUGIN_DIGESTS=digplug:f00ddeadbeefcafe"));
+    }
+
+    #[test]
+    fn credentials_digest_pass_sits_between_filter_and_env_hardening() {
+        let source = include_str!("mod.rs");
+        let filter_pos = source
+            .find("yaml = apply_integrations_filter(")
+            .expect("filter pass must exist");
+        let creds_pos = source
+            .find("apply_credentials_digests_in(data_dir")
+            .expect("credentials pass must be wired into render");
+        let harden_pos = source
+            .find("yaml = harden_env_scalar_quoting(")
+            .expect("hardening pass must exist");
+        assert!(
+            filter_pos < creds_pos && creds_pos < harden_pos,
+            "credentials digest must run on filtered services, before quoting"
+        );
+    }
+
     /// Builds a minimal valid YAML doc for `apply_plugins_from_verified`
     /// to mutate. The shape mirrors `compose.template.yml` enough that
     /// the renderer can find `services.claude` and `services.mcp-hub`.
@@ -10087,7 +10173,11 @@ services:
             instructions: None,
             oauth: None,
         };
-        plugin::VerifiedPlugin::new(manifest, plugin_dir.to_path_buf())
+        plugin::VerifiedPlugin::new(
+            manifest,
+            plugin_dir.to_path_buf(),
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        )
     }
 
     fn fixture_host_bridge_manifest(url_env: &str, token_env: &str) -> plugin::HostBridgeManifest {

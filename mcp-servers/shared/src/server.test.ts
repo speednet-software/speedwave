@@ -109,6 +109,38 @@ describe('server', () => {
   });
 
   describe('createMCPServer', () => {
+    describe('Signal handling (PID1 fast shutdown)', () => {
+      it('start() registers SIGTERM/SIGINT handlers that close and exit(0)', async () => {
+        const before = {
+          term: process.listeners('SIGTERM').length,
+          int: process.listeners('SIGINT').length,
+        };
+        const server = createMCPServer({
+          name: 'sig-test',
+          version: '1.0.0',
+          port: 0,
+        });
+        await server.start();
+
+        expect(process.listeners('SIGTERM').length).toBe(before.term + 1);
+        expect(process.listeners('SIGINT').length).toBe(before.int + 1);
+
+        const termHandler = process.listeners('SIGTERM').at(-1) as () => void;
+        const intHandler = process.listeners('SIGINT').at(-1) as () => void;
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+        try {
+          termHandler();
+          // close callback is async — give it a tick
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          expect(exitSpy).toHaveBeenCalledWith(0);
+        } finally {
+          exitSpy.mockRestore();
+          process.removeListener('SIGTERM', termHandler);
+          process.removeListener('SIGINT', intHandler);
+        }
+      });
+    });
+
     describe('Server Creation', () => {
       it('creates server with minimal config', () => {
         const options: MCPServerOptions = {

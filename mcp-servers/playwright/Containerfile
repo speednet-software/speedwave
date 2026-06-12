@@ -119,13 +119,15 @@ EXPOSE 3000
 #   crashes on startup if both are set. We go with the user-data-dir path
 #   because restarting the container already wipes /tmp, which gives us the
 #   same "fresh profile on restart" guarantee isolated mode advertises.
-CMD ["/usr/bin/playwright-mcp", \
-     "--host", "0.0.0.0", \
-     "--port", "3000", \
-     "--browser", "chromium", \
-     "--executable-path", "/ms-playwright/chromium_headless_shell-1217/chrome-linux/headless_shell", \
-     "--user-data-dir", "/tmp/playwright-mcp-userdata", \
-     "--output-dir", "/tmp/playwright-mcp-output", \
-     "--allowed-hosts", "*", \
-     "--headless", \
-     "--no-sandbox"]
+# sh PID1 with a TERM trap — the upstream binary registers no handler and
+# PID1 ignores default dispositions, so compose down would wait the full 10s.
+CMD ["sh", "-c", "trap 'exit 0' TERM INT; /usr/bin/playwright-mcp \
+     --host 0.0.0.0 \
+     --port 3000 \
+     --browser chromium \
+     --executable-path /ms-playwright/chromium_headless_shell-1217/chrome-linux/headless_shell \
+     --user-data-dir /tmp/playwright-mcp-userdata \
+     --output-dir /tmp/playwright-mcp-output \
+     --allowed-hosts '*' \
+     --headless \
+     --no-sandbox & wait $!"]

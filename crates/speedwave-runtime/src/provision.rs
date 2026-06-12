@@ -1119,9 +1119,27 @@ pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `true` if a `nerdctl --version` line reports exactly `NERDCTL_FULL_VERSION`.
+/// Output shape is `nerdctl version 2.2.2` (tokens after "version").
+#[cfg(any(target_os = "windows", test))]
+fn nerdctl_version_matches_pin(version_line: &str) -> bool {
+    version_line
+        .split_whitespace()
+        .any(|tok| tok == consts::NERDCTL_FULL_VERSION)
+}
+
 /// Installs nerdctl-full (containerd + nerdctl + CNI + BuildKit) inside the
-/// Speedwave WSL2 distribution if not already present. Checks for a bundled
-/// tarball first (offline install), falling back to download if not found.
+/// Speedwave WSL2 distribution if the pinned version is not already present.
+/// Checks for a bundled tarball first (offline install), falling back to
+/// download if not found. Re-installs when the in-distro version differs from
+/// `NERDCTL_FULL_VERSION` so an upgrade actually upgrades the guest (ADR-072).
+/// `true` when a failed version probe means nerdctl is genuinely absent
+/// (vs a transient wsl.exe transport error that must not trigger reinstall).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn probe_indicates_absent(code: Option<i32>, stderr: &str) -> bool {
+    code == Some(127) || stderr.contains("not found") || stderr.contains("No such file")
+}
+
 #[cfg(target_os = "windows")]
 fn install_nerdctl_full() -> anyhow::Result<()> {
     let nerdctl_check = crate::binary::system_command("wsl.exe")
@@ -1134,7 +1152,32 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
         ])
         .output()?;
     if nerdctl_check.status.success() {
-        return Ok(());
+        let version_line = String::from_utf8_lossy(&nerdctl_check.stdout);
+        if nerdctl_version_matches_pin(&version_line) {
+            return Ok(());
+        }
+        log::info!(
+            "in-distro nerdctl is not the pinned {} (got: {}); reinstalling",
+            consts::NERDCTL_FULL_VERSION,
+            version_line.trim()
+        );
+    } else {
+        // Probe failed: distinguish "nerdctl genuinely absent" (exit 127 /
+        // not-found) from a transient wsl.exe transport error — a transient
+        // failure must NOT trigger a daemon-stopping reinstall.
+        let stderr = String::from_utf8_lossy(&nerdctl_check.stderr);
+        let absent = probe_indicates_absent(nerdctl_check.status.code(), &stderr);
+        if !absent {
+            anyhow::bail!(
+                "nerdctl version probe failed transiently (status {:?}: {}); skipping reinstall",
+                nerdctl_check.status.code(),
+                stderr.trim()
+            );
+        }
+        log::info!(
+            "in-distro nerdctl absent; installing {}",
+            consts::NERDCTL_FULL_VERSION
+        );
     }
 
     // Try bundled nerdctl-full tarball first (offline install from NSIS bundle).
@@ -1187,7 +1230,22 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
   rm -rf /tmp/nerdctl-install
   exit 1
 fi
-tar -C /usr/local -xzf "/tmp/nerdctl-install/${{TARBALL}}"
+# Pre-existing installs carry a unit WITHOUT KillMode=process — stopping it
+# would cgroup-kill every running container. Patch via override BEFORE stop
+# so user containers survive the upgrade (shims keep them; the new daemon
+# re-attaches). No-op on fresh install.
+if [ -f /etc/systemd/system/containerd.service ]; then
+  mkdir -p /etc/systemd/system/containerd.service.d
+  printf '[Service]\nKillMode=process\nDelegate=yes\n' > /etc/systemd/system/containerd.service.d/10-speedwave-killmode.conf
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
+fi
+# Stop daemons before unpacking — tar over live binaries fails ETXTBSY on a
+# reinstall (ADR-072). No is-system-running gate (skips on `degraded`); pkill
+# covers the `$exec &` non-systemd fallback. No-op on fresh install.
+command -v systemctl >/dev/null 2>&1 && systemctl stop buildkit containerd 2>/dev/null || true
+pkill -x buildkitd 2>/dev/null || true
+pkill -x containerd 2>/dev/null || true
+tar -C /usr/local --unlink-first --recursive-unlink -xzf "/tmp/nerdctl-install/${{TARBALL}}"
 rm -rf /tmp/nerdctl-install
 # Install iptables — required by CNI bridge plugin for container networking.
 # nerdctl-full bundles CNI plugins but iptables is a system dependency.
@@ -1209,14 +1267,21 @@ ${{requires:+Requires=$requires}}
 [Service]
 ExecStart=$exec
 Restart=always
+KillMode=process
+Delegate=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
-  if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
-    systemctl daemon-reload
-    systemctl enable --now "$name"
+  # Try systemd unconditionally — gating on overall system state skips unit
+  # installation forever on the common WSL2 `degraded` state.
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl daemon-reload >/dev/null 2>&1 \
+     && systemctl enable --now "$name" >/dev/null 2>&1; then
+    :
   else
-    $exec &
+    # Detach from inherited stdio — daemons holding the caller's pipes would
+    # block the host's wait_with_output() forever (post-upgrade hang).
+    setsid $exec </dev/null >>"/var/log/${{name}}.log" 2>&1 &
   fi
   for i in $(seq 1 15); do
     if $check_cmd >/dev/null 2>&1; then return 0; fi
@@ -1271,10 +1336,162 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
     Ok(())
 }
 
+/// Reinstalls the in-distro nerdctl if it drifted from the pin (ADR-072).
+/// Warn-only, once-per-process: a failed reinstall must not churn on retry.
+#[cfg(target_os = "windows")]
+pub fn ensure_nerdctl_version() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if let Err(e) = install_nerdctl_full() {
+            log::warn!("could not align in-distro nerdctl to the pin: {e}");
+        }
+    });
+}
+
+/// No-op off Windows: macOS gets nerdctl from Lima (`.lima-version`).
+#[cfg(not(target_os = "windows"))]
+pub fn ensure_nerdctl_version() {}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // ── nerdctl version-pin matching ────────────────────────────────────────
+
+    #[test]
+    fn nerdctl_version_matches_exact_pin() {
+        let line = format!("nerdctl version {}", consts::NERDCTL_FULL_VERSION);
+        assert!(nerdctl_version_matches_pin(&line));
+        assert!(nerdctl_version_matches_pin(&format!("{line}\n")));
+    }
+
+    #[test]
+    fn nerdctl_version_rejects_other_version() {
+        // A non-exact version (older, or longer like 2.2.20) must NOT match.
+        assert!(!nerdctl_version_matches_pin("nerdctl version 2.1.2"));
+        assert!(!nerdctl_version_matches_pin("nerdctl version 2.2.20"));
+        assert!(!nerdctl_version_matches_pin(""));
+        assert!(!nerdctl_version_matches_pin("command not found"));
+    }
+
+    /// Structural: the install script must stop the daemons BEFORE `tar`
+    /// unpacks into /usr/local — on a reinstall the live containerd/buildkitd
+    /// binaries would otherwise be overwritten while executing (ETXTBSY),
+    /// failing the upgrade. The stop must precede the unpack, must NOT gate on
+    /// `is-system-running` (false in `degraded` state), and must `pkill` the
+    /// bare-background daemons (install_service's non-systemd `$exec &` path).
+    #[test]
+    fn nerdctl_install_stops_services_before_tar() {
+        let src = include_str!("provision.rs");
+        let stop_pos = src
+            .find("systemctl stop buildkit containerd")
+            .expect("install script must stop daemons before unpacking");
+        let killmode_pos = src
+            .find("10-speedwave-killmode.conf")
+            .expect("old-unit KillMode override must exist");
+        assert!(
+            killmode_pos < stop_pos,
+            "KillMode override must be written BEFORE the stop, or the first \
+             migration cgroup-kills every running container"
+        );
+        let pkill_pos = src
+            .find("pkill -x containerd")
+            .expect("install script must pkill bare-background daemons");
+        let tar_pos = src
+            .find("tar -C /usr/local --unlink-first --recursive-unlink -xzf")
+            .expect("install script must untar with --unlink-first (ETXTBSY on busy shims)");
+        assert!(
+            stop_pos < tar_pos && pkill_pos < tar_pos,
+            "daemon stop+pkill (at {stop_pos}/{pkill_pos}) must precede tar (at {tar_pos})"
+        );
+        // The stop must not be gated by is-system-running (skips on `degraded`).
+        let stop_line_end = src[stop_pos..]
+            .find('\n')
+            .map(|i| stop_pos + i)
+            .unwrap_or(src.len());
+        let stop_line_start = src[..stop_pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let stop_line = &src[stop_line_start..stop_line_end];
+        assert!(
+            !stop_line.contains("is-system-running"),
+            "the daemon-stop line must not gate on is-system-running: {stop_line}"
+        );
+    }
+
+    #[test]
+    fn probe_absent_on_exit_127_or_not_found() {
+        assert!(probe_indicates_absent(Some(127), ""));
+        assert!(probe_indicates_absent(Some(1), "nerdctl: not found"));
+        assert!(probe_indicates_absent(Some(2), "No such file or directory"));
+    }
+
+    #[test]
+    fn probe_transient_errors_do_not_mean_absent() {
+        // wsl.exe transport failures: no daemon-stopping reinstall.
+        assert!(!probe_indicates_absent(
+            Some(1),
+            "The system cannot find the distro"
+        ));
+        assert!(!probe_indicates_absent(None, "killed by signal"));
+        assert!(!probe_indicates_absent(Some(-1), ""));
+    }
+
+    #[test]
+    fn version_probe_failure_discriminates_absent_from_transient() {
+        let source = include_str!("provision.rs");
+        let anchor = source
+            .find("probe failed transiently")
+            .expect("transient-probe bail must exist");
+        let window_start = anchor.saturating_sub(900);
+        let window = &source[window_start..anchor];
+        assert!(
+            window.contains("probe_indicates_absent"),
+            "the bail path must gate on the pure discriminator"
+        );
+    }
+
+    #[test]
+    fn nerdctl_install_fallback_detaches_daemon_stdio() {
+        let src = include_str!("provision.rs");
+        let fallback = src
+            .find("setsid $exec </dev/null >>")
+            .expect("non-systemd fallback must detach stdio (inherited pipes hang the host)");
+        let fi = src[fallback..].find("fi").map(|i| fallback + i).unwrap();
+        assert!(
+            src[fallback..fi].contains("2>&1 &"),
+            "fallback must redirect stderr and background the daemon"
+        );
+        // A bare `$exec &` (no redirection) must not exist anywhere.
+        assert!(
+            !src.contains("\n    $exec &\n"),
+            "bare $exec & inherits the Rust pipes and deadlocks wait_with_output"
+        );
+    }
+
+    #[test]
+    fn install_service_does_not_gate_systemd_on_is_system_running() {
+        let src = include_str!("provision.rs");
+        let unit = src.find("ExecStart=$exec").expect("unit heredoc");
+        let window = &src[unit..unit + 1200];
+        assert!(
+            window.contains("systemctl enable --now") && !window.contains("is-system-running"),
+            "systemd path must be attempted unconditionally (degraded state is common on WSL2)"
+        );
+    }
+
+    #[test]
+    fn nerdctl_service_unit_has_killmode_process() {
+        let src = include_str!("provision.rs");
+        let unit = src
+            .find("ExecStart=$exec")
+            .expect("install_service unit heredoc must exist");
+        let tail = &src[unit..unit + 200];
+        assert!(
+            tail.contains("KillMode=process") && tail.contains("Delegate=yes"),
+            "containerd unit needs KillMode=process + Delegate=yes or a stop cgroup-kills every container"
+        );
+    }
 
     // ── Lima VM config migration tests ──────────────────────────────────────
 

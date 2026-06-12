@@ -215,6 +215,14 @@ pub fn verify_plugin_signature_with_key(
     Ok(())
 }
 
+/// Hex digest of the plugin tree — the same bytes the Ed25519 signature
+/// covers. Content-addressed plugin image tags derive from it (ADR-072).
+pub(crate) fn plugin_tree_digest_hex(plugin_dir: &Path) -> anyhow::Result<String> {
+    Ok(crate::bundle::bytes_to_hex(&compute_plugin_digest(
+        plugin_dir,
+    )?))
+}
+
 /// Computes a deterministic SHA-256 digest of all files in the plugin directory,
 /// excluding the SIGNATURE file. Files are sorted by relative path for determinism.
 fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {

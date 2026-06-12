@@ -91,21 +91,36 @@ pub(crate) struct ExitCleanupContext {
 }
 
 /// Stop + remove a project's worker; cleans token/port/pid/config (keeps audit log).
-pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project: &str) {
-    let proc = match host_exec.lock() {
+/// Generic per-project host-worker teardown (best-effort) — one body for
+/// every `HashMap<project, HostMcpProcess<S>>` registry.
+fn teardown_worker_for_project<S: speedwave_runtime::host_mcp_process::WorkerSpec>(
+    map: &Arc<Mutex<HashMap<String, speedwave_runtime::host_mcp_process::HostMcpProcess<S>>>>,
+    project: &str,
+    label: &str,
+) {
+    let proc = match map.lock() {
         Ok(mut map) => map.remove(project),
         Err(e) => {
-            log::warn!("teardown_host_exec_for_project: map mutex poisoned: {e}");
+            log::warn!("teardown {label}[{project}]: map mutex poisoned: {e}");
             return;
         }
     };
     if let Some(mut proc) = proc {
-        log::info!("host_exec[{project}]: tearing down worker");
+        log::info!("{label}[{project}]: tearing down worker");
         if let Err(e) = proc.stop() {
-            log::warn!("host_exec[{project}]: stop error during teardown: {e}");
+            log::warn!("{label}[{project}]: stop error during teardown: {e}");
         }
         proc.cleanup_files();
     }
+}
+
+pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project: &str) {
+    teardown_worker_for_project(host_exec, project, "host_exec");
+}
+
+/// ADR-060 oauth worker variant of [`teardown_host_exec_for_project`].
+pub(crate) fn teardown_oauth_for_project(oauth: &SharedOauth, project: &str) {
+    teardown_worker_for_project(oauth, project, "oauth");
 }
 
 /// Reconcile phase: nothing running.
@@ -265,6 +280,9 @@ fn restore_one_project(
     project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<(), String> {
+    // A background teardown of this project (mid-session switch) must finish
+    // before the restore, or it would kill the freshly restored containers.
+    crate::containers_cmd::wait_for_pending_teardown(project);
     // Build OUTSIDE the lock (ADR-066): bundle + plugin images.
     crate::integrations_cmd::ensure_project_images_built(rt, project)?;
 
@@ -345,10 +363,16 @@ fn prepare_rebuild(
     Ok(())
 }
 
+/// `true` if the installed reconcile id differs from the applied one — decided
+/// WITHOUT starting the VM, so the gate can close before any slow work (#781).
+fn reconcile_id_changed(state: &bundle::BundleState, manifest: &bundle::BundleManifest) -> bool {
+    state.applied_bundle_id.as_deref() != Some(manifest.bundle_id.as_str())
+}
+
 /// INVARIANT: `ensure_ready()` must NOT be gated behind `is_available()`.
 /// A stopped Lima VM returns `is_available() == false` but `ensure_ready()`
 /// can start it; gating one behind the other silently skips VM auto-start.
-/// The behavioral test for this lives in `lima.rs` → `test_ensure_ready_stopped_vm_starts_it`.
+/// Behavioral test: `lima.rs` → `test_ensure_ready_stopped_vm_starts_it`.
 fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), String> {
     log::info!("reconcile_bundle: loading current bundle manifest");
     let manifest = bundle::load_current_bundle_manifest().map_err(|e| {
@@ -358,13 +382,11 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     })?;
 
     let mut state = bundle::load_bundle_state();
-    let bundle_changed = state.applied_bundle_id.as_deref() != Some(manifest.bundle_id.as_str());
 
     log::info!(
-        "reconcile_bundle: current={} applied={} changed={}",
+        "reconcile_bundle: current={} applied={}",
         manifest.bundle_id,
         state.applied_bundle_id.as_deref().unwrap_or("(none)"),
-        bundle_changed,
     );
 
     // Scope: active project only; project switch builds the rest on demand (ADR-057).
@@ -386,9 +408,13 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
 
     let rt = speedwave_runtime::runtime::detect_runtime();
 
-    if bundle_changed {
+    // Reconcile-id change is decided WITHOUT starting the VM, so the gate can
+    // close before any slow work — preserving #781's start-vs-rebuild fix.
+    // The images-missing fallback (id unchanged but images gone) needs a probe,
+    // which runs after the gate opens in the no-change branch below (as in #781).
+    if reconcile_id_changed(&state, &manifest) {
         // Gate first, then the slow ensure_ready (VM start) — closes the
-        // start_containers vs rebuild race ("image not available").
+        // start_containers vs rebuild race ("image not available", #781).
         prepare_rebuild(&mut state, app_handle)?;
         rt.ensure_ready().map_err(|e| {
             set_bundle_error(
@@ -396,13 +422,58 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 format!("Runtime is not ready while applying the new bundle: {e}"),
             )
         })?;
+    } else if state.phase.is_before(bundle::BundleReconcilePhase::Done) {
+        // Id matches but a previous reconcile was interrupted before completion.
+        // Resources or images on disk may reflect a different app version
+        // (e.g. a downgrade after a partially-applied upgrade). Force a full
+        // re-reconcile from scratch to guarantee consistency.
+        log::warn!(
+            "reconcile_bundle: bundle id unchanged but phase={:?} — \
+             previous reconcile was interrupted, forcing re-reconcile",
+            state.phase,
+        );
+        prepare_rebuild(&mut state, app_handle)?;
+        rt.ensure_ready().map_err(|e| {
+            set_bundle_error(
+                &mut state,
+                format!("Runtime is not ready while re-reconciling after interrupted update: {e}"),
+            )
+        })?;
     } else {
-        if state.phase != bundle::BundleReconcilePhase::Done
-            || state.last_error.is_some()
-            || !state.pending_running_projects.is_empty()
-        {
+        // Id matches and previous reconcile completed (phase=Done).
+        // Restore any projects a no-op update left stopped, open the gate,
+        // then repair missing images (needs a running VM, ADR-072).
+        if !state.pending_running_projects.is_empty() {
+            match rt.ensure_ready() {
+                Ok(()) => {
+                    let pending = state.pending_running_projects.clone();
+                    log::info!(
+                        "reconcile_bundle: bundle unchanged, restoring {} stopped project(s)",
+                        pending.len()
+                    );
+                    restore_projects(&pending, &rt).map_err(|e| {
+                        let msg = format!("Project restore failed: {e}");
+                        log::error!("reconcile_bundle: {msg}");
+                        set_bundle_error(&mut state, msg)
+                    })?;
+                }
+                Err(e) => {
+                    // Keep pending_running_projects so the next launch retries.
+                    log::warn!(
+                        "reconcile_bundle: {} project(s) pending restore but runtime not ready \
+                         ({e}) — will retry next launch",
+                        state.pending_running_projects.len()
+                    );
+                    set_image_readiness(ImageReadiness::Ready);
+                    emit_bundle_status(app_handle);
+                    return Ok(());
+                }
+            }
+        }
+        // Pending projects (if any) were restored just above; this clears and
+        // persists them along with any stale phase/error left by a prior run.
+        if state.last_error.is_some() || !state.pending_running_projects.is_empty() {
             log::info!("reconcile_bundle: bundle matches but state dirty, cleaning up");
-            state.phase = bundle::BundleReconcilePhase::Done;
             state.last_error = None;
             state.pending_running_projects.clear();
             bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
@@ -413,8 +484,34 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         set_image_readiness(ImageReadiness::Ready);
         emit_bundle_status(app_handle);
 
+        // Converge crash-orphans: ONLY projects whose background teardown a
+        // previous process recorded but never finished. Never ps-diff against
+        // active_project — non-active projects run legitimately (CLI).
+        match config::load_user_config() {
+            Ok(cfg) => {
+                for project in crate::containers_cmd::crashed_teardown_intents() {
+                    if cfg.active_project.as_deref() == Some(project.as_str()) {
+                        // The active project is (re)started right after reconcile —
+                        // an interrupted teardown converges via that idempotent up.
+                        continue;
+                    }
+                    log::info!(
+                        "reconcile_bundle: converging crash-interrupted teardown of '{project}'"
+                    );
+                    crate::containers_cmd::spawn_background_teardown(project);
+                }
+            }
+            // Unknown active project — a teardown could race the post-reconcile
+            // start. Intents persist, so the next launch retries convergence.
+            Err(e) => {
+                log::warn!(
+                    "reconcile_bundle: skipping teardown convergence, config unreadable: {e}"
+                );
+            }
+        }
+
         // Repair: images may be gone after containerd reinstall/VM recreation;
-        // needs a running VM, so it runs after the gate opened (as before).
+        // needs a running VM, so it runs after the gate opened (#781).
         match rt.ensure_ready() {
             Ok(()) => {
                 if build::images_exist(&rt, &active_integrations) {
@@ -441,6 +538,33 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .phase
         .is_before(bundle::BundleReconcilePhase::ResourcesSynced)
     {
+        // The sync atomically REPLACES the resources dir that running
+        // containers bind-mount — their mounted tree would vanish for the
+        // whole build window (forever, on build failure). Stop them first;
+        // the restore phase brings them back from pending_running_projects.
+        if rt.is_available() {
+            if let Ok(cfg) = config::load_user_config() {
+                if let Ok(running) = list_running_projects(&rt, &cfg) {
+                    if !running.is_empty() {
+                        for p in &running {
+                            if !state.pending_running_projects.contains(p) {
+                                state.pending_running_projects.push(p.clone());
+                            }
+                        }
+                        state.pending_running_projects.sort();
+                        state.pending_running_projects.dedup();
+                        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+                        log::info!(
+                            "reconcile_bundle: stopping {} running project(s) before resources sync",
+                            running.len()
+                        );
+                        if let Err(e) = stop_projects(&running, &rt) {
+                            log::warn!("reconcile_bundle: pre-sync stop incomplete: {e}");
+                        }
+                    }
+                }
+            }
+        }
         log::info!("reconcile_bundle: syncing claude-resources");
         bundle::sync_claude_resources(&build_root).map_err(|e| {
             set_bundle_error(&mut state, format!("Claude resources sync failed: {e}"))
@@ -469,8 +593,19 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // pre-restore phase — no containers are running yet (see ContainerRuntime
         // trait docs for restart_container_engine).
         let enabled = build::enabled_images(&active_integrations);
-        match build::build_images_for_bundle(&rt, &enabled, &manifest.bundle_id) {
-            Ok(_) => {}
+        // Missing-only under the build lock — a present per-image tag is
+        // already the exact build this manifest needs (ADR-072).
+        match build::build_missing_images_locked(&rt, &enabled, &manifest) {
+            Ok(built) => {
+                let skipped = enabled.len() as u32 - built;
+                if skipped > 0 {
+                    log::info!(
+                        "reconcile_bundle: built {built} image(s), \
+                         {skipped} already present for bundle {}",
+                        manifest.bundle_id
+                    );
+                }
+            }
             Err(e)
                 if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
                     .is_some() =>
@@ -481,13 +616,11 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                     log::error!("reconcile_bundle: {msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
-                build::build_images_for_bundle(&rt, &enabled, &manifest.bundle_id).map_err(
-                    |e| {
-                        let msg = format!("Image rebuild failed after engine restart: {e}");
-                        log::error!("reconcile_bundle: {msg}");
-                        set_bundle_error(&mut state, msg)
-                    },
-                )?;
+                build::build_missing_images_locked(&rt, &enabled, &manifest).map_err(|e| {
+                    let msg = format!("Image rebuild failed after engine restart: {e}");
+                    log::error!("reconcile_bundle: {msg}");
+                    set_bundle_error(&mut state, msg)
+                })?;
             }
             Err(e) => {
                 let msg = format!("Image rebuild failed: {e}");
@@ -501,9 +634,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             log::warn!("reconcile_bundle: failed to rebuild some plugin images: {e}");
         }
         // Drop tags from this bundle that no longer belong to enabled set (warn-only).
-        if let Err(e) =
-            build::prune_orphan_current_bundle_images(&rt, &manifest.bundle_id, &enabled)
-        {
+        if let Err(e) = build::prune_orphan_current_bundle_images_locked(&rt, &manifest, &enabled) {
             log::warn!("reconcile_bundle: orphan-tag prune failed: {e}");
         }
 
@@ -533,6 +664,21 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             config::SpeedwaveUserConfig::default()
         }
     };
+
+    // Converge crash-interrupted teardowns before restoring projects (id-changed path).
+    for project in crate::containers_cmd::crashed_teardown_intents() {
+        if user_config.active_project.as_deref() == Some(project.as_str()) {
+            continue; // active project is re-started right after — idempotent up converges it
+        }
+        if state.pending_running_projects.contains(&project) {
+            continue; // about to restore it — teardown would race the restore
+        }
+        log::info!(
+            "reconcile_bundle: converging crash-interrupted teardown of '{project}' (id-changed path)"
+        );
+        crate::containers_cmd::spawn_background_teardown(project);
+    }
+
     let mut projects = state.pending_running_projects.clone();
     let running_projects = list_running_projects(&rt, &user_config)?;
     for project in running_projects {
@@ -548,6 +694,10 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .phase
         .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
     {
+        // Persist the merged set FIRST: a failed restore must not drop an
+        // already-downed project from the next attempt's list.
+        state.pending_running_projects = projects.clone();
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         log::info!("reconcile_bundle: restoring {} project(s)", projects.len());
         restore_projects(&projects, &rt).map_err(|e| {
             let msg = format!("Project restore failed: {e}");
@@ -562,19 +712,19 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         emit_bundle_status(app_handle);
     }
 
-    // Atomicity: only prune the previous bundle's images now that every
-    // earlier phase succeeded. If reconcile failed earlier (image build,
-    // project restore, ensure_ready), the previous images stay on disk so
-    // a restart resumes with a known-good state.
-    if let Some(old_id) =
-        build::should_prune_bundle(state.applied_bundle_id.as_deref(), &manifest.bundle_id)
-    {
-        if let Err(e) = build::prune_old_bundle_images(&rt, old_id) {
-            log::warn!("Failed to prune old bundle images: {e}");
-        }
-    }
+    // Atomicity: only prune superseded images now that every earlier phase
+    // succeeded (per-image replaced tags + one-time legacy prune, ADR-072).
+    // If reconcile failed earlier (image build, project restore, ensure_ready),
+    // the previous images stay on disk so a restart resumes known-good.
+    build::prune_superseded_images(
+        &rt,
+        &state.applied_image_hashes,
+        state.applied_bundle_id.as_deref(),
+        &manifest,
+    );
 
     state.applied_bundle_id = Some(manifest.bundle_id.clone());
+    state.applied_image_hashes = manifest.image_hashes.clone();
     state.phase = bundle::BundleReconcilePhase::Done;
     state.pending_running_projects.clear();
     state.last_error = None;
@@ -836,6 +986,9 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::HOST_EXEC_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    // A graceful exit must not race an in-flight background teardown —
+    // join them all before the container cleanup below.
+    crate::containers_cmd::drain_pending_teardowns();
 
     let ide_bridge = ctx.ide_bridge.clone();
     let plugin_bridges = ctx.plugin_bridges.clone();
@@ -968,6 +1121,140 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_projects_are_stopped_before_resources_sync() {
+        let source = include_str!("reconcile.rs");
+        let stop_pos = source
+            .find("stopping {} running project(s) before resources sync")
+            .expect("pre-sync stop must exist");
+        let sync_pos = source
+            .find("reconcile_bundle: syncing claude-resources")
+            .expect("sync log must exist");
+        assert!(
+            stop_pos < sync_pos,
+            "sync replaces live bind-mounted dirs — projects must stop first"
+        );
+    }
+
+    #[test]
+    fn restore_one_project_joins_pending_teardown_first() {
+        let source = include_str!("reconcile.rs");
+        let fn_start = source
+            .find("fn restore_one_project(")
+            .expect("restore_one_project must exist");
+        let body = &source[fn_start..fn_start + 1200];
+        let wait_pos = body
+            .find("wait_for_pending_teardown")
+            .expect("restore must join an in-flight teardown of the project");
+        let build_pos = body
+            .find("ensure_project_images_built")
+            .expect("restore must build images");
+        assert!(
+            wait_pos < build_pos,
+            "teardown join must precede any restore work"
+        );
+    }
+
+    #[test]
+    fn restore_set_is_persisted_before_restore_projects() {
+        let source = include_str!("reconcile.rs");
+        let anchor = source
+            .find("Persist the merged set FIRST")
+            .expect("restore-set persist must exist");
+        let window = &source[anchor..anchor + 700];
+        let save_pos = window.find("save_bundle_state").expect("must save state");
+        let restore_pos = window
+            .find("restore_projects(&projects")
+            .expect("must restore");
+        assert!(
+            save_pos < restore_pos,
+            "a failed restore must not drop already-downed projects from the retry list"
+        );
+    }
+
+    #[test]
+    fn exit_cleanup_drains_background_teardowns() {
+        let source = include_str!("reconcile.rs");
+        let fn_start = source
+            .find("pub(crate) fn run_exit_cleanup(")
+            .expect("run_exit_cleanup must exist");
+        let body = &source[fn_start..fn_start + 1500];
+        assert!(
+            body.contains("drain_pending_teardowns"),
+            "graceful exit must join in-flight teardowns before container cleanup"
+        );
+    }
+
+    #[test]
+    fn no_change_branch_converges_only_recorded_teardown_intents() {
+        let source = include_str!("reconcile.rs");
+        assert!(
+            source.contains("crashed_teardown_intents()"),
+            "convergence must use persisted intents, never ps-vs-active diffing \
+             (which killed legitimate CLI-run projects)"
+        );
+        // Split literal: include_str! sees this test too.
+        let removed_marker = format!("converging {} project", "orphaned");
+        assert!(
+            !source.contains(&removed_marker),
+            "the ps-diff orphan sweep must stay removed"
+        );
+    }
+
+    #[test]
+    fn teardown_convergence_skips_when_config_unreadable() {
+        // An unreadable config must skip convergence entirely (fail closed):
+        // with the active project unknown, a teardown could race the
+        // post-reconcile start of that very project.
+        let source = include_str!("reconcile.rs");
+        let anchor = source
+            .find("Converge crash-orphans")
+            .expect("convergence block must exist");
+        let window = &source[anchor..anchor + 1400];
+        let load_pos = window
+            .find("match config::load_user_config()")
+            .expect("convergence must branch on the config load result");
+        let intents_pos = window
+            .find("crashed_teardown_intents()")
+            .expect("convergence must read persisted intents");
+        assert!(
+            load_pos < intents_pos,
+            "config must be resolved once, before iterating intents"
+        );
+        assert!(
+            window.contains("skipping teardown convergence"),
+            "the Err arm must skip convergence instead of tearing down blindly"
+        );
+    }
+
+    #[test]
+    fn id_changed_branch_also_converges_teardown_intents() {
+        // Crash-interrupted teardowns must be converged in BOTH reconcile paths:
+        // the no-change path (else branch) AND the id-changed path. Without the
+        // id-changed path, orphaned containers accumulate whenever a crash and a
+        // bundle update happen in the same window.
+        let source = include_str!("reconcile.rs");
+
+        // Find the id-changed convergence block — it uses the same call but the
+        // comment says "id-changed path".
+        let anchor = source
+            .find("Converge crash-interrupted teardowns before restoring projects")
+            .expect("id-changed convergence block must exist");
+        let window = &source[anchor..anchor + 1500];
+        assert!(
+            window.contains("crashed_teardown_intents()"),
+            "id-changed path must read persisted teardown intents"
+        );
+        assert!(
+            window.contains("id-changed path"),
+            "id-changed convergence block must be labelled so it is distinguishable from the no-change block"
+        );
+        assert!(
+            window.contains("pending_running_projects.contains"),
+            "id-changed convergence must skip projects about to be restored (teardown vs restore race)"
+        );
+    }
     use serial_test::serial;
 
     #[test]
@@ -1209,6 +1496,165 @@ mod tests {
         }
     }
 
+    mod reconcile_id_tests {
+        use super::*;
+
+        #[test]
+        fn app_version_only_update_is_a_reconcile() {
+            // Release with zero image changes: the reconcile id differs
+            // (app_version) → full run; build phase is missing-only (0 builds)
+            // but restore brings stopped projects back. Decided without a VM.
+            let manifest = bundle::BundleManifest::for_tests("new-id");
+            let state = bundle::BundleState {
+                applied_bundle_id: Some("old-id".to_string()),
+                applied_image_hashes: manifest.image_hashes.clone(),
+                pending_running_projects: vec!["alpha".to_string()],
+                ..Default::default()
+            };
+            assert!(reconcile_id_changed(&state, &manifest));
+        }
+
+        #[test]
+        fn unchanged_id_is_not_a_reconcile() {
+            // Reinstall of the same version: id matches → no rebuild; the
+            // unchanged branch restores any stopped projects (ADR-072).
+            let manifest = bundle::BundleManifest::for_tests("same-id");
+            let state = bundle::BundleState {
+                applied_bundle_id: Some(manifest.bundle_id.clone()),
+                pending_running_projects: vec!["alpha".to_string(), "beta".to_string()],
+                ..Default::default()
+            };
+            assert!(!reconcile_id_changed(&state, &manifest));
+        }
+
+        #[test]
+        fn fresh_install_is_a_reconcile() {
+            let manifest = bundle::BundleManifest::for_tests("id1");
+            assert!(reconcile_id_changed(
+                &bundle::BundleState::default(),
+                &manifest
+            ));
+        }
+
+        /// Structural: the bundle-unchanged branch must restore pending projects
+        /// BEFORE clearing them from state — clearing first would strand them
+        /// stopped after a no-op update (ADR-072).
+        #[test]
+        fn unchanged_bundle_branch_restores_before_clearing_pending() {
+            let source = include_str!("reconcile.rs");
+            let inner_fn = source
+                .split("fn reconcile_bundle_update_inner(")
+                .nth(1)
+                .expect("reconcile_bundle_update_inner function should exist");
+            // The unchanged-id branch is the `else` of the reconcile-id check.
+            let branch_pos = inner_fn
+                .find("bundle unchanged, restoring")
+                .expect("unchanged-id branch must restore stopped projects");
+            let branch = &inner_fn[branch_pos..];
+            let restore_pos = branch
+                .find("restore_projects(")
+                .expect("unchanged branch must call restore_projects");
+            let clear_pos = branch
+                .find("pending_running_projects.clear()")
+                .expect("unchanged branch clears pending after restore");
+            assert!(
+                restore_pos < clear_pos,
+                "restore_projects (at {restore_pos}) must run before \
+                 pending_running_projects.clear() (at {clear_pos})"
+            );
+        }
+
+        /// Structural: when the runtime isn't ready in the unchanged-id restore
+        /// branch, the code must return early (keeping pending for next launch)
+        /// BEFORE the dirty-state cleanup that would clear pending — otherwise a
+        /// transiently-down VM silently strands the stopped projects (ADR-072).
+        #[test]
+        fn unchanged_branch_not_ready_keeps_pending() {
+            let source = include_str!("reconcile.rs");
+            let inner_fn = source
+                .split("fn reconcile_bundle_update_inner(")
+                .nth(1)
+                .expect("reconcile_bundle_update_inner function should exist");
+            let branch_pos = inner_fn
+                .find("pending restore but runtime not ready")
+                .expect("unchanged branch must handle runtime-not-ready");
+            let branch = &inner_fn[branch_pos..];
+            // The not-ready arm returns Ok before reaching the dirty-clear.
+            let return_pos = branch
+                .find("return Ok(())")
+                .expect("not-ready arm must return early");
+            let clear_pos = branch
+                .find("pending_running_projects.clear()")
+                .expect("dirty-clear exists later in the branch");
+            assert!(
+                return_pos < clear_pos,
+                "not-ready arm must return (keeping pending) before the clear"
+            );
+        }
+
+        /// Structural: `prepare_rebuild` must reset phase to Pending WITHOUT
+        /// clearing `pending_running_projects`. A new bundle may arrive while
+        /// a previous interrupted reconcile left projects in pending — they must
+        /// survive into the new reconcile so they get restored at the end.
+        /// The CAS guard ensures there is no concurrent reconcile to race this.
+        #[test]
+        fn prepare_rebuild_resets_phase_preserves_pending_projects() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("fn prepare_rebuild(")
+                .expect("prepare_rebuild must exist");
+            // Find the closing brace of prepare_rebuild by taking the next top-level fn.
+            let after_fn = &source[fn_start..];
+            let fn_end = after_fn
+                .find("\nfn ")
+                .or_else(|| after_fn.find("\npub(crate) fn "))
+                .or_else(|| after_fn.find("\npub fn "))
+                .unwrap_or(after_fn.len());
+            let body = &after_fn[..fn_end];
+
+            assert!(
+                body.contains("BundleReconcilePhase::Pending"),
+                "prepare_rebuild must reset phase to Pending"
+            );
+            assert!(
+                !body.contains("pending_running_projects.clear()"),
+                "prepare_rebuild must NOT clear pending_running_projects — \
+                 projects stopped by a prior interrupted reconcile must survive \
+                 into the new run so they are restored at the end"
+            );
+        }
+
+        /// Structural: when the bundle id matches but the previous reconcile was
+        /// interrupted (phase != Done), the code must force a full re-reconcile
+        /// via `prepare_rebuild`. This covers the downgrade-after-interrupted-update
+        /// scenario: v2 sync completed (phase=ResourcesSynced) but app rolled back to
+        /// v1 — the bundle id matches the pre-v2 applied id, but resources on disk
+        /// may reflect v2 content. Without the re-reconcile, v1 images run against
+        /// v2 claude-resources.
+        #[test]
+        fn interrupted_reconcile_with_matching_id_forces_rebuild() {
+            let source = include_str!("reconcile.rs");
+            let inner_fn = source
+                .split("fn reconcile_bundle_update_inner(")
+                .nth(1)
+                .expect("reconcile_bundle_update_inner function should exist");
+
+            // The matching-id + interrupted-phase branch must exist and call prepare_rebuild.
+            let interrupted_branch = inner_fn
+                .find("previous reconcile was interrupted")
+                .expect("interrupted-reconcile branch must exist in reconcile_bundle_update_inner");
+            let branch = &inner_fn[interrupted_branch..];
+            assert!(
+                branch.contains("prepare_rebuild"),
+                "interrupted-reconcile branch must call prepare_rebuild to force re-reconcile"
+            );
+            assert!(
+                branch.contains("ensure_ready"),
+                "interrupted-reconcile branch must call ensure_ready after prepare_rebuild"
+            );
+        }
+    }
+
     mod bundle_status_tests {
         use super::*;
 
@@ -1224,6 +1670,7 @@ mod tests {
 
             let state = bundle::BundleState {
                 applied_bundle_id: Some("older-bundle".to_string()),
+                applied_image_hashes: Default::default(),
                 phase: bundle::BundleReconcilePhase::Pending,
                 pending_running_projects: vec!["alpha".to_string()],
                 last_error: None,
@@ -1244,6 +1691,7 @@ mod tests {
 
             let state = bundle::BundleState {
                 applied_bundle_id: Some(manifest.bundle_id),
+                applied_image_hashes: Default::default(),
                 phase: bundle::BundleReconcilePhase::ImagesBuilt,
                 pending_running_projects: vec!["alpha".to_string()],
                 last_error: Some("stale error".to_string()),
@@ -1262,6 +1710,7 @@ mod tests {
 
             let state = bundle::BundleState {
                 applied_bundle_id: Some(manifest.bundle_id),
+                applied_image_hashes: Default::default(),
                 phase: bundle::BundleReconcilePhase::Done,
                 pending_running_projects: Vec::new(),
                 last_error: None,
@@ -1287,6 +1736,7 @@ mod tests {
 
             let state = bundle::BundleState {
                 applied_bundle_id: Some(manifest.bundle_id),
+                applied_image_hashes: Default::default(),
                 phase: bundle::BundleReconcilePhase::Done,
                 pending_running_projects: Vec::new(),
                 last_error: None,
@@ -1312,6 +1762,7 @@ mod tests {
 
             let state = bundle::BundleState {
                 applied_bundle_id: Some("older-bundle".to_string()),
+                applied_image_hashes: Default::default(),
                 phase: bundle::BundleReconcilePhase::ImagesBuilt,
                 pending_running_projects: vec!["alpha".to_string(), "beta".to_string()],
                 last_error: Some("Image rebuild failed".to_string()),
@@ -1774,8 +2225,8 @@ mod tests {
             .find("state.applied_bundle_id = Some(manifest.bundle_id.clone())")
             .expect("applied_bundle_id assignment must exist");
         let prune_pos = inner_fn
-            .find("prune_old_bundle_images")
-            .expect("prune_old_bundle_images must exist");
+            .find("prune_superseded_images")
+            .expect("prune_superseded_images must exist");
 
         assert!(
             bail_pos < applied_id_assignment_pos,
@@ -1786,7 +2237,7 @@ mod tests {
         assert!(
             bail_pos < prune_pos,
             "Image rebuild failed bail (at byte {bail_pos}) must return BEFORE \
-             prune_old_bundle_images runs (at byte {prune_pos}) — otherwise a \
+             prune_superseded_images runs (at byte {prune_pos}) — otherwise a \
              partial build failure prunes the previous bundle's images even \
              though no new images replaced them"
         );
@@ -1815,23 +2266,23 @@ mod tests {
             .expect("reconcile_bundle_update_inner function should exist");
 
         let prune_pos = inner_fn
-            .find("prune_old_bundle_images")
-            .expect("prune_old_bundle_images call must exist in reconcile_bundle_update_inner");
+            .find("prune_superseded_images")
+            .expect("prune_superseded_images call must exist in reconcile_bundle_update_inner");
         let build_pos = inner_fn
-            .find("build_images_for_bundle")
-            .expect("build_images_for_bundle call must exist in reconcile_bundle_update_inner");
+            .find("build_missing_images")
+            .expect("build_missing_images call must exist in reconcile_bundle_update_inner");
         let restore_pos = inner_fn
             .find("restore_projects(")
             .expect("restore_projects call must exist in reconcile_bundle_update_inner");
 
         assert!(
             prune_pos > build_pos,
-            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
+            "prune_superseded_images (at byte {prune_pos}) must appear AFTER \
              build_images_for_bundle (at byte {build_pos}) in reconcile_bundle_update_inner"
         );
         assert!(
             prune_pos > restore_pos,
-            "prune_old_bundle_images (at byte {prune_pos}) must appear AFTER \
+            "prune_superseded_images (at byte {prune_pos}) must appear AFTER \
              restore_projects (at byte {restore_pos}) in reconcile_bundle_update_inner"
         );
     }
@@ -1852,8 +2303,8 @@ mod tests {
         );
 
         let build_pos = inner_fn
-            .find("build_images_for_bundle")
-            .expect("build_images_for_bundle call must exist");
+            .find("build_missing_images")
+            .expect("build_missing_images call must exist");
         let plugin_pos = inner_fn
             .find("ensure_plugin_images")
             .expect("ensure_plugin_images call must exist");

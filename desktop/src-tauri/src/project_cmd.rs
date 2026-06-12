@@ -41,6 +41,11 @@ fn apply_switch_project(
     Ok(())
 }
 
+/// Serialises project transitions — concurrent switches race each other's
+/// config commits, teardowns and rollbacks (double-click, add during switch).
+pub(crate) static PROJECT_TRANSITION_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 #[tauri::command]
 pub(crate) async fn switch_project(
     name: String,
@@ -48,7 +53,13 @@ pub(crate) async fn switch_project(
     chat_state: tauri::State<'_, SharedChatSession>,
     host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
-    use containers_cmd::{switch_project_core, teardown_and_restore, teardown_only, SwitchResult};
+    use containers_cmd::{
+        spawn_background_teardown, switch_project_core, teardown_only, SwitchResult,
+    };
+
+    let Ok(_transition_guard) = PROJECT_TRANSITION_LOCK.try_lock() else {
+        return Err("A project switch is already in progress".to_string());
+    };
 
     // Config is committed first to keep the config lock brief — holding it
     // across the blocking container transition would starve other config
@@ -63,22 +74,20 @@ pub(crate) async fn switch_project(
     })
     .map_err(|e| e.to_string())?;
 
-    // Tear down the previous project's `host_exec` worker (best-effort).
-    if let Some(ref prev) = previous {
-        if prev != &name {
-            reconcile::teardown_host_exec_for_project(host_exec.inner(), prev);
-        }
-    }
-
     use tauri::Emitter;
     let _ = app.emit(
         "project_switch_started",
         serde_json::json!({ "project": name }),
     );
 
-    // Container transaction: wait for images → stop previous → recreate new
+    // Container transaction: wait for images → start new → teardown in background
     let prev_clone = previous.clone();
     let new_clone = name.clone();
+    use tauri::Manager;
+    let host_exec_arc = host_exec.inner().clone();
+    let host_exec_for_teardown = host_exec_arc.clone();
+    let oauth_arc = app.state::<reconcile::SharedOauth>().inner().clone();
+    let oauth_for_teardown = oauth_arc.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = containers_cmd::ensure_images_ready() {
             return SwitchResult::Failed {
@@ -93,7 +102,12 @@ pub(crate) async fn switch_project(
             if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
-            // compose_down(prev) already handled by switch_project_core step 2.
+            // Eager-start host workers before compose render — live WORKER_*_URLs
+            // prevent the first-message container recreate.
+            crate::ensure_host_exec_running(&host_exec_arc, proj);
+            crate::ensure_oauth_running(&oauth_arc, proj);
+            // Previous project is stopped in the background after the switch
+            // fully succeeds — never here.
             // Wrap the destination project's render → validate → up sequence in a
             // single transaction so it shares semantics with every other compose
             // callsite (see ADR-066) and benefits from compose_validate_with_retry's
@@ -102,7 +116,12 @@ pub(crate) async fn switch_project(
             rt.transaction(proj, |rt| -> anyhow::Result<()> {
                 containers_cmd::render_and_save_compose(proj).into_anyhow()?;
                 speedwave_runtime::runtime::compose_validate_with_retry(rt, proj)?;
-                rt.compose_up_recreate(proj)?;
+                // Idempotent up, not force-recreate: nerdctl ≥ 2.2.0 config-hash
+                // convergence recreates only containers whose config (or
+                // content-addressed image tag) actually changed — so a changed
+                // image or integration re-runs the entrypoint, while an
+                // unchanged destination is left in place instead of churned.
+                rt.compose_up(proj)?;
                 Ok(())
             })
             .map_err(|e| e.to_string())
@@ -111,14 +130,17 @@ pub(crate) async fn switch_project(
     .await
     .map_err(|e| e.to_string())?;
 
-    if let SwitchResult::Failed {
-        error,
-        cleanup_error,
-    } = switch_result
-    {
-        let full_error = rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
-        return Err(full_error);
-    }
+    let pending_teardown = match switch_result {
+        SwitchResult::Failed {
+            error,
+            cleanup_error,
+        } => {
+            let full_error =
+                rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
+            return Err(full_error);
+        }
+        SwitchResult::Succeeded { teardown } => teardown,
+    };
 
     // Rebind chat session (spawn_blocking: rebind_chat acquires Mutex and calls session.start)
     let rebind_name = name.clone();
@@ -130,47 +152,37 @@ pub(crate) async fn switch_project(
             .map_err(|e| e.to_string())?;
 
     if let Err(e) = rebind_result {
-        // Restore previous project containers + chat
+        // Previous is still running (teardown deferred) — only tear
+        // down the new project, then rebind chat back to previous.
+        // The eagerly-started host workers for the destination must be
+        // retired too, or they linger pointing at downed containers.
+        reconcile::teardown_host_exec_for_project(&host_exec_for_teardown, &name);
+        reconcile::teardown_oauth_for_project(&oauth_for_teardown, &name);
         let mut cleanup_parts: Vec<String> = Vec::new();
 
-        let prev_for_restore = previous.clone();
         let new_for_teardown = name.clone();
-        let restore_result: Result<(), String> = tokio::task::spawn_blocking(move || {
+        let teardown_err: Option<String> = tokio::task::spawn_blocking(move || {
             let rt = speedwave_runtime::runtime::detect_runtime();
-            match &prev_for_restore {
-                Some(prev) => teardown_and_restore(&new_for_teardown, prev, &rt),
-                None => teardown_only(&new_for_teardown, &rt).map_or(Ok(()), Err),
-            }
+            teardown_only(&new_for_teardown, &rt)
         })
         .await
-        .unwrap_or_else(|je| Err(format!("join error: {je}")));
+        .unwrap_or_else(|je| Some(format!("join error: {je}")));
 
-        if let Err(ref re) = restore_result {
-            if previous.is_some() {
-                cleanup_parts.push(format!(
-                    "Container restore failed: {re}. \
-                     System may be without running containers — run speedwave to restart."
-                ));
-            } else {
-                cleanup_parts.push(format!("Teardown of new project incomplete: {re}"));
-            }
+        if let Some(te) = teardown_err {
+            cleanup_parts.push(format!("Teardown of new project incomplete: {te}"));
         }
 
         if let Some(ref prev) = previous {
-            if restore_result.is_ok() {
-                let rb_prev = prev.clone();
-                let rb_app = app.clone();
-                let rb_state = chat_state.inner().clone();
-                let rb_result: Result<(), String> =
-                    tokio::task::spawn_blocking(move || rebind_chat(&rb_prev, &rb_app, &rb_state))
-                        .await
-                        .unwrap_or_else(|je| Err(format!("join error: {je}")));
+            let rb_prev = prev.clone();
+            let rb_app = app.clone();
+            let rb_state = chat_state.inner().clone();
+            let rb_result: Result<(), String> =
+                tokio::task::spawn_blocking(move || rebind_chat(&rb_prev, &rb_app, &rb_state))
+                    .await
+                    .unwrap_or_else(|je| Err(format!("join error: {je}")));
 
-                if let Err(re) = rb_result {
-                    cleanup_parts.push(format!(
-                        "Containers restored but chat rebind to '{prev}' failed: {re}"
-                    ));
-                }
+            if let Err(re) = rb_result {
+                cleanup_parts.push(format!("Chat rebind back to '{prev}' failed: {re}"));
             }
         }
 
@@ -183,6 +195,15 @@ pub(crate) async fn switch_project(
         let full_error =
             rollback_and_emit_failed(&app, previous, &e.to_string(), cleanup_error.as_deref());
         return Err(full_error);
+    }
+
+    // Switch fully succeeded — stop the previous project in the background
+    // and retire its host workers. Doing this only AFTER success keeps a
+    // failed switch's previous project fully functional (host_exec included).
+    if let Some(prev) = pending_teardown {
+        reconcile::teardown_host_exec_for_project(host_exec.inner(), &prev);
+        reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
+        spawn_background_teardown(prev);
     }
 
     let _ = app.emit(
@@ -318,6 +339,102 @@ mod tests {
             transcription: None,
             ui: None,
         }
+    }
+
+    /// Structural: project switch must use idempotent `compose_up`, not
+    /// `compose_up_recreate`. nerdctl ≥ 2.2.0 config-hash convergence recreates
+    /// only what changed (config or content-addressed image tag); an unchanged
+    /// destination is left in place. See the nerdctl SSOT pin.
+    #[test]
+    fn switch_uses_idempotent_compose_up() {
+        let source = include_str!("project_cmd.rs");
+        let switch_fn = source
+            .split("pub(crate) async fn switch_project(")
+            .nth(1)
+            .expect("switch_project must exist");
+        // Stop at the test module so we only inspect the production body.
+        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
+        assert!(
+            body.contains("rt.compose_up(proj)"),
+            "switch must call idempotent compose_up"
+        );
+        assert!(
+            !body.contains("compose_up_recreate"),
+            "switch must NOT force-recreate (nerdctl config-hash handles it)"
+        );
+    }
+
+    /// Structural: host workers must eager-start BEFORE compose render, or the
+    /// rendered WORKER_*_URLs are dead and host_exec_cmd later force-recreates
+    /// every container (killing the fresh chat session). Mirrors add_project.
+    #[test]
+    fn switch_eager_starts_host_workers_before_render() {
+        let source = include_str!("project_cmd.rs");
+        let switch_fn = source
+            .split("pub(crate) async fn switch_project(")
+            .nth(1)
+            .expect("switch_project must exist");
+        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
+        let host_exec_pos = body
+            .find("ensure_host_exec_running")
+            .expect("switch must eager-start host_exec");
+        let oauth_pos = body
+            .find("ensure_oauth_running")
+            .expect("switch must eager-start oauth");
+        let render_pos = body
+            .find("render_and_save_compose")
+            .expect("switch must render compose");
+        assert!(
+            host_exec_pos < render_pos && oauth_pos < render_pos,
+            "host workers must start before compose render"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_switch_is_rejected_while_lock_held() {
+        let guard = PROJECT_TRANSITION_LOCK.lock().await;
+        // A second transition must fail fast instead of racing the first.
+        assert!(PROJECT_TRANSITION_LOCK.try_lock().is_err());
+        drop(guard);
+        assert!(PROJECT_TRANSITION_LOCK.try_lock().is_ok());
+    }
+
+    /// Structural: previous project's host workers are retired only AFTER the
+    /// switch fully succeeds — a failed switch must leave them functional.
+    #[test]
+    fn switch_retires_previous_host_workers_only_after_success() {
+        let source = include_str!("project_cmd.rs");
+        let switch_fn = source
+            .split("pub(crate) async fn switch_project(")
+            .nth(1)
+            .expect("switch_project must exist");
+        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
+        let success_marker = body
+            .find("pending_teardown {")
+            .expect("success-path teardown block must exist");
+        // The PREVIOUS project's workers retire only in the success block...
+        let prev_teardown = body
+            .rfind("teardown_host_exec_for_project")
+            .expect("host_exec teardown must exist");
+        let prev_oauth = body
+            .rfind("teardown_oauth_for_project")
+            .expect("oauth teardown must exist");
+        assert!(
+            prev_teardown > success_marker && prev_oauth > success_marker,
+            "previous-project worker teardown must live in the success path"
+        );
+        // ...while the rebind-failure block retires the DESTINATION's
+        // eagerly-started workers (they would otherwise point at downed
+        // containers for the rest of the session).
+        let rebind_fail = body
+            .find("rebind_result {")
+            .expect("rebind-failure block must exist");
+        let fail_window = &body[rebind_fail..success_marker];
+        assert!(
+            fail_window.contains("teardown_host_exec_for_project")
+                && fail_window.contains("teardown_oauth_for_project"),
+            "rebind failure must retire the destination's host workers"
+        );
     }
 
     // -- apply_switch_project tests --

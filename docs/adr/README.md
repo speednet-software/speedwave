@@ -78,6 +78,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-069](ADR-069-generic-plugin-oauth2.md)                            | Generic plugin OAuth2 via host-side worker — per-human identity, PKCE loopback           | Accepted              |
 | [ADR-070](ADR-070-appleevents-kernel-process-id-gate.md)               | AppleEvents permission gate via `typeKernelProcessID` addressing                         | Accepted              |
 | [ADR-071](ADR-071-slack-oauth-pkce-user-tokens.md)                     | Slack OAuth2 PKCE — tokenless sign-in with rotating user tokens                          | Accepted              |
+| [ADR-072](ADR-072-per-image-build-input-hash-tags.md)                  | Per-image build-input hash tags + BuildKit cache retention — rebuild only changed images | Accepted              |
 
 ## Creating a New ADR
 

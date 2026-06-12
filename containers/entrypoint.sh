@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Trap TERM from the very top — a stop during the startup phase (hub wait,
+# runtime Claude install) must exit promptly, not eat the 10s SIGKILL timeout.
+trap 'exit 0' TERM INT
+
 # Disable auto-updater unconditionally — Speedwave pins Claude Code versions
 export DISABLE_AUTOUPDATER=1
 
@@ -171,13 +175,31 @@ done
 
 # settings.json must be a WRITABLE copy, not a symlink: Claude Code writes it
 # (`/effort`, `/model` persist the choice) and the resources mount is read-only
-# (EROFS otherwise). Replace a stale symlink (older builds linked it), then seed
-# only when absent so a user's persisted choice survives across restarts.
+# (EROFS otherwise). Replace a stale symlink (older builds linked it).
+# Key-level merge: template keys missing from the on-disk file are added so new
+# Speedwave defaults reach existing users without overwriting their choices.
 if [ -L "${HOME}/.claude/settings.json" ]; then
     rm -f "${HOME}/.claude/settings.json"
 fi
-if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ] && [ ! -e "${HOME}/.claude/settings.json" ]; then
-    cp "${SPEEDWAVE_RESOURCES}/settings.json" "${HOME}/.claude/settings.json"
+if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ]; then
+    _tmpl="${SPEEDWAVE_RESOURCES}/settings.json"
+    _dest="${HOME}/.claude/settings.json"
+    if [ ! -e "${_dest}" ]; then
+        cp "${_tmpl}" "${_dest}"
+    else
+        # Add template keys absent from the current file; existing keys are kept.
+        # Atomic write: crash mid-write leaves .tmp, not a truncated destination.
+        node -e "
+const fs = require('fs');
+const tmpl = JSON.parse(fs.readFileSync('${_tmpl}', 'utf8'));
+const cur  = JSON.parse(fs.readFileSync('${_dest}', 'utf8'));
+const merged = Object.assign({}, tmpl, cur);
+const tmp = '${_dest}' + '.tmp';
+fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + '\n');
+fs.renameSync(tmp, '${_dest}');
+" 2>/dev/null || true
+    fi
+    unset _tmpl _dest
 fi
 
 # output-styles: symlink individual file (not directory) to preserve user's custom styles
@@ -296,5 +318,9 @@ touch "${CLAUDE_READY_MARKER:-/tmp/claude-ready}"
 if [ $# -gt 0 ]; then
     exec "$@"
 else
-    exec sleep infinity
+    # PID1 must trap TERM — bare `sleep` ignores it and compose down waits
+    # 10s. Kill the background sleep too: an orphan would outlive the shell
+    # (and wedge the bats harness waiting on its output pipe).
+    trap 'kill "$!" 2>/dev/null; exit 0' TERM INT
+    while :; do sleep 86400 & wait $!; done
 fi

@@ -277,13 +277,17 @@ impl ResolvedIntegrationsConfig {
         self.plugins.get(service_id).copied().unwrap_or(false)
     }
 
-    /// Service ids of all enabled plugins.
+    /// Service ids of all enabled plugins, sorted — env values built from
+    /// this list must be deterministic or config-hash convergence flaps.
     pub fn enabled_plugin_service_ids(&self) -> Vec<&str> {
-        self.plugins
+        let mut ids: Vec<&str> = self
+            .plugins
             .iter()
             .filter(|(_, &enabled)| enabled)
             .map(|(id, _)| id.as_str())
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Enabled state for a macOS native service by config key, or `None` if unknown.
@@ -2812,6 +2816,28 @@ mod tests {
                     "migration claimed success on read-only dir but field actually removed: {after}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod plugin_order_tests {
+    use super::*;
+
+    #[test]
+    fn enabled_plugin_service_ids_are_sorted_and_stable() {
+        let mut cfg = ResolvedIntegrationsConfig::default();
+        for id in ["zeta", "alpha", "midway", "beta"] {
+            cfg.plugins.insert(id.to_string(), true);
+        }
+        cfg.plugins.insert("disabled".to_string(), false);
+        for _ in 0..20 {
+            assert_eq!(
+                cfg.enabled_plugin_service_ids(),
+                vec!["alpha", "beta", "midway", "zeta"],
+                "order must be deterministic — env values feed config-hash"
+            );
         }
     }
 }

@@ -945,20 +945,28 @@ pub(crate) fn validate_manifest(
         }
     }
 
-    // Validate image_tag format (alphanumeric, dots, hyphens, underscores)
-    if let Some(ref tag) = manifest.image_tag {
-        static TAG_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+    // One charset gate for every tag-feeding field (image_tag AND version) —
+    // an out-of-charset value would corrupt the OCI tag (or panic truncate).
+    fn tag_charset_re() -> anyhow::Result<&'static regex::Regex> {
+        static RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
             std::sync::OnceLock::new();
-        let re = TAG_RE
-            .get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"))
+        RE.get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"))
             .as_ref()
-            .map_err(|e| anyhow::anyhow!("invalid image_tag regex: {e}"))?;
-        if !re.is_match(tag) {
+            .map_err(|e| anyhow::anyhow!("invalid tag charset regex: {e}"))
+    }
+    if let Some(ref tag) = manifest.image_tag {
+        if !tag_charset_re()?.is_match(tag) {
             anyhow::bail!(
                 "Invalid image_tag '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
                 tag
             );
         }
+    }
+    if !tag_charset_re()?.is_match(&manifest.version) {
+        anyhow::bail!(
+            "Invalid version '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
+            manifest.version
+        );
     }
 
     // Validate auth_fields keys are safe filesystem names and field_type is known
@@ -1701,7 +1709,7 @@ fn install_plugin_with_base(
 ///
 /// When `runtime` is provided AND the plugin has a `service_id` (i.e. an
 /// MCP plugin with a built container image), also removes the cached
-/// container image (`speedwave-mcp-<slug>:<version>`). Image cleanup is
+/// container images (content-addressed tags, ADR-072). Image cleanup is
 /// best-effort — a failure is logged at warn level but does not fail the
 /// removal, since at that point the plugin directory is already gone and
 /// the surviving image is at worst a few hundred MB of leaked disk.
@@ -1739,6 +1747,38 @@ fn remove_plugin_with_base(
     } else {
         None
     };
+    // Content-addressed tags (ADR-072): collect BOTH the tag derived from the
+    // current tree and the last-built tag recorded in plugin-state — they can
+    // differ when a reinstall happened without a rebuild.
+    let mut tags_for_removal: Vec<String> = Vec::new();
+    if let Some(ref manifest) = manifest_for_image {
+        if manifest.service_id.is_some() {
+            if let Ok(digest_hex) = signing::plugin_tree_digest_hex(&plugin_dir) {
+                tags_for_removal.push(plugin_image_tag(manifest, &digest_hex));
+            }
+            if let Ok(applied) = std::fs::read_to_string(
+                plugin_state_dir_for(plugins_dir, slug).join(APPLIED_IMAGE_TAG_MARKER),
+            ) {
+                let applied = applied.trim().to_string();
+                if !applied.is_empty() && !tags_for_removal.contains(&applied) {
+                    tags_for_removal.push(applied);
+                }
+            }
+            if let Ok(pending) = std::fs::read_to_string(
+                plugin_state_dir_for(plugins_dir, slug).join(SUPERSEDED_TAGS_FILE),
+            ) {
+                for t in pending.lines().map(str::trim).filter(|t| !t.is_empty()) {
+                    if !tags_for_removal.contains(&t.to_string()) {
+                        tags_for_removal.push(t.to_string());
+                    }
+                }
+            }
+            let legacy = plugin_legacy_image_tag(manifest);
+            if !tags_for_removal.contains(&legacy) {
+                tags_for_removal.push(legacy);
+            }
+        }
+    }
 
     // Drop the cached signature verdict BEFORE removing the directory —
     // `invalidate_cache` resolves its key via `canonicalize`, which
@@ -1764,16 +1804,17 @@ fn remove_plugin_with_base(
 
     if let (Some(rt), Some(manifest)) = (runtime, manifest_for_image) {
         if manifest.service_id.is_some() {
-            let tag = plugin_image_tag(&manifest);
             // force=true: the user explicitly asked to remove this plugin,
             // and the worker container is almost always still running until
             // the next compose recreate. Without --force, rmi would refuse
             // and the layer cache would survive — defeating the next
             // reinstall (a fresh ZIP would receive the stale cached image).
-            if let Err(e) = rt.remove_images(std::slice::from_ref(&tag), true) {
-                log::warn!("Failed to remove container image '{tag}' for plugin '{slug}': {e}");
-            } else {
-                log::info!("Removed container image '{tag}' for plugin '{slug}'");
+            for tag in &tags_for_removal {
+                if let Err(e) = rt.remove_images(std::slice::from_ref(tag), true) {
+                    log::warn!("Failed to remove container image '{tag}' for plugin '{slug}': {e}");
+                } else {
+                    log::info!("Removed container image '{tag}' for plugin '{slug}'");
+                }
             }
         }
     }
@@ -1795,6 +1836,7 @@ pub struct VerifiedPlugin {
     // "verified" pair that never passed the signature/dir-slug checks.
     manifest: PluginManifest,
     dir: PathBuf,
+    digest_hex: String,
 }
 
 impl VerifiedPlugin {
@@ -1803,8 +1845,17 @@ impl VerifiedPlugin {
     /// — should reach this; the private fields force every other caller
     /// through the accessors, so the "this pair has been verified" intent
     /// cannot be bypassed with literal struct syntax.
-    pub(crate) fn new(manifest: PluginManifest, dir: PathBuf) -> Self {
-        Self { manifest, dir }
+    pub(crate) fn new(manifest: PluginManifest, dir: PathBuf, digest_hex: String) -> Self {
+        Self {
+            manifest,
+            dir,
+            digest_hex,
+        }
+    }
+
+    /// Hex digest of the signed tree — drives the content-addressed image tag.
+    pub fn tree_digest_hex(&self) -> &str {
+        &self.digest_hex
     }
 
     /// The verified manifest.
@@ -1935,9 +1986,13 @@ pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginM
         return Ok(vec![]);
     }
 
+    let mut entries: Vec<std::fs::DirEntry> =
+        std::fs::read_dir(plugins_dir)?.collect::<Result<_, _>>()?;
+    // Sort by slug — non-deterministic readdir order flips SPW_PLUGIN_DIGESTS across renders.
+    entries.sort_by_key(|e| e.file_name());
+
     let mut plugins = Vec::new();
-    for entry in std::fs::read_dir(plugins_dir)? {
-        let entry = entry?;
+    for entry in entries {
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -1980,8 +2035,12 @@ pub(crate) fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<V
         return Ok(vec![]);
     }
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(plugins_dir)? {
-        let entry = entry?;
+    // Sorted: SPEEDWAVE_PLUGINS and service insertion order must be
+    // deterministic or the rendered YAML (and config-hash) flaps per run.
+    let mut entries: Vec<std::fs::DirEntry> =
+        std::fs::read_dir(plugins_dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -2028,7 +2087,12 @@ fn verify_one_plugin_dir(
     }
     validate_manifest(&manifest, plugin_dir)
         .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': manifest validation failed: {e}"))?;
-    Ok(VerifiedPlugin::new(manifest, plugin_dir.to_path_buf()))
+    let digest_hex = signing::plugin_tree_digest_hex(plugin_dir)?;
+    Ok(VerifiedPlugin::new(
+        manifest,
+        plugin_dir.to_path_buf(),
+        digest_hex,
+    ))
 }
 
 /// Tolerant lister for the Desktop UI. Never returns `Err` — every
@@ -2273,7 +2337,7 @@ fn ensure_plugin_images_from_dir(
             continue;
         }
 
-        let tag = plugin_image_tag(manifest);
+        let tag = plugin_image_tag(manifest, vp.tree_digest_hex());
         let exists = runtime.image_exists(&tag).unwrap_or(false);
         if !exists {
             log::info!(
@@ -2383,13 +2447,32 @@ fn build_single_plugin_image(
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
+    // ADR-072: every image build + tag prune is serialised by build.lock.
+    // Single choke point for install / ensure / pending paths; callers must
+    // not already hold the lock (it is not reentrant).
+    crate::build::with_build_lock(|| {
+        build_single_plugin_image_locked(runtime, manifest, plugin_dir)
+    })
+}
+
+fn build_single_plugin_image_locked(
+    runtime: &crate::runtime::LockedRuntime,
+    manifest: &PluginManifest,
+    plugin_dir: &Path,
+) -> anyhow::Result<()> {
+    // Move any legacy in-tree pending marker out FIRST — it is not part of
+    // the signed tree and must not perturb the content-addressed tag.
+    if let Some(plugins_dir) = plugin_dir.parent() {
+        migrate_legacy_image_pending(plugins_dir, plugin_dir, &manifest.slug);
+    }
     signing::verify_plugin_signature(plugin_dir).map_err(|e| {
         anyhow::anyhow!(
             "refusing to build image for plugin '{}': {e}",
             manifest.slug
         )
     })?;
-    let tag = plugin_image_tag(manifest);
+    let digest_hex = signing::plugin_tree_digest_hex(plugin_dir)?;
+    let tag = plugin_image_tag(manifest, &digest_hex);
     let vm_root = runtime.prepare_build_context(plugin_dir)?;
     // vm_root is a VM-side path (on Windows a WSL `/mnt/c/...` path); join with
     // `vm_path_join`, never `PathBuf::join` which mangles it on Windows.
@@ -2407,6 +2490,13 @@ fn build_single_plugin_image(
     // location and the legacy in-tree marker, so a plugin installed by an older release
     // stops re-triggering on every launch. `plugin_dir` is always
     // `<plugins_dir>/<slug>/`, so its parent is the plugins base.
+    record_applied_image_tag_and_prune(
+        runtime,
+        plugin_dir,
+        &manifest.slug,
+        &tag,
+        &plugin_legacy_image_tag(manifest),
+    );
     if let Some(plugins_dir) = plugin_dir.parent() {
         clear_image_pending_for(plugins_dir, plugin_dir, &manifest.slug);
     } else {
@@ -2432,16 +2522,107 @@ fn build_single_plugin_image(
     Ok(())
 }
 
-/// Returns the image tag for a plugin. E.g. "speedwave-mcp-example-plugin:1.2.0"
-fn plugin_image_tag(manifest: &PluginManifest) -> String {
-    let tag = manifest.image_tag.as_deref().unwrap_or(&manifest.version);
-    format!("speedwave-mcp-{}:{}", manifest.slug, tag)
+/// Content-addressed plugin image tag (ADR-072): `<version|image_tag>-<digest16>`.
+/// Any tree change retags, so idempotent `compose up` recreates the container.
+fn plugin_image_tag(manifest: &PluginManifest, digest_hex: &str) -> String {
+    let mut base = manifest
+        .image_tag
+        .as_deref()
+        .unwrap_or(&manifest.version)
+        .to_string();
+    // OCI tag cap is 128 chars; cut on a char boundary (truncate panics mid-char).
+    let mut cut = 100.min(base.len());
+    while !base.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    base.truncate(cut);
+    let short = &digest_hex[..16.min(digest_hex.len())];
+    format!("speedwave-mcp-{}:{base}-{short}", manifest.slug)
+}
+
+/// Marker file under `plugin-state/<slug>/` holding the last-built image tag.
+const APPLIED_IMAGE_TAG_MARKER: &str = "applied_image_tag";
+
+/// Pending-prune list (one tag per line): superseded tags whose `rmi` failed
+/// (worker still running on them) — retried on every subsequent build.
+const SUPERSEDED_TAGS_FILE: &str = "superseded_image_tags";
+
+/// Queues the superseded tag(s), retries the pending prunes, records the new
+/// tag. First content-addressed build also queues the legacy `slug:version`.
+fn record_applied_image_tag_and_prune(
+    runtime: &crate::runtime::LockedRuntime,
+    plugin_dir: &Path,
+    slug: &str,
+    tag: &str,
+    legacy_tag: &str,
+) {
+    let Some(plugins_dir) = plugin_dir.parent() else {
+        return;
+    };
+    let state_dir = plugin_state_dir_for(plugins_dir, slug);
+    let marker = state_dir.join(APPLIED_IMAGE_TAG_MARKER);
+    let pending_path = state_dir.join(SUPERSEDED_TAGS_FILE);
+
+    let mut pending: Vec<String> = std::fs::read_to_string(&pending_path)
+        .map(|c| c.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    if let Err(e) = std::fs::read_to_string(&marker) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!(
+                "applied-tag marker unreadable for '{slug}' ({e}) — treating as first build"
+            );
+        }
+    }
+    match std::fs::read_to_string(&marker) {
+        Ok(old) if !old.trim().is_empty() => {
+            if old.trim() != tag {
+                pending.push(old.trim().to_string());
+            }
+        }
+        _ => {
+            // Pre-marker install (old tag scheme) — queue the legacy tag once.
+            if legacy_tag != tag {
+                pending.push(legacy_tag.to_string());
+            }
+        }
+    }
+    pending.retain(|t| !t.is_empty() && t != tag);
+    pending.sort_unstable();
+    pending.dedup();
+    pending.retain(
+        |old| match runtime.remove_images(std::slice::from_ref(old), false) {
+            Ok(()) => false,
+            Err(e) => {
+                log::debug!(
+                    "superseded plugin image '{old}' not removed yet (retried next build): {e}"
+                );
+                true
+            }
+        },
+    );
+
+    let _ = std::fs::create_dir_all(&state_dir);
+    if pending.is_empty() {
+        let _ = std::fs::remove_file(&pending_path);
+    } else if let Err(e) = std::fs::write(&pending_path, pending.join("\n")) {
+        log::warn!("failed to persist superseded tags for '{slug}': {e}");
+    }
+    if let Err(e) = std::fs::write(&marker, tag) {
+        log::warn!("failed to record applied image tag for '{slug}': {e}");
+    }
+}
+
+/// Legacy (pre-content-addressed) tag: `speedwave-mcp-<slug>:<version|image_tag>`.
+fn plugin_legacy_image_tag(manifest: &PluginManifest) -> String {
+    let base = manifest.image_tag.as_deref().unwrap_or(&manifest.version);
+    format!("speedwave-mcp-{}:{base}", manifest.slug)
 }
 
 /// Generates a fully-resolved compose service definition for a plugin.
 /// Follows the `apply_llm_config()` pattern (format! + serde_yaml insert).
 pub fn generate_plugin_service(
     manifest: &PluginManifest,
+    digest_hex: &str,
     project_name: &str,
     network_name: &str,
     tokens_dir: &Path,
@@ -2452,7 +2633,7 @@ pub fn generate_plugin_service(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("generate_plugin_service requires service_id"))?;
 
-    let tag = plugin_image_tag(manifest);
+    let tag = plugin_image_tag(manifest, digest_hex);
     let container_name = format!(
         "{}_{}_{}_{}",
         consts::compose_prefix(),
@@ -2964,6 +3145,7 @@ mod tests {
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/myproject");
         let result = generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
@@ -3046,6 +3228,7 @@ mod tests {
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
         let result = generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "proj",
             "speedwave_proj_network",
             &tokens_dir,
@@ -3087,9 +3270,15 @@ mod tests {
         };
 
         let tokens_dir = PathBuf::from("/tokens");
-        let result =
-            generate_plugin_service(&manifest, "proj", "net", &tokens_dir, "/test/project")
-                .unwrap();
+        let result = generate_plugin_service(
+            &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
+            "proj",
+            "net",
+            &tokens_dir,
+            "/test/project",
+        )
+        .unwrap();
 
         let yaml = serde_yaml_ng::to_string(&result).unwrap();
         assert!(yaml.contains("CUSTOM_VAR=value"), "extra env: {yaml}");
@@ -3153,6 +3342,32 @@ mod tests {
     }
 
     #[test]
+    fn test_list_installed_from_dir_sorted_by_slug() {
+        // Non-deterministic readdir order causes compose volumes and SPW_PLUGIN_DIGESTS
+        // to change between renders, triggering spurious container recreates. The list
+        // must always come back in ascending slug order regardless of filesystem order.
+        let tmp = tempfile::tempdir().unwrap();
+        for slug in ["zebra-plugin", "alpha-plugin", "middle-plugin"] {
+            let dir = tmp.path().join(slug);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("plugin.json"),
+                format!(
+                    r#"{{"name":"{slug}","slug":"{slug}","version":"1.0.0","description":"ok","port":4010}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let plugins = list_installed_from_dir(tmp.path()).unwrap();
+        let slugs: Vec<&str> = plugins.iter().map(|p| p.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            ["alpha-plugin", "middle-plugin", "zebra-plugin"],
+            "plugins must be returned in ascending slug order for deterministic compose output"
+        );
+    }
+
+    #[test]
     fn test_validate_extracted_paths_clean() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path();
@@ -3206,7 +3421,10 @@ mod tests {
             instructions: None,
             oauth: None,
         };
-        assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:2.0.0");
+        assert_eq!(
+            plugin_image_tag(&manifest, "f00ddeadbeefcafe0123"),
+            "speedwave-mcp-test:2.0.0-f00ddeadbeefcafe"
+        );
     }
 
     #[test]
@@ -3232,7 +3450,10 @@ mod tests {
             instructions: None,
             oauth: None,
         };
-        assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:custom-tag");
+        assert_eq!(
+            plugin_image_tag(&manifest, "f00ddeadbeefcafe0123"),
+            "speedwave-mcp-test:custom-tag-f00ddeadbeefcafe"
+        );
     }
 
     #[test]
@@ -4487,6 +4708,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path().join("plugins");
         write_plugin_dir(&plugins_dir, "img-cleanup", true);
+        // Compute the expected content-addressed tag BEFORE removal deletes the tree.
+        let expected_tag = expected_tag_for(&plugins_dir, "img-cleanup");
 
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         remove_plugin_with_base("img-cleanup", &plugins_dir, Some(&rt)).unwrap();
@@ -4496,9 +4719,13 @@ mod tests {
         // remove_images called once with the expected tag AND force=true
         // (uninstall is an explicit user request — no waiting for prune).
         let calls = handles.remove_images_calls.lock().unwrap().clone();
+        // Current content-addressed tag + the legacy version-only tag.
         assert_eq!(
             calls,
-            vec![(vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)]
+            vec![
+                (vec![expected_tag], true),
+                (vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)
+            ]
         );
     }
 
@@ -4542,11 +4769,10 @@ mod tests {
         // remove_images was attempted with force=true even on the error path
         // — the uninstall caller never silently downgrades to non-force rmi.
         let calls = handles.remove_images_calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2, "current + legacy tag, both attempted");
         assert!(
-            calls[0].1,
-            "rmi error path should still pass force=true, got force={}",
-            calls[0].1
+            calls.iter().all(|(_, force)| *force),
+            "rmi error path should still pass force=true for every tag"
         );
     }
 
@@ -4705,9 +4931,15 @@ mod tests {
         };
 
         let tokens_dir = PathBuf::from("/tokens");
-        let result =
-            generate_plugin_service(&manifest, "proj", "net", &tokens_dir, "/test/project")
-                .unwrap();
+        let result = generate_plugin_service(
+            &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
+            "proj",
+            "net",
+            &tokens_dir,
+            "/test/project",
+        )
+        .unwrap();
 
         // Verify it parses back as valid YAML
         let yaml = serde_yaml_ng::to_string(&result).unwrap();
@@ -4952,6 +5184,7 @@ mod tests {
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
         let result = generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
             "proj",
             "speedwave_proj_network",
             &tokens_dir,
@@ -7382,7 +7615,7 @@ mod tests {
             1,
             "should build the missing image"
         );
-        assert!(handle.was_built("speedwave-mcp-example-plugin:1.4.6"));
+        assert!(handle.was_built(&expected_tag_for(tmp.path(), "example-plugin")));
     }
 
     #[test]
@@ -7421,12 +7654,262 @@ mod tests {
     }
 
     #[test]
+    fn plugin_image_tag_changes_when_tree_changes() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
+        let before = expected_tag_for(tmp.path(), "example-plugin");
+        std::fs::write(
+            tmp.path().join("example-plugin").join("Containerfile"),
+            "FROM scratch\nLABEL changed=1",
+        )
+        .unwrap();
+        let after = expected_tag_for(tmp.path(), "example-plugin");
+        assert_ne!(before, after, "tree change must retag (ADR-072)");
+        assert!(after.starts_with("speedwave-mcp-example-plugin:1.0.0-"));
+    }
+
+    #[test]
+    fn plugin_image_tag_truncate_survives_multibyte_boundary() {
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test".to_string()),
+            slug: "test".to_string(),
+            // 99 ASCII chars then a multibyte char straddling index 100.
+            version: format!("{}{}", "v".repeat(99), "łłł"),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        // Must not panic; result stays within the OCI cap.
+        let tag = plugin_image_tag(&manifest, "0123456789abcdef");
+        assert!(tag.split(':').nth(1).unwrap().len() <= 128);
+    }
+
+    #[test]
+    fn validate_manifest_rejects_version_outside_tag_charset() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("badver");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{"name":"x","slug":"badver","version":"1.0:evil","description":"d"}"#,
+        )
+        .unwrap();
+        let manifest: PluginManifest =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("plugin.json")).unwrap())
+                .unwrap();
+        let err = validate_manifest(&manifest, &dir).unwrap_err().to_string();
+        assert!(err.contains("Invalid version"), "got: {err}");
+    }
+
+    #[test]
+    fn plugin_image_tag_truncates_long_base_within_oci_limit() {
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test".to_string()),
+            slug: "test".to_string(),
+            version: "2.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: Some("x".repeat(128)),
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let tag = plugin_image_tag(&manifest, "0123456789abcdef0123");
+        let after_colon = tag.split(':').nth(1).unwrap();
+        assert!(
+            after_colon.len() <= 128,
+            "OCI tag cap: {}",
+            after_colon.len()
+        );
+        assert!(after_colon.ends_with("-0123456789abcdef"));
+    }
+
+    #[test]
+    fn record_applied_tag_prunes_superseded_and_updates_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Plugins dir must be a subdir: plugin-state lives at its SIBLING,
+        // and tmp.path() directly would leak state into the shared TMPDIR.
+        let plugins_dir = tmp.path().join("plugins");
+        let plugin_dir = plugins_dir.join("prune-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let plugins_dir = plugins_dir.as_path();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+
+        // First build: no marker yet — queues + prunes the LEGACY tag, records.
+        record_applied_image_tag_and_prune(
+            &rt,
+            &plugin_dir,
+            "prune-test",
+            "repo:tag-one",
+            "repo:legacy",
+        );
+        assert_eq!(
+            handles.remove_images_calls.lock().unwrap().clone(),
+            vec![(vec!["repo:legacy".to_string()], false)],
+            "pre-marker install queues the legacy version-only tag"
+        );
+
+        // Second build with a new digest: prunes the recorded tag (force=false).
+        record_applied_image_tag_and_prune(
+            &rt,
+            &plugin_dir,
+            "prune-test",
+            "repo:tag-two",
+            "repo:legacy",
+        );
+        let calls = handles.remove_images_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls.last().unwrap(),
+            &(vec!["repo:tag-one".to_string()], false)
+        );
+
+        let marker = plugin_state_dir_for(plugins_dir, "prune-test").join(APPLIED_IMAGE_TAG_MARKER);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "repo:tag-two");
+        // Everything pruned → no pending file left.
+        assert!(!plugin_state_dir_for(plugins_dir, "prune-test")
+            .join(SUPERSEDED_TAGS_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn record_applied_tag_keeps_failed_prune_pending_and_retries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let plugin_dir = plugins_dir.join("retry-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let state = plugin_state_dir_for(&plugins_dir, "retry-test");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(APPLIED_IMAGE_TAG_MARKER), "repo:old").unwrap();
+
+        // rmi fails (worker still running) → tag must land on the pending list.
+        let (rt_fail, _h) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_remove_images_error("in use")
+            .build();
+        record_applied_image_tag_and_prune(
+            &rt_fail,
+            &plugin_dir,
+            "retry-test",
+            "repo:new",
+            "repo:legacy",
+        );
+        let pending = std::fs::read_to_string(state.join(SUPERSEDED_TAGS_FILE)).unwrap();
+        assert_eq!(pending.trim(), "repo:old");
+        assert_eq!(
+            std::fs::read_to_string(state.join(APPLIED_IMAGE_TAG_MARKER)).unwrap(),
+            "repo:new"
+        );
+
+        // Next build: retry succeeds → pending list drained.
+        let (rt_ok, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        record_applied_image_tag_and_prune(
+            &rt_ok,
+            &plugin_dir,
+            "retry-test",
+            "repo:newer",
+            "repo:legacy",
+        );
+        let calls = handles.remove_images_calls.lock().unwrap().clone();
+        assert!(calls.contains(&(vec!["repo:old".to_string()], false)));
+        assert!(calls.contains(&(vec!["repo:new".to_string()], false)));
+        assert!(!state.join(SUPERSEDED_TAGS_FILE).exists());
+    }
+
+    #[test]
+    fn record_applied_tag_same_tag_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins").join("idem-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same", "repo:same");
+        record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same", "repo:same");
+        // Unchanged tag (legacy == current too) must not remove anything.
+        assert!(handles.remove_images_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_plugin_removes_marker_tag_when_it_differs_from_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "img-cleanup", true);
+        let current_tag = expected_tag_for(&plugins_dir, "img-cleanup");
+        // Simulate an earlier build of a different tree revision.
+        let state = plugin_state_dir_for(&plugins_dir, "img-cleanup");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(APPLIED_IMAGE_TAG_MARKER), "repo:stale-old").unwrap();
+
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        remove_plugin_with_base("img-cleanup", &plugins_dir, Some(&rt)).unwrap();
+
+        let calls = handles.remove_images_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                (vec![current_tag], true),
+                (vec!["repo:stale-old".to_string()], true),
+                (vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_build_runs_under_build_lock() {
+        let source = include_str!("plugin.rs");
+        let outer = source
+            .find("fn build_single_plugin_image(")
+            .expect("outer build fn must exist");
+        let body_end = source[outer..]
+            .find("fn build_single_plugin_image_locked(")
+            .map(|i| outer + i)
+            .expect("locked inner fn must exist");
+        assert!(
+            source[outer..body_end].contains("with_build_lock"),
+            "plugin build+prune must be serialised by build.lock (ADR-072)"
+        );
+    }
+
+    /// Expected content-addressed tag for a plugin dir created by a test.
+    fn expected_tag_for(plugins_dir: &Path, slug: &str) -> String {
+        let dir = plugins_dir.join(slug);
+        let manifest: PluginManifest =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("plugin.json")).unwrap())
+                .unwrap();
+        let digest = signing::plugin_tree_digest_hex(&dir).unwrap();
+        plugin_image_tag(&manifest, &digest)
+    }
+
+    #[test]
     fn test_ensure_plugin_images_skips_existing() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
-        let (rt, handle) = tracking_runtime(&["speedwave-mcp-example-plugin:1.4.6"]); // image exists
+        let tag = expected_tag_for(tmp.path(), "example-plugin");
+        let (rt, handle) = tracking_runtime(&[&tag]); // image exists
         ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(
@@ -7478,7 +7961,8 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0"); // enabled, existing image
         make_mcp_plugin_dir(tmp.path(), "plugin-c", "1.0.0"); // disabled, missing image
 
-        let (rt, handle) = tracking_runtime(&["speedwave-mcp-plugin-b:1.0.0"]); // B exists
+        let tag_b = expected_tag_for(tmp.path(), "plugin-b");
+        let (rt, handle) = tracking_runtime(&[&tag_b]); // B exists
         ensure_plugin_images_from_dir(&rt, &["plugin-a", "plugin-b"], tmp.path()).unwrap();
 
         assert_eq!(
@@ -7486,8 +7970,8 @@ mod tests {
             1,
             "only plugin-a should be built (plugin-b exists, plugin-c disabled)"
         );
-        assert!(handle.was_built("speedwave-mcp-plugin-a:1.0.0"));
-        assert!(!handle.was_built("speedwave-mcp-plugin-c:1.0.0"));
+        assert!(handle.was_built(&expected_tag_for(tmp.path(), "plugin-a")));
+        assert!(!handle.was_built(&expected_tag_for(tmp.path(), "plugin-c")));
     }
 
     #[test]
@@ -7669,9 +8153,14 @@ mod tests {
         ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(handle.build_call_count(), 1);
+        let tag = expected_tag_for(tmp.path(), "example-plugin");
         assert!(
-            handle.was_built("speedwave-mcp-example-plugin:custom-tag"),
-            "should use custom image_tag, got calls: {:?}",
+            tag.starts_with("speedwave-mcp-example-plugin:custom-tag-"),
+            "tag must keep the custom base and append the digest, got: {tag}"
+        );
+        assert!(
+            handle.was_built(&tag),
+            "should use custom image_tag + digest, got calls: {:?}",
             handle.build_tags()
         );
     }
@@ -7708,7 +8197,8 @@ mod tests {
         assert_eq!(handle.build_call_count(), 1, "first call should build");
 
         // Second call: image now exists (simulate by creating a runtime that knows about it)
-        let (rt2, handle2) = tracking_runtime(&["speedwave-mcp-example-plugin:1.0.0"]);
+        let tag = expected_tag_for(tmp.path(), "example-plugin");
+        let (rt2, handle2) = tracking_runtime(&[&tag]);
         ensure_plugin_images_from_dir(&rt2, &["example-plugin"], tmp.path()).unwrap();
         assert_eq!(
             handle2.build_call_count(),
@@ -7737,7 +8227,8 @@ mod tests {
         );
 
         // Project using only plugin-b — succeeds (image already exists in this runtime).
-        let (rt_b_exists, _) = tracking_runtime(&["speedwave-mcp-plugin-b:1.0.0"]);
+        let tag_b = expected_tag_for(tmp.path(), "plugin-b");
+        let (rt_b_exists, _) = tracking_runtime(&[&tag_b]);
         let project_b_result =
             ensure_plugin_images_from_dir(&rt_b_exists, &["plugin-b"], tmp.path());
         assert!(
