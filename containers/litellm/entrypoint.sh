@@ -10,7 +10,7 @@
 # (^[a-z][a-z0-9-]{0,63}$); hyphens map to underscores in the env name,
 # mirroring derive_worker_env.
 #
-# INVARIANT (ADR-072): keys must NEVER be exported under canonical provider
+# INVARIANT (ADR-073): keys must NEVER be exported under canonical provider
 # names (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, OPENAI_API_KEY, ...).
 # The /anthropic passthrough route forwards the client's Authorization header
 # (subscription OAuth) only while the proxy holds no Anthropic credential of

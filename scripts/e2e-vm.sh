@@ -450,7 +450,7 @@ Copy-Item $nodePath desktop\src-tauri\nodejs\node.exe
 
 Write-Host "── Downloading WSL resources..."
 New-Item -ItemType Directory -Path desktop\src-tauri\wsl -Force | Out-Null
-curl.exe -fsSL -o desktop\src-tauri\wsl\nerdctl-full.tar.gz "https://github.com/containerd/nerdctl/releases/download/v2.1.2/nerdctl-full-2.1.2-linux-amd64.tar.gz"
+curl.exe -fsSL -o desktop\src-tauri\wsl\nerdctl-full.tar.gz "https://github.com/containerd/nerdctl/releases/download/v2.2.2/nerdctl-full-2.2.2-linux-amd64.tar.gz"
 Assert-ExitCode
 curl.exe -fsSL -o desktop\src-tauri\wsl\ubuntu-rootfs.tar.gz "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz"
 Assert-ExitCode

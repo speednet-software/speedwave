@@ -1204,7 +1204,7 @@ describe('LlmProviderComponent', () => {
     expect(invokeCalled).toBe(true);
   });
 
-  // ── Remote providers (ADR-072) ──────────────────────────────────────────
+  // ── Remote providers (ADR-073) ──────────────────────────────────────────
 
   it('adds and removes remote providers with unique slug ids', () => {
     component.addExtraProvider('open_router');

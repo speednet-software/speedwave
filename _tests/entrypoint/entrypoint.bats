@@ -393,11 +393,11 @@ EOF
 # Default command keeps container alive (sleep infinity)
 # ---------------------------------------------------------------------------
 
-@test "default command is sleep infinity (not interactive shell)" {
-    # Verify that entrypoint execs 'sleep infinity' when no args given.
-    # We can't run it on macOS (sleep infinity is Linux-only), so we
-    # check the script source directly.
-    grep -q 'exec sleep infinity' "$ENTRYPOINT"
+@test "default command is a TERM-trappable keep-alive loop (not interactive shell)" {
+    # No-args branch must keep PID1 alive AND responsive to SIGTERM —
+    # bare `exec sleep infinity` ignored TERM and ate the 10s kill timeout.
+    grep -q "while :; do sleep 86400 & wait" "$ENTRYPOINT"
+    ! grep -q 'exec sleep infinity' "$ENTRYPOINT"
 }
 
 # ---------------------------------------------------------------------------
@@ -561,13 +561,54 @@ EOF
     echo '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    grep -q '"effortLevel":"low"' "${TEST_HOME}/.claude/settings.json"
+    # Use node for assertion — merge output is pretty-printed JSON (spaces after colons).
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
 }
 
 @test "skips settings.json when not in resources" {
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/settings.json" ]
+}
+
+@test "merges new template keys into existing settings.json without overwriting user values" {
+    # Template ships with effortLevel=high and a new key newKey=42.
+    printf '{"effortLevel":"high","newKey":42}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # User already has settings.json with effortLevel set to low.
+    printf '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # User's effortLevel choice is preserved.
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
+    # New template key is added.
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.newKey===42?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "merge degrades gracefully when node fails (corrupt settings.json)" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # On-disk file is not valid JSON; node parse fails → silent continue.
+    printf 'NOT_JSON' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    # Entrypoint must still exit 0 — the merge failure is best-effort.
+    [ "$status" -eq 0 ]
+    # On-disk file is unchanged (node exited non-zero, || true swallowed it).
+    run cat "${TEST_HOME}/.claude/settings.json"
+    [[ "$output" == "NOT_JSON" ]]
+}
+
+@test "merge leaves no stale .tmp file after successful settings.json merge" {
+    printf '{"effortLevel":"high","newKey":1}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # Atomic write: .tmp must be renamed away, not left behind.
+    [ ! -e "${TEST_HOME}/.claude/settings.json.tmp" ]
+    # Destination must be valid JSON (not truncated).
+    run node -e "JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8'))"
+    [ "$status" -eq 0 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -1306,4 +1347,49 @@ setup_os_subservice_fixture() {
     [ ! -e "${TEST_HOME}/.claude/skills/notes" ]
     # `os` itself must NOT be linked as a skill — only its sub-services exist as skills.
     [ ! -e "${TEST_HOME}/.claude/skills/os" ]
+}
+
+# ---------------------------------------------------------------------------
+# Keep-alive PID1 must exit 0 on SIGTERM (trap), not die killed (143) —
+# in the container PID1 would otherwise ignore TERM and eat the 10s timeout.
+# ---------------------------------------------------------------------------
+
+@test "SIGTERM during startup phase exits promptly via top trap" {
+    # Block startup on the hub probe (no SPEEDWAVE_SKIP_HUB_WAIT) so TERM
+    # lands mid-startup, before the ready marker exists.
+    unset SPEEDWAVE_SKIP_HUB_WAIT
+    bash "$ENTRYPOINT" &
+    pid=$!
+    sleep 0.4
+    [ ! -f "$CLAUDE_READY_MARKER" ] || skip "startup finished too fast to test the window"
+    kill -TERM "$pid"
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    set +e
+    wait "$pid"
+    status=$?
+    set -e
+    [ "$status" -eq 0 ]
+}
+
+@test "keep-alive exits 0 on SIGTERM via trap" {
+    bash "$ENTRYPOINT" &
+    pid=$!
+    for _ in $(seq 1 50); do
+        [ -f "$CLAUDE_READY_MARKER" ] && break
+        sleep 0.1
+    done
+    [ -f "$CLAUDE_READY_MARKER" ]
+    kill -TERM "$pid"
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    set +e
+    wait "$pid"
+    status=$?
+    set -e
+    [ "$status" -eq 0 ]
 }

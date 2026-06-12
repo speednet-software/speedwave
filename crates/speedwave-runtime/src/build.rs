@@ -14,6 +14,10 @@ pub struct ImageDef {
     pub containerfile: &'static str,
     /// Build arguments passed as `--build-arg KEY=VAL` to the container engine.
     pub build_args: &'static [(&'static str, &'static str)],
+    /// Paths (relative to build root; file or dir) feeding this image's
+    /// build-input hash. Must cover the containerfile and every COPY/ADD
+    /// source — enforced by `hash_inputs_cover_copy_sources` (ADR-072).
+    pub hash_inputs: &'static [&'static str],
 }
 
 /// Prefix on every toggleable MCP worker image; the suffix is the integration
@@ -28,7 +32,7 @@ const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults:
 
 /// Claude Code container image name.
 pub const IMAGE_CLAUDE: &str = "speedwave-claude";
-/// LiteLLM proxy image name (ADR-072).
+/// LiteLLM proxy image name (ADR-073).
 pub const IMAGE_LITELLM: &str = "speedwave-litellm";
 /// MCP hub image name.
 pub const IMAGE_MCP_HUB: &str = "speedwave-mcp-hub";
@@ -58,6 +62,14 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "containers",
         containerfile: "containers/Containerfile.claude",
         build_args: CLAUDE_BUILD_ARGS,
+        // Explicit file list: containers/ also holds claude-resources/ (synced +
+        // mounted, never baked) and compose.template.yml — neither may rebuild claude.
+        hash_inputs: &[
+            "containers/Containerfile.claude",
+            "containers/entrypoint.sh",
+            "containers/install-claude.sh",
+            "containers/osc52-copy.sh",
+        ],
     },
     ImageDef {
         name: IMAGE_LITELLM,
@@ -70,60 +82,107 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
         build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/hub",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_SLACK,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/slack/Dockerfile",
         build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/slack",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_SHAREPOINT,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/sharepoint/Dockerfile",
         build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/sharepoint",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_REDMINE,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/redmine/Dockerfile",
         build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/redmine",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_GITLAB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/gitlab/Dockerfile",
         build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/gitlab",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_GITHUB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/github/Dockerfile",
         build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/github",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_ATLASSIAN,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/atlassian/Dockerfile",
         build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/atlassian",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_OFFICE,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/office/Dockerfile",
         build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/office",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_PLAYWRIGHT,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/playwright/Containerfile",
         build_args: &[],
+        // No COPY/ADD: base image pin + RUN layers live in the Containerfile.
+        hash_inputs: &["mcp-servers/playwright"],
     },
     ImageDef {
         name: IMAGE_MCP_CONTEXT7,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/context7/Dockerfile",
         build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/context7",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
     },
 ];
 
@@ -169,9 +228,31 @@ const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duratio
 #[cfg(test)]
 const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
 
-/// Tags an image name with the bundle id (`name:bundle_id`).
-pub fn image_ref(name: &str, bundle_id: &str) -> String {
-    format!("{name}:{bundle_id}")
+/// Tags an image name with its build-input hash (`name:hash`).
+pub fn image_ref(name: &str, hash: &str) -> String {
+    format!("{name}:{hash}")
+}
+
+/// In-process half of the global image-build lock. Cross-process half is the
+/// `<data_dir>/build.lock` file — see [`with_build_lock`].
+static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serialises image builds + tag prunes across processes (Desktop reconcile,
+/// CLI update, project switch). Outside compose locks per ADR-066; hold around
+/// a build+prune sequence, never around `compose up`. Not reentrant (ADR-072).
+pub fn with_build_lock<F, T>(f: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    with_build_lock_in(crate::consts::data_dir(), f)
+}
+
+/// Testable variant of [`with_build_lock`] — lock-file root supplied explicitly.
+pub fn with_build_lock_in<F, T>(data_dir: &std::path::Path, f: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    crate::runtime::compose_locks::with_file_lock_in(&BUILD_LOCK, &data_dir.join("build.lock"), f)
 }
 
 /// `true` if every image that should exist for `integrations` is present —
@@ -201,7 +282,10 @@ pub fn images_exist_with_manifest(
     manifest: &crate::bundle::BundleManifest,
 ) -> bool {
     enabled_images(integrations).iter().all(|img| {
-        let tag = image_ref(img.name, &manifest.bundle_id);
+        let Ok(tag) = manifest.image_tag(img.name) else {
+            log::warn!("images_exist: no hash for {} in manifest", img.name);
+            return false;
+        };
         rt.image_exists(&tag).unwrap_or(false)
     })
 }
@@ -539,23 +623,43 @@ fn platform_restart_hint() -> &'static str {
     }
 }
 
-/// Builds `enabled_images(integrations)` for the current bundle.
+/// Builds `enabled_images(integrations)` for the current bundle, under the
+/// build lock (callers — the setup wizard — never hold it already).
 pub fn build_enabled_images(
     runtime: &crate::runtime::LockedRuntime,
     integrations: &ResolvedIntegrationsConfig,
 ) -> anyhow::Result<u32> {
     let manifest = bundle::load_current_bundle_manifest()?;
-    build_images_for_bundle(runtime, &enabled_images(integrations), &manifest.bundle_id)
+    with_build_lock(|| build_images_for_bundle(runtime, &enabled_images(integrations), &manifest))
 }
 
-/// Builds images from `images` not yet present for `bundle_id`. Returns count built.
+/// [`build_missing_images`] under [`with_build_lock`] — the form host call
+/// sites use, so the serialisation invariant can't be forgotten (ADR-072).
+pub fn build_missing_images_locked(
+    runtime: &crate::runtime::LockedRuntime,
+    images: &[&ImageDef],
+    manifest: &bundle::BundleManifest,
+) -> anyhow::Result<u32> {
+    with_build_lock(|| build_missing_images(runtime, images, manifest))
+}
+
+/// [`prune_orphan_current_bundle_images`] under [`with_build_lock`].
+pub fn prune_orphan_current_bundle_images_locked(
+    runtime: &crate::runtime::LockedRuntime,
+    manifest: &bundle::BundleManifest,
+    keep: &[&ImageDef],
+) -> anyhow::Result<()> {
+    with_build_lock(|| prune_orphan_current_bundle_images(runtime, manifest, keep))
+}
+
+/// Builds images from `images` whose per-image tag is absent. Returns count built.
 pub fn build_missing_images(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
-    bundle_id: &str,
+    manifest: &bundle::BundleManifest,
 ) -> anyhow::Result<u32> {
     let root = resolve_build_root()?;
-    build_missing_images_in(runtime, images, bundle_id, &root)
+    build_missing_images_in(runtime, images, manifest, &root)
 }
 
 /// Env-free core of [`build_missing_images`]: takes an explicit build root so
@@ -564,22 +668,20 @@ pub fn build_missing_images(
 pub fn build_missing_images_in(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
-    bundle_id: &str,
+    manifest: &bundle::BundleManifest,
     root: &std::path::Path,
 ) -> anyhow::Result<u32> {
-    let missing: Vec<&ImageDef> = images
-        .iter()
-        .copied()
-        .filter(|img| {
-            !runtime
-                .image_exists(&image_ref(img.name, bundle_id))
-                .unwrap_or(false)
-        })
-        .collect();
+    let mut missing: Vec<&ImageDef> = Vec::new();
+    for img in images.iter().copied() {
+        let tag = manifest.image_tag(img.name)?;
+        if !runtime.image_exists(&tag).unwrap_or(false) {
+            missing.push(img);
+        }
+    }
     if missing.is_empty() {
         return Ok(0);
     }
-    build_images_for_bundle_in(runtime, &missing, bundle_id, root)?;
+    build_images_for_bundle_in(runtime, &missing, manifest, root)?;
     Ok(missing.len() as u32)
 }
 
@@ -591,19 +693,19 @@ pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) ->
     }
 }
 
-/// Force-removes orphan tags for `current_bundle_id` — tags that exist in the
+/// Force-removes orphan tags for the current manifest — tags that exist in the
 /// runtime but are not in `keep`. Filtered through `image_exists` so a fresh
 /// setup that never built a worker doesn't spam `rmi: no such image` warnings.
 pub fn prune_orphan_current_bundle_images(
     runtime: &crate::runtime::LockedRuntime,
-    current_bundle_id: &str,
+    manifest: &bundle::BundleManifest,
     keep: &[&ImageDef],
 ) -> anyhow::Result<()> {
     let keep_names: std::collections::HashSet<&str> = keep.iter().map(|i| i.name).collect();
     let stale: Vec<String> = IMAGES
         .iter()
         .filter(|img| !keep_names.contains(img.name))
-        .map(|img| image_ref(img.name, current_bundle_id))
+        .filter_map(|img| manifest.image_tag(img.name).ok())
         .filter(|tag| runtime.image_exists(tag).unwrap_or(false))
         .collect();
     if stale.is_empty() {
@@ -614,7 +716,63 @@ pub fn prune_orphan_current_bundle_images(
     Ok(())
 }
 
-/// Force-removes the previous bundle's image tags. `--force` is required
+/// Force-removes superseded per-image tags: for every image whose applied hash
+/// differs from the manifest's, removes `name:old_hash`. Only touches tags from
+/// this install's own applied history — never sweeps by repo name (ADR-072).
+pub(crate) fn prune_replaced_images(
+    runtime: &crate::runtime::LockedRuntime,
+    applied_image_hashes: &std::collections::BTreeMap<String, String>,
+    manifest: &bundle::BundleManifest,
+) -> anyhow::Result<()> {
+    let stale: Vec<String> = IMAGES
+        .iter()
+        .filter_map(|img| {
+            let old = applied_image_hashes.get(img.name)?;
+            let current = manifest.image_hashes.get(img.name);
+            (Some(old) != current).then(|| image_ref(img.name, old))
+        })
+        .filter(|tag| runtime.image_exists(tag).unwrap_or(false))
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    log::info!("Pruning {} replaced image tag(s)", stale.len());
+    runtime.remove_images(&stale, true)?;
+    Ok(())
+}
+
+/// Warn-only post-restore prune under the build lock: per-image replaced tags,
+/// plus one-time legacy single-id tags (pre-ADR-072 state without a map).
+/// Callers MUST invoke only after new containers are confirmed running —
+/// ordering pinned by `reconcile_prunes_old_images_after_full_restore`.
+pub fn prune_superseded_images(
+    runtime: &crate::runtime::LockedRuntime,
+    applied_image_hashes: &std::collections::BTreeMap<String, String>,
+    applied_bundle_id: Option<&str>,
+    manifest: &bundle::BundleManifest,
+) {
+    let result = with_build_lock(|| {
+        if let Err(e) = prune_replaced_images(runtime, applied_image_hashes, manifest) {
+            log::warn!("Failed to prune replaced image tags: {e}");
+        }
+        // Legacy pre-ADR-072 state (no per-image map): the old tags share one
+        // `name:<old_bundle_id>` suffix — prune them once on migration.
+        if applied_image_hashes.is_empty() {
+            if let Some(old_id) = should_prune_bundle(applied_bundle_id, &manifest.bundle_id) {
+                if let Err(e) = prune_old_bundle_images(runtime, old_id) {
+                    log::warn!("Failed to prune old bundle images: {e}");
+                }
+            }
+        }
+        Ok(())
+    });
+    if let Err(e) = result {
+        log::warn!("Image prune skipped — build lock unavailable: {e}");
+    }
+}
+
+/// Force-removes a pre-ADR-072 bundle's image tags (`name:<old_bundle_id>` for
+/// every catalogue image) — one-time migration prune. `--force` is required
 /// because stopped containers from the previous session block plain `rmi`.
 pub fn prune_old_bundle_images(
     runtime: &crate::runtime::LockedRuntime,
@@ -632,23 +790,18 @@ pub fn prune_old_bundle_images(
         tags.len()
     );
     runtime.remove_images(&tags, true)?;
-
-    log::info!("Pruning BuildKit cache");
-    if let Err(e) = runtime.prune_buildkit_cache() {
-        log::warn!("Failed to prune BuildKit cache: {e}");
-    }
     Ok(())
 }
 
-/// Builds `images` for `bundle_id`. Snapshotter/transient errors retry
-/// internally (see `is_snapshotter_error` / `is_transient_build_error`).
+/// Builds `images` for `manifest`'s per-image tags. Snapshotter/transient errors
+/// retry internally (see `is_snapshotter_error` / `is_transient_build_error`).
 pub fn build_images_for_bundle(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
-    bundle_id: &str,
+    manifest: &bundle::BundleManifest,
 ) -> anyhow::Result<u32> {
     let root = resolve_build_root()?;
-    build_images_for_bundle_in(runtime, images, bundle_id, &root)
+    build_images_for_bundle_in(runtime, images, manifest, &root)
 }
 
 /// Env-free core of [`build_images_for_bundle`]: takes an explicit build root so
@@ -657,13 +810,13 @@ pub fn build_images_for_bundle(
 pub fn build_images_for_bundle_in(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
-    bundle_id: &str,
+    manifest: &bundle::BundleManifest,
     root: &std::path::Path,
 ) -> anyhow::Result<u32> {
     let vm_root = runtime.prepare_build_context(root)?;
     let needs_cleanup = vm_root != root;
 
-    let result = try_build_images(runtime, images, &vm_root, bundle_id).or_else(|first_err| {
+    let result = try_build_images(runtime, images, &vm_root, manifest).or_else(|first_err| {
         if is_disk_full_error(&first_err) {
             log::warn!(
                 "build failed with disk-full error, pruning unused images and retrying: {first_err}"
@@ -671,7 +824,12 @@ pub fn build_images_for_bundle_in(
             if let Err(prune_err) = runtime.prune_unused_images() {
                 log::warn!("prune_unused_images failed: {prune_err}");
             }
-            try_build_images(runtime, images, &vm_root, bundle_id)
+            // `nerdctl system prune` does not clear BuildKit cache-mounts; under
+            // disk pressure the cache must go too (ADR-072 — sole cache-prune site).
+            if let Err(prune_err) = runtime.prune_buildkit_cache() {
+                log::warn!("prune_buildkit_cache failed: {prune_err}");
+            }
+            try_build_images(runtime, images, &vm_root, manifest)
         } else if is_snapshotter_error(&first_err) {
             log::warn!(
                 "build failed with containerd snapshotter error, pruning and retrying: {first_err}"
@@ -679,7 +837,7 @@ pub fn build_images_for_bundle_in(
             if let Err(prune_err) = runtime.system_prune() {
                 log::warn!("system prune failed: {prune_err}");
             }
-            try_build_images(runtime, images, &vm_root, bundle_id).map_err(|second_err| {
+            try_build_images(runtime, images, &vm_root, manifest).map_err(|second_err| {
                 anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
             })
         } else if is_transient_build_error(&first_err) {
@@ -694,7 +852,7 @@ pub fn build_images_for_bundle_in(
                     delay.as_secs()
                 );
                 std::thread::sleep(delay);
-                match try_build_images(runtime, images, &vm_root, bundle_id) {
+                match try_build_images(runtime, images, &vm_root, manifest) {
                     Ok(n) => return Ok(n),
                     Err(e) => last_err = e,
                 }
@@ -751,12 +909,17 @@ fn try_build_images(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
     vm_root: &std::path::Path,
-    bundle_id: &str,
+    manifest: &bundle::BundleManifest,
 ) -> anyhow::Result<u32> {
     let total = images.len();
     if total == 0 {
         return Ok(0);
     }
+    // Resolve every tag up front so a manifest gap fails before any worker spawns.
+    let tags: Vec<String> = images
+        .iter()
+        .map(|img| manifest.image_tag(img.name))
+        .collect::<anyhow::Result<_>>()?;
     let worker_count = match std::thread::available_parallelism() {
         Ok(n) => n.get().min(total),
         Err(e) => {
@@ -791,7 +954,7 @@ fn try_build_images(
             s.spawn(|| {
                 for &idx in *chunk {
                     let img = images[idx];
-                    let tag = image_ref(img.name, bundle_id);
+                    let tag = tags[idx].clone();
                     // vm_path_join, not PathBuf::join: vm_root may be a WSL/Linux
                     // path on Windows where PathBuf::join mangles /-rooted strings.
                     let abs_context = crate::engine_path::vm_path_join(root_str, img.context_dir);
@@ -1053,7 +1216,8 @@ mod tests {
         bundle_id: &str,
         root: &std::path::Path,
     ) -> anyhow::Result<u32> {
-        build_images_for_bundle_in(rt, &all_images(), bundle_id, root)
+        let manifest = crate::bundle::BundleManifest::for_tests(bundle_id);
+        build_images_for_bundle_in(rt, &all_images(), &manifest, root)
     }
 
     /// Runs the worker pool over the full `IMAGES` set (old `try_build_all`).
@@ -1062,12 +1226,152 @@ mod tests {
         vm_root: &std::path::Path,
         bundle_id: &str,
     ) -> anyhow::Result<u32> {
-        try_build_images(rt, &all_images(), vm_root, bundle_id)
+        let manifest = crate::bundle::BundleManifest::for_tests(bundle_id);
+        try_build_images(rt, &all_images(), vm_root, &manifest)
     }
 
     #[test]
     fn test_images_constant_has_entries() {
         assert!(!IMAGES.is_empty());
+    }
+
+    /// Repo checkout root — hash-input honesty tests run against real sources.
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    #[test]
+    fn hash_inputs_exist_in_repo() {
+        for img in IMAGES {
+            assert!(
+                !img.hash_inputs.is_empty(),
+                "{}: hash_inputs must not be empty",
+                img.name
+            );
+            for input in img.hash_inputs {
+                assert!(
+                    repo_root().join(input).exists(),
+                    "{}: declared hash input '{input}' does not exist in the repo",
+                    img.name
+                );
+            }
+        }
+    }
+
+    /// Anti-under-rebuild guard (ADR-072): every COPY/ADD source in every
+    /// Containerfile must be covered by that image's `hash_inputs`, else a
+    /// source change would not change the image hash and ship stale code.
+    #[test]
+    fn every_base_image_is_digest_pinned() {
+        // Retained BuildKit cache (ADR-072) freezes whatever base was first
+        // pulled; a floating tag would silently diverge between users and
+        // never receive upstream security patches. Every external FROM must
+        // carry an @sha256 digest; bumping a base is a deliberate edit.
+        let root = repo_root();
+        let mut violations = Vec::new();
+        for img in IMAGES {
+            let containerfile = root.join(img.containerfile);
+            let content = std::fs::read_to_string(&containerfile)
+                .unwrap_or_else(|e| panic!("read {}: {e}", containerfile.display()));
+            for line in content.lines() {
+                let line = line.trim();
+                let Some(rest) = line.strip_prefix("FROM ") else {
+                    continue;
+                };
+                let image_ref = rest.split_whitespace().next().unwrap_or("");
+                // Internal stage references (FROM builder) carry no registry path.
+                let external = image_ref.contains('/') || image_ref.contains(':');
+                if external && !image_ref.contains("@sha256:") {
+                    violations.push(format!("{}: {line}", img.containerfile));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "unpinned base images:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    #[test]
+    fn hash_inputs_cover_copy_sources() {
+        for img in IMAGES {
+            let content = std::fs::read_to_string(repo_root().join(img.containerfile))
+                .unwrap_or_else(|e| panic!("{}: cannot read containerfile: {e}", img.name));
+            let mut sources: Vec<String> = vec![img.containerfile.to_string()];
+            for line in content.lines() {
+                let line = line.trim();
+                let Some(rest) = line
+                    .strip_prefix("COPY ")
+                    .or_else(|| line.strip_prefix("ADD "))
+                else {
+                    continue;
+                };
+                let tokens: Vec<&str> = rest.split_whitespace().collect();
+                // `--from=` copies move stage-internal artifacts, not context files.
+                if tokens.iter().any(|t| t.starts_with("--from=")) {
+                    continue;
+                }
+                let args: Vec<&str> = tokens
+                    .into_iter()
+                    .filter(|t| !t.starts_with("--"))
+                    .collect();
+                if args.len() < 2 {
+                    continue;
+                }
+                for src in &args[..args.len() - 1] {
+                    let src = src.trim_start_matches("./");
+                    sources.push(format!("{}/{src}", img.context_dir));
+                }
+            }
+            for src in sources {
+                let covered = img
+                    .hash_inputs
+                    .iter()
+                    .any(|input| src == *input || src.starts_with(&format!("{input}/")));
+                assert!(
+                    covered,
+                    "{}: COPY/ADD source '{src}' is not covered by hash_inputs {:?}",
+                    img.name, img.hash_inputs
+                );
+            }
+        }
+    }
+
+    /// Structural pin (ADR-072): every host-facing build/prune entry point
+    /// must hold the build lock — a forgotten wrapper reintroduces the race.
+    #[test]
+    fn build_entry_points_hold_build_lock() {
+        let source = include_str!("build.rs");
+        for fn_name in [
+            "fn build_enabled_images(",
+            "fn build_missing_images_locked(",
+            "fn prune_orphan_current_bundle_images_locked(",
+            "fn prune_superseded_images(",
+        ] {
+            let start = source
+                .find(fn_name)
+                .unwrap_or_else(|| panic!("{fn_name} must exist in build.rs"));
+            let body = &source[start..(start + 1200).min(source.len())];
+            assert!(
+                body.contains("with_build_lock"),
+                "{fn_name} must run under with_build_lock"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_hash_inputs_exclude_resources_and_template() {
+        // claude-resources are synced + mounted (never baked into the image);
+        // the compose template is embedded in the binary. Neither may rebuild claude.
+        let claude = IMAGES.iter().find(|i| i.name == IMAGE_CLAUDE).unwrap();
+        for input in claude.hash_inputs {
+            assert!(
+                !input.starts_with("containers/claude-resources"),
+                "claude hash input '{input}' must not cover claude-resources"
+            );
+            assert_ne!(*input, "containers/compose.template.yml");
+        }
     }
 
     #[test]
@@ -2019,7 +2323,8 @@ mod tests {
             ..ResolvedIntegrationsConfig::default()
         };
         let (rt, handles) = lazy_build_mock(root.clone(), vec![]);
-        let n = build_images_for_bundle_in(&rt, &enabled_images(&cfg), "b1", &root).unwrap();
+        let manifest = crate::bundle::BundleManifest::for_tests("b1");
+        let n = build_images_for_bundle_in(&rt, &enabled_images(&cfg), &manifest, &root).unwrap();
         assert_eq!(n, 4);
         let mut built = handles.build_tags();
         built.sort();
@@ -2044,7 +2349,8 @@ mod tests {
             IMAGES.iter().find(|i| i.name == IMAGE_CLAUDE).unwrap(),
             IMAGES.iter().find(|i| i.name == IMAGE_MCP_HUB).unwrap(),
         ];
-        let n = build_missing_images_in(&rt, &images, "b1", &root).unwrap();
+        let manifest = crate::bundle::BundleManifest::for_tests("b1");
+        let n = build_missing_images_in(&rt, &images, &manifest, &root).unwrap();
         assert_eq!(n, 1, "only the missing playwright image is built");
         assert_eq!(
             handles.build_tags(),
@@ -2060,7 +2366,8 @@ mod tests {
             .into_iter()
             .filter(|i| i.name == IMAGE_CLAUDE || i.name == IMAGE_MCP_HUB)
             .collect();
-        let n = build_missing_images_in(&rt, &images, "b1", &root).unwrap();
+        let manifest = crate::bundle::BundleManifest::for_tests("b1");
+        let n = build_missing_images_in(&rt, &images, &manifest, &root).unwrap();
         assert_eq!(n, 0);
         assert!(handles.build_tags().is_empty());
     }
@@ -2134,6 +2441,12 @@ mod tests {
             count_unused_prunes(&handles),
             1,
             "prune_unused_images must be called exactly once for disk-full recovery"
+        );
+        assert_eq!(
+            count_buildkit_prunes(&handles),
+            1,
+            "disk-full recovery is the sole BuildKit cache-prune site (ADR-072) — \
+             `nerdctl system prune` does not clear cache-mounts"
         );
         assert_eq!(
             count_prunes(&handles),
@@ -2271,6 +2584,43 @@ mod tests {
             "bundle-build-context.sh MCP_SERVICES and bundle-build-context.ps1 $services \
              must list the same services in the same order"
         );
+    }
+
+    #[test]
+    fn bundle_build_context_sh_covers_all_worker_images() {
+        // SSOT: every IMAGES mcp- entry (except hub) must be in MCP_SERVICES in bundle-build-context.sh.
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        let sh_content = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
+            .expect("bundle-build-context.sh should exist");
+
+        let sh_services: std::collections::HashSet<&str> = sh_content
+            .lines()
+            .find(|l| l.starts_with("MCP_SERVICES="))
+            .expect("MCP_SERVICES= line should exist in bundle-build-context.sh")
+            .trim_start_matches("MCP_SERVICES=")
+            .trim_matches('"')
+            .split_whitespace()
+            .collect();
+
+        for img in IMAGES {
+            let Some(suffix) = img.name.strip_prefix(MCP_IMAGE_PREFIX) else {
+                continue; // speedwave-claude has no MCP prefix
+            };
+            if suffix == "hub" {
+                continue; // hub is in MCP_SERVICES but has no Containerfile per worker
+            }
+            assert!(
+                sh_services.contains(suffix),
+                "IMAGES entry '{}' (suffix '{suffix}') is missing from MCP_SERVICES in \
+                 scripts/bundle-build-context.sh — add it or the image will never be bundled",
+                img.name
+            );
+        }
     }
 
     #[test]
@@ -2416,14 +2766,9 @@ mod tests {
 
         /// Synthetic manifest so `images_exist_with_manifest` never reads
         /// `SPEEDWAVE_RESOURCES_DIR` or the production `~/.speedwave` marker. The
-        /// bundle_id is irrelevant — the mock matches on the image name substring.
+        /// hash is irrelevant — the mock matches on the image name substring.
         fn fake_manifest() -> crate::bundle::BundleManifest {
-            crate::bundle::BundleManifest {
-                app_version: "0.0.0-test".to_string(),
-                bundle_id: "testbundle".to_string(),
-                build_context_hash: "deadbeef".to_string(),
-                claude_resources_hash: "cafebabe".to_string(),
-            }
+            crate::bundle::BundleManifest::for_tests("testbundle")
         }
 
         #[test]
@@ -2830,7 +3175,12 @@ mod tests {
             builder = builder.with_image_exists(&image_ref(img.name, "cur123"), true);
         }
         let (rt, handles) = builder.build();
-        prune_orphan_current_bundle_images(&rt, "cur123", &keep).unwrap();
+        prune_orphan_current_bundle_images(
+            &rt,
+            &crate::bundle::BundleManifest::for_tests("cur123"),
+            &keep,
+        )
+        .unwrap();
         let removed = collect_removed_tags(&handles);
         // Removed = IMAGES \ {claude, mcp-hub, mcp-slack} = 6 tags.
         assert_eq!(removed.len(), IMAGES.len() - keep.len());
@@ -2846,30 +3196,100 @@ mod tests {
     fn test_prune_orphan_current_bundle_noop_when_all_kept() {
         let keep: Vec<&ImageDef> = IMAGES.iter().collect();
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
-        prune_orphan_current_bundle_images(&rt, "cur123", &keep).unwrap();
+        prune_orphan_current_bundle_images(
+            &rt,
+            &crate::bundle::BundleManifest::for_tests("cur123"),
+            &keep,
+        )
+        .unwrap();
         assert!(collect_removed_tags(&handles).is_empty());
     }
 
     #[test]
-    fn test_prune_old_bundle_images_also_prunes_buildkit_cache() {
+    fn test_prune_old_bundle_images_keeps_buildkit_cache() {
+        // ADR-072: routine pruning must NOT clear the BuildKit cache — apt/npm
+        // layers are reused across updates. Cache is pruned only under disk
+        // pressure (see test_retry_on_disk_full_error).
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         prune_old_bundle_images(&rt, "abc123").unwrap();
 
         assert_eq!(
             count_buildkit_prunes(&handles),
-            1,
-            "prune_buildkit_cache should be called exactly once"
+            0,
+            "prune_buildkit_cache must not run in the routine prune path"
         );
     }
 
     #[test]
-    fn test_prune_old_bundle_images_buildkit_failure_is_warn_only() {
-        // A runtime where prune_buildkit_cache fails should NOT cause
-        // prune_old_bundle_images to return an error.
-        let (rt, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
-            .with_prune_buildkit_error("buildkit prune failed")
+    fn test_prune_replaced_images_removes_exactly_changed_hashes() {
+        let manifest = crate::bundle::BundleManifest::for_tests("new1");
+        let mut applied: std::collections::BTreeMap<String, String> = manifest
+            .image_hashes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // Two images previously applied with different hashes; rest unchanged.
+        applied.insert(IMAGE_CLAUDE.to_string(), "old1".to_string());
+        applied.insert(IMAGE_MCP_SLACK.to_string(), "old2".to_string());
+
+        let mut builder = crate::runtime::mock_runtime::MockRuntimeBuilder::new();
+        builder = builder
+            .with_image_exists(&image_ref(IMAGE_CLAUDE, "old1"), true)
+            .with_image_exists(&image_ref(IMAGE_MCP_SLACK, "old2"), true);
+        let (rt, handles) = builder.build();
+
+        prune_replaced_images(&rt, &applied, &manifest).unwrap();
+
+        let mut removed = collect_removed_tags(&handles);
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec![
+                image_ref(IMAGE_CLAUDE, "old1"),
+                image_ref(IMAGE_MCP_SLACK, "old2"),
+            ]
+        );
+        assert_eq!(count_buildkit_prunes(&handles), 0);
+    }
+
+    #[test]
+    fn test_prune_replaced_images_noop_when_hashes_unchanged() {
+        let manifest = crate::bundle::BundleManifest::for_tests("same");
+        let applied = manifest.image_hashes.clone();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        prune_replaced_images(&rt, &applied, &manifest).unwrap();
+        assert!(collect_removed_tags(&handles).is_empty());
+    }
+
+    #[test]
+    fn test_prune_replaced_images_never_touches_current_tags() {
+        // Adversarial: applied hash differs, but the OLD tag equals another
+        // image's CURRENT tag must never happen by construction (tags embed the
+        // image name); verify removal list contains only `name:old_hash` pairs.
+        let manifest = crate::bundle::BundleManifest::for_tests("cur");
+        let mut applied = manifest.image_hashes.clone();
+        applied.insert(IMAGE_MCP_HUB.to_string(), "old".to_string());
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_image_exists(&image_ref(IMAGE_MCP_HUB, "old"), true)
             .build();
-        assert!(prune_old_bundle_images(&rt, "abc123").is_ok());
+        prune_replaced_images(&rt, &applied, &manifest).unwrap();
+        let removed = collect_removed_tags(&handles);
+        assert_eq!(removed, vec![image_ref(IMAGE_MCP_HUB, "old")]);
+        assert!(!removed.contains(&image_ref(IMAGE_MCP_HUB, "cur")));
+    }
+
+    #[test]
+    fn test_prune_replaced_images_rmi_failure_propagates_to_warn_only_callers() {
+        // remove_images error propagates; callers (maybe_prune_previous_bundle,
+        // reconcile) downgrade it to a warning — pin the Err here.
+        let manifest = crate::bundle::BundleManifest::for_tests("new1");
+        let mut applied = manifest.image_hashes.clone();
+        applied.insert(IMAGE_CLAUDE.to_string(), "old1".to_string());
+        let (rt, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_image_exists(&image_ref(IMAGE_CLAUDE, "old1"), true)
+            .with_remove_images_error("rmi failed")
+            .build();
+        assert!(prune_replaced_images(&rt, &applied, &manifest).is_err());
     }
 
     #[test]

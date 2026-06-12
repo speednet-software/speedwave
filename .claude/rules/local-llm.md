@@ -11,15 +11,15 @@ paths:
   - 'desktop/src/src/app/settings/llm-provider/**'
   - 'docs/adr/ADR-040-remove-litellm-direct-provider-injection.md'
   - 'docs/adr/ADR-041-local-llm-model-discovery.md'
-  - 'docs/adr/ADR-072-embedded-per-project-litellm-proxy.md'
+  - 'docs/adr/ADR-073-embedded-per-project-litellm-proxy.md'
 ---
 
 # LLM Provider Rules
 
-Speedwave is a **local-first** platform. Since ADR-072 every session routes
+Speedwave is a **local-first** platform. Since ADR-073 every session routes
 through a per-project LiteLLM proxy container (`litellm`, port 4000, compose
 network only); ADR-040's direct-injection path survives behind the
-`llm.proxy_enabled` kill-switch until N+2. ADR-040, ADR-041 and ADR-072 are
+`llm.proxy_enabled` kill-switch until N+2. ADR-040, ADR-041 and ADR-073 are
 mandatory reading before touching any code under the `paths:` above.
 
 ## Invariants (non-negotiable)
@@ -97,7 +97,7 @@ checkpoint must use the same predicate.
   `compose::validate_base_url` (render) — never a third validator.
 - Does it add a provider kind or change routing? Update the renderer
   (`compose/litellm.rs`), the injection (`compose/llm.rs`), the security
-  rule expectations, AND ADR-072 in the same change.
+  rule expectations, AND ADR-073 in the same change.
 - Does it touch litellm's version? Follow the bump procedure in
   `containers/litellm/requirements.in` (regenerate hashes, audit changelog).
 - Does it surface usage numbers? Decide which source of truth (invariant 6)

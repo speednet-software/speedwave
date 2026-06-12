@@ -43,28 +43,38 @@ pub(crate) fn with_project_compose_lock_in<F, T>(
 where
     F: FnOnce() -> anyhow::Result<T>,
 {
-    use fs2::FileExt;
-
     // Defence-in-depth: lock path is built from `project`, so reject traversal
     // at the boundary even if the caller forgot to validate.
     crate::validation::validate_project_name(project)?;
 
     let inner_arc = in_process_lock_for(project);
-    let _inner_guard = inner_arc.lock().unwrap_or_else(|e| e.into_inner());
-
     let lock_path = data_dir.join("compose").join(project).join("compose.lock");
+    with_file_lock_in(&inner_arc, &lock_path, f)
+}
+
+/// Holds `in_process` + an exclusive file lock at `lock_path`, runs `f`,
+/// releases in reverse. Shared by the per-project compose lock and the
+/// global image-build lock (`build::with_build_lock`, ADR-072).
+pub(crate) fn with_file_lock_in<F, T>(
+    in_process: &Mutex<()>,
+    lock_path: &std::path::Path,
+    f: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    use fs2::FileExt;
+
+    let _inner_guard = in_process.lock().unwrap_or_else(|e| e.into_inner());
+
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let lock_file = std::fs::File::create(&lock_path)?;
-    lock_file.lock_exclusive().with_context(|| {
-        format!(
-            "Failed to acquire compose lock for project '{}' at '{}'",
-            project,
-            lock_path.display()
-        )
-    })?;
+    let lock_file = std::fs::File::create(lock_path)?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("Failed to acquire lock at '{}'", lock_path.display()))?;
     let _file_guard = FileLockGuard(lock_file);
 
     f()

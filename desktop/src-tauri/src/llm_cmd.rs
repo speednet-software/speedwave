@@ -956,7 +956,7 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
 }
 
 // ---------------------------------------------------------------------------
-// Usage dashboard (ADR-072)
+// Usage dashboard (ADR-073)
 // ---------------------------------------------------------------------------
 
 /// Aggregated LLM usage for the project's dashboard. The single source is

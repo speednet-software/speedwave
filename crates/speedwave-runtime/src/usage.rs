@@ -1,10 +1,10 @@
-//! LLM usage aggregation (ADR-072).
+//! LLM usage aggregation (ADR-073).
 //!
 //! Reads the append-only JSONL written by the litellm container's usage
 //! callback (`<data_dir>/usage/<project>/litellm/usage.jsonl`, mounted
 //! `:rw` at `/usage`) and aggregates it for the Desktop dashboard.
 //!
-//! Source-of-truth split (ADR-072 §usage): this file is the ONLY input to
+//! Source-of-truth split (ADR-073 §usage): this file is the ONLY input to
 //! the usage dashboard. The Claude Code result stream (`total_cost_usd`,
 //! `modelUsage` parsed in desktop `chat.rs`/`history.rs`) remains the input
 //! to per-session chat statistics and is never summed with this data — the

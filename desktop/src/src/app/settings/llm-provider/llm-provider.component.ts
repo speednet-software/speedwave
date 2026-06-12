@@ -27,7 +27,7 @@ import {
 } from '../../models/llm';
 
 /**
- * Edit-state row of a remote (proxy-routed) provider — ADR-072. The key
+ * Edit-state row of a remote (proxy-routed) provider — ADR-073. The key
  * VALUE lives only in `keyInput` until Save sends it through
  * `set_llm_provider_key`; config carries the `hasKey` presence flag.
  */
@@ -322,7 +322,7 @@ Ocp-Apim-Subscription-Key: bar'
         }
       }
 
-      <!-- Remote providers (ADR-072): routed through the per-project LLM
+      <!-- Remote providers (ADR-073): routed through the per-project LLM
            proxy. Each entry needs a model and (usually) an API key; keys go
            to per-provider token files, never into config.json. -->
       <div class="mt-6">
@@ -482,7 +482,7 @@ export class LlmProviderComponent implements OnInit {
   messagesEndpointOk: boolean | null = null;
 
   /**
-   * Remote (proxy-routed) providers — ADR-072. Parsed from the v2
+   * Remote (proxy-routed) providers — ADR-073. Parsed from the v2
    * `providers` list on load (anthropic/local entries stay on the cards);
    * Save sends the reconstructed full set.
    */
@@ -739,7 +739,7 @@ export class LlmProviderComponent implements OnInit {
   /**
    * Adds a remote provider row with a unique slug id derived from the kind
    * (`openrouter`, `openrouter-2`, …) and selects it as the active target.
-   * @param kind - Remote provider class (ADR-072).
+   * @param kind - Remote provider class (ADR-073).
    */
   addExtraProvider(kind: ExtraProviderEdit['kind']): void {
     const base = kind === 'open_router' ? 'openrouter' : 'compat';
@@ -977,7 +977,7 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Builds the full v2 provider set (ADR-072): the two cards map to the
+   * Builds the full v2 provider set (ADR-073): the two cards map to the
    * `anthropic`/`local` entries, remote rows append verbatim.
    * @param anthropicHasApiKey - Whether the project has an Anthropic API
    * key configured (classifies the anthropic entry's kind).
@@ -1069,7 +1069,7 @@ export class LlmProviderComponent implements OnInit {
         this.provider === 'anthropic' ? null : this.baseUrl || this.defaultBaseUrl || null;
       // Anthropic-entry classification (oauth vs api key) comes from the
       // project's stored auth state; failure degrades to oauth, which routes
-      // identically (both ride the passthrough — ADR-072).
+      // identically (both ride the passthrough — ADR-073).
       let anthropicHasApiKey = false;
       const project = this.projectState.activeProject;
       if (project) {
@@ -1108,7 +1108,7 @@ export class LlmProviderComponent implements OnInit {
       }
       await this.tauri.invoke('update_llm_config', { update });
 
-      // Per-provider key mutations (values bypass config.json — ADR-072).
+      // Per-provider key mutations (values bypass config.json — ADR-073).
       for (const extra of this.extraProviders) {
         if (extra.keyTouched) {
           await this.tauri.invoke('set_llm_provider_key', {
@@ -1146,7 +1146,7 @@ export class LlmProviderComponent implements OnInit {
       // not after the next session start.
       void this.chatState.refreshLlmConfigCache();
       this.providerChange.emit(this.provider);
-      // Restart scope (ADR-072): the active provider/model lives in the
+      // Restart scope (ADR-073): the active provider/model lives in the
       // claude env — changing it needs the full project restart. Anything
       // else (keys, added/removed remote providers) only changes the litellm
       // config: hot-reload the proxy and keep the claude session running.
@@ -1230,7 +1230,7 @@ export class LlmProviderComponent implements OnInit {
         this.baseUrlByProvider[this.provider] = this.baseUrl;
       }
 
-      // v2 provider list (ADR-072): anthropic/local entries map onto the
+      // v2 provider list (ADR-073): anthropic/local entries map onto the
       // cards (already seeded from the legacy flat fields above, which
       // sync_llm_legacy_fields keeps coherent); everything else becomes a
       // remote row.

@@ -1,4 +1,4 @@
-# ADR-072: Embedded Per-Project LiteLLM Proxy
+# ADR-073: Embedded Per-Project LiteLLM Proxy
 
 > **Status:** Accepted — supersedes ADR-040 in part (the "no proxy" decision; the credential-handling and SSRF rules of ADR-040 are upheld and extended)
 > **Context:** New product requirements — multi-provider choice (Anthropic subscription, Anthropic API key, local servers, OpenRouter, any OpenAI-compatible endpoint), per-project usage accounting, and in-session model switching — cannot be met by direct env injection alone.

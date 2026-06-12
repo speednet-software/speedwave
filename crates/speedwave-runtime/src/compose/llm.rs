@@ -1,4 +1,4 @@
-//! LLM provider switching (ADR-072): routes the `claude` container at the
+//! LLM provider switching (ADR-073): routes the `claude` container at the
 //! per-project LiteLLM proxy, with the pre-proxy direct-injection path kept
 //! behind the `proxy_enabled` kill-switch (removal in N+2).
 
@@ -32,7 +32,7 @@ pub(crate) fn apply_llm_config_in(
     apply_llm_config_legacy_in(data_dir, yaml, llm, project)
 }
 
-/// ADR-072 proxy path: every session talks to the litellm service; the
+/// ADR-073 proxy path: every session talks to the litellm service; the
 /// provider kind picks the route and model prefix.
 ///
 /// Auth rules (validated in the Phase 0 spike):
@@ -134,7 +134,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
     inject_claude_env(yaml, &extra_env)
 }
 
-/// Pre-ADR-072 direct-injection path, kept verbatim behind the
+/// Pre-ADR-073 direct-injection path, kept verbatim behind the
 /// `proxy_enabled` kill-switch. Scheduled for removal in N+2.
 fn apply_llm_config_legacy_in(
     data_dir: &Path,

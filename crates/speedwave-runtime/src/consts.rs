@@ -214,17 +214,22 @@ pub fn wsl_distro_name() -> &'static str {
 
 /// nerdctl-full bundle version installed inside WSL2 on Windows.
 /// Contains containerd + nerdctl + CNI plugins + BuildKit.
-pub const NERDCTL_FULL_VERSION: &str = "2.1.2";
+///
+/// SSOT-alignment: must match the nerdctl version Lima bundles on macOS
+/// (`.lima-version` → `pkg/limayaml/containerd.yaml` at that tag) so both
+/// platforms share `compose up` config-hash convergence (nerdctl ≥ 2.2.0).
+/// Bumping Lima = verify the bundled nerdctl and align this pin in the same commit.
+pub const NERDCTL_FULL_VERSION: &str = "2.2.2";
 
 /// SHA256 checksums for the nerdctl-full bundle downloads.
-/// Source: https://github.com/containerd/nerdctl/releases/download/v2.1.2/SHA256SUMS
+/// Source: https://github.com/containerd/nerdctl/releases/download/v2.2.2/SHA256SUMS
 /// Update these when bumping NERDCTL_FULL_VERSION above.
 /// SHA256 of the amd64 nerdctl-full bundle.
 pub const NERDCTL_FULL_SHA256_AMD64: &str =
-    "b3ab8564c8fa6feb89d09bee881211b700b047373c767bec38256d0d68f93074";
+    "8a477f35533c6cc1120c19558d8142967c74f25a4b952b481f48104e030de914";
 /// SHA256 of the arm64 nerdctl-full bundle.
 pub const NERDCTL_FULL_SHA256_ARM64: &str =
-    "1b52f32b7d5bbf63005bceb6a3cacd237d2fa8f1d05bb590e8ce58731779b9ee";
+    "55d68d2613b5f065021146bac21f620cde9e7fdd4bd3eff74cd324f5462e107a";
 
 /// Ubuntu rootfs download URLs for WSL2 import (per-architecture).
 /// Uses the `releases/24.04/current` path (latest daily build of 24.04 LTS).
@@ -1149,7 +1154,7 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     // slug verbatim as the bridge name). No compose service — pure reservation.
     "ide",
     // Reserves the `llm` token-dir namespace (`tokens/<project>/llm/`,
-    // per-provider LiteLLM API keys — ADR-072) against plugin slug collisions.
+    // per-provider LiteLLM API keys — ADR-073) against plugin slug collisions.
     // The `litellm` compose service itself needs no entry here: plugin compose
     // names are `mcp-<slug>`-prefixed, so they can never collide with it.
     "llm",
@@ -1165,6 +1170,8 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
 pub const RESERVED_ENV_KEYS: &[&str] = &[
     // Reserved by Speedwave — auto-injected
     "PORT",
+    "SPW_CREDENTIALS_DIGEST",
+    "SPW_PLUGIN_DIGESTS",
     // Dynamic linker hijacks (Linux)
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
@@ -1423,7 +1430,7 @@ mod tests {
         // A change here is deliberate — bumping this count signals a new
         // hijack vector was added (and the matching test in plugin.rs
         // should grow too). Catches accidental deletions.
-        assert_eq!(RESERVED_ENV_KEYS.len(), 19);
+        assert_eq!(RESERVED_ENV_KEYS.len(), 21);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
                 k,
@@ -1434,6 +1441,8 @@ mod tests {
         // Sanity: the dynamic-linker and Speedwave-reserved entries are present.
         for required in [
             "PORT",
+            "SPW_CREDENTIALS_DIGEST",
+            "SPW_PLUGIN_DIGESTS",
             "LD_PRELOAD",
             "DYLD_INSERT_LIBRARIES",
             "NODE_OPTIONS",
@@ -2076,6 +2085,19 @@ mod tests {
     }
 
     #[test]
+    fn test_built_in_service_ids_covers_all_toggleable_services() {
+        // SSOT: every TOGGLEABLE_MCP_SERVICES config_key must be in BUILT_IN_SERVICE_IDS (plugin blocklist).
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            assert!(
+                BUILT_IN_SERVICE_IDS.contains(&svc.config_key),
+                "TOGGLEABLE_MCP_SERVICES entry '{}' is missing from BUILT_IN_SERVICE_IDS \
+                 — plugins could shadow it; add it to the blocklist",
+                svc.config_key
+            );
+        }
+    }
+
+    #[test]
     fn test_wsl_service_start_delay_is_positive() {
         assert!(
             WSL_SERVICE_START_DELAY_SECS > 0,
@@ -2528,6 +2550,69 @@ mod tests {
             src.contains(NODEJS_SUBDIR),
             "NODEJS_SUBDIR ({NODEJS_SUBDIR}) not found in sweep.ps1; \
              rename it there too (ADR-048 SSOT alignment)"
+        );
+    }
+
+    #[test]
+    fn nerdctl_version_appears_in_e2e_vm_script() {
+        // SSOT-alignment (CLAUDE.md): the E2E provisioning script hardcodes the
+        // nerdctl-full download URL (a PowerShell literal that can't read the
+        // Rust const). A version bump that forgets the script silently installs
+        // a different nerdctl on the E2E path than on the Windows install path.
+        let src = include_str!("../../../scripts/e2e-vm.sh");
+        let needle = format!("nerdctl-full-{NERDCTL_FULL_VERSION}-linux");
+        assert!(
+            src.contains(&needle),
+            "scripts/e2e-vm.sh must reference nerdctl-full {NERDCTL_FULL_VERSION} \
+             ('{needle}'); bump the URL there too"
+        );
+        assert!(
+            src.contains(&format!("/v{NERDCTL_FULL_VERSION}/")),
+            "scripts/e2e-vm.sh release path must be /v{NERDCTL_FULL_VERSION}/"
+        );
+    }
+
+    /// Lima version → bundled nerdctl-full version (macOS SSOT alignment guard).
+    /// If you bump `.lima-version` to a version not in this table the test fails —
+    /// look up the bundled nerdctl in Lima's `pkg/limayaml/containerd.yaml` at that
+    /// tag, then add the entry AND update `NERDCTL_FULL_VERSION` in the same commit.
+    #[test]
+    fn lima_version_and_nerdctl_full_version_are_aligned() {
+        // Known Lima release → nerdctl-full version it bundles.
+        // Source: https://github.com/lima-vm/lima/blob/vX.Y.Z/pkg/limayaml/containerd.yaml
+        let known: &[(&str, &str)] = &[
+            ("2.1.2", "2.2.2"), // Lima 2.1.2 bundles nerdctl-full 2.2.2 (verified in acc2c691)
+            ("2.2.0", "2.2.2"),
+            ("2.2.1", "2.2.2"),
+            ("2.2.2", "2.2.2"),
+            ("2.3.0", "2.3.0"),
+        ];
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let lima_ver = std::fs::read_to_string(repo_root.join(".lima-version"))
+            .expect(".lima-version must exist")
+            .trim()
+            .to_owned();
+        let expected_nerdctl = known
+            .iter()
+            .find(|(lima, _)| *lima == lima_ver)
+            .map(|(_, nerdctl)| *nerdctl)
+            .unwrap_or_else(|| {
+                panic!(
+                    ".lima-version is '{lima_ver}' which is not in the known alignment table; \
+                 look up what nerdctl-full Lima {lima_ver} bundles \
+                 (pkg/limayaml/containerd.yaml at that tag), add the entry to this table, \
+                 and set NERDCTL_FULL_VERSION to match"
+                )
+            });
+        assert_eq!(
+            NERDCTL_FULL_VERSION, expected_nerdctl,
+            "Lima {lima_ver} bundles nerdctl-full {expected_nerdctl} but \
+             NERDCTL_FULL_VERSION is '{NERDCTL_FULL_VERSION}'; \
+             update NERDCTL_FULL_VERSION (and SHA256s) to match"
         );
     }
 

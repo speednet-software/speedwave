@@ -135,6 +135,10 @@ name = "compose_lock_cross_process"
 required-features = ["test-support"]
 
 [[test]]
+name = "build_lock_cross_process"
+# No required-features — `build::with_build_lock_in` is plain public API.
+
+[[test]]
 name = "ssot_enforcement"
 # No required-features — pure source-parsing assertions, no runtime types.
 

@@ -5,7 +5,7 @@ Appends one JSON line per LLM request to ``SPW_USAGE_PATH`` (default
 aggregator in ``speedwave-runtime``).
 
 Two capture paths, mutually exclusive per request (validated against
-litellm 1.88.1, see ADR-072):
+litellm 1.88.1, see ADR-073):
 
 - ``success/failure events`` — non-streaming requests on every route, and
   streaming requests on the ``/anthropic`` passthrough route (passthrough

@@ -43,7 +43,7 @@ services:
           cpus: '${CLAUDE_CPUS}'
           memory: ${CLAUDE_MEMORY}
 
-  # LiteLLM proxy (ADR-072): Claude Code's single LLM endpoint. Routes to the
+  # LiteLLM proxy (ADR-073): Claude Code's single LLM endpoint. Routes to the
   # configured providers; subscription OAuth passes through /anthropic
   # untouched. Worker-class token holder: per-provider API keys mount at
   # /tokens:ro, never enter the claude container. No host port — reachable

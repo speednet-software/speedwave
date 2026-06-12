@@ -312,10 +312,12 @@ pub fn build_images() -> anyhow::Result<()> {
 
     // Record that the current bundle's images are now built so that
     // reconcile_bundle_update (on next startup) sees bundle_changed=false
-    // and skips the unnecessary rebuild.
+    // and skips the unnecessary rebuild. The per-image map must be persisted
+    // too, else the first reconcile would re-prune/rebuild (ADR-072).
     let manifest = bundle::load_current_bundle_manifest()?;
     let mut bundle_state = bundle::load_bundle_state();
     bundle_state.applied_bundle_id = Some(manifest.bundle_id);
+    bundle_state.applied_image_hashes = manifest.image_hashes;
     bundle_state.phase = bundle::BundleReconcilePhase::Done;
     bundle_state.pending_running_projects.clear();
     bundle_state.last_error = None;
@@ -377,9 +379,12 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 
     rt.transaction(project, |rt| -> anyhow::Result<()> {
         compose::save_compose(project, &yaml)?;
-        log::info!("starting containers via compose_up_recreate");
+        log::info!("starting containers via idempotent compose_up");
         speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
-        rt.compose_up_recreate(project)?;
+        // Idempotent up, not force-recreate: config-hash convergence plus
+        // content-addressed image tags (ADR-072) recreate exactly what
+        // changed; an unchanged running project starts in seconds.
+        rt.compose_up(project)?;
         Ok(())
     })?;
     log::info!("containers started, verifying health");
@@ -435,7 +440,7 @@ pub(crate) fn lookup_project_provider<'a>(
 /// True when the project's sessions authenticate to Anthropic (the only
 /// case where the in-container `claude auth status` check is meaningful).
 ///
-/// v2 configs (ADR-072) decide by the active provider kind: only
+/// v2 configs (ADR-073) decide by the active provider kind: only
 /// `AnthropicOauth` needs the OAuth check (`AnthropicApiKey` injects a key
 /// — no interactive login). Legacy configs fall back to the v1 rule:
 /// anything non-local is Anthropic.
@@ -1194,7 +1199,7 @@ mod tests {
         assert!(!is_local_provider(None));
     }
 
-    /// Builds a project entry carrying a v2 (ADR-072) provider list with one
+    /// Builds a project entry carrying a v2 (ADR-073) provider list with one
     /// active entry of the given kind.
     fn project_with_v2_kind(
         name: &str,
@@ -1229,7 +1234,7 @@ mod tests {
         }
     }
 
-    /// ADR-072: only AnthropicOauth sessions need the in-container OAuth
+    /// ADR-073: only AnthropicOauth sessions need the in-container OAuth
     /// check; every other kind (api key, local, openrouter, …) must skip it
     /// or offline/key-based users get blocked on a claude.ai login.
     #[test]
@@ -2952,23 +2957,32 @@ networks:
              so that reconcile_bundle_update sees bundle_changed=false on next startup"
         );
         assert!(
+            body.contains("applied_image_hashes = manifest.image_hashes"),
+            "build_images() must persist the per-image hash map (ADR-072) — without it the \
+             first reconcile after setup would treat every image as replaced"
+        );
+        assert!(
             body.contains("bundle::load_current_bundle_manifest"),
             "build_images() must load the current manifest to get bundle_id for BundleState"
         );
     }
 
     /// Structural test: verifies that `start_containers()` calls
-    /// `ensure_exec_healthy` between `compose_up_recreate` and `SetupState`
-    /// save. Without this, `containers_started = true` could be persisted
-    /// while containers are broken or missing.
+    /// `ensure_exec_healthy` between the idempotent `compose_up` and the
+    /// `SetupState` save. Without this, `containers_started = true` could be
+    /// persisted while containers are broken or missing.
     #[test]
     fn start_containers_probes_exec_after_compose_up() {
         let source = include_str!("setup_wizard.rs");
         let body = extract_fn_body(source, "pub fn start_containers(");
 
-        let recreate_pos = body
-            .find("compose_up_recreate")
-            .expect("start_containers must call compose_up_recreate");
+        assert!(
+            !body.contains("compose_up_recreate"),
+            "start must use idempotent compose_up (ADR-072), not force-recreate"
+        );
+        let up_pos = body
+            .find("rt.compose_up(project)")
+            .expect("start_containers must call compose_up");
         let probe_pos = body
             .find("ensure_exec_healthy")
             .expect("start_containers must call ensure_exec_healthy");
@@ -2977,8 +2991,8 @@ networks:
             .expect("start_containers must set containers_started = true");
 
         assert!(
-            recreate_pos < probe_pos,
-            "ensure_exec_healthy must come AFTER compose_up_recreate"
+            up_pos < probe_pos,
+            "ensure_exec_healthy must come AFTER compose_up"
         );
         assert!(
             probe_pos < state_pos,

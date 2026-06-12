@@ -187,12 +187,45 @@ const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
 pub struct BundleManifest {
     /// App version string.
     pub app_version: String,
-    /// Bundle identifier used to tag built images.
+    /// Reconcile id (app_version + image hashes + resources hash). Triggers
+    /// resources sync + project restore; image rebuilds are per-image (ADR-072).
     pub bundle_id: String,
-    /// Hash of the build-context tree.
-    pub build_context_hash: String,
+    /// Per-image build-input hash (image name → 16-char hex) used to tag images.
+    /// One entry per `build::IMAGES`; empty ⇒ legacy pre-ADR-072, regenerated.
+    #[serde(default)]
+    pub image_hashes: std::collections::BTreeMap<String, String>,
     /// Hash of the claude-resources tree.
     pub claude_resources_hash: String,
+}
+
+impl BundleManifest {
+    /// Build-input hash for image `name`; errors on names outside the catalogue.
+    pub(crate) fn image_hash(&self, name: &str) -> anyhow::Result<&str> {
+        self.image_hashes
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| anyhow::anyhow!("no image hash for '{name}' in bundle manifest"))
+    }
+
+    /// Full image tag (`name:hash`) for image `name`.
+    pub fn image_tag(&self, name: &str) -> anyhow::Result<String> {
+        Ok(build::image_ref(name, self.image_hash(name)?))
+    }
+
+    /// Manifest mapping every catalogue image to `uniform_hash` — keeps legacy
+    /// `name:test-bundle`-style tags working in tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests(uniform_hash: &str) -> Self {
+        Self {
+            app_version: "0.0.0-test".to_string(),
+            bundle_id: uniform_hash.to_string(),
+            image_hashes: build::IMAGES
+                .iter()
+                .map(|img| (img.name.to_string(), uniform_hash.to_string()))
+                .collect(),
+            claude_resources_hash: uniform_hash.to_string(),
+        }
+    }
 }
 
 /// Ordered stages of bundle reconciliation after an app upgrade.
@@ -215,8 +248,12 @@ pub enum BundleReconcilePhase {
 /// Persisted reconciliation state across restarts.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleState {
-    /// Bundle id currently applied, if any.
+    /// Reconcile id currently applied, if any.
     pub applied_bundle_id: Option<String>,
+    /// Per-image hashes currently applied; drives replaced-tag pruning.
+    /// Empty on first run after migration from the single-id format.
+    #[serde(default)]
+    pub applied_image_hashes: std::collections::BTreeMap<String, String>,
     /// Current reconciliation phase.
     pub phase: BundleReconcilePhase,
     /// Projects to restart once reconciliation reaches that phase.
@@ -255,7 +292,11 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
     let manifest_path = build_root.join(BUNDLE_MANIFEST_FILE);
     if manifest_path.exists() {
         let data = std::fs::read_to_string(&manifest_path)?;
-        return serde_json::from_str(&data).map_err(anyhow::Error::from);
+        let manifest: BundleManifest = serde_json::from_str(&data)?;
+        // Pre-ADR-072 manifest (no per-image hashes) — regenerate from the tree.
+        if !manifest.image_hashes.is_empty() {
+            return Ok(manifest);
+        }
     }
     generate_bundle_manifest(
         env!("CARGO_PKG_VERSION"),
@@ -264,40 +305,110 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
     )
 }
 
-/// `claude_version` is mixed into `bundle_id` because it's a build-arg to
-/// Containerfile.claude — not covered by `build_context_hash`. Bumping the pin
-/// must trigger image rebuild on the next reconciliation.
+/// Per-image hashes cover each image's declared `hash_inputs` + build args;
+/// `claude_version` overrides the `CLAUDE_VERSION` build-arg value so callers
+/// (desktop build.rs, CLI fallback, tests) control the pin. See ADR-072.
 pub fn generate_bundle_manifest(
     app_version: &str,
     claude_version: &str,
     build_root: &Path,
 ) -> anyhow::Result<BundleManifest> {
-    let build_context_hash = digest_paths(&[
-        ("containers", &build_root.join("containers")),
-        ("mcp-servers", &build_root.join("mcp-servers")),
-    ])?;
+    // Each distinct input is hashed once (mcp-servers/shared feeds every worker).
+    let mut component_cache: std::collections::HashMap<&str, String> =
+        std::collections::HashMap::new();
+    let mut image_hashes = std::collections::BTreeMap::new();
+    for img in build::IMAGES {
+        let mut components: Vec<(&str, &str)> = Vec::with_capacity(img.hash_inputs.len());
+        for input in img.hash_inputs {
+            if !component_cache.contains_key(input) {
+                let hash = digest_paths(&[(input, &build_root.join(input))])?;
+                component_cache.insert(input, hash);
+            }
+        }
+        for input in img.hash_inputs {
+            components.push((input, component_cache[input].as_str()));
+        }
+        let effective_args: Vec<(&str, &str)> = img
+            .build_args
+            .iter()
+            .map(|(k, v)| {
+                (
+                    *k,
+                    if *k == "CLAUDE_VERSION" {
+                        claude_version
+                    } else {
+                        *v
+                    },
+                )
+            })
+            .collect();
+        image_hashes.insert(
+            img.name.to_string(),
+            image_content_hash(img.name, &effective_args, &components),
+        );
+    }
+
     let claude_resources_hash = digest_paths(&[(
         "claude-resources",
         &build_root.join("containers").join("claude-resources"),
     )])?;
-
-    let mut bundle_hasher = Sha256::new();
-    bundle_hasher.update(app_version.as_bytes());
-    bundle_hasher.update(b":");
-    bundle_hasher.update(build_context_hash.as_bytes());
-    bundle_hasher.update(b":");
-    bundle_hasher.update(claude_resources_hash.as_bytes());
-    bundle_hasher.update(b":");
-    bundle_hasher.update(claude_version.as_bytes());
-    let mut bundle_id = bytes_to_hex(&bundle_hasher.finalize());
-    bundle_id.truncate(16);
+    let bundle_id = reconcile_id(app_version, &image_hashes, &claude_resources_hash);
 
     Ok(BundleManifest {
         app_version: app_version.to_string(),
         bundle_id,
-        build_context_hash,
+        image_hashes,
         claude_resources_hash,
     })
+}
+
+/// Pure hash of one image's build inputs: name + per-input component hashes +
+/// effective build args. 16-char hex, used as the image tag suffix.
+pub(crate) fn image_content_hash(
+    name: &str,
+    build_args: &[(&str, &str)],
+    components: &[(&str, &str)],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    hasher.update(b"\0");
+    for (path, hash) in components {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\0");
+    }
+    for (key, value) in build_args {
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(value.as_bytes());
+        hasher.update(b"\0");
+    }
+    let mut hash = bytes_to_hex(&hasher.finalize());
+    hash.truncate(16);
+    hash
+}
+
+/// Reconcile id: app_version + sorted per-image hashes + resources hash.
+/// app_version deliberately included — rationale in ADR-072.
+fn reconcile_id(
+    app_version: &str,
+    image_hashes: &std::collections::BTreeMap<String, String>,
+    claude_resources_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(app_version.as_bytes());
+    hasher.update(b"\0");
+    for (name, hash) in image_hashes {
+        hasher.update(name.as_bytes());
+        hasher.update(b":");
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(claude_resources_hash.as_bytes());
+    let mut id = bytes_to_hex(&hasher.finalize());
+    id.truncate(16);
+    id
 }
 
 /// Loads the persisted bundle state, defaulting if absent or unreadable.
@@ -392,13 +503,22 @@ fn save_bundle_state_to(state: &BundleState, path: &Path) -> anyhow::Result<()> 
 
     let json = serde_json::to_string_pretty(state)?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    // Restrict permissions before rename — rename preserves the inode (and
-    // thus the mode bits) on Unix, so the final file inherits 0o600.
-    #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(json.as_bytes())?;
+        // fsync before rename — APFS/virtiofs can persist the rename before data blocks (torn write).
+        crate::fs_perms::fsync_file_durable(&file)
+            .map_err(|e| anyhow::anyhow!("fsync bundle-state before rename: {e}"))?;
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -528,7 +648,20 @@ fn collect_directory_entries(
     out: &mut Vec<(String, Vec<u8>)>,
 ) -> anyhow::Result<()> {
     if !dir.exists() {
-        anyhow::bail!("Missing directory for bundle digest: {}", dir.display());
+        anyhow::bail!("Missing path for bundle digest: {}", dir.display());
+    }
+    // Single-file hash input (e.g. containers/entrypoint.sh) — see ADR-072.
+    // is_file()/is_dir() follow symlinks — the copier dereferences them, so
+    // a symlinked input could change image content without changing the hash.
+    if dir.is_symlink() {
+        anyhow::bail!(
+            "symlink not allowed in image hash inputs: {}",
+            dir.display()
+        );
+    }
+    if dir.is_file() {
+        out.push((prefix.to_string(), std::fs::read(dir)?));
+        return Ok(());
     }
 
     let mut children: Vec<PathBuf> = std::fs::read_dir(dir)?
@@ -537,9 +670,14 @@ fn collect_directory_entries(
     children.sort();
 
     for child in children {
-        // Skip symlinks to prevent infinite recursion from circular links
+        // Fail loud: the build-context copier dereferences symlinks, so a
+        // silently-skipped link would change image content WITHOUT changing
+        // the hash — users would keep the stale tag after an update.
         if child.is_symlink() {
-            continue;
+            anyhow::bail!(
+                "symlink not allowed in image hash inputs: {}",
+                child.display()
+            );
         }
         let rel_name = child
             .strip_prefix(dir)
@@ -566,12 +704,17 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
+            // fsync each file — staging→target rename must not outlive the data (torn-write).
+            let file = std::fs::File::open(&dst_path)
+                .map_err(|e| anyhow::anyhow!("open {} for fsync: {e}", dst_path.display()))?;
+            crate::fs_perms::fsync_file_durable(&file)
+                .map_err(|e| anyhow::anyhow!("fsync {}: {e}", dst_path.display()))?;
         }
     }
     Ok(())
 }
 
-fn bytes_to_hex(bytes: &[u8]) -> String {
+pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -579,6 +722,36 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn digest_paths_rejects_top_level_symlinked_file_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real.sh");
+        std::fs::write(&real, "x").unwrap();
+        let link = tmp.path().join("link.sh");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut out = Vec::new();
+        let err = collect_directory_entries(&link, "p", &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn digest_paths_rejects_symlinked_hash_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("inputs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("link.txt")).unwrap();
+        let mut out = Vec::new();
+        let err = collect_directory_entries(&dir, "p", &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
 
     fn write_resource_tree(root: &Path) {
         std::fs::create_dir_all(root.join("containers/claude-resources/output-styles")).unwrap();
@@ -597,6 +770,41 @@ mod tests {
             "# style",
         )
         .unwrap();
+    }
+
+    /// Materializes every `hash_inputs` path of every catalogue image so
+    /// `generate_bundle_manifest` can digest a synthetic build root.
+    fn write_build_tree(root: &Path) {
+        write_resource_tree(root);
+        for img in build::IMAGES {
+            for input in img.hash_inputs {
+                let path = root.join(input);
+                // Inputs with an extension are files; the rest are directories.
+                if Path::new(input).extension().is_some() {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).unwrap();
+                    }
+                    if !path.exists() {
+                        std::fs::write(&path, format!("stub for {input}")).unwrap();
+                    }
+                } else {
+                    std::fs::create_dir_all(&path).unwrap();
+                    let stub = path.join("src.ts");
+                    if !stub.exists() {
+                        std::fs::write(&stub, format!("content of {input}")).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Image names whose hash differs between two manifests.
+    fn changed_images(a: &BundleManifest, b: &BundleManifest) -> Vec<String> {
+        a.image_hashes
+            .iter()
+            .filter(|(name, hash)| b.image_hashes.get(*name) != Some(*hash))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     fn write_common_bundled_assets(root: &Path) {
@@ -722,48 +930,152 @@ mod tests {
     #[test]
     fn manifest_generation_is_deterministic() {
         let temp = tempfile::tempdir().unwrap();
-        write_resource_tree(temp.path());
+        write_build_tree(temp.path());
 
         let a = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
         let b = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
 
         assert_eq!(a, b);
         assert_eq!(a.bundle_id.len(), 16);
+        for img in build::IMAGES {
+            let hash = a.image_hashes.get(img.name).expect("hash for every image");
+            assert_eq!(hash.len(), 16, "16-char hash for {}", img.name);
+        }
     }
 
     #[test]
-    fn manifest_generation_changes_with_content() {
+    fn claude_input_change_rebuilds_only_claude() {
         let temp = tempfile::tempdir().unwrap();
-        write_resource_tree(temp.path());
+        write_build_tree(temp.path());
 
         let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
-        std::fs::write(
-            temp.path().join("containers/Containerfile.claude"),
-            "FROM changed",
-        )
-        .unwrap();
+        std::fs::write(temp.path().join("containers/entrypoint.sh"), "changed").unwrap();
         let after = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
 
+        assert_eq!(
+            changed_images(&before, &after),
+            vec![build::IMAGE_CLAUDE.to_string()]
+        );
         assert_ne!(before.bundle_id, after.bundle_id);
-        assert_ne!(before.build_context_hash, after.build_context_hash);
     }
 
     #[test]
-    fn manifest_generation_changes_with_claude_version() {
+    fn worker_input_change_is_isolated() {
         let temp = tempfile::tempdir().unwrap();
-        write_resource_tree(temp.path());
+        write_build_tree(temp.path());
+
+        let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+        std::fs::write(temp.path().join("mcp-servers/slack/src.ts"), "changed").unwrap();
+        let after = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+
+        assert_eq!(
+            changed_images(&before, &after),
+            vec![build::IMAGE_MCP_SLACK.to_string()]
+        );
+    }
+
+    #[test]
+    fn shared_change_fans_out_to_all_workers_but_not_claude() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+
+        let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+        std::fs::write(temp.path().join("mcp-servers/shared/src.ts"), "changed").unwrap();
+        let after = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+
+        let changed = changed_images(&before, &after);
+        assert!(!changed.contains(&build::IMAGE_CLAUDE.to_string()));
+        assert!(!changed.contains(&build::IMAGE_MCP_PLAYWRIGHT.to_string()));
+        for img in build::IMAGES {
+            let is_shared_consumer = img.hash_inputs.contains(&"mcp-servers/shared");
+            assert_eq!(
+                changed.contains(&img.name.to_string()),
+                is_shared_consumer,
+                "shared change must rebuild exactly its consumers: {}",
+                img.name
+            );
+        }
+    }
+
+    #[test]
+    fn claude_version_changes_only_claude_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
 
         let before = generate_bundle_manifest("1.2.3", "2.1.143", temp.path()).unwrap();
         let after = generate_bundle_manifest("1.2.3", "2.1.153", temp.path()).unwrap();
 
+        assert_eq!(
+            changed_images(&before, &after),
+            vec![build::IMAGE_CLAUDE.to_string()],
+            "bumping CLAUDE_VERSION must rebuild only the claude image"
+        );
+        assert_ne!(before.bundle_id, after.bundle_id);
+    }
+
+    #[test]
+    fn resources_change_alters_no_image_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+
+        let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+        std::fs::write(
+            temp.path().join("containers/claude-resources/CLAUDE.md"),
+            "# changed",
+        )
+        .unwrap();
+        let after = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+
+        assert!(changed_images(&before, &after).is_empty());
+        assert_ne!(before.claude_resources_hash, after.claude_resources_hash);
         assert_ne!(
             before.bundle_id, after.bundle_id,
-            "bumping CLAUDE_VERSION must change bundle_id so the claude image is rebuilt"
+            "resources change must trigger reconcile (sync + restore) without rebuilds"
         );
+    }
+
+    #[test]
+    fn app_version_changes_only_bundle_id() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+
+        let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+        let after = generate_bundle_manifest("1.2.4", "2.1.0", temp.path()).unwrap();
+
+        assert_eq!(before.image_hashes, after.image_hashes);
+        assert_ne!(
+            before.bundle_id, after.bundle_id,
+            "a release must trigger restore (render code lives in the binary) with 0 rebuilds"
+        );
+    }
+
+    #[test]
+    fn image_hash_and_tag_helpers() {
+        let manifest = BundleManifest::for_tests("abc123");
+        assert_eq!(manifest.image_hash(build::IMAGE_CLAUDE).unwrap(), "abc123");
         assert_eq!(
-            before.build_context_hash, after.build_context_hash,
-            "build_context_hash covers files only — CLAUDE_VERSION is mixed into bundle_id directly"
+            manifest.image_tag(build::IMAGE_MCP_HUB).unwrap(),
+            "speedwave-mcp-hub:abc123"
         );
+        assert!(manifest.image_hash("speedwave-nonexistent").is_err());
+    }
+
+    #[test]
+    fn for_tests_covers_every_catalogue_image() {
+        let manifest = BundleManifest::for_tests("t1");
+        for img in build::IMAGES {
+            assert!(manifest.image_hashes.contains_key(img.name));
+        }
+    }
+
+    #[test]
+    fn missing_hash_input_fails_manifest_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+        std::fs::remove_file(temp.path().join("containers/entrypoint.sh")).unwrap();
+
+        let err = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap_err();
+        assert!(err.to_string().contains("Missing path for bundle digest"));
     }
 
     #[test]
@@ -772,6 +1084,10 @@ mod tests {
         let path = temp.path().join("bundle-state.json");
         let state = BundleState {
             applied_bundle_id: Some("abc123".to_string()),
+            applied_image_hashes: std::collections::BTreeMap::from([
+                ("speedwave-claude".to_string(), "h1".to_string()),
+                ("speedwave-mcp-hub".to_string(), "h2".to_string()),
+            ]),
             phase: BundleReconcilePhase::ImagesBuilt,
             pending_running_projects: vec!["alpha".to_string(), "beta".to_string()],
             last_error: Some("boom".to_string()),
@@ -780,6 +1096,85 @@ mod tests {
         save_bundle_state_to(&state, &path).unwrap();
         let loaded = load_bundle_state_from(&path).unwrap();
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn legacy_state_file_parses_preserving_existing_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bundle-state.json");
+        // Pre-ADR-072 shape: no applied_image_hashes field.
+        std::fs::write(
+            &path,
+            r#"{
+                "applied_bundle_id": "old16charbundleid",
+                "phase": "images_built",
+                "pending_running_projects": ["alpha", "beta"],
+                "last_error": "boom"
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_bundle_state_from(&path).unwrap();
+        assert_eq!(
+            loaded.applied_bundle_id.as_deref(),
+            Some("old16charbundleid")
+        );
+        assert!(loaded.applied_image_hashes.is_empty());
+        assert_eq!(loaded.phase, BundleReconcilePhase::ImagesBuilt);
+        assert_eq!(loaded.pending_running_projects, vec!["alpha", "beta"]);
+        assert_eq!(loaded.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn new_state_file_readable_by_legacy_shape() {
+        // Downgrade safety: old releases deserialize the new file (serde
+        // ignores unknown fields) and fall back to a full rebuild via id mismatch.
+        #[derive(Deserialize)]
+        struct LegacyBundleState {
+            applied_bundle_id: Option<String>,
+            phase: BundleReconcilePhase,
+            pending_running_projects: Vec<String>,
+        }
+
+        let state = BundleState {
+            applied_bundle_id: Some("aggregate-id".to_string()),
+            applied_image_hashes: std::collections::BTreeMap::from([(
+                "speedwave-claude".to_string(),
+                "h1".to_string(),
+            )]),
+            phase: BundleReconcilePhase::Done,
+            pending_running_projects: vec!["alpha".to_string()],
+            last_error: None,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let legacy: LegacyBundleState = serde_json::from_str(&json).unwrap();
+        assert_eq!(legacy.applied_bundle_id.as_deref(), Some("aggregate-id"));
+        assert_eq!(legacy.phase, BundleReconcilePhase::Done);
+        assert_eq!(legacy.pending_running_projects, vec!["alpha"]);
+    }
+
+    #[test]
+    fn legacy_manifest_json_is_regenerated() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+        // Pre-ADR-072 manifest: no image_hashes field.
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            r#"{
+                "app_version": "0.9.0",
+                "bundle_id": "legacy0123456789",
+                "build_context_hash": "deadbeef",
+                "claude_resources_hash": "cafebabe"
+            }"#,
+        )
+        .unwrap();
+
+        let manifest = load_current_bundle_manifest_from(temp.path()).unwrap();
+        assert!(
+            !manifest.image_hashes.is_empty(),
+            "legacy manifest must be discarded and regenerated from the tree"
+        );
+        assert_ne!(manifest.bundle_id, "legacy0123456789");
     }
 
     #[test]

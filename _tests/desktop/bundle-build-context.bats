@@ -343,3 +343,37 @@ teardown() {
     [ -d "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
     [ ! -L "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
 }
+
+@test "every COPY source in bundled Containerfiles exists in the staged tree" {
+    # The script honours only $BUNDLE_DEST (set by setup) — never argv.
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    ctx="$BUNDLE_DEST/build-context"
+    [ -d "$ctx" ] || { echo "staged context missing: $ctx"; return 1; }
+    found_any=""
+    fail=""
+    # Worker images build with context = mcp-servers/; claude with containers/.
+    while IFS= read -r df; do
+        case "$df" in
+            */mcp-servers/*) root="$ctx/mcp-servers" ;;
+            *) root="$ctx/containers" ;;
+        esac
+        while IFS= read -r src; do
+            found_any=1
+            # Glob sources (package*.json) must expand to >=1 staged file.
+            matches=$(cd "$root" 2>/dev/null && compgen -G "$src" | head -1)
+            [ -n "$matches" ] || fail="$fail\n$df: missing COPY source '$src'"
+        done < <(grep -E '^(COPY|ADD) ' "$df" \
+                   | grep -v -- '--from=' \
+                   | sed -E 's/^(COPY|ADD) +//; s/ +[^ ]+$//' \
+                   | tr ' ' '\n' \
+                   | grep -v '^--' \
+                   | sed 's/^\.\///' \
+                   | grep -v '^$')
+    done < <(find "$ctx" \( -name 'Dockerfile' -o -name 'Containerfile*' \) -type f)
+    [ -n "$found_any" ] || { echo "vacuous: no COPY lines parsed"; return 1; }
+    if [ -n "$fail" ]; then
+        echo -e "COPY sources missing from staged bundle:$fail"
+        return 1
+    fi
+}

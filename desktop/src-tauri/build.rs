@@ -21,9 +21,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .to_path_buf();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS")?;
     let allow_stubs = std::env::var_os("SPEEDWAVE_ALLOW_BUNDLE_STUBS").is_some();
-    let hash_root = if build_context.join("containers").exists()
-        && build_context.join("mcp-servers").exists()
-    {
+    // build-context qualifies as hash root only when COMPLETE — CI stubs
+    // create the directories but not every declared hash input, and hashing
+    // a partial tree would either fail or mint garbage tags.
+    let build_context_complete = speedwave_runtime::build::IMAGES
+        .iter()
+        .flat_map(|img| img.hash_inputs.iter())
+        .all(|input| build_context.join(input).exists());
+    let hash_root = if build_context_complete {
         build_context.clone()
     } else {
         repo_root.clone()

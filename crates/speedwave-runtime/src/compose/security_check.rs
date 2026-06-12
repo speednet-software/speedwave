@@ -247,7 +247,7 @@ pub enum SecurityRule {
     SlackMissingWorkspaceMount,
 
     /// LiteLLM proxy mounts exactly config:ro + tokens:ro + usage:rw and no
-    /// host network (ADR-072 — it is a worker-class token holder).
+    /// host network (ADR-073 — it is a worker-class token holder).
     #[strum(to_string = "LITELLM_VOLUMES")]
     #[strum(props(description = "LiteLLM mounts are config:ro, tokens:ro, usage:rw only"))]
     LitellmVolumes,
@@ -412,7 +412,7 @@ impl SecurityCheck {
             // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
             Self::check_builtin_slack_volumes(&doc, expected_paths),
-            // LiteLLM proxy mount profile (ADR-072)
+            // LiteLLM proxy mount profile (ADR-073)
             Self::check_litellm_volumes(&doc, expected_paths),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
@@ -940,7 +940,7 @@ impl SecurityCheck {
         violations
     }
 
-    /// ADR-072: the litellm proxy is a worker-class token holder. Its mounts
+    /// ADR-073: the litellm proxy is a worker-class token holder. Its mounts
     /// must be exactly: `/config:ro`, `<tokens>/llm:/tokens:ro`, `/usage:rw` —
     /// nothing else (no workspace, no claude-home, no sockets) — and it must
     /// not use host networking.

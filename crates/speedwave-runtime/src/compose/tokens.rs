@@ -53,7 +53,7 @@ pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Res
 /// (validated by `plugin::validate_manifest`).
 const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm", LLM_TOKEN_SERVICE];
 
-/// LiteLLM per-provider key namespace (ADR-072). Mounted `:ro` at `/tokens`
+/// LiteLLM per-provider key namespace (ADR-073). Mounted `:ro` at `/tokens`
 /// in the litellm container; its entrypoint exports each file as
 /// `SPW_KEY_<PROVIDER_ID>`. The namespace is reserved against plugin slugs
 /// in `consts::BUILT_IN_SERVICE_IDS`.

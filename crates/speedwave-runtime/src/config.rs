@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Current LLM config schema version. Version 2 introduces the provider
-/// list + active selection (ADR-072); absent/`None` means the legacy flat
+/// list + active selection (ADR-073); absent/`None` means the legacy flat
 /// v1 shape, auto-migrated on resolve by [`migrate_llm_to_v2`].
 pub const LLM_SCHEMA_VERSION: u32 = 2;
 
-/// What class of backend a configured provider entry is (ADR-072).
+/// What class of backend a configured provider entry is (ADR-073).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProviderKind {
@@ -31,7 +31,7 @@ pub enum LlmProviderKind {
     Custom,
 }
 
-/// One configured LLM provider (ADR-072). Key VALUES never live here —
+/// One configured LLM provider (ADR-073). Key VALUES never live here —
 /// they sit in `tokens/<project>/llm/<id>_api_key`; only presence flags do.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LlmProviderEntry {
@@ -56,7 +56,7 @@ pub struct LlmProviderEntry {
     pub has_custom_headers: bool,
 }
 
-/// The provider+model a project's sessions start with (ADR-072).
+/// The provider+model a project's sessions start with (ADR-073).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LlmActive {
     /// `LlmProviderEntry::id` of the selected provider.
@@ -68,7 +68,7 @@ pub struct LlmActive {
 
 /// LLM provider selection and model settings.
 ///
-/// Two coexisting shapes (ADR-072 migration):
+/// Two coexisting shapes (ADR-073 migration):
 /// - **v1 (legacy, flat)**: `provider`/`model`/`base_url`/`context_tokens`/
 ///   `has_api_key`/`has_custom_headers`. Still WRITTEN on save for one
 ///   release so an older Speedwave reads the config without losing the
@@ -101,7 +101,7 @@ pub struct LlmConfig {
     /// LLM schema version; `None` = legacy v1 (see [`LLM_SCHEMA_VERSION`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_version: Option<u32>,
-    /// Kill-switch (ADR-072): `false` routes Claude Code directly at the
+    /// Kill-switch (ADR-073): `false` routes Claude Code directly at the
     /// provider (pre-proxy behaviour). Default `true`. User-only — the repo
     /// layer cannot set it (merge_llm_repo ignores it). Removal in N+2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -483,13 +483,17 @@ impl ResolvedIntegrationsConfig {
         self.plugins.get(service_id).copied().unwrap_or(false)
     }
 
-    /// Service ids of all enabled plugins.
+    /// Service ids of all enabled plugins, sorted — env values built from
+    /// this list must be deterministic or config-hash convergence flaps.
     pub fn enabled_plugin_service_ids(&self) -> Vec<&str> {
-        self.plugins
+        let mut ids: Vec<&str> = self
+            .plugins
             .iter()
             .filter(|(_, &enabled)| enabled)
             .map(|(id, _)| id.as_str())
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Enabled state for a macOS native service by config key, or `None` if unknown.
@@ -677,7 +681,7 @@ pub fn resolve_project_config(
         }
     }
 
-    // Lift the merged result into the v2 provider-list shape (ADR-072). The
+    // Lift the merged result into the v2 provider-list shape (ADR-073). The
     // anthropic-secret presence decides AnthropicApiKey vs AnthropicOauth for
     // legacy `provider=anthropic` configs.
     migrate_llm_to_v2(&mut llm, anthropic_secret_exists(project_name));
@@ -942,7 +946,7 @@ fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
     if overlay.has_custom_headers {
         base.has_custom_headers = true;
     }
-    // v2 (ADR-072): the user layer carries the provider list wholesale.
+    // v2 (ADR-073): the user layer carries the provider list wholesale.
     if overlay.schema_version.is_some() {
         base.schema_version = overlay.schema_version;
     }
@@ -962,7 +966,7 @@ fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
 /// Only model is merged, allowing repos to suggest a default model name.
 /// The v2 fields (`providers`, `active`, `schema_version`) are equally
 /// ignored — a repo must never add providers, redirect base URLs, or switch
-/// the active provider (ADR-072 keeps the ADR-040 rule). The model
+/// the active provider (ADR-073 keeps the ADR-040 rule). The model
 /// suggestion reaches `active.model` via the lift in [`migrate_llm_to_v2`]
 /// only when the user has not pinned a model.
 fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
@@ -1321,7 +1325,7 @@ mod tests {
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        // User config wins over repo config. The v1→v2 migration (ADR-072)
+        // User config wins over repo config. The v1→v2 migration (ADR-073)
         // normalises the legacy `ollama` alias to `local` on resolve.
         assert_eq!(resolved.llm.provider.as_deref(), Some("local"));
         assert_eq!(resolved.llm.model.as_deref(), Some("llama3.3"));
@@ -1362,7 +1366,7 @@ mod tests {
         let user_config = SpeedwaveUserConfig::default();
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
         // provider and base_url from repo config must be ignored (SSRF
-        // prevention — ADR-040, upheld by ADR-072). Post-migration the
+        // prevention — ADR-040, upheld by ADR-073). Post-migration the
         // default resolves to anthropic, NOT the repo's "ollama".
         assert_eq!(resolved.llm.provider.as_deref(), Some("anthropic"));
         assert_eq!(resolved.llm.base_url, None);
@@ -1376,7 +1380,7 @@ mod tests {
         assert_eq!(entry.base_url, None);
     }
 
-    /// ADR-072: a repo `.speedwave.json` must not be able to inject the v2
+    /// ADR-073: a repo `.speedwave.json` must not be able to inject the v2
     /// fields either — providers (base URLs!), active selection, schema.
     #[test]
     fn test_repo_config_cannot_set_v2_providers_or_active() {
@@ -1539,7 +1543,7 @@ mod tests {
     /// shape (unknown fields ignored) with a usable provider/model pair.
     #[test]
     fn test_v2_config_readable_by_v1_schema() {
-        /// The exact v1 struct shape (pre-ADR-072) — what an older
+        /// The exact v1 struct shape (pre-ADR-073) — what an older
         /// Speedwave's serde sees.
         #[derive(serde::Deserialize)]
         struct LlmConfigV1 {
@@ -3265,6 +3269,28 @@ mod tests {
                     "migration claimed success on read-only dir but field actually removed: {after}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod plugin_order_tests {
+    use super::*;
+
+    #[test]
+    fn enabled_plugin_service_ids_are_sorted_and_stable() {
+        let mut cfg = ResolvedIntegrationsConfig::default();
+        for id in ["zeta", "alpha", "midway", "beta"] {
+            cfg.plugins.insert(id.to_string(), true);
+        }
+        cfg.plugins.insert("disabled".to_string(), false);
+        for _ in 0..20 {
+            assert_eq!(
+                cfg.enabled_plugin_service_ids(),
+                vec!["alpha", "beta", "midway", "zeta"],
+                "order must be deterministic — env values feed config-hash"
+            );
         }
     }
 }

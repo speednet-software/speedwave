@@ -132,7 +132,7 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
 /// plain `fsync`, then to a best-effort no-op — degrading to pre-fsync durability
 /// rather than failing the write. Other Unix uses `fsync`; Windows is a no-op.
 #[cfg(unix)]
-fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
+pub(crate) fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use rustix::io::Errno;
@@ -167,7 +167,7 @@ fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn fsync_file_durable(_file: &std::fs::File) -> std::io::Result<()> {
+pub(crate) fn fsync_file_durable(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 

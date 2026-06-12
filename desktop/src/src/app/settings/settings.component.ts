@@ -122,7 +122,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           (errorOccurred)="error = $event"
         />
 
-        <!-- LLM usage dashboard (ADR-072): per-day/per-model aggregate from
+        <!-- LLM usage dashboard (ADR-073): per-day/per-model aggregate from
              the proxy's usage log. -->
         @if (activeProject; as project) {
           <section id="section-llm-usage" class="mt-6">

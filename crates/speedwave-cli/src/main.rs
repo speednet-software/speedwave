@@ -804,6 +804,11 @@ fn main() -> anyhow::Result<()> {
         runtime_not_available();
     }
 
+    // Align the in-distro nerdctl to the pin (Windows; no-op elsewhere) —
+    // CLI-only users must not stay on a version with divergent compose-up
+    // semantics. Warn-only and Once-guarded inside.
+    speedwave_runtime::provision::ensure_nerdctl_version();
+
     // Load config once — used for both project resolution and compose rendering
     let user_config = config::load_user_config().unwrap_or_else(|e| {
         err!("Failed to load config: {err}", err = redact_err(&e));
@@ -955,6 +960,33 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Save compose file and start containers.
+    // Build missing images first (outside the compose lock, ADR-066) —
+    // pull_policy:never would fail a CLI run made after an app update but
+    // before Desktop reconciles (ADR-072).
+    let bundle_manifest = speedwave_runtime::bundle::load_current_bundle_manifest()?;
+    let enabled_imgs = speedwave_runtime::build::enabled_images(&integrations);
+    let prior_state = speedwave_runtime::bundle::load_bundle_state();
+    let built = speedwave_runtime::build::build_missing_images_locked(
+        &runtime,
+        &enabled_imgs,
+        &bundle_manifest,
+    )
+    .map_err(|e| anyhow::anyhow!("container image build failed: {}", redact_err(&e)))?;
+    if built > 0 {
+        out!("Built {built} container image(s) for this app version");
+        // Prune superseded tags — warn-only, Desktop reconcile is the authoritative GC
+        // path but CLI-only users would otherwise leak one tag generation per update.
+        speedwave_runtime::build::prune_superseded_images(
+            &runtime,
+            &prior_state.applied_image_hashes,
+            prior_state.applied_bundle_id.as_deref(),
+            &bundle_manifest,
+        );
+    }
+    let enabled_plugin_ids: Vec<&str> = integrations.enabled_plugin_service_ids();
+    plugin::ensure_plugin_images(&runtime, &enabled_plugin_ids)
+        .map_err(|e| anyhow::anyhow!("plugin image build failed: {}", redact_err(&e)))?;
+
     // compose_up is idempotent (no --force-recreate) — nerdctl
     // recreates containers whose config changed. Skip the expensive compose_ps
     // call over SSH; just call compose_up unconditionally and let the engine
@@ -1057,6 +1089,70 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_aligns_nerdctl_before_compose_work() {
+        let source = include_str!("main.rs");
+        let avail = source
+            .find("runtime_not_available();")
+            .expect("availability gate must exist");
+        let align = source
+            .find("ensure_nerdctl_version();")
+            .expect("CLI must align in-distro nerdctl (Windows pin)");
+        let txn = source
+            .find("runtime.transaction(")
+            .expect("compose transaction must exist");
+        assert!(
+            avail < align && align < txn,
+            "nerdctl alignment must run after availability, before compose work"
+        );
+    }
+
+    /// Structural (ADR-072): the run path must build missing images BEFORE the
+    /// compose transaction — pull_policy:never fails a CLI-first-after-update.
+    #[test]
+    fn run_builds_missing_images_before_compose_transaction() {
+        let src = include_str!("main.rs");
+        let build_pos = src
+            .find("build_missing_images_locked")
+            .expect("run path must build missing images");
+        let tx_pos = src
+            .find("runtime.transaction(&project_name")
+            .expect("run path must use the compose transaction");
+        assert!(
+            build_pos < tx_pos,
+            "missing-image build (at {build_pos}) must precede the compose \
+             transaction (at {tx_pos}) — builds stay outside compose locks"
+        );
+    }
+
+    /// Structural (ADR-072 GC): when the CLI builds images it must prune superseded
+    /// tags immediately after — CLI-only users never see Desktop reconcile, so
+    /// without this they leak one tag generation per update.
+    #[test]
+    fn cli_prunes_superseded_images_after_build() {
+        let src = include_str!("main.rs");
+        let build_pos = src
+            .find("build_missing_images_locked")
+            .expect("run path must call build_missing_images_locked");
+        let prune_pos = src
+            .find("prune_superseded_images")
+            .expect("run path must prune superseded images after build");
+        assert!(
+            build_pos < prune_pos,
+            "prune_superseded_images (at {prune_pos}) must follow build_missing_images_locked \
+             (at {build_pos}) — prune needs the previous state captured before the build"
+        );
+        // The prune must use the state captured BEFORE the build.
+        let state_pos = src
+            .find("load_bundle_state()")
+            .expect("run path must load prior bundle state for GC");
+        assert!(
+            state_pos < build_pos,
+            "load_bundle_state (at {state_pos}) must precede build_missing_images_locked \
+             (at {build_pos}) — prune compares applied hashes vs new manifest"
+        );
+    }
 
     #[test]
     fn parse_action_no_args_returns_run() {

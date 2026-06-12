@@ -99,16 +99,16 @@ export interface LlmConfigResponse {
   has_api_key?: boolean;
   /** True when a custom_headers file exists for this project. */
   has_custom_headers?: boolean;
-  /** v2 provider list (ADR-072); absent on never-migrated legacy configs. */
+  /** v2 provider list (ADR-073); absent on never-migrated legacy configs. */
   providers?: LlmProviderEntry[];
-  /** v2 active provider+model selection (ADR-072). */
+  /** v2 active provider+model selection (ADR-073). */
   active?: LlmActive | null;
-  /** ADR-072 kill-switch; absent = enabled. */
+  /** ADR-073 kill-switch; absent = enabled. */
   proxy_enabled?: boolean | null;
 }
 
 /**
- * Provider kind discriminator (ADR-072). Mirror of the Rust
+ * Provider kind discriminator (ADR-073). Mirror of the Rust
  * `speedwave_runtime::config::LlmProviderKind` serde representation
  * (snake_case strings).
  */
@@ -121,7 +121,7 @@ export type LlmProviderKind =
   | 'custom';
 
 /**
- * One configured LLM provider (ADR-072 schema v2). Mirror of the Rust
+ * One configured LLM provider (ADR-073 schema v2). Mirror of the Rust
  * `LlmProviderEntry`. Key VALUES never reach the frontend — only the
  * `has_api_key` presence flag.
  */
@@ -135,7 +135,7 @@ export interface LlmProviderEntry {
   has_custom_headers?: boolean;
 }
 
-/** Active provider+model selection (ADR-072). Mirror of Rust `LlmActive`. */
+/** Active provider+model selection (ADR-073). Mirror of Rust `LlmActive`. */
 export interface LlmActive {
   provider_id: string;
   model?: string | null;
@@ -156,7 +156,7 @@ export interface UsageBucket {
 }
 
 /**
- * Usage dashboard payload from `get_llm_usage` (ADR-072). The single
+ * Usage dashboard payload from `get_llm_usage` (ADR-073). The single
  * source is the litellm callback JSONL; per-session chat statistics come
  * from the stream and are deliberately NOT part of this payload.
  */

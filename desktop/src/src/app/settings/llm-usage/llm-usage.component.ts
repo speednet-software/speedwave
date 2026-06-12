@@ -13,7 +13,7 @@ interface UsageRow {
 }
 
 /**
- * LLM usage dashboard (ADR-072). Renders the aggregate returned by the
+ * LLM usage dashboard (ADR-073). Renders the aggregate returned by the
  * `get_llm_usage` Tauri command — the litellm callback JSONL is the single
  * source of truth here; per-session chat statistics (the stream-derived
  * numbers in `session-stats`) are intentionally NOT mixed in, the same

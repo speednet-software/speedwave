@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for containers/litellm/entrypoint.sh (ADR-072)
+# Tests for containers/litellm/entrypoint.sh (ADR-073)
 # Runs on the host (macOS) — stubs out 'litellm' so no Python is required.
 
 ENTRYPOINT="$BATS_TEST_DIRNAME/../../containers/litellm/entrypoint.sh"
@@ -67,7 +67,7 @@ teardown() {
 }
 
 @test "never exports canonical provider env names" {
-    # The ADR-072 invariant: a key must not surface as ANTHROPIC_API_KEY etc.
+    # The ADR-073 invariant: a key must not surface as ANTHROPIC_API_KEY etc.
     printf 'sk-test' > "$TOKENS_DIR/anthropic_api_key"
     cat > "$STUBS_DIR/litellm" <<'EOF'
 #!/bin/sh

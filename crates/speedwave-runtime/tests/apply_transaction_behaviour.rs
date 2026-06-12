@@ -112,17 +112,26 @@ fn apply_update_transaction_aborts_recreate_on_compose_down_failure() {
     );
 }
 
+/// Pre-ADR-072 state: legacy single-id applied, no per-image map.
+fn legacy_state(applied: Option<&str>) -> speedwave_runtime::bundle::BundleState {
+    speedwave_runtime::bundle::BundleState {
+        applied_bundle_id: applied.map(str::to_string),
+        ..Default::default()
+    }
+}
+
 #[test]
 #[serial_test::serial]
-fn maybe_prune_previous_bundle_prunes_when_bundle_id_differs() {
+fn maybe_prune_previous_bundle_prunes_legacy_tags_on_migration() {
     let _ = shared_data_dir();
     let (rt, handles) = MockRuntimeBuilder::new().build();
-    maybe_prune_previous_bundle(&rt, Some("old-bundle"), "new-bundle");
+    let manifest = speedwave_runtime::bundle::BundleManifest::for_tests("new-bundle");
+    maybe_prune_previous_bundle(&rt, &legacy_state(Some("old-bundle")), &manifest);
 
     let removed = handles.remove_images_calls.lock().unwrap().clone();
     assert!(
         !removed.is_empty(),
-        "remove_images must be called when bundle ID changes"
+        "remove_images must be called when migrating off a legacy bundle id"
     );
     assert!(
         removed[0].0.iter().any(|tag| tag.contains("old-bundle")),
@@ -136,7 +145,8 @@ fn maybe_prune_previous_bundle_prunes_when_bundle_id_differs() {
 fn maybe_prune_previous_bundle_skips_when_bundle_id_unchanged() {
     let _ = shared_data_dir();
     let (rt, handles) = MockRuntimeBuilder::new().build();
-    maybe_prune_previous_bundle(&rt, Some("same-bundle"), "same-bundle");
+    let manifest = speedwave_runtime::bundle::BundleManifest::for_tests("same-bundle");
+    maybe_prune_previous_bundle(&rt, &legacy_state(Some("same-bundle")), &manifest);
 
     assert!(
         handles.remove_images_calls.lock().unwrap().is_empty(),
@@ -149,11 +159,38 @@ fn maybe_prune_previous_bundle_skips_when_bundle_id_unchanged() {
 fn maybe_prune_previous_bundle_skips_when_no_previous_bundle() {
     let _ = shared_data_dir();
     let (rt, handles) = MockRuntimeBuilder::new().build();
-    maybe_prune_previous_bundle(&rt, None, "new-bundle");
+    let manifest = speedwave_runtime::bundle::BundleManifest::for_tests("new-bundle");
+    maybe_prune_previous_bundle(&rt, &legacy_state(None), &manifest);
 
     assert!(
         handles.remove_images_calls.lock().unwrap().is_empty(),
         "remove_images must NOT be called on first install (no previous bundle)"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn maybe_prune_previous_bundle_prunes_replaced_per_image_tags() {
+    let _ = shared_data_dir();
+    let manifest = speedwave_runtime::bundle::BundleManifest::for_tests("newhash");
+    // Applied state matches the manifest except one image on an older hash.
+    let mut state = legacy_state(Some("aggregate-id"));
+    state.applied_image_hashes = manifest.image_hashes.clone();
+    state
+        .applied_image_hashes
+        .insert("speedwave-claude".to_string(), "oldhash".to_string());
+
+    let (rt, handles) = MockRuntimeBuilder::new()
+        .with_image_exists("speedwave-claude:oldhash", true)
+        .build();
+    maybe_prune_previous_bundle(&rt, &state, &manifest);
+
+    let removed = handles.remove_images_calls.lock().unwrap().clone();
+    assert_eq!(removed.len(), 1, "exactly one remove_images call expected");
+    assert_eq!(removed[0].0, vec!["speedwave-claude:oldhash".to_string()]);
+    assert!(
+        !removed[0].0.iter().any(|tag| tag.contains("aggregate-id")),
+        "non-empty per-image map must suppress the legacy single-id prune"
     );
 }
 
@@ -179,7 +216,8 @@ fn prune_does_not_run_when_apply_update_transaction_fails() {
 
     // Simulate caller: prune only on Ok.
     if result.is_ok() {
-        maybe_prune_previous_bundle(&rt, Some("old"), "new");
+        let manifest = speedwave_runtime::bundle::BundleManifest::for_tests("new");
+        maybe_prune_previous_bundle(&rt, &legacy_state(Some("old")), &manifest);
     }
     assert!(
         handles.remove_images_calls.lock().unwrap().is_empty(),

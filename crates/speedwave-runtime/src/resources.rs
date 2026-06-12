@@ -46,7 +46,7 @@ pub const HUB_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-/// LiteLLM proxy (ADR-072): on every inference request's path, but the work is
+/// LiteLLM proxy (ADR-073): on every inference request's path, but the work is
 /// I/O-bound forwarding/translation — 1 core is plenty. 512 MiB covers the
 /// Python runtime + litellm with headroom for concurrent streams (a bare proxy
 /// idles at ~200-300 MiB; no DB, no Admin UI).

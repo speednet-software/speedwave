@@ -100,15 +100,15 @@ pub(crate) struct LlmConfigUpdate {
     pub(crate) api_key: Option<Option<String>>,
     #[serde(default, with = "serde_with::rust::double_option")]
     pub(crate) custom_headers: Option<Option<String>>,
-    /// v2 provider list (ADR-072). When present, replaces the stored list
+    /// v2 provider list (ADR-073). When present, replaces the stored list
     /// wholesale (the UI always sends the full set). Key VALUES never ride
     /// this DTO — they go through `set_llm_provider_key`.
     #[serde(default)]
     pub(crate) providers: Option<Vec<speedwave_runtime::config::LlmProviderEntry>>,
-    /// v2 active provider+model selection (ADR-072).
+    /// v2 active provider+model selection (ADR-073).
     #[serde(default)]
     pub(crate) active: Option<speedwave_runtime::config::LlmActive>,
-    /// ADR-072 kill-switch passthrough; omitted = leave unchanged.
+    /// ADR-073 kill-switch passthrough; omitted = leave unchanged.
     #[serde(default)]
     pub(crate) proxy_enabled: Option<bool>,
 }

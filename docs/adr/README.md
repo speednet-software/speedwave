@@ -46,7 +46,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-037](ADR-037-code-signing-and-bundled-binary-signing.md)          | Code Signing and Bundled Binary Signing                                                  | Accepted                      |
 | [ADR-038](ADR-038-single-internal-worker-port.md)                      | Single Internal Worker Port                                                              | Accepted                      |
 | [ADR-039](ADR-039-playwright-shared-browser-service.md)                | Playwright Shared Browser Service                                                        | Accepted                      |
-| [ADR-040](ADR-040-remove-litellm-direct-provider-injection.md)         | Remove LiteLLM — Direct Local Provider Injection                                         | Superseded in part by ADR-072 |
+| [ADR-040](ADR-040-remove-litellm-direct-provider-injection.md)         | Remove LiteLLM — Direct Local Provider Injection                                         | Superseded in part by ADR-073 |
 | [ADR-041](ADR-041-local-llm-model-discovery.md)                        | Local LLM Model Discovery and SSRF Policy                                                | Accepted                      |
 | [ADR-042](ADR-042-json-patch-stream-protocol.md)                       | JSON Patch (RFC 6902) as the Stream-to-UI Protocol                                       | Retired                       |
 | [ADR-043](ADR-043-msgstore-history-plus-stream.md)                     | MsgStore — Broadcast Channel Plus Bounded History                                        | Retired                       |
@@ -78,7 +78,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-069](ADR-069-generic-plugin-oauth2.md)                            | Generic plugin OAuth2 via host-side worker — per-human identity, PKCE loopback           | Accepted                      |
 | [ADR-070](ADR-070-appleevents-kernel-process-id-gate.md)               | AppleEvents permission gate via `typeKernelProcessID` addressing                         | Accepted                      |
 | [ADR-071](ADR-071-slack-oauth-pkce-user-tokens.md)                     | Slack OAuth2 PKCE — tokenless sign-in with rotating user tokens                          | Accepted                      |
-| [ADR-072](ADR-072-embedded-per-project-litellm-proxy.md)               | Embedded per-project LiteLLM proxy — multi-provider routing + usage accounting           | Accepted                      |
+| [ADR-072](ADR-072-per-image-build-input-hash-tags.md)                  | Per-image build-input hash tags + BuildKit cache retention — rebuild only changed images | Accepted                      |
+| [ADR-073](ADR-073-embedded-per-project-litellm-proxy.md)               | Embedded per-project LiteLLM proxy — multi-provider routing + usage accounting           | Accepted                      |
 
 ## Creating a New ADR
 

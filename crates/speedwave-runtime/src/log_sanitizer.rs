@@ -64,7 +64,7 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         ),
         // Anthropic API keys: sk-ant- prefixed
         (r"sk-ant-[A-Za-z0-9_-]+", "***REDACTED_ANTHROPIC_KEY***"),
-        // Google API keys (Gemini via LiteLLM, ADR-072): AIza + exactly 35
+        // Google API keys (Gemini via LiteLLM, ADR-073): AIza + exactly 35
         // base64url chars per Google's documented key shape.
         (r"\bAIza[0-9A-Za-z_-]{35}\b", "***REDACTED_GOOGLE_KEY***"),
         // Bare sk-prefixed keys: sk-proj-*, sk-test-*, sk-or-* (OpenRouter),
