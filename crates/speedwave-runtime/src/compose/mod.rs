@@ -15,12 +15,20 @@ use std::path::{Path, PathBuf};
 // Self-contained concerns split out of this module. Each is re-exported below
 // so the public path `compose::*` is preserved for external callers.
 mod addressing;
+mod litellm;
 mod llm;
 mod plugins;
 mod quoting;
 mod security_check;
 mod tokens;
 mod workers;
+
+// LiteLLM proxy config rendering + key management (ADR-072).
+pub use litellm::{
+    litellm_config_path_in, remove_llm_provider_key_in, render_litellm_config, spw_key_env_name,
+    write_litellm_config_in, write_llm_provider_key_in, LITELLM_ANTHROPIC_PASSTHROUGH_URL,
+    LITELLM_BASE_URL, LITELLM_PORT,
+};
 
 // Host addressing SSOT (ADR-067) — public API surface.
 pub use addressing::{
@@ -249,8 +257,9 @@ pub fn render_compose_in(
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
     // LiteLLM proxy mounts (ADR-072): rendered config (ro) + usage sink (rw).
-    // Both per-project; the config file itself is written by
-    // litellm::write_litellm_config_in inside the same render transaction.
+    // Both per-project; the config file is rendered here, inside the same
+    // render transaction as the compose file itself.
+    litellm::write_litellm_config_in(data_dir, project_name, &resolved_config.llm)?;
     let litellm_config_dir = data_dir.join("litellm").join(project_name);
     std::fs::create_dir_all(&litellm_config_dir)?;
     let litellm_usage_dir = data_dir.join("usage").join(project_name).join("litellm");
