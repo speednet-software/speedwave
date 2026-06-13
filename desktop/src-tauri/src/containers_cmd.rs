@@ -1011,6 +1011,16 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
                     active.provider_id
                 ));
             }
+            // active.model is the routing SSOT (injected as ANTHROPIC_MODEL /
+            // ANTHROPIC_SMALL_FAST_MODEL) — apply the same flag-collision guard
+            // as the flat field and per-entry models.
+            if let Some(model) = active.model.as_deref() {
+                if model.starts_with('-') {
+                    return Err(
+                        "active model must not start with '-' (CLI flag collision)".to_string()
+                    );
+                }
+            }
         }
     }
 
@@ -1119,6 +1129,14 @@ fn validate_provider_entries(
                 return Err(format!("provider '{}' requires a base URL", entry.id));
             }
             (None, false) => {}
+        }
+        if let Some(model) = entry.model.as_deref() {
+            if model.starts_with('-') {
+                return Err(format!(
+                    "provider '{}': model must not start with '-' (CLI flag collision)",
+                    entry.id
+                ));
+            }
         }
     }
     Ok(())
@@ -1253,6 +1271,7 @@ fn apply_credential_action(
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
+            mirror_local_key_to_llm_namespace(project, file, None)?;
             Ok(())
         }
         CredentialAction::Write(value) => {
@@ -1264,9 +1283,46 @@ fn apply_credential_action(
                 path.display(),
                 value.len()
             );
+            mirror_local_key_to_llm_namespace(project, file, Some(value))?;
             Ok(())
         }
     }
+}
+
+/// Keeps the litellm-readable `tokens/<project>/llm/local_api_key` in sync
+/// with the local card's `api_key` write/delete. The legacy
+/// `local-llm/api_key` feeds the kill-switch direct path; the proxy entrypoint
+/// reads only the `llm/` namespace, so without this mirror a rotated key (and
+/// the one-time migration's copy) would go stale. Only `api_key` is mirrored —
+/// `custom_headers` belongs to the legacy direct path alone. Non-fatal: a
+/// failure leaves the proxy on the previous key rather than aborting the save.
+fn mirror_local_key_to_llm_namespace(
+    project: &str,
+    file: &str,
+    value: Option<&str>,
+) -> anyhow::Result<()> {
+    if file != "api_key" {
+        return Ok(());
+    }
+    let data_dir = speedwave_runtime::consts::data_dir();
+    let result = match value {
+        Some(v) => speedwave_runtime::compose::write_llm_provider_key_in(
+            data_dir.as_path(),
+            project,
+            "local",
+            v,
+        )
+        .map(|_| ()),
+        None => speedwave_runtime::compose::remove_llm_provider_key_in(
+            data_dir.as_path(),
+            project,
+            "local",
+        ),
+    };
+    if let Err(e) = result {
+        log::warn!("update_llm_config: mirroring local api_key to llm namespace failed: {e}");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1643,10 +1699,24 @@ mod tests {
             id: id.to_string(),
             kind,
             base_url: base_url.map(str::to_string),
+            model: None,
             has_api_key: false,
             context_tokens: None,
             has_custom_headers: false,
         }
+    }
+
+    #[test]
+    fn validate_provider_entries_rejects_flag_shaped_model() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut entry = v2_entry("openrouter", K::OpenRouter, None);
+        entry.model = Some("--dangerously-skip".to_string());
+        let err = validate_provider_entries(&[entry]).unwrap_err();
+        assert!(err.contains("must not start with '-'"));
+
+        let mut ok = v2_entry("openrouter", K::OpenRouter, None);
+        ok.model = Some("deepseek/deepseek-v4-flash".to_string());
+        assert!(validate_provider_entries(&[ok]).is_ok());
     }
 
     #[test]

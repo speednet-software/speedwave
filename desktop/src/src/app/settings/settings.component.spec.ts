@@ -104,15 +104,6 @@ describe('SettingsComponent', () => {
     expect(llmEl).not.toBeNull();
   });
 
-  it('renders AuthSectionComponent', async () => {
-    component.ngOnInit();
-    await fixture.whenStable();
-    fixture.changeDetectorRef.markForCheck();
-    fixture.detectChanges();
-    const authEl = fixture.nativeElement.querySelector('app-auth-section');
-    expect(authEl).not.toBeNull();
-  });
-
   it('renders AdvancedSectionComponent', () => {
     fixture.detectChanges();
     const advancedEl = fixture.nativeElement.querySelector('app-advanced-section');

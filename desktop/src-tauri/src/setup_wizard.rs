@@ -1218,6 +1218,7 @@ mod tests {
                         id: "p1".to_string(),
                         kind,
                         base_url: None,
+                        model: None,
                         has_api_key: false,
                         context_tokens: None,
                         has_custom_headers: false,

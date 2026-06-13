@@ -44,6 +44,10 @@ pub struct LlmProviderEntry {
     /// Base URL for `Local`/`OpenAiCompat`/`Custom` kinds (user-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Last model used with this provider — restored on re-activation;
+    /// `active.model` stays the routing source of truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// True when `tokens/<project>/llm/<id>_api_key` exists.
     #[serde(default)]
     pub has_api_key: bool,
@@ -140,6 +144,7 @@ pub fn migrate_llm_to_v2(llm: &mut LlmConfig, has_anthropic_secret: bool) {
                 id: "local".to_string(),
                 kind: LlmProviderKind::Local,
                 base_url: llm.base_url.clone(),
+                model: llm.model.clone(),
                 has_api_key: llm.has_api_key,
                 context_tokens: llm.context_tokens,
                 has_custom_headers: llm.has_custom_headers,
@@ -159,6 +164,7 @@ pub fn migrate_llm_to_v2(llm: &mut LlmConfig, has_anthropic_secret: bool) {
                 id: "anthropic".to_string(),
                 kind,
                 base_url: None,
+                model: llm.model.clone(),
                 has_api_key: has_anthropic_secret,
                 context_tokens: llm.context_tokens,
                 has_custom_headers: false,
@@ -1510,6 +1516,7 @@ mod tests {
                     id: "Bad.Id".into(),
                     kind: LlmProviderKind::OpenRouter,
                     base_url: None,
+                    model: None,
                     has_api_key: true,
                     context_tokens: None,
                     has_custom_headers: false,
@@ -1518,6 +1525,7 @@ mod tests {
                     id: "good-id".into(),
                     kind: LlmProviderKind::OpenRouter,
                     base_url: None,
+                    model: None,
                     has_api_key: true,
                     context_tokens: None,
                     has_custom_headers: false,

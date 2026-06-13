@@ -130,6 +130,8 @@ export interface LlmProviderEntry {
   id: string;
   kind: LlmProviderKind;
   base_url?: string | null;
+  /** Last model used with this provider — restored on re-activation. */
+  model?: string | null;
   has_api_key?: boolean;
   context_tokens?: number | null;
   has_custom_headers?: boolean;
@@ -153,6 +155,10 @@ export interface UsageBucket {
   cache_read: number;
   cache_write: number;
   cost_usd: number;
+  /** Throughput numerator: completion tokens from successful timed records. */
+  throughput_completion_tokens: number;
+  /** Throughput denominator: latency of the same successful timed records. */
+  throughput_latency_ms_sum: number;
 }
 
 /**
@@ -163,6 +169,8 @@ export interface UsageBucket {
 export interface UsageSummary {
   /** `YYYY-MM-DD` → model → bucket (sorted by the backend's BTreeMap). */
   days: Record<string, Record<string, UsageBucket>>;
+  /** `YYYY-MM-DD` → requests per local hour (24 entries) — heatmap input. */
+  hours: Record<string, number[]>;
   totals: UsageBucket;
   /** Unparseable JSONL lines skipped by the aggregator (crash-truncated tails). */
   skipped_lines: number;
