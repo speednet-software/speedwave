@@ -219,6 +219,13 @@ export class ShellComponent implements OnInit, OnDestroy {
       shortcut: '⌘4',
     },
     {
+      id: 'usage',
+      label: 'LLM usage',
+      route: '/usage',
+      iconName: 'chart',
+      shortcut: '⌘5',
+    },
+    {
       id: 'settings',
       label: 'Settings',
       route: '/settings',
@@ -343,6 +350,10 @@ export class ShellComponent implements OnInit, OnDestroy {
         if (this.beta.enabled()) {
           void this.router.navigateByUrl('/meeting-transcription');
         }
+        return;
+      case '5':
+        event.preventDefault();
+        void this.router.navigateByUrl('/usage');
         return;
       case ',':
         event.preventDefault();

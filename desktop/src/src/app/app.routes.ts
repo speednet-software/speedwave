@@ -48,6 +48,11 @@ export const routes: Routes = [
           ),
       },
       {
+        path: 'usage',
+        loadComponent: () =>
+          import('./usage-view/usage-view.component').then((m) => m.UsageViewComponent),
+      },
+      {
         path: 'settings',
         loadComponent: () =>
           import('./settings/settings.component').then((m) => m.SettingsComponent),

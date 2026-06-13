@@ -75,6 +75,15 @@ pub struct UsageBucket {
     pub cache_write: u64,
     /// Summed cost in USD (0.0 where litellm had no pricing — local models).
     pub cost_usd: f64,
+    /// Throughput numerator: completion tokens from SUCCESS records that also
+    /// carried a latency. Paired with `throughput_latency_ms_sum` so tok/s
+    /// divides matched numerator/denominator — failures (latency, ~0 output)
+    /// and pre-latency records (output, no latency) are excluded from both,
+    /// otherwise the rate is wildly skewed.
+    pub throughput_completion_tokens: u64,
+    /// Throughput denominator: wall-clock latency over the same success+latency
+    /// records that feed `throughput_completion_tokens`.
+    pub throughput_latency_ms_sum: u64,
 }
 
 /// Dashboard payload: day → model → bucket, plus grand totals.
@@ -82,6 +91,9 @@ pub struct UsageBucket {
 pub struct UsageSummary {
     /// `YYYY-MM-DD` → model → bucket. BTreeMap keeps days/models ordered.
     pub days: BTreeMap<String, BTreeMap<String, UsageBucket>>,
+    /// `YYYY-MM-DD` → requests per local hour (index 0–23) — the callback
+    /// timestamps carry the container's TZ, which mirrors the host's.
+    pub hours: BTreeMap<String, [u64; 24]>,
     /// Grand totals across all days and models.
     pub totals: UsageBucket,
     /// Lines that failed to parse (truncated tail after a crash is normal —
@@ -166,6 +178,14 @@ fn aggregate_file(
             .model
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
+        if let Some(hour) = record
+            .ts
+            .get(11..13)
+            .and_then(|h| h.parse::<usize>().ok())
+            .filter(|h| *h < 24)
+        {
+            summary.hours.entry(day.clone()).or_insert([0; 24])[hour] += 1;
+        }
         let bucket = summary
             .days
             .entry(day)
@@ -179,14 +199,24 @@ fn aggregate_file(
 
 fn apply_record(bucket: &mut UsageBucket, r: &UsageRecord) {
     bucket.requests += 1;
-    if r.status == "failure" {
+    let is_failure = r.status == "failure";
+    if is_failure {
         bucket.failures += 1;
     }
+    let completion = r.completion_tokens.unwrap_or(0);
     bucket.prompt_tokens += r.prompt_tokens.unwrap_or(0);
-    bucket.completion_tokens += r.completion_tokens.unwrap_or(0);
+    bucket.completion_tokens += completion;
     bucket.cache_read += r.cache_read.unwrap_or(0);
     bucket.cache_write += r.cache_write.unwrap_or(0);
     bucket.cost_usd += r.cost_usd.unwrap_or(0.0);
+    // Throughput uses only successful records that produced output AND timed it,
+    // so numerator and denominator describe the same requests.
+    if let Some(latency) = r.latency_ms {
+        if !is_failure && completion > 0 && latency > 0 {
+            bucket.throughput_completion_tokens += completion;
+            bucket.throughput_latency_ms_sum += latency;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -207,9 +237,10 @@ mod tests {
             dir.path(),
             "proj",
             &[
-                r#"{"ts":"2026-06-12T10:00:00+0200","capture":"success_event","status":"success","model":"claude-haiku-4-5","cost_usd":0.005,"prompt_tokens":50000,"completion_tokens":10}"#,
-                r#"{"ts":"2026-06-12T11:00:00+0200","capture":"stream_iterator","status":"success","model":"local/qwen3","prompt_tokens":14,"completion_tokens":2}"#,
-                r#"{"ts":"2026-06-13T09:00:00+0200","capture":"stream_iterator","status":"failure","model":"local/qwen3","prompt_tokens":5,"completion_tokens":0}"#,
+                r#"{"ts":"2026-06-12T10:00:00+0200","capture":"success_event","status":"success","model":"claude-haiku-4-5","cost_usd":0.005,"prompt_tokens":50000,"completion_tokens":10,"latency_ms":900}"#,
+                r#"{"ts":"2026-06-12T11:00:00+0200","capture":"stream_iterator","status":"success","model":"local/qwen3","prompt_tokens":14,"completion_tokens":2,"latency_ms":300}"#,
+                // Failure with latency but no output — must NOT feed throughput.
+                r#"{"ts":"2026-06-13T09:00:00+0200","capture":"stream_iterator","status":"failure","model":"local/qwen3","prompt_tokens":5,"completion_tokens":0,"latency_ms":60000}"#,
             ],
         );
         let s = read_usage_summary_in(dir.path(), "proj");
@@ -222,6 +253,43 @@ mod tests {
         assert_eq!(day1["claude-haiku-4-5"].requests, 1);
         assert_eq!(day1["local/qwen3"].completion_tokens, 2);
         assert_eq!(s.skipped_lines, 0);
+        // Throughput counts only successful timed records with output — the
+        // 60 s failure (0 tokens) is excluded from both numerator and divisor.
+        assert_eq!(s.totals.throughput_completion_tokens, 12);
+        assert_eq!(s.totals.throughput_latency_ms_sum, 1200);
+        assert_eq!(day1["claude-haiku-4-5"].throughput_latency_ms_sum, 900);
+        assert_eq!(
+            s.days["2026-06-13"]["local/qwen3"].throughput_latency_ms_sum,
+            0
+        );
+        // Hourly histogram: local hours 10 and 11 on day one, 9 on day two.
+        assert_eq!(s.hours["2026-06-12"][10], 1);
+        assert_eq!(s.hours["2026-06-12"][11], 1);
+        assert_eq!(s.hours["2026-06-12"][9], 0);
+        assert_eq!(s.hours["2026-06-13"][9], 1);
+    }
+
+    #[test]
+    fn malformed_timestamps_skip_the_hour_histogram_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                // Hour field not numeric / out of range / ts too short — the
+                // record still aggregates, only the histogram entry is skipped.
+                r#"{"ts":"2026-06-12Txx:00:00+0200","status":"success","model":"m","prompt_tokens":1}"#,
+                r#"{"ts":"2026-06-12T99:00:00+0200","status":"success","model":"m","prompt_tokens":2}"#,
+                r#"{"ts":"short","status":"success","model":"m","prompt_tokens":4}"#,
+            ],
+        );
+        let s = read_usage_summary_in(dir.path(), "proj");
+        assert_eq!(s.totals.requests, 3);
+        assert_eq!(s.totals.prompt_tokens, 7);
+        assert!(s
+            .hours
+            .get("2026-06-12")
+            .is_none_or(|h| h.iter().all(|c| *c == 0)));
     }
 
     #[test]
