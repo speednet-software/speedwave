@@ -66,6 +66,8 @@ JSONL over SQLite is deliberate: the file crosses the VM boundary on a bind moun
 
 `ContainerRuntime::compose_up_service(project, "litellm")` recreates only the proxy after an LLM-settings change (config re-render + targeted `up -d --force-recreate litellm`); the claude container restarts only when its own env changed. Service names are validated against `BUILT_IN_SERVICES` before reaching engine argv.
 
+The full-restart path relies on nerdctl's config-hash convergence, which only recreates services whose compose definition changed — and neither the bind-mounted `/config` files nor the `/tokens` key files are part of that definition, while litellm loads its config and the entrypoint exports keys only at container start. The renderer therefore injects `SPW_CONFIG_DIGEST` (sha256 of every rendered file under `litellm/<project>/` plus key-file metadata — names, sizes, mtimes; never key values) into the litellm service env, making any config, callback or key change a compose-definition change. Image-level changes (Containerfile, requirements, entrypoint, callback source) propagate independently via the per-image build-input hash tags (ADR-072).
+
 ## Known noise (pinned version)
 
 litellm 1.88.1 logs a background `pydantic` validation error per streamed translated request (its internal logging bridge; fixed upstream in 1.89.x). Responses and usage capture are unaffected — the iterator hook does not depend on that code path. The pin bump to 1.89.0 stable removes the noise.

@@ -52,6 +52,26 @@ def _ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
+def _requested_model(kwargs):
+    """Client-requested model name (provider-prefixed route, e.g. ``local/x``).
+
+    ``kwargs["model"]`` is the deployment resolved by wildcard routing — the
+    provider prefix is stripped, so it differs from what the iterator hook
+    logs (``request_data["model"]``) and the same model would split into two
+    aggregator rows. Prefer the original proxy request body, then the router
+    model group, falling back to the resolved name.
+    """
+    params = kwargs.get("litellm_params") or {}
+    metadata = params.get("metadata") or {}
+    proxy_request = (
+        params.get("proxy_server_request")
+        or metadata.get("proxy_server_request")
+        or {}
+    )
+    body = proxy_request.get("body") or {}
+    return body.get("model") or metadata.get("model_group") or kwargs.get("model")
+
+
 def _sse_frame_as_dict(chunk):
     """Parse a raw SSE frame (bytes/str) or dict-like chunk into a dict."""
     if isinstance(chunk, dict):
@@ -103,7 +123,7 @@ class SpeedwaveUsageLogger(litellm.integrations.custom_logger.CustomLogger):
                 "ts": _ts(),
                 "capture": "success_event",
                 "status": status,
-                "model": kwargs.get("model"),
+                "model": _requested_model(kwargs),
                 "response_id": response_id,
                 "cost_usd": kwargs.get("response_cost"),
                 "latency_ms": int((end_time - start_time).total_seconds() * 1000),

@@ -248,6 +248,10 @@ pub fn render_compose_in(
         &to_engine_path(&litellm_config_dir)?,
     );
     yaml = yaml.replace("${LITELLM_USAGE_DIR}", &to_engine_path(&litellm_usage_dir)?);
+    yaml = yaml.replace(
+        "${LITELLM_CONFIG_DIGEST}",
+        &litellm::litellm_state_digest_in(data_dir, project_name),
+    );
 
     yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
@@ -3711,6 +3715,23 @@ services:
             Some(true),
             "litellm must be read_only"
         );
+        let env: Vec<&str> = svc
+            .get("environment")
+            .and_then(|e| e.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            env.contains(&"LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true"),
+            "chat-completions forcing env must be present (prompt-cache + \
+             chat-template-kwargs depend on it — see template comment), got {env:?}"
+        );
+        let digest_env = env
+            .iter()
+            .find(|e| e.starts_with("SPW_CONFIG_DIGEST="))
+            .expect("litellm must carry the config digest env");
+        let digest = digest_env.trim_start_matches("SPW_CONFIG_DIGEST=");
+        assert_eq!(digest.len(), 64, "substituted sha256 hex, got {digest}");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
 
         let volumes: Vec<&str> = svc
             .get("volumes")

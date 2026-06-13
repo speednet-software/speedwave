@@ -8,7 +8,7 @@
 # - built locally by the Speedwave build pipeline (pull_policy: never)
 # - no Admin UI, no database, no host port; reachable only on the per-project
 #   compose network
-FROM python:3.13-slim-bookworm
+FROM python:3.13-slim-bookworm@sha256:05b95397cac02b060ff1251afaa78087d92d7034369afbc8eb765631cada8257
 
 # Security: container user is set via compose `user:` field to "1000:1000".
 # See Containerfile.claude for the rootless-BuildKit rationale.

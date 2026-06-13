@@ -76,6 +76,8 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "containers",
         containerfile: "containers/Containerfile.litellm",
         build_args: &[],
+        // Everything the Containerfile COPYies lives under containers/litellm.
+        hash_inputs: &["containers/Containerfile.litellm", "containers/litellm"],
     },
     ImageDef {
         name: IMAGE_MCP_HUB,

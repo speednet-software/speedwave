@@ -119,8 +119,21 @@ fn ensure_v1_suffix(base_url: &str) -> String {
     }
 }
 
+/// Usage-callback source, embedded at compile time. LiteLLM resolves the
+/// `callbacks: litellm_callback.…` module RELATIVE TO THE CONFIG FILE's
+/// directory when started with `--config` (its `get_instance_fn` requires
+/// `<config dir>/litellm_callback.py` to exist and never falls back to
+/// PYTHONPATH) — so the renderer must place the module next to config.yaml.
+/// The copy baked into the image at /opt/speedwave is unreachable for this
+/// purpose.
+const LITELLM_CALLBACK_SRC: &str =
+    include_str!("../../../../containers/litellm/litellm_callback.py");
+
 /// Renders and atomically persists the config (0600 + fsync) under
-/// `<data_dir>/litellm/<project>/config.yaml`.
+/// `<data_dir>/litellm/<project>/config.yaml`, alongside the usage-callback
+/// module litellm imports from the same directory. Also lifts a legacy
+/// `local-llm/api_key` into the llm token namespace so a migrated `local`
+/// entry's `SPW_KEY_LOCAL` reference resolves (ADR-073 migration).
 pub fn write_litellm_config_in(
     data_dir: &Path,
     project: &str,
@@ -131,10 +144,93 @@ pub fn write_litellm_config_in(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         crate::fs_perms::ensure_owner_only_dir(parent)?;
+        crate::fs_perms::write_restricted_file_atomic(
+            &parent.join("litellm_callback.py"),
+            LITELLM_CALLBACK_SRC,
+        )?;
     }
+    migrate_legacy_local_key_in(data_dir, project, llm);
     let content = render_litellm_config(llm);
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
     Ok(path)
+}
+
+/// `SPW_CONFIG_DIGEST` value: sha256 over every rendered `/config` file and
+/// every key file's NAME + CONTENT HASH. Key values are folded in as their
+/// own sha256, not raw — the digest is a one-way fingerprint that can't
+/// reveal a secret, and content-hashing (not size/mtime) means a rotated
+/// same-length key always changes it. litellm reads both config and keys
+/// only at container start, so any change here must alter the compose
+/// definition to force a recreate.
+pub(crate) fn litellm_state_digest_in(data_dir: &Path, project: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let config_dir = data_dir.join("litellm").join(project);
+    let mut rendered: Vec<PathBuf> = std::fs::read_dir(&config_dir)
+        .map(|dir| {
+            dir.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    rendered.sort();
+    for path in rendered {
+        hasher.update(path.file_name().unwrap_or_default().as_encoded_bytes());
+        hasher.update(b"\0");
+        hasher.update(std::fs::read(&path).unwrap_or_default());
+        hasher.update(b"\0");
+    }
+    let tokens_dir = data_dir.join("tokens").join(project).join("llm");
+    let mut entries: Vec<(std::ffi::OsString, Vec<u8>)> = std::fs::read_dir(&tokens_dir)
+        .map(|dir| {
+            dir.filter_map(|e| e.ok())
+                .map(|e| {
+                    let content_hash = Sha256::digest(std::fs::read(e.path()).unwrap_or_default());
+                    (e.file_name(), content_hash.to_vec())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, content_hash) in entries {
+        hasher.update(name.as_encoded_bytes());
+        hasher.update(b"\0");
+        hasher.update(&content_hash);
+        hasher.update(b"\n");
+    }
+    crate::bundle::bytes_to_hex(&hasher.finalize())
+}
+
+/// v1→v2 key-file migration: the legacy `local` provider stored its Bearer
+/// at `tokens/<project>/local-llm/api_key`; the litellm entrypoint reads
+/// `tokens/<project>/llm/local_api_key`. Copy once when the target is
+/// missing — the legacy file stays for the kill-switch direct path.
+/// Failures are non-fatal (the proxy then sends the dummy key, exactly the
+/// pre-migration behaviour for keyless servers).
+fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) {
+    let needs_local_key = llm
+        .providers
+        .iter()
+        .any(|p| p.id == "local" && p.kind == LlmProviderKind::Local && p.has_api_key);
+    if !needs_local_key {
+        return;
+    }
+    let Ok(target) = super::tokens::llm_provider_key_path_in(data_dir, project, "local") else {
+        return;
+    };
+    if target.exists() {
+        return;
+    }
+    let Some(value) = super::llm::read_local_llm_token_opt_in(data_dir, project, "api_key") else {
+        log::warn!("litellm: local entry flags has_api_key but no legacy key file to migrate");
+        return;
+    };
+    if let Err(e) = write_llm_provider_key_in(data_dir, project, "local", &value) {
+        log::warn!("litellm: legacy local key migration failed: {e}");
+    } else {
+        log::info!("litellm: migrated legacy local-llm api_key into the llm token namespace");
+    }
 }
 
 /// Validates and persists one provider's API key under the llm token
@@ -190,6 +286,7 @@ mod tests {
             id: id.into(),
             kind,
             base_url: None,
+            model: None,
             has_api_key: false,
             context_tokens: None,
             has_custom_headers: false,
@@ -328,6 +425,58 @@ general_settings: {}
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "config must be owner-only");
         }
+        // litellm resolves the callbacks module relative to the config file's
+        // directory — the module MUST land next to config.yaml or the proxy
+        // fails startup with "Could not find module file".
+        let callback = path.parent().unwrap().join("litellm_callback.py");
+        assert!(
+            callback.is_file(),
+            "callback module must sit next to config"
+        );
+        let src = std::fs::read_to_string(&callback).unwrap();
+        assert!(
+            src.contains("speedwave_usage_logger"),
+            "embedded callback must export the instance the config references"
+        );
+    }
+
+    /// v1→v2 key migration: a legacy `local-llm/api_key` is lifted into the
+    /// llm namespace when the migrated entry references SPW_KEY_LOCAL —
+    /// once, without clobbering an existing new-namespace key.
+    #[test]
+    fn write_config_migrates_legacy_local_key() {
+        let dir = tempfile::tempdir().unwrap();
+        // Seed the legacy key file.
+        let legacy_dir =
+            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
+        std::fs::write(legacy_dir.join("api_key"), "sk-legacy-token\n").unwrap();
+
+        let llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                has_api_key: true,
+                base_url: Some("http://host.docker.internal:9000".into()),
+                ..entry("local", LlmProviderKind::Local)
+            }],
+            ..Default::default()
+        };
+        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+
+        let target =
+            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "sk-legacy-token",
+            "legacy key must be copied (trimmed) into the llm namespace"
+        );
+
+        // Idempotent + non-clobbering: a newer key in the llm namespace wins.
+        std::fs::write(&target, "sk-new-token").unwrap();
+        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "sk-new-token");
+
+        // No legacy file + no target → non-fatal (dummy-key behaviour).
+        let dir2 = tempfile::tempdir().unwrap();
+        write_litellm_config_in(dir2.path(), "proj", &llm).unwrap();
     }
 
     #[test]
@@ -353,5 +502,70 @@ general_settings: {}
         // Second removal: missing file is fine.
         remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
         assert!(remove_llm_provider_key_in(dir.path(), "proj", "../x").is_err());
+    }
+
+    #[test]
+    fn state_digest_tracks_config_and_key_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![entry("local", LlmProviderKind::Local)],
+            ..Default::default()
+        };
+        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+
+        let d1 = litellm_state_digest_in(dir.path(), "proj");
+        assert_eq!(d1.len(), 64);
+        assert!(d1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(d1, litellm_state_digest_in(dir.path(), "proj"));
+
+        write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-abc").unwrap();
+        let d2 = litellm_state_digest_in(dir.path(), "proj");
+        assert_ne!(d1, d2);
+        assert!(!d2.contains("sk-or-v1-abc"));
+
+        // Same-length rotation must still flip the digest — it hashes key
+        // content, not size/mtime (the metadata-only digest could collide).
+        write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-xyz").unwrap();
+        let d3 = litellm_state_digest_in(dir.path(), "proj");
+        assert_ne!(d2, d3, "same-length key rotation must change the digest");
+
+        remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
+        assert_ne!(d3, litellm_state_digest_in(dir.path(), "proj"));
+
+        let llm2 = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                has_api_key: true,
+                ..entry("openrouter", LlmProviderKind::OpenRouter)
+            }],
+            ..Default::default()
+        };
+        write_litellm_config_in(dir.path(), "proj", &llm2).unwrap();
+        assert_ne!(d1, litellm_state_digest_in(dir.path(), "proj"));
+    }
+
+    #[test]
+    fn state_digest_covers_every_rendered_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![entry("local", LlmProviderKind::Local)],
+            ..Default::default()
+        };
+        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        let d1 = litellm_state_digest_in(dir.path(), "proj");
+
+        let callback = litellm_config_path_in(dir.path(), "proj")
+            .parent()
+            .unwrap()
+            .join("litellm_callback.py");
+        std::fs::write(&callback, "# patched in a newer binary\n").unwrap();
+        assert_ne!(d1, litellm_state_digest_in(dir.path(), "proj"));
+    }
+
+    #[test]
+    fn state_digest_handles_missing_config_and_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = litellm_state_digest_in(dir.path(), "proj");
+        assert_eq!(d.len(), 64);
+        assert_eq!(d, litellm_state_digest_in(dir.path(), "proj"));
     }
 }
