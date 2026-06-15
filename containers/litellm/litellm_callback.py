@@ -119,6 +119,14 @@ class SpeedwaveUsageLogger(litellm.integrations.custom_logger.CustomLogger):
                 cached = getattr(details, "cached_tokens", None) if details else None
                 if cached:
                     usage["cache_read"] = cached
+                # cache_write lives on the usage object directly (Anthropic
+                # maps cache_creation_input_tokens here), mirroring the
+                # streaming-iterator path below.
+                cache_creation = getattr(
+                    raw_usage, "cache_creation_input_tokens", None
+                )
+                if cache_creation:
+                    usage["cache_write"] = int(cache_creation)
         _append(
             {
                 "ts": _ts(),

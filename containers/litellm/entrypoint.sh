@@ -36,6 +36,8 @@ if [ -d "$TOKENS_DIR" ]; then
         esac
         leftover="$(printf '%s' "$provider_id" | LC_ALL=C tr -d 'a-z0-9-')"
         [ -z "$leftover" ] || continue
+        # Slug max length is 64 (^[a-z][a-z0-9-]{0,63}$); printf adds no newline.
+        [ "$(printf '%s' "$provider_id" | wc -c)" -le 64 ] || continue
         env_name="SPW_KEY_$(printf '%s' "$provider_id" | tr 'a-z-' 'A-Z_')"
         value="$(cat "$token_file")"
         [ -n "$value" ] || continue

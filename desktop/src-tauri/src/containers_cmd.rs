@@ -1189,6 +1189,13 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
         if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
             if let Some(entry) = llm.providers.iter_mut().find(|p| p.id == provider_id) {
                 entry.has_api_key = has_key;
+            } else {
+                // Normal Angular flow follows with update_llm_config, which
+                // rewrites providers wholesale; a direct caller would leave a
+                // key file with has_api_key stuck false — surface that.
+                log::warn!(
+                    "set_llm_provider_key: provider '{provider_id}' not in config — has_api_key not updated"
+                );
             }
         }
         config::save_user_config(&user_config)?;

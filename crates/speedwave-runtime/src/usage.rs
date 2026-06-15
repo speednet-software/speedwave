@@ -13,7 +13,9 @@
 //! Records are deduplicated by `response_id`: should a future litellm
 //! version start emitting success events for streamed unified-route
 //! requests (which today only the iterator hook captures), both lines
-//! would carry the same id — the one with a cost figure wins.
+//! would carry the same id — first-seen wins (the duplicate is skipped).
+//! Today the two capture paths are mutually exclusive per request, so the
+//! tie-break never fires.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -166,9 +168,9 @@ fn aggregate_file(
             summary.skipped_lines += 1;
             continue;
         };
-        // Dedup across capture paths: same response counted once; the
-        // costed (success_event) record wins by arriving via either order —
-        // buckets are additive, so the duplicate is simply skipped.
+        // Dedup across capture paths: same response counted once, first-seen
+        // wins (the second line with that id is skipped). The two paths are
+        // mutually exclusive per request today, so the order never matters.
         if let Some(id) = record.response_id.as_deref() {
             if !id.is_empty() && !seen_ids.insert(id.to_string()) {
                 continue;
@@ -370,6 +372,12 @@ mod tests {
         let s = read_usage_summary_in(dir.path(), "proj");
         assert_eq!(s.totals.requests, 2, "msg_1 counted once");
         assert_eq!(s.totals.prompt_tokens, 13);
+        // First-seen wins: the stream_iterator record (no cost) arrives before
+        // the success_event (cost=0.01) and is the one kept, so cost stays 0.
+        assert!(
+            s.totals.cost_usd < 1e-9,
+            "first-seen (costless stream_iterator) wins the dedup"
+        );
     }
 
     #[test]

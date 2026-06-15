@@ -91,6 +91,24 @@ teardown() {
     [[ "$output" == *"SPW_KEY_A_VALID_SLUG=v"* ]]
 }
 
+@test "rejects a provider id longer than the 64-char slug cap" {
+    # Host-side slug is ^[a-z][a-z0-9-]{0,63}$; a 65-char id (rejected
+    # host-side, possible only via a tampered tokens dir) must not export.
+    long_id="a$(printf 'b%.0s' $(seq 1 64))"  # 1 + 64 = 65 chars
+    printf 'v' > "$TOKENS_DIR/${long_id}_api_key"
+    run "$ENTRYPOINT"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"SPW_KEY_A"* ]]
+}
+
+@test "accepts a provider id at exactly the 64-char cap" {
+    id64="a$(printf 'b%.0s' $(seq 1 63))"  # 1 + 63 = 64 chars
+    printf 'v' > "$TOKENS_DIR/${id64}_api_key"
+    run "$ENTRYPOINT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SPW_KEY_A"* ]]
+}
+
 @test "never exports canonical provider env names" {
     # The ADR-073 invariant: a key must not surface as ANTHROPIC_API_KEY etc.
     printf 'sk-test' > "$TOKENS_DIR/anthropic_api_key"
